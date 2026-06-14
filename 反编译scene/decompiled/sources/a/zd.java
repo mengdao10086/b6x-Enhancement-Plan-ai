@@ -1,0 +1,25 @@
+package a;
+
+import java.util.Comparator;
+
+/* JADX INFO: loaded from: D:\下载\Claude Code\scene_decompile\extracted\classes.dex */
+public class zd implements Comparator<byte[]> {
+    @Override // java.util.Comparator
+    /* JADX INFO: renamed from: a, reason: merged with bridge method [inline-methods] */
+    public int compare(byte[] bArr, byte[] bArr2) {
+        int length;
+        int length2;
+        if (bArr.length == bArr2.length) {
+            for (int i = 0; i < bArr.length; i++) {
+                if (bArr[i] != bArr2[i]) {
+                    length = bArr[i];
+                    length2 = bArr2[i];
+                }
+            }
+            return 0;
+        }
+        length = bArr.length;
+        length2 = bArr2.length;
+        return length - length2;
+    }
+}
