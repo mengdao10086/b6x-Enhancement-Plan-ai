@@ -787,8 +787,19 @@ static void battery_control(void) {
             skip_delta = 1;   // 冷却期内 delta 不执行
         }
 
-        // 2°C 外使用 PEAK_DAMP_OUTER_THRESHOLD 作为豁免/反补分界
-        int peak_bound = (abs_diff > BATT_ZONE_2) ? PEAK_DAMP_OUTER_THRESHOLD : PEAK_DAMP_INNER_BOUNDARY;
+        // 方向感知的区间判断：同向变动时容忍度更宽，反向时收紧
+        // 降温时 batt ≤ BASELINE+ZONE_2 → 内区（温和反补）
+        // 升温时 batt ≥ BASELINE-ZONE_2 → 内区（温和反补）
+        // 否则 → 外区（强力反补）
+        int in_inner_zone = 0;
+        if (batt_change < 0) {
+            in_inner_zone = (batt <= BATT_BASELINE + BATT_ZONE_2);
+        } else if (batt_change > 0) {
+            in_inner_zone = (batt >= BATT_BASELINE - BATT_ZONE_2);
+        } else {
+            in_inner_zone = (abs_diff <= BATT_ZONE_2);
+        }
+        int peak_bound = in_inner_zone ? PEAK_DAMP_INNER_BOUNDARY : PEAK_DAMP_OUTER_THRESHOLD;
 
         // ═══ 小变动（≤阈值）→ 趋势豁免 ═══
         // 最高/最低档位时不触发豁免
@@ -815,14 +826,14 @@ static void battery_control(void) {
             trend_override = 0;
 
             int adjust = 0;
-            if (abs_diff <= BATT_ZONE_2) {
-                // 2°C内：≤PEAK_DAMP_INNER_THRESHOLD→1档，>→2档（固定）
+            if (in_inner_zone) {
+                // 内区：≤PEAK_DAMP_INNER_THRESHOLD→1档，>→2档（固定）
                 if (abs_change <= PEAK_DAMP_INNER_THRESHOLD)
                     adjust = (batt_change > 0) ? 1 : -1;
                 else
                     adjust = (batt_change > 0) ? 2 : -2;
             } else {
-                // 2°C外：固定反补1档
+                // 外区：固定反补1档
                 adjust = (batt_change > 0) ? 1 : -1;
             }
 

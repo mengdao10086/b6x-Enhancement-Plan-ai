@@ -15,8 +15,7 @@
 
 ### LSPosed 模块功能
 
-- 修复 Android 16 (API 36) 上 `checkBluetoothPermission()` 返回 false 导致 BLE 无法连接的问题
-- 修复连接后扫描不停、ViewModel LiveData 不更新等 4 层 Bug
+- 修复 Android 16 BLE 无法连接的 4 层连环 Bug（权限/扫描/ViewModel/UI 闪烁）
 - 提供 `com.flydigi.SET_TEMPERATURE` 广播接收器，支持 7 参数完整控制
 - 修复 DefaultDispatcher 线程 100% CPU 占用（`runFetchLoop` 空队列忙等）
 - 模块每 5 秒写入 `tempctrl.status` 上报 BLE 连接状态 + 心跳，daemon 通过 pgrep + mtime + BLE 三重检查检测进程存活
@@ -26,11 +25,12 @@
 - 读取电池温度（sysfs）和 CPU 温度，综合决策散热档位
 - CPU 紧急干预（65/75/85°C 三级，带低通滤波 + 10°C 滞回）
 - 电池温度调档（基准 35°C，三级调整区间：死区/±1档/±2档）
-- 趋势豁免/峰值反补：小反向变动趋势→豁免，大变动→直接反补
-  - 2°C 内：≤PEAK_DAMP_INNER_BOUNDARY(0.3°C) 且趋势反向：豁免
-  - 2°C 内：>PEAK_DAMP_INNER_BOUNDARY(0.3°C) 且 ≤PEAK_DAMP_INNER_THRESHOLD(0.5°C)：反补 1 档
-  - 2°C 内：>PEAK_DAMP_INNER_THRESHOLD(0.5°C)：反补 2 档（固定）
-  - 2°C 外：≤PEAK_DAMP_OUTER_THRESHOLD(0.5°C)：豁免，>：反补 1 档（固定）
+- 趋势豁免/峰值反补（方向感知区间）：
+  - **内区**（降温≤37°C / 升温≥33°C / 无变化时|diff|≤2°C）：
+    - ≤PEAK_DAMP_INNER_BOUNDARY(0.3°C) 且趋势反向：豁免
+    - >分界且 ≤PEAK_DAMP_INNER_THRESHOLD(0.5°C)：反补 1 档
+    - >PEAK_DAMP_INNER_THRESHOLD(0.5°C)：反补 2 档（固定）
+  - **外区**（其余情况）：≤PEAK_DAMP_OUTER_THRESHOLD(0.5°C)：豁免，>：反补 1 档（固定）
 - 温度未变化时跳过升降档，防止重复调整
 - 电池档位继承实际下发档位，紧急退出后挡位不暴跌
 - 退出紧急降档验证：仅电池温度低于升档阈值，且未在充电状态时允许进行最高档位钳制
