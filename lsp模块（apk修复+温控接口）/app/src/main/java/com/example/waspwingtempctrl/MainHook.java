@@ -350,11 +350,13 @@ public class MainHook implements IXposedHookLoadPackage {
             XposedBridge.log(TAG + " 已钩住 GattCallback.onServicesDiscovered");
 
             // 诊断 3d：WaspWingDataInteractionController.onGattConnected — GATT 连接成功
+            // 同时用于修复 BLE 断联后重连时 bleConnected 未恢复的问题
             XposedHelpers.findAndHookMethod(wingCtrl, "onGattConnected",
                     BluetoothGatt.class, new XC_MethodHook() {
                         @Override
                         protected void afterHookedMethod(MethodHookParam param) {
-                            XposedBridge.log(TAG + " [诊断] WaspWingDataInteractionController.onGattConnected 已触发");
+                            bleConnected = true;  // 重连后恢复 BLE 状态
+                            XposedBridge.log(TAG + " BLE 已连接（onGattConnected）");
                             // 检查 discoverServices 结果
                             BluetoothGatt gatt = (BluetoothGatt) param.args[0];
                             if (gatt != null) {
@@ -363,7 +365,7 @@ public class MainHook implements IXposedHookLoadPackage {
                             }
                         }
                     });
-            XposedBridge.log(TAG + " 已钩住 WaspWingDataInteractionController.onGattConnected");
+            XposedBridge.log(TAG + " 已钩住 WaspWingDataInteractionController.onGattConnected（BLE 状态恢复）");
 
             // 诊断 3c：SDK ViewModel 的 onGattConnected
             XposedHelpers.findAndHookMethod(sdkVm, "onGattConnected",
