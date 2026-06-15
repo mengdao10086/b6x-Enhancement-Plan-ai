@@ -10,15 +10,14 @@
 
 | 组件 | 路径 | 说明 | 状态 |
 |------|------|------|------|
-| **LSPosed 模块** | [lsp模块（apk修复+温控接口）/](lsp模块（apk修复+温控接口）/README.md) | 修复 Android 16 BLE Bug + 提供智能温控广播接口 | ✅ v1.0 已发布 |
-| **C 守护程序** | [magisk模块（智能温控）/](magisk模块（智能温控）/tempctrl.c) | 三重检查存活检测(pgrep+心跳文件+BLE) + am broadcast 控制 | ✅ v2.0 |
+| **LSPosed 模块** | [lsp模块（apk修复+温控接口）/](lsp模块（apk修复+温控接口）/README.md) | 提供散热器控制接口 | ✅ v2.0 已发布 |
+| **C 守护程序** | [magisk模块（智能温控）/](magisk模块（智能温控）/tempctrl.c) | 使用lsp模块接口控制散热器 | ✅ v2.0 已发布 |
 
 ### LSPosed 模块功能
 
 - 修复 Android 16 BLE 无法连接的 4 层连环 Bug（权限/扫描/ViewModel/UI 闪烁）
 - 提供 `com.flydigi.SET_TEMPERATURE` 广播接收器，支持 7 参数完整控制
 - 修复 DefaultDispatcher 线程 100% CPU 占用（`runFetchLoop` 空队列忙等）
-- 模块每 5 秒写入 `tempctrl.status` 上报 BLE 连接状态 + 心跳，daemon 通过 pgrep + mtime + BLE 三重检查检测进程存活
 
 ### C 智能温控守护程序
 
@@ -26,7 +25,7 @@
 - CPU 紧急干预（65/75/85°C 三级，带低通滤波 + 10°C 滞回）
 - 电池温度调档（基准 35°C，三级调整区间：死区/±1档/±2档）
 - 趋势豁免/峰值反补（方向感知区间）：
-  - **内区**（降温≤37°C / 升温≥33°C / 无变化时|diff|≤2°C）：
+  - **内区**（降温且≤37°C / 升温且≥33°C时）：
     - ≤PEAK_DAMP_INNER_BOUNDARY(0.3°C) 且趋势反向：豁免
     - >分界且 ≤PEAK_DAMP_INNER_THRESHOLD(0.5°C)：反补 1 档
     - >PEAK_DAMP_INNER_THRESHOLD(0.5°C)：反补 2 档（固定）
@@ -55,7 +54,7 @@
 
 ## 构建
 
-GitHub Actions 自动构建：
+GitHub Actions 自动构建，**只推送有变化部分的编译即可**：
 
 | 触发方式 | 编译内容 |
 |----------|----------|
@@ -69,7 +68,7 @@ GitHub Actions 自动构建：
 > **NDK 缓存**：NDK (~700MB) 已配置 `actions/cache`，首次运行后不再重复下载。
 > **分支**：所有开发直接提交到 **`main`** 分支。
 
-### ⚠️ 重要：C 守护程序必须使用 GitHub Actions 编译
+### ⚠️ 重要：C 守护程序推荐使用 GitHub Actions 编译
 
 **不要在手机上用 Termux 编译！** Termux 的 `clang -static` 链接的是 Termux 的 libc，
 不是 Android 的 libc，编译出的二进制在实际的 Android 系统上 PT_TLS 段对齐错误，
@@ -84,25 +83,12 @@ GitHub Actions 自动构建：
 
 ---
 
-## 待办 / 开发中
-
-### 待修复问题
-
-| 问题 | 优先级 | 说明 |
-|------|--------|------|
-| ~~BLE 断联后无法自动恢复~~ | ✅ 已修复 | `onGattConnected` 钩子中添加 `bleConnected = true`，重连后恢复 BLE 状态 |
-
-### CI 可改进
-
-- NDK 缓存：每次 CI 下载 NDK ~700MB，可改为缓存加速（✅ 已实现）
-- 自动发布：v2.0 测试通过后开启 tag 自动发布 APK + C 二进制
-
 ### 待分析/待实现
 
-| 项目 | 类型 | 说明 |
+| 项目 | 优先度 | 说明 |
 |------|------|------|
-| 档位表可配置化(v2.1) | 🟡 中 | 将 4 张查表数组改为 profile.conf GEAR_N=模式,目标,风扇,制冷 格式，支持自动扩展档位数量 |
-| UI 模式选择器闪烁（固定功率时圆点空白） | 🟢 低 | 不影响运行，无法手动操控时切换一次模式即可 |
+| 档位表可配置化(v2.1) | 🟡 中 | 暂定将 4 张查表数组改为 profile.conf GEAR_N=模式,目标,风扇,制冷 格式，支持自动扩展档位数量 |
+| UI 模式选择器智能温控时闪烁，固定功率时圆点空白 | 🟢 低 | 不影响运行，无法手动操控时切换一次模式即可 |
 
 ---
 
