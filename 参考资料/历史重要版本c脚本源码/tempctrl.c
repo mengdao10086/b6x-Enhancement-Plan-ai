@@ -1092,13 +1092,10 @@ int main(int argc, char *argv[]) {
         if (!fully_connected) {
             if (app_was_alive) {
                 app_was_alive = 0;
-                if (!app_proc_ok) {
+                if (!app_proc_ok)
                     write_log("App 不存在，等待连接...");
-                    write_log("");
-                } else {
+                else
                     write_log("BLE 已断开，等待连接...");
-                    write_log("");
-                }
 
                 // 散热器已断联，清零待执行步伐
                 actual_level = target_level;
