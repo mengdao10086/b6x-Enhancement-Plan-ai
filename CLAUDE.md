@@ -1,10 +1,10 @@
 # 飞智 B6X 增强计划 — Claude 指令
 
 ## 项目定位
-飞智 B6X 散热器开发者工具增强项目。**Android 16 BLE 修复已完成**，智能温控 v2.0 开发中。
+飞智 B6X 散热器开发者工具增强项目。**Android 16 BLE 修复已完成**，**智能温控 v2.0 已完成**。
 
 ### v2.0 概况
-- 通信：~~FIFO~~ → 已废弃，改用 status 文件 mtime + pgrep 双重检测
+- 通信：~~FIFO~~ → 已废弃，改用 status 文件 mtime + pgrep + BLE 三合一检测
 - 控制：C 守护程序每 5 秒决策 → `am broadcast` → LSPosed 模块 → `WaspWingManager.setRunMode()` → BLE 指令
 - 配置：所有阈值通过 `profile.conf` 运行时配置，支持 mtime 热重载（`CONFIG_ENABLED=0` 可跳过）
 - 档位：1~12 级，使用查表法，趋势豁免+峰值反补合并逻辑

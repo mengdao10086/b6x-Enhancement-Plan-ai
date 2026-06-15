@@ -9,7 +9,7 @@
 | 版本 | 功能 | 状态 |
 |------|------|------|
 | **v1.0** | 修复 Android 16 (API 36) 上蓝牙扫描生命周期崩溃导致无法连接散热器的问题 | ✅ 已发布 |
-| **v2.0** | 智能温控后台守护程序的广播接口 + status 文件心跳检测 + 双重进程检测 | ⚙️ 开发中 |
+| **v2.0** | 智能温控后台守护程序的广播接口 + status 文件心跳检测 + 三合一存活检测 | ✅ 已发布 |
 
 ---
 
@@ -24,7 +24,7 @@
 | UI 层 | 智能温控模式下 UI 闪烁（convertFromDevice 副作用） | 不创建中间态 WaspWingInfo，等正常 BLE 数据流 |
 | Android 16 | `checkBluetoothPermission()` 在 BLE 回调线程返回 false，导致 `discoverServices()` 从未被调用 | 强制返回 true |
 
-## 二、智能温控扩展（v2.0 开发中）
+## 二、智能温控扩展（v2.0）
 
 ### 2.1 系统架构
 
@@ -54,11 +54,11 @@
 
 ### 2.2 进程检测与控制通信
 
-使用 **双重检测**：pgrep 进程存在 + status 文件 mtime 心跳。模块每 5 秒写入一次 status 文件，tempctrl 检测 mtime 是否在 16 秒内：
+使用 **三合一检测**：pgrep 进程存在 + status 文件 mtime 心跳 + BLE=1 状态。模块每 5 秒写入一次 status 文件，tempctrl 检测 mtime 是否在 16 秒内：
 
 ```
 tempctrl 侧（C 守护程序）：
-  每轮 main_loop() 末尾：
+  每轮主循环开头：
     1. 读 /data/local/tmp/tempctrl.status 获取 BLE=0/1
     2. pgrep -f com.flydigi.waspwing.experimental
     3. stat(status 文件).mtime 距现在 ≤ 16秒？

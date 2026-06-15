@@ -11,14 +11,14 @@
 | 组件 | 路径 | 说明 | 状态 |
 |------|------|------|------|
 | **LSPosed 模块** | [lsp模块（apk修复+温控接口）/](lsp模块（apk修复+温控接口）/README.md) | 修复 Android 16 BLE Bug + 提供智能温控广播接口 | ✅ v1.0 已发布 |
-| **C 守护程序** | [magisk模块（智能温控）/](magisk模块（智能温控）/tempctrl.c) | 双重进程检测(pgrep+心跳文件) + am broadcast 控制 | ⚙️ v2.0 开发中 |
+| **C 守护程序** | [magisk模块（智能温控）/](magisk模块（智能温控）/tempctrl.c) | 三合一存活检测(pgrep+心跳文件+BLE) + am broadcast 控制 | ✅ v2.0 |
 
 ### LSPosed 模块功能
 
 - 修复 Android 16 (API 36) 上 `checkBluetoothPermission()` 返回 false 导致 BLE 无法连接的问题
 - 修复连接后扫描不停、ViewModel LiveData 不更新等 4 层 Bug
 - 提供 `com.flydigi.SET_TEMPERATURE` 广播接收器，支持 7 参数完整控制
-- 模块每 5 秒写入 `tempctrl.status` 上报 BLE 连接状态 + 心跳，daemon 通过 pgrep + 文件 mtime 双重检测进程存活
+- 模块每 5 秒写入 `tempctrl.status` 上报 BLE 连接状态 + 心跳，daemon 通过 pgrep + mtime + BLE 三合一检测进程存活
 
 ### C 智能温控守护程序
 
@@ -104,7 +104,7 @@ APK 和 C 守护程序均由 GitHub Actions 自动构建：
 
 | 任务 | 优先级 | 说明 |
 |------|--------|------|
-| 进程检测与恢复（双重检测） | 🟡 中 | pgrep + status 文件 mtime 16 秒超时，模块断写心跳后 daemon 能否正确判死并恢复 |
+| 三合一存活检测 | 🟡 中 | pgrep + status 文件 mtime 16 秒超时 + BLE=1，断联后 daemon 能否正确判死并恢复 |
 | 断联恢复测试 | 🟡 中 | BLE 断开后重连，daemon 是否正确恢复（不重置状态） |
 | Status 文件 BLE 状态上报 | 🟡 中 | 模块每 5 秒写 BLE=0/1 到 status 文件，daemon 读取并响应 |
 | config 热重载验证 | 🟡 中 | 修改 `profile.conf` 后是否自动生效 |
@@ -114,7 +114,7 @@ APK 和 C 守护程序均由 GitHub Actions 自动构建：
 ### CI 可改进
 
 - NDK 缓存：每次 CI 下载 NDK ~700MB，可改为缓存加速（✅ 已实现）
-- 自动发布：等 v2.0 稳定后可开启 tag 自动发布 APK + C 二进制
+- 自动发布：v2.0 测试通过后开启 tag 自动发布 APK + C 二进制
 
 ### 待分析/待实现
 
