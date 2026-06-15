@@ -1,14 +1,21 @@
 # 飞智 B6X 增强计划 — Claude 指令
 
 ## 项目定位
-飞智 B6X 散热器开发者工具增强项目。**Android 16 BLE 修复已完成**，**智能温控 v2.0 已完成**。
+飞智 B6X 散热器开发者工具增强项目。**Android 16 BLE 修复已完成**，**智能温控 v2.0 已发布**。
 
 ### v2.0 概况
 - 通信：~~FIFO~~ → 已废弃，改用 status 文件 mtime + pgrep + BLE 三重检查
-- 控制：C 守护程序每 5 秒决策 → `am broadcast` → LSPosed 模块 → `WaspWingManager.setRunMode()` → BLE 指令
+- 控制：C 守护程序每 5 秒计算目标档位 → 渐进执行（每次±1 档压制突变噪音）→ `am broadcast` → LSPosed 模块 → `WaspWingManager.setRunMode()` → BLE 指令
 - 配置：所有阈值通过 `profile.conf` 运行时配置，支持 mtime 热重载（`CONFIG_ENABLED=0` 可跳过）
-- 档位：1~12 级，使用查表法，趋势豁免+峰值反补合并逻辑
+- 档位：1~12 级，使用查表法，趋势豁免+峰值反补合并逻辑，决策与执行分离（逐级±1 档）
 - 部署：Magisk/KSU 模块（`service.sh` 复制到 `/data/local/tmp/` 绕过 noexec）
+
+## ⚠️ Git 子模块
+- **本目录（`飞智b6x增强计划/`）是一个 git 子模块**，所有代码和 git 操作都在此目录内进行。
+- 外层 `D:\下载\Claude Code\` 只追踪子模块指针（gitlink），在外层 add/commit 只改了指针。
+- **所有 git 操作（add/commit/push/pull）必须在本目录内执行**。
+- 子模块内有 `origin/main` 的本地缓存，`git rebase origin/main` 无需网络。
+- `origin` remote 使用 PAT 认证，push 前需要网络可达 GitHub。
 
 ## 工作目录
 - 根目录：`D:\下载\Claude Code\飞智b6x增强计划`

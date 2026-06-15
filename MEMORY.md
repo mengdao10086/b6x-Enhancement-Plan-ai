@@ -20,9 +20,10 @@
 
 - ~~FIFO 通信已废弃~~（KernelSU 下 App 进程写 `/data/local/tmp/` 权限不通）
 - tempctrl 通过 `pgrep` 每 5 秒检测 App 进程存活
-- App 进程不存在 → 等待复活；复活后清缓存强制重发当前档位
-- 断联超时 ≥60 秒 → `reset_state()` 重置所有状态重新开始
+- App 进程不存在 → 等待复活；复活后 `actual_level = target_level` 对齐，清缓存强制下发
+- 断联时 `actual_level = target_level`（清零待执行步伐），无超时重置
+- 档位决策与执行分离：`main_loop` 纯计算，每轮连接检测后逐步执行 ±1 档
 - 电池档位继承：`battery_fan_level = final_level`，紧急退出后不会暴跌
-- 温度趋势豁免：降温不升档、升温不降档（最多豁免 6 次）
+- 温度趋势豁免：降温不升档、升温不降档（最多豁免 `OVERRIDE_MAX` 次，默认 8）
 - 所有阈值通过 `profile.conf` 配置，修改后 mtime 热重载无需重启
 - App 前后台切换不影响控制（模块仍在接收广播）
