@@ -27,15 +27,15 @@
 - CPU 紧急干预（65/75/85°C 三级，带低通滤波 + 10°C 滞回）
 - 电池温度调档（基准 35°C，三级区间：死区/±1档/±2档）
 - 趋势豁免（融合峰值反补）：小变动趋势反向→豁免，大变动→直接反补
-  - ≤0.3°C 且趋势反向：豁免（跳过本次调整）
-  - 0.3~0.5°C 且 2°C 内：反补 1 档
-  - >0.5°C 且 2°C 内：反补 PEAK_DAMP_INNER_ADJUST 档（默认 2）
-  - >0.3°C 且 2°C 外：反补 PEAK_DAMP_OUTER_ADJUST 档（默认 1）
+  - 2°C 内：≤PEAK_DAMP_INNER_BOUNDARY(0.3°C) 且趋势反向：豁免
+  - 2°C 内：>PEAK_DAMP_INNER_BOUNDARY(0.3°C) 且 ≤PEAK_DAMP_INNER_THRESHOLD(0.5°C)：反补 1 档
+  - 2°C 内：>PEAK_DAMP_INNER_THRESHOLD(0.5°C)：反补 2 档（固定）
+  - 2°C 外：≤PEAK_DAMP_OUTER_THRESHOLD(0.5°C)：豁免，>：反补 1 档（固定）
 - 温度未变化时跳过升降档，防止重复调整
 - 电池档位继承实际下发档位，紧急退出后挡位不暴跌
 - 退出紧急降档验证：仅电池温度低于升档阈值时允许降档
-- 双重进程检测：pgrep + 状态文件 mtime 心跳（16 秒超时），任一判死即断联
-- 所有阈值可通过 profile.conf 运行时配置并热重载（共 21 个可调参数）
+- 三合一存活检测：pgrep + 状态文件 mtime 心跳 + BLE=1，任一判死即断联
+- 所有阈值可通过 profile.conf 运行时配置并热重载（共 16 个可调参数）
 - CONFIG_ENABLED=0 时跳过配置加载，全部使用代码默认值
 - 指令去重，避免散热器频繁切换
 
@@ -105,7 +105,7 @@ APK 和 C 守护程序均由 GitHub Actions 自动构建：
 | 任务 | 优先级 | 说明 |
 |------|--------|------|
 | 进程检测与恢复（双重检测） | 🟡 中 | pgrep + status 文件 mtime 16 秒超时，模块断写心跳后 daemon 能否正确判死并恢复 |
-| 断联超时重置测试 | 🟡 中 | BLE 断开 >60 秒重连后，daemon 是否执行 `reset_state()` |
+| 断联恢复测试 | 🟡 中 | BLE 断开后重连，daemon 是否正确恢复（不重置状态） |
 | Status 文件 BLE 状态上报 | 🟡 中 | 模块每 5 秒写 BLE=0/1 到 status 文件，daemon 读取并响应 |
 | config 热重载验证 | 🟡 中 | 修改 `profile.conf` 后是否自动生效 |
 | 峰值过冲抑制测试 | 🟡 中 | 温度快速变化时反向补偿是否合理，日志确认 |
@@ -120,7 +120,7 @@ APK 和 C 守护程序均由 GitHub Actions 自动构建：
 
 | 项目 | 类型 | 说明 |
 |------|------|------|
-| DefaultDispatch 线程死循环 | ✅ 已修复 | `runFetchLoop` 空队列忙等，模块中替换队列为 sleep(100ms) 包装 |
+| DefaultDispatch 线程死循环 | 🔴 待修复 | `runFetchLoop` 空队列忙等，sleep(100ms) 包装未能解决。原因待分析 |
 | UI 模式选择器闪烁（固定功率时圆点空白） | 🟢 低 | `experimentalRunModeValue` 覆写已修复智能温控模式闪烁，但固定功率模式仍显示异常 |
 
 ---

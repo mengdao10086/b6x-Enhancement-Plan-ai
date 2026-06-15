@@ -62,10 +62,9 @@ tempctrl 侧（C 守护程序）：
     1. 读 /data/local/tmp/tempctrl.status 获取 BLE=0/1
     2. pgrep -f com.flydigi.waspwing.experimental
     3. stat(status 文件).mtime 距现在 ≤ 16秒？
-    两者都通过才算存活，任一失败即断联
-    └─ 断联 → 等待复活
-        ├─ ≥60 秒 → reset_state() 重置所有状态
-        └─ <60 秒 → 正常恢复，强制重发当前档位
+    三者都通过才算存活，任一失败即断联
+    └─ 断联 → 等待复活（进程+BLE 都恢复才视为复活）
+        └─ 恢复后保持当前状态，强制重发当前档位（不重置状态）
 
 模块侧（LSPosed）：
   onDeviceConnected / disconnect 钩子 → 更新 bleConnected 状态

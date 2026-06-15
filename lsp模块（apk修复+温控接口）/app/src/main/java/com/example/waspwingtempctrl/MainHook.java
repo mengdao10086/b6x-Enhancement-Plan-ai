@@ -411,66 +411,66 @@ public class MainHook implements IXposedHookLoadPackage {
         // ========== 修复 DefaultDispatcher 线程 100% CPU（runFetchLoop 空队列忙等） ==========
         // SDK 的 AbstractDataInteractionController.runFetchLoop 在命令队列为空时
         // 无限循环 peek()，无协程挂起点，导致 Dispatchers.Default 线程吃满一个核心。
-        // 修复：用带 sleep(100ms) 的包装队列替换原 ConcurrentLinkedQueue。
-        // 注意：钩子挂在具体子类 WaspWingDataInteractionController 上，而非抽象父类。
+        // 修复方法一：在 AbstractDataInteractionController 构造函数中替换队列
+        // 方法二：钩住 runFetchLoop 注入等 待（已废弃，协程挂起函数难包装）
+        // 这里使用方法一，同时用 hookAllConstructors 兜底确保捕获所有子类构造。
         try {
-            Class<?> wingCtrl2 = lpparam.classLoader.loadClass(
-                    "com.flydigi.sdk.waspwing.WaspWingDataInteractionController");
-            XposedHelpers.findAndHookMethod(wingCtrl2, "<init>",
-                    Context.class,
-                    lpparam.classLoader.loadClass("com.flydigi.sdk.bluetooth.DeviceFilter"),
-                    new XC_MethodHook() {
-                        @Override
-                        protected void afterHookedMethod(MethodHookParam param) {
-                            try {
-                                Object ctrl = param.thisObject;
-                                Object originalQueue = XposedHelpers.getObjectField(
-                                        ctrl, "mConcurrentLinkedQueue");
+            Class<?> absCtrl = lpparam.classLoader.loadClass(
+                    "com.flydigi.sdk.bluetooth.AbstractDataInteractionController");
+            // 使用 hookAllConstructors 而非 findAndHookMethod(<init>)，
+            // 避免子类签名不匹配导致钩子不触发的问题
+            XposedBridge.hookAllConstructors(absCtrl, new XC_MethodHook() {
+                @Override
+                protected void afterHookedMethod(MethodHookParam param) {
+                    try {
+                        Object ctrl = param.thisObject;
+                        Object originalQueue = XposedHelpers.getObjectField(
+                                ctrl, "mConcurrentLinkedQueue");
 
-                                // 包装 ConcurrentLinkedQueue：peek 空时 sleep 100ms
-                                ConcurrentLinkedQueue<Object> wrapped =
-                                        new ConcurrentLinkedQueue<Object>() {
-                                    @Override
-                                    public Object peek() {
-                                        Object result = super.peek();
-                                        if (result == null) {
-                                            try {
-                                                Thread.sleep(100);
-                                            } catch (InterruptedException e) {
-                                                Thread.currentThread().interrupt();
-                                            }
-                                        }
-                                        return result;
-                                    }
-                                };
-
-                                // 把原队列中已有数据搬过来
-                                if (originalQueue instanceof ConcurrentLinkedQueue) {
-                                    ConcurrentLinkedQueue<?> src =
-                                            (ConcurrentLinkedQueue<?>) originalQueue;
-                                    while (true) {
-                                        Object item = src.poll();
-                                        if (item == null) break;
-                                        wrapped.add(item);
+                        // 包装 ConcurrentLinkedQueue：peek 空时 sleep 100ms
+                        ConcurrentLinkedQueue<Object> wrapped =
+                                new ConcurrentLinkedQueue<Object>() {
+                            @Override
+                            public Object peek() {
+                                Object result = super.peek();
+                                if (result == null) {
+                                    try {
+                                        Thread.sleep(50);
+                                    } catch (InterruptedException e) {
+                                        Thread.currentThread().interrupt();
                                     }
                                 }
+                                return result;
+                            }
+                        };
 
-                                // volatile 字段，替换后运行中的协程线程立即可见
-                                XposedHelpers.setObjectField(ctrl,
-                                        "mConcurrentLinkedQueue", wrapped);
-
-                                XposedBridge.log(TAG
-                                        + " runFetchLoop 队列已替换（空等 sleep 100ms）");
-                            } catch (Exception e) {
-                                XposedBridge.log(TAG
-                                        + " runFetchLoop 队列替换失败: " + e.getMessage());
+                        // 把原队列中已有数据搬过来
+                        if (originalQueue instanceof ConcurrentLinkedQueue) {
+                            ConcurrentLinkedQueue<?> src =
+                                    (ConcurrentLinkedQueue<?>) originalQueue;
+                            while (true) {
+                                Object item = src.poll();
+                                if (item == null) break;
+                                wrapped.add(item);
                             }
                         }
-                    });
-            XposedBridge.log(TAG + " 已钩住 WaspWingDataInteractionController 构造"
+
+                        // volatile 字段，替换后运行中的协程线程立即可见
+                        XposedHelpers.setObjectField(ctrl,
+                                "mConcurrentLinkedQueue", wrapped);
+
+                        XposedBridge.log(TAG
+                                + " runFetchLoop 队列已替换（空待 sleep 50ms）");
+                    } catch (Exception e) {
+                        XposedBridge.log(TAG
+                                + " runFetchLoop 队列替换失败: " + e.getMessage());
+                    }
+                }
+            });
+            XposedBridge.log(TAG + " 已钩住 AbstractDataInteractionController 构造"
                     + "（修复 runFetchLoop CPU 满载）");
         } catch (Throwable t) {
-            XposedBridge.log(TAG + " 构 WaspWingDataInteractionController 失败: "
+            XposedBridge.log(TAG + " 钩 AbstractDataInteractionController 失败: "
                     + t.getMessage());
         }
 

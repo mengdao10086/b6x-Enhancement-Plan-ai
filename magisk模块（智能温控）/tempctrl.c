@@ -105,11 +105,7 @@ static int EMERG_FORCED_1 = 6;   // 新档位 6 = 旧档位 5（智能 16°C/400
 static int EMERG_FORCED_2 = 8;   // 新档位 8 = 旧档位 7（智能 14°C/5100RPM）
 static int EMERG_FORCED_3 = 10;  // 新档位 10 = 旧档位 9（智能 12°C/5800RPM）
 
-// --- FIFO 通信（已废弃，改用 pgrep 检测 App 进程）---
-// 保留 DISCONNECT_RESET_SEC 作为断联超时重置
-static int DISCONNECT_RESET_SEC = 60;   // 断联超时秒数（可配置）
-
-// --- CPU 滤波系数（百分比，0~100，默认 25=α=0.25）---
+// --- CPU 滤波系数（百分比，0~100，默认 20=α=0.20）---
 static int CPU_FILTER_ALPHA = 20;
 
 // --- 趋势豁免上限（可配置）---
@@ -117,14 +113,15 @@ static int CPU_FILTER_ALPHA = 20;
 static int OVERRIDE_MAX = 8;
 
 // --- 峰值过冲抑制（可配置）---
-// PEAK_DAMP_THRESHOLD：2°C 外趋势豁免触发阈值
-// PEAK_DAMP_INNER_THRESHOLD：2°C 内反补触发阈值，超此值反补 PEAK_DAMP_INNER_ADJUST 档
-// PEAK_DAMP_OUTER_THRESHOLD：2°C 外反补触发阈值，超此值反补 PEAK_DAMP_OUTER_ADJUST 档
-static int PEAK_DAMP_THRESHOLD      = 3;
+// PEAK_DAMP_OUTER_THRESHOLD：2°C 外豁免/反补分界阈值。
+//   变动 ≤ 此值 → 趋势豁免；变动 > 此值 → 反补 1 档
+// PEAK_DAMP_INNER_BOUNDARY：2°C 内豁免/反补分界阈值。
+//   变动 ≤ 此值 → 趋势豁免；变动 > 此值 → 反补（仍受 INNER_THRESHOLD 控制分级）
+// PEAK_DAMP_INNER_THRESHOLD：2°C 内反补二级阈值。
+//   boundary < 变动 ≤ 此值(0.5°C) → 反补 1 档；> 此值 → 反补 2 档（固定）
+static int PEAK_DAMP_INNER_BOUNDARY  = 3;
 static int PEAK_DAMP_INNER_THRESHOLD = 5;
-static int PEAK_DAMP_OUTER_THRESHOLD = 3;
-static int PEAK_DAMP_INNER_ADJUST    = 2;
-static int PEAK_DAMP_OUTER_ADJUST    = 1;
+static int PEAK_DAMP_OUTER_THRESHOLD = 5;
 
 // --- 电池调档冷却周期数（可配置）---
 // 每次电池温度导致的档位变动后冻结多少周期（×5s），期内跳过常规升降档
@@ -224,14 +221,11 @@ static void load_config(const char *path) {
         else if (strcmp(key, "EMERG_FORCED_1") == 0)       EMERG_FORCED_1     = clamp(val, 0, 10);
         else if (strcmp(key, "EMERG_FORCED_2") == 0)       EMERG_FORCED_2     = clamp(val, 0, 10);
         else if (strcmp(key, "EMERG_FORCED_3") == 0)       EMERG_FORCED_3     = clamp(val, 0, 10);
-        else if (strcmp(key, "DISCONNECT_RESET_SEC") == 0) DISCONNECT_RESET_SEC = clamp(val, 10, 600);
         else if (strcmp(key, "CPU_FILTER_ALPHA") == 0)     CPU_FILTER_ALPHA   = clamp(val, 1, 100);
         else if (strcmp(key, "OVERRIDE_MAX") == 0)         OVERRIDE_MAX       = clamp(val, 0, 20);
-        else if (strcmp(key, "PEAK_DAMP_THRESHOLD") == 0)      PEAK_DAMP_THRESHOLD      = clamp(val, 1, 10);
-        else if (strcmp(key, "PEAK_DAMP_INNER_THRESHOLD") == 0) PEAK_DAMP_INNER_THRESHOLD = clamp(val, 1, 10);
-        else if (strcmp(key, "PEAK_DAMP_OUTER_THRESHOLD") == 0) PEAK_DAMP_OUTER_THRESHOLD = clamp(val, 1, 10);
-        else if (strcmp(key, "PEAK_DAMP_INNER_ADJUST") == 0)    PEAK_DAMP_INNER_ADJUST    = clamp(val, 1, 3);
-        else if (strcmp(key, "PEAK_DAMP_OUTER_ADJUST") == 0)    PEAK_DAMP_OUTER_ADJUST    = clamp(val, 1, 3);
+        else if (strcmp(key, "PEAK_DAMP_INNER_BOUNDARY") == 0) PEAK_DAMP_INNER_BOUNDARY  = clamp(val, 1, 10);
+        else if (strcmp(key, "PEAK_DAMP_INNER_THRESHOLD") == 0)  PEAK_DAMP_INNER_THRESHOLD = clamp(val, 1, 10);
+        else if (strcmp(key, "PEAK_DAMP_OUTER_THRESHOLD") == 0)  PEAK_DAMP_OUTER_THRESHOLD = clamp(val, 1, 10);
         else if (strcmp(key, "BATT_COOLDOWN_CYCLES") == 0) BATT_COOLDOWN_CYCLES = clamp(val, 0, 20);
         else if (strcmp(key, "STATUS_TIMEOUT") == 0)       STATUS_TIMEOUT     = clamp(val, 5, 60);
         else if (strcmp(key, "CPU_ZONE_MIN") == 0)          CPU_ZONE_MIN       = clamp(val, 0, 99);
@@ -328,7 +322,6 @@ static int last_windLevel = -1;
 
 // --- App 进程检测 ---
 static int app_was_alive = 0;          // 上次检测时 App 是否存活
-static time_t app_dead_since = 0;      // App 失联起始时间戳
 
 // --- 状态文件检测（模块心跳 + BLE 状态）---
 // 模块每 5 秒写入一次 status 文件，daemon 通过 mtime 判断进程是否活着
@@ -733,37 +726,6 @@ static int is_app_alive(void) {
     return pgrep_ok && status_ok;
 }
 
-// ======================== 状态重置 ========================
-
-/**
- * 重置所有状态（视为刚开机）
- */
-static void reset_state(void) {
-    battery_fan_level = LEVEL_INIT;
-    write_log("重置 初始档=%d", battery_fan_level);
-
-    batt_cooldown = 0;
-    batt_cooldown = 0;
-    emergency_level = 0;
-    forced_min_level = 0;
-    cpu_weighted = 250;      // 25.0°C
-    first_run = 1;
-    prev_batt_temp = -1;     // 重置温度变化检测
-    last_batt_reading = -1;  // 重置趋势判断
-    trend_override = 0;      // 重置豁免计数器
-
-    app_dead_since = 0;
-    app_was_alive = 1;                 // 重置后视为 App 存活，等待检测
-    app_ble_connected = 0;             // 重置 BLE 连接状态
-    cpu_zone_scanned = 0;              // 重新扫描 CPU 温度 zone
-
-    // 清发送缓存，确保重置参数一定下发
-    last_sent_valid = 0;
-
-    // 立即下发重置后的档位
-    apply_level(battery_fan_level);
-}
-
 // ======================== 电池温度控制 ========================
 
 /**
@@ -777,6 +739,10 @@ static void reset_state(void) {
  *
  * 温度读数未变化时跳过升降档。
  * 已去除冷却期（冷却期原用于延迟升降档，现改为随到随调）。
+ *
+ * 合并逻辑：
+ *   2°C 内：≤0.3°C 趋势豁免，0.3~0.5°C 反补 1 档，>0.5°C 反补 2 档
+ *   2°C 外：≤PEAK_DAMP_OUTER_THRESHOLD 趋势豁免，> 则反补 1 档
  */
 static void battery_control(void) {
     int batt = read_battery_temp();
@@ -821,9 +787,12 @@ static void battery_control(void) {
             skip_delta = 1;   // 冷却期内 delta 不执行
         }
 
-        if (!in_cooldown && abs_change <= 3) {
-            // ═══ 小变动（≤0.3°C）→ 趋势豁免 ═══
-            // 最高/最低档位时不触发豁免
+        // 2°C 外使用 PEAK_DAMP_OUTER_THRESHOLD 作为豁免/反补分界
+        int peak_bound = (abs_diff > BATT_ZONE_2) ? PEAK_DAMP_OUTER_THRESHOLD : PEAK_DAMP_INNER_BOUNDARY;
+
+        // ═══ 小变动（≤阈值）→ 趋势豁免 ═══
+        // 最高/最低档位时不触发豁免
+        if (!in_cooldown && abs_change <= peak_bound) {
             if (trend_rev && battery_fan_level > LEVEL_MIN &&
                 battery_fan_level < LEVEL_MAX) {
                 if (trend_override < OVERRIDE_MAX) {
@@ -831,8 +800,7 @@ static void battery_control(void) {
                     trend_override++;
                     skip_delta = 1;
                     if (first) {
-                        int old = battery_fan_level;
-                        write_log("趋势豁免 %d", old);
+                        write_log("趋势豁免 %d", battery_fan_level);
                     }
                 } else {
                     trend_override = 0;
@@ -842,29 +810,33 @@ static void battery_control(void) {
             }
         }
 
-        if (abs_change > 3) {
-            // ═══ 大变动（>0.3°C）→ 峰值反补（冷却期也执行） ═══
+        // ═══ 大变动（>阈值）→ 峰值反补（冷却期也执行） ═══
+        if (abs_change > peak_bound) {
             trend_override = 0;
 
             int adjust = 0;
             if (abs_diff <= BATT_ZONE_2) {
-                if (abs_change <= 5)
+                // 2°C内：≤PEAK_DAMP_INNER_THRESHOLD→1档，>→2档（固定）
+                if (abs_change <= PEAK_DAMP_INNER_THRESHOLD)
                     adjust = (batt_change > 0) ? 1 : -1;
                 else
-                    adjust = (batt_change > 0) ? PEAK_DAMP_INNER_ADJUST : -PEAK_DAMP_INNER_ADJUST;
+                    adjust = (batt_change > 0) ? 2 : -2;
             } else {
-                adjust = (batt_change > 0) ? PEAK_DAMP_OUTER_ADJUST : -PEAK_DAMP_OUTER_ADJUST;
+                // 2°C外：固定反补1档
+                adjust = (batt_change > 0) ? 1 : -1;
             }
 
-            int old = battery_fan_level;
-            battery_fan_level += adjust;
-            battery_fan_level = clamp(battery_fan_level, LEVEL_MIN, LEVEL_MAX);
-            skip_delta = 1;
-            if (old != battery_fan_level) {
-                batt_cooldown = BATT_COOLDOWN_CYCLES;
-                write_log("过冲%d.%d 挡位%d %+d",
-                          abs_change / 10, abs_change % 10,
-                          old, adjust);
+            if (adjust != 0) {
+                int old = battery_fan_level;
+                battery_fan_level += adjust;
+                battery_fan_level = clamp(battery_fan_level, LEVEL_MIN, LEVEL_MAX);
+                skip_delta = 1;
+                if (old != battery_fan_level) {
+                    batt_cooldown = BATT_COOLDOWN_CYCLES;
+                    write_log("过冲%d.%d 挡位%d %+d",
+                              abs_change / 10, abs_change % 10,
+                              old, adjust);
+                }
             }
         }
     }
@@ -876,7 +848,7 @@ static void battery_control(void) {
         battery_fan_level = clamp(battery_fan_level, LEVEL_MIN, LEVEL_MAX);
         if (old != battery_fan_level) {
             batt_cooldown = BATT_COOLDOWN_CYCLES;
-            write_log("档位%d %+d", old, delta);
+            write_log("挡位%d（%d）", battery_fan_level, delta);
         }
     }
 
@@ -927,11 +899,14 @@ static void emergency_intervention(void) {
     // 等级变化处理
     if (new_level != emergency_level) {
         int old = emergency_level;
-        write_log("紧急 %d 档+%d cpu=%d.%d",
-                  old, new_level - old,
+        int delta_e = new_level - old;
+        write_log("紧急%d（%s%d）cpu%d.%d",
+                  new_level,
+                  (delta_e >= 0 ? "+" : ""), delta_e,
                   cpu_now / 10, cpu_now % 10);
 
         emergency_level = new_level;
+        batt_cooldown = BATT_COOLDOWN_CYCLES;   // 任何档位变动后启动冷却
     }
 
     // 设定强制最低档位
@@ -1014,11 +989,6 @@ static void main_loop(void) {
                 battery_fan_level = EMERG_FORCED_2;
             if (prev_emerg_level >= 1 && emergency_level < 1 && battery_fan_level > EMERG_FORCED_1)
                 battery_fan_level = EMERG_FORCED_1;
-        } else if (prev_emerg_level != emergency_level) {
-            // 只在紧急等级刚切换时打一次，避免每 5 秒刷屏
-            write_log("紧急 跳过降档: %d.%d°C > 升阈%d.%d°C",
-                      batt / 10, batt % 10,
-                      upshift_threshold / 10, upshift_threshold % 10);
         }
     }
 }
@@ -1081,10 +1051,12 @@ int main(int argc, char *argv[]) {
                 break;
             }
         }
-        // 降低日志频率：每 30 秒（6 轮）打一次
-        static int wait_noise = 0;
-        if (++wait_noise % 6 == 1)
-            write_log("等待 BLE连接，5秒后重试...");
+        // 只发一条等待日志
+        static int wait_logged = 0;
+        if (!wait_logged) {
+            write_log("等待 BLE连接...");
+            wait_logged = 1;
+        }
         sleep(5);
     }
     if (!running) goto exit;
@@ -1108,28 +1080,25 @@ int main(int argc, char *argv[]) {
         // 读取模块上报的 BLE 连接状态（从 status 文件）
         read_status_ble();
 
-        // App 进程存活检测（pgrep + 状态文件 mtime）
-        if (!is_app_alive()) {
-            // App 刚死 → 记录失联时间
+        // 存活检测（进程+mtime + BLE，任一不满足即算断联）
+        int app_proc_ok = is_app_alive();
+        int fully_connected = app_proc_ok && app_ble_connected;
+
+        if (!fully_connected) {
+            // 刚断联 → 标记
             if (app_was_alive) {
-                app_dead_since = time(NULL);
                 app_was_alive = 0;
-                write_log("App 消失，等待重连...");
+                if (!app_proc_ok)
+                    write_log("App 消失，等待重连...");
+                else
+                    write_log("BLE 断开，等待重连...");
             }
 
-            // 等待 App 复活的循环
+            // 等待完全恢复的循环（进程+BLE 都就绪）
             while (running) {
                 sleep(5);
-                if (is_app_alive()) {
-                    time_t elapsed = time(NULL) - app_dead_since;
-                    if (elapsed >= DISCONNECT_RESET_SEC) {
-                        write_log("App 恢复(断%lds≥%ds) 重置状态",
-                                  (long)elapsed, DISCONNECT_RESET_SEC);
-                        reset_state();
-                    } else {
-                        write_log("App 恢复(断%lds) 继续",
-                                  (long)elapsed);
-                    }
+                read_status_ble();
+                if (is_app_alive() && app_ble_connected) {
                     app_was_alive = 1;
                     last_sent_valid = 0;          // 强制重发当前档位
                     apply_level(battery_fan_level);
