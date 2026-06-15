@@ -120,7 +120,8 @@ APK 和 C 守护程序均由 GitHub Actions 自动构建：
 
 | 项目 | 类型 | 说明 |
 |------|------|------|
-| DefaultDispatch 线程死循环 | 🔴 待修复 | `runFetchLoop` 空队列忙等，sleep(100ms) 包装未能解决。原因待分析 |
+| DefaultDispatch 线程死循环 | ✅ 已修复 | `hookAllConstructors` 替换队列 + sleep(50ms) |
+| 档位表可配置化(v2.1) | 🟡 中 | 将 4 张查表数组改为 profile.conf GEAR_N=模式,目标,风扇,制冷 格式，支持自动扩展档位数量 |
 | UI 模式选择器闪烁（固定功率时圆点空白） | 🟢 低 | `experimentalRunModeValue` 覆写已修复智能温控模式闪烁，但固定功率模式仍显示异常 |
 
 ---

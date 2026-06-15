@@ -183,7 +183,7 @@ static void load_config(const char *path) {
     fclose(f);
 
     if (!enabled) {
-        write_log("配置 已禁用(CONFIG_ENABLED=0)，使用默认参数");
+        write_log("配置 已禁用，使用默认参数");
         return;
     }
 
@@ -833,9 +833,9 @@ static void battery_control(void) {
                 skip_delta = 1;
                 if (old != battery_fan_level) {
                     batt_cooldown = BATT_COOLDOWN_CYCLES;
-                    write_log("过冲%d.%d 挡位%d %+d",
+                    write_log("过冲%d.%d 挡位%d（%+d）",
                               abs_change / 10, abs_change % 10,
-                              old, adjust);
+                              battery_fan_level, adjust);
                 }
             }
         }
@@ -941,7 +941,7 @@ static void main_loop(void) {
             if (st.st_mtime != config_mtime) {
                 load_config(config_path);
                 config_mtime = st.st_mtime;
-                write_log("配置 热重载 (mtime变化)");
+                write_log("配置 热重载");
             }
         }
     }
@@ -1030,7 +1030,7 @@ int main(int argc, char *argv[]) {
             last_batt_reading = batt;
         }
     }
-    write_log("=== 智能温控启动(档位%d) ===", battery_fan_level);
+    write_log("脚本启动成功");
 
     // --- 等待模块就绪（进程存活 + status 文件有内容） ---
     // status 文件由模块在 Application.onCreate 中写入 "BLE=0/1\n"，
@@ -1051,12 +1051,6 @@ int main(int argc, char *argv[]) {
                 break;
             }
         }
-        // 只发一条等待日志
-        static int wait_logged = 0;
-        if (!wait_logged) {
-            write_log("等待 BLE连接...");
-            wait_logged = 1;
-        }
         sleep(5);
     }
     if (!running) goto exit;
@@ -1071,27 +1065,21 @@ int main(int argc, char *argv[]) {
     // 强制首次下发
     last_sent_valid = 0;
     apply_level(battery_fan_level);
-    write_log("进入工作模式");
 
     // ---- 主控制循环：每 5 秒一次 ----
+    // 循环开头先检测连接状态，断联时不执行 main_loop
     while (running) {
-        main_loop();
-
-        // 读取模块上报的 BLE 连接状态（从 status 文件）
         read_status_ble();
-
-        // 存活检测（进程+mtime + BLE，任一不满足即算断联）
         int app_proc_ok = is_app_alive();
         int fully_connected = app_proc_ok && app_ble_connected;
 
         if (!fully_connected) {
-            // 刚断联 → 标记
             if (app_was_alive) {
                 app_was_alive = 0;
                 if (!app_proc_ok)
-                    write_log("App 消失，等待重连...");
+                    write_log("App 不存在，等待连接...");
                 else
-                    write_log("BLE 断开，等待重连...");
+                    write_log("BLE 已断开，等待连接...");
             }
 
             // 等待完全恢复的循环（进程+BLE 都就绪）
@@ -1100,19 +1088,19 @@ int main(int argc, char *argv[]) {
                 read_status_ble();
                 if (is_app_alive() && app_ble_connected) {
                     app_was_alive = 1;
-                    last_sent_valid = 0;          // 强制重发当前档位
+                    last_sent_valid = 0;
                     apply_level(battery_fan_level);
-                    write_log("进入工作模式(重连)");
                     break;
                 }
             }
+            continue;   // 跳过本轮 main_loop，下一轮再开始控制
         } else if (!app_was_alive) {
-            // App 已复活（但上一轮检测还活着，不用重置）
             app_was_alive = 1;
             last_sent_valid = 0;
             apply_level(battery_fan_level);
-            write_log("进入工作模式(恢复)");
         }
+
+        main_loop();
 
         // 逐秒睡眠（可被信号中断）
         for (int i = 0; i < 5 && running; i++) {
@@ -1121,6 +1109,5 @@ int main(int argc, char *argv[]) {
     }
 
 exit:
-    write_log("=== 智能温控退出 ===");
     return 0;
 }
