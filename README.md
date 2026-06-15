@@ -53,21 +53,6 @@
 ```
 
 ## 构建
-
-GitHub Actions 自动构建，**只推送有变化部分的编译即可**：
-
-| 触发方式 | 编译内容 |
-|----------|----------|
-| 推送 `lsp模块/**` 变更 | 仅 LSPosed 模块（`build-lsposed.yml`） |
-| 推送 `magisk模块/**` 变更 | 仅 C 守护程序 + Magisk 模块包（`build-magisk.yml`） |
-| 推送 `v*` 标签 | 全量编译（`build-apk.yml`） |
-| 手动 `workflow_dispatch` | 全量编译 |
-
-构建产物在对应运行记录的 Artifacts 中下载。
-
-> **NDK 缓存**：NDK (~700MB) 已配置 `actions/cache`，首次运行后不再重复下载。
-> **分支**：所有开发直接提交到 **`main`** 分支。
-
 ### ⚠️ 重要：C 守护程序推荐使用 GitHub Actions 编译
 
 **不要在手机上用 Termux 编译！** Termux 的 `clang -static` 链接的是 Termux 的 libc，
@@ -80,6 +65,19 @@ GitHub Actions 自动构建，**只推送有变化部分的编译即可**：
 - 编译命令：`aarch64-linux-android21-clang -static -O2`
 - NDK 已配置 `actions/cache` 缓存（~700MB），首次后不再重复下载
 - CI 产物在 Actions 运行记录的 Artifacts 中下载
+
+GitHub Actions 自动构建，**只推送有变化部分的编译即可**：
+| 触发方式 | 编译内容 |
+|----------|----------|
+| 推送 `lsp模块/**` 变更 | 仅 LSPosed 模块（`build-lsposed.yml`） |
+| 推送 `magisk模块/**` 变更 | 仅 C 守护程序 + Magisk 模块包（`build-magisk.yml`） |
+| 推送 `v*` 标签 | 全量编译（`build-apk.yml`） |
+| 手动 `workflow_dispatch` | 全量编译 |
+
+构建产物在对应运行记录的 Artifacts 中下载。
+
+> **NDK 缓存**：NDK (~700MB) 已配置 `actions/cache`，首次运行后不再重复下载。
+> **分支**：所有开发直接提交到 **`main`** 分支。
 
 ---
 
