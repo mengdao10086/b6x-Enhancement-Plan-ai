@@ -8,12 +8,16 @@
 - 紧急干预双源化：CPU 温度 + 电池电流 OR 入 AND 出，电流使用绝对值不平滑
 - 断联时 actual_level = target_level 清零待执行步伐
 - 退出紧急直接按 AND 结果钳制，不再判断电池温度/充电电流
+- 删除 pgrep 进程检测：改为 status 文件 mtime 心跳 + BLE=1 双重检查
+- 日志持 FILE* 避免每行 open/close，日志格式支持末尾 \\n 实现空行
 
 ### v2.0 概况（基础）
 - 通信：~~FIFO~~ → 已废弃，改用 status 文件 mtime + pgrep + BLE 三重检查
 - 控制：C 守护程序每 5 秒计算目标档位 → 渐进执行（每次±1 档压制突变噪音）→ `am broadcast` → LSPosed 模块 → `WaspWingManager.setRunMode()` → BLE 指令
 - 配置：所有阈值通过 `profile.conf` 运行时配置，支持 mtime 热重载（`CONFIG_ENABLED=0` 可跳过）
 - 档位：1~12 级，使用查表法，趋势豁免+峰值反补合并逻辑，决策与执行分离（逐级±1 档）
+- 进程检测：双重检查（status 文件 mtime 心跳 + BLE=1），无 pgrep
+- 日志：持 FILE* 避免重复 open/close，超限自动滚动
 - 部署：Magisk/KSU 模块（`service.sh` 复制到 `/data/local/tmp/` 绕过 noexec）
 
 ## ⚠️ Git 子模块

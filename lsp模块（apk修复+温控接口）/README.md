@@ -34,8 +34,8 @@
  ┌─ 手机 ──────────────────────────────────────────────────┐
  │                                                         │
  │  飞智 App 进程                        Root 进程          │
- │  ┌──────────────────────┐     pgrep    ┌───────────────┐  │
- │  │ LSPosed 模块          │ ◄────────── │ tempctrl      │  │
+ │  ┌──────────────────────┐   status 文件  ┌───────────────┐  │
+ │  │ LSPosed 模块          │ ◄───心跳───── │ tempctrl      │  │
  │  │                      │  进程存活检测 │ C 守护程序     │  │
  │  │ BLE 连接/断联        │             │ 每 5 秒：     │  │
  │  │ (tempctrl 自行检测   │             │ 读温度→决策→  │  │
@@ -56,16 +56,15 @@
 
 ### 2.2 进程检测与控制通信
 
-使用 **三重检查检测**：pgrep 进程存在 + status 文件 mtime 心跳 + BLE=1 状态。模块每 5 秒写入一次 status 文件，tempctrl 检测 mtime 是否在 16 秒内：
+使用 **双重检查检测**：status 文件 mtime 心跳 + BLE=1 状态。模块每 5 秒写入一次 status 文件，tempctrl 检测 mtime 是否在 16 秒内（已移除 pgrep，模块心跳足以判断存活）：
 
 ```
 tempctrl 侧（C 守护程序）：
   每轮主循环开头：
     1. 读 /data/local/tmp/tempctrl.status 获取 BLE=0/1
-    2. pgrep -f com.flydigi.waspwing.experimental
-    3. stat(status 文件).mtime 距现在 ≤ 16秒？
-    三者都通过才算存活，任一失败即断联
-    └─ 断联 → 等待复活（进程+BLE 都恢复才视为复活）
+    2. stat(status 文件).mtime 距现在 ≤ 16秒？
+    两者都通过才算存活，任一失败即断联
+    └─ 断联 → 等待复活（模块+BLE 都恢复才视为复活）
         └─ 恢复后保持当前状态，强制重发当前档位（不重置状态）
 
 模块侧（LSPosed）：

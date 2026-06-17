@@ -12,14 +12,14 @@
 
 | 方向 | 方式 | 数据 |
 |------|------|------|
-| tempctrl → App 存活检测 | `pgrep -f com.flydigi.waspwing.experimental` | 每 5 秒检查 |
+| tempctrl → App 存活检测 | `stat(status 文件).mtime ≤ 16秒` | 每 5 秒检查 |
 | tempctrl → LSPosed 模块 | `am broadcast` | `com.flydigi.SET_TEMPERATURE` 带 7 参数 |
 | LSPosed 模块 → 散热器 | `WaspWingManager.setRunMode()` → BLE | 散热器控制指令 |
 
 ## 核心逻辑
 
 - ~~FIFO 通信已废弃~~（KernelSU 下 App 进程写 `/data/local/tmp/` 权限不通）
-- tempctrl 通过 `pgrep` 每 5 秒检测 App 进程存活
+- tempctrl 通过 status 文件 mtime 每 5 秒检测 App 进程存活（模块心跳，超时 16 秒判死）
 - App 进程不存在 → 等待复活；复活后 `actual_level = target_level` 对齐，清缓存强制下发
 - 断联时 `actual_level = target_level`（清零待执行步伐），无超时重置
 - 档位决策与执行分离：`main_loop` 纯计算，每轮连接检测后逐步执行 ±1 档
