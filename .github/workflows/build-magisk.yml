@@ -71,9 +71,15 @@ jobs:
           echo "Module contents:"
           ls -la magisk模块（智能温控）/magisk模块框架/
 
+      - name: 打包为 ZIP（b6x-EP-Magisk-v版本号.zip）
+        run: |
+          VERSION=$(grep '^version=' magisk模块（智能温控）/magisk模块框架/module.prop | sed 's/^version=v//')
+          cd magisk模块（智能温控）/magisk模块框架/
+          zip -r "../../b6x-EP-Magisk-v${VERSION}.zip" .
+
       - name: 上传 Magisk 模块包
         uses: actions/upload-artifact@v4
         with:
-          name: b6x-Magisk-Module
-          path: magisk模块（智能温控）/magisk模块框架/
+          name: b6x-EP-Magisk
+          path: b6x-EP-Magisk-v*.zip
           if-no-files-found: error

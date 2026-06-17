@@ -81,6 +81,16 @@ GitHub Actions 自动构建，**只推送有变化部分的编译即可**：
 
 构建产物在对应运行记录的 Artifacts 中下载。
 
+### 产物命名规范
+
+| 组件 | 格式 | 示例 | 版本号来源 |
+|------|------|------|-----------|
+| **LSPosed APK** | `b6x-EP-LSPosed-v{version}.apk` | `b6x-EP-LSPosed-v2.0.apk` | `app/build.gradle.kts` → `versionName` |
+| **Magisk ZIP** | `b6x-EP-Magisk-v{version}.zip` | `b6x-EP-Magisk-v2.0.zip` | `module.prop` → `version` 字段（去 v 前缀） |
+
+- `b6x-EP` = b6x Enhancement Plan（项目缩写）
+- 版本号编号与 Magisk 模块的 version 字段保持一致
+
 > **NDK 缓存**：NDK (~700MB) 已配置 `actions/cache`，首次运行后不再重复下载。
 > **分支**：所有开发直接提交到 **`main`** 分支。
 

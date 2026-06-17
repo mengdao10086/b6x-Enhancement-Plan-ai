@@ -35,11 +35,16 @@ jobs:
       - name: 编译 APK（b6x keystore 签名，每次签名一致）
         run: ./gradlew assembleRelease
 
+      - name: 重命名 APK（b6x-EP-LSPosed-v版本号.apk）
+        run: |
+          VERSION=$(grep "versionName" app/build.gradle.kts | sed 's/.*"\(.*\)".*/\1/')
+          cp app/build/outputs/apk/release/*.apk "b6x-EP-LSPosed-v${VERSION}.apk"
+
       - name: 上传 APK 构建产物
         uses: actions/upload-artifact@v4
         with:
-          name: LSPosed-Module-APK
-          path: lsp模块（apk修复+温控接口）/app/build/outputs/apk/release/*.apk
+          name: b6x-EP-LSPosed
+          path: b6x-EP-LSPosed-v*.apk
 
   build-c:
     name: 编译 C 智能温控守护程序
@@ -107,9 +112,15 @@ jobs:
           echo "Module contents:"
           ls -la magisk模块（智能温控）/magisk模块框架/
 
+      - name: 打包为 ZIP（b6x-EP-Magisk-v版本号.zip）
+        run: |
+          VERSION=$(grep '^version=' magisk模块（智能温控）/magisk模块框架/module.prop | sed 's/^version=v//')
+          cd magisk模块（智能温控）/magisk模块框架/
+          zip -r "../../b6x-EP-Magisk-v${VERSION}.zip" .
+
       - name: 上传 Magisk 模块包（刷入即用）
         uses: actions/upload-artifact@v4
         with:
-          name: b6x-Magisk-Module
-          path: magisk模块（智能温控）/magisk模块框架/
+          name: b6x-EP-Magisk
+          path: b6x-EP-Magisk-v*.zip
           if-no-files-found: error
