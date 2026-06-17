@@ -3,7 +3,13 @@
 ## 项目定位
 飞智 B6X 散热器开发者工具增强项目。**Android 16 BLE 修复已完成**，**智能温控 v2.0 已发布**。
 
-### v2.0 概况
+### v2.1 概况（累计）
+- 决策与执行分离：main_loop 纯计算，连接检测后逐步 ±1 档执行
+- 紧急干预双源化：CPU 温度 + 电池电流 OR 入 AND 出，电流使用绝对值不平滑
+- 断联时 actual_level = target_level 清零待执行步伐
+- 退出紧急直接按 AND 结果钳制，不再判断电池温度/充电电流
+
+### v2.0 概况（基础）
 - 通信：~~FIFO~~ → 已废弃，改用 status 文件 mtime + pgrep + BLE 三重检查
 - 控制：C 守护程序每 5 秒计算目标档位 → 渐进执行（每次±1 档压制突变噪音）→ `am broadcast` → LSPosed 模块 → `WaspWingManager.setRunMode()` → BLE 指令
 - 配置：所有阈值通过 `profile.conf` 运行时配置，支持 mtime 热重载（`CONFIG_ENABLED=0` 可跳过）

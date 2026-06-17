@@ -75,7 +75,7 @@ static const int GEAR_MODE_TABLE[12] = {
 
 // 档位 → 智能温控目标温度 (°C)，固定功率模式该项无效（传 20 占位），索引 = level - 1
 static const int TARGET_TEMP_TABLE[12] = {
-    20, 20, 20, 20, 20, 18, 16, 15, 14, 13, 12, 20
+    0, 0, 0, 0, 0, 18, 16, 15, 14, 13, 12, 0
 };
 
 // 档位 → 固定功率制冷片强度，智能模式该项传 0（让散热器自行管理），索引 = level - 1
@@ -134,6 +134,15 @@ static int STATUS_TIMEOUT = 16;
 // 首次运行在此范围内扫描有效的 thermal_zone，后续只扫命中的 zone
 static int CPU_ZONE_MIN = 0;
 static int CPU_ZONE_MAX = 99;
+
+// --- 电池电流紧急干预阈值（µA，可配置）---
+// 通过 /sys/class/power_supply/battery/current_now 读取，取绝对值
+static int CURRENT_EMERG_3 = 7000000;   // >7A → 等级 3
+static int CURRENT_EMERG_2 = 6000000;   // >6A → 等级 2
+static int CURRENT_EMERG_1 = 5000000;   // >5A → 等级 1
+static int CURRENT_RECOVER_2 = 6000000; // <6A → 从 3 降为 2
+static int CURRENT_RECOVER_1 = 5000000; // <5A → 从 2 降为 1
+static int CURRENT_RECOVER_0 = 4000000; // <4A → 清除
 
 
 // --- 日志路径（默认根据二进制名自动生成，可由 profile.conf 覆盖）---
@@ -230,6 +239,12 @@ static void load_config(const char *path) {
         else if (strcmp(key, "STATUS_TIMEOUT") == 0)       STATUS_TIMEOUT     = clamp(val, 5, 60);
         else if (strcmp(key, "CPU_ZONE_MIN") == 0)          CPU_ZONE_MIN       = clamp(val, 0, 99);
         else if (strcmp(key, "CPU_ZONE_MAX") == 0)          CPU_ZONE_MAX       = clamp(val, 0, 99);
+        else if (strcmp(key, "CURRENT_EMERG_3") == 0)       CURRENT_EMERG_3    = clamp(val, 1000000, 15000000);
+        else if (strcmp(key, "CURRENT_EMERG_2") == 0)       CURRENT_EMERG_2    = clamp(val, 1000000, 15000000);
+        else if (strcmp(key, "CURRENT_EMERG_1") == 0)       CURRENT_EMERG_1    = clamp(val, 1000000, 15000000);
+        else if (strcmp(key, "CURRENT_RECOVER_2") == 0)     CURRENT_RECOVER_2  = clamp(val, 1000000, 15000000);
+        else if (strcmp(key, "CURRENT_RECOVER_1") == 0)     CURRENT_RECOVER_1  = clamp(val, 1000000, 15000000);
+        else if (strcmp(key, "CURRENT_RECOVER_0") == 0)     CURRENT_RECOVER_0  = clamp(val, 1000000, 15000000);
         else if (strcmp(key, "LOG_MAX_KB") == 0)           LOG_MAX_KB         = clamp(val, 0, 1000);
         else if (strcmp(key, "LOG_FILE") == 0) {
             char *v = val_str;
@@ -600,6 +615,24 @@ static int read_cpu_temp_max(void) {
     return max_temp;
 }
 
+/**
+ * 读取电池电流绝对值（µA）
+ * /sys/class/power_supply/battery/current_now
+ * 正值=放电，负值=充电，本函数取绝对值
+ * 返回值：µA 绝对值，读取失败返回 -1
+ */
+static int read_battery_current_abs(void) {
+    FILE *f = fopen("/sys/class/power_supply/battery/current_now", "r");
+    if (!f) return -1;
+    int val;
+    if (fscanf(f, "%d", &val) != 1) {
+        fclose(f);
+        return -1;
+    }
+    fclose(f);
+    return (val >= 0) ? val : -val;
+}
+
 // ======================== 控制参数计算与下发 ========================
 
 /**
@@ -863,7 +896,7 @@ static void battery_control(void) {
         battery_fan_level = clamp(battery_fan_level, LEVEL_MIN, LEVEL_MAX);
         if (old != battery_fan_level) {
             batt_cooldown = BATT_COOLDOWN_CYCLES;
-            write_log("挡位%d（%d）", battery_fan_level, delta);
+            write_log("挡位%d（%+d）", battery_fan_level, delta);
         }
     }
 
@@ -875,56 +908,88 @@ static void battery_control(void) {
 // ======================== CPU 紧急干预 ========================
 
 /**
- * CPU 温度紧急干预
+ * 紧急干预（CPU 温度 + 电池电流双源）
  * 每 5 秒调用一次
  *
- * 使用一阶低通滤波（α=0.25）平滑温度
+ * CPU 温度使用一阶低通滤波（α=CPU_FILTER_ALPHA）平滑
+ * 电池电流取绝对值，不平滑
  *
- * 紧急等级分布（档位值根据 Sheet2 标注）：
- *   等级 1（>65°C）→ 最低档位 5（智能 16°C/4000RPM，紧急1-min）
- *   等级 2（>75°C）→ 最低档位 7（智能 14°C/5100RPM，紧急2-min）
- *   等级 3（>85°C）→ 最低档位 9（智能 12°C/5800RPM，紧急3-min）
+ * 紧急等级：
+ *   等级 1 → 强制最低档位 EMERG_FORCED_1（默认 6，智能 16°C/4000RPM）
+ *   等级 2 → 强制最低档位 EMERG_FORCED_2（默认 8，智能 14°C/5100RPM）
+ *   等级 3 → 强制最低档位 EMERG_FORCED_3（默认 10，智能 12°C/5800RPM）
  *
- * 降温使用 10°C 滞回避免频繁跳变
+ * 进入逻辑（OR）：CPU 或电流任一触发即进入对应等级
+ * 退出逻辑（AND）：CPU 和电流都低于恢复阈值才降级
  */
 static void emergency_intervention(void) {
+    // --- 1. CPU 温度读入与滤波 ---
     int cpu_now = read_cpu_temp_max();
-    if (cpu_now < 0) return;   // 读取失败，保持当前等级
-
-    // 一阶低通滤波：weighted = raw×ALPHA% + weighted×(100-ALPHA)%
-    if (first_run) {
-        cpu_weighted = cpu_now;
-        first_run = 0;
-    } else {
-        cpu_weighted = (cpu_now * CPU_FILTER_ALPHA + cpu_weighted * (100 - CPU_FILTER_ALPHA)) / 100;
+    if (cpu_now >= 0) {
+        if (first_run) {
+            cpu_weighted = cpu_now;
+            first_run = 0;
+        } else {
+            cpu_weighted = (cpu_now * CPU_FILTER_ALPHA + cpu_weighted * (100 - CPU_FILTER_ALPHA)) / 100;
+        }
     }
+    int t = cpu_weighted;   // 加权 CPU 温度（始终有效）
+    int cpu_valid = (cpu_now >= 0);
 
-    int t = cpu_weighted;
+    // --- 2. 电池电流绝对值（不平滑）---
+    int cur_ua = read_battery_current_abs();
+    int cur_valid = (cur_ua >= 0);
+
     int new_level = emergency_level;
 
-    // 升温：直接跳到对应等级
-    if      (t > CPU_EMERG_3) new_level = 3;
-    else if (t > CPU_EMERG_2) new_level = 2;
-    else if (t > CPU_EMERG_1) new_level = 1;
-    // 降温：10°C 滞回，逐级下降
-    else if (t < CPU_RECOVER_0)                          new_level = 0;
-    else if (t < CPU_RECOVER_1 && emergency_level >= 2)  new_level = 1;
-    else if (t < CPU_RECOVER_2 && emergency_level >= 3)  new_level = 2;
+    // === 3. Entry（OR 逻辑）：任一源满足即触发 ===
+    if      ((cpu_valid && t > CPU_EMERG_3) || (cur_valid && cur_ua > CURRENT_EMERG_3))
+        new_level = 3;
+    else if ((cpu_valid && t > CPU_EMERG_2) || (cur_valid && cur_ua > CURRENT_EMERG_2))
+        new_level = 2;
+    else if ((cpu_valid && t > CPU_EMERG_1) || (cur_valid && cur_ua > CURRENT_EMERG_1))
+        new_level = 1;
+    // === 4. Exit（AND 逻辑）：两方都允许退出才降级 ===
+    else if (emergency_level > 0) {
+        int cpu_ok = !cpu_valid;   // 传感器不可用时跳过
+        if (cpu_valid) {
+            if      (emergency_level >= 3) cpu_ok = (t < CPU_RECOVER_2);
+            else if (emergency_level >= 2) cpu_ok = (t < CPU_RECOVER_1);
+            else                           cpu_ok = (t < CPU_RECOVER_0);
+        }
+        int cur_ok = !cur_valid;
+        if (cur_valid) {
+            if      (emergency_level >= 3) cur_ok = (cur_ua < CURRENT_RECOVER_2);
+            else if (emergency_level >= 2) cur_ok = (cur_ua < CURRENT_RECOVER_1);
+            else                           cur_ok = (cur_ua < CURRENT_RECOVER_0);
+        }
+        if (cpu_ok && cur_ok) {
+            if      (emergency_level >= 3 && t < CPU_RECOVER_2 && cur_ua < CURRENT_RECOVER_2)
+                new_level = 2;
+            else if (emergency_level >= 2 && t < CPU_RECOVER_1 && cur_ua < CURRENT_RECOVER_1)
+                new_level = 1;
+            else if (t < CPU_RECOVER_0 && cur_ua < CURRENT_RECOVER_0)
+                new_level = 0;
+        }
+    }
 
-    // 等级变化处理
+    // --- 5. 等级变化处理与日志 ---
     if (new_level != emergency_level) {
         int old = emergency_level;
         int delta_e = new_level - old;
-        write_log("紧急%d（%s%d）cpu%d.%d",
+        int cpu_disp = cpu_valid ? cpu_now : t;
+        int cur_disp = cur_valid ? cur_ua : 0;
+        write_log("紧急%d（%s%d）cpu%d.%d cur%d.%d",
                   new_level,
                   (delta_e >= 0 ? "+" : ""), delta_e,
-                  cpu_now / 10, cpu_now % 10);
+                  cpu_disp / 10, cpu_disp % 10,
+                  cur_disp / 1000000, (cur_disp / 100000) % 10);
 
         emergency_level = new_level;
         batt_cooldown = BATT_COOLDOWN_CYCLES;   // 任何档位变动后启动冷却
     }
 
-    // 设定强制最低档位
+    // --- 6. 设定强制最低档位 ---
     switch (emergency_level) {
         case 3: forced_min_level = EMERG_FORCED_3; break;
         case 2: forced_min_level = EMERG_FORCED_2; break;
@@ -980,30 +1045,15 @@ static void main_loop(void) {
     target_level = final_level;
 
     // 6. 退出紧急时限制电池档位上限（在同步之后执行）
-    // 仅在电池温度低于升档阈值（基准温度+死区）时允许降档，
-    // 防止 CPU 温度刚降下来又反弹回去
-    // 大电流充电（current < -2000mA）时跳过限制——此时电池升温来自充电而非 CPU
+    // 退出条件已由 emergency_intervention 的 AND 逻辑保证
+    // （CPU 和电流都低于恢复阈值才允许降级），此处直接执行钳制
     {
-        int batt = read_battery_temp();
-        int upshift_threshold = BATT_BASELINE + BATT_ZONE_1;
-        int charging_hard = 0;
-        FILE *cf = fopen("/sys/class/power_supply/battery/current_now", "r");
-        if (cf) {
-            int cur;
-            if (fscanf(cf, "%d", &cur) == 1 && cur < -2000000)
-                charging_hard = 1;
-            fclose(cf);
-        }
-        if (batt >= 0 && charging_hard) {
-            ;  // 大电流充电中→不降档
-        } else if (batt < 0 || batt <= upshift_threshold) {
-            if (prev_emerg_level >= 3 && emergency_level < 3 && battery_fan_level > EMERG_FORCED_3)
-                battery_fan_level = EMERG_FORCED_3;
-            if (prev_emerg_level >= 2 && emergency_level < 2 && battery_fan_level > EMERG_FORCED_2)
-                battery_fan_level = EMERG_FORCED_2;
-            if (prev_emerg_level >= 1 && emergency_level < 1 && battery_fan_level > EMERG_FORCED_1)
-                battery_fan_level = EMERG_FORCED_1;
-        }
+        if (prev_emerg_level >= 3 && emergency_level < 3 && battery_fan_level > EMERG_FORCED_3)
+            battery_fan_level = EMERG_FORCED_3;
+        if (prev_emerg_level >= 2 && emergency_level < 2 && battery_fan_level > EMERG_FORCED_2)
+            battery_fan_level = EMERG_FORCED_2;
+        if (prev_emerg_level >= 1 && emergency_level < 1 && battery_fan_level > EMERG_FORCED_1)
+            battery_fan_level = EMERG_FORCED_1;
     }
 }
 
@@ -1093,11 +1143,9 @@ int main(int argc, char *argv[]) {
             if (app_was_alive) {
                 app_was_alive = 0;
                 if (!app_proc_ok) {
-                    write_log("App 不存在，等待连接...");
-                    write_log("");
+                    write_log("App 不存在，等待连接...\n");
                 } else {
-                    write_log("BLE 已断开，等待连接...");
-                    write_log("");
+                    write_log("BLE 已断开，等待连接...\n");
                 }
 
                 // 散热器已断联，清零待执行步伐
