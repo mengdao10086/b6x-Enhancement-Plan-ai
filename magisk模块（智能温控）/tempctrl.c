@@ -112,7 +112,7 @@ static int CPU_FILTER_ALPHA = 20;
 
 // --- 趋势豁免上限（可配置）---
 // 温度趋势反向时最多连续豁免次数，超过后强制执行
-static int OVERRIDE_MAX = 8;
+static int OVERRIDE_MAX = 6;
 
 // --- 峰值过冲抑制（可配置）---
 // PEAK_DAMP_OUTER_THRESHOLD：2°C 外豁免/反补分界阈值。
@@ -150,6 +150,8 @@ static int CURRENT_RECOVER_0 = 4000000; // <4A → 清除
 // --- 日志路径（默认根据二进制名自动生成，可由 profile.conf 覆盖）---
 static char log_file_path[256] = "";
 static int LOG_MAX_KB = 10;          // 日志文件大小上限（KB），0=关闭日志
+static FILE *log_fp = NULL;          // 持久的日志文件指针，避免每行都 fopen/fclose
+static char log_path_opened[256] = ""; // 已打开的文件路径（检测路径变化）
 
 // ======================== 配置文件系统 ========================
 
@@ -357,15 +359,19 @@ static int app_ble_connected = 0;
  * 写入日志（自动滚动：超上限后删除最早 1~2 行）
  * 日期格式：日+时间，无年月（例 "14 22:30:16"）
  * LOG_MAX_KB=0 时关闭日志
+ *
+ * 持有一个持久 FILE*，避免每行日志都 syscall open/close
+ * 路径变化（热重载 LOG_FILE）时自动重开
  */
 static void write_log(const char *fmt, ...) {
     if (LOG_MAX_KB == 0) return;     // 日志关闭
 
     int max_bytes = LOG_MAX_KB * 1024;
 
-    // 超标 → 滚动：读文件，跳过最早 2 行，重写剩余内容
+    // 超标 → 滚动：先关 log_fp，再读-删-写，下次自动重开
     struct stat st;
     if (stat(log_file_path, &st) == 0 && st.st_size > max_bytes) {
+        if (log_fp) { fclose(log_fp); log_fp = NULL; }
         size_t sz = st.st_size;
         char *buf = malloc(sz + 1);
         if (buf) {
@@ -383,7 +389,6 @@ static void write_log(const char *fmt, ...) {
                     tail++;
                 }
 
-                // 重写
                 FILE *wf = fopen(log_file_path, "w");
                 if (wf) {
                     fwrite(tail, 1, rd - (tail - buf), wf);
@@ -394,23 +399,28 @@ static void write_log(const char *fmt, ...) {
         }
     }
 
-    FILE *f = fopen(log_file_path, "a");
-    if (!f) return;
+    // 打开或重开（首次调用、路径变化、或因滚动刚关闭）
+    if (!log_fp || strcmp(log_file_path, log_path_opened) != 0) {
+        if (log_fp) fclose(log_fp);
+        log_fp = fopen(log_file_path, "a");
+        if (!log_fp) return;
+        strncpy(log_path_opened, log_file_path, sizeof(log_path_opened) - 1);
+    }
 
     // 时间戳（仅日+时间）
     time_t now = time(NULL);
     struct tm *tm = localtime(&now);
     char ts[24];
     strftime(ts, sizeof(ts), "%d %H:%M:%S", tm);
-    fprintf(f, "[%s] ", ts);
+    fprintf(log_fp, "[%s] ", ts);
 
     va_list args;
     va_start(args, fmt);
-    vfprintf(f, fmt, args);
+    vfprintf(log_fp, fmt, args);
     va_end(args);
 
-    fprintf(f, "\n");
-    fclose(f);
+    fprintf(log_fp, "\n");
+    fflush(log_fp);    // 立即落盘，防止崩溃丢日志
 }
 
 /**
@@ -743,26 +753,14 @@ static int apply_level(int level) {
 // ======================== App 进程 + 心跳检测 ========================
 
 /**
- * 双重检测 App 是否存活：
- *   1. pgrep 进程存在
- *   2. 状态文件 mtime 不超过 STATUS_TIMEOUT 秒（模块心跳）
- * 两者都确认才算存活，任一有问题即判死。
+ * 检测 App 是否存活：状态文件 mtime 不超过 STATUS_TIMEOUT 秒
+ * 模块每 5 秒写入一次 status 文件，mtime 超时即判进程死
  */
 static int is_app_alive(void) {
-    // 1. pgrep 进程检测
-    int pgrep_ok = system("pgrep -f 'com.flydigi.waspwing.experimental' >/dev/null 2>&1") == 0;
-
-    // 2. 状态文件 mtime 心跳检测（模块每 5 秒写入一次）
-    int status_ok = 0;
     struct stat st;
-    if (stat(status_file_path, &st) == 0) {
-        time_t now = time(NULL);
-        if (now - st.st_mtime <= STATUS_TIMEOUT) {
-            status_ok = 1;
-        }
-    }
-
-    return pgrep_ok && status_ok;
+    if (stat(status_file_path, &st) != 0) return 0;
+    time_t now = time(NULL);
+    return (now - st.st_mtime <= STATUS_TIMEOUT) ? 1 : 0;
 }
 
 // ======================== 电池温度控制 ========================
@@ -1086,24 +1084,21 @@ int main(int argc, char *argv[]) {
     }
     write_log("脚本启动成功");
 
-    // --- 等待模块就绪（进程存活 + status 文件有内容） ---
+    // --- 等待模块就绪 + BLE 连接 ---
     // status 文件由模块在 Application.onCreate 中写入 "BLE=0/1\n"，
-    // 文件有内容即代表模块初始化完成。
+    // 有内容即代表模块已启动，读到 BLE=1 表示蓝牙已连
     while (running) {
-        if (system("pgrep -f 'com.flydigi.waspwing.experimental' >/dev/null 2>&1") == 0) {
-            // 检查 status 文件是否有模块写入的实际内容
-            int ready = 0;
-            FILE *f = fopen(status_file_path, "r");
-            if (f) {
-                char line[16];
-                if (fgets(line, sizeof(line), f) && strncmp(line, "BLE=1", 5) == 0)
-                    ready = 1;
-                fclose(f);
-            }
-            if (ready) {
-                read_status_ble();
-                break;
-            }
+        int ready = 0;
+        FILE *f = fopen(status_file_path, "r");
+        if (f) {
+            char line[16];
+            if (fgets(line, sizeof(line), f) && strncmp(line, "BLE=1", 5) == 0)
+                ready = 1;
+            fclose(f);
+        }
+        if (ready) {
+            read_status_ble();
+            break;
         }
         sleep(5);
     }
@@ -1180,5 +1175,6 @@ int main(int argc, char *argv[]) {
     }
 
 exit:
+    if (log_fp) fclose(log_fp);
     return 0;
 }
