@@ -9,9 +9,11 @@
 // 温度单位：整型 0.1°C（电池原生单位，CPU m°C ÷ 100）
 //   例：350 = 35.0°C, 753 = 75.3°C
 //
-// 编译（Termux）：
-//   clang -static -o tempctrl tempctrl.c
-//   python3 patch_tls.py tempctrl   （修复 PT_TLS 对齐）
+// 编译（请使用 GitHub Actions CI，NDK r27c）：
+//   Termux 的 clang -static 链接 Termux 的 libc，非 Android libc，
+//   编译出的二进制在真机上 PT_TLS 对齐错误，不可用。
+//   NDK 编译命令：aarch64-linux-android21-clang -static -O2
+//   （NDK 静态编译后需要 python3 patch_tls.py 修复 PT_TLS 对齐）
 //
 // ================================================================
 
@@ -73,7 +75,7 @@ static const int GEAR_MODE_TABLE[12] = {
     1, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0, 1
 };
 
-// 档位 → 智能温控目标温度 (°C)，固定功率模式该项无效（传 20 占位），索引 = level - 1
+// 档位 → 智能温控目标温度 (°C)，固定功率模式该项传 clamp(0,5,35)=5°C 占位，索引 = level - 1
 static const int TARGET_TEMP_TABLE[12] = {
     0, 0, 0, 0, 0, 18, 16, 15, 14, 13, 12, 0
 };
@@ -101,9 +103,9 @@ static int CPU_RECOVER_1 = 650;     // <65.0°C 且 ≥2 级时降为 1
 static int CPU_RECOVER_2 = 750;     // <75.0°C 且 ≥3 级时降为 2
 
 // --- 紧急强制最低档位 —— 可由 profile.conf 覆盖 ---
-static int EMERG_FORCED_1 = 6;   // 新档位 6 = 旧档位 5（智能 16°C/4000RPM）
-static int EMERG_FORCED_2 = 8;   // 新档位 8 = 旧档位 7（智能 14°C/5100RPM）
-static int EMERG_FORCED_3 = 10;  // 新档位 10 = 旧档位 9（智能 12°C/5800RPM）
+static int EMERG_FORCED_1 = 6;   // 等级 1 强制最低档位（智能 16°C/4000RPM）
+static int EMERG_FORCED_2 = 8;   // 等级 2 强制最低档位（智能 14°C/5100RPM）
+static int EMERG_FORCED_3 = 10;  // 等级 3 强制最低档位（智能 12°C/5800RPM）
 
 // --- CPU 滤波系数（百分比，0~100，默认 20=α=0.20）---
 static int CPU_FILTER_ALPHA = 20;
@@ -316,13 +318,13 @@ static int detect_config_path(void) {
 // ======================== 全局状态 ========================
 
 static int battery_fan_level = 0;      // 电池控制决定的基础档位
-static int emergency_level = 0;        // CPU 紧急等级 0~3
+static int emergency_level = 0;        // 紧急等级 0~3（CPU+电流双源）
 static int forced_min_level = 0;       // 紧急强制最低档位
 static int cpu_weighted = 250;         // 加权 CPU 温度，初始 25.0°C
 static int batt_cooldown = 0;          // 电池调档冷却剩余周期
 static int prev_batt_temp = -1;       // 上次调整时的电池温度（变化检测）
 static int last_batt_reading = -1;    // 上次读取的电池温度（趋势判断）
-static int trend_override = 0;        // 趋势豁免计数器（最多 6 次）
+static int trend_override = 0;        // 趋势豁免计数器（最多 OVERRIDE_MAX 次）
 static int first_run = 1;             // 首次运行（滤波初始化）
 static volatile int running = 1;       // 信号控制标记
 
@@ -648,7 +650,7 @@ static int read_battery_current_abs(void) {
  * 固定功率模式（mode=1）：
  *   windLevelOverclock = 查表风扇固定转速 (RPM)
  *   coldLevelOverclock = 查表制冷片强度
- *   targetTemperature = 占位 20
+ *   targetTemperature = 5°C（表值为 0，clamp(5,35) 后为 5，固件模式忽略此值）
  */
 static void build_params(int level,
                          int *out_mode,
@@ -775,7 +777,7 @@ static int is_app_alive(void) {
  *   偏差 >2°C    → ±2 档
  *
  * 温度读数未变化时跳过升降档。
- * 已去除冷却期（冷却期原用于延迟升降档，现改为随到随调）。
+ * 每次档位变动后启动 BATT_COOLDOWN_CYCLES 周期冷却，期间跳过常规升降档。
  *
  * 合并逻辑：
  *   2°C 内：≤0.3°C 趋势豁免，0.3~0.5°C 反补 1 档，>0.5°C 反补 2 档
@@ -900,7 +902,7 @@ static void battery_control(void) {
     last_batt_reading = batt;
 }
 
-// ======================== CPU 紧急干预 ========================
+// ======================== 紧急干预（CPU+电流双源） ========================
 
 /**
  * 紧急干预（CPU 温度 + 电池电流双源）
@@ -1000,7 +1002,7 @@ static void handle_signal(int sig) {
 
 /**
  * 单次控制循环（纯计算，不下发）
- * 配置重载 → CPU 紧急 → 电池控制 → 保存目标档位
+ * 配置重载 → 紧急干预（CPU+电流）→ 电池控制 → 保存目标档位
  */
 // 记录上一轮紧急等级（用于退出限制判断）
 static int prev_emerg_level = 0;
@@ -1018,7 +1020,7 @@ static void main_loop(void) {
         }
     }
 
-    // 1. CPU 紧急干预（更新 cpu_weighted 和 emergency_level）
+    // 1. 紧急干预（CPU 温度 + 电池电流，更新 emergency_level）
     prev_emerg_level = emergency_level;
     emergency_intervention();
 
