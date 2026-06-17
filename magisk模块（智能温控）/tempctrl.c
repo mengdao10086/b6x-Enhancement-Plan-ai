@@ -665,12 +665,12 @@ static void build_params(int level,
 
     if (mode == 0) {
         // --- 智能温控 ---
-        windLevel = FAN_RPM_TABLE[level];
+        windLevel = FAN_RPM_TABLE[level - 1];
         windOC = 0;
         coldOC = 0;   // 智能模式让散热器自行管理制冷
     } else {
         // --- 固定功率 ---
-        windOC = FAN_RPM_TABLE[level];
+        windOC = FAN_RPM_TABLE[level - 1];
         coldOC = COLD_INTENSITY_TABLE[level - 1];
         coldOC = clamp(coldOC, COLD_MIN, COLD_MAX);
         windLevel = 0;
@@ -842,17 +842,12 @@ static void battery_control(void) {
         // 最高/最低档位时不触发豁免
         if (!in_cooldown && abs_change <= peak_bound) {
             if (trend_rev && battery_fan_level > LEVEL_MIN &&
-                battery_fan_level < LEVEL_MAX) {
-                if (trend_override < OVERRIDE_MAX) {
-                    int first = (trend_override == 0);
-                    trend_override++;
-                    skip_delta = 1;
-                    if (first) {
-                        write_log("趋势豁免 %d", battery_fan_level);
-                    }
-                } else {
-                    trend_override = 0;
+                battery_fan_level < LEVEL_MAX && trend_override < OVERRIDE_MAX) {
+                if (trend_override == 0) {
+                    write_log("趋势豁免 %d", battery_fan_level);
                 }
+                trend_override++;
+                skip_delta = 1;
             } else {
                 trend_override = 0;
             }
@@ -964,12 +959,9 @@ static void emergency_intervention(void) {
             else                           cur_ok = (cur_ua < CURRENT_RECOVER_0);
         }
         if (cpu_ok && cur_ok) {
-            if      (emergency_level >= 3 && t < CPU_RECOVER_2 && cur_ua < CURRENT_RECOVER_2)
-                new_level = 2;
-            else if (emergency_level >= 2 && t < CPU_RECOVER_1 && cur_ua < CURRENT_RECOVER_1)
-                new_level = 1;
-            else if (t < CPU_RECOVER_0 && cur_ua < CURRENT_RECOVER_0)
-                new_level = 0;
+            if      (emergency_level >= 3) new_level = 2;
+            else if (emergency_level >= 2) new_level = 1;
+            else                           new_level = 0;
         }
     }
 
@@ -1045,16 +1037,12 @@ static void main_loop(void) {
     target_level = final_level;
 
     // 6. 退出紧急时限制电池档位上限（在同步之后执行）
-    // 退出条件已由 emergency_intervention 的 AND 逻辑保证
-    // （CPU 和电流都低于恢复阈值才允许降级），此处直接执行钳制
-    {
-        if (prev_emerg_level >= 3 && emergency_level < 3 && battery_fan_level > EMERG_FORCED_3)
-            battery_fan_level = EMERG_FORCED_3;
-        if (prev_emerg_level >= 2 && emergency_level < 2 && battery_fan_level > EMERG_FORCED_2)
-            battery_fan_level = EMERG_FORCED_2;
-        if (prev_emerg_level >= 1 && emergency_level < 1 && battery_fan_level > EMERG_FORCED_1)
-            battery_fan_level = EMERG_FORCED_1;
-    }
+    if (prev_emerg_level >= 3 && emergency_level < 3 && battery_fan_level > EMERG_FORCED_3)
+        battery_fan_level = EMERG_FORCED_3;
+    if (prev_emerg_level >= 2 && emergency_level < 2 && battery_fan_level > EMERG_FORCED_2)
+        battery_fan_level = EMERG_FORCED_2;
+    if (prev_emerg_level >= 1 && emergency_level < 1 && battery_fan_level > EMERG_FORCED_1)
+        battery_fan_level = EMERG_FORCED_1;
 }
 
 // ======================== 程序入口 ========================
@@ -1089,12 +1077,10 @@ int main(int argc, char *argv[]) {
     batt_cooldown = 0;
     target_level = battery_fan_level;
     actual_level = battery_fan_level;
-    {
-        int batt = read_battery_temp();
-        if (batt >= 0) {
-            prev_batt_temp = batt;
-            last_batt_reading = batt;
-        }
+    int batt = read_battery_temp();
+    if (batt >= 0) {
+        prev_batt_temp = batt;
+        last_batt_reading = batt;
     }
     write_log("脚本启动成功");
 
