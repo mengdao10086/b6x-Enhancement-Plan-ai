@@ -32,13 +32,16 @@ jobs:
       - name: 编译 APK（b6x keystore 签名）
         run: ./gradlew assembleRelease
 
+      - name: 获取版本号
+        id: lsposed-version
+        run: echo "VERSION=$(grep "versionName" app/build.gradle.kts | sed 's/.*"\(.*\)".*/\1/')" >> $GITHUB_OUTPUT
+
       - name: 重命名 APK（b6x-EP-LSPosed-v版本号.apk）
         run: |
-          VERSION=$(grep "versionName" app/build.gradle.kts | sed 's/.*"\(.*\)".*/\1/')
-          cp app/build/outputs/apk/release/*.apk "b6x-EP-LSPosed-v${VERSION}.apk"
+          cp app/build/outputs/apk/release/*.apk "b6x-EP-LSPosed-v${{ steps.lsposed-version.outputs.VERSION }}.apk"
 
       - name: 上传 APK 构建产物
         uses: actions/upload-artifact@v4
         with:
-          name: b6x-EP-LSPosed
+          name: b6x-EP-LSPosed-v${{ steps.lsposed-version.outputs.VERSION }}
           path: b6x-EP-LSPosed-v*.apk

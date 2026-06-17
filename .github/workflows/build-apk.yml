@@ -35,15 +35,18 @@ jobs:
       - name: 编译 APK（b6x keystore 签名，每次签名一致）
         run: ./gradlew assembleRelease
 
+      - name: 获取版本号
+        id: lsposed-version
+        run: echo "VERSION=$(grep "versionName" app/build.gradle.kts | sed 's/.*"\(.*\)".*/\1/')" >> $GITHUB_OUTPUT
+
       - name: 重命名 APK（b6x-EP-LSPosed-v版本号.apk）
         run: |
-          VERSION=$(grep "versionName" app/build.gradle.kts | sed 's/.*"\(.*\)".*/\1/')
-          cp app/build/outputs/apk/release/*.apk "b6x-EP-LSPosed-v${VERSION}.apk"
+          cp app/build/outputs/apk/release/*.apk "b6x-EP-LSPosed-v${{ steps.lsposed-version.outputs.VERSION }}.apk"
 
       - name: 上传 APK 构建产物
         uses: actions/upload-artifact@v4
         with:
-          name: b6x-EP-LSPosed
+          name: b6x-EP-LSPosed-v${{ steps.lsposed-version.outputs.VERSION }}
           path: b6x-EP-LSPosed-v*.apk
 
   build-c:
@@ -112,15 +115,13 @@ jobs:
           echo "Module contents:"
           ls -la magisk模块（智能温控）/magisk模块框架/
 
-      - name: 打包为 ZIP（b6x-EP-Magisk-v版本号.zip）
-        run: |
-          VERSION=$(grep '^version=' magisk模块（智能温控）/magisk模块框架/module.prop | sed 's/^version=v//')
-          cd magisk模块（智能温控）/magisk模块框架/
-          zip -r "../../b6x-EP-Magisk-v${VERSION}.zip" .
+      - name: 获取版本号
+        id: magisk-version
+        run: echo "VERSION=$(grep '^version=' magisk模块（智能温控）/magisk模块框架/module.prop | sed 's/^version=v//')" >> $GITHUB_OUTPUT
 
       - name: 上传 Magisk 模块包（刷入即用）
         uses: actions/upload-artifact@v4
         with:
-          name: b6x-EP-Magisk
-          path: b6x-EP-Magisk-v*.zip
+          name: b6x-EP-Magisk-v${{ steps.magisk-version.outputs.VERSION }}
+          path: magisk模块（智能温控）/magisk模块框架/
           if-no-files-found: error
