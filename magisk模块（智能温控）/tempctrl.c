@@ -380,7 +380,6 @@ static void load_config(const char *path) {
         }
     }
 
-    write_log("配置 已加载 %d 项 %s", loaded, path);
 }
 
 // ======================== 可执行文件名提取 ========================
@@ -1181,7 +1180,7 @@ static void main_loop(void) {
             if (st.st_mtime != config_mtime) {
                 load_config(config_path);
                 config_mtime = st.st_mtime;
-                write_log("配置 热重载");
+                write_log("配置 热重载\n");
             }
         }
     }
