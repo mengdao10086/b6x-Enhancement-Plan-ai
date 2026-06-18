@@ -964,7 +964,8 @@ static void battery_control(void) {
     int skip_delta = 0;  // =1 时本次不执行常规升降档
 
     // 冷却递减（放在 abs_change 判断之前，温度不变强制进入时也能递减）
-    if (batt_cooldown > 0) {
+    int in_cooldown = (batt_cooldown > 0);
+    if (in_cooldown) {
         batt_cooldown--;
         skip_delta = 1;
     }
