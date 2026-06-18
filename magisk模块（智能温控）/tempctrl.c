@@ -165,6 +165,7 @@ static time_t config_mtime = 0;
 // 前向声明（配置系统函数位于 write_log/clamp 之前，C 要求先声明后使用）
 static void write_log(const char *fmt, ...);
 static inline int clamp(int val, int lo, int hi);
+static int battery_fan_level;            // load_config 的后处理中引用，声明于全局状态区之前
 
 /** 去除首尾空白，返回修剪后的起始指针 */
 static inline char *trim_line(char *line) {
