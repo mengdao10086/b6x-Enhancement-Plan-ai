@@ -1,19 +1,16 @@
 #!/system/bin/sh
-# ============================================================
-# 飞智 B6X 增强计划 — 开机自启动脚本
-# ============================================================
-# MODDIR 由 Magisk/KSU 自动设为模块所在目录
-#
 # KernelSU 的模块目录通常挂载了 noexec，不能直接运行二进制，
 # 所以将 tempctrl 复制到 /data/local/tmp/ 再执行。
 # tempctrl 通过 /proc/self/exe 自动定位 profile.conf（同目录/父目录）
-#
-# 不再使用 FIFO 通信，改为 pgrep 检测 App 进程。
-# ============================================================
 
 MODDIR=${0%/*}
 
-# 等待系统启动完成（防止过早启动导致 sysfs 不可读）
+# 启动函数
+start_tempctrl() {
+    nohup /data/local/tmp/tempctrl --config "$MODDIR/profile.conf" >> /cache/tempctrl.log 2>&1 &
+}
+
+# 1. 等待系统启动完成（仅首次执行）
 for i in $(seq 1 12); do
     if [ "$(getprop sys.boot_completed)" = "1" ]; then
         break
@@ -21,10 +18,21 @@ for i in $(seq 1 12); do
     sleep 5
 done
 
-# 复制二进制到可执行分区（绕过 KernelSU 的 noexec 限制）
+# 2. 复制二进制到可执行分区（仅首次执行）
 cp "$MODDIR/tempctrl" /data/local/tmp/tempctrl
 chmod 755 /data/local/tmp/tempctrl
 
-# 启动智能温控守护程序（直接从模块目录读取配置）
-nohup /data/local/tmp/tempctrl --config "$MODDIR/profile.conf" \
-    >> /cache/tempctrl.log 2>&1 &
+# 3. 首次启用
+start_tempctrl
+
+# 4. 每隔5分钟检查一次进程状态
+while true; do
+    sleep 300
+    if ! pgrep -f "/data/local/tmp/tempctrl" > /dev/null 2>&1; then
+        # 进程不存在，重新启动
+        start_tempctrl
+        echo "
+$(date '+%Y-%m-%d %H:%M:%S')：已重启tempctrl
+" >> /cache/tempctrl.log
+    fi
+done

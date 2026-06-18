@@ -1126,11 +1126,14 @@ static void emergency_intervention(void) {
             else if (emergency_level >= 2) cur_ok = (cur_exit < CURRENT_RECOVER_1);
             else                           cur_ok = (cur_exit < CURRENT_RECOVER_0);
         }
-        if (!(cpu_ok && cur_ok)) {
-            // 至少一个未恢复：hold 在 1 级
-            new_level = 1;
+        if (cpu_ok && cur_ok) {
+            // 双源都恢复 → 逐级下降（3→2→1→0），不硬跳
+            if      (emergency_level >= 4) new_level = 3;
+            else if (emergency_level >= 3) new_level = 2;
+            else if (emergency_level >= 2) new_level = 1;
+            else                           new_level = 0;
         }
-        // 都恢复 → new_level 保持 0，完全退出
+        // 至少一个未恢复 → 保持当前等级（new_level = emergency_level）
     }
 
     // --- 7. 等级变化处理与日志 ---
