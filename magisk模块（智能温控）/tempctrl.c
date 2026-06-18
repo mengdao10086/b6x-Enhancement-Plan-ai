@@ -28,62 +28,64 @@
 
 // ======================== 档位定义 ========================
 //
-// 档位    模式             目标温度   风扇转速/RPM   制冷片强度  说明
-// ─────────────────────────────────────────────────────────────────
-//  12    固定功率(mode=1)    —        6000          190        制冷峰值
-//  11    智能温控(mode=0)   12°C      5800          auto       紧急3-min
-//  10    智能温控(mode=0)   13°C      5500          auto       官方默认风扇满速值
-//   9    智能温控(mode=0)   14°C      5100          auto       紧急2-min
-//   8    智能温控(mode=0)   15°C      4600          auto
-//   7    智能温控(mode=0)   16°C      4000          auto       紧急1-min
-//   6    智能温控(mode=0)   18°C      3400          auto
-//   5    固定功率(mode=1)    —        2900           80        低功耗1
-//   4    固定功率(mode=1)    —        2500           60        低功耗2
-//   3    固定功率(mode=1)    —        2200           40        低功耗3
-//   2    固定功率(mode=1)    —        2000           20        伪待机4
-//   1    固定功率(mode=1)    —        2000           10        伪待机
+// ⚠️ 不推荐使用智能温控模式（mode=0）：实测其风扇转速配置疑似并非强制生效，经常突破设定的上限，尤其在刚切换过去的瞬间。这会导致噪音突然变大，体验较差。全部固定功率模式的档位表已避免此问题。
 //
-// setRunMode 签名：
-//   setRunMode(mode, targetTemperature,
-//              windLevelOverclock, coldLevelOverclock,
-//              windLevel, modeCustom, extra)
+//setRunMode(mode, targetTemperature,windLevelOverclock, coldLevelOverclock,windLevel, modeCustom, extra)
 //
-// 参数映射：
-//   mode=0（智能温控）：targetTemperature, windLevel(风扇转速上限)
-//   mode=1（固定功率）：windLevelOverclock(风扇固定转速), coldLevelOverclock(制冷片强度)
+// 参数映射：mode=0（智能温控）：targetTemperature, windLevel(风扇转速上限)
+//          mode=1（固定功率）：windLevelOverclock(风扇固定转速), coldLevelOverclock(制冷片强度)
 //
-// 档位映射使用查表法（见 build_params），因为风扇转速、目标温度不再是线性关系。
-//
-// ================================================================
+// ==========================================================
 
 // --- 档位范围 ---
-#define LEVEL_MAX          12
-#define LEVEL_MIN           1     // 档位范围 1~12（1=最低待机，12=满功率）
 #define LEVEL_INIT          5     // 无存档时的默认初始档位
+#define GEAR_TABLE_MAX      32    // 最大支持档位数（支持自动扩展）
 
-// --- 档位查表 ---
-// 注意：风扇转速、目标温度、制冷片强度在档位间不是线性关系，
-//       必须使用查表法而非公式计算。
+// --- 档位表（动态，可通过 profile.conf 的 GEAR_N 配置覆盖）---
+// 每条包含：模式(0=智能温控, 1=固定功率), 目标温度(°C), 风扇转速(RPM), 制冷片强度(0-194)
+typedef struct {
+    int mode;       // 0=智能温控, 1=固定功率
+    int target;     // 智能温控目标温度 (°C)，固定功率时为 0
+    int fan_rpm;    // 风扇转速 (RPM)
+    int cold;       // 制冷片强度 (0-194)
+} GearEntry;
 
-// 档位 → 风扇转速 (RPM)，索引 = level - 1
-static const int FAN_RPM_TABLE[12] = {
-    2000, 2000, 2200, 2500, 2900, 3400, 4000, 4600, 5100, 5500, 5800, 6000
+static GearEntry gear_table[GEAR_TABLE_MAX];
+static int gear_count = 0;     // 实际档位数，0=尚未初始化
+static int level_min = 1;
+static int level_max = 10;     // 默认 10 档（由 init_gear_table 设定）
+
+// 默认档位表（依实测散热曲线标定，全部固定功率模式）
+// 格式：GEAR_<档位N>=<模式>,<目标温度°C>,<风扇RPM>,<制冷强度>
+// 范围：N=1~32, 模式=0(智能)或1(固定), 目标=5~35°C, 风扇=2000~6000, 制冷=1~194
+// 注意：模式 0 时制冷强度失效（散热器自行管理），模式 1 时目标温度无效
+// 例：GEAR_10=1,0,6000,190 表示 10 档固定功率，6000RPM，制冷 190
+//     GEAR_5=0,16,4000,0   表示  5 档智能温控，16°C，风扇上限 4000RPM
+static const GearEntry DEFAULT_GEAR_TABLE[10] = {
+    {1, 0, 2000, 10},    // Level 1  伪待机
+    {1, 0, 2000, 20},    // Level 2
+    {1, 0, 2350, 35},    // Level 3
+    {1, 0, 2800, 55},    // Level 4
+    {1, 0, 3350, 75},    // Level 5
+    {1, 0, 4000, 100},   // Level 6
+    {1, 0, 4650, 130},   // Level 7
+    {1, 0, 5200, 155},   // Level 8
+    {1, 0, 5650, 175},   // Level 9
+    {1, 0, 6000, 190},   // Level 10 制冷峰值
 };
 
-// 档位 → 运行模式 (0=智能温控, 1=固定功率)，索引 = level - 1
-static const int GEAR_MODE_TABLE[12] = {
-    1, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0, 1
-};
-
-// 档位 → 智能温控目标温度 (°C)，固定功率模式该项传 clamp(0,5,35)=5°C 占位，索引 = level - 1
-static const int TARGET_TEMP_TABLE[12] = {
-    0, 0, 0, 0, 0, 18, 16, 15, 14, 13, 12, 0
-};
-
-// 档位 → 固定功率制冷片强度，智能模式该项传 0（让散热器自行管理），索引 = level - 1
-static const int COLD_INTENSITY_TABLE[12] = {
-    10, 20, 40, 60, 80, 0, 0, 0, 0, 0, 0, 190
-};
+/**
+ * 初始化默认档位表
+ * 程序启动时调用。若 profile.conf 包含 GEAR_N 配置，load_config 将覆盖之。
+ */
+static void init_gear_table(void) {
+    gear_count = 10;
+    level_min = 1;
+    level_max = 10;
+    for (int i = 0; i < gear_count; i++) {
+        gear_table[i] = DEFAULT_GEAR_TABLE[i];
+    }
+}
 
 // --- 制冷片强度范围 ---
 #define COLD_MIN             1
@@ -103,9 +105,9 @@ static int CPU_RECOVER_1 = 650;     // <65.0°C 且 ≥2 级时降为 1
 static int CPU_RECOVER_2 = 750;     // <75.0°C 且 ≥3 级时降为 2
 
 // --- 紧急强制最低档位 —— 可由 profile.conf 覆盖 ---
-static int EMERG_FORCED_1 = 6;   // 等级 1 强制最低档位（智能 16°C/4000RPM）
-static int EMERG_FORCED_2 = 8;   // 等级 2 强制最低档位（智能 14°C/5100RPM）
-static int EMERG_FORCED_3 = 10;  // 等级 3 强制最低档位（智能 12°C/5800RPM）
+static int EMERG_FORCED_1 = 6;   // 等级 1 强制最低档位（固定功率 4000RPM/100）
+static int EMERG_FORCED_2 = 7;   // 等级 2 强制最低档位（固定功率 4650RPM/130）
+static int EMERG_FORCED_3 = 8;   // 等级 3 强制最低档位（固定功率 5200RPM/155）
 
 // --- CPU 滤波系数（百分比，0~100，默认 20=α=0.20）---
 static int CPU_FILTER_ALPHA = 20;
@@ -164,23 +166,32 @@ static time_t config_mtime = 0;
 static void write_log(const char *fmt, ...);
 static inline int clamp(int val, int lo, int hi);
 
+/** 去除首尾空白，返回修剪后的起始指针 */
+static inline char *trim_line(char *line) {
+    char *p = line;
+    while (*p == ' ' || *p == '\t') p++;
+    char *end = p + strlen(p) - 1;
+    while (end > p && (*end == ' ' || *end == '\t')) *end-- = '\0';
+    return p;
+}
+
 /**
  * 从 KEY=VALUE 格式的配置文件加载参数
  * 遇到不认识的 key 或格式错误的行，跳过并记日志
  * 找不到文件则不修改任何变量（保持默认值）
  */
 static void load_config(const char *path) {
-    // ---- 先预检 CONFIG_ENABLED ----
     FILE *f = fopen(path, "r");
     if (!f) {
         write_log("配置 无法打开 %s", path);
         return;
     }
+
+    // ---- 先预检 CONFIG_ENABLED ----
     int enabled = 1;
     char line[256];
     while (fgets(line, sizeof(line), f)) {
-        char *p = line;
-        while (*p == ' ' || *p == '\t') p++;
+        char *p = trim_line(line);
         if (*p == '#' || *p == '\n' || *p == '\0') continue;
         char *eq = strchr(p, '=');
         if (!eq) continue;
@@ -189,25 +200,71 @@ static void load_config(const char *path) {
         char *end = k + strlen(k) - 1;
         while (end > k && (*end == ' ' || *end == '\t')) *end-- = '\0';
         if (strcmp(k, "CONFIG_ENABLED") == 0) {
-            enabled = atoi(eq + 1) ? 1 : 0;
+            enabled = atoi(eq + 1) != 0;
             break;
         }
     }
-    fclose(f);
 
     if (!enabled) {
+        fclose(f);
         write_log("配置 已禁用，使用默认参数");
         return;
     }
 
-    // ---- 正常解析全部参数 ----
-    f = fopen(path, "r");
-    if (!f) return;
+    // ---- 预检 GEAR_CONFIG_ENABLED（档位表独立开关） ----
+    int gear_config_enabled = 0;   // 默认关闭
+    {
+        rewind(f);
+        while (fgets(line, sizeof(line), f)) {
+            char *p2 = trim_line(line);
+            if (*p2 == '#' || *p2 == '\n' || *p2 == '\0') continue;
+            char *eq2 = strchr(p2, '=');
+            if (!eq2) continue;
+            *eq2 = '\0';
+            char *k2 = p2;
+            char *end2 = k2 + strlen(k2) - 1;
+            while (end2 > k2 && (*end2 == ' ' || *end2 == '\t')) *end2-- = '\0';
+            if (strcmp(k2, "GEAR_CONFIG_ENABLED") == 0) {
+                gear_config_enabled = atoi(eq2 + 1) != 0;
+                break;
+            }
+        }
+    }
 
+    // ---- 预检 GEAR_N 档位配置 ----
+    // 如果 GEAR_CONFIG_ENABLED=1 且配置中存在 GEAR_N，则档位表完全由配置定义
+    int gear_config_seen = 0;
+    if (gear_config_enabled) {
+        rewind(f);
+        while (fgets(line, sizeof(line), f)) {
+            char *p2 = trim_line(line);
+            if (*p2 == '#' || *p2 == '\n' || *p2 == '\0') continue;
+            char *eq2 = strchr(p2, '=');
+            if (!eq2) continue;
+            *eq2 = '\0';
+            char *k2 = p2;
+            char *end2 = k2 + strlen(k2) - 1;
+            while (end2 > k2 && (*end2 == ' ' || *end2 == '\t')) *end2-- = '\0';
+            if (strncmp(k2, "GEAR_", 5) == 0) {
+                gear_config_seen = 1;
+                break;
+            }
+        }
+    }
+
+    // 有 GEAR_N → 清空档位表，后续只从配置读取
+    if (gear_config_seen) {
+        gear_count = 0;
+        level_max = 0;
+        memset(gear_table, 0, sizeof(gear_table));
+        write_log("配置 档位表将由 GEAR_N 定义");
+    }
+
+    // ---- 正常解析全部参数 ----
+    rewind(f);
     int loaded = 0;
     while (fgets(line, sizeof(line), f)) {
-        char *p = line;
-        while (*p == ' ' || *p == '\t') p++;
+        char *p = trim_line(line);
         if (*p == '#' || *p == '\n' || *p == '\0') continue;
 
         char *eq = strchr(p, '=');
@@ -249,6 +306,7 @@ static void load_config(const char *path) {
         else if (strcmp(key, "CURRENT_RECOVER_2") == 0)     CURRENT_RECOVER_2  = clamp(val, 1000000, 15000000);
         else if (strcmp(key, "CURRENT_RECOVER_1") == 0)     CURRENT_RECOVER_1  = clamp(val, 1000000, 15000000);
         else if (strcmp(key, "CURRENT_RECOVER_0") == 0)     CURRENT_RECOVER_0  = clamp(val, 1000000, 15000000);
+        else if (strcmp(key, "GEAR_CONFIG_ENABLED") == 0) { /* 预检已处理 */ }
         else if (strcmp(key, "LOG_MAX_KB") == 0)           LOG_MAX_KB         = clamp(val, 0, 1000);
         else if (strcmp(key, "LOG_FILE") == 0) {
             char *v = val_str;
@@ -260,13 +318,66 @@ static void load_config(const char *path) {
                 log_file_path[sizeof(log_file_path) - 1] = '\0';
             }
         }
+        else if (strncmp(key, "GEAR_", 5) == 0) {
+            // GEAR_N=模式,目标温度(°C),风扇转速(RPM),制冷片强度
+            int n = atoi(key + 5);
+            if (n < 1 || n > GEAR_TABLE_MAX || !gear_config_seen) continue;
+
+            int m, t, f, c;
+            char *next;
+            m = (int)strtol(val_str, &next, 10);
+            if (*next != ',') continue;
+            t = (int)strtol(next + 1, &next, 10);
+            if (*next != ',') continue;
+            f = (int)strtol(next + 1, &next, 10);
+            if (*next != ',') continue;
+            c = (int)strtol(next + 1, NULL, 10);
+
+            gear_table[n - 1].mode   = (m == 0) ? 0 : 1;
+            gear_table[n - 1].target = clamp(t, 0, 35);
+            gear_table[n - 1].fan_rpm = clamp(f, 0, 99999);
+            gear_table[n - 1].cold   = clamp(c, 0, 194);
+            if (n > gear_count) gear_count = n;
+        }
         else { continue; }
 
         loaded++;
     }
     fclose(f);
 
+    // ---- GEAR_N 后处理：同步档位范围，钳制当前档位 ----
+    if (gear_config_seen) {
+        if (gear_count > 0) {
+            level_max = gear_count;
+            if (battery_fan_level > level_max) battery_fan_level = level_max;
+            if (battery_fan_level < level_min) battery_fan_level = level_min;
+            write_log("配置 档位表 %d 级 (1~%d)", gear_count, level_max);
+        } else {
+            // 所有 GEAR_N 行格式无效，回退到默认档位表
+            init_gear_table();
+            write_log("配置 GEAR_N 全部无效，使用默认档位表 (%d 级)", gear_count);
+        }
+    }
+
     write_log("配置 已加载 %d 项 %s", loaded, path);
+}
+
+// ======================== 可执行文件名提取 ========================
+
+/**
+ * 从 /proc/self/exe 获取可执行文件名（不含路径）
+ * 返回 1=成功，0=失败
+ */
+static int get_exe_basename(char *buf, size_t size) {
+    char exe_path[512];
+    ssize_t len = readlink("/proc/self/exe", exe_path, sizeof(exe_path) - 1);
+    if (len <= 0) return 0;
+    exe_path[len] = '\0';
+    char *slash = strrchr(exe_path, '/');
+    if (!slash) return 0;
+    strncpy(buf, slash + 1, size - 1);
+    buf[size - 1] = '\0';
+    return 1;
 }
 
 /**
@@ -275,16 +386,10 @@ static void load_config(const char *path) {
  * 此值为默认值，profile.conf 中 LOG_FILE 可覆盖
  */
 static void set_default_log_path(void) {
-    char exe_path[512];
-    ssize_t len = readlink("/proc/self/exe", exe_path, sizeof(exe_path) - 1);
-    if (len > 0) {
-        exe_path[len] = '\0';
-        char *slash = strrchr(exe_path, '/');
-        if (slash) {
-            slash++;
-            snprintf(log_file_path, sizeof(log_file_path), "/cache/%s.log", slash);
-            return;
-        }
+    char basename[64];
+    if (get_exe_basename(basename, sizeof(basename))) {
+        snprintf(log_file_path, sizeof(log_file_path), "/cache/%s.log", basename);
+        return;
     }
     // fallback
     strncpy(log_file_path, "/cache/tempctrl.log", sizeof(log_file_path) - 1);
@@ -319,15 +424,14 @@ static int detect_config_path(void) {
 
 // ======================== 全局状态 ========================
 
-static int battery_fan_level = 0;      // 电池控制决定的基础档位
-static int emergency_level = 0;        // 紧急等级 0~3（CPU+电流双源）
+static int battery_fan_level = 0;      // 电池控制决定的基础档位（逻辑基准值，非实际档位）
+static int emergency_level = 0;        // 紧急等级 0~3
 static int forced_min_level = 0;       // 紧急强制最低档位
 static int cpu_weighted = 250;         // 加权 CPU 温度，初始 25.0°C
 static int batt_cooldown = 0;          // 电池调档冷却剩余周期
-static int prev_batt_temp = -1;       // 上次调整时的电池温度（变化检测）
-static int last_batt_reading = -1;    // 上次读取的电池温度（趋势判断）
-static int trend_override = 0;        // 趋势豁免计数器（最多 OVERRIDE_MAX 次）
-static int first_run = 1;             // 首次运行（滤波初始化）
+static int last_batt_reading = -1;     // 上次读取的电池温度（变化检测 + 趋势判断）
+static int trend_override = 0;         // 趋势豁免计数器（最多 OVERRIDE_MAX 次）
+static int first_run = 1;              // 首次运行，滤波直接赋初值
 static volatile int running = 1;       // 信号控制标记
 
 // --- 逐步执行状态 ---
@@ -336,7 +440,7 @@ static int target_level = LEVEL_INIT;   // 逻辑计算的目标档位（执行�
 
 // --- 发送去重缓存 ---
 // 记录上次发送的完整参数，避免重复下发
-static int last_sent_valid = 0;        // 0=尚未发送过
+static int last_sent_valid = 0;
 static int last_mode = -1;
 static int last_target_temp = -1;
 static int last_windOC = -1;
@@ -344,7 +448,7 @@ static int last_coldOC = -1;
 static int last_windLevel = -1;
 
 // --- App 进程检测 ---
-static int app_was_alive = 0;          // 上次检测时 App 是否存活
+static int app_was_alive = 0;
 
 // --- 状态文件检测（模块心跳 + BLE 状态）---
 // 模块每 5 秒写入一次 status 文件，daemon 通过 mtime 判断进程是否活着
@@ -423,9 +527,6 @@ static void write_log(const char *fmt, ...) {
     fflush(log_fp);    // 立即落盘，防止崩溃丢日志
 }
 
-/**
- * 限幅
- */
 static inline int clamp(int val, int lo, int hi) {
     if (val < lo) return lo;
     if (val > hi) return hi;
@@ -439,17 +540,11 @@ static inline int clamp(int val, int lo, int hi) {
  * 例：tempctrl → /data/local/tmp/tempctrl.status
  */
 static void set_default_status_path(void) {
-    char exe_path[512];
-    ssize_t len = readlink("/proc/self/exe", exe_path, sizeof(exe_path) - 1);
-    if (len > 0) {
-        exe_path[len] = '\0';
-        char *slash = strrchr(exe_path, '/');
-        if (slash) {
-            slash++;
-            snprintf(status_file_path, sizeof(status_file_path),
-                     "/data/local/tmp/%s.status", slash);
-            return;
-        }
+    char basename[64];
+    if (get_exe_basename(basename, sizeof(basename))) {
+        snprintf(status_file_path, sizeof(status_file_path),
+                 "/data/local/tmp/%s.status", basename);
+        return;
     }
     // fallback
     strncpy(status_file_path, "/data/local/tmp/tempctrl.status",
@@ -499,17 +594,11 @@ static void read_status_ble(void) {
  * 设定齿轮存档路径（根据 /proc/self/exe 推导）
  */
 static void set_gear_file_path(void) {
-    char exe[512];
-    ssize_t len = readlink("/proc/self/exe", exe, sizeof(exe) - 1);
-    if (len > 0) {
-        exe[len] = '\0';
-        char *s = strrchr(exe, '/');
-        if (s) {
-            s++;
-            snprintf(gear_file_path, sizeof(gear_file_path),
-                     "/data/local/tmp/%s.gear", s);
-            return;
-        }
+    char basename[64];
+    if (get_exe_basename(basename, sizeof(basename))) {
+        snprintf(gear_file_path, sizeof(gear_file_path),
+                 "/data/local/tmp/%s.gear", basename);
+        return;
     }
     strncpy(gear_file_path, "/data/local/tmp/tempctrl.gear",
             sizeof(gear_file_path) - 1);
@@ -535,19 +624,18 @@ static int load_gear(void) {
     int val = LEVEL_INIT;
     fscanf(f, "%d", &val);
     fclose(f);
-    if (val < LEVEL_MIN || val > LEVEL_MAX) return LEVEL_INIT;
+    if (val < level_min || val > level_max) return LEVEL_INIT;
     return val;
 }
 
-// ======================== 温度读取 ========================
+// ======================== sysfs 读取工具 ========================
 
 /**
- * 读取电池温度，返回 0.1°C（如 350 = 35.0°C）
- * 文件路径：/sys/class/power_supply/battery/temp
- * 失败返回 -1
+ * 从 sysfs 文件读取一个整数值
+ * 失败（文件不可读或解析失败）返回 -1
  */
-static int read_battery_temp(void) {
-    FILE *f = fopen("/sys/class/power_supply/battery/temp", "r");
+static int read_sysfs_int(const char *path) {
+    FILE *f = fopen(path, "r");
     if (!f) return -1;
     int val;
     if (fscanf(f, "%d", &val) != 1) {
@@ -559,12 +647,45 @@ static int read_battery_temp(void) {
 }
 
 /**
+ * 读取指定 thermal_zone 的原始温度值（m°C），含异常值过滤
+ * 失败或值不合法返回 -1
+ */
+static int read_thermal_zone_raw(int zone_id) {
+    char path[64];
+    snprintf(path, sizeof(path), "/sys/class/thermal/thermal_zone%d/temp", zone_id);
+    int raw = read_sysfs_int(path);
+    if (raw <= 0 || raw > 150000) return -1;
+    return raw;
+}
+
+// ======================== 温度读取 ========================
+
+/**
+ * 读取电池温度，返回 0.1°C（如 350 = 35.0°C）
+ * 文件路径：/sys/class/power_supply/battery/temp
+ * 失败返回 -1
+ */
+static int read_battery_temp(void) {
+    return read_sysfs_int("/sys/class/power_supply/battery/temp");
+}
+
+/**
  * 缓存已发现的 CPU 温度 zone（首次全量扫描后记录）
  */
 #define CPU_ZONE_MAX_CACHE 64
+#define CPU_ZONE_TOP_KEEP   20   // 首次扫描后只保留温度最高的 N 个 zone
 static int cpu_zone_cache[CPU_ZONE_MAX_CACHE];
 static int cpu_zone_count = 0;
 static int cpu_zone_scanned = 0;
+
+// 初始扫描时暂存 zone 编号 + 温度（用于排序筛选）
+typedef struct { int id; int raw; } ZoneReading;
+
+static int cmp_zone_desc(const void *a, const void *b) {
+    int da = ((const ZoneReading*)a)->raw;
+    int db = ((const ZoneReading*)b)->raw;
+    return (da < db) - (da > db);   // 降序
+}
 
 /**
  * 读取 CPU 最高温度，返回 0.1°C（如 753 = 75.3°C）
@@ -578,48 +699,32 @@ static int cpu_zone_scanned = 0;
 static int read_cpu_temp_max(void) {
     // 首次调用 → 在 CPU_ZONE_MIN~MAX 范围内扫描可用 zone
     if (!cpu_zone_scanned) {
-        char path[64];
+        ZoneReading readings[CPU_ZONE_MAX_CACHE];
+        int count = 0;
         for (int i = CPU_ZONE_MIN; i <= CPU_ZONE_MAX; i++) {
-            snprintf(path, sizeof(path),
-                     "/sys/class/thermal/thermal_zone%d/temp", i);
-            FILE *f = fopen(path, "r");
-            if (!f) continue;
-
-            int raw;
-            if (fscanf(f, "%d", &raw) != 1) {
-                fclose(f);
-                continue;
-            }
-            fclose(f);
-
-            if (raw <= 0 || raw > 150000) continue;
-
-            if (cpu_zone_count < CPU_ZONE_MAX_CACHE) {
-                cpu_zone_cache[cpu_zone_count++] = i;
+            int raw = read_thermal_zone_raw(i);
+            if (raw < 0) continue;
+            if (count < CPU_ZONE_MAX_CACHE) {
+                readings[count].id  = i;
+                readings[count].raw = raw;
+                count++;
             }
         }
+
+        // 按温度降序排列，保留温度最高的 CPU_ZONE_TOP_KEEP 个
+        qsort(readings, count, sizeof(ZoneReading), cmp_zone_desc);
+        int keep = count < CPU_ZONE_TOP_KEEP ? count : CPU_ZONE_TOP_KEEP;
+        for (int i = 0; i < keep; i++)
+            cpu_zone_cache[i] = readings[i].id;
+        cpu_zone_count = keep;
         cpu_zone_scanned = 1;
-        write_log("CPU扫描 %d 个有效 zone (%d~%d)", cpu_zone_count, CPU_ZONE_MIN, CPU_ZONE_MAX);
     }
 
-    // 后续调用 → 只扫描已记录的 zone
+    // 后续调用 → 只扫描已保留的 zone
     int max_temp = -1;
-    char path[64];
     for (int j = 0; j < cpu_zone_count; j++) {
-        snprintf(path, sizeof(path),
-                 "/sys/class/thermal/thermal_zone%d/temp", cpu_zone_cache[j]);
-        FILE *f = fopen(path, "r");
-        if (!f) continue;
-
-        int raw;
-        if (fscanf(f, "%d", &raw) != 1) {
-            fclose(f);
-            continue;
-        }
-        fclose(f);
-
-        // 滤除异常值
-        if (raw <= 0 || raw > 150000) continue;
+        int raw = read_thermal_zone_raw(cpu_zone_cache[j]);
+        if (raw < 0) continue;
 
         int decic = raw / 100;
         if (decic > max_temp) max_temp = decic;
@@ -669,30 +774,28 @@ static void build_params(int level,
                          int *out_coldOC,
                          int *out_windLevel)
 {
-    int mode, target, windOC, coldOC, windLevel;
+    int idx = level - 1;
+    int mode   = gear_table[idx].mode;
+    int target = gear_table[idx].target;
+    int fan    = gear_table[idx].fan_rpm;
+    int cold   = gear_table[idx].cold;
 
-    mode   = GEAR_MODE_TABLE[level - 1];
-    target = TARGET_TEMP_TABLE[level - 1];
     target = clamp(target, 5, 35);
 
     if (mode == 0) {
         // --- 智能温控 ---
-        windLevel = FAN_RPM_TABLE[level - 1];
-        windOC = 0;
-        coldOC = 0;   // 智能模式让散热器自行管理制冷
+        *out_windLevel = fan;
+        *out_windOC    = 0;
+        *out_coldOC    = 0;   // 智能模式让散热器自行管理制冷
     } else {
         // --- 固定功率 ---
-        windOC = FAN_RPM_TABLE[level - 1];
-        coldOC = COLD_INTENSITY_TABLE[level - 1];
-        coldOC = clamp(coldOC, COLD_MIN, COLD_MAX);
-        windLevel = 0;
+        *out_windOC    = fan;
+        *out_coldOC    = clamp(cold, COLD_MIN, COLD_MAX);
+        *out_windLevel = 0;
     }
 
-    *out_mode      = mode;
-    *out_target    = target;
-    *out_windOC    = windOC;
-    *out_coldOC    = coldOC;
-    *out_windLevel = windLevel;
+    *out_mode   = mode;
+    *out_target = target;
 }
 
 /**
@@ -705,7 +808,7 @@ static void build_params(int level,
 static int apply_level(int level) {
     int mode, target, windOC, coldOC, windLevel;
 
-    level = clamp(level, LEVEL_MIN, LEVEL_MAX);
+    level = clamp(level, level_min, level_max);
     build_params(level, &mode, &target, &windOC, &coldOC, &windLevel);
 
     // ---- 去重检测 ----
@@ -786,13 +889,13 @@ static void battery_control(void) {
     if (batt < 0) return;
 
     // 温度值与上次调整时相同 → 跳过所有逻辑
-    if (batt == prev_batt_temp) return;
+    if (batt == last_batt_reading) return;
 
     // 计算本周期温度变化量
     int batt_change = 0, abs_change = 0;
     if (last_batt_reading >= 0) {
         batt_change = batt - last_batt_reading;
-        abs_change = (batt_change > 0) ? batt_change : -batt_change;
+        abs_change = abs(batt_change);
     }
 
     // 计算常规档位调整量（无副作用，纯计算）
@@ -809,7 +912,6 @@ static void battery_control(void) {
         else                        delta = -2;
     }
 
-    int abs_diff = (diff > 0) ? diff : -diff;
     int skip_delta = 0;  // =1 时本次不执行常规升降档
 
     // ═══════════════ 合并逻辑：趋势豁免 + 峰值过冲抑制 ═══════════════
@@ -821,7 +923,7 @@ static void battery_control(void) {
         int in_cooldown = (batt_cooldown > 0);
         if (in_cooldown) {
             batt_cooldown--;
-            skip_delta = 1;   // 冷却期内 delta 不执行
+            skip_delta = 1;
         }
 
         // 方向感知的区间判断：同向变动时容忍度更宽，反向时收紧
@@ -834,15 +936,18 @@ static void battery_control(void) {
         } else if (batt_change > 0) {
             in_inner_zone = (batt >= BATT_BASELINE - BATT_ZONE_2);
         } else {
-            in_inner_zone = (abs_diff <= BATT_ZONE_2);
+            int abs_baseline_diff = (diff > 0) ? diff : -diff;
+            in_inner_zone = (abs_baseline_diff <= BATT_ZONE_2);
         }
-        int peak_bound = in_inner_zone ? PEAK_DAMP_INNER_BOUNDARY : PEAK_DAMP_OUTER_THRESHOLD;
+        int peak_bound = in_inner_zone ? PEAK_DAMP_INNER_BOUNDARY
+                                       : PEAK_DAMP_OUTER_THRESHOLD;
 
         // ═══ 小变动（≤阈值）→ 趋势豁免 ═══
         // 最高/最低档位时不触发豁免
         if (!in_cooldown && abs_change <= peak_bound) {
-            if (trend_rev && battery_fan_level > LEVEL_MIN &&
-                battery_fan_level < LEVEL_MAX && trend_override < OVERRIDE_MAX) {
+            if (trend_rev && battery_fan_level > level_min &&
+                battery_fan_level < level_max &&
+                trend_override < OVERRIDE_MAX) {
                 if (trend_override == 0) {
                     write_log("趋势豁免 %d", battery_fan_level);
                 }
@@ -872,7 +977,7 @@ static void battery_control(void) {
             if (adjust != 0) {
                 int old = battery_fan_level;
                 battery_fan_level += adjust;
-                battery_fan_level = clamp(battery_fan_level, LEVEL_MIN, LEVEL_MAX);
+                battery_fan_level = clamp(battery_fan_level, level_min, level_max);
                 skip_delta = 1;
                 if (old != battery_fan_level) {
                     batt_cooldown = BATT_COOLDOWN_CYCLES;
@@ -888,7 +993,7 @@ static void battery_control(void) {
     if (delta != 0 && !skip_delta) {
         int old = battery_fan_level;
         battery_fan_level += delta;
-        battery_fan_level = clamp(battery_fan_level, LEVEL_MIN, LEVEL_MAX);
+        battery_fan_level = clamp(battery_fan_level, level_min, level_max);
         if (old != battery_fan_level) {
             batt_cooldown = BATT_COOLDOWN_CYCLES;
             write_log("挡位%d（%+d）", battery_fan_level, delta);
@@ -896,7 +1001,6 @@ static void battery_control(void) {
     }
 
     // 更新温度记录
-    prev_batt_temp = batt;
     last_batt_reading = batt;
 }
 
@@ -910,9 +1014,9 @@ static void battery_control(void) {
  * 电池电流取绝对值，不平滑
  *
  * 紧急等级：
- *   等级 1 → 强制最低档位 EMERG_FORCED_1（默认 6，智能 16°C/4000RPM）
- *   等级 2 → 强制最低档位 EMERG_FORCED_2（默认 8，智能 14°C/5100RPM）
- *   等级 3 → 强制最低档位 EMERG_FORCED_3（默认 10，智能 12°C/5800RPM）
+ *   等级 1 → 强制最低档位 EMERG_FORCED_1（默认 6，固定功率 4000RPM/100）
+ *   等级 2 → 强制最低档位 EMERG_FORCED_2（默认 7，固定功率 4650RPM/130）
+ *   等级 3 → 强制最低档位 EMERG_FORCED_3（默认 8，固定功率 5200RPM/155）
  *
  * 进入逻辑（OR）：CPU 或电流任一触发即进入对应等级
  * 退出逻辑（AND）：CPU 和电流都低于恢复阈值才降级
@@ -925,7 +1029,8 @@ static void emergency_intervention(void) {
             cpu_weighted = cpu_now;
             first_run = 0;
         } else {
-            cpu_weighted = (cpu_now * CPU_FILTER_ALPHA + cpu_weighted * (100 - CPU_FILTER_ALPHA)) / 100;
+            cpu_weighted = (cpu_now * CPU_FILTER_ALPHA +
+                            cpu_weighted * (100 - CPU_FILTER_ALPHA)) / 100;
         }
     }
     int t = cpu_weighted;   // 加权 CPU 温度（始终有效）
@@ -946,13 +1051,13 @@ static void emergency_intervention(void) {
         new_level = 1;
     // === 4. Exit（AND 逻辑）：两方都允许退出才降级 ===
     else if (emergency_level > 0) {
-        int cpu_ok = !cpu_valid;   // 传感器不可用时跳过
+        int cpu_ok = 1;  // 传感器不可用时默认允许退出
         if (cpu_valid) {
             if      (emergency_level >= 3) cpu_ok = (t < CPU_RECOVER_2);
             else if (emergency_level >= 2) cpu_ok = (t < CPU_RECOVER_1);
             else                           cpu_ok = (t < CPU_RECOVER_0);
         }
-        int cur_ok = !cur_valid;
+        int cur_ok = 1;  // 传感器不可用时默认允许退出
         if (cur_valid) {
             if      (emergency_level >= 3) cur_ok = (cur_ua < CURRENT_RECOVER_2);
             else if (emergency_level >= 2) cur_ok = (cur_ua < CURRENT_RECOVER_1);
@@ -995,15 +1100,13 @@ static void emergency_intervention(void) {
 static void handle_signal(int sig) {
     (void)sig;
     running = 0;
-    // 如果阻塞在 read(fifo_fd) 中，信号会中断它
 }
 
 /**
  * 单次控制循环（纯计算，不下发）
  * 配置重载 → 紧急干预（CPU+电流）→ 电池控制 → 保存目标档位
  */
-// 记录上一轮紧急等级（用于退出限制判断）
-static int prev_emerg_level = 0;
+static int prev_emerg_level = 0;   // 记录上一轮紧急等级，退出紧急时用作档位上限
 
 static void main_loop(void) {
     // 0. 检查配置文件是否更新（热重载）
@@ -1028,7 +1131,7 @@ static void main_loop(void) {
     // 3. 计算最终档位 = max(电池基础档位, 紧急强制最低档位)
     int final_level = battery_fan_level;
     if (forced_min_level > final_level) final_level = forced_min_level;
-    final_level = clamp(final_level, LEVEL_MIN, LEVEL_MAX);
+    final_level = clamp(final_level, level_min, level_max);
 
     // 4. 同步逻辑跟踪值（供下轮控制计算基础），不下发
     battery_fan_level = final_level;
@@ -1036,13 +1139,14 @@ static void main_loop(void) {
     // 5. 保存为目标档位（供下轮逐步执行使用）
     target_level = final_level;
 
-    // 6. 退出紧急时限制电池档位上限（在同步之后执行）
-    if (prev_emerg_level >= 3 && emergency_level < 3 && battery_fan_level > EMERG_FORCED_3)
-        battery_fan_level = EMERG_FORCED_3;
-    if (prev_emerg_level >= 2 && emergency_level < 2 && battery_fan_level > EMERG_FORCED_2)
-        battery_fan_level = EMERG_FORCED_2;
-    if (prev_emerg_level >= 1 && emergency_level < 1 && battery_fan_level > EMERG_FORCED_1)
-        battery_fan_level = EMERG_FORCED_1;
+    // 6. 退出紧急时限制电池档位上限（过渡期保护，仅生效一周期）
+    //    用上一级紧急的强制最低档位作为上限，压制 battery_control 立即拉升
+    if (emergency_level < prev_emerg_level) {
+        int cap = prev_emerg_level >= 3 ? EMERG_FORCED_3 :
+                  prev_emerg_level >= 2 ? EMERG_FORCED_2 : EMERG_FORCED_1;
+        if (battery_fan_level > cap)
+            battery_fan_level = cap;
+    }
 }
 
 // ======================== 程序入口 ========================
@@ -1050,6 +1154,9 @@ static void main_loop(void) {
 int main(int argc, char *argv[]) {
     signal(SIGTERM, handle_signal);
     signal(SIGINT,  handle_signal);
+
+    // --- 初始化默认档位表（load_config 中 GEAR_N 可覆盖） ---
+    init_gear_table();
 
     // --- 日志路径、配置加载 ---
     set_default_log_path();
@@ -1079,7 +1186,6 @@ int main(int argc, char *argv[]) {
     actual_level = battery_fan_level;
     int batt = read_battery_temp();
     if (batt >= 0) {
-        prev_batt_temp = batt;
         last_batt_reading = batt;
     }
     write_log("脚本启动成功");

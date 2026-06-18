@@ -2,7 +2,7 @@
 
 - [完整修复历程](修复历程/完整修复历程.md) — 全部 4 层 Bug 修复全记录
 - [LSPosed 模块源码](lsp模块（apk修复+温控接口）/app/src/main/java/com/example/waspwingtempctrl/MainHook.java) — MainHook.java（SET_TEMPERATURE 广播接收 + BLE 修复）
-- [智能温控 C 守护程序](magisk模块（智能温控）/tempctrl.c) — 智能温控算法源码（pgrep 进程检测，查表法档位，电池/CPU 双温控，profile.conf 配置热重载，温度趋势豁免）
+- [智能温控 C 守护程序](magisk模块（智能温控）/tempctrl.c) — 智能温控算法源码（动态档位表，GEAR_N可配置，电池/CPU 双温控，profile.conf 配置热重载，温度趋势豁免）
 - [智能温控逻辑说明](magisk模块（智能温控）/逻辑说明.md) — 智能温控设计文档（运行逻辑、策略细节、注意事项）
 - [Magisk 模块框架](magisk模块（智能温控）/magisk模块框架/) — module.prop / service.sh / customize.sh / profile.conf
 - [反编译分析](参考资料/反编译及分析结果/bug_analysis_report.md) — 原始 Bug 分析报告

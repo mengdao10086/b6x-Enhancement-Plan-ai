@@ -100,8 +100,7 @@ GitHub Actions 自动构建，**只推送有变化部分的编译即可**：
 
 | 项目 | 优先度 | 说明 |
 |------|------|------|
-| 档位表可配置化(v2.1) | 🟡 中 | 暂定将 4 张查表数组改为 profile.conf GEAR_N=模式,目标,风扇,制冷 格式，支持自动扩展档位数量 |
-| UI 模式选择器智能温控时闪烁，固定功率时圆点空白 | 🟢 低 | 不影响运行，无法手动操控时切换一次模式即可 |
+| UI 模式选择器智能温控时闪烁；固定功率时圆点空白 | 🟢 低 | **智能模式闪烁**：经尝试修复后变为无法稳定复现，暂无法确定根因。<br>**固定功率圆点空白**：脚本下发的档位并非 App 自带的"固定模式"——它是通过 `setRunMode` 参数独立设定的一档固定功率值，与 App 内置的那几个固定功率档位（UI 上可选的）是两套独立的配置。因此模式选择器空白反而是**正确显示**：当前运行的既非智能温控、也非 App 的任何一档内置固定模式。此时点击"固定模式"切回的是 App 自身的固定模式（使用 App 此前设定的数值），而不是脚本下发的挡位。<br><br>**推测（未实测验证）**：LSPosed 模块钩住 `WaspWingManager.setRunMode()` 后，通过广播接收参数并调用此方法，成功发送了 BLE 指令，散热器确实按脚本参数运行。但 App 的 UI 状态（模式选中项）监听的是 `WaspWingInfo.runMode` 等 LiveData——此字段仅反映 App 自身通过 UI 设定的模式，不感知外部广播设置的参数。因此圆点空白是正常现象：它准确报告了"当前模式不在 App 内置选项列表中"。 |
 
 ---
 
@@ -122,6 +121,5 @@ GitHub Actions 自动构建，**只推送有变化部分的编译即可**：
 |------|------|
 | `RECEIVER_EXPORTED` 权限 | `am broadcast` 从系统进程发广播，模块需 `RECEIVER_EXPORTED` 才能收到（Android 14+） |
 | 温度传感器路径 | `thermal_zone` 范围可通过 `CPU_ZONE_MIN/MAX` 配置，K60 推荐 30~40 |
-| BLE 重连时序 | `BluetoothGatt.disconnect()` 钩子可能被多次触发（已移除 FIFO，不影响） |
 | NDK 编译 | CI 中不要依赖 `$ANDROID_NDK_HOME`，改用固定路径下载 NDK r27c |
 | Xposed `catch(Exception)` 陷阱 | `NoSuchMethodError` / `NoSuchFieldError` 继承自 `Error` 而非 `Exception`，必须用 `catch(Throwable)` 捕获。模块中所有外层 try 块均已使用 `Throwable` |
