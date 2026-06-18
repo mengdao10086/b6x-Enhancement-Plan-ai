@@ -220,6 +220,7 @@ static int curr_smooth_valid = 0;     // 平滑数据是否有效
 // 前向声明（配置系统函数位于 write_log/clamp 之前，C 要求先声明后使用）
 static void write_log(const char *fmt, ...);
 static inline int clamp(int val, int lo, int hi);
+static void alarm_handler(int sig);
 
 /** 去除首尾空白，返回修剪后的起始指针 */
 static inline char *trim_line(char *line) {
