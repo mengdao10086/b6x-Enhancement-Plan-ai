@@ -135,6 +135,10 @@ static int OVERRIDE_MAX = 6;
 // 每次电池温度导致的档位变动后冻结多少周期（×5s），期内跳过常规升降档
 static int BATT_COOLDOWN_CYCLES = 3;
 
+// --- 温度不变最大跳过次数（可配置）---
+// 电池温度连续不变时最多跳过多少次 battery_control，之后强制进入
+static int BATT_SKIP_MAX = 6;
+
 // --- 状态文件超时（秒，可配置）---
 static int STATUS_TIMEOUT = 16;
 
@@ -306,6 +310,7 @@ static void load_config(const char *path) {
         else if (strcmp(key, "OVERRIDE_MAX") == 0)         OVERRIDE_MAX       = clamp(val, 0, 20);
         // PEAK_DAMP_* 已移除（v2.1 改为 Sheet3 查表法）
         else if (strcmp(key, "BATT_COOLDOWN_CYCLES") == 0) BATT_COOLDOWN_CYCLES = clamp(val, 0, 20);
+        else if (strcmp(key, "BATT_SKIP_MAX") == 0)        BATT_SKIP_MAX        = clamp(val, 0, 30);
         else if (strcmp(key, "STATUS_TIMEOUT") == 0)       STATUS_TIMEOUT     = clamp(val, 5, 60);
         else if (strcmp(key, "CPU_ZONE_MIN") == 0)          CPU_ZONE_MIN       = clamp(val, 0, 99);
         else if (strcmp(key, "CPU_ZONE_MAX") == 0)          CPU_ZONE_MAX       = clamp(val, 0, 99);
@@ -441,6 +446,7 @@ static int forced_min_level = 0;       // 紧急强制最低档位
 static int cpu_weighted = 250;         // 加权 CPU 温度，初始 25.0°C
 static int batt_cooldown = 0;          // 电池调档冷却剩余周期
 static int last_batt_reading = -1;     // 上次读取的电池温度（变化检测 + 趋势判断）
+static int batt_unchanged_count = 0;   // 温度连续不变跳过次数（≥BATT_SKIP_MAX 时强制进入）
 static int trend_override = 0;         // 趋势豁免计数器（最多 OVERRIDE_MAX 次）
 static int first_run = 1;              // 首次运行，滤波直接赋初值
 static volatile int running = 1;       // 信号控制标记
@@ -904,8 +910,14 @@ static void battery_control(void) {
     int batt = read_battery_temp();
     if (batt < 0) return;
 
-    // 温度值与上次调整时相同 → 跳过所有逻辑
-    if (batt == last_batt_reading) return;
+    // 温度值与上次调整时相同 → 计数跳过，超过 BATT_SKIP_MAX 次后强制进入
+    if (batt == last_batt_reading) {
+        if (++batt_unchanged_count < BATT_SKIP_MAX) return;
+        // 超限后强制进入（让常规升降档有机会恢复）
+        batt_unchanged_count = 0;
+    } else {
+        batt_unchanged_count = 0;
+    }
 
     // 计算本周期温度变化量
     int batt_change = 0, abs_change = 0;
