@@ -230,6 +230,30 @@ static inline char *trim_line(char *line) {
     return p;
 }
 
+/** 去除字符串尾部空白，原地修改 */
+static inline void trim_right(char *s) {
+    char *end = s + strlen(s) - 1;
+    while (end > s && (*end == ' ' || *end == '\t')) *end-- = '\0';
+}
+
+/**
+ * 解析配置文件中的一行 KEY=VALUE。
+ * 跳过注释（#开头）和空行，在 '=' 处分割，修剪 key 尾部空白。
+ * 原地修改 line：key 尾部被 '\0' 截断。
+ * 成功时 *out_key 指向修剪后的 key，返回 value 起始指针（跳过 '='）。
+ * 失败（注释/空行/无'='）返回 NULL。
+ */
+static char *config_parse_line(char *line, char **out_key) {
+    char *p = trim_line(line);
+    if (*p == '#' || *p == '\n' || *p == '\0') return NULL;
+    char *eq = strchr(p, '=');
+    if (!eq) return NULL;
+    *eq = '\0';
+    *out_key = p;
+    trim_right(p);
+    return eq + 1;
+}
+
 /**
  * 从 KEY=VALUE 格式的配置文件加载参数
  * 遇到不认识的 key 或格式错误的行，跳过并记日志
@@ -242,22 +266,23 @@ static void load_config(const char *path) {
         return;
     }
 
-    // ---- 先预检 CONFIG_ENABLED ----
-    int enabled = 1;
+    // ---- 第一遍扫描：收集开关状态 ----
+    // CONFIG_ENABLED / GEAR_CONFIG_ENABLED / GEAR_N 存在性一次性检测
     char line[256];
+    int enabled = 1;
+    int gear_config_enabled = 0;
+    int gear_any_seen = 0;
     while (fgets(line, sizeof(line), f)) {
-        char *p = trim_line(line);
-        if (*p == '#' || *p == '\n' || *p == '\0') continue;
-        char *eq = strchr(p, '=');
-        if (!eq) continue;
-        *eq = '\0';
-        char *k = p;
-        char *end = k + strlen(k) - 1;
-        while (end > k && (*end == ' ' || *end == '\t')) *end-- = '\0';
-        if (strcmp(k, "CONFIG_ENABLED") == 0) {
-            enabled = atoi(eq + 1) != 0;
-            break;
-        }
+        char *key;
+        char *val_str = config_parse_line(line, &key);
+        if (!val_str) continue;
+
+        if (strcmp(key, "CONFIG_ENABLED") == 0)
+            enabled = atoi(val_str) != 0;
+        else if (strcmp(key, "GEAR_CONFIG_ENABLED") == 0)
+            gear_config_enabled = atoi(val_str) != 0;
+        else if (strncmp(key, "GEAR_", 5) == 0)
+            gear_any_seen = 1;
     }
 
     if (!enabled) {
@@ -266,46 +291,8 @@ static void load_config(const char *path) {
         return;
     }
 
-    // ---- 预检 GEAR_CONFIG_ENABLED（档位表独立开关） ----
-    int gear_config_enabled = 0;   // 默认关闭
-    {
-        rewind(f);
-        while (fgets(line, sizeof(line), f)) {
-            char *p2 = trim_line(line);
-            if (*p2 == '#' || *p2 == '\n' || *p2 == '\0') continue;
-            char *eq2 = strchr(p2, '=');
-            if (!eq2) continue;
-            *eq2 = '\0';
-            char *k2 = p2;
-            char *end2 = k2 + strlen(k2) - 1;
-            while (end2 > k2 && (*end2 == ' ' || *end2 == '\t')) *end2-- = '\0';
-            if (strcmp(k2, "GEAR_CONFIG_ENABLED") == 0) {
-                gear_config_enabled = atoi(eq2 + 1) != 0;
-                break;
-            }
-        }
-    }
-
-    // ---- 预检 GEAR_N 档位配置 ----
-    // 如果 GEAR_CONFIG_ENABLED=1 且配置中存在 GEAR_N，则档位表完全由配置定义
-    int gear_config_seen = 0;
-    if (gear_config_enabled) {
-        rewind(f);
-        while (fgets(line, sizeof(line), f)) {
-            char *p2 = trim_line(line);
-            if (*p2 == '#' || *p2 == '\n' || *p2 == '\0') continue;
-            char *eq2 = strchr(p2, '=');
-            if (!eq2) continue;
-            *eq2 = '\0';
-            char *k2 = p2;
-            char *end2 = k2 + strlen(k2) - 1;
-            while (end2 > k2 && (*end2 == ' ' || *end2 == '\t')) *end2-- = '\0';
-            if (strncmp(k2, "GEAR_", 5) == 0) {
-                gear_config_seen = 1;
-                break;
-            }
-        }
-    }
+    // GEAR_CONFIG_ENABLED 关闭时忽略 GEAR_N，即使文件中有
+    int gear_config_seen = gear_config_enabled && gear_any_seen;
 
     // 有 GEAR_N → 清空档位表，后续只从配置读取
     if (gear_config_seen) {
@@ -315,21 +302,13 @@ static void load_config(const char *path) {
         write_log("配置 档位表将由 GEAR_N 定义");
     }
 
-    // ---- 正常解析全部参数 ----
+    // ---- 第二遍扫描：解析全部参数 ----
     rewind(f);
     int loaded = 0;
     while (fgets(line, sizeof(line), f)) {
-        char *p = trim_line(line);
-        if (*p == '#' || *p == '\n' || *p == '\0') continue;
-
-        char *eq = strchr(p, '=');
-        if (!eq) continue;
-        *eq = '\0';
-        char *key = p;
-        char *val_str = eq + 1;
-
-        char *end = key + strlen(key) - 1;
-        while (end > key && (*end == ' ' || *end == '\t')) *end-- = '\0';
+        char *key;
+        char *val_str = config_parse_line(line, &key);
+        if (!val_str) continue;
 
         int val = atoi(val_str);
 
@@ -407,8 +386,7 @@ static void load_config(const char *path) {
     if (gear_config_seen) {
         if (gear_count > 0) {
             level_max = gear_count;
-            if (battery_fan_level > level_max) battery_fan_level = level_max;
-            if (battery_fan_level < level_min) battery_fan_level = level_min;
+            battery_fan_level = clamp(battery_fan_level, level_min, level_max);
             write_log("配置 档位表 %d 级 (1~%d)", gear_count, level_max);
         } else {
             // 所有 GEAR_N 行格式无效，回退到默认档位表
@@ -855,6 +833,11 @@ static int apply_level(int level) {
     snprintf(wl_s, sizeof(wl_s), "%d", windLevel);
 
     pid_t pid = fork();
+    if (pid < 0) {
+        // fork 失败（系统资源不足），跳过本周期
+        write_log("fork 失败，跳过下发");
+        return 0;
+    }
     if (pid == 0) {
         // 子进程：静默执行，stdout/stderr 重定向到 /dev/null
         int fd = open("/dev/null", O_WRONLY);
@@ -876,8 +859,17 @@ static int apply_level(int level) {
         _exit(127);  // 到达这里说明 exec 失败
     }
     if (pid > 0) {
+        // 父进程：限时等待子进程（3 秒超时，防止 am 卡死阻塞 daemon）
+        signal(SIGALRM, alarm_handler);
+        alarm(3);
         int status;
-        waitpid(pid, &status, 0);
+        if (waitpid(pid, &status, 0) == -1) {
+            write_log("am broadcast 超时，已强杀");
+            kill(pid, SIGKILL);
+            waitpid(pid, NULL, 0);  // 回收僵尸
+        }
+        alarm(0);
+        signal(SIGALRM, SIG_DFL);
     }
 
     // ---- 更新缓存 ----
@@ -937,17 +929,15 @@ static void battery_control(void) {
         abs_change = abs(batt_change);
     }
     int diff = batt - BATT_BASELINE;
+    int ad = abs(diff);
+    int sign;
+    if      (diff > 0) sign =  1;
+    else if (diff < 0) sign = -1;
+    else               sign =  0;
     int delta = 0;
-    if (diff > 0) {
-        if      (diff <= BATT_ZONE_1) delta = 0;
-        else if (diff <= BATT_ZONE_2) delta = 1;
-        else                          delta = 2;
-    } else if (diff < 0) {
-        int ad = -diff;
-        if      (ad <= BATT_ZONE_1) delta = 0;
-        else if (ad <= BATT_ZONE_2) delta = -1;
-        else                        delta = -2;
-    }
+    if      (ad > BATT_ZONE_2) delta = 2;
+    else if (ad > BATT_ZONE_1) delta = 1;
+    delta *= sign;
 
     // 温度值与上次调整时相同 → 计数跳过，超过 BATT_SKIP_MAX 次后强制进入
     if (batt == last_batt_reading) {
@@ -964,7 +954,8 @@ static void battery_control(void) {
     int skip_delta = 0;  // =1 时本次不执行常规升降档
 
     // 冷却递减（放在 abs_change 判断之前，温度不变强制进入时也能递减）
-    if (batt_cooldown > 0) {
+    int in_cooldown = (batt_cooldown > 0);
+    if (in_cooldown) {
         batt_cooldown--;
         skip_delta = 1;
     }
@@ -1062,7 +1053,7 @@ static void battery_control(void) {
  *   等级 4 → 强制最低档位 EMERG_FORCED_4（默认 12，固定 6000RPM/185）
  *   单源最高触发 3 级，4 级需双源叠加（≥3+1 或 2+2 等）
  *
- * 退出逻辑（AND）：综合等级为 0 时检查双源恢复阈值后才完全退出
+ * 退出逻辑（AND）：降档时逐级检查双源恢复阈值后才允许下降，包括退出到 0
  */
 static void emergency_intervention(void) {
     // --- 1. CPU 温度读入与滤波 ---
@@ -1101,14 +1092,37 @@ static void emergency_intervention(void) {
         else if (cur_ua > CURRENT_EMERG_1) cur_lvl = 1;
     }
 
-    // === 4. 综合等级 = cpu_level + current_level ===
+    // === 4. 综合等级 = cpu_level + current_level（统一升降滞回） ===
+    // 升档：combined > 当前等级 → 立即跳升（进入阈值，快速响应）
+    // 降档：combined < 当前等级 → 逐级下降（恢复阈值滞回，防振荡）
     // 单源最高 3 级，综合最高 4 级
     int combined = cpu_lvl + cur_lvl;
     if (combined > 4) combined = 4;
 
-    if (combined > 0) {
+    if (combined > emergency_level) {
+        // 升档：立即响应
         new_level = combined;
+    } else if (combined < emergency_level) {
+        // 降档：双源都低于恢复阈值才允许降一级
+        int cpu_ok = 1;
+        if (cpu_valid) {
+            if      (emergency_level >= 3) cpu_ok = (t < CPU_RECOVER_2);
+            else if (emergency_level >= 2) cpu_ok = (t < CPU_RECOVER_1);
+            else                           cpu_ok = (t < CPU_RECOVER_0);
+        }
+        int cur_ok = 1;
+        if (cur_valid) {
+            int cur_exit = curr_smooth_valid ? curr_smooth_val : cur_ua;
+            if      (emergency_level >= 3) cur_ok = (cur_exit < CURRENT_RECOVER_2);
+            else if (emergency_level >= 2) cur_ok = (cur_exit < CURRENT_RECOVER_1);
+            else                           cur_ok = (cur_exit < CURRENT_RECOVER_0);
+        }
+        if (cpu_ok && cur_ok) {
+            new_level = emergency_level - 1;  // 逐级下降
+        }
+        // 至少一个未恢复 → 保持当前等级
     }
+    // combined == emergency_level → 保持当前等级
 
     // === 5. 电流平滑维护（紧急退出用 EMA） ===
     // 升档时重置平滑（从新值重新累积）；降档不重置，直到完全退出
@@ -1125,34 +1139,7 @@ static void emergency_intervention(void) {
         }
     }
 
-    // === 6. Exit（AND 逻辑）：综合为 0 时检查恢复阈值 ===
-    // 防止双源刚退到底时频繁 0-1 振荡
-    if (combined == 0 && emergency_level > 0) {
-        int cpu_ok = 1;
-        if (cpu_valid) {
-            if      (emergency_level >= 3) cpu_ok = (t < CPU_RECOVER_2);
-            else if (emergency_level >= 2) cpu_ok = (t < CPU_RECOVER_1);
-            else                           cpu_ok = (t < CPU_RECOVER_0);
-        }
-        int cur_ok = 1;
-        if (cur_valid) {
-            // 退出时电流用平滑值判断
-            int cur_exit = curr_smooth_valid ? curr_smooth_val : cur_ua;
-            if      (emergency_level >= 3) cur_ok = (cur_exit < CURRENT_RECOVER_2);
-            else if (emergency_level >= 2) cur_ok = (cur_exit < CURRENT_RECOVER_1);
-            else                           cur_ok = (cur_exit < CURRENT_RECOVER_0);
-        }
-        if (cpu_ok && cur_ok) {
-            // 双源都恢复 → 逐级下降（3→2→1→0），不硬跳
-            if      (emergency_level >= 4) new_level = 3;
-            else if (emergency_level >= 3) new_level = 2;
-            else if (emergency_level >= 2) new_level = 1;
-            else                           new_level = 0;
-        }
-        // 至少一个未恢复 → 保持当前等级（new_level = emergency_level）
-    }
-
-    // --- 7. 等级变化处理与日志 ---
+    // --- 6. 等级变化处理与日志 ---
     if (new_level != emergency_level) {
         int delta_e = new_level - emergency_level;
         int cpu_disp = cpu_valid ? cpu_now : t;
@@ -1167,7 +1154,7 @@ static void emergency_intervention(void) {
         batt_cooldown = BATT_COOLDOWN_CYCLES;
     }
 
-    // --- 8. 设定强制最低档位 ---
+    // --- 7. 设定强制最低档位 ---
     switch (emergency_level) {
         case 4: forced_min_level = EMERG_FORCED_4; break;
         case 3: forced_min_level = EMERG_FORCED_3; break;
@@ -1182,6 +1169,10 @@ static void emergency_intervention(void) {
 static void handle_signal(int sig) {
     (void)sig;
     running = 0;
+}
+
+static void alarm_handler(int sig) {
+    (void)sig;  // 仅用于中断 waitpid，不做事
 }
 
 /**
