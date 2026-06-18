@@ -59,19 +59,21 @@ static int level_max = 10;     // 默认 10 档（由 init_gear_table 设定）
 // 格式：GEAR_<档位N>=<模式>,<目标温度°C>,<风扇RPM>,<制冷强度>
 // 范围：N=1~32, 模式=0(智能)或1(固定), 目标=5~35°C, 风扇=2000~6000, 制冷=1~194
 // 注意：模式 0 时制冷强度失效（散热器自行管理），模式 1 时目标温度无效
-// 例：GEAR_10=1,0,6000,190 表示 10 档固定功率，6000RPM，制冷 190
-//     GEAR_5=0,16,4000,0   表示  5 档智能温控，16°C，风扇上限 4000RPM
-static const GearEntry DEFAULT_GEAR_TABLE[10] = {
-    {1, 0, 2000, 10},    // Level 1  伪待机
-    {1, 0, 2000, 20},    // Level 2
-    {1, 0, 2350, 35},    // Level 3
-    {1, 0, 2800, 55},    // Level 4
-    {1, 0, 3350, 75},    // Level 5
-    {1, 0, 4000, 100},   // Level 6
-    {1, 0, 4650, 130},   // Level 7
-    {1, 0, 5200, 155},   // Level 8
-    {1, 0, 5650, 175},   // Level 9
-    {1, 0, 6000, 190},   // Level 10 制冷峰值
+// 例：GEAR_12=1,0,6000,185 表示 12 档固定功率，6000RPM，制冷 185
+//     GEAR_5=0,16,2650,0   表示  5 档智能温控，16°C，风扇上限 2650RPM
+static const GearEntry DEFAULT_GEAR_TABLE[12] = {
+    {1, 0, 2000,  5},    // Level 1   α待机
+    {1, 0, 2000, 10},    // Level 2
+    {1, 0, 2000, 20},    // Level 3
+    {1, 0, 2300, 35},    // Level 4
+    {1, 0, 2650, 55},    // Level 5   LEVEL_INIT
+    {1, 0, 3050, 75},    // Level 6
+    {1, 0, 3500, 100},   // Level 7
+    {1, 0, 4000, 125},   // Level 8
+    {1, 0, 4500, 145},   // Level 9
+    {1, 0, 5000, 160},   // Level 10
+    {1, 0, 5500, 175},   // Level 11
+    {1, 0, 6000, 185},   // Level 12 制冷峰值
 };
 
 /**
@@ -79,9 +81,9 @@ static const GearEntry DEFAULT_GEAR_TABLE[10] = {
  * 程序启动时调用。若 profile.conf 包含 GEAR_N 配置，load_config 将覆盖之。
  */
 static void init_gear_table(void) {
-    gear_count = 10;
+    gear_count = 12;
     level_min = 1;
-    level_max = 10;
+    level_max = 12;
     for (int i = 0; i < gear_count; i++) {
         gear_table[i] = DEFAULT_GEAR_TABLE[i];
     }
@@ -96,6 +98,11 @@ static int BATT_BASELINE = 350;     // 基准温度 35.0°C
 static int BATT_ZONE_1   = 7;       // ±0.7°C → 不变（死区）
 static int BATT_ZONE_2   = 20;      // ±2.0°C → 1 档（超过→2档）
 
+// --- CPU 温度扫描范围（可配置）---
+// 首次运行在此范围内扫描有效的 thermal_zone，后续只扫命中的 zone
+static int CPU_ZONE_MIN = 0;
+static int CPU_ZONE_MAX = 99;
+
 // --- CPU 紧急干预阈值（0.1°C）—— 可由 profile.conf 覆盖 ---
 static int CPU_EMERG_3   = 850;     // >85.0°C → 等级 3
 static int CPU_EMERG_2   = 750;     // >75.0°C → 等级 2
@@ -105,9 +112,13 @@ static int CPU_RECOVER_1 = 650;     // <65.0°C 且 ≥2 级时降为 1
 static int CPU_RECOVER_2 = 750;     // <75.0°C 且 ≥3 级时降为 2
 
 // --- 紧急强制最低档位 —— 可由 profile.conf 覆盖 ---
-static int EMERG_FORCED_1 = 6;   // 等级 1 强制最低档位（固定功率 4000RPM/100）
-static int EMERG_FORCED_2 = 7;   // 等级 2 强制最低档位（固定功率 4650RPM/130）
-static int EMERG_FORCED_3 = 8;   // 等级 3 强制最低档位（固定功率 5200RPM/155）
+static int EMERG_FORCED_1 = 6;   // 等级 1 强制最低档位（固定功率 3050RPM/75）
+static int EMERG_FORCED_2 = 8;   // 等级 2 强制最低档位（固定功率 4000RPM/125）
+static int EMERG_FORCED_3 = 10;  // 等级 3 强制最低档位（固定功率 5000RPM/160）
+static int EMERG_FORCED_4 = 12;  // 等级 4 强制最低档位（固定功率 6000RPM/185 峰值）
+
+// --- 紧急退出钳制偏移（退出时高一级强制档位 + 此偏移作为档位上限）---
+static int EMERG_EXIT_CAP_OFFSET = 1;
 
 // --- CPU 滤波系数（百分比，0~100，默认 20=α=0.20）---
 static int CPU_FILTER_ALPHA = 20;
@@ -134,11 +145,6 @@ static int BATT_COOLDOWN_CYCLES = 3;
 // --- 状态文件超时（秒，可配置）---
 static int STATUS_TIMEOUT = 16;
 
-// --- CPU 温度扫描范围（可配置）---
-// 首次运行在此范围内扫描有效的 thermal_zone，后续只扫命中的 zone
-static int CPU_ZONE_MIN = 0;
-static int CPU_ZONE_MAX = 99;
-
 // --- 电池电流紧急干预阈值（µA，可配置）---
 // 通过 /sys/class/power_supply/battery/current_now 读取，取绝对值
 static int CURRENT_EMERG_3 = 7000000;   // >7A → 等级 3
@@ -147,6 +153,16 @@ static int CURRENT_EMERG_1 = 5000000;   // >5A → 等级 1
 static int CURRENT_RECOVER_2 = 6000000; // <6A → 从 3 降为 2
 static int CURRENT_RECOVER_1 = 5000000; // <5A → 从 2 降为 1
 static int CURRENT_RECOVER_0 = 4000000; // <4A → 清除
+
+// --- 电流紧急退出平滑系数（百分比，可配置）---
+// 进入紧急时电流用原始值不平滑；退出时使用 EMA 平滑值
+// 升档（紧急等级提高）时重置平滑，从当前值重新累积
+static int CURRENT_SMOOTH_ALPHA = 25;   // 默认 α=0.25
+
+// --- 逐档提升启动档位（可配置）---
+// ≤此档位时：可直接跳到目标档位（不逐级变动）
+// >此档位时：每轮最多 ±1 档，压制噪音突变
+static int GRADUAL_STEP_THRESHOLD = 5;
 
 
 // --- 日志路径（默认根据二进制名自动生成，可由 profile.conf 覆盖）---
@@ -289,9 +305,10 @@ static void load_config(const char *path) {
         else if (strcmp(key, "CPU_RECOVER_0") == 0)        CPU_RECOVER_0      = clamp(val, 300, 700);
         else if (strcmp(key, "CPU_RECOVER_1") == 0)        CPU_RECOVER_1      = clamp(val, 400, 800);
         else if (strcmp(key, "CPU_RECOVER_2") == 0)        CPU_RECOVER_2      = clamp(val, 500, 900);
-        else if (strcmp(key, "EMERG_FORCED_1") == 0)       EMERG_FORCED_1     = clamp(val, 0, 10);
-        else if (strcmp(key, "EMERG_FORCED_2") == 0)       EMERG_FORCED_2     = clamp(val, 0, 10);
-        else if (strcmp(key, "EMERG_FORCED_3") == 0)       EMERG_FORCED_3     = clamp(val, 0, 10);
+        else if (strcmp(key, "EMERG_FORCED_1") == 0)       EMERG_FORCED_1     = clamp(val, 0, 12);
+        else if (strcmp(key, "EMERG_FORCED_2") == 0)       EMERG_FORCED_2     = clamp(val, 0, 12);
+        else if (strcmp(key, "EMERG_FORCED_3") == 0)       EMERG_FORCED_3     = clamp(val, 0, 12);
+        else if (strcmp(key, "EMERG_FORCED_4") == 0)       EMERG_FORCED_4     = clamp(val, 0, 12);
         else if (strcmp(key, "CPU_FILTER_ALPHA") == 0)     CPU_FILTER_ALPHA   = clamp(val, 1, 100);
         else if (strcmp(key, "OVERRIDE_MAX") == 0)         OVERRIDE_MAX       = clamp(val, 0, 20);
         else if (strcmp(key, "PEAK_DAMP_INNER_BOUNDARY") == 0) PEAK_DAMP_INNER_BOUNDARY  = clamp(val, 1, 10);
@@ -307,6 +324,9 @@ static void load_config(const char *path) {
         else if (strcmp(key, "CURRENT_RECOVER_2") == 0)     CURRENT_RECOVER_2  = clamp(val, 1000000, 15000000);
         else if (strcmp(key, "CURRENT_RECOVER_1") == 0)     CURRENT_RECOVER_1  = clamp(val, 1000000, 15000000);
         else if (strcmp(key, "CURRENT_RECOVER_0") == 0)     CURRENT_RECOVER_0  = clamp(val, 1000000, 15000000);
+        else if (strcmp(key, "CURRENT_SMOOTH_ALPHA") == 0)  CURRENT_SMOOTH_ALPHA = clamp(val, 1, 100);
+        else if (strcmp(key, "GRADUAL_STEP_THRESHOLD") == 0) GRADUAL_STEP_THRESHOLD = clamp(val, 0, 10);
+        else if (strcmp(key, "EMERG_EXIT_CAP_OFFSET") == 0) EMERG_EXIT_CAP_OFFSET = clamp(val, 0, 5);
         else if (strcmp(key, "GEAR_CONFIG_ENABLED") == 0) { /* 预检已处理 */ }
         else if (strcmp(key, "LOG_MAX_KB") == 0)           LOG_MAX_KB         = clamp(val, 0, 1000);
         else if (strcmp(key, "LOG_FILE") == 0) {
@@ -457,6 +477,10 @@ static int app_was_alive = 0;
 static char status_file_path[512] = "";
 static char gear_file_path[512] = "";
 static int app_ble_connected = 0;
+
+// --- 电流平滑状态（紧急退出用 EMA）---
+static int curr_smooth_val = 0;       // 平滑后的电流值（µA）
+static int curr_smooth_valid = 0;     // 平滑数据是否有效
 
 // ======================== 辅助函数 ========================
 
@@ -1012,15 +1036,18 @@ static void battery_control(void) {
  * 每 5 秒调用一次
  *
  * CPU 温度使用一阶低通滤波（α=CPU_FILTER_ALPHA）平滑
- * 电池电流取绝对值，不平滑
+ * 电池电流：进入时用原始值（不平滑），退出时用 EMA 平滑值
+ * 电流 EMA 平滑（α=CURRENT_SMOOTH_ALPHA）仅在紧急状态下累积，
+ * 升档（紧急等级提高）时重置，降档时继续累积。
  *
- * 紧急等级：
- *   等级 1 → 强制最低档位 EMERG_FORCED_1（默认 6，固定功率 4000RPM/100）
- *   等级 2 → 强制最低档位 EMERG_FORCED_2（默认 7，固定功率 4650RPM/130）
- *   等级 3 → 强制最低档位 EMERG_FORCED_3（默认 8，固定功率 5200RPM/155）
+ * 紧急等级 = cpu_level + current_level（各自 0~3，综合 0~6，上限 4）
+ *   等级 1 → 强制最低档位 EMERG_FORCED_1（默认 6，固定 3050RPM/75）
+ *   等级 2 → 强制最低档位 EMERG_FORCED_2（默认 8，固定 4000RPM/125）
+ *   等级 3 → 强制最低档位 EMERG_FORCED_3（默认 10，固定 5000RPM/160）
+ *   等级 4 → 强制最低档位 EMERG_FORCED_4（默认 12，固定 6000RPM/185）
+ *   单源最高触发 3 级，4 级需双源叠加（≥3+1 或 2+2 等）
  *
- * 进入逻辑（OR）：CPU 或电流任一触发即进入对应等级
- * 退出逻辑（AND）：CPU 和电流都低于恢复阈值才降级
+ * 退出逻辑（AND）：综合等级为 0 时检查双源恢复阈值后才完全退出
  */
 static void emergency_intervention(void) {
     // --- 1. CPU 温度读入与滤波 ---
@@ -1034,47 +1061,82 @@ static void emergency_intervention(void) {
                             cpu_weighted * (100 - CPU_FILTER_ALPHA)) / 100;
         }
     }
-    int t = cpu_weighted;   // 加权 CPU 温度（始终有效）
+    int t = cpu_weighted;
     int cpu_valid = (cpu_now >= 0);
 
-    // --- 2. 电池电流绝对值（不平滑）---
+    // --- 2. 电池电流绝对值 ---
     int cur_ua = read_battery_current_abs();
     int cur_valid = (cur_ua >= 0);
 
+    int prev_level = emergency_level;
     int new_level = emergency_level;
 
-    // === 3. Entry（OR 逻辑）：任一源满足即触发 ===
-    if      ((cpu_valid && t > CPU_EMERG_3) || (cur_valid && cur_ua > CURRENT_EMERG_3))
-        new_level = 3;
-    else if ((cpu_valid && t > CPU_EMERG_2) || (cur_valid && cur_ua > CURRENT_EMERG_2))
-        new_level = 2;
-    else if ((cpu_valid && t > CPU_EMERG_1) || (cur_valid && cur_ua > CURRENT_EMERG_1))
-        new_level = 1;
-    // === 4. Exit（AND 逻辑）：两方都允许退出才降级 ===
-    else if (emergency_level > 0) {
-        int cpu_ok = 1;  // 传感器不可用时默认允许退出
+    // === 3. 计算单源级别（各自 0~3，用进入阈值） ===
+    int cpu_lvl = 0;
+    if (cpu_valid) {
+        if      (t > CPU_EMERG_3) cpu_lvl = 3;
+        else if (t > CPU_EMERG_2) cpu_lvl = 2;
+        else if (t > CPU_EMERG_1) cpu_lvl = 1;
+    }
+    int cur_lvl = 0;
+    if (cur_valid) {
+        // 进入时用原始电流值
+        if      (cur_ua > CURRENT_EMERG_3) cur_lvl = 3;
+        else if (cur_ua > CURRENT_EMERG_2) cur_lvl = 2;
+        else if (cur_ua > CURRENT_EMERG_1) cur_lvl = 1;
+    }
+
+    // === 4. 综合等级 = cpu_level + current_level ===
+    // 单源最高 3 级，综合最高 4 级
+    int combined = cpu_lvl + cur_lvl;
+    if (combined > 4) combined = 4;
+
+    if (combined > 0) {
+        new_level = combined;
+    }
+
+    // === 5. 电流平滑维护（紧急退出用 EMA） ===
+    // 升档时重置平滑（从新值重新累积）；降档不重置，直到完全退出
+    if (new_level > prev_level) {
+        curr_smooth_valid = 0;
+    }
+    if (cur_valid && emergency_level > 0) {
+        if (!curr_smooth_valid) {
+            curr_smooth_val = cur_ua;
+            curr_smooth_valid = 1;
+        } else {
+            curr_smooth_val = (cur_ua * CURRENT_SMOOTH_ALPHA +
+                               curr_smooth_val * (100 - CURRENT_SMOOTH_ALPHA)) / 100;
+        }
+    }
+
+    // === 6. Exit（AND 逻辑）：综合为 0 时检查恢复阈值 ===
+    // 防止双源刚退到底时频繁 0-1 振荡
+    if (combined == 0 && emergency_level > 0) {
+        int cpu_ok = 1;
         if (cpu_valid) {
             if      (emergency_level >= 3) cpu_ok = (t < CPU_RECOVER_2);
             else if (emergency_level >= 2) cpu_ok = (t < CPU_RECOVER_1);
             else                           cpu_ok = (t < CPU_RECOVER_0);
         }
-        int cur_ok = 1;  // 传感器不可用时默认允许退出
+        int cur_ok = 1;
         if (cur_valid) {
-            if      (emergency_level >= 3) cur_ok = (cur_ua < CURRENT_RECOVER_2);
-            else if (emergency_level >= 2) cur_ok = (cur_ua < CURRENT_RECOVER_1);
-            else                           cur_ok = (cur_ua < CURRENT_RECOVER_0);
+            // 退出时电流用平滑值判断
+            int cur_exit = curr_smooth_valid ? curr_smooth_val : cur_ua;
+            if      (emergency_level >= 3) cur_ok = (cur_exit < CURRENT_RECOVER_2);
+            else if (emergency_level >= 2) cur_ok = (cur_exit < CURRENT_RECOVER_1);
+            else                           cur_ok = (cur_exit < CURRENT_RECOVER_0);
         }
-        if (cpu_ok && cur_ok) {
-            if      (emergency_level >= 3) new_level = 2;
-            else if (emergency_level >= 2) new_level = 1;
-            else                           new_level = 0;
+        if (!(cpu_ok && cur_ok)) {
+            // 至少一个未恢复：hold 在 1 级
+            new_level = 1;
         }
+        // 都恢复 → new_level 保持 0，完全退出
     }
 
-    // --- 5. 等级变化处理与日志 ---
+    // --- 7. 等级变化处理与日志 ---
     if (new_level != emergency_level) {
-        int old = emergency_level;
-        int delta_e = new_level - old;
+        int delta_e = new_level - emergency_level;
         int cpu_disp = cpu_valid ? cpu_now : t;
         int cur_disp = cur_valid ? cur_ua : 0;
         write_log("紧急%d（%s%d）cpu%d.%d cur%d.%d",
@@ -1084,11 +1146,12 @@ static void emergency_intervention(void) {
                   cur_disp / 1000000, (cur_disp / 100000) % 10);
 
         emergency_level = new_level;
-        batt_cooldown = BATT_COOLDOWN_CYCLES;   // 任何档位变动后启动冷却
+        batt_cooldown = BATT_COOLDOWN_CYCLES;
     }
 
-    // --- 6. 设定强制最低档位 ---
+    // --- 8. 设定强制最低档位 ---
     switch (emergency_level) {
+        case 4: forced_min_level = EMERG_FORCED_4; break;
         case 3: forced_min_level = EMERG_FORCED_3; break;
         case 2: forced_min_level = EMERG_FORCED_2; break;
         case 1: forced_min_level = EMERG_FORCED_1; break;
@@ -1105,7 +1168,8 @@ static void handle_signal(int sig) {
 
 /**
  * 单次控制循环（纯计算，不下发）
- * 配置重载 → 紧急干预（CPU+电流）→ 电池控制 → 保存目标档位
+ * 配置重载 → 紧急干预（CPU+电流综合等级）→ 电池控制 → 保存目标档位
+ * 调用者在外部立即执行逐步变档，本函数只做决策
  */
 static int prev_emerg_level = 0;   // 记录上一轮紧急等级，退出紧急时用作档位上限
 
@@ -1141,10 +1205,16 @@ static void main_loop(void) {
     target_level = final_level;
 
     // 6. 退出紧急时限制电池档位上限（过渡期保护，仅生效一周期）
-    //    用上一级紧急的强制最低档位作为上限，压制 battery_control 立即拉升
+    //    用上一级紧急的强制最低档位 + 偏移量作为上限
+    //    压制 battery_control 立即拉升，又给用户一点过渡余量
     if (emergency_level < prev_emerg_level) {
-        int cap = prev_emerg_level >= 3 ? EMERG_FORCED_3 :
-                  prev_emerg_level >= 2 ? EMERG_FORCED_2 : EMERG_FORCED_1;
+        int cap;
+        if      (prev_emerg_level >= 4) cap = EMERG_FORCED_4;
+        else if (prev_emerg_level >= 3) cap = EMERG_FORCED_3;
+        else if (prev_emerg_level >= 2) cap = EMERG_FORCED_2;
+        else                             cap = EMERG_FORCED_1;
+        cap += EMERG_EXIT_CAP_OFFSET;
+        if (cap > level_max) cap = level_max;
         if (battery_fan_level > cap)
             battery_fan_level = cap;
     }
@@ -1262,18 +1332,23 @@ int main(int argc, char *argv[]) {
             apply_level(actual_level);
         }
 
-        // ★ 逐步执行（每轮最多变动 1 档，向 target_level 方向靠拢）
-        // 散热器实际运行的档位逐级变化，压制档位突变带来的噪音突变
+        main_loop();
+
+        // ★ 计算完成后立即执行（向 target_level 靠拢）
+        // 升档时：target ≤ GRADUAL_STEP_THRESHOLD 可直接跳转，否则逐级 ±1
+        // 降档时：始终逐级 -1（压制噪音突降）
         if (actual_level < target_level) {
-            actual_level++;
+            if (target_level <= GRADUAL_STEP_THRESHOLD) {
+                actual_level = target_level;     // 低频区直接跳转
+            } else {
+                actual_level++;                  // 高频区逐级提升
+            }
             apply_level(actual_level);
         } else if (actual_level > target_level) {
             actual_level--;
             apply_level(actual_level);
         }
         // actual_level == target_level → 跳过（已到达目标）
-
-        main_loop();
 
         // 逐秒睡眠（可被信号中断）
         for (int i = 0; i < 5 && running; i++) {
