@@ -127,16 +127,9 @@ static int CPU_FILTER_ALPHA = 20;
 // 温度趋势反向时最多连续豁免次数，超过后强制执行
 static int OVERRIDE_MAX = 6;
 
-// --- 峰值过冲抑制（可配置）---
-// PEAK_DAMP_OUTER_THRESHOLD：2°C 外豁免/反补分界阈值。
-//   变动 ≤ 此值 → 趋势豁免；变动 > 此值 → 反补 1 档
-// PEAK_DAMP_INNER_BOUNDARY：2°C 内豁免/反补分界阈值。
-//   变动 ≤ 此值 → 趋势豁免；变动 > 此值 → 反补（仍受 INNER_THRESHOLD 控制分级）
-// PEAK_DAMP_INNER_THRESHOLD：2°C 内反补二级阈值。
-//   boundary < 变动 ≤ 此值(0.5°C) → 反补 1 档；> 此值 → 反补 2 档（固定）
-static int PEAK_DAMP_INNER_BOUNDARY  = 3;
-static int PEAK_DAMP_INNER_THRESHOLD = 5;
-static int PEAK_DAMP_OUTER_THRESHOLD = 5;
+// --- 反补阈值（由 battery_control 根据方向+区域查表使用）---
+// 原 PEAK_DAMP_INNER_BOUNDARY/THRESHOLD/OUTER_THRESHOLD 已移除，
+// 改为 Sheet3 三区×双向×三级阈值查表法，详见 battery_control。
 
 // --- 电池调档冷却周期数（可配置）---
 // 每次电池温度导致的档位变动后冻结多少周期（×5s），期内跳过常规升降档
@@ -311,9 +304,7 @@ static void load_config(const char *path) {
         else if (strcmp(key, "EMERG_FORCED_4") == 0)       EMERG_FORCED_4     = clamp(val, 0, 12);
         else if (strcmp(key, "CPU_FILTER_ALPHA") == 0)     CPU_FILTER_ALPHA   = clamp(val, 1, 100);
         else if (strcmp(key, "OVERRIDE_MAX") == 0)         OVERRIDE_MAX       = clamp(val, 0, 20);
-        else if (strcmp(key, "PEAK_DAMP_INNER_BOUNDARY") == 0) PEAK_DAMP_INNER_BOUNDARY  = clamp(val, 1, 10);
-        else if (strcmp(key, "PEAK_DAMP_INNER_THRESHOLD") == 0)  PEAK_DAMP_INNER_THRESHOLD = clamp(val, 1, 10);
-        else if (strcmp(key, "PEAK_DAMP_OUTER_THRESHOLD") == 0)  PEAK_DAMP_OUTER_THRESHOLD = clamp(val, 1, 10);
+        // PEAK_DAMP_* 已移除（v2.1 改为 Sheet3 查表法）
         else if (strcmp(key, "BATT_COOLDOWN_CYCLES") == 0) BATT_COOLDOWN_CYCLES = clamp(val, 0, 20);
         else if (strcmp(key, "STATUS_TIMEOUT") == 0)       STATUS_TIMEOUT     = clamp(val, 5, 60);
         else if (strcmp(key, "CPU_ZONE_MIN") == 0)          CPU_ZONE_MIN       = clamp(val, 0, 99);
@@ -904,9 +895,10 @@ static int is_app_alive(void) {
  * 温度读数未变化时跳过升降档。
  * 每次档位变动后启动 BATT_COOLDOWN_CYCLES 周期冷却，期间跳过常规升降档。
  *
- * 合并逻辑：
- *   2°C 内：≤0.3°C 趋势豁免，0.3~0.5°C 反补 1 档，>0.5°C 反补 2 档
- *   2°C 外：≤PEAK_DAMP_OUTER_THRESHOLD 趋势豁免，> 则反补 1 档
+ * 反补查表（Sheet3 三区×双向×三级阈值）：
+ *   三区：冷外区(≤基准-ZONE2) / 内区(±ZONE2内) / 热外区(≥基准+ZONE2)
+ *   升温时：冷外 0.8→1 / 内区 0.5→1, 0.8→2 / 热外 0.3→1, 0.5→2, 0.8→3
+ *   降温时：冷外 0.3→1, 0.5→2, 0.8→3 / 内区 0.5→1, 0.8→2 / 热外 0.8→1
  */
 static void battery_control(void) {
     int batt = read_battery_temp();
@@ -938,43 +930,43 @@ static void battery_control(void) {
 
     int skip_delta = 0;  // =1 时本次不执行常规升降档
 
-    // ═══════════════ 合并逻辑：趋势豁免 + 峰值过冲抑制 ═══════════════
-    if (last_batt_reading >= 0) {
+    // ═══════════════ 反补查表（Sheet3 三区×双向×三级阈值） ═══════════════
+    if (last_batt_reading >= 0 && abs_change > 0) {
         int trend_rev = (delta > 0 && batt < last_batt_reading) ||
                         (delta < 0 && batt > last_batt_reading);
+        int dir = (batt_change > 0) ? 1 : -1;  // +1=升温, -1=降温
 
-        // 冷却期内跳过常规升降档和豁免，峰值反补仍运行（安全机制）
+        // 冷却期内跳过常规升降档和豁免，反补仍运行（安全机制）
         int in_cooldown = (batt_cooldown > 0);
         if (in_cooldown) {
             batt_cooldown--;
             skip_delta = 1;
         }
 
-        // 方向感知的区间判断：同向变动时容忍度更宽，反向时收紧
-        // 降温时 batt ≤ BASELINE+ZONE_2 → 内区（温和反补）
-        // 升温时 batt ≥ BASELINE-ZONE_2 → 内区（温和反补）
-        // 否则 → 外区（强力反补）
-        int in_inner_zone = 0;
-        if (batt_change < 0) {
-            in_inner_zone = (batt <= BATT_BASELINE + BATT_ZONE_2);
-        } else if (batt_change > 0) {
-            in_inner_zone = (batt >= BATT_BASELINE - BATT_ZONE_2);
-        } else {
-            int abs_baseline_diff = (diff > 0) ? diff : -diff;
-            in_inner_zone = (abs_baseline_diff <= BATT_ZONE_2);
-        }
-        int peak_bound = in_inner_zone ? PEAK_DAMP_INNER_BOUNDARY
-                                       : PEAK_DAMP_OUTER_THRESHOLD;
+        // 三区判断：冷外区 / 内区 / 热外区
+        int is_cold_outer = (batt <= BATT_BASELINE - BATT_ZONE_2);
+        int is_hot_outer  = (batt >= BATT_BASELINE + BATT_ZONE_2);
+        int in_inner_zone = !is_cold_outer && !is_hot_outer;
 
-        // ═══ 小变动（≤阈值）→ 趋势豁免 ═══
-        // 最高/最低档位时不触发豁免
-        if (!in_cooldown && abs_change <= peak_bound) {
+        // 根据方向+区域查三级阈值（0.1°C 单位，999=无穷大）
+        int t1 = 999, t2 = 999, t3 = 999;  // 分别对应 +1/+2/+3 档的 ∆T 门槛
+        if (dir > 0) {    // ═══ 升温 ═══
+            if      (is_cold_outer) { t1 = 8; }                         // 0.8→1
+            else if (in_inner_zone) { t1 = 5; t2 = 8; }                 // 0.5→1, 0.8→2
+            else                   { t1 = 3; t2 = 5; t3 = 8; }          // 0.3→1, 0.5→2, 0.8→3
+        } else {          // ═══ 降温 ═══
+            if      (is_cold_outer) { t1 = 3; t2 = 5; t3 = 8; }         // 0.3→1, 0.5→2, 0.8→3
+            else if (in_inner_zone) { t1 = 5; t2 = 8; }                 // 0.5→1, 0.8→2
+            else                   { t1 = 8; }                          // 0.8→1
+        }
+
+        // ═══ 小变动（≤t1）→ 趋势豁免 ═══
+        if (!in_cooldown && abs_change <= t1) {
             if (trend_rev && battery_fan_level > level_min &&
                 battery_fan_level < level_max &&
                 trend_override < OVERRIDE_MAX) {
-                if (trend_override == 0) {
+                if (trend_override == 0)
                     write_log("趋势豁免 %d", battery_fan_level);
-                }
                 trend_override++;
                 skip_delta = 1;
             } else {
@@ -982,21 +974,13 @@ static void battery_control(void) {
             }
         }
 
-        // ═══ 大变动（>阈值）→ 峰值反补（冷却期也执行） ═══
-        if (abs_change > peak_bound) {
+        // ═══ 大变动（>t1）→ 反补（冷却期也执行） ═══
+        if (abs_change > t1) {
             trend_override = 0;
 
-            int adjust = 0;
-            if (in_inner_zone) {
-                // 内区：≤PEAK_DAMP_INNER_THRESHOLD→1档，>→2档（固定）
-                if (abs_change <= PEAK_DAMP_INNER_THRESHOLD)
-                    adjust = (batt_change > 0) ? 1 : -1;
-                else
-                    adjust = (batt_change > 0) ? 2 : -2;
-            } else {
-                // 外区：固定反补1档
-                adjust = (batt_change > 0) ? 1 : -1;
-            }
+            // 跨越几个门槛就补几档
+            int steps = (abs_change > t1) + (abs_change > t2) + (abs_change > t3);
+            int adjust = dir * steps;
 
             if (adjust != 0) {
                 int old = battery_fan_level;
