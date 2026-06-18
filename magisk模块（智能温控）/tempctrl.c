@@ -25,6 +25,8 @@
 #include <time.h>
 #include <stdarg.h>
 #include <sys/stat.h>
+#include <sys/wait.h>
+#include <fcntl.h>
 
 // ======================== 档位定义 ========================
 //
@@ -175,10 +177,49 @@ static char config_path[256] = "";
 // 配置文件的最后修改时间（用于热重载检测）
 static time_t config_mtime = 0;
 
+// ======================== 全局状态 ========================
+
+static int battery_fan_level = 0;      // 电池控制决定的基础档位（逻辑基准值，非实际档位）
+static int emergency_level = 0;        // 紧急等级 0~3
+static int forced_min_level = 0;       // 紧急强制最低档位
+static int cpu_weighted = 250;         // 加权 CPU 温度，初始 25.0°C
+static int batt_cooldown = 0;          // 电池调档冷却剩余周期
+static int last_batt_reading = -1;     // 上次读取的电池温度（变化检测 + 趋势判断）
+static int batt_unchanged_count = 0;   // 温度连续不变跳过次数（≥BATT_SKIP_MAX 时强制进入）
+static int trend_override = 0;         // 趋势豁免计数器（最多 OVERRIDE_MAX 次）
+static int first_run = 1;              // 首次运行，滤波直接赋初值
+static volatile int running = 1;       // 信号控制标记
+
+// --- 逐步执行状态 ---
+static int actual_level = LEVEL_INIT;   // 散热器实际运行的档位（逐级变动）
+static int target_level = LEVEL_INIT;   // 逻辑计算的目标档位（执行向此靠拢）
+
+// --- 发送去重缓存 ---
+// 记录上次发送的完整参数，避免重复下发
+static int last_sent_valid = 0;
+static int last_mode = -1;
+static int last_target_temp = -1;
+static int last_windOC = -1;
+static int last_coldOC = -1;
+static int last_windLevel = -1;
+
+// --- App 进程检测 ---
+static int app_was_alive = 0;
+
+// --- 状态文件检测（模块心跳 + BLE 状态）---
+// 模块每 5 秒写入一次 status 文件，daemon 通过 mtime 判断进程是否活着
+// 同时读取 BLE=0/1 获知 BLE 连接状态
+static char status_file_path[512] = "";
+static char gear_file_path[512] = "";
+static int app_ble_connected = 0;
+
+// --- 电流平滑状态（紧急退出用 EMA）---
+static int curr_smooth_val = 0;       // 平滑后的电流值（µA）
+static int curr_smooth_valid = 0;     // 平滑数据是否有效
+
 // 前向声明（配置系统函数位于 write_log/clamp 之前，C 要求先声明后使用）
 static void write_log(const char *fmt, ...);
 static inline int clamp(int val, int lo, int hi);
-static int battery_fan_level;            // load_config 的后处理中引用，声明于全局状态区之前
 
 /** 去除首尾空白，返回修剪后的起始指针 */
 static inline char *trim_line(char *line) {
@@ -437,46 +478,6 @@ static int detect_config_path(void) {
     config_path[0] = '\0';
     return 0;
 }
-
-// ======================== 全局状态 ========================
-
-static int battery_fan_level = 0;      // 电池控制决定的基础档位（逻辑基准值，非实际档位）
-static int emergency_level = 0;        // 紧急等级 0~3
-static int forced_min_level = 0;       // 紧急强制最低档位
-static int cpu_weighted = 250;         // 加权 CPU 温度，初始 25.0°C
-static int batt_cooldown = 0;          // 电池调档冷却剩余周期
-static int last_batt_reading = -1;     // 上次读取的电池温度（变化检测 + 趋势判断）
-static int batt_unchanged_count = 0;   // 温度连续不变跳过次数（≥BATT_SKIP_MAX 时强制进入）
-static int trend_override = 0;         // 趋势豁免计数器（最多 OVERRIDE_MAX 次）
-static int first_run = 1;              // 首次运行，滤波直接赋初值
-static volatile int running = 1;       // 信号控制标记
-
-// --- 逐步执行状态 ---
-static int actual_level = LEVEL_INIT;   // 散热器实际运行的档位（逐级变动）
-static int target_level = LEVEL_INIT;   // 逻辑计算的目标档位（执行向此靠拢）
-
-// --- 发送去重缓存 ---
-// 记录上次发送的完整参数，避免重复下发
-static int last_sent_valid = 0;
-static int last_mode = -1;
-static int last_target_temp = -1;
-static int last_windOC = -1;
-static int last_coldOC = -1;
-static int last_windLevel = -1;
-
-// --- App 进程检测 ---
-static int app_was_alive = 0;
-
-// --- 状态文件检测（模块心跳 + BLE 状态）---
-// 模块每 5 秒写入一次 status 文件，daemon 通过 mtime 判断进程是否活着
-// 同时读取 BLE=0/1 获知 BLE 连接状态
-static char status_file_path[512] = "";
-static char gear_file_path[512] = "";
-static int app_ble_connected = 0;
-
-// --- 电流平滑状态（紧急退出用 EMA）---
-static int curr_smooth_val = 0;       // 平滑后的电流值（µA）
-static int curr_smooth_valid = 0;     // 平滑数据是否有效
 
 // ======================== 辅助函数 ========================
 
@@ -795,6 +796,8 @@ static void build_params(int level,
                          int *out_coldOC,
                          int *out_windLevel)
 {
+    // 防御性钳制：确保档位索引不越界（调用栈已保证，但作为内部接口增加保护）
+    if (level < level_min || level > level_max) level = level_min;
     int idx = level - 1;
     int mode   = gear_table[idx].mode;
     int target = gear_table[idx].target;
@@ -843,22 +846,39 @@ static int apply_level(int level) {
         return 0;   // 无变化，跳过
     }
 
-    // ---- 构建命令 ----
-    char cmd[512];
-    snprintf(cmd, sizeof(cmd),
-        "am broadcast --user 0 "
-        "-a com.flydigi.SET_TEMPERATURE "
-        "--ei mode %d "
-        "--ei temperature %d "
-        "--ei windOC %d "
-        "--ei coldOC %d "
-        "--ei windLevel %d "
-        "--ei modeCustom 0 "
-        "--ei extra 0 "
-        ">/dev/null 2>&1",
-        mode, target, windOC, coldOC, windLevel);
+    // ---- 直接执行 am（fork+execvp 避开 shell 进程） ----
+    char m_s[12], t_s[12], woc_s[12], coc_s[12], wl_s[12];
+    snprintf(m_s, sizeof(m_s), "%d", mode);
+    snprintf(t_s, sizeof(t_s), "%d", target);
+    snprintf(woc_s, sizeof(woc_s), "%d", windOC);
+    snprintf(coc_s, sizeof(coc_s), "%d", coldOC);
+    snprintf(wl_s, sizeof(wl_s), "%d", windLevel);
 
-    int ret = system(cmd);
+    pid_t pid = fork();
+    if (pid == 0) {
+        // 子进程：静默执行，stdout/stderr 重定向到 /dev/null
+        int fd = open("/dev/null", O_WRONLY);
+        if (fd >= 0) {
+            dup2(fd, STDOUT_FILENO);
+            dup2(fd, STDERR_FILENO);
+            close(fd);
+        }
+        execlp("am", "am", "broadcast", "--user", "0",
+               "-a", "com.flydigi.SET_TEMPERATURE",
+               "--ei", "mode", m_s,
+               "--ei", "temperature", t_s,
+               "--ei", "windOC", woc_s,
+               "--ei", "coldOC", coc_s,
+               "--ei", "windLevel", wl_s,
+               "--ei", "modeCustom", "0",
+               "--ei", "extra", "0",
+               (char *)NULL);
+        _exit(127);  // 到达这里说明 exec 失败
+    }
+    if (pid > 0) {
+        int status;
+        waitpid(pid, &status, 0);
+    }
 
     // ---- 更新缓存 ----
     last_sent_valid    = 1;
@@ -910,23 +930,12 @@ static void battery_control(void) {
     int batt = read_battery_temp();
     if (batt < 0) return;
 
-    // 温度值与上次调整时相同 → 计数跳过，超过 BATT_SKIP_MAX 次后强制进入
-    if (batt == last_batt_reading) {
-        if (++batt_unchanged_count < BATT_SKIP_MAX) return;
-        // 超限后强制进入（让常规升降档有机会恢复）
-        batt_unchanged_count = 0;
-    } else {
-        batt_unchanged_count = 0;
-    }
-
-    // 计算本周期温度变化量
+    // 计算本周期温度变化量和常规升降档量（先算，给跳过逻辑参考）
     int batt_change = 0, abs_change = 0;
     if (last_batt_reading >= 0) {
         batt_change = batt - last_batt_reading;
         abs_change = abs(batt_change);
     }
-
-    // 计算常规档位调整量（无副作用，纯计算）
     int diff = batt - BATT_BASELINE;
     int delta = 0;
     if (diff > 0) {
@@ -940,20 +949,31 @@ static void battery_control(void) {
         else                        delta = -2;
     }
 
+    // 温度值与上次调整时相同 → 计数跳过，超过 BATT_SKIP_MAX 次后强制进入
+    if (batt == last_batt_reading) {
+        if (++batt_unchanged_count < BATT_SKIP_MAX) return;
+        batt_unchanged_count = 0;
+        // 温度没变时 delta 已在上次执行过，清零防齿轮漂移
+        delta = 0;
+        abs_change = 0;
+        batt_change = 0;
+    } else {
+        batt_unchanged_count = 0;
+    }
+
     int skip_delta = 0;  // =1 时本次不执行常规升降档
+
+    // 冷却递减（放在 abs_change 判断之前，温度不变强制进入时也能递减）
+    if (batt_cooldown > 0) {
+        batt_cooldown--;
+        skip_delta = 1;
+    }
 
     // ═══════════════ 反补查表（Sheet3 三区×双向×三级阈值） ═══════════════
     if (last_batt_reading >= 0 && abs_change > 0) {
         int trend_rev = (delta > 0 && batt < last_batt_reading) ||
                         (delta < 0 && batt > last_batt_reading);
         int dir = (batt_change > 0) ? 1 : -1;  // +1=升温, -1=降温
-
-        // 冷却期内跳过常规升降档和豁免，反补仍运行（安全机制）
-        int in_cooldown = (batt_cooldown > 0);
-        if (in_cooldown) {
-            batt_cooldown--;
-            skip_delta = 1;
-        }
 
         // 三区判断：冷外区 / 内区 / 热外区
         int is_cold_outer = (batt <= BATT_BASELINE - BATT_ZONE_2);
@@ -1215,6 +1235,9 @@ static void main_loop(void) {
         if (cap > level_max) cap = level_max;
         if (battery_fan_level > cap)
             battery_fan_level = cap;
+        // 同步 target_level，避免逐步执行向已被压低的档位上方移动
+        if (target_level > battery_fan_level)
+            target_level = battery_fan_level;
     }
 }
 
@@ -1253,10 +1276,6 @@ int main(int argc, char *argv[]) {
     batt_cooldown = 0;
     target_level = battery_fan_level;
     actual_level = battery_fan_level;
-    int batt = read_battery_temp();
-    if (batt >= 0) {
-        last_batt_reading = batt;
-    }
     write_log("脚本启动成功");
 
     // --- 等待模块就绪 + BLE 连接 ---
@@ -1285,6 +1304,7 @@ int main(int argc, char *argv[]) {
     emergency_level = 0;
     forced_min_level = 0;
     first_run = 1;
+    last_batt_reading = -1;     // 重置电池温度跟踪，使首次 battery_control 视作新读数
 
     // 强制首次下发
     last_sent_valid = 0;
