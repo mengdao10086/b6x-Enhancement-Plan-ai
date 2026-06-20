@@ -355,28 +355,22 @@ static void load_config(const char *path) {
             char *v = val_str;
             while (*v == ' ' || *v == '	') v++;
             char *nl = v + strlen(v) - 1;
-            while (nl > v && (*nl == '
-' || *nl == '
-' || *nl == ' ' || *nl == '	')) *nl-- = ' ';
-            if (*v) { strncpy(BATT_TEMP_PATH, v, sizeof(BATT_TEMP_PATH) - 1); BATT_TEMP_PATH[sizeof(BATT_TEMP_PATH) - 1] = ' '; }
+            while (nl > v && (*nl == '\n' || *nl == '\r' || *nl == ' ' || *nl == '\t')) *nl-- = '\0';
+            if (*v) { strncpy(BATT_TEMP_PATH, v, sizeof(BATT_TEMP_PATH) - 1); BATT_TEMP_PATH[sizeof(BATT_TEMP_PATH) - 1] = '\0'; }
         }
         else if (strcmp(key, "CPU_TEMP_PATH_FMT") == 0) {
             char *v = val_str;
             while (*v == ' ' || *v == '	') v++;
             char *nl = v + strlen(v) - 1;
-            while (nl > v && (*nl == '
-' || *nl == '
-' || *nl == ' ' || *nl == '	')) *nl-- = ' ';
-            if (*v) { strncpy(CPU_TEMP_PATH_FMT, v, sizeof(CPU_TEMP_PATH_FMT) - 1); CPU_TEMP_PATH_FMT[sizeof(CPU_TEMP_PATH_FMT) - 1] = ' '; }
+            while (nl > v && (*nl == '\n' || *nl == '\r' || *nl == ' ' || *nl == '\t')) *nl-- = '\0';
+            if (*v) { strncpy(CPU_TEMP_PATH_FMT, v, sizeof(CPU_TEMP_PATH_FMT) - 1); CPU_TEMP_PATH_FMT[sizeof(CPU_TEMP_PATH_FMT) - 1] = '\0'; }
         }
         else if (strcmp(key, "BATT_CURRENT_PATH") == 0) {
             char *v = val_str;
             while (*v == ' ' || *v == '	') v++;
             char *nl = v + strlen(v) - 1;
-            while (nl > v && (*nl == '
-' || *nl == '
-' || *nl == ' ' || *nl == '	')) *nl-- = ' ';
-            if (*v) { strncpy(BATT_CURRENT_PATH, v, sizeof(BATT_CURRENT_PATH) - 1); BATT_CURRENT_PATH[sizeof(BATT_CURRENT_PATH) - 1] = ' '; }
+            while (nl > v && (*nl == '\n' || *nl == '\r' || *nl == ' ' || *nl == '\t')) *nl-- = '\0';
+            if (*v) { strncpy(BATT_CURRENT_PATH, v, sizeof(BATT_CURRENT_PATH) - 1); BATT_CURRENT_PATH[sizeof(BATT_CURRENT_PATH) - 1] = '\0'; }
         }
         else if (strcmp(key, "BATT_TEMP_DIVISOR") == 0)   BATT_TEMP_DIVISOR  = clamp(val, 1, 10000);
         else if (strcmp(key, "CPU_TEMP_DIVISOR") == 0)    CPU_TEMP_DIVISOR   = clamp(val, 1, 10000);
