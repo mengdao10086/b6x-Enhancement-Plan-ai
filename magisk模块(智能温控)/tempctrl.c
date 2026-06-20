@@ -122,6 +122,13 @@ static int EMERG_FORCED_4 = 12;  // 等级 4 强制最低档位（固定功率 6
 // --- 紧急退出钳制偏移（退出时高一级强制档位 + 此偏移作为档位上限）---
 static int EMERG_EXIT_CAP_OFFSET = 1;
 
+// --- 紧急干预模式（可由 profile.conf 覆盖）---
+// EMERG_MODE_ENTRY: 0=提高最低档(EMERG_FORCED_N), 1=升档(EMERG_STEP*level)
+// EMERG_MODE_EXIT:  0=钳制最高档(EMERG_EXIT_CAP_OFFSET), 1=降档(EMERG_STEP*drop)
+static int EMERG_MODE_ENTRY = 0;
+static int EMERG_MODE_EXIT  = 1;
+static int EMERG_STEP = 2;
+
 // --- CPU 滤波系数（百分比，0~100，默认 25=α=0.25）---
 static int CPU_FILTER_ALPHA = 25;
 
@@ -386,6 +393,14 @@ static void load_config(const char *path) {
         else if (strcmp(key, "CURRENT_SMOOTH_ALPHA") == 0)  CURRENT_SMOOTH_ALPHA = clamp(val, 1, 100);
         else if (strcmp(key, "GRADUAL_STEP_THRESHOLD") == 0) GRADUAL_STEP_THRESHOLD = clamp(val, -10, 10);
         else if (strcmp(key, "EMERG_EXIT_CAP_OFFSET") == 0) EMERG_EXIT_CAP_OFFSET = clamp(val, 0, 5);
+        else if (strcmp(key, "EMERG_MODE") == 0) {
+            int entry = EMERG_MODE_ENTRY, exit = EMERG_MODE_EXIT;
+            if (sscanf(val_str, "%d %d", &entry, &exit) >= 1) {
+                EMERG_MODE_ENTRY = clamp(entry, 0, 1);
+                EMERG_MODE_EXIT  = clamp(exit, 0, 1);
+            }
+        }
+        else if (strcmp(key, "EMERG_STEP") == 0)              EMERG_STEP = clamp(val, 1, 12);
         else if (strcmp(key, "GEAR_CONFIG_ENABLED") == 0) { /* 预检已处理 */ }
         else if (strcmp(key, "LOG_MAX_KB") == 0)           LOG_MAX_KB         = clamp(val, 0, 1000);
         else if (strcmp(key, "LOG_FILE") == 0) {
@@ -1200,13 +1215,24 @@ static void emergency_intervention(void) {
         batt_cooldown = BATT_COOLDOWN_CYCLES;
     }
 
-    // --- 7. 设定强制最低档位 ---
-    switch (emergency_level) {
-        case 4: forced_min_level = EMERG_FORCED_4; break;
-        case 3: forced_min_level = EMERG_FORCED_3; break;
-        case 2: forced_min_level = EMERG_FORCED_2; break;
-        case 1: forced_min_level = EMERG_FORCED_1; break;
-        default: forced_min_level = 0;             break;
+    // --- 7. 根据模式设定强制最低档位 ---
+    if (EMERG_MODE_ENTRY == 0) {
+        // 模式 0：表查强制最低档（EMERG_FORCED_N，当前逻辑）
+        switch (emergency_level) {
+            case 4: forced_min_level = EMERG_FORCED_4; break;
+            case 3: forced_min_level = EMERG_FORCED_3; break;
+            case 2: forced_min_level = EMERG_FORCED_2; break;
+            case 1: forced_min_level = EMERG_FORCED_1; break;
+            default: forced_min_level = 0;             break;
+        }
+    } else {
+        // 模式 1：升档模式 — 按等级计算最低档 = level_min + EMERG_STEP * level
+        if (emergency_level > 0) {
+            forced_min_level = level_min + EMERG_STEP * emergency_level;
+            if (forced_min_level > level_max) forced_min_level = level_max;
+        } else {
+            forced_min_level = 0;
+        }
     }
 }
 
@@ -1259,19 +1285,30 @@ static void main_loop(void) {
     // 5. 保存为目标档位（供下轮逐步执行使用）
     target_level = final_level;
 
-    // 6. 退出紧急时限制电池档位上限（过渡期保护，仅生效一周期）
-    //    用上一级紧急的强制最低档位 + 偏移量作为上限
-    //    压制 battery_control 立即拉升，又给用户一点过渡余量
+    // 6. 退出紧急时限制档位（过渡期保护，仅生效一周期）
+    //    根据模式选择钳制或降档
     if (emergency_level < prev_emerg_level) {
-        int cap;
-        if      (prev_emerg_level >= 4) cap = EMERG_FORCED_4;
-        else if (prev_emerg_level >= 3) cap = EMERG_FORCED_3;
-        else if (prev_emerg_level >= 2) cap = EMERG_FORCED_2;
-        else                             cap = EMERG_FORCED_1;
-        cap += EMERG_EXIT_CAP_OFFSET;
-        if (cap > level_max) cap = level_max;
-        if (battery_fan_level > cap)
-            battery_fan_level = cap;
+        if (EMERG_MODE_EXIT == 0) {
+            // 模式 0：钳制最高档（当前逻辑）
+            //    用上一级紧急的强制最低档位 + 偏移量作为上限
+            //    压制 battery_control 立即拉升，又给用户一点过渡余量
+            int cap;
+            if      (prev_emerg_level >= 4) cap = EMERG_FORCED_4;
+            else if (prev_emerg_level >= 3) cap = EMERG_FORCED_3;
+            else if (prev_emerg_level >= 2) cap = EMERG_FORCED_2;
+            else                             cap = EMERG_FORCED_1;
+            cap += EMERG_EXIT_CAP_OFFSET;
+            if (cap > level_max) cap = level_max;
+            if (battery_fan_level > cap)
+                battery_fan_level = cap;
+        } else {
+            // 模式 1：降档模式 — 直接减去 EMERG_STEP × 下降等级数
+            int drop = prev_emerg_level - emergency_level;
+            if (battery_fan_level > EMERG_STEP * drop)
+                battery_fan_level -= EMERG_STEP * drop;
+            else
+                battery_fan_level = level_min;
+        }
         // 同步 target_level，避免逐步执行向已被压低的档位上方移动
         if (target_level > battery_fan_level)
             target_level = battery_fan_level;
