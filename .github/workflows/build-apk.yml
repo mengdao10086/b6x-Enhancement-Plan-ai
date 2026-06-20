@@ -84,7 +84,7 @@ jobs:
           CC=/opt/ndk/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android21-clang
           $CC --version > /dev/null 2>&1
           # 编译，错误输出到文件，不中断脚本
-          $CC -static -O2 -o tempctrl magisk模块(智能温控)/tempctrl.c > compile_ok.txt 2>compile_err.txt
+          $CC -static -O2 -o tempctrl "magisk模块(智能温控)/tempctrl.c" > compile_ok.txt 2>compile_err.txt
           RC=$?
           echo "=== exit code: $RC ==="
           echo "=== stdout ==="
