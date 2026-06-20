@@ -149,6 +149,16 @@ static int BATT_SKIP_MAX = 6;
 // --- 状态文件超时（秒，可配置）---
 static int STATUS_TIMEOUT = 11;
 
+// --- sysfs 路径配置（可由 profile.conf 覆盖）---
+static char BATT_TEMP_PATH[128] = "/sys/class/power_supply/battery/temp";
+static char CPU_TEMP_PATH_FMT[128] = "/sys/class/thermal/thermal_zone%d/temp";
+static char BATT_CURRENT_PATH[128] = "/sys/class/power_supply/battery/current_now";
+
+// --- sysfs 缩放系数（原始值 ÷ 缩放系数 = 内部单位 0.1°C / µA）---
+static int BATT_TEMP_DIVISOR = 1;     // 电池温度原始值 0.1°C，无需缩放
+static int CPU_TEMP_DIVISOR = 100;    // CPU 温度原始值 m°C，÷100 转 0.1°C
+static int BATT_CURRENT_DIVISOR = 1;  // 电池电流原始值 µA，无需缩放
+
 // --- 电池电流紧急干预阈值（µA，可配置）---
 // 通过 /sys/class/power_supply/battery/current_now 读取，取绝对值
 static int CURRENT_EMERG_3 = 7000000;   // >7A → 等级 3
@@ -341,6 +351,36 @@ static void load_config(const char *path) {
         else if (strcmp(key, "BATT_COOLDOWN_CYCLES") == 0) BATT_COOLDOWN_CYCLES = clamp(val, 0, 20);
         else if (strcmp(key, "BATT_SKIP_MAX") == 0)        BATT_SKIP_MAX        = clamp(val, 0, 30);
         else if (strcmp(key, "STATUS_TIMEOUT") == 0)       STATUS_TIMEOUT     = clamp(val, 5, 60);
+        else if (strcmp(key, "BATT_TEMP_PATH") == 0) {
+            char *v = val_str;
+            while (*v == ' ' || *v == '	') v++;
+            char *nl = v + strlen(v) - 1;
+            while (nl > v && (*nl == '
+' || *nl == '
+' || *nl == ' ' || *nl == '	')) *nl-- = ' ';
+            if (*v) { strncpy(BATT_TEMP_PATH, v, sizeof(BATT_TEMP_PATH) - 1); BATT_TEMP_PATH[sizeof(BATT_TEMP_PATH) - 1] = ' '; }
+        }
+        else if (strcmp(key, "CPU_TEMP_PATH_FMT") == 0) {
+            char *v = val_str;
+            while (*v == ' ' || *v == '	') v++;
+            char *nl = v + strlen(v) - 1;
+            while (nl > v && (*nl == '
+' || *nl == '
+' || *nl == ' ' || *nl == '	')) *nl-- = ' ';
+            if (*v) { strncpy(CPU_TEMP_PATH_FMT, v, sizeof(CPU_TEMP_PATH_FMT) - 1); CPU_TEMP_PATH_FMT[sizeof(CPU_TEMP_PATH_FMT) - 1] = ' '; }
+        }
+        else if (strcmp(key, "BATT_CURRENT_PATH") == 0) {
+            char *v = val_str;
+            while (*v == ' ' || *v == '	') v++;
+            char *nl = v + strlen(v) - 1;
+            while (nl > v && (*nl == '
+' || *nl == '
+' || *nl == ' ' || *nl == '	')) *nl-- = ' ';
+            if (*v) { strncpy(BATT_CURRENT_PATH, v, sizeof(BATT_CURRENT_PATH) - 1); BATT_CURRENT_PATH[sizeof(BATT_CURRENT_PATH) - 1] = ' '; }
+        }
+        else if (strcmp(key, "BATT_TEMP_DIVISOR") == 0)   BATT_TEMP_DIVISOR  = clamp(val, 1, 10000);
+        else if (strcmp(key, "CPU_TEMP_DIVISOR") == 0)    CPU_TEMP_DIVISOR   = clamp(val, 1, 10000);
+        else if (strcmp(key, "BATT_CURRENT_DIVISOR") == 0) BATT_CURRENT_DIVISOR = clamp(val, 1, 10000);
         else if (strcmp(key, "CPU_ZONE_MIN") == 0)          CPU_ZONE_MIN       = clamp(val, 0, 99);
         else if (strcmp(key, "CPU_ZONE_MAX") == 0)          CPU_ZONE_MAX       = clamp(val, 0, 99);
         else if (strcmp(key, "CURRENT_EMERG_3") == 0)       CURRENT_EMERG_3    = clamp(val, 1000000, 15000000);
@@ -660,8 +700,8 @@ static int read_sysfs_int(const char *path) {
  * 失败或值不合法返回 -1
  */
 static int read_thermal_zone_raw(int zone_id) {
-    char path[64];
-    snprintf(path, sizeof(path), "/sys/class/thermal/thermal_zone%d/temp", zone_id);
+    char path[128];
+    snprintf(path, sizeof(path), CPU_TEMP_PATH_FMT, zone_id);
     int raw = read_sysfs_int(path);
     if (raw <= 0 || raw > 150000) return -1;
     return raw;
@@ -675,7 +715,9 @@ static int read_thermal_zone_raw(int zone_id) {
  * 失败返回 -1
  */
 static int read_battery_temp(void) {
-    return read_sysfs_int("/sys/class/power_supply/battery/temp");
+    int raw = read_sysfs_int(BATT_TEMP_PATH);
+    if (raw < 0) return -1;
+    return raw / BATT_TEMP_DIVISOR;
 }
 
 /**
@@ -735,7 +777,7 @@ static int read_cpu_temp_max(void) {
         int raw = read_thermal_zone_raw(cpu_zone_cache[j]);
         if (raw < 0) continue;
 
-        int decic = raw / 100;
+        int decic = raw / CPU_TEMP_DIVISOR;
         if (decic > max_temp) max_temp = decic;
     }
     return max_temp;
@@ -748,7 +790,7 @@ static int read_cpu_temp_max(void) {
  * 返回值：µA 绝对值，读取失败返回 -1
  */
 static int read_battery_current_abs(void) {
-    FILE *f = fopen("/sys/class/power_supply/battery/current_now", "r");
+    FILE *f = fopen(BATT_CURRENT_PATH, "r");
     if (!f) return -1;
     int val;
     if (fscanf(f, "%d", &val) != 1) {
@@ -756,7 +798,7 @@ static int read_battery_current_abs(void) {
         return -1;
     }
     fclose(f);
-    return (val >= 0) ? val : -val;
+    return ((val >= 0 ? val : -val)) / BATT_CURRENT_DIVISOR;
 }
 
 // ======================== 控制参数计算与下发 ========================
