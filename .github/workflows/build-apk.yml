@@ -107,17 +107,17 @@ jobs:
           if-no-files-found: ignore
 
       - name: 修复 PT_TLS 对齐
-        run: python3 magisk模块(智能温控)/patch_tls.py tempctrl || echo "TLS patch skipped (not needed)"
+        run: python3 "magisk模块(智能温控)/patch_tls.py" tempctrl || echo "TLS patch skipped (not needed)"
 
       - name: 打包 Magisk 模块框架（将二进制复制到模块目录）
         run: |
-          cp tempctrl magisk模块(智能温控)/magisk模块框架/
+          cp tempctrl "magisk模块(智能温控)/magisk模块框架/"
           echo "Module contents:"
-          ls -la magisk模块(智能温控)/magisk模块框架/
+          ls -la "magisk模块(智能温控)/magisk模块框架/"
 
       - name: 获取版本号
         id: magisk-version
-        run: echo "VERSION=$(grep '^version=' magisk模块(智能温控)/magisk模块框架/module.prop | sed 's/^version=v//')" >> $GITHUB_OUTPUT
+        run: echo "VERSION=$(grep '^version=' "magisk模块(智能温控)/magisk模块框架/module.prop" | sed 's/^version=v//')" >> $GITHUB_OUTPUT
 
       - name: 上传 Magisk 模块包（刷入即用）
         uses: actions/upload-artifact@v4
