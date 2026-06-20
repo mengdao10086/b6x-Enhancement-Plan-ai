@@ -34,7 +34,7 @@
 //
 //setRunMode(mode, targetTemperature,windLevelOverclock, coldLevelOverclock,windLevel, modeCustom, extra)
 //
-// 参数映射：mode=0（智能温控）：targetTemperature, windLevel(风扇转速上限)
+// 参数映射：mode=0(智能温控)：targetTemperature, windLevel(风扇转速上限)
 //          mode=1（固定功率）：windLevelOverclock(风扇固定转速), coldLevelOverclock(制冷片强度)
 //
 // ==========================================================
@@ -55,13 +55,13 @@ typedef struct {
 static GearEntry gear_table[GEAR_TABLE_MAX];
 static int gear_count = 0;     // 实际档位数，0=尚未初始化
 static int level_min = 1;
-static int level_max = 10;     // 默认 10 档（由 init_gear_table 设定）
+static int level_max = 12;     // 默认 12 档（由 init_gear_table 设定）
 
 // 默认档位表（依实测散热曲线标定，全部固定功率模式）
 // 格式：GEAR_<档位N>=<模式>,<目标温度°C>,<风扇RPM>,<制冷强度>
 // 范围：N=1~32, 模式=0(智能)或1(固定), 目标=5~35°C, 风扇=2000~6000, 制冷=1~194
 // 注意：模式 0 时制冷强度失效（散热器自行管理），模式 1 时目标温度无效
-// 例：GEAR_12=1,0,6000,185 表示 12 档固定功率，6000RPM，制冷 185
+// 例：GEAR_12=1,0,6000,190 表示 12 档固定功率，6000RPM，制冷 190
 //     GEAR_5=0,16,2650,0   表示  5 档智能温控，16°C，风扇上限 2650RPM
 static const GearEntry DEFAULT_GEAR_TABLE[12] = {
     {1, 0, 2000,  5},    // Level 1   α待机
@@ -73,9 +73,9 @@ static const GearEntry DEFAULT_GEAR_TABLE[12] = {
     {1, 0, 3500, 100},   // Level 7
     {1, 0, 4000, 125},   // Level 8
     {1, 0, 4500, 145},   // Level 9
-    {1, 0, 5000, 160},   // Level 10
-    {1, 0, 5500, 175},   // Level 11
-    {1, 0, 6000, 185},   // Level 12 制冷峰值
+    {1, 0, 5000, 165},   // Level 10
+    {1, 0, 5500, 180},   // Level 11
+    {1, 0, 6000, 190},   // Level 12 制冷峰值
 };
 
 /**
@@ -93,12 +93,12 @@ static void init_gear_table(void) {
 
 // --- 制冷片强度范围 ---
 #define COLD_MIN             1
-#define COLD_MAX           194     // 最大有效值（以上需超频模式，本场景不用）
+#define COLD_MAX           194     // 最大有效值（更高需超频模式，本场景不用）
 
 // --- 电池温度控制（0.1°C）—— 可由 profile.conf 覆盖 ---
 static int BATT_BASELINE = 350;     // 基准温度 35.0°C
-static int BATT_ZONE_1   = 7;       // ±0.7°C → 不变（死区）
-static int BATT_ZONE_2   = 20;      // ±2.0°C → 1 档（超过→2档）
+static int BATT_ZONE_1   = 5;       // ±0.5°C → 不变（死区）
+static int BATT_ZONE_2   = 15;      // ±1.5°C → 1 档（超过→2档）
 
 // --- CPU 温度扫描范围（可配置）---
 // 首次运行在此范围内扫描有效的 thermal_zone，后续只扫命中的 zone
@@ -116,22 +116,27 @@ static int CPU_RECOVER_2 = 750;     // <75.0°C 且 ≥3 级时降为 2
 // --- 紧急强制最低档位 —— 可由 profile.conf 覆盖 ---
 static int EMERG_FORCED_1 = 6;   // 等级 1 强制最低档位（固定功率 3050RPM/75）
 static int EMERG_FORCED_2 = 8;   // 等级 2 强制最低档位（固定功率 4000RPM/125）
-static int EMERG_FORCED_3 = 10;  // 等级 3 强制最低档位（固定功率 5000RPM/160）
-static int EMERG_FORCED_4 = 12;  // 等级 4 强制最低档位（固定功率 6000RPM/185 峰值）
+static int EMERG_FORCED_3 = 10;  // 等级 3 强制最低档位（固定功率 5000RPM/165）
+static int EMERG_FORCED_4 = 12;  // 等级 4 强制最低档位（固定功率 6000RPM/190 峰值）
 
 // --- 紧急退出钳制偏移（退出时高一级强制档位 + 此偏移作为档位上限）---
 static int EMERG_EXIT_CAP_OFFSET = 1;
 
-// --- CPU 滤波系数（百分比，0~100，默认 20=α=0.20）---
-static int CPU_FILTER_ALPHA = 20;
+// --- CPU 滤波系数（百分比，0~100，默认 25=α=0.25）---
+static int CPU_FILTER_ALPHA = 25;
 
 // --- 趋势豁免上限（可配置）---
 // 温度趋势反向时最多连续豁免次数，超过后强制执行
 static int OVERRIDE_MAX = 6;
 
-// --- 反补阈值（由 battery_control 根据方向+区域查表使用）---
-// 原 PEAK_DAMP_INNER_BOUNDARY/THRESHOLD/OUTER_THRESHOLD 已移除，
-// 改为 Sheet3 三区×双向×三级阈值查表法，详见 battery_control。
+// --- 反补查表三级阈值（0.1°C，可由 profile.conf 覆盖）---
+// 对应 battery_control 中 t1/t2/t3 三个台阶，不同方向+区域组合下有不同的生效方式：
+//   升温：冷外 t1 / 内 t1/t2 / 热 t1/t2/t3
+//   降温：冷 t1/t2/t3 / 内 t1/t2 / 热 t1
+// 默认值 3/5/8 = 0.3°C / 0.5°C / 0.8°C
+static int REV_COMP_T1 = 3;
+static int REV_COMP_T2 = 5;
+static int REV_COMP_T3 = 8;
 
 // --- 电池调档冷却周期数（可配置）---
 // 每次电池温度导致的档位变动后冻结多少周期（×5s），期内跳过常规升降档
@@ -142,7 +147,7 @@ static int BATT_COOLDOWN_CYCLES = 3;
 static int BATT_SKIP_MAX = 6;
 
 // --- 状态文件超时（秒，可配置）---
-static int STATUS_TIMEOUT = 16;
+static int STATUS_TIMEOUT = 11;
 
 // --- 电池电流紧急干预阈值（µA，可配置）---
 // 通过 /sys/class/power_supply/battery/current_now 读取，取绝对值
@@ -151,7 +156,7 @@ static int CURRENT_EMERG_2 = 6000000;   // >6A → 等级 2
 static int CURRENT_EMERG_1 = 5000000;   // >5A → 等级 1
 static int CURRENT_RECOVER_2 = 6000000; // <6A → 从 3 降为 2
 static int CURRENT_RECOVER_1 = 5000000; // <5A → 从 2 降为 1
-static int CURRENT_RECOVER_0 = 4000000; // <4A → 清除
+static int CURRENT_RECOVER_0 = 4000000; // <4A → 退出紧急
 
 // --- 电流紧急退出平滑系数（百分比，可配置）---
 // 进入紧急时电流用原始值不平滑；退出时使用 EMA 平滑值
@@ -166,7 +171,7 @@ static int GRADUAL_STEP_THRESHOLD = 5;
 
 // --- 日志路径（默认根据二进制名自动生成，可由 profile.conf 覆盖）---
 static char log_file_path[256] = "";
-static int LOG_MAX_KB = 10;          // 日志文件大小上限（KB），0=关闭日志
+static int LOG_MAX_KB = 7;          // 日志文件大小上限（KB），0=关闭日志
 static FILE *log_fp = NULL;          // 持久的日志文件指针，避免每行都 fopen/fclose
 static char log_path_opened[256] = ""; // 已打开的文件路径（检测路径变化）
 
@@ -329,6 +334,9 @@ static void load_config(const char *path) {
         else if (strcmp(key, "EMERG_FORCED_4") == 0)       EMERG_FORCED_4     = clamp(val, 0, 12);
         else if (strcmp(key, "CPU_FILTER_ALPHA") == 0)     CPU_FILTER_ALPHA   = clamp(val, 1, 100);
         else if (strcmp(key, "OVERRIDE_MAX") == 0)         OVERRIDE_MAX       = clamp(val, 0, 20);
+        else if (strcmp(key, "REV_COMP_T1") == 0)          REV_COMP_T1        = clamp(val, 1, 50);
+        else if (strcmp(key, "REV_COMP_T2") == 0)          REV_COMP_T2        = clamp(val, 1, 50);
+        else if (strcmp(key, "REV_COMP_T3") == 0)          REV_COMP_T3        = clamp(val, 1, 50);
         // PEAK_DAMP_* 已移除（v2.1 改为 Sheet3 查表法）
         else if (strcmp(key, "BATT_COOLDOWN_CYCLES") == 0) BATT_COOLDOWN_CYCLES = clamp(val, 0, 20);
         else if (strcmp(key, "BATT_SKIP_MAX") == 0)        BATT_SKIP_MAX        = clamp(val, 0, 30);
@@ -342,7 +350,7 @@ static void load_config(const char *path) {
         else if (strcmp(key, "CURRENT_RECOVER_1") == 0)     CURRENT_RECOVER_1  = clamp(val, 1000000, 15000000);
         else if (strcmp(key, "CURRENT_RECOVER_0") == 0)     CURRENT_RECOVER_0  = clamp(val, 1000000, 15000000);
         else if (strcmp(key, "CURRENT_SMOOTH_ALPHA") == 0)  CURRENT_SMOOTH_ALPHA = clamp(val, 1, 100);
-        else if (strcmp(key, "GRADUAL_STEP_THRESHOLD") == 0) GRADUAL_STEP_THRESHOLD = clamp(val, 0, 10);
+        else if (strcmp(key, "GRADUAL_STEP_THRESHOLD") == 0) GRADUAL_STEP_THRESHOLD = clamp(val, -10, 10);
         else if (strcmp(key, "EMERG_EXIT_CAP_OFFSET") == 0) EMERG_EXIT_CAP_OFFSET = clamp(val, 0, 5);
         else if (strcmp(key, "GEAR_CONFIG_ENABLED") == 0) { /* 预检已处理 */ }
         else if (strcmp(key, "LOG_MAX_KB") == 0)           LOG_MAX_KB         = clamp(val, 0, 1000);
@@ -372,9 +380,9 @@ static void load_config(const char *path) {
             c = (int)strtol(next + 1, NULL, 10);
 
             gear_table[n - 1].mode   = (m == 0) ? 0 : 1;
-            gear_table[n - 1].target = clamp(t, 0, 35);
-            gear_table[n - 1].fan_rpm = clamp(f, 0, 99999);
-            gear_table[n - 1].cold   = clamp(c, 0, 194);
+            gear_table[n - 1].target = clamp(t, 5, 35);
+            gear_table[n - 1].fan_rpm = clamp(f, 2000, 6000);
+            gear_table[n - 1].cold   = clamp(c, 1, 194);
             if (n > gear_count) gear_count = n;
         }
         else { continue; }
@@ -973,15 +981,16 @@ static void battery_control(void) {
         int in_inner_zone = !is_cold_outer && !is_hot_outer;
 
         // 根据方向+区域查三级阈值（0.1°C 单位，999=无穷大）
+        // REV_COMP_T1/T2/T3 默认 3/5/8 = 0.3°C / 0.5°C / 0.8°C，可通过 profile.conf 配置
         int t1 = 999, t2 = 999, t3 = 999;  // 分别对应 +1/+2/+3 档的 ∆T 门槛
         if (dir > 0) {    // ═══ 升温 ═══
-            if      (is_cold_outer) { t1 = 8; }                         // 0.8→1
-            else if (in_inner_zone) { t1 = 5; t2 = 8; }                 // 0.5→1, 0.8→2
-            else                   { t1 = 3; t2 = 5; t3 = 8; }          // 0.3→1, 0.5→2, 0.8→3
+            if      (is_cold_outer) { t1 = REV_COMP_T3; }                      // t3→1
+            else if (in_inner_zone) { t1 = REV_COMP_T2; t2 = REV_COMP_T3; }    // t2→1, t3→2
+            else                   { t1 = REV_COMP_T1; t2 = REV_COMP_T2; t3 = REV_COMP_T3; } // t1→1, t2→2, t3→3
         } else {          // ═══ 降温 ═══
-            if      (is_cold_outer) { t1 = 3; t2 = 5; t3 = 8; }         // 0.3→1, 0.5→2, 0.8→3
-            else if (in_inner_zone) { t1 = 5; t2 = 8; }                 // 0.5→1, 0.8→2
-            else                   { t1 = 8; }                          // 0.8→1
+            if      (is_cold_outer) { t1 = REV_COMP_T1; t2 = REV_COMP_T2; t3 = REV_COMP_T3; } // t1→1, t2→2, t3→3
+            else if (in_inner_zone) { t1 = REV_COMP_T2; t2 = REV_COMP_T3; }    // t2→1, t3→2
+            else                   { t1 = REV_COMP_T3; }                      // t3→1
         }
 
         // ═══ 小变动（≤t1）→ 趋势豁免 ═══

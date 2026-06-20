@@ -1,0 +1,341 @@
+# 飞智散热器开发者工具 — App 运行逻辑分析
+
+> **说明**：本文档基于 `smali/` 的反编译输出，梳理 App（`com.flydigi.waspwing.experimental`）的核心运行逻辑。主要面向需要理解 App 内部工作原理以维护 LSPosed 模块的场景。
+>
+> 📦 对应 APK：`参考资料/飞智散热器开发者工具原版.apk`
+> 🔧 涉及模块引用：`lsp模块(apk修复+温控接口)/app/src/main/java/.../MainHook.java`
+> 📖 修复历程：`参考资料/完整修复历程.md`
+
+---
+
+## 一、App 启动流程
+
+### 1.1 Application 初始化
+
+App 入口类为 `com.example.extool.App`，继承自 `Application`。其 `onCreate()` 执行以下关键初始化：
+
+1. **Xposed 钩子注册窗口**：`onCreate()` 执行后，LSPosed 模块的 `handleLoadPackage()` 被调用，所有 `findAndHookMethod` 在此阶段注册。这是最早的钩子注入时机，适合拦截 Application 级别的初始化。
+2. **BLE 状态写入线程启动**：模块的 `startPeriodicStatusWrite()` 在 `Application.onCreate` 的 after-hook 中启动，每 5 秒写入 status 文件供 tempctrl 守护进程检测心跳。
+
+> ⚠️ Xposed 的 `findAndHookMethod` 找不到方法会抛 `NoSuchMethodError`（继承自 `Error` 而非 `Exception`），外层必须用 `catch(Throwable)` 捕获。一个钩子失败会导致后面所有钩子注册不上。
+
+### 1.2 B6ExperimentalActivity 生命周期
+
+`B6ExperimentalActivity` 是散热器控制主界面，继承自 `AppCompatActivity`，使用 DataBinding（`ActivityExperimentalB6Binding`）。
+
+```
+onCreate:
+  ├─ DataBinding.setContentView → ActivityExperimentalB6Binding.inflate
+  ├─ 绑定 ViewModel（WaspWingViewModel）
+  ├─ 初始化模式选择器（RadioGroup/RadioButton）
+  └─ 注册 LiveData 观察者
+
+onResume:
+  ├─ 检查蓝牙权限（PermissionX）
+  ├─ 权限通过 → WaspWingViewModel.scan()
+  └─ 权限拒绝 → 请求权限对话框
+```
+
+**关键观察**：Activity 每次 `onResume` 都会触发扫描，即使蓝牙已连接。这意味着从后台切回前台时会有短暂的重连过程。
+
+### 1.3 DataBinding 与 UI 映射
+
+布局文件中，`WaspWingInfo` 的字段通过 DataBinding 直接绑定到 UI 控件：
+
+| WaspWingInfo 字段 | UI 控件 | 作用 |
+|---|---|---|
+| `connected` | 扫描动画/控制面板切换 | 控制整个 UI 的连接/断开状态 |
+| `runMode` | 模式选择器选中项 | 0=固定功率, 1=智能温控 |
+| `realWindLevel` | 风速指示条 | 当前风扇档位（0-12） |
+| `realColdLevel` | 制冷指示条 | 当前制冷强度 |
+| `temperature` | 温度显示 | 散热器当前温度 |
+| `experimentalRunModeValue` | 智能温控标签 | 智能温控模式的运行状态反馈 |
+
+`executeBindings()` 在每次 `_waspWingInfo` 变化时被触发，遍历所有绑定的字段进行 UI 重绘。这是 UI 闪烁问题的根源——智能温控模式下每秒一次的 0x13 数据包会触发 DataBinding 重渲染，如果中间还有额外的 `postValue`，就会看到明显的闪烁。
+
+---
+
+## 二、蓝牙连接流程
+
+### 2.1 扫描阶段
+
+`WaspWingViewModel.scan()` 硬编码 `scanMode=2`：
+
+```kotlin
+// WaspWingViewModel (伪代码)
+fun scan() {
+    WaspWingManager.startScan(activity, 2)  // scanMode=2
+}
+```
+
+调用链：
+
+```
+WaspWingViewModel.scan()
+  → WaspWingManager.startScan(activity, scanMode=2)      [单例]
+    → AbstractBluetoothController.startScan(activity, 2)
+      → startLeScan(activity)
+         ├─ PermissionX 请求 BLUETOOTH_SCAN (SDK≥31)
+         └─ 权限通过:
+              ├─ inScanning = true
+              ├─ scanMode == 2 ? startLeScan(已废弃) : BluetoothLeScanner.startScan()
+              └─ scanDeviceCallbacks.onScanStarted()
+```
+
+**SDK 36 上的问题**：`scanMode=2` 触发已废弃的 `BluetoothAdapter.startLeScan()`。SDK 36 上该 API 可能静默返回而不做实际扫描，导致 `onDeviceFound()` 永远不会调用，也就不会触发正常的 `stopScan()` 路径。
+
+### 2.2 连接阶段
+
+```
+扫描发现设备:
+  scanCallback.onScanResult()
+    → AbstractBluetoothController.onDeviceFound(devices)
+      → 取第一个设备
+      → BluetoothViewModel.onDeviceFound(device)
+         ├─ this.stopScan()             ← 正常路径下唯一的 stopScan
+         └─ connect(device)
+
+connect(device):
+  → WaspWingManager.connectGattWith(device)
+    → LeDataInteractionController.connectGattWith(device)
+      → BluetoothDevice.connectGatt(context, false, gattCallback)
+        → BluetoothGatt.connect()       [自动发起]
+```
+
+**已配对设备的自动回连**：当散热器之前已与手机配对，系统会在扫描阶段自动建立 ACL 连接。此时：
+
+| 事件 | 是否触发 | 是否调 stopScan |
+|------|---------|----------------|
+| `onDeviceFound()` | ❌ 设备未通过扫描被发现 | — |
+| `createBond()` | ❌ 已配对无需再次配对 | — |
+| `ACL_CONNECTED` 广播 | ✅ 系统自动发出 | **否**，此分支不调 stopScan |
+
+结果：UI 显示已连接，但扫描动画永不停止。此 Bug 由 LSPosed 模块修复 #1（钩 `onDeviceConnected` → `stopScan()`）解决。
+
+### 2.3 GATT 服务发现
+
+连接建立后的关键路径：
+
+```
+ACL_CONNECTED 广播
+  → AbstractBluetoothController.onDeviceConnected(device)
+    → connectionStateCallbacks.onDeviceConnected(device)
+      → BluetoothViewModel.onDeviceConnected(device)
+        → 更新 LiveData（bluetoothName, macAddress, connectState=true）
+
+GATT 连接回调:
+  LeDataInteractionController$mGattCallback.onConnectionStateChange(gatt, CONNECTED)
+    → this$0.onGattConnected(gatt)
+      → if !checkBluetoothPermission(): return     [⚠️ 关键检查点]
+      → gatt.discoverServices()
+```
+
+**`checkBluetoothPermission()` 的实现**：
+
+```smali
+private checkBluetoothPermission()Z:
+    if (SDK_INT > 30):
+        return PermissionChecker.checkSelfPermission(BLUETOOTH_CONNECT) == GRANTED
+    if (SDK_INT <= 30):
+        return Context.checkSelfPermission(BLUETOOTH) == GRANTED
+    return false
+```
+
+Android 16 (SDK 36) 上该函数在 GATT 回调线程中调用，`PermissionChecker.checkSelfPermission(BLUETOOTH_CONNECT)` 返回 `false`。原因推测为：
+
+- App 的 `targetSdkVersion` 较低，manifest 中未声明 `BLUETOOTH_CONNECT` 权限（只声明了 `BLUETOOTH`）
+- `connectGatt()` 中对权限有宽松处理，所以主线程的 `connect()` 能通过
+- 但 `checkBluetoothPermission()` 在 SDK 内部做了更严格的检查，BLE 回调线程上的权限状态与主线程不一致
+
+**修复方式**：LSPosed 模块钩 `checkBluetoothPermission` 强制返回 `true`。
+
+### 2.4 数据通道建立
+
+服务发现完成后：
+
+```
+onServicesDiscovered(status=0)
+  → initCharacteristic(gatt)
+    → gatt.setCharacteristicNotification(targetUUID, true)  [注册通知]
+    → 写入 CCCD (Client Characteristic Configuration Descriptor)
+
+数据就绪后:
+  onCharacteristicChanged(gatt, characteristic)
+    → 解析 0x13 数据包
+    → onReceiveDataFromDevice(waspWingInfo)
+      → SDK.onDeviceInfoUpdate(waspWingInfo)
+        → WaspWingViewModel._waspWingInfo.postValue(info)  [触发 DataBinding]
+```
+
+**完整链路验证**：
+
+```
+checkBluetoothPermission → true ✓
+discoverServices() → true ✓
+onServicesDiscovered → status=0 ✓
+onCharacteristicChanged → 已触发 ✓
+App.onDeviceInfoUpdate → connected=true, _waspWingInfo=有值 ✓
+```
+
+---
+
+## 三、设备状态管理
+
+### 3.1 WaspWingInfo 数据类
+
+`WaspWingInfo` 是 App 的核心数据类，实现 `Parcelable` 接口，约 31 个构造参数。它承载散热器的所有设备状态。
+
+**关键字段**：
+
+| 字段 | 类型 | 说明 | 更新频率 |
+|------|------|------|---------|
+| `connected` | boolean | BLE 连接状态 | 连接/断开时 |
+| `runMode` | int | 运行模式（0=固定功率, 1=智能温控） | 模式切换时 |
+| `realWindLevel` | int | 当前风扇档位（散热器风扇转速对应的档位编号） | 每温控周期 |
+| `realColdLevel` | int | 当前制冷片强度（百分比对应值） | 每温控周期 |
+| `temperature` | int | 散热器当前温度（°C） | 智能温控时每秒更新 |
+| `experimentalRunModeValue` | int? | 智能温控运行状态值 | 智能温控时每秒更新 |
+| `deviceCode` | String | 设备型号代码（"b6", "b6x", "b5" 等） | 连接时 |
+| `windLevel` | int | 设定风速档位 | 设定时 |
+| `coldLevel` | int | 设定制冷档位 | 设定时 |
+
+`WaspWingInfo` 通过 `convertFromDevice(BluetoothDevice)` 工厂方法可以从蓝牙设备创建初始实例，但此方法创建的对象所有字段为默认值（0/null/false），**不应在正常数据流到达前使用**，否则会触发 UI 闪烁（详见 §3.2 自修复逻辑）。
+
+### 3.2 ViewModel 层
+
+**WaspWingViewModel** 继承自 `BluetoothViewModel`，通过 `_waspWingInfo`（`MutableLiveData<WaspWingInfo>`）向 UI 层推送状态。
+
+```
+数据更新链：
+
+设备 0x13 数据包
+  → onCharacteristicChanged
+    → 协议解析（填充 WaspWingInfo 字段）
+      → SDK.onDeviceInfoUpdate(waspWingInfo)
+        → _waspWingInfo.postValue(info)
+          → DataBinding.executeBindings()
+            → UI 重绘
+```
+
+**智能温控自修复逻辑**（`onDeviceInfoUpdate` 内部）：
+
+```kotlin
+// 伪代码
+fun onDeviceInfoUpdate(info: WaspWingInfo) {
+    _waspWingInfo.postValue(info)   // ← 触发 DataBinding
+
+    // 自修复检查：
+    if (info.experimentalRunModeValue == null
+        || info.experimentalRunModeValue != info.realColdLevel + 1) {
+        // experimentalRunModeValue 异常 → 重新发送智能温控模式指令
+        WaspWingManager.setExperimentalRunMode(true, realColdLevel + 1, ...)
+    }
+}
+```
+
+**自修复逻辑的副作用**：如果中间插入了一帧字段全为默认值的 WaspWingInfo（例如用 `convertFromDevice` 创建的），`experimentalRunModeValue=null` 会立即触发指令重发 → 设备响应 → 新数据包 → 又一次 `postValue` → 再加上正常的每秒数据包 → 频繁的 DataBinding 重渲染 → **UI 闪烁**。这是修复历程中第 4 层 Bug 的根因。
+
+### 3.3 模式切换逻辑
+
+`WaspWingManager.setRunMode()` 是向散热器发送控制指令的核心方法，签名如下：
+
+```java
+setRunMode(int mode, int targetTemperature,
+           int windLevelOverclock, int coldLevelOverclock,
+           int windLevel, int modeCustom, int extra)
+```
+
+**参数映射**：
+
+| 模式 | 生效参数 | 说明 |
+|------|---------|------|
+| mode=0（智能温控） | targetTemperature + windLevel | 设目标温度和风扇上限，散热器自行管理制冷 |
+| mode=1（固定功率） | windLevelOverclock + coldLevelOverclock | 直接指定风扇转速和制冷片强度 |
+
+**模式选择器的 UI 状态**：App 的 UI 模式选中项监听的是 `WaspWingInfo.runMode` 等 LiveData，此字段仅反映 App 自身通过 UI 设定的模式。当 LSPosed 模块通过广播接收参数并调用 `setRunMode()` 时，散热器确实按参数运行，但 `runMode` LiveData 不会自动更新——因为这是外部注入的指令，没有走 UI 操作路径。因此模式选择器显示"空白"是**正确行为**：它准确报告了"当前运行模式不在 App 内置选项列表中"。
+
+---
+
+## 四、BLE 通信协议
+
+### 4.1 指令格式
+
+App 使用 BLE GATT 协议与散热器通信。控制指令通过 `WaspWingManager.setRunMode()` 编码为 BLE 特征值写入。
+
+**setRunMode 广播接口**（LSPosed 模块接收的 `am broadcast`）：
+
+```
+Action: com.flydigi.SET_TEMPERATURE
+Extras:
+  --ei mode         0=智能温控, 1=固定功率
+  --ei temperature  目标温度 (°C)
+  --ei windOC       风扇固定转速 (RPM)
+  --ei coldOC       制冷片强度 (0-194)
+  --ei windLevel    智能温控风扇上限 (RPM)
+  --ei modeCustom   保留 (传0)
+  --ei extra        保留 (传0)
+```
+
+实际 BLE 指令编码由 `WaspWingManager` 和底层 SDK 处理，App 通过 `setRunMode(7 params)` → BLE Write → 散热器固件解析的链路完成控制。
+
+### 4.2 数据包解析
+
+散热器通过 Notify 主动上报数据。已知的关键特征值 UUID：
+
+- **温度/状态数据包**（0x13）：约 1 秒间隔，包含温度、风速、制冷强度等运行状态数据
+- **其他控制特征值**：用于下发指令和读取设备信息
+
+0x13 数据包触发 `onCharacteristicChanged` → `onReceiveDataFromDevice` → 反序列化为 `WaspWingInfo` 字段。数据包字段与 `WaspWingInfo` 构造参数的映射关系由 `WaspWingDataInteractionController` 中的解析逻辑决定。
+
+### 4.3 散热器状态同步
+
+**上报模式**：设备主动上报，非 App 轮询。智能温控模式下设备约每秒发送一次 0x13 数据包，固定功率模式下上报频率较低。
+
+**状态字段更新时机**：
+
+| 字段 | 更新时机 | 说明 |
+|------|---------|------|
+| `temperature` | 每个 0x13 数据包 | 智能温控模式每秒更新 |
+| `realWindLevel` | 风扇转速变化时 | 档位变动后下一数据包 |
+| `realColdLevel` | 制冷强度变化时 | 指令生效后下一数据包 |
+| `runMode` | 模式切换响应后 | App 主动查询或设备确认 |
+| `experimentalRunModeValue` | 智能温控模式 | 设备反馈的运行状态值 |
+
+> 注意：`onCharacteristicChanged` 在 BLE 回调线程上执行，`postValue` 会将数据切换到主线程更新 LiveData，因此 UI 更新相比数据到达有一帧延迟。
+
+---
+
+## 五、已知问题与兼容性
+
+### 5.1 Android 16 兼容性
+
+| 问题 | 影响 | 修复方式 |
+|------|------|---------|
+| **废弃扫描 API**（`startLeScan`） | scanMode=2 触发废弃 API，SDK 36 上可能静默失败 | 替换为 `BluetoothLeScanner.startScan()`，或 LSPosed 钩子绕过 |
+| **权限检查线程不一致** | `checkBluetoothPermission()` 在 BLE 回调线程返回 false，阻止 `discoverServices()` | 钩该方法强制返回 true |
+| **registerReceiver 未标记导出** | SDK 34+ 要求 `RECEIVER_EXPORTED`/`RECEIVER_NOT_EXPORTED`，否则注册可能被拒绝 | 修改 smali 或 LSPosed 钩子补偿 |
+
+三个问题叠加导致 Android 16 上 App 完全无法使用散热器。目前已全部通过 LSPosed 模块修复。
+
+### 5.2 固件行为观察
+
+经实测发现的散热器固件行为特性：
+
+**智能温控模式（mode=0）**：
+- `windLevel` 参数在固件中被解释为"建议上限"而非"硬上限"
+- 切换模式或温差较大时，散热器内部 PID 可能以更高转速运行来快速达到目标温度，导致噪音突增
+- `coldLevelOverclock`（制冷强度）在此模式下被忽略，散热器自行管理制冷
+
+**固定功率模式（mode=1）**：
+- 风扇转速和制冷强度按指令值强制运行，不存在"突破上限"问题
+- 推荐作为智能温控的替代方案使用
+- 默认档位表（1~12 档）已全部采用此模式
+
+**制冷片强度范围**：
+- 有效范围 0-194
+- 180-200 为最高效区间，更高值时鳍片解热能力不足，散热效果反而下降
+- 超频模式（>194）本场景不使用
+
+---
+
+> **数据来源**：`smali/` 反编译输出 + 运行时日志分析 + LSPosed 模块钩子调试

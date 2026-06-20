@@ -3,7 +3,7 @@ name: Build Magisk Module Only
 on:
   push:
     paths:
-      - 'magisk模块（智能温控）/**'
+      - 'magisk模块(智能温控)/**'
 
 jobs:
   build-c:
@@ -40,7 +40,7 @@ jobs:
           set +e
           CC=/opt/ndk/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android21-clang
           $CC --version > /dev/null 2>&1
-          $CC -static -O2 -o tempctrl magisk模块（智能温控）/tempctrl.c > compile_ok.txt 2>compile_err.txt
+          $CC -static -O2 -o tempctrl magisk模块(智能温控)/tempctrl.c > compile_ok.txt 2>compile_err.txt
           RC=$?
           echo "=== exit code: $RC ==="
           echo "=== stdout ==="
@@ -63,21 +63,21 @@ jobs:
           if-no-files-found: ignore
 
       - name: 修复 PT_TLS 对齐
-        run: python3 magisk模块（智能温控）/patch_tls.py tempctrl || echo "TLS patch skipped (not needed)"
+        run: python3 magisk模块(智能温控)/patch_tls.py tempctrl || echo "TLS patch skipped (not needed)"
 
       - name: 打包 Magisk 模块框架
         run: |
-          cp tempctrl magisk模块（智能温控）/magisk模块框架/
+          cp tempctrl magisk模块(智能温控)/magisk模块框架/
           echo "Module contents:"
-          ls -la magisk模块（智能温控）/magisk模块框架/
+          ls -la magisk模块(智能温控)/magisk模块框架/
 
       - name: 获取版本号
         id: magisk-version
-        run: echo "VERSION=$(grep '^version=' magisk模块（智能温控）/magisk模块框架/module.prop | sed 's/^version=v//')" >> $GITHUB_OUTPUT
+        run: echo "VERSION=$(grep '^version=' magisk模块(智能温控)/magisk模块框架/module.prop | sed 's/^version=v//')" >> $GITHUB_OUTPUT
 
       - name: 上传 Magisk 模块包
         uses: actions/upload-artifact@v4
         with:
           name: b6x-EP-Magisk-v${{ steps.magisk-version.outputs.VERSION }}
-          path: magisk模块（智能温控）/magisk模块框架/
+          path: magisk模块(智能温控)/magisk模块框架/
           if-no-files-found: error

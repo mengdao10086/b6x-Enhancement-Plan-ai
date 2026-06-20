@@ -10,8 +10,8 @@
 
 | 组件 | 路径 | 说明 | 状态 |
 |------|------|------|------|
-| **LSPosed 模块** | [lsp模块（apk修复+温控接口）/](lsp模块（apk修复+温控接口）/README.md) | 提供散热器控制接口 | ✅ v2.0 已发布 |
-| **C 守护程序** | [magisk模块（智能温控）/](magisk模块（智能温控）/tempctrl.c) | 使用lsp模块接口控制散热器 | ✅ v2.1 已发布 |
+| **LSPosed 模块** | [lsp模块(apk修复+温控接口)/](lsp模块(apk修复+温控接口)/) | 提供散热器控制接口 | ✅ v2.0 已发布 |
+| **C 守护程序** | [magisk模块(智能温控)/](magisk模块(智能温控)/) | 使用lsp模块接口控制散热器 | ✅ v2.1 已发布 |
 
 ### LSPosed 模块功能
 
@@ -48,12 +48,19 @@
 ## 项目结构
 
 ```
-├── lsp模块（apk修复+温控接口）/     ← LSPosed 模块（Android 项目）
-├── magisk模块（智能温控）/          ← C 守护程序源码 + Magisk 模块框架
-├── 参考资料/                        ← 原始 APK + 反编译分析
-├── 修复历程/                        ← Bug 修复全记录
+├── lsp模块(apk修复+温控接口)/     ← LSPosed 模块（Android 项目）
+├── magisk模块(智能温控)/          ← C 守护程序源码 + Magisk 模块框架
+├── 参考资料/                        ← APK 反编译分析 + 修复历程 + 历史源码
+│   ├── 完整修复历程.md              ← 4 层 Bug 修复全记录
+│   ├── 飞智散热器开发者工具原版.apk  ← 原始 APK
+│   ├── apk逆向分析/                ← APK 逆向工程
+│   │   ├── smali/                 ← 合并反编译输出（8865 文件）
+│   │   ├── apk_extracted/         ← 原始 APK 解压
+│   │   └── app运行逻辑.md          ← App 运行逻辑分析
+│   ├── smali修改重编译apk尝试/      ← smali 工具链 + DEX 修改产物
+│   └── 历史c脚本源码/              ← 历史 C 源码备份
 ├── .github/workflows/              ← CI 自动构建（APK + C 二进制）
-└── log.md                           ← 修改日志（git 已忽略，仅本地）
+├── log.md                           ← 修改日志（git 已忽略，仅本地）
 └── README.md                       ← 本文件
 ```
 
@@ -111,7 +118,7 @@ GitHub Actions 自动构建，**只推送有变化部分的编译即可**：
 | 代码路径 | `D:\下载\Claude Code\飞智b6x增强计划\` |
 | Git 远程 | `https://github.com/mengdao10086/b6x-Enhancement-Plan-ai.git` |
 | 默认分支 | `main` |
-| 模块编译 | Android Studio 打开 `lsp模块（apk修复+温控接口）/` → Build APK |
+| 模块编译 | Android Studio 打开 `lsp模块(apk修复+温控接口)/` → Build APK |
 | C 编译 | **仅限 GitHub Actions**（NDK r27c），参见上方构建说明 |
 | 模块安装 | LSPosed 勾选模块 + 作用域 `com.flydigi.waspwing.experimental` → 强制停止 App |
 

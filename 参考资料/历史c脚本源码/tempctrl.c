@@ -47,7 +47,7 @@
 //              windLevel, modeCustom, extra)
 //
 // 参数映射：
-//   mode=0（智能温控）：targetTemperature, windLevel(风扇转速上限)
+//   mode=0(智能温控)：targetTemperature, windLevel(风扇转速上限)
 //   mode=1（固定功率）：windLevelOverclock(风扇固定转速), coldLevelOverclock(制冷片强度)
 //
 // 档位映射使用查表法（见 build_params），因为风扇转速、目标温度不再是线性关系。

@@ -3,7 +3,7 @@ name: Build LSPosed Module Only
 on:
   push:
     paths:
-      - 'lsp模块（apk修复+温控接口）/**'
+      - 'lsp模块(apk修复+温控接口)/**'
 
 jobs:
   build-apk:
@@ -11,7 +11,7 @@ jobs:
     runs-on: ubuntu-latest
     defaults:
       run:
-        working-directory: ./lsp模块（apk修复+温控接口）
+        working-directory: ./lsp模块(apk修复+温控接口)
 
     steps:
       - name: 检出代码

@@ -4,7 +4,7 @@
 
 **飞智 B6X 增强计划**是一个为飞智 B6X 散热器开发者工具（`com.flydigi.waspwing.experimental`）提供修复和扩展功能的 LSPosed 模块。
 
-> **代码仓库注意**：本目录（`lsp模块（apk修复+温控接口）/`）是项目的一部分，不是独立仓库。所有 git 操作在父目录 `飞智b6x增强计划/`（git 子模块）中进行。
+> **代码仓库注意**：本目录（`lsp模块(apk修复+温控接口)/`）是项目的一部分，不是独立仓库。所有 git 操作在父目录 `飞智b6x增强计划/`（git 子模块）中进行。
 
 ### 主要功能
 
@@ -56,7 +56,7 @@
 
 ### 2.2 进程检测与控制通信
 
-使用 **双重检查检测**：status 文件 mtime 心跳 + BLE=1 状态。模块每 5 秒写入一次 status 文件，tempctrl 检测 mtime 是否在 16 秒内（已移除 pgrep，模块心跳足以判断存活）：
+使用 **双重检查检测**：status 文件 mtime 心跳 + BLE=1 状态。模块每 5 秒写入一次 status 文件，tempctrl 检测 mtime 是否在 11 秒内（已移除 pgrep，模块心跳足以判断存活）：
 
 ```
 tempctrl 侧（C 守护程序）：
@@ -80,22 +80,7 @@ tempctrl 侧（C 守护程序）：
 
 ### 2.3 档位定义
 
-> 档位映射使用查表法，基于实测数据（`zone核心温度数值对比.xlsx` Sheet2）。
-
-| 档位 | 模式 | 目标温度 | 风扇转速 | 制冷片 | 说明 |
-|------|------|---------|---------|--------|------|
-| 12 | 固定功率 | — | 6000RPM | 185 | 制冷峰值，紧急4+ |
-| 11 | 固定功率 | — | 5500RPM | 175 | |
-| 10 | 固定功率 | — | 5000RPM | 160 | 紧急3+ |
-| 9 | 固定功率 | — | 4500RPM | 145 | |
-| 8 | 固定功率 | — | 4000RPM | 125 | 紧急2+ |
-| 7 | 固定功率 | — | 3500RPM | 100 | |
-| 6 | 固定功率 | — | 3050RPM | 75 | 紧急1+ |
-| 5 | 固定功率 | — | 2650RPM | 55 | LEVEL_INIT |
-| 4 | 固定功率 | — | 2300RPM | 35 | |
-| 3 | 固定功率 | — | 2000RPM | 20 | |
-| 2 | 固定功率 | — | 2000RPM | 10 | |
-| 1 | 固定功率 | — | 2000RPM | 5 | α待机 |
+> 档位映射使用查表法，完整档位表见 [magisk模块(智能温控)/逻辑说明.md](../magisk模块(智能温控)/逻辑说明.md)（档位系统章节），或 [profile.conf](../magisk模块(智能温控)/magisk模块框架/profile.conf) 中的 `GEAR_N` 配置。
 
 **setRunMode 参数映射：**
 ```
@@ -103,7 +88,7 @@ setRunMode(mode, targetTemperature,
            windLevelOverclock, coldLevelOverclock,
            windLevel, modeCustom, extra)
 ```
-- `mode=0`（智能温控）：`targetTemperature` + `windLevel`（风扇转速上限）
+- `mode=0`(智能温控)：`targetTemperature` + `windLevel`（风扇转速上限）
 - `mode=1`（固定功率）：`windLevelOverclock`（风扇转速）+ `coldLevelOverclock`（制冷片强度）
 
 ---
@@ -112,11 +97,11 @@ setRunMode(mode, targetTemperature,
 
 ### 3.1 编译 LSPosed 模块
 
-**Android Studio：** 用 Android Studio 打开 `lsp模块（apk修复+温控接口）/` 目录 → Build → Build APK
+**Android Studio：** 用 Android Studio 打开 `lsp模块(apk修复+温控接口)/` 目录 → Build → Build APK
 
 **命令行：**
 ```bash
-cd lsp模块（apk修复+温控接口）
+cd lsp模块(apk修复+温控接口)
 export ANDROID_HOME=/path/to/Android/Sdk
 ./gradlew assembleRelease
 ```
@@ -134,11 +119,7 @@ export ANDROID_HOME=/path/to/Android/Sdk
 3. 在 LSPosed 中启用模块，作用域勾选 `com.flydigi.waspwing.experimental`
 4. 强制停止目标 App 或重启手机
 
-### 4.2 部署 C 守护程序（v2.0）
-
-编译后将 `tempctrl` 放入 Magisk 模块目录，编写 `service.sh` 启动。
-
-### 4.3 Shell 手动测试广播
+### 4.2 Shell 手动测试广播
 
 ```bash
 # 智能温控：目标 16°C，风扇上限 4000RPM
@@ -172,9 +153,6 @@ app/
 ```bash
 # 查看模块日志
 adb logcat -s WaspWingTempCtrl
-
-# 查看 tempctrl 日志
-adb shell cat /cache/tempctrl.log
 ```
 
 ---
@@ -186,9 +164,6 @@ A: 确保 LSPosed ≥ 1.8，模块启用后**强制停止目标 App** 或重启�
 
 **Q: 发送广播后温度没变？**
 A: 检查① LSPosed 中模块已勾选且作用域正确 ② App BLE 已连接。
-
-**Q: C 守护程序没在运行？**
-A: 检查 Magisk 模块的 `service.sh` 是否正确，查看 `/cache/tempctrl.log`。
 
 ---
 
