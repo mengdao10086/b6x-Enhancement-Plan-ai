@@ -4,6 +4,7 @@ on:
   push:
     paths:
       - 'magisk模块(智能温控)/**'
+  workflow_dispatch:
 
 jobs:
   build-c:
