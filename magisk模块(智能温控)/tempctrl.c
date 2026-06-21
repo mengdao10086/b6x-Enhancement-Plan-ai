@@ -141,10 +141,14 @@ static int OVERRIDE_MAX = 6;
 // 对应 battery_control 中 t1/t2/t3 三个台阶，不同方向+区域组合下有不同的生效方式：
 //   升温：冷外 t1 / 内 t1/t2 / 热 t1/t2/t3
 //   降温：冷 t1/t2/t3 / 内 t1/t2 / 热 t1
-// 默认值 3/5/8 = 0.3°C / 0.5°C / 0.8°C
-static int REV_COMP_T1 = 3;
-static int REV_COMP_T2 = 5;
-static int REV_COMP_T3 = 8;
+// 默认值 2/3/4 = 0.2°C / 0.3°C / 0.4°C 每周期
+static int REV_COMP_T1 = 2;
+static int REV_COMP_T2 = 3;
+static int REV_COMP_T3 = 4;
+
+// --- 反补冷却周期数（可配置）---
+// 每次反补生效后冻结 N 个周期，期内不执行反补调整
+static int REV_COMP_COOLDOWN = 1;
 
 // --- 电池调档冷却周期数（可配置）---
 // 每次电池温度导致的档位变动后冻结多少周期（×5s），期内跳过常规升降档
@@ -207,6 +211,10 @@ static int emergency_level = 0;        // 紧急等级 0~3
 static int forced_min_level = 0;       // 紧急强制最低档位
 static int cpu_weighted = 250;         // 加权 CPU 温度，初始 25.0°C
 static int batt_cooldown = 0;          // 电池调档冷却剩余周期
+static int rev_comp_cooldown = 0;      // 反补冷却剩余周期
+static int batt_idle_cycles = 0;       // 自上次有效变化以来温度未变的周期数
+static int rev_comp_pending_abs = 0;   // 反补冷却期累积温差
+static int rev_comp_pending_idle = 0;  // 反补冷却期累积空闲周期
 static int last_batt_reading = -1;     // 上次读取的电池温度（变化检测 + 趋势判断）
 static int batt_unchanged_count = 0;   // 温度连续不变跳过次数（≥BATT_SKIP_MAX 时强制进入）
 static int trend_override = 0;         // 趋势豁免计数器（最多 OVERRIDE_MAX 次）
@@ -356,6 +364,7 @@ static void load_config(const char *path) {
         else if (strcmp(key, "REV_COMP_T1") == 0)          REV_COMP_T1        = clamp(val, 1, 50);
         else if (strcmp(key, "REV_COMP_T2") == 0)          REV_COMP_T2        = clamp(val, 1, 50);
         else if (strcmp(key, "REV_COMP_T3") == 0)          REV_COMP_T3        = clamp(val, 1, 50);
+        else if (strcmp(key, "REV_COMP_COOLDOWN") == 0)   REV_COMP_COOLDOWN  = clamp(val, 0, 10);
         // PEAK_DAMP_* 已移除（v2.1 改为 Sheet3 查表法）
         else if (strcmp(key, "BATT_COOLDOWN_CYCLES") == 0) BATT_COOLDOWN_CYCLES = clamp(val, 0, 20);
         else if (strcmp(key, "BATT_SKIP_MAX") == 0)        BATT_SKIP_MAX        = clamp(val, 0, 30);
@@ -1003,8 +1012,11 @@ static void battery_control(void) {
     else if (ad > BATT_ZONE_1) delta = 1;
     delta *= sign;
 
+    int cur_idle = batt_idle_cycles;  // 快照：自上次有效变化以来已过的空闲周期数
+
     // 温度值与上次调整时相同 → 计数跳过，超过 BATT_SKIP_MAX 次后强制进入
     if (batt == last_batt_reading) {
+        batt_idle_cycles++;
         if (++batt_unchanged_count < BATT_SKIP_MAX) return;
         batt_unchanged_count = 0;
         // 温度没变时 delta 已在上次执行过，清零防齿轮漂移
@@ -1013,6 +1025,7 @@ static void battery_control(void) {
         batt_change = 0;
     } else {
         batt_unchanged_count = 0;
+        batt_idle_cycles = 0;
     }
 
     int skip_delta = 0;  // =1 时本次不执行常规升降档
@@ -1023,6 +1036,7 @@ static void battery_control(void) {
         batt_cooldown--;
         skip_delta = 1;
     }
+    if (rev_comp_cooldown > 0) rev_comp_cooldown--;
 
     // ═══════════════ 反补查表（Sheet3 三区×双向×三级阈值） ═══════════════
     if (last_batt_reading >= 0 && abs_change > 0) {
@@ -1036,55 +1050,70 @@ static void battery_control(void) {
         int in_inner_zone = !is_cold_outer && !is_hot_outer;
 
         // 根据方向+区域查三级阈值（0.1°C 单位，999=无穷大）
-        // REV_COMP_T1/T2/T3 默认 3/5/8 = 0.3°C / 0.5°C / 0.8°C，可通过 profile.conf 配置
-        int t1 = 999, t2 = 999, t3 = 999;  // 分别对应 +1/+2/+3 档的 ∆T 门槛
-        if (dir > 0) {    // ═══ 升温 ═══
-            if      (is_cold_outer) { t1 = REV_COMP_T3; }                      // t3→1
-            else if (in_inner_zone) { t1 = REV_COMP_T2; t2 = REV_COMP_T3; }    // t2→1, t3→2
-            else                   { t1 = REV_COMP_T1; t2 = REV_COMP_T2; t3 = REV_COMP_T3; } // t1→1, t2→2, t3→3
-        } else {          // ═══ 降温 ═══
-            if      (is_cold_outer) { t1 = REV_COMP_T1; t2 = REV_COMP_T2; t3 = REV_COMP_T3; } // t1→1, t2→2, t3→3
-            else if (in_inner_zone) { t1 = REV_COMP_T2; t2 = REV_COMP_T3; }    // t2→1, t3→2
-            else                   { t1 = REV_COMP_T3; }                      // t3→1
-        }
+        // REV_COMP_T1/T2/T3 默认 2/3/4 = 0.2°C / 0.3°C / 0.4°C 每周期，可通过 profile.conf 配置
+	        int t1 = 999, t2 = 999, t3 = 999;
+	        if (dir > 0) {
+	            if      (is_cold_outer) { t1 = REV_COMP_T3; }
+	            else if (in_inner_zone) { t1 = REV_COMP_T2; t2 = REV_COMP_T3; }
+	            else                   { t1 = REV_COMP_T1; t2 = REV_COMP_T2; t3 = REV_COMP_T3; }
+	        } else {
+	            if      (is_cold_outer) { t1 = REV_COMP_T1; t2 = REV_COMP_T2; t3 = REV_COMP_T3; }
+	            else if (in_inner_zone) { t1 = REV_COMP_T2; t2 = REV_COMP_T3; }
+	            else                   { t1 = REV_COMP_T3; }
+	        }
 
-        // ═══ 小变动（≤t1）→ 趋势豁免 ═══
-        if (!in_cooldown && abs_change <= t1) {
-            if (trend_rev && battery_fan_level > level_min &&
-                battery_fan_level < level_max &&
-                trend_override < OVERRIDE_MAX) {
-                if (trend_override == 0)
-                    write_log("趋势豁免 %d", battery_fan_level);
-                trend_override++;
-                skip_delta = 1;
-            } else {
-                trend_override = 0;
-            }
-        }
+	        // 统一计算每周期速率（用于下方趋势豁免和反补）
+	        int total_abs = abs_change + rev_comp_pending_abs;
+	        int total_interval = (cur_idle + 1) + rev_comp_pending_idle;
+	        int rate = total_abs / total_interval;
+	        if (rate < 1) rate = 1;
 
-        // ═══ 大变动（>t1）→ 反补（冷却期也执行） ═══
-        if (abs_change > t1) {
-            trend_override = 0;
+	        // ═══ 小变动（速率≤t1）→ 趋势豁免 ═══
+	        if (!in_cooldown && rev_comp_pending_abs == 0 && rate < t1) {
+	            if (trend_rev && battery_fan_level > level_min &&
+	                battery_fan_level < level_max &&
+	                trend_override < OVERRIDE_MAX) {
+	                if (trend_override == 0)
+	                    write_log("趋势豁免 %d", battery_fan_level);
+	                trend_override++;
+	                skip_delta = 1;
+	            } else {
+	                trend_override = 0;
+	            }
+	        }
 
-            // 跨越几个门槛就补几档
-            int steps = (abs_change > t1) + (abs_change > t2) + (abs_change > t3);
-            int adjust = dir * steps;
+	        // ═══ 大变动（速率>t1）→ 反补（使用每周期速率归一化） ═══
+	        if (rate > t1 || rev_comp_pending_abs > 0) {
+	            trend_override = 0;
 
-            if (adjust != 0) {
-                int old = battery_fan_level;
-                battery_fan_level += adjust;
-                battery_fan_level = clamp(battery_fan_level, level_min, level_max);
-                skip_delta = 1;
-                if (old != battery_fan_level) {
-                    batt_cooldown = BATT_COOLDOWN_CYCLES;
-                    write_log("过冲%d.%d 挡位%d（%+d）",
-                              abs_change / 10, abs_change % 10,
-                              battery_fan_level, adjust);
-                }
-            }
-        }
-    }
+	            if (rev_comp_cooldown == 0) {
+	                // 冷却已到 → 用速率查表执行反补
+	                int steps = (rate > t1) + (rate > t2) + (rate > t3);
+	                int adjust = dir * steps;
 
+	                rev_comp_pending_abs = 0;
+	                rev_comp_pending_idle = 0;
+
+	                if (adjust != 0) {
+	                    int old = battery_fan_level;
+	                    battery_fan_level += adjust;
+	                    battery_fan_level = clamp(battery_fan_level, level_min, level_max);
+	                    skip_delta = 1;
+	                    if (old != battery_fan_level) {
+	                        batt_cooldown = BATT_COOLDOWN_CYCLES;
+	                        rev_comp_cooldown = REV_COMP_COOLDOWN;
+	                        write_log("过冲%d.%d周期 挡位%d（%+d）",
+	                                  rate / 10, rate % 10,
+	                                  battery_fan_level, adjust);
+	                    }
+	                }
+	            } else {
+	                // 冷却期内累积温差和周期数，不做调整
+	                rev_comp_pending_abs = total_abs;
+	                rev_comp_pending_idle = total_interval;
+	            }
+	        }
+	    }
     // ---- 应用常规升降档（仅当未被豁免/反补跳过时） ----
     if (delta != 0 && !skip_delta) {
         int old = battery_fan_level;
