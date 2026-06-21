@@ -98,7 +98,8 @@ static void init_gear_table(void) {
 // --- 电池温度控制（0.1°C）—— 可由 profile.conf 覆盖 ---
 static int BATT_BASELINE = 350;     // 基准温度 35.0°C
 static int BATT_ZONE_1   = 5;       // ±0.5°C → 不变（死区）
-static int BATT_ZONE_2   = 15;      // ±1.5°C → 1 档（超过→2档）
+static int BATT_ZONE_2   = 14;      // ±1.4°C → ±1 档
+static int BATT_ZONE_3   = 25;      // ±2.5°C → ±2 档（超过→±3档）
 
 // --- CPU 温度扫描范围（可配置）---
 // 首次运行在此范围内扫描有效的 thermal_zone，后续只扫命中的 zone
@@ -339,6 +340,7 @@ static void load_config(const char *path) {
         if      (strcmp(key, "BATT_BASELINE") == 0)        BATT_BASELINE      = clamp(val, 300, 500);
         else if (strcmp(key, "BATT_ZONE_1") == 0)          BATT_ZONE_1        = clamp(val, 1, 100);
         else if (strcmp(key, "BATT_ZONE_2") == 0)          BATT_ZONE_2        = clamp(val, 1, 100);
+        else if (strcmp(key, "BATT_ZONE_3") == 0)          BATT_ZONE_3        = clamp(val, 1, 100);
         else if (strcmp(key, "CPU_EMERG_3") == 0)          CPU_EMERG_3        = clamp(val, 600, 1000);
         else if (strcmp(key, "CPU_EMERG_2") == 0)          CPU_EMERG_2        = clamp(val, 500, 900);
         else if (strcmp(key, "CPU_EMERG_1") == 0)          CPU_EMERG_1        = clamp(val, 400, 800);
@@ -966,9 +968,10 @@ static int is_app_alive(void) {
  * 每 5 秒调用一次
  *
  * 调整策略（基准温度 35.0°C）：
- *   偏差 ≤0.7°C  → 不变（死区）
- *   偏差 0.7~2°C → ±1 档
- *   偏差 >2°C    → ±2 档
+ *   偏差 ≤0.5°C  → 不变（死区）
+ *   ±0.5~1.4°C  → ±1 档
+ *   ±1.4~2.5°C  → ±2 档
+ *   偏差 >2.5°C  → ±3 档
  *
  * 温度读数未变化时跳过升降档。
  * 每次档位变动后启动 BATT_COOLDOWN_CYCLES 周期冷却，期间跳过常规升降档。
@@ -995,7 +998,8 @@ static void battery_control(void) {
     else if (diff < 0) sign = -1;
     else               sign =  0;
     int delta = 0;
-    if      (ad > BATT_ZONE_2) delta = 2;
+    if      (ad > BATT_ZONE_3) delta = 3;
+    else if (ad > BATT_ZONE_2) delta = 2;
     else if (ad > BATT_ZONE_1) delta = 1;
     delta *= sign;
 
@@ -1302,10 +1306,9 @@ static void main_loop(void) {
             if (battery_fan_level > cap)
                 battery_fan_level = cap;
         } else {
-            // 模式 1：降档模式 — 直接减去 EMERG_STEP × 下降等级数
-            int drop = prev_emerg_level - emergency_level;
-            if (battery_fan_level > EMERG_STEP * drop)
-                battery_fan_level -= EMERG_STEP * drop;
+            // 模式 1：降档模式 — 直接减去 EMERG_STEP（固定步数，不乘下降级数）
+            if (battery_fan_level > EMERG_STEP)
+                battery_fan_level -= EMERG_STEP;
             else
                 battery_fan_level = level_min;
         }
