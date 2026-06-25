@@ -74,6 +74,7 @@
   - 改 `magisk模块/` → 仅编译 C 二进制
   - 推送 `v*` 标签或手动触发 → 全量编译
 - `patch_tls.py` 仅对 NDK 静态编译有效，Termux 编译修复后仍不可靠
+- 每轮新对话和压缩上下文之后的首次推送，必须跟随检查是否报错
 
 ## 工具位置
 - `baksmali.jar` → `参考资料/smali修改重编译apk尝试/baksmali.jar`

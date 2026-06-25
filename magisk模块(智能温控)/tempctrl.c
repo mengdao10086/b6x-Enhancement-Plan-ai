@@ -901,7 +901,6 @@ static int apply_level(int level) {
                 windLevel = limited_rpm;
             else
                 windOC = limited_rpm;
-            write_log("RPM平滑 %d→%d（目标%d）", prev_rpm, limited_rpm, curr_rpm);
         }
     }
 
@@ -1014,6 +1013,13 @@ static int is_app_alive(void) {
 static void battery_control(void) {
     int batt = read_battery_temp();
     if (batt < 0) return;
+
+    // 首次读取（启动后/重连后第一次）：不参与任何判断，数据正常更新，直接进入冷却
+    if (last_batt_reading < 0) {
+        last_batt_reading = batt;
+        batt_cooldown = BATT_COOLDOWN_CYCLES;
+        return;
+    }
 
     // 计算本周期温度变化量和常规升降档量（先算，给跳过逻辑参考）
     int batt_change = 0, abs_change = 0;
@@ -1498,6 +1504,8 @@ int main(int argc, char *argv[]) {
                     app_was_alive = 1;
                     last_sent_valid = 0;
                     actual_level = target_level;
+                    last_batt_reading = -1;
+                    first_run = 1;
                     apply_level(actual_level);
                     break;
                 }
@@ -1507,6 +1515,8 @@ int main(int argc, char *argv[]) {
             app_was_alive = 1;
             last_sent_valid = 0;
             actual_level = target_level;
+            last_batt_reading = -1;
+            first_run = 1;
             apply_level(actual_level);
         }
 
