@@ -138,9 +138,11 @@ static int EMERG_EXIT_BATT_THRESHOLD = 20;  // 默认2.0°C
 // --- CPU 滤波系数（百分比，0~100，默认 25=α=0.25）---
 static int CPU_FILTER_ALPHA = 25;
 
-// --- 趋势豁免上限（可配置）---
-// 温度趋势反向时最多连续豁免次数，超过后强制执行
-static int OVERRIDE_MAX = 6;
+// --- 趋势豁免（温度锚点复位机制）---
+// 首次豁免记录当前电池温度，以此 - 当前豁免区间中值为复位阈值，
+// 温度低于该值后复位豁免计数器，下轮重新开始
+static int OVERRIDE_MAX = 6;            // 保留配置项（当前未作主动限制，仅作安全兜底）
+static int override_anchor_temp = -1;   // 趋势豁免锚点温度（首次豁免时记录）
 
 // --- 反补查表三级阈值（0.1°C，可由 profile.conf 覆盖）---
 // 对应 battery_control 中 t1/t2/t3 三个台阶，不同方向+区域组合下有不同的生效方式：
@@ -222,7 +224,7 @@ static int rev_comp_pending_abs = 0;   // 反补冷却期累积温差
 static int rev_comp_pending_idle = 0;  // 反补冷却期累积空闲周期
 static int last_batt_reading = -1;     // 上次读取的电池温度（变化检测 + 趋势判断）
 static int batt_unchanged_count = 0;   // 温度连续不变跳过次数（≥BATT_SKIP_MAX 时强制进入）
-static int trend_override = 0;         // 趋势豁免计数器（最多 OVERRIDE_MAX 次）
+static int trend_override = 0;         // 趋势豁免计数器（锚点温度复位机制使用）
 static int first_run = 1;              // 首次运行，滤波直接赋初值
 static volatile int running = 1;       // 信号控制标记
 
@@ -1104,14 +1106,49 @@ static void battery_control(void) {
 	        //   steps=1(T1已触发, T2未触发) → 豁免区间 [T1, T2)（抬至T1以上）
 	        //   steps=2(T2已触发, T3未触发) → 豁免区间 [T2, T3)（抬至T2以上）
 	        //   steps=3(T3已触发) → 始终不豁免
+	        //
+	        // 温度锚点复位：首次豁免记录当前温度为锚点。区间中间值（steps=0→T1/2,
+	        // steps=1→(T1+T2)/2, steps=2→(T2+T3)/2）作为偏移量：降温豁免用减号
+	        // （锚点-偏移量=复位阈值），升温豁免用加号（锚点+偏移量=复位阈值）。
+	        // 电池温度越过复位阈值后豁免计数器复位，下轮以新锚点重新开始
 	        if (!in_cooldown && rev_comp_pending_abs == 0 && steps < 3) {
 	            if (trend_rev && battery_fan_level > level_min &&
-	                battery_fan_level < level_max &&
-	                trend_override < OVERRIDE_MAX) {
-	                if (trend_override == 0)
+	                battery_fan_level < level_max)
+	            {
+	                if (trend_override == 0) {
+	                    // 首次豁免：记录锚点温度
+	                    override_anchor_temp = batt;
 	                    write_log("趋势豁免 %d", battery_fan_level);
-	                trend_override++;
-	                skip_delta = 1;
+	                    trend_override++;
+	                    skip_delta = 1;
+	                } else {
+	                    // 持续豁免中：计算当前区间中间值（0.1°C）
+	                    int band_mid;
+	                    if      (steps == 0) band_mid = REV_COMP_T1 / 2;
+	                    else if (steps == 1) band_mid = (REV_COMP_T1 + REV_COMP_T2) / 2;
+	                    else                 band_mid = (REV_COMP_T2 + REV_COMP_T3) / 2;
+	                    if (band_mid < 1) band_mid = 1;
+
+	                    // 降温（delta<0，温度向基准降温）→ 锚点 - 中值 = 复位下限
+	                    // 升温（delta>0，温度向基准升温）→ 锚点 + 中值 = 复位上限
+	                    int reset_threshold;
+	                    int reset_triggered = 0;
+	                    if (delta < 0) {
+	                        reset_threshold = override_anchor_temp - band_mid;
+	                        if (batt <= reset_threshold) reset_triggered = 1;
+	                    } else {
+	                        reset_threshold = override_anchor_temp + band_mid;
+	                        if (batt >= reset_threshold) reset_triggered = 1;
+	                    }
+
+	                    if (reset_triggered) {
+	                        // 温度越过复位阈值 → 复位豁免
+	                        trend_override = 0;
+	                    } else {
+	                        trend_override++;
+	                        skip_delta = 1;
+	                    }
+	                }
 	            } else {
 	                trend_override = 0;
 	            }
