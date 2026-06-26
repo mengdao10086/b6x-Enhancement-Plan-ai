@@ -14,7 +14,7 @@
 - **默认档位表改为全部固定功率**：根据实测，智能温控模式（mode=0）的风扇转速上限非强制生效，常突破上限导致噪音突增。新默认表 1~10 级全部固定功率模式（mode=1）
 
 ### v2.0 概况（基础）
-- 通信：~~FIFO~~ → 已废弃，改用 status 文件 mtime + pgrep + BLE 三重检查
+- 通信：~~FIFO~~ → 已废弃，改用 status 文件 mtime 心跳 + BLE=1 双重检查
 - 控制：C 守护程序每 5 秒计算目标档位 → 渐进执行（每次±1 档压制突变噪音）→ `am broadcast` → LSPosed 模块 → `WaspWingManager.setRunMode()` → BLE 指令
 - 配置：所有阈值通过 `profile.conf` 运行时配置，支持 mtime 热重载（`CONFIG_ENABLED=0` 可跳过）
 - 档位：1~12 级，使用查表法，趋势豁免+峰值反补合并逻辑，决策与执行分离（逐级±1 档）

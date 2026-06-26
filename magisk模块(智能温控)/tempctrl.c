@@ -194,8 +194,17 @@ static int CURRENT_SMOOTH_ALPHA = 25;   // 默认 α=0.25
 
 // --- 逐档提升启动档位（可配置）---
 // ≤此档位时：可直接跳到目标档位（不逐级变动）
-// >此档位时：每轮最多 ±1 档，压制噪音突变
+// >此档位时：每轮最多 ±GRADUAL_STEP 档
 static int GRADUAL_STEP_THRESHOLD = 5;
+
+// --- 每周期最大档位变化量（可配置）---
+static int GRADUAL_STEP = 1;
+
+// --- RPM 平滑独立跟踪（可配置）---
+// 每周期风扇转速最多变化 rpm_smooth_step RPM，不受档位变动影响
+// 连续换档时 RPM 轨迹始终保持平滑
+static int rpm_smooth_step = 250;   // 每周期最大 RPM 变化量
+static int smooth_rpm = -1;         // RPM 平滑跟踪值（-1=未初始化）
 
 
 // --- 日志路径（默认根据二进制名自动生成，可由 profile.conf 覆盖）---
@@ -338,6 +347,7 @@ static void load_config(const char *path) {
         gear_count = 0;
         level_max = 0;
         memset(gear_table, 0, sizeof(gear_table));
+        smooth_rpm = -1;  // 档位表变化，重置 RPM 跟踪
         write_log("配置 档位表将由 GEAR_N 定义");
     }
 
@@ -410,6 +420,8 @@ static void load_config(const char *path) {
         else if (strcmp(key, "CURRENT_RECOVER_0") == 0)     CURRENT_RECOVER_0  = clamp(val, 1000000, 15000000);
         else if (strcmp(key, "CURRENT_SMOOTH_ALPHA") == 0)  CURRENT_SMOOTH_ALPHA = clamp(val, 1, 100);
         else if (strcmp(key, "GRADUAL_STEP_THRESHOLD") == 0) GRADUAL_STEP_THRESHOLD = clamp(val, -10, 10);
+        else if (strcmp(key, "GRADUAL_STEP") == 0)             GRADUAL_STEP            = clamp(val, 1, 12);
+        else if (strcmp(key, "RPM_SMOOTH_STEP") == 0)          rpm_smooth_step = clamp(val, 50, 1000);
         else if (strcmp(key, "EMERG_EXIT_CAP_OFFSET") == 0) EMERG_EXIT_CAP_OFFSET = clamp(val, 0, 5);
         else if (strcmp(key, "EMERG_MODE") == 0) {
             int entry = EMERG_MODE_ENTRY, exit = EMERG_MODE_EXIT;
@@ -892,18 +904,12 @@ static int apply_level(int level) {
     level = clamp(level, level_min, level_max);
     build_params(level, &mode, &target, &windOC, &coldOC, &windLevel);
 
-    // ---- RPM 平滑：每次 5 秒循环风扇转速最多变化 300 RPM ----
-    if (last_sent_valid) {
-        int prev_rpm = (last_mode == 0) ? last_windLevel : last_windOC;
-        int curr_rpm = (mode == 0) ? windLevel : windOC;
-        int rpm_delta = curr_rpm - prev_rpm;
-        if (abs(rpm_delta) > 300) {
-            int limited_rpm = prev_rpm + (rpm_delta > 0 ? 300 : -300);
-            if (mode == 0)
-                windLevel = limited_rpm;
-            else
-                windOC = limited_rpm;
-        }
+    // ---- RPM 独立跟踪值覆盖（由 rpm_smooth_update 每周期维护）----
+    if (smooth_rpm >= 0) {
+        if (mode == 0)
+            windLevel = smooth_rpm;
+        else
+            windOC = smooth_rpm;
     }
 
     // ---- 去重检测 ----
@@ -1358,6 +1364,27 @@ static void alarm_handler(int sig) {
  */
 static int prev_emerg_level = 0;   // 记录上一轮紧急等级，退出紧急时用作档位上限
 
+/**
+ * 每周期更新 RPM 平滑跟踪值
+ * 以当前档位的目标转速为方向，每周期最多变化 rpm_smooth_step RPM
+ * 档位稳定后自然收敛至档位表值
+ * 此机制独立于档位变动，连续换档时 RPM 轨迹始终保持平滑
+ */
+static void rpm_smooth_update(int gear_level) {
+    int target_rpm = gear_table[gear_level - 1].fan_rpm;
+    if (smooth_rpm < 0) {
+        smooth_rpm = target_rpm;
+        return;
+    }
+    int diff = target_rpm - smooth_rpm;
+    if (abs(diff) > rpm_smooth_step) {
+        smooth_rpm += (diff > 0) ? rpm_smooth_step : -rpm_smooth_step;
+    } else if (abs(diff) > 10) {
+        smooth_rpm = target_rpm;
+    }
+    // diff <= 10: 已收敛，保持当前值
+}
+
 static void main_loop(void) {
     // 0. 检查配置文件是否更新（热重载）
     if (config_path[0] != '\0') {
@@ -1540,6 +1567,7 @@ int main(int argc, char *argv[]) {
                 if (is_app_alive() && app_ble_connected) {
                     app_was_alive = 1;
                     last_sent_valid = 0;
+                    smooth_rpm = -1;
                     actual_level = target_level;
                     last_batt_reading = -1;
                     first_run = 1;
@@ -1551,6 +1579,7 @@ int main(int argc, char *argv[]) {
         } else if (!app_was_alive) {
             app_was_alive = 1;
             last_sent_valid = 0;
+            smooth_rpm = -1;
             actual_level = target_level;
             last_batt_reading = -1;
             first_run = 1;
@@ -1559,30 +1588,26 @@ int main(int argc, char *argv[]) {
 
         main_loop();
 
-        // ★ 计算完成后立即执行（向 target_level 靠拢）
-        // 升档时：target ≤ GRADUAL_STEP_THRESHOLD 可直接跳转，否则逐级 ±1
-        // 降档时：始终逐级 -1（压制噪音突降）
+        // ★ 逐步执行（只调整档位变量，不下发）
+        // 升档时：target ≤ GRADUAL_STEP_THRESHOLD 可直接跳转，否则按 GRADUAL_STEP 步进
+        // 降档：按 GRADUAL_STEP 步进（不超出 target）
         if (actual_level < target_level) {
             if (target_level <= GRADUAL_STEP_THRESHOLD) {
-                actual_level = target_level;     // 低频区直接跳转
+                actual_level = target_level;
             } else {
-                actual_level++;                  // 高频区逐级提升
+                actual_level += GRADUAL_STEP;
+                if (actual_level > target_level) actual_level = target_level;
             }
-            apply_level(actual_level);
         } else if (actual_level > target_level) {
-            actual_level--;
-            apply_level(actual_level);
+            actual_level -= GRADUAL_STEP;
+            if (actual_level < target_level) actual_level = target_level;
         }
-        // actual_level == target_level → 跳过（已到达目标）
 
-        // RPM 收敛：档位已达目标但转速尚未匹配档位表，继续调整
-        if (actual_level == target_level && last_sent_valid) {
-            int gear_rpm = gear_table[actual_level - 1].fan_rpm;
-            int sent_rpm = (last_mode == 0) ? last_windLevel : last_windOC;
-            if (abs(sent_rpm - gear_rpm) > 10) {
-                apply_level(actual_level);
-            }
-        }
+        // ★ RPM 独立跟踪 + 统一下发（每周期一次 apply_level）
+        // RPM 平滑由 rpm_smooth_update 独立控制，不受档位变动影响
+        // 连续换档时 RPM 始终以 rpm_smooth_step 步长平滑变化
+        rpm_smooth_update(actual_level);
+        apply_level(actual_level);
 
         // 逐秒睡眠（可被信号中断）
         for (int i = 0; i < 5 && running; i++) {
