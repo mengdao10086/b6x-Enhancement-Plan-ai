@@ -192,19 +192,20 @@ static int CURRENT_RECOVER_0 = 4000000; // <4A → 退出紧急
 // 升档（紧急等级提高）时重置平滑，从当前值重新累积
 static int CURRENT_SMOOTH_ALPHA = 25;   // 默认 α=0.25
 
-// --- 逐档提升启动档位（可配置）---
-// ≤此档位时：可直接跳到目标档位（不逐级变动）
-// >此档位时：每轮最多 ±GRADUAL_STEP 档
-static int GRADUAL_STEP_THRESHOLD = 5;
+// --- 速率限制（每 5 秒周期最大变化量，可配置）---
+// 风扇转速限制（两种模式通用）
+static int RATE_LIMIT_RPM = 250;
+// 制冷片强度限制（固定功率模式时生效）
+static int RATE_LIMIT_COLD = 20;
+// 目标温度限制（智能温控模式时生效）
+static int RATE_LIMIT_TEMP = 2;
 
-// --- 每周期最大档位变化量（可配置）---
-static int GRADUAL_STEP = 1;
-
-// --- RPM 平滑独立跟踪（可配置）---
-// 每周期风扇转速最多变化 rpm_smooth_step RPM，不受档位变动影响
-// 连续换档时 RPM 轨迹始终保持平滑
-static int rpm_smooth_step = 250;   // 每周期最大 RPM 变化量
-static int smooth_rpm = -1;         // RPM 平滑跟踪值（-1=未初始化）
+// --- 当前实际值（-1=未初始化）---
+// 始终向目标档位的表格值靠拢，每周期最多变动速率限制的量
+// 溢出部分自然累积到下周期；目标档位变化时自动从当前值计算新差值
+static int actual_rpm = -1;            // 当前实际风扇转速（RPM）
+static int actual_cold = -1;           // 当前实际制冷片强度
+static int actual_target_temp = -1;    // 当前实际目标温度（°C）
 
 
 // --- 日志路径（默认根据二进制名自动生成，可由 profile.conf 覆盖）---
@@ -237,8 +238,7 @@ static int trend_override = 0;         // 趋势豁免计数器（锚点温度�
 static int first_run = 1;              // 首次运行，滤波直接赋初值
 static volatile int running = 1;       // 信号控制标记
 
-// --- 逐步执行状态 ---
-static int actual_level = LEVEL_INIT;   // 散热器实际运行的档位（逐级变动）
+// --- 执行状态 ---
 static int target_level = LEVEL_INIT;   // 逻辑计算的目标档位（执行向此靠拢）
 
 // --- 发送去重缓存 ---
@@ -347,7 +347,9 @@ static void load_config(const char *path) {
         gear_count = 0;
         level_max = 0;
         memset(gear_table, 0, sizeof(gear_table));
-        smooth_rpm = -1;  // 档位表变化，重置 RPM 跟踪
+        actual_rpm = -1;
+        actual_cold = -1;
+        actual_target_temp = -1;  // 档位表变化，重置速率跟踪
         write_log("配置 档位表将由 GEAR_N 定义");
     }
 
@@ -419,9 +421,11 @@ static void load_config(const char *path) {
         else if (strcmp(key, "CURRENT_RECOVER_1") == 0)     CURRENT_RECOVER_1  = clamp(val, 1000000, 15000000);
         else if (strcmp(key, "CURRENT_RECOVER_0") == 0)     CURRENT_RECOVER_0  = clamp(val, 1000000, 15000000);
         else if (strcmp(key, "CURRENT_SMOOTH_ALPHA") == 0)  CURRENT_SMOOTH_ALPHA = clamp(val, 1, 100);
-        else if (strcmp(key, "GRADUAL_STEP_THRESHOLD") == 0) GRADUAL_STEP_THRESHOLD = clamp(val, -10, 10);
-        else if (strcmp(key, "GRADUAL_STEP") == 0)             GRADUAL_STEP            = clamp(val, 1, 12);
-        else if (strcmp(key, "RPM_SMOOTH_STEP") == 0)          rpm_smooth_step = clamp(val, 50, 1000);
+        else if (strcmp(key, "RATE_LIMIT_RPM") == 0)  RATE_LIMIT_RPM  = clamp(val, 50, 2000);
+        else if (strcmp(key, "RATE_LIMIT_COLD") == 0) RATE_LIMIT_COLD = clamp(val, 1, 194);
+        else if (strcmp(key, "RATE_LIMIT_TEMP") == 0) RATE_LIMIT_TEMP = clamp(val, 1, 30);
+        // 兼容旧名称
+        else if (strcmp(key, "RPM_SMOOTH_STEP") == 0) RATE_LIMIT_RPM  = clamp(val, 50, 2000);
         else if (strcmp(key, "EMERG_EXIT_CAP_OFFSET") == 0) EMERG_EXIT_CAP_OFFSET = clamp(val, 0, 5);
         else if (strcmp(key, "EMERG_MODE") == 0) {
             int entry = EMERG_MODE_ENTRY, exit = EMERG_MODE_EXIT;
@@ -904,12 +908,18 @@ static int apply_level(int level) {
     level = clamp(level, level_min, level_max);
     build_params(level, &mode, &target, &windOC, &coldOC, &windLevel);
 
-    // ---- RPM 独立跟踪值覆盖（由 rpm_smooth_update 每周期维护）----
-    if (smooth_rpm >= 0) {
+    // ---- 速率限制实际值覆盖（由 rate_limited_execute 每周期维护）----
+    if (actual_rpm >= 0) {
         if (mode == 0)
-            windLevel = smooth_rpm;
+            windLevel = actual_rpm;
         else
-            windOC = smooth_rpm;
+            windOC = actual_rpm;
+    }
+    if (actual_cold >= 0) {
+        coldOC = actual_cold;
+    }
+    if (actual_target_temp >= 0) {
+        target = actual_target_temp;
     }
 
     // ---- 去重检测 ----
@@ -1360,29 +1370,65 @@ static void alarm_handler(int sig) {
 /**
  * 单次控制循环（纯计算，不下发）
  * 配置重载 → 紧急干预（CPU+电流综合等级）→ 电池控制 → 保存目标档位
- * 调用者在外部立即执行逐步变档，本函数只做决策
+ * 调用者在外部立即执行速率限制下发，本函数只做决策
  */
 static int prev_emerg_level = 0;   // 记录上一轮紧急等级，退出紧急时用作档位上限
 
 /**
- * 每周期更新 RPM 平滑跟踪值
- * 以当前档位的目标转速为方向，每周期最多变化 rpm_smooth_step RPM
- * 档位稳定后自然收敛至档位表值
- * 此机制独立于档位变动，连续换档时 RPM 轨迹始终保持平滑
+ * 速率限制执行（替代逐档变动 + RPM 平滑跟踪）
+ * 每周期最多变动 RATE_LIMIT_RPM RPM、RATE_LIMIT_COLD 制冷强度、
+ * RATE_LIMIT_TEMP °C 目标温度，未完成部分自然累积到下周期。
+ * 目标档位变化时自动从当前实际值重新计算差值，
+ * 实现"还没变动完时也可以继续增加/减少要变动的数值"。
  */
-static void rpm_smooth_update(int gear_level) {
-    int target_rpm = gear_table[gear_level - 1].fan_rpm;
-    if (smooth_rpm < 0) {
-        smooth_rpm = target_rpm;
-        return;
+static void rate_limited_execute(void) {
+    int mode, target, windOC, coldOC, windLevel;
+    build_params(target_level, &mode, &target, &windOC, &coldOC, &windLevel);
+
+    // ---- 初始化实际值（首次运行或档位表变化后重置）----
+    if (actual_rpm < 0) {
+        actual_rpm = (mode == 0) ? windLevel : windOC;
     }
-    int diff = target_rpm - smooth_rpm;
-    if (abs(diff) > rpm_smooth_step) {
-        smooth_rpm += (diff > 0) ? rpm_smooth_step : -rpm_smooth_step;
-    } else if (abs(diff) > 10) {
-        smooth_rpm = target_rpm;
+    if (actual_cold < 0) {
+        actual_cold = coldOC;
     }
-    // diff <= 10: 已收敛，保持当前值
+    if (actual_target_temp < 0) {
+        actual_target_temp = target;
+    }
+
+    // ---- 速率限制：风扇 RPM（两种模式通用）----
+    {
+        int target_rpm = (mode == 0) ? windLevel : windOC;
+        int diff = target_rpm - actual_rpm;
+        if (abs(diff) > RATE_LIMIT_RPM) {
+            actual_rpm += (diff > 0) ? RATE_LIMIT_RPM : -RATE_LIMIT_RPM;
+        } else {
+            actual_rpm = target_rpm;  // 已收敛到目标
+        }
+    }
+
+    // ---- 速率限制：制冷片强度（固定功率模式）----
+    {
+        int diff = coldOC - actual_cold;
+        if (abs(diff) > RATE_LIMIT_COLD) {
+            actual_cold += (diff > 0) ? RATE_LIMIT_COLD : -RATE_LIMIT_COLD;
+        } else {
+            actual_cold = coldOC;
+        }
+    }
+
+    // ---- 速率限制：目标温度（智能温控模式）----
+    {
+        int diff = target - actual_target_temp;
+        if (abs(diff) > RATE_LIMIT_TEMP) {
+            actual_target_temp += (diff > 0) ? RATE_LIMIT_TEMP : -RATE_LIMIT_TEMP;
+        } else {
+            actual_target_temp = target;
+        }
+    }
+
+    // ---- 统一下发（apply_level 内部用 actual_rpm/actual_cold/actual_target_temp 覆盖）----
+    apply_level(target_level);
 }
 
 static void main_loop(void) {
@@ -1471,6 +1517,37 @@ static void main_loop(void) {
     }
 }
 
+// ======================== 重连安全对齐 ========================
+
+/**
+ * 断联重连时：用实际值（制冷强度/目标温度）匹配最接近的档位，
+ * 将风扇转速对齐到该档位，防止断联前部分执行导致参数组合不协调。
+ *
+ * 例如：风扇转速很低但制冷强度很高（危险），或风扇很高但制冷很弱（噪音）。
+ * 匹配后风扇从安全值开始，再经 rate_limited_execute 向目标档位变化。
+ *
+ * 返回档位索引（0-based），失败返回 -1。
+ */
+static int match_nearest_gear_for_reconnect(void) {
+    if (gear_count == 0) return -1;
+
+    // 用目标档位的模式决定匹配依据
+    int mode = gear_table[target_level - 1].mode;
+    int ref_val = (mode == 0) ? actual_target_temp : actual_cold;
+
+    int best_idx = 0;
+    int best_dist = INT_MAX;
+    for (int i = 0; i < gear_count; i++) {
+        int tbl = (gear_table[i].mode == 0) ? gear_table[i].target : gear_table[i].cold;
+        int dist = abs(tbl - ref_val);
+        if (dist < best_dist) {
+            best_dist = dist;
+            best_idx = i;
+        }
+    }
+    return best_idx;
+}
+
 // ======================== 程序入口 ========================
 
 int main(int argc, char *argv[]) {
@@ -1505,7 +1582,6 @@ int main(int argc, char *argv[]) {
     battery_fan_level = load_gear();
     batt_cooldown = 0;
     target_level = battery_fan_level;
-    actual_level = battery_fan_level;
     write_log("脚本启动成功");
 
     // --- 等待模块就绪 + BLE 连接 ---
@@ -1556,8 +1632,8 @@ int main(int argc, char *argv[]) {
                     write_log("BLE 已断开，等待连接...\n");
                 }
 
-                // 散热器已断联，清零待执行步伐
-                actual_level = target_level;
+                // 散热器已断联，丢弃未执行的变化量
+                // 实际值保持断联前最后记录的数值，不再继续变化
             }
 
             // 等待完全恢复的循环（进程+BLE 都就绪）
@@ -1567,11 +1643,28 @@ int main(int argc, char *argv[]) {
                 if (is_app_alive() && app_ble_connected) {
                     app_was_alive = 1;
                     last_sent_valid = 0;
-                    smooth_rpm = -1;
-                    actual_level = target_level;
+
+                    // 重连安全对齐：将三个实际值都调到匹配挡位的值，
+                    // 后续由 rate_limited_execute 按正常速率向目标挡位变化，
+                    // 不在此处立即下发，防止部分执行后参数组合不协调
+                    if (actual_rpm >= 0 && actual_cold >= 0) {
+                        int idx = match_nearest_gear_for_reconnect();
+                        if (idx >= 0) {
+                            actual_rpm = gear_table[idx].fan_rpm;
+                            actual_cold = gear_table[idx].cold;
+                            actual_target_temp = gear_table[idx].target;
+                            write_log("重连 匹配档位%d 风扇%dRPM 制冷%d",
+                                      idx + 1, actual_rpm, actual_cold);
+                        }
+                    } else {
+                        actual_rpm = -1;
+                        actual_cold = -1;
+                        actual_target_temp = -1;
+                    }
+
                     last_batt_reading = -1;
                     first_run = 1;
-                    apply_level(actual_level);
+                    // 不下发，等下轮 rate_limited_execute 从匹配挡位自然过渡
                     break;
                 }
             }
@@ -1579,35 +1672,35 @@ int main(int argc, char *argv[]) {
         } else if (!app_was_alive) {
             app_was_alive = 1;
             last_sent_valid = 0;
-            smooth_rpm = -1;
-            actual_level = target_level;
+
+            // 重连安全对齐（同上方子循环路径）
+            if (actual_rpm >= 0 && actual_cold >= 0) {
+                int idx = match_nearest_gear_for_reconnect();
+                if (idx >= 0) {
+                    actual_rpm = gear_table[idx].fan_rpm;
+                    actual_cold = gear_table[idx].cold;
+                    actual_target_temp = gear_table[idx].target;
+                    write_log("重连 匹配档位%d 风扇%dRPM 制冷%d",
+                              idx + 1, actual_rpm, actual_cold);
+                }
+            } else {
+                actual_rpm = -1;
+                actual_cold = -1;
+                actual_target_temp = -1;
+            }
+
             last_batt_reading = -1;
             first_run = 1;
-            apply_level(actual_level);
+            // 不下发，等下轮 rate_limited_execute 从匹配挡位自然过渡
         }
 
         main_loop();
 
-        // ★ 逐步执行（只调整档位变量，不下发）
-        // 升档时：target ≤ GRADUAL_STEP_THRESHOLD 可直接跳转，否则按 GRADUAL_STEP 步进
-        // 降档：按 GRADUAL_STEP 步进（不超出 target）
-        if (actual_level < target_level) {
-            if (target_level <= GRADUAL_STEP_THRESHOLD) {
-                actual_level = target_level;
-            } else {
-                actual_level += GRADUAL_STEP;
-                if (actual_level > target_level) actual_level = target_level;
-            }
-        } else if (actual_level > target_level) {
-            actual_level -= GRADUAL_STEP;
-            if (actual_level < target_level) actual_level = target_level;
-        }
-
-        // ★ RPM 独立跟踪 + 统一下发（每周期一次 apply_level）
-        // RPM 平滑由 rpm_smooth_update 独立控制，不受档位变动影响
-        // 连续换档时 RPM 始终以 rpm_smooth_step 步长平滑变化
-        rpm_smooth_update(actual_level);
-        apply_level(actual_level);
+        // ★ 速率限制执行（替代逐档变动 + RPM 平滑跟踪）
+        // 每周期最多变动 RATE_LIMIT_RPM RPM、RATE_LIMIT_COLD 制冷强度、
+        // RATE_LIMIT_TEMP °C 目标温度，未完成部分自然累积到下周期
+        // 目标档位变化时自动从当前实际值重新计算差值
+        rate_limited_execute();
 
         // 逐秒睡眠（可被信号中断）
         for (int i = 0; i < 5 && running; i++) {

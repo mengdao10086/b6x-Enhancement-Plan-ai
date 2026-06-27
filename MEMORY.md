@@ -20,9 +20,13 @@
 
 - ~~FIFO 通信已废弃~~（KernelSU 下 App 进程写 `/data/local/tmp/` 权限不通）
 - tempctrl 通过 status 文件 mtime 每 5 秒检测 App 进程存活（模块心跳，超时 11 秒判死）
-- App 进程不存在 → 等待复活；复活后 `actual_level = target_level` 对齐，清缓存强制下发
-- 断联时 `actual_level = target_level`（清零待执行步伐），无超时重置
-- 档位决策与执行分离：`main_loop` 纯计算，每轮连接检测后逐步执行 ±1 档
+- App 进程不存在 → 等待复活；复活后三值（RPM/制冷/温度）对齐匹配挡位，由 rate_limited_execute 按正常速率过渡
+- 断联时实际值保持不动（丢弃未执行变化量），无超时重置
+- 档位决策与执行分离：`main_loop` 纯计算，`rate_limited_execute` 按速率限制执行
+  - 风扇转速每周期最多 ±`RATE_LIMIT_RPM`（默认 250 RPM）
+  - 制冷片强度每周期最多 ±`RATE_LIMIT_COLD`（默认 20，固定功率模式）
+  - 目标温度每周期最多 ±`RATE_LIMIT_TEMP`（默认 2°C，智能温控模式）
+  - 溢出自然累积下周期，目标变化时从当前实际值重新计算
 - 电池档位继承：`battery_fan_level = final_level`，紧急退出后不会暴跌
 - 温度趋势豁免：降温不升档、升温不降档（最多豁免 `OVERRIDE_MAX` 次，默认 6）
 - 紧急干预：CPU 温度 + 电池电流双源，OR 入 AND 出，电流值不平滑

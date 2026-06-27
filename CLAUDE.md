@@ -1,12 +1,15 @@
 # 飞智 B6X 增强计划 — Claude 指令
 
 ## 项目定位
-飞智 B6X 散热器开发者工具增强项目。**Android 16 BLE 修复已完成**，**智能温控 v2.0 已发布**。
+飞智 B6X 散热器开发者工具增强项目。**Android 16 BLE 修复已完成**，**智能温控 v2.1 已发布**。
 
-### v2.1 概况（累计）
-- 决策与执行分离：main_loop 纯计算，连接检测后逐步 ±1 档执行
+### v2.1 概况（速率限制取代逐档变动）
+- **速率限制执行**（替代逐档变动）：三参数独立限速——风扇 RPM（`RATE_LIMIT_RPM`，默认 250）、制冷强度（`RATE_LIMIT_COLD`，默认 20）、目标温度（`RATE_LIMIT_TEMP`，默认 2°C）
+- 溢出自然累积下周期，目标变化时从当前实际值重新计算
+- 所有速率限制值加入 `profile.conf` 可自定义；`RPM_SMOOTH_STEP` 作为 `RATE_LIMIT_RPM` 的别名保留兼容
+- 断联时丢弃未执行的变化量，实际值保持断联前最后数值
+- 重连时三个实际值（RPM/制冷/温度）都调到匹配挡位的值，不下发，等下轮 `rate_limited_execute` 按正常速率向目标挡位过渡，防止基准值错误导致的操作偏差
 - 紧急干预双源化：CPU 温度 + 电池电流 OR 入 AND 出，电流使用绝对值不平滑
-- 断联时 actual_level = target_level 清零待执行步伐
 - 退出紧急直接按 AND 结果钳制，不再判断电池温度/充电电流
 - 删除 pgrep 进程检测：改为 status 文件 mtime 心跳 + BLE=1 双重检查
 - 日志持 FILE* 避免每行 open/close，日志格式支持末尾 \\n 实现空行
@@ -15,12 +18,12 @@
 
 ### v2.0 概况（基础）
 - 通信：~~FIFO~~ → 已废弃，改用 status 文件 mtime 心跳 + BLE=1 双重检查
-- 控制：C 守护程序每 5 秒计算目标档位 → 渐进执行（每次±1 档压制突变噪音）→ `am broadcast` → LSPosed 模块 → `WaspWingManager.setRunMode()` → BLE 指令
 - 配置：所有阈值通过 `profile.conf` 运行时配置，支持 mtime 热重载（`CONFIG_ENABLED=0` 可跳过）
-- 档位：1~12 级，使用查表法，趋势豁免+峰值反补合并逻辑，决策与执行分离（逐级±1 档）
+- 档位：1~12 级，使用查表法，趋势豁免+峰值反补合并逻辑
 - 进程检测：双重检查（status 文件 mtime 心跳 + BLE=1），无 pgrep
 - 日志：持 FILE* 避免重复 open/close，超限自动滚动
 - 部署：Magisk/KSU 模块（`service.sh` 复制到 `/data/local/tmp/` 绕过 noexec）
+- *(v2.1 改为速率限制执行)*
 
 ## ⚠️ Git 子模块
 - **本目录（`飞智b6x增强计划/`）是一个 git 子模块**，所有代码和 git 操作都在此目录内进行。
