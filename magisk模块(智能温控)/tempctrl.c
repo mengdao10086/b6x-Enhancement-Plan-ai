@@ -98,8 +98,8 @@ static void init_gear_table(void) {
 // --- 电池温度控制（0.1°C）—— 可由 profile.conf 覆盖 ---
 static int BATT_BASELINE = 350;     // 基准温度 35.0°C
 static int BATT_ZONE_1   = 5;       // ±0.5°C → 不变（死区）
-static int BATT_ZONE_2   = 15;      // ±1.5°C → ±1 档
-static int BATT_ZONE_3   = 30;      // ±3.0°C → ±2 档（超过→±3档）
+static int BATT_ZONE_2   = 13;      // ±1.3°C → ±1 档
+static int BATT_ZONE_3   = 25;      // ±2.5°C → ±2 档（超过→±3档）
 
 // --- CPU 温度扫描范围（可配置）---
 // 首次运行在此范围内扫描有效的 thermal_zone，后续只扫命中的 zone
@@ -236,6 +236,17 @@ static int last_batt_reading = -1;     // 上次读取的电池温度（变化�
 static int batt_unchanged_count = 0;   // 温度连续不变跳过次数（≥BATT_SKIP_MAX 时强制进入）
 static int trend_override = 0;         // 趋势豁免计数器（锚点温度复位机制使用）
 static int first_run = 1;              // 首次运行，滤波直接赋初值
+
+// --- 紧急退出恢复期状态 ---
+static int batt_recovery_multiplier = 1;  // 电池阈值恢复倍率（1=正常）
+static int batt_recovery_cycles = 0;      // 当前恢复阶段剩余周期数
+
+// 恢复期配置（可由 profile.conf 覆盖）
+static int BATT_RECOVERY_M1 = 6;             // P1 阈值倍率
+static int BATT_RECOVERY_M2 = 4;             // P2 阈值倍率
+static int BATT_RECOVERY_M3 = 2;             // P3 阈值倍率
+static int BATT_RECOVERY_PHASE_CYCLES = 6;   // 每阶段周期数
+
 static volatile int running = 1;       // 信号控制标记
 
 // --- 执行状态 ---
@@ -387,6 +398,10 @@ static void load_config(const char *path) {
         // PEAK_DAMP_* 已移除（v2.1 改为 Sheet3 查表法）
         else if (strcmp(key, "BATT_COOLDOWN_CYCLES") == 0) BATT_COOLDOWN_CYCLES = clamp(val, 0, 20);
         else if (strcmp(key, "BATT_SKIP_MAX") == 0)        BATT_SKIP_MAX        = clamp(val, 0, 30);
+        else if (strcmp(key, "BATT_RECOVERY_M1") == 0)    BATT_RECOVERY_M1     = clamp(val, 1, 20);
+        else if (strcmp(key, "BATT_RECOVERY_M2") == 0)    BATT_RECOVERY_M2     = clamp(val, 1, 20);
+        else if (strcmp(key, "BATT_RECOVERY_M3") == 0)    BATT_RECOVERY_M3     = clamp(val, 1, 20);
+        else if (strcmp(key, "BATT_RECOVERY_PHASE_CYCLES") == 0) BATT_RECOVERY_PHASE_CYCLES = clamp(val, 1, 50);
         else if (strcmp(key, "STATUS_TIMEOUT") == 0)       STATUS_TIMEOUT     = clamp(val, 5, 60);
         else if (strcmp(key, "BATT_TEMP_PATH") == 0) {
             char *v = val_str;
@@ -1032,6 +1047,27 @@ static void battery_control(void) {
     int batt = read_battery_temp();
     if (batt < 0) return;
 
+    // --- 紧急退出恢复期：阶段推进 ---
+    // 阶段推进不受电池温度读取失败影响（已在上方 return），
+    // 但推进逻辑需放在首次读取判断之前，确保冷却期中也能正常走完各阶段
+    if (batt_recovery_cycles > 0) {
+        batt_recovery_cycles--;
+        if (batt_recovery_cycles == 0) {
+            if (batt_recovery_multiplier == BATT_RECOVERY_M1) {
+                batt_recovery_multiplier = BATT_RECOVERY_M2;
+                batt_recovery_cycles = BATT_RECOVERY_PHASE_CYCLES;
+                write_log("恢复期 倍率%d %d周期", batt_recovery_multiplier, batt_recovery_cycles);
+            } else if (batt_recovery_multiplier == BATT_RECOVERY_M2) {
+                batt_recovery_multiplier = BATT_RECOVERY_M3;
+                batt_recovery_cycles = BATT_RECOVERY_PHASE_CYCLES;
+                write_log("恢复期 倍率%d %d周期", batt_recovery_multiplier, batt_recovery_cycles);
+            } else if (batt_recovery_multiplier == BATT_RECOVERY_M3) {
+                batt_recovery_multiplier = 1;
+                write_log("恢复期 结束");
+            }
+        }
+    }
+
     // 首次读取（启动后/重连后第一次）：不参与任何判断，数据正常更新，直接进入冷却
     if (last_batt_reading < 0) {
         last_batt_reading = batt;
@@ -1051,10 +1087,14 @@ static void battery_control(void) {
     if      (diff > 0) sign =  1;
     else if (diff < 0) sign = -1;
     else               sign =  0;
+    // 紧急退出恢复期：将 BATT_ZONE 阈值乘以恢复倍率，降低调档灵敏度
+    int eff_z1 = BATT_ZONE_1 * batt_recovery_multiplier;
+    int eff_z2 = BATT_ZONE_2 * batt_recovery_multiplier;
+    int eff_z3 = BATT_ZONE_3 * batt_recovery_multiplier;
     int delta = 0;
-    if      (ad > BATT_ZONE_3) delta = 3;
-    else if (ad > BATT_ZONE_2) delta = 2;
-    else if (ad > BATT_ZONE_1) delta = 1;
+    if      (ad > eff_z3) delta = 3;
+    else if (ad > eff_z2) delta = 2;
+    else if (ad > eff_z1) delta = 1;
     delta *= sign;
 
     int cur_idle = batt_idle_cycles;  // 快照：自上次有效变化以来已过的空闲周期数
@@ -1090,8 +1130,8 @@ static void battery_control(void) {
         int dir = (batt_change > 0) ? 1 : -1;  // +1=升温, -1=降温
 
         // 三区判断：冷外区 / 内区 / 热外区
-        int is_cold_outer = (batt <= BATT_BASELINE - BATT_ZONE_2);
-        int is_hot_outer  = (batt >= BATT_BASELINE + BATT_ZONE_2);
+        int is_cold_outer = (batt <= BATT_BASELINE - eff_z2);
+        int is_hot_outer  = (batt >= BATT_BASELINE + eff_z2);
         int in_inner_zone = !is_cold_outer && !is_hot_outer;
 
         // 根据方向+区域查三级阈值（0.1°C 单位，999=无穷大）
@@ -1448,6 +1488,15 @@ static void main_loop(void) {
     prev_emerg_level = emergency_level;
     emergency_intervention();
 
+    // 重新进入紧急 → 取消恢复期（立即恢复全灵敏度以快速响应）
+    if (emergency_level > prev_emerg_level) {
+        if (batt_recovery_multiplier > 1) {
+            write_log("恢复期 取消（重新进入紧急）");
+        }
+        batt_recovery_multiplier = 1;
+        batt_recovery_cycles = 0;
+    }
+
     // 2. 电池温度控制（内部处理冷却期）
     battery_control();
 
@@ -1514,6 +1563,14 @@ static void main_loop(void) {
                 target_level = battery_fan_level;
         }
         // exit_mode == 0 → 电池温度过高，不退出紧急，保持当前档位
+
+        // 启动恢复期：紧急等级降低后逐步恢复电池调档灵敏度
+        // 恢复期内 BATT_ZONE 阈值 × 恢复倍率（反补正常执行）
+        // 倍率序列 M1→M2→M3→1，每阶段持续 BATT_RECOVERY_PHASE_CYCLES 周期
+        // 连续退出紧急时重新从 M1 开始
+        batt_recovery_multiplier = BATT_RECOVERY_M1;
+        batt_recovery_cycles = BATT_RECOVERY_PHASE_CYCLES;
+        write_log("恢复期 倍率%d %d周期", batt_recovery_multiplier, batt_recovery_cycles);
     }
 }
 
