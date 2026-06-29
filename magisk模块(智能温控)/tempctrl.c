@@ -50,6 +50,7 @@ typedef struct {
     int target;     // 智能温控目标温度 (°C)，固定功率时为 0
     int fan_rpm;    // 风扇转速 (RPM)
     int cold;       // 制冷片强度 (0-194)
+    int config_n;   // 配置中的原始档位编号（日志显示用，无空洞时同 runtime level）
 } GearEntry;
 
 static GearEntry gear_table[GEAR_TABLE_MAX];
@@ -64,18 +65,18 @@ static int level_max = 12;     // 默认 12 档（由 init_gear_table 设定）
 // 例：GEAR_12=1,0,6000,190 表示 12 档固定功率，6000RPM，制冷 190
 //     GEAR_5=0,16,2650,0   表示  5 档智能温控，16°C，风扇上限 2650RPM
 static const GearEntry DEFAULT_GEAR_TABLE[12] = {
-    {1, 0, 2000,  5},    // Level 1   α待机
-    {1, 0, 2000, 10},    // Level 2
-    {1, 0, 2000, 20},    // Level 3
-    {1, 0, 2300, 35},    // Level 4
-    {1, 0, 2650, 55},    // Level 5   LEVEL_INIT
-    {1, 0, 3050, 75},    // Level 6
-    {1, 0, 3500, 100},   // Level 7
-    {1, 0, 4000, 125},   // Level 8
-    {1, 0, 4500, 145},   // Level 9
-    {1, 0, 5000, 165},   // Level 10
-    {1, 0, 5500, 180},   // Level 11
-    {1, 0, 6000, 190},   // Level 12 制冷峰值
+    {1, 0, 2000,  5,  1},    // Level 1   α待机
+    {1, 0, 2000, 10,  2},    // Level 2
+    {1, 0, 2000, 20,  3},    // Level 3
+    {1, 0, 2300, 35,  4},    // Level 4
+    {1, 0, 2650, 55,  5},    // Level 5   LEVEL_INIT
+    {1, 0, 3050, 75,  6},    // Level 6
+    {1, 0, 3500, 100, 7},    // Level 7
+    {1, 0, 4000, 125, 8},    // Level 8
+    {1, 0, 4500, 145, 9},    // Level 9
+    {1, 0, 5000, 165, 10},   // Level 10
+    {1, 0, 5500, 180, 11},   // Level 11
+    {1, 0, 6000, 190, 12},   // Level 12 制冷峰值
 };
 
 /**
@@ -89,6 +90,26 @@ static void init_gear_table(void) {
     for (int i = 0; i < gear_count; i++) {
         gear_table[i] = DEFAULT_GEAR_TABLE[i];
     }
+}
+
+/** GEAR_N 配置解析临时结构体（用于排序后填入连续档位表） */
+typedef struct {
+    int config_n;   // 配置中的原始档位编号
+    int mode;
+    int target;
+    int fan_rpm;
+    int cold;
+} GearConfigTemp;
+
+static int cmp_gear_config_n(const void *a, const void *b) {
+    return ((const GearConfigTemp*)a)->config_n - ((const GearConfigTemp*)b)->config_n;
+}
+
+/** 获取运行时档位的配置编号（日志显示用，空洞时显示原始编号） */
+static inline int gear_label(int level) {
+    if (level < 1 || level > gear_count) return level;
+    int label = gear_table[level - 1].config_n;
+    return (label > 0) ? label : level;
 }
 
 // --- 制冷片强度范围 ---
@@ -240,6 +261,7 @@ static int first_run = 1;              // 首次运行，滤波直接赋初值
 // --- 紧急退出恢复期状态 ---
 static int batt_recovery_multiplier = 1;  // 电池阈值恢复倍率（1=正常）
 static int batt_recovery_cycles = 0;      // 当前恢复阶段剩余周期数
+static int recovery_step = 0;             // 恢复期阶段（0=关闭, 1=P1, 2=P2, 3=P3）
 
 // 恢复期配置（可由 profile.conf 覆盖）
 static int BATT_RECOVERY_M1 = 6;             // P1 阈值倍率
@@ -367,6 +389,8 @@ static void load_config(const char *path) {
     // ---- 第二遍扫描：解析全部参数 ----
     rewind(f);
     int loaded = 0;
+    GearConfigTemp config_gears[GEAR_TABLE_MAX];
+    int config_gear_count = 0;
     while (fgets(line, sizeof(line), f)) {
         char *key;
         char *val_str = config_parse_line(line, &key);
@@ -465,6 +489,7 @@ static void load_config(const char *path) {
         }
         else if (strncmp(key, "GEAR_", 5) == 0) {
             // GEAR_N=模式,目标温度(°C),风扇转速(RPM),制冷片强度
+            // 收集到临时数组，解析完成后按 config_n 排序填入连续档位表
             int n = atoi(key + 5);
             if (n < 1 || n > GEAR_TABLE_MAX || !gear_config_seen) continue;
 
@@ -478,11 +503,14 @@ static void load_config(const char *path) {
             if (*next != ',') continue;
             c = (int)strtol(next + 1, NULL, 10);
 
-            gear_table[n - 1].mode   = (m == 0) ? 0 : 1;
-            gear_table[n - 1].target = clamp(t, 5, 35);
-            gear_table[n - 1].fan_rpm = clamp(f, 2000, 6000);
-            gear_table[n - 1].cold   = clamp(c, 1, 194);
-            if (n > gear_count) gear_count = n;
+            if (config_gear_count < GEAR_TABLE_MAX) {
+                config_gears[config_gear_count].config_n = n;
+                config_gears[config_gear_count].mode     = (m == 0) ? 0 : 1;
+                config_gears[config_gear_count].target   = clamp(t, 5, 35);
+                config_gears[config_gear_count].fan_rpm  = clamp(f, 2000, 6000);
+                config_gears[config_gear_count].cold     = clamp(c, 1, 194);
+                config_gear_count++;
+            }
         }
         else { continue; }
 
@@ -490,9 +518,20 @@ static void load_config(const char *path) {
     }
     fclose(f);
 
-    // ---- GEAR_N 后处理：同步档位范围，钳制当前档位 ----
+    // ---- GEAR_N 后处理：排序重排为连续档位表，同步范围 ----
     if (gear_config_seen) {
-        if (gear_count > 0) {
+        if (config_gear_count > 0) {
+            // 按配置编号排序，填入连续档位表
+            qsort(config_gears, config_gear_count, sizeof(GearConfigTemp), cmp_gear_config_n);
+            gear_count = 0;
+            for (int i = 0; i < config_gear_count; i++) {
+                gear_table[i].config_n = config_gears[i].config_n;
+                gear_table[i].mode     = config_gears[i].mode;
+                gear_table[i].target   = config_gears[i].target;
+                gear_table[i].fan_rpm  = config_gears[i].fan_rpm;
+                gear_table[i].cold     = config_gears[i].cold;
+                gear_count++;
+            }
             level_max = gear_count;
             battery_fan_level = clamp(battery_fan_level, level_min, level_max);
             write_log("配置 档位表 %d 级 (1~%d)", gear_count, level_max);
@@ -849,15 +888,9 @@ static int read_cpu_temp_max(void) {
  * 返回值：µA 绝对值，读取失败返回 -1
  */
 static int read_battery_current_abs(void) {
-    FILE *f = fopen(BATT_CURRENT_PATH, "r");
-    if (!f) return -1;
-    int val;
-    if (fscanf(f, "%d", &val) != 1) {
-        fclose(f);
-        return -1;
-    }
-    fclose(f);
-    return ((val >= 0 ? val : -val)) / BATT_CURRENT_DIVISOR;
+    int val = read_sysfs_int(BATT_CURRENT_PATH);
+    if (val < 0) return -1;
+    return abs(val) / BATT_CURRENT_DIVISOR;
 }
 
 // ======================== 控制参数计算与下发 ========================
@@ -1045,24 +1078,33 @@ static int is_app_alive(void) {
  */
 static void battery_control(void) {
     int batt = read_battery_temp();
-    if (batt < 0) return;
+    if (batt < 0) {
+        batt_idle_cycles++;  // 传感器偶发失败时递增空闲计数，保证温差归一化正确
+        return;
+    }
 
-    // --- 紧急退出恢复期：阶段推进 ---
-    // 阶段推进不受电池温度读取失败影响（已在上方 return），
+    // --- 紧急退出恢复期：阶段推进（用 recovery_step 索引，不依赖具体倍率值）---
+    // 阶段推进不受电池温度读取失败影响（已在上方处理），
     // 但推进逻辑需放在首次读取判断之前，确保冷却期中也能正常走完各阶段
     if (batt_recovery_cycles > 0) {
         batt_recovery_cycles--;
         if (batt_recovery_cycles == 0) {
-            if (batt_recovery_multiplier == BATT_RECOVERY_M1) {
+            if (recovery_step == 1) {
+                // P1 → P2
                 batt_recovery_multiplier = BATT_RECOVERY_M2;
+                recovery_step = 2;
                 batt_recovery_cycles = BATT_RECOVERY_PHASE_CYCLES;
                 write_log("恢复期 倍率%d %d周期", batt_recovery_multiplier, batt_recovery_cycles);
-            } else if (batt_recovery_multiplier == BATT_RECOVERY_M2) {
+            } else if (recovery_step == 2) {
+                // P2 → P3
                 batt_recovery_multiplier = BATT_RECOVERY_M3;
+                recovery_step = 3;
                 batt_recovery_cycles = BATT_RECOVERY_PHASE_CYCLES;
                 write_log("恢复期 倍率%d %d周期", batt_recovery_multiplier, batt_recovery_cycles);
-            } else if (batt_recovery_multiplier == BATT_RECOVERY_M3) {
+            } else if (recovery_step >= 3) {
+                // P3 结束 → 恢复正常
                 batt_recovery_multiplier = 1;
+                recovery_step = 0;
                 write_log("恢复期 结束");
             }
         }
@@ -1174,7 +1216,7 @@ static void battery_control(void) {
 	                if (trend_override == 0) {
 	                    // 首次豁免：记录锚点温度
 	                    override_anchor_temp = batt;
-	                    write_log("趋势豁免 %d", battery_fan_level);
+	                    write_log("趋势豁免 %d", gear_label(battery_fan_level));
 	                    trend_override++;
 	                    skip_delta = 1;
 	                } else {
@@ -1231,7 +1273,7 @@ static void battery_control(void) {
 	                        rev_comp_cooldown = REV_COMP_COOLDOWN;
 	                        write_log("过冲%d.%d周期 挡位%d（%+d）",
 	                                  rate / 10, rate % 10,
-	                                  battery_fan_level, adjust);
+	                                  gear_label(battery_fan_level), adjust);
 	                    }
 	                }
 	            } else {
@@ -1248,7 +1290,7 @@ static void battery_control(void) {
         battery_fan_level = clamp(battery_fan_level, level_min, level_max);
         if (old != battery_fan_level) {
             batt_cooldown = BATT_COOLDOWN_CYCLES;
-            write_log("挡位%d（%+d）", battery_fan_level, delta);
+            write_log("挡位%d（%+d）", gear_label(battery_fan_level), delta);
         }
     }
 
@@ -1495,9 +1537,28 @@ static void main_loop(void) {
         }
         batt_recovery_multiplier = 1;
         batt_recovery_cycles = 0;
+        recovery_step = 0;
+        // 复位趋势豁免和反补累积，防止紧急期间的脏状态影响后续逻辑
+        trend_override = 0;
+        override_anchor_temp = -1;
+        rev_comp_pending_abs = 0;
+        rev_comp_pending_idle = 0;
     }
 
-    // 2. 电池温度控制（内部处理冷却期）
+    // 退出紧急 → 在 battery_control 之前启动恢复期，确保本周期即生效
+    // 同时复位趋势豁免/反补累积，避免退出紧急后因脏数据误调档
+    if (emergency_level < prev_emerg_level) {
+        recovery_step = 1;
+        batt_recovery_multiplier = BATT_RECOVERY_M1;
+        batt_recovery_cycles = BATT_RECOVERY_PHASE_CYCLES;
+        trend_override = 0;
+        override_anchor_temp = -1;
+        rev_comp_pending_abs = 0;
+        rev_comp_pending_idle = 0;
+        write_log("恢复期 倍率%d %d周期", batt_recovery_multiplier, batt_recovery_cycles);
+    }
+
+    // 2. 电池温度控制（内部处理冷却期，此时恢复期倍率已生效）
     battery_control();
 
     // 3. 计算最终档位 = max(电池基础档位, 紧急强制最低档位)
@@ -1515,6 +1576,7 @@ static void main_loop(void) {
     //    电池温度低于基准+EMERG_EXIT_BATT_THRESHOLD → 全效退出
     //    低于基准+EMERG_EXIT_BATT_THRESHOLD×2 → 半效退出
     //    否则 → 不退出（保持当前档位）
+    //    注意：恢复期启动已在步骤 1 中完成，此处只做 cap/drop
     if (emergency_level < prev_emerg_level) {
         int batt_temp = read_battery_temp();
         int exit_mode = 2;  // 0=不退出, 1=半效, 2=全效
@@ -1563,14 +1625,7 @@ static void main_loop(void) {
                 target_level = battery_fan_level;
         }
         // exit_mode == 0 → 电池温度过高，不退出紧急，保持当前档位
-
-        // 启动恢复期：紧急等级降低后逐步恢复电池调档灵敏度
-        // 恢复期内 BATT_ZONE 阈值 × 恢复倍率（反补正常执行）
-        // 倍率序列 M1→M2→M3→1，每阶段持续 BATT_RECOVERY_PHASE_CYCLES 周期
-        // 连续退出紧急时重新从 M1 开始
-        batt_recovery_multiplier = BATT_RECOVERY_M1;
-        batt_recovery_cycles = BATT_RECOVERY_PHASE_CYCLES;
-        write_log("恢复期 倍率%d %d周期", batt_recovery_multiplier, batt_recovery_cycles);
+        // 恢复期已在步骤 1 提前启动，此处不再重复
     }
 }
 
@@ -1588,8 +1643,13 @@ static void main_loop(void) {
 static int match_nearest_gear_for_reconnect(void) {
     if (gear_count == 0) return -1;
 
+    // 防御：target_level 越界时回退到 level_min
+    int safe_level = target_level;
+    if (safe_level < level_min || safe_level > level_max)
+        safe_level = level_min;
+
     // 用目标档位的模式决定匹配依据
-    int mode = gear_table[target_level - 1].mode;
+    int mode = gear_table[safe_level - 1].mode;
     int ref_val = (mode == 0) ? actual_target_temp : actual_cold;
 
     int best_idx = 0;
@@ -1711,7 +1771,7 @@ int main(int argc, char *argv[]) {
                             actual_cold = gear_table[idx].cold;
                             actual_target_temp = gear_table[idx].target;
                             write_log("重连 匹配档位%d 风扇%dRPM 制冷%d",
-                                      idx + 1, actual_rpm, actual_cold);
+                                      gear_label(idx + 1), actual_rpm, actual_cold);
                         }
                     } else {
                         actual_rpm = -1;
@@ -1738,7 +1798,7 @@ int main(int argc, char *argv[]) {
                     actual_cold = gear_table[idx].cold;
                     actual_target_temp = gear_table[idx].target;
                     write_log("重连 匹配档位%d 风扇%dRPM 制冷%d",
-                              idx + 1, actual_rpm, actual_cold);
+                              gear_label(idx + 1), actual_rpm, actual_cold);
                 }
             } else {
                 actual_rpm = -1;

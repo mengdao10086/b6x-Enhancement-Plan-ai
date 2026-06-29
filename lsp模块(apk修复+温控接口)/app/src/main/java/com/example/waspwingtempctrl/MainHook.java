@@ -349,6 +349,20 @@ public class MainHook implements IXposedHookLoadPackage {
                     });
             XposedBridge.log(TAG + " 已钩住 GattCallback.onServicesDiscovered");
 
+            // 远程 BLE 断联检测（散热器超出范围/关机/蓝牙异常断开时的回调）
+            XposedHelpers.findAndHookMethod(gattCb, "onConnectionStateChange",
+                    BluetoothGatt.class, int.class, int.class, new XC_MethodHook() {
+                        @Override
+                        protected void beforeHookedMethod(MethodHookParam param) {
+                            int newState = (int) param.args[2];
+                            if (newState == 0) {  // BluetoothProfile.STATE_DISCONNECTED
+                                bleConnected = false;
+                                XposedBridge.log(TAG + " BLE 断联（onConnectionStateChange）");
+                            }
+                        }
+                    });
+            XposedBridge.log(TAG + " 已钩住 GattCallback.onConnectionStateChange（远程断联检测）");
+
             // 诊断 3d：WaspWingDataInteractionController.onGattConnected — GATT 连接成功
             // 同时用于修复 BLE 断联后重连时 bleConnected 未恢复的问题
             XposedHelpers.findAndHookMethod(wingCtrl, "onGattConnected",
@@ -493,7 +507,7 @@ public class MainHook implements IXposedHookLoadPackage {
                                 Boolean isConnected = (Boolean) XposedHelpers.callMethod(connLd, "getValue");
 
                                 if (isConnected != null && isConnected) {
-                                    XposedBridge.log(TAG + " onResume + BLE 已连接（tempctrl 通过 pgrep 检测）");
+                                    XposedBridge.log(TAG + " onResume + BLE 已连接（tempctrl 通过 status 文件检测）");
                                 } else {
                                     XposedBridge.log(TAG + " onResume 但 BLE 未连接，不唤醒");
                                 }
