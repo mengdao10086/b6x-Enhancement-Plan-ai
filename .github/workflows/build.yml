@@ -48,8 +48,8 @@ jobs:
             echo "magisk=true" >> "$GITHUB_OUTPUT"
           else
             CHANGES=$(git diff --name-only "$BEFORE" "${{ github.sha }}")
-            echo "$CHANGES" | grep -q '^lsp模块/' && echo "lsposed=true" >> "$GITHUB_OUTPUT" || echo "lsposed=false" >> "$GITHUB_OUTPUT"
-            echo "$CHANGES" | grep -q '^magisk模块/' && echo "magisk=true" >> "$GITHUB_OUTPUT" || echo "magisk=false" >> "$GITHUB_OUTPUT"
+            echo "$CHANGES" | grep -q '^lsp模块(apk修复+温控接口)/' && echo "lsposed=true" >> "$GITHUB_OUTPUT" || echo "lsposed=false" >> "$GITHUB_OUTPUT"
+            echo "$CHANGES" | grep -q '^magisk模块(智能温控)/' && echo "magisk=true" >> "$GITHUB_OUTPUT" || echo "magisk=false" >> "$GITHUB_OUTPUT"
           fi
 
   # ──────────────────────────────────────

@@ -234,6 +234,14 @@ static char log_file_path[256] = "";
 static int LOG_MAX_KB = 7;          // 日志文件大小上限（KB），0=关闭日志
 static FILE *log_fp = NULL;          // 持久的日志文件指针，避免每行都 fopen/fclose
 static char log_path_opened[256] = ""; // 已打开的文件路径（检测路径变化）
+static int debug_mode = 0;           // 调试日志总开关，=1 时启用各分区调试输出
+static int debug_sensor = 0;    // [传感器] 电池/CPU/电流读数
+static int debug_emerg   = 0;   // [紧急干预] CPU 温度/电流紧急等级计算
+static int debug_batt    = 0;   // [电池控制] 电池温度调档/恢复期/反补
+static int debug_exec    = 0;   // [执行下发] 速率限制/am broadcast 送参数
+static int debug_conn    = 0;   // [连接状态] App 存活/BLE/重连对齐
+static int debug_config  = 0;   // [配置加载] 配置文件解析过程
+static int debug_main    = 0;   // [主循环] main_loop 流程跟踪
 
 // ======================== 配置文件系统 ========================
 
@@ -301,6 +309,7 @@ static int curr_smooth_valid = 0;     // 平滑数据是否有效
 static void write_log(const char *fmt, ...);
 static inline int clamp(int val, int lo, int hi);
 static void alarm_handler(int sig);
+static int match_nearest_gear_for_reconnect(void);
 
 /** 去除首尾空白，返回修剪后的起始指针 */
 static inline char *trim_line(char *line) {
@@ -487,6 +496,17 @@ static void load_config(const char *path) {
                 log_file_path[sizeof(log_file_path) - 1] = '\0';
             }
         }
+        else if (strcmp(key, "DEBUG_MODE") == 0) {
+            debug_mode = (val != 0) ? 1 : 0;
+            write_log("配置 调试模式 %s", debug_mode ? "开启" : "关闭");
+        }
+        else if (strcmp(key, "DEBUG_SENSOR") == 0) { debug_sensor = (val != 0) ? 1 : 0; }
+        else if (strcmp(key, "DEBUG_EMERG") == 0)   { debug_emerg   = (val != 0) ? 1 : 0; }
+        else if (strcmp(key, "DEBUG_BATT") == 0)    { debug_batt    = (val != 0) ? 1 : 0; }
+        else if (strcmp(key, "DEBUG_EXEC") == 0)    { debug_exec    = (val != 0) ? 1 : 0; }
+        else if (strcmp(key, "DEBUG_CONN") == 0)    { debug_conn    = (val != 0) ? 1 : 0; }
+        else if (strcmp(key, "DEBUG_CONFIG") == 0)  { debug_config  = (val != 0) ? 1 : 0; }
+        else if (strcmp(key, "DEBUG_MAIN") == 0)    { debug_main    = (val != 0) ? 1 : 0; }
         else if (strncmp(key, "GEAR_", 5) == 0) {
             // GEAR_N=模式,目标温度(°C),风扇转速(RPM),制冷片强度
             // 收集到临时数组，解析完成后按 config_n 排序填入连续档位表
@@ -674,6 +694,9 @@ static void write_log(const char *fmt, ...) {
     fflush(log_fp);    // 立即落盘，防止崩溃丢日志
 }
 
+/** 调试日志宏：需要总开关 DEBUG_MODE=1 且对应分区开关=1 时才输出 */
+#define debug_log(flag, fmt, ...) \n    do { if (debug_mode && (flag)) write_log("[DEBUG] " fmt, ##__VA_ARGS__); } while(0)
+
 static inline int clamp(int val, int lo, int hi) {
     if (val < lo) return lo;
     if (val > hi) return hi;
@@ -815,7 +838,9 @@ static int read_thermal_zone_raw(int zone_id) {
 static int read_battery_temp(void) {
     int raw = read_sysfs_int(BATT_TEMP_PATH);
     if (raw < 0) return -1;
-    return raw / BATT_TEMP_DIVISOR;
+    int val = raw / BATT_TEMP_DIVISOR;
+    debug_log(debug_sensor, "batt_temp 原始 %d 除数 %d = %d (%.1f°C)", raw, BATT_TEMP_DIVISOR, val, val / 10.0);
+    return val;
 }
 
 /**
@@ -867,6 +892,14 @@ static int read_cpu_temp_max(void) {
             cpu_zone_cache[i] = readings[i].id;
         cpu_zone_count = keep;
         cpu_zone_scanned = 1;
+
+        if (keep == 0) {
+            debug_log(debug_sensor, "thermal_zone 扫描 无可读 zone（路径 %s），CPU 紧急无法触发",
+                      CPU_TEMP_PATH_FMT);
+        } else {
+            debug_log(debug_sensor, "thermal_zone 扫描 发现 %d 个有效 zone，保留 %d 个最高温",
+                      count, keep);
+        }
     }
 
     // 后续调用 → 只扫描已保留的 zone
@@ -877,6 +910,10 @@ static int read_cpu_temp_max(void) {
 
         int decic = raw / CPU_TEMP_DIVISOR;
         if (decic > max_temp) max_temp = decic;
+    }
+    if (max_temp >= 0) {
+        debug_log(debug_sensor, "cpu_temp zone=%.0f max=%d (%.1f°C)",
+                  (double)cpu_zone_count, max_temp, max_temp / 10.0);
     }
     return max_temp;
 }
@@ -890,7 +927,9 @@ static int read_cpu_temp_max(void) {
 static int read_battery_current_abs(void) {
     int val = read_sysfs_int(BATT_CURRENT_PATH);
     if (val < 0) return -1;
-    return abs(val) / BATT_CURRENT_DIVISOR;
+    int abs_val = abs(val) / BATT_CURRENT_DIVISOR;
+    debug_log(debug_sensor, "batt_current 原始 %d 除数 %d = %d µA (%.1fA)", val, BATT_CURRENT_DIVISOR, abs_val, abs_val / 1000000.0);
+    return abs_val;
 }
 
 // ======================== 控制参数计算与下发 ========================
@@ -978,8 +1017,12 @@ static int apply_level(int level) {
         coldOC    == last_coldOC &&
         windLevel == last_windLevel)
     {
+        debug_log(debug_exec, "apply_level 档位%d 参数无变化，跳过下发", gear_label(level));
         return 0;   // 无变化，跳过
     }
+
+    debug_log(debug_exec, "apply_level 下发 档位%d mode=%d target=%d windOC=%d coldOC=%d windLevel=%d",
+              gear_label(level), mode, target, windOC, coldOC, windLevel);
 
     // ---- 直接执行 am（fork+execvp 避开 shell 进程） ----
     char m_s[12], t_s[12], woc_s[12], coc_s[12], wl_s[12];
@@ -1053,7 +1096,9 @@ static int is_app_alive(void) {
     struct stat st;
     if (stat(status_file_path, &st) != 0) return 0;
     time_t now = time(NULL);
-    return (now - st.st_mtime <= STATUS_TIMEOUT) ? 1 : 0;
+    int alive = (now - st.st_mtime <= STATUS_TIMEOUT) ? 1 : 0;
+    debug_log(debug_conn, "app_alive %d mtime_gap=%lds timeout=%ds", alive, (long)(now - st.st_mtime), STATUS_TIMEOUT);
+    return alive;
 }
 
 // ======================== 电池温度控制 ========================
@@ -1094,15 +1139,18 @@ static void battery_control(void) {
                 batt_recovery_multiplier = BATT_RECOVERY_M2;
                 recovery_step = 2;
                 batt_recovery_cycles = BATT_RECOVERY_PHASE_CYCLES;
+                debug_log(debug_batt, "recovery P1→P2 倍率%d→%d", BATT_RECOVERY_M1, BATT_RECOVERY_M2);
             } else if (recovery_step == 2) {
                 // P2 → P3
                 batt_recovery_multiplier = BATT_RECOVERY_M3;
                 recovery_step = 3;
                 batt_recovery_cycles = BATT_RECOVERY_PHASE_CYCLES;
+                debug_log(debug_batt, "recovery P2→P3 倍率%d→%d", BATT_RECOVERY_M2, BATT_RECOVERY_M3);
             } else if (recovery_step >= 3) {
                 // P3 结束 → 恢复正常
                 batt_recovery_multiplier = 1;
                 recovery_step = 0;
+                debug_log(debug_batt, "recovery P3 结束，恢复正常");
             }
         }
     }
@@ -1136,6 +1184,9 @@ static void battery_control(void) {
     else if (ad > eff_z1) delta = 1;
     delta *= sign;
 
+    debug_log(debug_batt, "batt_ctrl temp=%d (%.1f°C) diff=%d ad=%d sign=%d eff_z=[%d/%d/%d] delta=%d rec_mul=%d",
+              batt, batt / 10.0, diff, ad, sign, eff_z1, eff_z2, eff_z3, delta, batt_recovery_multiplier);
+
     int cur_idle = batt_idle_cycles;  // 快照：自上次有效变化以来已过的空闲周期数
 
     // 温度值与上次调整时相同 → 计数跳过，超过 BATT_SKIP_MAX 次后强制进入
@@ -1159,6 +1210,7 @@ static void battery_control(void) {
     if (in_cooldown) {
         batt_cooldown--;
         skip_delta = 1;
+        debug_log(debug_batt, "batt_ctrl 冷却中，剩余%d周期", batt_cooldown);
     }
     if (rev_comp_cooldown > 0) rev_comp_cooldown--;
 
@@ -1277,6 +1329,7 @@ static void battery_control(void) {
 	                // 冷却期内累积温差和周期数，不做调整
 	                rev_comp_pending_abs = total_abs;
 	                rev_comp_pending_idle = total_interval;
+	                debug_log(debug_batt, "batt_ctrl 反补冷却中 累积 abs=%d 周期=%d", total_abs, total_interval);
 	            }
 	        }
 	    }
@@ -1290,6 +1343,9 @@ static void battery_control(void) {
             write_log("挡位%d（%+d）", gear_label(battery_fan_level), delta);
         }
     }
+
+    debug_log(debug_batt, "batt_ctrl 最终 battery_fan_level=%d skip_delta=%d cooldown=%d",
+              battery_fan_level, skip_delta, batt_cooldown);
 
     // 更新温度记录
     last_batt_reading = batt;
@@ -1329,6 +1385,7 @@ static void emergency_intervention(void) {
     }
     int t = cpu_weighted;
     int cpu_valid = (cpu_now >= 0);
+    debug_log(debug_emerg, "emerg CPU 原始%d 滤波%d 有效%d", cpu_now, t, cpu_valid);
 
     // --- 2. 电池电流绝对值 ---
     int cur_ua = read_battery_current_abs();
@@ -1351,6 +1408,8 @@ static void emergency_intervention(void) {
         else if (cur_ua > CURRENT_EMERG_2) cur_lvl = 2;
         else if (cur_ua > CURRENT_EMERG_1) cur_lvl = 1;
     }
+    debug_log(debug_emerg, "emerg cpu_lvl=%d cur_lvl=%d combined=%d prev_level=%d",
+              cpu_lvl, cur_lvl, cpu_lvl + cur_lvl > 4 ? 4 : cpu_lvl + cur_lvl, prev_level);
 
     // === 4. 综合等级 = cpu_level + current_level（统一升降滞回） ===
     // 升档：combined > 当前等级 → 立即跳升（进入阈值，快速响应）
@@ -1364,13 +1423,15 @@ static void emergency_intervention(void) {
         new_level = combined;
     } else if (combined < emergency_level) {
         // 降档：双源都低于恢复阈值才允许降一级
-        int cpu_ok = 1;
+        // 注意：传感器读取失败时（!cpu_valid 或 !cur_valid）
+        //       cpu_ok/cur_ok 默认 0（保守），防止偶发读取失败导致误降级
+        int cpu_ok = 0;
         if (cpu_valid) {
             if      (emergency_level >= 3) cpu_ok = (t < CPU_RECOVER_2);
             else if (emergency_level >= 2) cpu_ok = (t < CPU_RECOVER_1);
             else                           cpu_ok = (t < CPU_RECOVER_0);
         }
-        int cur_ok = 1;
+        int cur_ok = 0;
         if (cur_valid) {
             int cur_exit = curr_smooth_valid ? curr_smooth_val : cur_ua;
             if      (emergency_level >= 3) cur_ok = (cur_exit < CURRENT_RECOVER_2);
@@ -1379,8 +1440,12 @@ static void emergency_intervention(void) {
         }
         if (cpu_ok && cur_ok) {
             new_level = emergency_level - 1;  // 逐级下降
+            debug_log(debug_emerg, "emerg 降级 %d→%d（cpu_ok=%d cur_ok=%d）",
+                      emergency_level, new_level, cpu_ok, cur_ok);
+        } else {
+            debug_log(debug_emerg, "emerg 保持 %d（cpu_ok=%d cur_ok=%d）",
+                      emergency_level, cpu_ok, cur_ok);
         }
-        // 至少一个未恢复 → 保持当前等级
     }
     // combined == emergency_level → 保持当前等级
 
@@ -1433,6 +1498,7 @@ static void emergency_intervention(void) {
             forced_min_level = 0;
         }
     }
+    debug_log(debug_emerg, "emerg 最终等级=%d forced_min=%d", emergency_level, forced_min_level);
 }
 
 // ======================== 主循环 ========================
@@ -1452,8 +1518,10 @@ static void alarm_handler(int sig) {
  * 不在此处立即下发，防止部分执行后参数组合不协调
  */
 static void reconnect_align(void) {
+    debug_log(debug_conn, "reconnect_align actual_rpm=%d actual_cold=%d", actual_rpm, actual_cold);
     if (actual_rpm >= 0 && actual_cold >= 0) {
         int idx = match_nearest_gear_for_reconnect();
+        debug_log(debug_conn, "reconnect_align match idx=%d target_level=%d", idx, target_level);
         if (idx >= 0) {
             actual_rpm = gear_table[idx].fan_rpm;
             actual_cold = gear_table[idx].cold;
@@ -1489,6 +1557,10 @@ static int prev_emerg_level = 0;   // 记录上一轮紧急等级，退出紧急
 static void rate_limited_execute(void) {
     int mode, target, windOC, coldOC, windLevel;
     build_params(target_level, &mode, &target, &windOC, &coldOC, &windLevel);
+
+debug_log(debug_exec, "rate_limit target_level=%d mode=%d target=%d windOC=%d coldOC=%d",
+
+          target_level, mode, target, windOC, coldOC);
 
     // ---- 初始化实际值（首次运行或档位表变化后重置）----
     if (actual_rpm < 0) {
@@ -1538,6 +1610,8 @@ static void rate_limited_execute(void) {
 
 static void main_loop(void) {
     // 0. 检查配置文件是否更新（热重载）
+    debug_log(debug_main, "main_loop 开始 emergency=%d forced_min=%d battery_fan=%d target=%d",
+              emergency_level, forced_min_level, battery_fan_level, target_level);
     if (config_path[0] != '\0') {
         struct stat st;
         if (stat(config_path, &st) == 0) {
@@ -1555,8 +1629,6 @@ static void main_loop(void) {
 
     // 重新进入紧急 → 取消恢复期（立即恢复全灵敏度以快速响应）
     if (emergency_level > prev_emerg_level) {
-        if (batt_recovery_multiplier > 1) {
-        }
         batt_recovery_multiplier = 1;
         batt_recovery_cycles = 0;
         recovery_step = 0;
@@ -1691,6 +1763,7 @@ static int match_nearest_gear_for_reconnect(void) {
 int main(int argc, char *argv[]) {
     signal(SIGTERM, handle_signal);
     signal(SIGINT,  handle_signal);
+    debug_log(debug_main, "main 启动 ALPHA=%d ZONE=%d~%d", CPU_FILTER_ALPHA, CPU_ZONE_MIN, CPU_ZONE_MAX);
 
     // --- 初始化默认档位表（load_config 中 GEAR_N 可覆盖） ---
     init_gear_table();
@@ -1758,6 +1831,7 @@ int main(int argc, char *argv[]) {
     // 循环开头先检测连接状态，断联时不执行 main_loop
     while (running) {
         read_status_ble();
+        debug_log(debug_conn, "main 连接状态 app_alive=%d ble=%d fully=%d", app_proc_ok, app_ble_connected, fully_connected);
         int app_proc_ok = is_app_alive();
         int fully_connected = app_proc_ok && app_ble_connected;
 
