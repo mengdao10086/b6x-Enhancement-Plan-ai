@@ -1,4 +1,4 @@
-name: Build All (APK + C Daemon)
+name: 全部构建(LSP+Magisk)
 
 on:
   push:
