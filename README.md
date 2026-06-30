@@ -1,6 +1,6 @@
 # 飞智 B6X 增强计划
 
-[![Build](https://github.com/mengdao10086/b6x-Enhancement-Plan-ai/actions/workflows/build-apk.yml/badge.svg)](https://github.com/mengdao10086/b6x-Enhancement-Plan-ai/actions/workflows/build-apk.yml)
+[![Build](https://github.com/mengdao10086/b6x-Enhancement-Plan-ai/actions/workflows/build.yml/badge.svg)](https://github.com/mengdao10086/b6x-Enhancement-Plan-ai/actions/workflows/build.yml)
 
 飞智 B6X 散热器开发者工具的增强方案。修复了 Android 16 上的 BLE 兼容性问题，并扩展了智能温控功能。
 
@@ -84,12 +84,12 @@
 - NDK 已配置 `actions/cache` 缓存（~700MB），首次后不再重复下载
 - CI 产物在 Actions 运行记录的 Artifacts 中下载
 
-GitHub Actions 自动构建，**只推送有变化部分的编译即可**：
+单一 Workflow（[build.yml](.github/workflows/build.yml)）自动按变更内容编译：
 | 触发方式 | 编译内容 |
 |----------|----------|
-| 推送 `lsp模块/**` 变更 | 仅 LSPosed 模块（`build-lsposed.yml`） |
-| 推送 `magisk模块/**` 变更 | 仅 C 守护程序 + Magisk 模块包（`build-magisk.yml`） |
-| 推送 `v*` 标签 | 全量编译（`build-apk.yml`） |
+| 推送 `lsp模块/**` 变更 | 仅 LSPosed 模块 APK |
+| 推送 `magisk模块/**` 变更 | 仅 Magisk 模块（C 守护程序 + 模块框架） |
+| 推送 `v*` 标签 / 手动触发 | 全量编译（LSPosed + Magisk） |
 | 手动 `workflow_dispatch` | 全量编译 |
 
 构建产物在对应运行记录的 Artifacts 中下载。
