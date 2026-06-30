@@ -41,7 +41,7 @@ jobs:
 
       - name: 重命名 APK（b6x-EP-LSPosed-v版本号.apk）
         run: |
-          cp app/build/outputs/apk/release/*.apk "b6x-EP-LSPosed-v${{ steps.lsposed-version.outputs.VERSION }}.apk"
+          cp app/build/outputs/apk/release/*.apk "$GITHUB_WORKSPACE/b6x-EP-LSPosed-v${{ steps.lsposed-version.outputs.VERSION }}.apk"
 
       - name: 上传 APK 构建产物
         uses: actions/upload-artifact@v4
