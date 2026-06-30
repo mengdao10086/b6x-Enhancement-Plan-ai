@@ -1,24 +1,71 @@
-name: 全部构建(LSP+Magisk)
+name: Build
 
 on:
+  # 分支推送：按路径过滤，只有改到相关模块才触发
   push:
+    paths:
+      - 'lsp模块(apk修复+温控接口)/**'
+      - 'magisk模块(智能温控)/**'
+      - '.github/workflows/build.yml'
     tags:
       - 'v*'
+  # 手动触发：全量构建
   workflow_dispatch:
 
-# 注意：单独编译 LSPosed 见 build-lsposed.yml，单独编译 Magisk 见 build-magisk.yml
+# 旧版独立 workflow（build-apk/build-lsposed/build-magisk）已废弃，合并至此文件
 
 jobs:
-  build-apk:
+  # ──────────────────────────────────────
+  # 检测哪些模块有变更
+  # ──────────────────────────────────────
+  detect-changes:
+    name: 检测变更模块
+    runs-on: ubuntu-latest
+    outputs:
+      lsposed: ${{ steps.check.outputs.lsposed }}
+      magisk: ${{ steps.check.outputs.magisk }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # 需要 commit 历史做 git diff
+
+      - name: 检测变更范围
+        id: check
+        run: |
+          # workflow_dispatch / 标签推送 → 全量构建
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" || \
+                "${{ github.ref_type }}" == "tag" ]]; then
+            echo "lsposed=true" >> "$GITHUB_OUTPUT"
+            echo "magisk=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # 普通推送 → 对比 commit 范围检测变更
+          BEFORE="${{ github.event.before }}"
+          if [[ -z "$BEFORE" || "$BEFORE" == "0000000000000000000000000000000000000000" ]]; then
+            # 首次推送无 before → 全量
+            echo "lsposed=true" >> "$GITHUB_OUTPUT"
+            echo "magisk=true" >> "$GITHUB_OUTPUT"
+          else
+            CHANGES=$(git diff --name-only "$BEFORE" "${{ github.sha }}")
+            echo "$CHANGES" | grep -q '^lsp模块/' && echo "lsposed=true" >> "$GITHUB_OUTPUT" || echo "lsposed=false" >> "$GITHUB_OUTPUT"
+            echo "$CHANGES" | grep -q '^magisk模块/' && echo "magisk=true" >> "$GITHUB_OUTPUT" || echo "magisk=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  # ──────────────────────────────────────
+  # 编译 LSPosed 模块 APK
+  # ──────────────────────────────────────
+  build-lsposed:
     name: 编译 LSPosed 模块 APK
+    needs: detect-changes
+    if: needs.detect-changes.outputs.lsposed == 'true'
     runs-on: ubuntu-latest
     defaults:
       run:
         working-directory: ./lsp模块(apk修复+温控接口)
 
     steps:
-      - name: 检出代码
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
       - name: 设置 JDK 17
         uses: actions/setup-java@v4
@@ -32,14 +79,14 @@ jobs:
       - name: 授权 gradlew
         run: chmod +x gradlew
 
-      - name: 编译 APK（b6x keystore 签名，每次签名一致）
+      - name: 编译 APK（b6x keystore 签名）
         run: ./gradlew assembleRelease
 
       - name: 获取版本号
         id: lsposed-version
         run: echo "VERSION=$(grep "versionName" app/build.gradle.kts | sed 's/.*"\(.*\)".*/\1/')" >> $GITHUB_OUTPUT
 
-      - name: 重命名 APK（b6x-EP-LSPosed-v版本号.apk）
+      - name: 重命名 APK
         run: |
           cp app/build/outputs/apk/release/*.apk "$GITHUB_WORKSPACE/b6x-EP-LSPosed-v${{ steps.lsposed-version.outputs.VERSION }}.apk"
 
@@ -49,13 +96,17 @@ jobs:
           name: b6x-EP-LSPosed-v${{ steps.lsposed-version.outputs.VERSION }}
           path: b6x-EP-LSPosed-v*.apk
 
-  build-c:
-    name: 编译 C 智能温控守护程序
+  # ──────────────────────────────────────
+  # 编译 Magisk 模块（C 守护程序 + 模块框架）
+  # ──────────────────────────────────────
+  build-magisk:
+    name: 编译 Magisk 模块
+    needs: detect-changes
+    if: needs.detect-changes.outputs.magisk == 'true'
     runs-on: ubuntu-latest
 
     steps:
-      - name: 检出代码
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
       - name: 缓存 NDK
         id: cache-ndk
@@ -83,14 +134,13 @@ jobs:
           set +e
           CC=/opt/ndk/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android21-clang
           $CC --version > /dev/null 2>&1
-          # 编译，错误输出到文件，不中断脚本
           $CC -static -O2 -o tempctrl "magisk模块(智能温控)/tempctrl.c" > compile_ok.txt 2>compile_err.txt
           RC=$?
           echo "=== exit code: $RC ==="
           echo "=== stdout ==="
           cat compile_ok.txt
           echo "=== stderr ==="
-            cat compile_err.txt
+          cat compile_err.txt
           if [ $RC -ne 0 ] || [ ! -f tempctrl ]; then
             echo "COMPILATION FAILED"
             exit 1
@@ -102,14 +152,14 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: compile-logs
+          name: compile-logs-magisk
           path: compile_*.txt
           if-no-files-found: ignore
 
       - name: 修复 PT_TLS 对齐
         run: python3 "magisk模块(智能温控)/patch_tls.py" tempctrl || echo "TLS patch skipped (not needed)"
 
-      - name: 打包 Magisk 模块框架（将二进制复制到模块目录）
+      - name: 打包 Magisk 模块框架
         run: |
           cp tempctrl "magisk模块(智能温控)/magisk模块框架/"
           echo "Module contents:"
@@ -119,7 +169,7 @@ jobs:
         id: magisk-version
         run: echo "VERSION=$(grep '^version=' "magisk模块(智能温控)/magisk模块框架/module.prop" | sed 's/^version=v//')" >> $GITHUB_OUTPUT
 
-      - name: 上传 Magisk 模块包（刷入即用）
+      - name: 上传 Magisk 模块包
         uses: actions/upload-artifact@v4
         with:
           name: b6x-EP-Magisk-v${{ steps.magisk-version.outputs.VERSION }}

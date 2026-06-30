@@ -7,7 +7,7 @@ MODDIR=${0%/*}
 
 # 启动函数
 start_tempctrl() {
-    nohup /data/local/tmp/tempctrl --config "$MODDIR/profile.conf" >> /cache/tempctrl_init.log 2>&1 &
+    nohup /data/local/tmp/tempctrl --config "$MODDIR/profile.conf" >> /cache/tempctrl.log 2>&1 &
 }
 
 # 1. 等待系统启动完成（仅首次执行）
@@ -33,6 +33,6 @@ while true; do
         start_tempctrl
         echo "
 $(date '+%Y-%m-%d %H:%M:%S')：已重启tempctrl
-" >> /cache/tempctrl_init.log
+" >> /cache/tempctrl.log
     fi
 done

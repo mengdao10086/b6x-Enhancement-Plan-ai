@@ -1021,7 +1021,7 @@ static int apply_level(int level) {
         alarm(3);
         int status;
         if (waitpid(pid, &status, 0) == -1) {
-            write_log("am broadcast 超时，已强杀");
+            write_log("am broadcast 超时");
             kill(pid, SIGKILL);
             waitpid(pid, NULL, 0);  // 回收僵尸
         }
@@ -1094,18 +1094,15 @@ static void battery_control(void) {
                 batt_recovery_multiplier = BATT_RECOVERY_M2;
                 recovery_step = 2;
                 batt_recovery_cycles = BATT_RECOVERY_PHASE_CYCLES;
-                write_log("恢复期 倍率%d %d周期", batt_recovery_multiplier, batt_recovery_cycles);
             } else if (recovery_step == 2) {
                 // P2 → P3
                 batt_recovery_multiplier = BATT_RECOVERY_M3;
                 recovery_step = 3;
                 batt_recovery_cycles = BATT_RECOVERY_PHASE_CYCLES;
-                write_log("恢复期 倍率%d %d周期", batt_recovery_multiplier, batt_recovery_cycles);
             } else if (recovery_step >= 3) {
                 // P3 结束 → 恢复正常
                 batt_recovery_multiplier = 1;
                 recovery_step = 0;
-                write_log("恢复期 结束");
             }
         }
     }
@@ -1271,7 +1268,7 @@ static void battery_control(void) {
 	                    if (old != battery_fan_level) {
 	                        batt_cooldown = BATT_COOLDOWN_CYCLES;
 	                        rev_comp_cooldown = REV_COMP_COOLDOWN;
-	                        write_log("过冲%d.%d周期 挡位%d（%+d）",
+	                        write_log("过冲%d/%d 挡位%d（%+d）",
 	                                  rate / 10, rate % 10,
 	                                  gear_label(battery_fan_level), adjust);
 	                    }
@@ -1450,6 +1447,32 @@ static void alarm_handler(int sig) {
 }
 
 /**
+ * 重连安全对齐：将三个实际值都调到匹配挡位的值，
+ * 后续由 rate_limited_execute 按正常速率向目标挡位变化，
+ * 不在此处立即下发，防止部分执行后参数组合不协调
+ */
+static void reconnect_align(void) {
+    if (actual_rpm >= 0 && actual_cold >= 0) {
+        int idx = match_nearest_gear_for_reconnect();
+        if (idx >= 0) {
+            actual_rpm = gear_table[idx].fan_rpm;
+            actual_cold = gear_table[idx].cold;
+            actual_target_temp = gear_table[idx].target;
+            write_log("重连 匹配档位%d 风扇%dRPM 制冷%d",
+                      gear_label(idx + 1), actual_rpm, actual_cold);
+        }
+    } else {
+        actual_rpm = -1;
+        actual_cold = -1;
+        actual_target_temp = -1;
+    }
+
+    last_batt_reading = -1;
+    first_run = 1;
+    // 不下发，等下轮 rate_limited_execute 从匹配挡位自然过渡
+}
+
+/**
  * 单次控制循环（纯计算，不下发）
  * 配置重载 → 紧急干预（CPU+电流综合等级）→ 电池控制 → 保存目标档位
  * 调用者在外部立即执行速率限制下发，本函数只做决策
@@ -1533,7 +1556,6 @@ static void main_loop(void) {
     // 重新进入紧急 → 取消恢复期（立即恢复全灵敏度以快速响应）
     if (emergency_level > prev_emerg_level) {
         if (batt_recovery_multiplier > 1) {
-            write_log("恢复期 取消（重新进入紧急）");
         }
         batt_recovery_multiplier = 1;
         batt_recovery_cycles = 0;
@@ -1555,7 +1577,6 @@ static void main_loop(void) {
         override_anchor_temp = -1;
         rev_comp_pending_abs = 0;
         rev_comp_pending_idle = 0;
-        write_log("恢复期 倍率%d %d周期", batt_recovery_multiplier, batt_recovery_cycles);
     }
 
     // 2. 电池温度控制（内部处理冷却期，此时恢复期倍率已生效）
@@ -1760,28 +1781,7 @@ int main(int argc, char *argv[]) {
                 if (is_app_alive() && app_ble_connected) {
                     app_was_alive = 1;
                     last_sent_valid = 0;
-
-                    // 重连安全对齐：将三个实际值都调到匹配挡位的值，
-                    // 后续由 rate_limited_execute 按正常速率向目标挡位变化，
-                    // 不在此处立即下发，防止部分执行后参数组合不协调
-                    if (actual_rpm >= 0 && actual_cold >= 0) {
-                        int idx = match_nearest_gear_for_reconnect();
-                        if (idx >= 0) {
-                            actual_rpm = gear_table[idx].fan_rpm;
-                            actual_cold = gear_table[idx].cold;
-                            actual_target_temp = gear_table[idx].target;
-                            write_log("重连 匹配档位%d 风扇%dRPM 制冷%d",
-                                      gear_label(idx + 1), actual_rpm, actual_cold);
-                        }
-                    } else {
-                        actual_rpm = -1;
-                        actual_cold = -1;
-                        actual_target_temp = -1;
-                    }
-
-                    last_batt_reading = -1;
-                    first_run = 1;
-                    // 不下发，等下轮 rate_limited_execute 从匹配挡位自然过渡
+                    reconnect_align();
                     break;
                 }
             }
@@ -1789,26 +1789,7 @@ int main(int argc, char *argv[]) {
         } else if (!app_was_alive) {
             app_was_alive = 1;
             last_sent_valid = 0;
-
-            // 重连安全对齐（同上方子循环路径）
-            if (actual_rpm >= 0 && actual_cold >= 0) {
-                int idx = match_nearest_gear_for_reconnect();
-                if (idx >= 0) {
-                    actual_rpm = gear_table[idx].fan_rpm;
-                    actual_cold = gear_table[idx].cold;
-                    actual_target_temp = gear_table[idx].target;
-                    write_log("重连 匹配档位%d 风扇%dRPM 制冷%d",
-                              gear_label(idx + 1), actual_rpm, actual_cold);
-                }
-            } else {
-                actual_rpm = -1;
-                actual_cold = -1;
-                actual_target_temp = -1;
-            }
-
-            last_batt_reading = -1;
-            first_run = 1;
-            // 不下发，等下轮 rate_limited_execute 从匹配挡位自然过渡
+            reconnect_align();
         }
 
         main_loop();
