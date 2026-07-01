@@ -1,6 +1,6 @@
 # 飞智 B6X 增强计划
 
-[![Build](https://github.com/mengdao10086/b6x-Enhancement-Plan-ai/actions/workflows/build.yml/badge.svg)](https://github.com/mengdao10086/b6x-Enhancement-Plan-ai/actions/workflows/build.yml)
+[![自动构建](https://github.com/mengdao10086/b6x-Enhancement-Plan-ai/actions/workflows/build.yml/badge.svg)](https://github.com/mengdao10086/b6x-Enhancement-Plan-ai/actions/workflows/build.yml)
 
 飞智 B6X 散热器开发者工具的增强方案。修复了 Android 16 上的 BLE 兼容性问题，并扩展了智能温控功能。
 
@@ -11,7 +11,7 @@
 | 组件 | 路径 | 说明 | 状态 |
 |------|------|------|------|
 | **LSPosed 模块** | [lsp模块(apk修复+温控接口)/](lsp模块(apk修复+温控接口)/) | 提供散热器控制接口 | ✅ v2.0 已发布 |
-| **C 守护程序** | [magisk模块(智能温控)/](magisk模块(智能温控)/) | 使用lsp模块接口控制散热器 | ✅ v2.1 已发布 |
+| **C 守护程序** | [magisk模块(智能温控)/](magisk模块(智能温控)/) | 使用lsp模块接口控制散热器 | ✅ v2.2 已发布 |
 
 ### LSPosed 模块功能
 
@@ -43,10 +43,13 @@
   - 溢出自然累积下周期，目标变化时从当前值重新计算
 - 断联时丢弃未执行的变化量，实际值保持断联前最后数值
 - 重连时将三个实际值（RPM/制冷/温度）都调到匹配挡位，不下发，由 `rate_limited_execute` 按正常速率逐步过渡，防止基准值错误
+- **电流-挡位映射模式（v2.2）**：以电池电流为挡位调整依据，覆盖常规电池温度调档。分充电/放电两套倍率，配置开关 `CURRENT_GEAR_MODE`。支持温度偏移修正（±N 档），无冷却期
+- **独立开关（v2.2）**：电流紧急（默认关闭）、CPU 紧急、反补、趋势豁免各自独立启用/禁用
+- **调试日志系统（v2.2）**：`DEBUG_MODE` 总开关 + 7 个分区（传感器/紧急/电池/执行/连接/配置/主循环），开启时自动关闭日志体积限制
+- **电流单位优化**：原始 µA ÷10000 转 0.01A 内部单位，减小计算量；放电负值正确处理
 - **紧急退出恢复期**：紧急等级降低后 BATT_ZONE 阈值 ×6→×4→×2→1 逐步恢复全灵敏度，每阶段 BATT_RECOVERY_PHASE_CYCLES 周期（默认 6），连续退出重启，反补照常执行
 - 双重检查存活检测：status 文件 mtime 心跳 + BLE=1，任一判死即断联（pgrep 已移除）
-- 大部分参数可通过 profile.conf 运行时配置并热重载
-- CONFIG_ENABLED=0 时跳过配置加载，全部使用代码默认值
+- 大部分参数可通过 profile.conf 运行时配置并热重载；`CONFIG_ENABLED=0` 时跳过配置加载
 - 指令去重，避免散热器频繁切换
 
 ---
@@ -82,14 +85,14 @@
 - CI 使用 NDK r27c，固定路径 `/opt/ndk`
 - 编译命令：`aarch64-linux-android21-clang -static -O2`
 - NDK 已配置 `actions/cache` 缓存（~700MB），首次后不再重复下载
+- 构建产物和编译日志统一输出到仓库 `CI记录/` 目录结构，方便下载后直接识别
 - CI 产物在 Actions 运行记录的 Artifacts 中下载
 
-单一 Workflow（[build.yml](.github/workflows/build.yml)）自动按变更内容编译：
+单一 Workflow（[build.yml](.github/workflows/build.yml)，名称「自动构建」）自动检测变更模块编译：
 | 触发方式 | 编译内容 |
 |----------|----------|
-| 推送 `lsp模块/**` 变更 | 仅 LSPosed 模块 APK |
-| 推送 `magisk模块/**` 变更 | 仅 Magisk 模块（C 守护程序 + 模块框架） |
-| 推送 `v*` 标签 / 手动触发 | 全量编译（LSPosed + Magisk） |
+| 推送（detect-changes 内部 git diff 判断） | 按变更自动选择 LSPosed / Magisk / 全量 |
+| 推送 `v*` 标签 | 全量编译（LSPosed + Magisk） |
 | 手动 `workflow_dispatch` | 全量编译 |
 
 构建产物在对应运行记录的 Artifacts 中下载。

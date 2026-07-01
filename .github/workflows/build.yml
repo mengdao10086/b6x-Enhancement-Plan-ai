@@ -1,4 +1,4 @@
-name: Build
+name: 自动构建
 
 on:
   # 所有推送都触发构建（不设 paths 过滤——中文路径存在 Unicode 匹配问题）
@@ -85,13 +85,14 @@ jobs:
 
       - name: 重命名 APK
         run: |
-          cp app/build/outputs/apk/release/*.apk "$GITHUB_WORKSPACE/b6x-EP-LSPosed-v${{ steps.lsposed-version.outputs.VERSION }}.apk"
+          mkdir -p "$GITHUB_WORKSPACE/CI记录"
+          cp app/build/outputs/apk/release/*.apk "$GITHUB_WORKSPACE/CI记录/b6x-EP-LSPosed-v${{ steps.lsposed-version.outputs.VERSION }}.apk"
 
       - name: 上传 APK 构建产物
         uses: actions/upload-artifact@v4
         with:
           name: b6x-EP-LSPosed-v${{ steps.lsposed-version.outputs.VERSION }}
-          path: b6x-EP-LSPosed-v*.apk
+          path: CI记录/b6x-EP-LSPosed-v*.apk
 
   # ──────────────────────────────────────
   # 编译 Magisk 模块（C 守护程序 + 模块框架）
@@ -131,13 +132,14 @@ jobs:
           set +e
           CC=/opt/ndk/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android21-clang
           $CC --version > /dev/null 2>&1
-          $CC -static -O2 -o tempctrl "magisk模块(智能温控)/tempctrl.c" > compile_ok.txt 2>compile_err.txt
+          mkdir -p "CI记录"
+          $CC -static -O2 -o tempctrl "magisk模块(智能温控)/tempctrl.c" > "CI记录/compile_ok.txt" 2>"CI记录/compile_err.txt"
           RC=$?
           echo "=== exit code: $RC ==="
           echo "=== stdout ==="
-          cat compile_ok.txt
+          cat "CI记录/compile_ok.txt"
           echo "=== stderr ==="
-          cat compile_err.txt
+          cat "CI记录/compile_err.txt"
           if [ $RC -ne 0 ] || [ ! -f tempctrl ]; then
             echo "COMPILATION FAILED"
             exit 1
@@ -150,7 +152,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: compile-logs-magisk
-          path: compile_*.txt
+          path: CI记录/compile_*.txt
           if-no-files-found: ignore
 
       - name: 修复 PT_TLS 对齐
@@ -158,9 +160,11 @@ jobs:
 
       - name: 打包 Magisk 模块框架
         run: |
+          mkdir -p "CI记录/magisk模块"
           cp tempctrl "magisk模块(智能温控)/magisk模块框架/"
+          cp -r "magisk模块(智能温控)/magisk模块框架/"* "CI记录/magisk模块/"
           echo "Module contents:"
-          ls -la "magisk模块(智能温控)/magisk模块框架/"
+          ls -la "CI记录/magisk模块/"
 
       - name: 获取版本号
         id: magisk-version
@@ -170,5 +174,5 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: b6x-EP-Magisk-v${{ steps.magisk-version.outputs.VERSION }}
-          path: magisk模块(智能温控)/magisk模块框架/
+          path: CI记录/magisk模块/
           if-no-files-found: error

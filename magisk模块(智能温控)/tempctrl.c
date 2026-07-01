@@ -201,12 +201,12 @@ static int BATT_CURRENT_DIVISOR = 1;  // 电池电流原始值 µA，无需缩�
 
 // --- 电池电流紧急干预阈值（µA，可配置）---
 // 通过 /sys/class/power_supply/battery/current_now 读取，取绝对值
-static int CURRENT_EMERG_3 = 7000000;   // >7A → 等级 3
-static int CURRENT_EMERG_2 = 6000000;   // >6A → 等级 2
-static int CURRENT_EMERG_1 = 5000000;   // >5A → 等级 1
-static int CURRENT_RECOVER_2 = 6000000; // <6A → 从 3 降为 2
-static int CURRENT_RECOVER_1 = 5000000; // <5A → 从 2 降为 1
-static int CURRENT_RECOVER_0 = 4000000; // <4A → 退出紧急
+static int CURRENT_EMERG_3 = 700;   // >7A → 等级 3
+static int CURRENT_EMERG_2 = 600;   // >6A → 等级 2
+static int CURRENT_EMERG_1 = 500;   // >5A → 等级 1
+static int CURRENT_RECOVER_2 = 600; // <6A → 从 3 降为 2
+static int CURRENT_RECOVER_1 = 500; // <5A → 从 2 降为 1
+static int CURRENT_RECOVER_0 = 400; // <4A → 退出紧急
 
 // --- 电流紧急退出平滑系数（百分比，可配置）---
 // 进入紧急时电流用原始值不平滑；退出时使用 EMA 平滑值
@@ -242,6 +242,25 @@ static int debug_exec    = 0;   // [执行下发] 速率限制/am broadcast 送�
 static int debug_conn    = 0;   // [连接状态] App 存活/BLE/重连对齐
 static int debug_config  = 0;   // [配置加载] 配置文件解析过程
 static int debug_main    = 0;   // [主循环] main_loop 流程跟踪
+
+// ======================== 独立开关（可由 profile.conf 覆盖）===================
+static int EMERG_CURRENT_ENABLED = 0;   // 电流紧急独立开关，默认关闭（让位于电流-挡位映射）
+static int EMERG_CPU_ENABLED     = 1;   // CPU 温度紧急独立开关
+static int REV_COMP_ENABLED      = 1;   // 反补独立开关
+static int TREND_EXEMPT_ENABLED  = 1;   // 趋势豁免独立开关
+
+// ======================== 电流-挡位映射模式（可由 profile.conf 覆盖）===========
+// 以电池电流为挡位调整依据，覆盖常规电池温度挡位调整
+static int CURRENT_GEAR_MODE_CHARGE    = 0;    // 充电(负电流)：0=普通模式, 1=电流-挡位模式
+static int CURRENT_GEAR_MODE_DISCHARGE = 1;    // 放电(正电流)：0=普通模式, 1=电流-挡位模式
+static int CURRENT_GEAR_MULT_CHARGE    = 2;    // 充电倍率：abs(电流µA) × 倍率 ÷ 1000000 → 推荐档位
+static int CURRENT_GEAR_MULT_DISCHARGE = 6;    // 放电倍率：电流µA × 倍率 ÷ 1000000 → 推荐档位
+static int CURRENT_GEAR_OFFSET         = 2;    // 温度允许偏移 ±N 档
+static int CURRENT_GEAR_SMOOTH_ALPHA   = 25;   // 电流平滑系数（百分比，1~100），默认 α=0.25
+static int CURRENT_GEAR_MIN            = 6;    // 推荐档位低于此值回退基准模式
+// 电流-挡位平滑状态
+static int curr_gear_smooth_val   = 0;         // 电流平滑值（µA）
+static int curr_gear_smooth_valid = 0;         // 平滑值是否已初始化
 
 // ======================== 配置文件系统 ========================
 
@@ -381,6 +400,36 @@ static void load_config(const char *path) {
         return;
     }
 
+    // ---- 开关预扫描：先解析所有开关/模式类参数，后续跳过关项细节 ----
+    rewind(f);
+    while (fgets(line, sizeof(line), f)) {
+        char *key;
+        char *val_str = config_parse_line(line, &key);
+        if (!val_str) continue;
+        int val = atoi(val_str);
+
+        if      (strcmp(key, "EMERG_CURRENT_ENABLED") == 0)   EMERG_CURRENT_ENABLED = (val != 0) ? 1 : 0;
+        else if (strcmp(key, "EMERG_CPU_ENABLED") == 0)       EMERG_CPU_ENABLED     = (val != 0) ? 1 : 0;
+        else if (strcmp(key, "REV_COMP_ENABLED") == 0)        REV_COMP_ENABLED      = (val != 0) ? 1 : 0;
+        else if (strcmp(key, "TREND_EXEMPT_ENABLED") == 0)    TREND_EXEMPT_ENABLED  = (val != 0) ? 1 : 0;
+        else if (strcmp(key, "CURRENT_GEAR_MODE") == 0) {
+            int charge = CURRENT_GEAR_MODE_CHARGE, discharge = CURRENT_GEAR_MODE_DISCHARGE;
+            if (sscanf(val_str, "%d %d", &charge, &discharge) >= 1) {
+                CURRENT_GEAR_MODE_CHARGE    = clamp(charge, 0, 1);
+                CURRENT_GEAR_MODE_DISCHARGE = clamp(discharge, 0, 1);
+            }
+        }
+        else if (strcmp(key, "EMERG_MODE") == 0) {
+            int entry = EMERG_MODE_ENTRY, exit = EMERG_MODE_EXIT;
+            if (sscanf(val_str, "%d %d", &entry, &exit) >= 1) {
+                EMERG_MODE_ENTRY = clamp(entry, 0, 1);
+                EMERG_MODE_EXIT  = clamp(exit, 0, 1);
+            }
+        }
+        else if (strcmp(key, "DEBUG_MODE") == 0)              debug_mode           = (val != 0) ? 1 : 0;
+        else if (strcmp(key, "GEAR_CONFIG_ENABLED") == 0)     gear_config_enabled  = (val != 0) ? 1 : 0;
+    }
+
     // GEAR_CONFIG_ENABLED 关闭时忽略 GEAR_N，即使文件中有
     int gear_config_seen = gear_config_enabled && gear_any_seen;
 
@@ -462,13 +511,36 @@ static void load_config(const char *path) {
         else if (strcmp(key, "BATT_CURRENT_DIVISOR") == 0) BATT_CURRENT_DIVISOR = clamp(val, 1, 10000);
         else if (strcmp(key, "CPU_ZONE_MIN") == 0)          CPU_ZONE_MIN       = clamp(val, 0, 99);
         else if (strcmp(key, "CPU_ZONE_MAX") == 0)          CPU_ZONE_MAX       = clamp(val, 0, 99);
-        else if (strcmp(key, "CURRENT_EMERG_3") == 0)       CURRENT_EMERG_3    = clamp(val, 1000000, 15000000);
-        else if (strcmp(key, "CURRENT_EMERG_2") == 0)       CURRENT_EMERG_2    = clamp(val, 1000000, 15000000);
-        else if (strcmp(key, "CURRENT_EMERG_1") == 0)       CURRENT_EMERG_1    = clamp(val, 1000000, 15000000);
-        else if (strcmp(key, "CURRENT_RECOVER_2") == 0)     CURRENT_RECOVER_2  = clamp(val, 1000000, 15000000);
-        else if (strcmp(key, "CURRENT_RECOVER_1") == 0)     CURRENT_RECOVER_1  = clamp(val, 1000000, 15000000);
-        else if (strcmp(key, "CURRENT_RECOVER_0") == 0)     CURRENT_RECOVER_0  = clamp(val, 1000000, 15000000);
+        else if (strcmp(key, "CURRENT_EMERG_3") == 0)       CURRENT_EMERG_3    = clamp(val, 100, 1500);
+        else if (strcmp(key, "CURRENT_EMERG_2") == 0)       CURRENT_EMERG_2    = clamp(val, 100, 1500);
+        else if (strcmp(key, "CURRENT_EMERG_1") == 0)       CURRENT_EMERG_1    = clamp(val, 100, 1500);
+        else if (strcmp(key, "CURRENT_RECOVER_2") == 0)     CURRENT_RECOVER_2  = clamp(val, 100, 1500);
+        else if (strcmp(key, "CURRENT_RECOVER_1") == 0)     CURRENT_RECOVER_1  = clamp(val, 100, 1500);
+        else if (strcmp(key, "CURRENT_RECOVER_0") == 0)     CURRENT_RECOVER_0  = clamp(val, 100, 1500);
         else if (strcmp(key, "CURRENT_SMOOTH_ALPHA") == 0)  CURRENT_SMOOTH_ALPHA = clamp(val, 1, 100);
+        // --- 独立开关 ---
+        else if (strcmp(key, "EMERG_CURRENT_ENABLED") == 0)  EMERG_CURRENT_ENABLED = (val != 0) ? 1 : 0;
+        else if (strcmp(key, "EMERG_CPU_ENABLED") == 0)      EMERG_CPU_ENABLED     = (val != 0) ? 1 : 0;
+        else if (strcmp(key, "REV_COMP_ENABLED") == 0)       REV_COMP_ENABLED      = (val != 0) ? 1 : 0;
+        else if (strcmp(key, "TREND_EXEMPT_ENABLED") == 0)   TREND_EXEMPT_ENABLED  = (val != 0) ? 1 : 0;
+        // --- 电流-挡位映射模式 ---
+        else if (strcmp(key, "CURRENT_GEAR_MODE") == 0) {
+            int charge = CURRENT_GEAR_MODE_CHARGE, discharge = CURRENT_GEAR_MODE_DISCHARGE;
+            if (sscanf(val_str, "%d %d", &charge, &discharge) >= 1) {
+                CURRENT_GEAR_MODE_CHARGE    = clamp(charge, 0, 1);
+                CURRENT_GEAR_MODE_DISCHARGE = clamp(discharge, 0, 1);
+            }
+        }
+        else if (strcmp(key, "CURRENT_GEAR_MULT_CHARGE") == 0 && (CURRENT_GEAR_MODE_CHARGE || CURRENT_GEAR_MODE_DISCHARGE))
+            CURRENT_GEAR_MULT_CHARGE = clamp(val, 1, 50);
+        else if (strcmp(key, "CURRENT_GEAR_MULT_DISCHARGE") == 0 && (CURRENT_GEAR_MODE_CHARGE || CURRENT_GEAR_MODE_DISCHARGE))
+            CURRENT_GEAR_MULT_DISCHARGE = clamp(val, 1, 50);
+        else if (strcmp(key, "CURRENT_GEAR_OFFSET") == 0 && (CURRENT_GEAR_MODE_CHARGE || CURRENT_GEAR_MODE_DISCHARGE))
+            CURRENT_GEAR_OFFSET = clamp(val, 0, 5);
+        else if (strcmp(key, "CURRENT_GEAR_SMOOTH_ALPHA") == 0 && (CURRENT_GEAR_MODE_CHARGE || CURRENT_GEAR_MODE_DISCHARGE))
+            CURRENT_GEAR_SMOOTH_ALPHA = clamp(val, 1, 100);
+        else if (strcmp(key, "CURRENT_GEAR_MIN") == 0 && (CURRENT_GEAR_MODE_CHARGE || CURRENT_GEAR_MODE_DISCHARGE))
+            CURRENT_GEAR_MIN = clamp(val, 1, 12);
         else if (strcmp(key, "RATE_LIMIT_RPM") == 0)  RATE_LIMIT_RPM  = clamp(val, 50, 2000);
         else if (strcmp(key, "RATE_LIMIT_COLD") == 0) RATE_LIMIT_COLD = clamp(val, 1, 194);
         else if (strcmp(key, "RATE_LIMIT_TEMP") == 0) RATE_LIMIT_TEMP = clamp(val, 1, 30);
@@ -500,13 +572,13 @@ static void load_config(const char *path) {
             debug_mode = (val != 0) ? 1 : 0;
             write_log("配置 调试模式 %s", debug_mode ? "开启" : "关闭");
         }
-        else if (strcmp(key, "DEBUG_SENSOR") == 0) { debug_sensor = (val != 0) ? 1 : 0; }
-        else if (strcmp(key, "DEBUG_EMERG") == 0)   { debug_emerg   = (val != 0) ? 1 : 0; }
-        else if (strcmp(key, "DEBUG_BATT") == 0)    { debug_batt    = (val != 0) ? 1 : 0; }
-        else if (strcmp(key, "DEBUG_EXEC") == 0)    { debug_exec    = (val != 0) ? 1 : 0; }
-        else if (strcmp(key, "DEBUG_CONN") == 0)    { debug_conn    = (val != 0) ? 1 : 0; }
-        else if (strcmp(key, "DEBUG_CONFIG") == 0)  { debug_config  = (val != 0) ? 1 : 0; }
-        else if (strcmp(key, "DEBUG_MAIN") == 0)    { debug_main    = (val != 0) ? 1 : 0; }
+        else if (strcmp(key, "DEBUG_SENSOR") == 0 && debug_mode) { debug_sensor = (val != 0) ? 1 : 0; }
+        else if (strcmp(key, "DEBUG_EMERG") == 0 && debug_mode)   { debug_emerg   = (val != 0) ? 1 : 0; }
+        else if (strcmp(key, "DEBUG_BATT") == 0 && debug_mode)    { debug_batt    = (val != 0) ? 1 : 0; }
+        else if (strcmp(key, "DEBUG_EXEC") == 0 && debug_mode)    { debug_exec    = (val != 0) ? 1 : 0; }
+        else if (strcmp(key, "DEBUG_CONN") == 0 && debug_mode)    { debug_conn    = (val != 0) ? 1 : 0; }
+        else if (strcmp(key, "DEBUG_CONFIG") == 0 && debug_mode)  { debug_config  = (val != 0) ? 1 : 0; }
+        else if (strcmp(key, "DEBUG_MAIN") == 0 && debug_mode)    { debug_main    = (val != 0) ? 1 : 0; }
         else if (strncmp(key, "GEAR_", 5) == 0) {
             // GEAR_N=模式,目标温度(°C),风扇转速(RPM),制冷片强度
             // 收集到临时数组，解析完成后按 config_n 排序填入连续档位表
@@ -926,10 +998,12 @@ static int read_cpu_temp_max(void) {
  */
 static int read_battery_current_abs(void) {
     int val = read_sysfs_int(BATT_CURRENT_PATH);
-    if (val < 0) return -1;
+    // 注意：不检查 val<0，因为放电时 current_now 为负值，这是正常现象
+    // 传感器读取出错时 val=-1，abs(-1)=1 远低于所有阈值，不影响判断
     int abs_val = abs(val) / BATT_CURRENT_DIVISOR;
-    debug_log(debug_sensor, "batt_current 原始 %d 除数 %d = %d µA (%.1fA)", val, BATT_CURRENT_DIVISOR, abs_val, abs_val / 1000000.0);
-    return abs_val;
+    int cA = abs_val / 10000;  // µA → 0.01A（截断后4位，减小后续计算量）
+    debug_log(debug_sensor, "batt_current 原始 %d µA → %d (0.01A)", val, cA);
+    return cA;
 }
 
 // ======================== 控制参数计算与下发 ========================
@@ -1258,7 +1332,7 @@ static void battery_control(void) {
 	        // steps=1→(T1+T2)/2, steps=2→(T2+T3)/2）作为偏移量：降温豁免用减号
 	        // （锚点-偏移量=复位阈值），升温豁免用加号（锚点+偏移量=复位阈值）。
 	        // 电池温度越过复位阈值后豁免计数器复位，下轮以新锚点重新开始
-	        if (!in_cooldown && rev_comp_pending_abs == 0 && steps < 3) {
+	        if (TREND_EXEMPT_ENABLED && !in_cooldown && rev_comp_pending_abs == 0 && steps < 3) {
 	            if (trend_rev && battery_fan_level > level_min &&
 	                battery_fan_level < level_max)
 	            {
@@ -1302,7 +1376,7 @@ static void battery_control(void) {
 	        }
 
 	        // ═══ 反补（不为全效豁免时执行） ═══
-	        if (!skip_delta && (steps > 0 || rev_comp_pending_abs > 0)) {
+	        if (REV_COMP_ENABLED && !skip_delta && (steps > 0 || rev_comp_pending_abs > 0)) {
 	            trend_override = 0;
 
 	            if (rev_comp_cooldown == 0) {
@@ -1396,20 +1470,20 @@ static void emergency_intervention(void) {
 
     // === 3. 计算单源级别（各自 0~3，用进入阈值） ===
     int cpu_lvl = 0;
-    if (cpu_valid) {
+    if (cpu_valid && EMERG_CPU_ENABLED) {
         if      (t > CPU_EMERG_3) cpu_lvl = 3;
         else if (t > CPU_EMERG_2) cpu_lvl = 2;
         else if (t > CPU_EMERG_1) cpu_lvl = 1;
     }
     int cur_lvl = 0;
-    if (cur_valid) {
+    if (cur_valid && EMERG_CURRENT_ENABLED) {
         // 进入时用原始电流值
         if      (cur_ua > CURRENT_EMERG_3) cur_lvl = 3;
         else if (cur_ua > CURRENT_EMERG_2) cur_lvl = 2;
         else if (cur_ua > CURRENT_EMERG_1) cur_lvl = 1;
     }
-    debug_log(debug_emerg, "emerg cpu_lvl=%d cur_lvl=%d combined=%d prev_level=%d",
-              cpu_lvl, cur_lvl, cpu_lvl + cur_lvl > 4 ? 4 : cpu_lvl + cur_lvl, prev_level);
+    debug_log(debug_emerg, "emerg cpu_lvl=%d cur_lvl=%d cur=%d(0.01A) combined=%d prev_level=%d",
+              cpu_lvl, cur_lvl, cur_ua, cpu_lvl + cur_lvl > 4 ? 4 : cpu_lvl + cur_lvl, prev_level);
 
     // === 4. 综合等级 = cpu_level + current_level（统一升降滞回） ===
     // 升档：combined > 当前等级 → 立即跳升（进入阈值，快速响应）
@@ -1499,6 +1573,99 @@ static void emergency_intervention(void) {
         }
     }
     debug_log(debug_emerg, "emerg 最终等级=%d forced_min=%d", emergency_level, forced_min_level);
+}
+
+// ======================== 电流-挡位映射模式 ========================
+
+/**
+ * 电流-挡位映射模式
+ * 以电池电流为挡位调整依据，覆盖常规电池温度挡位调整。
+ * 分为充电/放电两套逻辑，各自有独立开关。
+ *
+ * 计算流程：
+ *   1. 读取带符号电池电流，判断方向（用户约定：负=充电，正=放电）
+ *   2. 检查对应方向的开关是否开启，未开→返回（继续使用常规电池温度模式）
+ *   3. EMA 平滑（α=CURRENT_GEAR_SMOOTH_ALPHA）
+ *   4. 推荐挡位 = 平滑值(0.01A) × 倍率 ÷ 100
+ *   5. 推荐挡位 < CURRENT_GEAR_MIN → 返回（回退到基准模式）
+ *   6. 温度偏移：电池温度偏离基准越远，在 ±CURRENT_GEAR_OFFSET 范围内调档
+ *
+ * 特点：无冷却期，无趋势豁免，无反补，清除现有状态
+ *
+ * 返回值：1=已应用电流-挡位覆盖，0=未覆盖（应回退到常规模式）
+ */
+static int current_gear_override(void) {
+    // 1. 读取带符号电池电流（÷10000 转 0.01A 单位）
+    int val = read_sysfs_int(BATT_CURRENT_PATH);
+    int ua10 = val / 10000;  // µA → 0.01A（截断后4位）
+    if (ua10 == 0) {
+        // 接近零电流，跳过此模式让常规电池温度控制继续
+        return 0;
+    }
+
+    // 用户约定：负值 = 充电（充电电流），正值 = 放电（放电电流）
+    int is_charging = (ua10 < 0);
+    int abs_ua10 = (ua10 < 0) ? -ua10 : ua10;
+
+    // 2. 检查方向开关
+    int mode_enabled = is_charging ? CURRENT_GEAR_MODE_CHARGE : CURRENT_GEAR_MODE_DISCHARGE;
+    if (!mode_enabled) return 0;
+
+    // 3. EMA 平滑
+    if (!curr_gear_smooth_valid) {
+        curr_gear_smooth_val = abs_ua10;
+        curr_gear_smooth_valid = 1;
+    } else {
+        curr_gear_smooth_val = (abs_ua10 * CURRENT_GEAR_SMOOTH_ALPHA +
+                                curr_gear_smooth_val * (100 - CURRENT_GEAR_SMOOTH_ALPHA)) / 100;
+    }
+
+    // 4. 推荐挡位 = 平滑值(0.01A) × 倍率 ÷ 100
+    //    原 µA 公式：平滑值(µA) × 倍率 ÷ 1000000
+    //    转 0.01A 后：平滑值(0.01A) × 倍率 ÷ 100
+    int multiplier = is_charging ? CURRENT_GEAR_MULT_CHARGE : CURRENT_GEAR_MULT_DISCHARGE;
+    int recommended = (curr_gear_smooth_val * multiplier) / 100;
+    recommended = clamp(recommended, level_min, level_max);
+
+    debug_log(debug_batt, "curr_gear sign=%s raw=%d smooth=%d rec=%d/%d",
+              is_charging ? "充电" : "放电", abs_ua10, curr_gear_smooth_val,
+              recommended, gear_label(recommended));
+
+    // 5. 低于回退阈值 → 返回，让常规电池温度控制继续
+    if (recommended < CURRENT_GEAR_MIN) return 0;
+
+    // 6. 温度偏移
+    int batt = read_battery_temp();
+    int offset = 0;
+    if (batt >= 0) {
+        int diff = batt - BATT_BASELINE;
+        int abs_diff = (diff >= 0) ? diff : -diff;
+        // 每跨越一个 BATT_ZONE_1 偏移 1 档
+        if (abs_diff >= BATT_ZONE_1) {
+            int raw = abs_diff / BATT_ZONE_1;
+            if (raw > CURRENT_GEAR_OFFSET) raw = CURRENT_GEAR_OFFSET;
+            offset = (diff > 0) ? raw : -raw;  // 热↑ 冷↓
+        }
+    }
+
+    int final_level = recommended + offset;
+    final_level = clamp(final_level, level_min, level_max);
+
+    // 应用电流-挡位模式的结果
+    battery_fan_level = final_level;
+    batt_cooldown = 0;  // 无冷却期
+
+    // 清除反补/豁免状态（切换到该模式时不应保留旧状态）
+    trend_override = 0;
+    override_anchor_temp = -1;
+    rev_comp_pending_abs = 0;
+    rev_comp_pending_idle = 0;
+    rev_comp_cooldown = 0;
+    last_batt_reading = -1;  // 复位温度跟踪，切回基准模式时重新初始化
+
+    debug_log(debug_batt, "curr_gear 最终 rec=%d offset=%+d gear=%d",
+              recommended, offset, gear_label(final_level));
+    return 1;
 }
 
 // ======================== 主循环 ========================
@@ -1651,8 +1818,11 @@ static void main_loop(void) {
         rev_comp_pending_idle = 0;
     }
 
-    // 2. 电池温度控制（内部处理冷却期，此时恢复期倍率已生效）
-    battery_control();
+    // 2. 电池温度控制 / 电流-挡位映射模式
+    // 先尝试电流-挡位模式（返回 1 表示已覆盖挡位），未覆盖则回退到常规温度控制
+    if (!current_gear_override()) {
+        battery_control();
+    }
 
     // 3. 计算最终档位 = max(电池基础档位, 紧急强制最低档位)
     int final_level = battery_fan_level;
