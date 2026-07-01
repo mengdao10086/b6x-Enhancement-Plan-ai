@@ -695,8 +695,8 @@ static void write_log(const char *fmt, ...) {
 }
 
 /** 调试日志宏：需要总开关 DEBUG_MODE=1 且对应分区开关=1 时才输出 */
-#define debug_log(flag, fmt, ...) \r
-    do { if (debug_mode && (flag)) write_log("[DEBUG] " fmt, ##__VA_ARGS__); } while(0)
+/* 注意：必须写成单行，多行续行在 NDK clang + CRLF 下会失效 */
+#define debug_log(flag, fmt, ...) do { if (debug_mode && (flag)) write_log("[DEBUG] " fmt, ##__VA_ARGS__); } while(0)
 static inline int clamp(int val, int lo, int hi) {
     if (val < lo) return lo;
     if (val > hi) return hi;

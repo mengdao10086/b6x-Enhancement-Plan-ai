@@ -1,0 +1,5 @@
+# 强制 C 源文件使用 LF 换行，防止 NDK clang 下 \<CRLF> 续行问题
+magisk模块(智能温控)/*.c text eol=lf
+magisk模块(智能温控)/*.h text eol=lf
+.github/workflows/*.yml text eol=lf
+*.sh text eol=lf
