@@ -43,7 +43,8 @@ jobs:
             echo "lsposed=true" >> "$GITHUB_OUTPUT"
             echo "magisk=true" >> "$GITHUB_OUTPUT"
           else
-            CHANGES=$(git diff --name-only "$BEFORE" "${{ github.sha }}")
+            # core.quotePath=false 防止中文路径被转义为八进制导致 grep 匹配失败
+            CHANGES=$(git -c core.quotePath=false diff --name-only "$BEFORE" "${{ github.sha }}")
             echo "$CHANGES" | grep -q '^lsp模块(apk修复+温控接口)/' && echo "lsposed=true" >> "$GITHUB_OUTPUT" || echo "lsposed=false" >> "$GITHUB_OUTPUT"
             echo "$CHANGES" | grep -q '^magisk模块(智能温控)/' && echo "magisk=true" >> "$GITHUB_OUTPUT" || echo "magisk=false" >> "$GITHUB_OUTPUT"
           fi
