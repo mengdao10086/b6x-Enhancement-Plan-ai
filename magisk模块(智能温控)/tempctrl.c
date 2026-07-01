@@ -1831,9 +1831,9 @@ int main(int argc, char *argv[]) {
     // 循环开头先检测连接状态，断联时不执行 main_loop
     while (running) {
         read_status_ble();
-        debug_log(debug_conn, "main 连接状态 app_alive=%d ble=%d fully=%d", app_proc_ok, app_ble_connected, fully_connected);
         int app_proc_ok = is_app_alive();
         int fully_connected = app_proc_ok && app_ble_connected;
+        debug_log(debug_conn, "main 连接状态 app_alive=%d ble=%d fully=%d", app_proc_ok, app_ble_connected, fully_connected);
 
         if (!fully_connected) {
             if (app_was_alive) {
