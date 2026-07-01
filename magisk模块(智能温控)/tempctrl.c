@@ -639,9 +639,9 @@ static void write_log(const char *fmt, ...) {
 
     int max_bytes = LOG_MAX_KB * 1024;
 
-    // 超标 → 滚动：先关 log_fp，再读-删-写，下次自动重开
+    // 超标 → 滚动：先关 log_fp，再读-删-写，下次自动重开（调试模式下跳过限制，保留完整日志）
     struct stat st;
-    if (stat(log_file_path, &st) == 0 && st.st_size > max_bytes) {
+    if (!debug_mode && stat(log_file_path, &st) == 0 && st.st_size > max_bytes) {
         if (log_fp) { fclose(log_fp); log_fp = NULL; }
         size_t sz = st.st_size;
         char *buf = malloc(sz + 1);

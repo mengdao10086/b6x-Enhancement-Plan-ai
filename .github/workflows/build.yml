@@ -1,14 +1,10 @@
 name: Build
 
 on:
-  # 分支推送：按路径过滤，只有改到相关模块才触发
+  # 所有推送都触发构建（不设 paths 过滤——中文路径存在 Unicode 匹配问题）
+  # 由 detect-changes job 内部判断哪些模块有变更
   push:
-    paths:
-      - 'lsp模块(apk修复+温控接口)/**'
-      - 'magisk模块(智能温控)/**'
-      - '.github/workflows/build.yml'
-    tags:
-      - 'v*'
+  # 标签推送（v*）→ detect-changes 中会设为全量构建
   # 手动触发：全量构建
   workflow_dispatch:
 
