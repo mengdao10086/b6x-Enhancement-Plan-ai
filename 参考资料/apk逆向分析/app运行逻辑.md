@@ -15,7 +15,7 @@
 App 入口类为 `com.example.extool.App`，继承自 `Application`。其 `onCreate()` 执行以下关键初始化：
 
 1. **Xposed 钩子注册窗口**：`onCreate()` 执行后，LSPosed 模块的 `handleLoadPackage()` 被调用，所有 `findAndHookMethod` 在此阶段注册。这是最早的钩子注入时机，适合拦截 Application 级别的初始化。
-2. **BLE 状态写入线程启动**：模块的 `startPeriodicStatusWrite()` 在 `Application.onCreate` 的 after-hook 中启动，每 5 秒写入 status 文件供 tempctrl 守护进程检测心跳。
+2. **BLE 状态写入线程启动**：模块的 `startPeriodicStatusWrite()` 在 `Application.onCreate` 的 after-hook 中启动（[MainHook.java:547](../../lsp模块(apk修复+温控接口)/app/src/main/java/com/example/waspwingtempctrl/MainHook.java#L547)），每 5 秒写入 status 文件供 tempctrl 守护进程检测心跳。
 
 > ⚠️ Xposed 的 `findAndHookMethod` 找不到方法会抛 `NoSuchMethodError`（继承自 `Error` 而非 `Exception`），外层必须用 `catch(Throwable)` 捕获。一个钩子失败会导致后面所有钩子注册不上。
 
@@ -110,7 +110,7 @@ connect(device):
 | `createBond()` | ❌ 已配对无需再次配对 | — |
 | `ACL_CONNECTED` 广播 | ✅ 系统自动发出 | **否**，此分支不调 stopScan |
 
-结果：UI 显示已连接，但扫描动画永不停止。此 Bug 由 LSPosed 模块修复 #1（钩 `onDeviceConnected` → `stopScan()`）解决。
+结果：UI 显示已连接，但扫描动画永不停止。此 Bug 由 LSPosed 模块修复（[钩 `AbstractBluetoothController.onDeviceConnected` → `stopScan()`](../../lsp模块(apk修复+温控接口)/app/src/main/java/com/example/waspwingtempctrl/MainHook.java#L159) + [钩 `BluetoothViewModel.onDeviceConnected` → 更新 LiveData](../../lsp模块(apk修复+温控接口)/app/src/main/java/com/example/waspwingtempctrl/MainHook.java#L188)）解决。
 
 ### 2.3 GATT 服务发现
 
@@ -129,6 +129,8 @@ GATT 连接回调:
       → if !checkBluetoothPermission(): return     [⚠️ 关键检查点]
       → gatt.discoverServices()
 ```
+
+> 🔗 LSPosed 钩子位置：`LeDataInteractionController.checkBluetoothPermission` → `MainHook.java:274`（强制返回 true）
 
 **`checkBluetoothPermission()` 的实现**：
 
@@ -177,6 +179,14 @@ onCharacteristicChanged → 已触发 ✓
 App.onDeviceInfoUpdate → connected=true, _waspWingInfo=有值 ✓
 ```
 
+> 🔗 诊断钩子位置（`handleLoadPackage` 中统一注册）：
+> - `discoverServices` → `MainHook.java:284`
+> - `connect` → `MainHook.java:318`
+> - `onServicesDiscovered` → `MainHook.java:342`
+> - `onConnectionStateChange` → `MainHook.java:353`
+> - `SDK.onGattConnected` → `MainHook.java:385`
+> - `SDK.onDeviceInfoUpdate` → `MainHook.java:401`
+
 ---
 
 ## 三、设备状态管理
@@ -200,6 +210,8 @@ App.onDeviceInfoUpdate → connected=true, _waspWingInfo=有值 ✓
 | `coldLevel` | int | 设定制冷档位 | 设定时 |
 
 `WaspWingInfo` 通过 `convertFromDevice(BluetoothDevice)` 工厂方法可以从蓝牙设备创建初始实例，但此方法创建的对象所有字段为默认值（0/null/false），**不应在正常数据流到达前使用**，否则会触发 UI 闪烁（详见 §3.2 自修复逻辑）。
+
+> 🔗 `convertFromDevice` 已禁用：`MainHook.java:220`（第 4 层 Bug 修复，注释中说明了禁用原因）
 
 ### 3.2 ViewModel 层
 

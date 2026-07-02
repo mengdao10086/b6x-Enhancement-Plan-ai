@@ -1,176 +1,113 @@
-# 飞智 B6X 增强计划 — LSPosed 模块
+# LSPosed 模块 — 飞智 B6X 增强计划
 
-## 简介
-
-**飞智 B6X 增强计划**是一个为飞智 B6X 散热器开发者工具（`com.flydigi.waspwing.experimental`）提供修复和扩展功能的 LSPosed 模块。
-
-> **代码仓库注意**：本目录（`lsp模块(apk修复+温控接口)/`）是项目的一部分，不是独立仓库。所有 git 操作在父目录 `飞智b6x增强计划/`（git 子模块）中进行。
-
-### 主要功能
-
-| 版本 | 功能 | 状态 |
-|------|------|------|
-| **v1.0** | 修复 Android 16 (API 36) 上蓝牙扫描生命周期崩溃导致无法连接散热器的问题 | ✅ 已发布 |
-| **v2.0** | 智能温控后台守护程序的广播接口 + status 文件心跳检测 + 双重检查存活检测 + BLE 重连状态恢复 | ✅ 已发布 |
+> 本目录是 git 子模块的一部分，非独立仓库。git 操作在父目录 `飞智b6x增强计划/` 中执行。
 
 ---
 
-## 一、修复内容（v1.0）
+## 功能
 
-本模块修复了飞智散热器开发者工具在 **Android 16** 上无法使用的 4 层 Bug：
-
-| 层级 | 问题 | 修复方式 |
-|------|------|---------|
-| 控制器层 | 设备连接后扫描未停止，影响后续 BLE 操作 | 拦截 `onDeviceConnected` → 调用 `stopScan()` |
-| ViewModel 层 | BluetoothViewModel 的 LiveData 未及时更新 | 拦截 `onDeviceConnected` → 手动 postValue |
-| UI 层 | 智能温控模式下 UI 闪烁（convertFromDevice 副作用） | 不创建中间态 WaspWingInfo，等正常 BLE 数据流 |
-| Android 16 | `checkBluetoothPermission()` 在 BLE 回调线程返回 false，导致 `discoverServices()` 从未被调用 | 强制返回 true |
-
-## 二、智能温控扩展（v2.0）
-
-### 2.1 系统架构
-
-```
- ┌─ 手机 ──────────────────────────────────────────────────┐
- │                                                         │
- │  飞智 App 进程                        Root 进程          │
- │  ┌──────────────────────┐   status 文件  ┌───────────────┐  │
- │  │ LSPosed 模块          │ ◄───心跳───── │ tempctrl      │  │
- │  │                      │  进程存活检测 │ C 守护程序     │  │
- │  │ BLE 连接/断联        │             │ 每 5 秒：     │  │
- │  │ (tempctrl 自行检测   │             │ 读温度→决策→  │  │
- │  │  进程存活)           │             │ 下发指令      │  │
- │  │                      │             │               │  │
- │  │ ←── am broadcast ────│──指令───────│               │  │
- │  │       mode/temp/     │             │               │  │
- │  │       windOC/coldOC  │             └───────────────┘  │
- │  │          ↓                                          │
- │  │  WaspWingManager                                     │
- │  │  .setRunMode(7 params)                              │
- │  │  .setRunMode(7 params)                              │
- │  │          ↓                                          │
- │  │     BLE 指令 → 散热器                                │
- │  └──────────────────────┘                              │
- └────────────────────────────────────────────────────────┘
-```
-
-### 2.2 进程检测与控制通信
-
-使用 **双重检查检测**：status 文件 mtime 心跳 + BLE=1 状态。模块每 5 秒写入一次 status 文件，tempctrl 检测 mtime 是否在 11 秒内（已移除 pgrep，模块心跳足以判断存活）：
-
-```
-tempctrl 侧（C 守护程序）：
-  每轮主循环开头：
-    1. 读 /data/local/tmp/tempctrl.status 获取 BLE=0/1
-    2. stat(status 文件).mtime 距现在 ≤ 16秒？
-    两者都通过才算存活，任一失败即断联
-    └─ 断联 → 等待复活（模块+BLE 都恢复才视为复活）
-        └─ 恢复后保持当前状态，强制重发当前档位（不重置状态）
-
-模块侧（LSPosed）：
-  onDeviceConnected / disconnect 钩子 → 更新 bleConnected 状态
-  后台线程每 5 秒：FileOutputStream("/data/local/tmp/tempctrl.status")
-    → 写 "BLE=0\n" 或 "BLE=1\n"
-  （直接 Java 文件 I/O，不走 su，无 KSU 命名空间问题）
-```
-
-**⚠️ 旧版 FIFO 废弃原因**：KernelSU 下 App 进程无权限写 `/data/local/tmp/`，
-`Runtime.exec("su", "-c", "echo > fifo")` 在 KSU 中不可靠。改为 status 文件后，
-由 daemon（root）创建文件并设 0666 权限，App 进程直接 Java I/O 写入，无权限问题。
-
-### 2.3 档位定义
-
-> 档位映射使用查表法，完整档位表见 [magisk模块(智能温控)/逻辑说明.md](../magisk模块(智能温控)/逻辑说明.md)（档位系统章节），或 [profile.conf](../magisk模块(智能温控)/magisk模块框架/profile.conf) 中的 `GEAR_N` 配置。
-
-**setRunMode 参数映射：**
-```
-setRunMode(mode, targetTemperature,
-           windLevelOverclock, coldLevelOverclock,
-           windLevel, modeCustom, extra)
-```
-- `mode=0`(智能温控)：`targetTemperature` + `windLevel`（风扇转速上限）
-- `mode=1`（固定功率）：`windLevelOverclock`（风扇转速）+ `coldLevelOverclock`（制冷片强度）
+- **BLE 修复**：修复 Android 16 上飞智散热器开发者工具无法连接的 4 层连环 Bug（[完整修复历程](../参考资料/完整修复历程.md)）
+- **广播接口**：接收 `com.flydigi.SET_TEMPERATURE` 广播，将参数转发到 `WaspWingManager.setRunMode()`
+- **status 文件心跳**：每 5 秒写入 `BLE=0/1` 到 `/data/local/tmp/tempctrl.status`，供 tempctrl 检测存活
+- **CPU 占用修复**：修复 DefaultDispatcher 线程空队列忙等导致的 100% CPU 占用
 
 ---
 
-## 三、编译方法
-
-### 3.1 编译 LSPosed 模块
-
-**Android Studio：** 用 Android Studio 打开 `lsp模块(apk修复+温控接口)/` 目录 → Build → Build APK
-
-**命令行：**
-```bash
-cd lsp模块(apk修复+温控接口)
-export ANDROID_HOME=/path/to/Android/Sdk
-./gradlew assembleRelease
-```
-
-**GitHub Actions：** 推送 tag（`v*`）或手动触发 workflow_dispatch 即可自动编译。
-
----
-
-## 四、安装与使用
-
-### 4.1 安装模块
+## 安装
 
 1. 编译或下载 APK
 2. 安装到手机（允许未知来源应用）
-3. 在 LSPosed 中启用模块，作用域勾选 `com.flydigi.waspwing.experimental`
-4. 强制停止目标 App 或重启手机
+3. 在 LSPosed 中**启用模块**，作用域勾选 `com.flydigi.waspwing.experimental`
+4. **强制停止**目标 App 或重启手机
 
-### 4.2 Shell 手动测试广播
+> 需要 LSPosed ≥ 1.8。
+
+---
+
+## 广播协议
+
+### 接口
+
+```
+Action: com.flydigi.SET_TEMPERATURE
+```
+
+### 参数
+
+| Extra | 类型 | 说明 |
+|-------|------|------|
+| `mode` | int | 0=智能温控, 1=固定功率 |
+| `temperature` | int | 目标温度 (°C)，智能温控模式 |
+| `windOC` | int | 风扇固定转速 (RPM)，固定功率模式 |
+| `coldOC` | int | 制冷片强度 (0-194)，固定功率模式 |
+| `windLevel` | int | 风扇转速上限 (RPM)，智能温控模式 |
+| `modeCustom` | int | 保留（传 0） |
+| `extra` | int | 保留（传 0） |
+
+### 示例
 
 ```bash
 # 智能温控：目标 16°C，风扇上限 4000RPM
 am broadcast -a com.flydigi.SET_TEMPERATURE \
     --ei mode 0 --ei temperature 16 --ei windLevel 4000
 
-# 固定功率：风扇 2900RPM，制冷 80
+# 固定功率：风扇 2900RPM，制冷强度 80
 am broadcast -a com.flydigi.SET_TEMPERATURE \
     --ei mode 1 --ei windOC 2900 --ei coldOC 80
 ```
 
 ---
 
-## 五、模块文件结构
+## 源码结构
 
 ```
-app/
-├── src/main/
-│   ├── AndroidManifest.xml       ← 模块声明 + Xposed 元数据
-│   ├── assets/xposed_init        ← Xposed 入口
-│   └── java/.../MainHook.java    ← 核心注入代码（修复 + 广播接收处理）
-├── build.gradle.kts
-├── settings.gradle.kts
-└── gradle/
+app/src/main/
+├── AndroidManifest.xml       ← 模块声明 + Xposed 元数据
+├── assets/xposed_init        ← Xposed 入口点声明
+└── java/.../
+    ├── MainHook.java         ← 核心：Xposed 钩子 + 广播接收
+    └── (其他辅助类)
 ```
 
 ---
 
-## 六、验证
+## 编译
+
+**Android Studio**：打开本目录 → Build → Build APK
+
+**命令行**：
+```bash
+cd lsp模块(apk修复+温控接口)
+export ANDROID_HOME=/path/to/Android/Sdk
+./gradlew assembleRelease
+```
+
+**GitHub Actions**：推送 `v*` 标签或手动触发 workflow_dispatch。
+
+---
+
+## 验证
 
 ```bash
-# 查看模块日志
 adb logcat -s WaspWingTempCtrl
 ```
 
 ---
 
-## 七、常见问题
+## 注意事项
+
+| 风险 | 说明 |
+|------|------|
+| `RECEIVER_EXPORTED` | `am broadcast` 从系统进程发广播，模块需 `RECEIVER_EXPORTED` 才能在 Android 14+ 收到 |
+| `convertFromDevice()` | 不要调用该方法——它创建全默认值 WaspWingInfo，触发状态循环导致 UI 闪烁 |
+| catch(Throwable) | `NoSuchMethodError` 继承自 `Error` 而非 `Exception`，所有外层 try 块必须用 `Throwable` 捕获 |
+
+---
+
+## 常见问题
 
 **Q: 模块不生效？**
 A: 确保 LSPosed ≥ 1.8，模块启用后**强制停止目标 App** 或重启手机。
 
-**Q: 发送广播后温度没变？**
-A: 检查① LSPosed 中模块已勾选且作用域正确 ② App BLE 已连接。
-
----
-
-## 八、注意事项 / 已知风险
-
-| 风险 | 说明 |
-|------|------|
-| `RECEIVER_EXPORTED` 权限 | `am broadcast` 从系统进程发广播，模块需 `RECEIVER_EXPORTED` 才能收到（Android 14+） |
-| BLE 重连时序 | `BluetoothGatt.disconnect()` 钩子可能被多次触发（已移除 FIFO，不影响） |
-| `convertFromDevice()` 禁用 | 不要调用该方法——它创建全默认值 WaspWingInfo，触发循环导致 UI 闪烁 |
+**Q: 发送广播后温度没变化？**
+A: 检查：① LSPosed 中模块已勾选且作用域正确；② App BLE 已连接。

@@ -249,18 +249,21 @@ static int EMERG_CPU_ENABLED     = 1;   // CPU 温度紧急独立开关
 static int REV_COMP_ENABLED      = 1;   // 反补独立开关
 static int TREND_EXEMPT_ENABLED  = 1;   // 趋势豁免独立开关
 
-// ======================== 电流-挡位映射模式（可由 profile.conf 覆盖）===========
-// 以电池电流为挡位调整依据，覆盖常规电池温度挡位调整
-static int CURRENT_GEAR_MODE_CHARGE    = 0;    // 充电(负电流)：0=普通模式, 1=电流-挡位模式
+// ======================== 电流-挡位映射 + 温度融合模式 =======================
+// 电流为推荐挡位基础，温度累积偏移调整，带冷却期和偏移继承
+static int CURRENT_GEAR_MODE_CHARGE    = 1;    // 充电(负电流)：0=普通模式, 1=电流-挡位模式
 static int CURRENT_GEAR_MODE_DISCHARGE = 1;    // 放电(正电流)：0=普通模式, 1=电流-挡位模式
 static int CURRENT_GEAR_MULT_CHARGE    = 2;    // 充电倍率：abs(电流µA) × 倍率 ÷ 1000000 → 推荐档位
 static int CURRENT_GEAR_MULT_DISCHARGE = 6;    // 放电倍率：电流µA × 倍率 ÷ 1000000 → 推荐档位
-static int CURRENT_GEAR_OFFSET         = 2;    // 温度允许偏移 ±N 档
 static int CURRENT_GEAR_SMOOTH_ALPHA   = 25;   // 电流平滑系数（百分比，1~100），默认 α=0.25
 static int CURRENT_GEAR_MIN            = 6;    // 推荐档位低于此值回退基准模式
 // 电流-挡位平滑状态
 static int curr_gear_smooth_val   = 0;         // 电流平滑值（µA）
 static int curr_gear_smooth_valid = 0;         // 平滑值是否已初始化
+// 电流-挡位融合模式状态（推荐挡位跟踪 + 温度偏移继承）
+static int curr_gear_rec           = 0;         // 上一次的电流推荐挡位
+static int curr_gear_temp_offset   = 0;         // 温度累积偏移量（无上限，由 level_min/max 钳位）
+static int curr_gear_temp_cooldown = 0;         // 温度偏移冷却剩余周期
 
 // ======================== 配置文件系统 ========================
 
@@ -535,8 +538,6 @@ static void load_config(const char *path) {
             CURRENT_GEAR_MULT_CHARGE = clamp(val, 1, 50);
         else if (strcmp(key, "CURRENT_GEAR_MULT_DISCHARGE") == 0 && (CURRENT_GEAR_MODE_CHARGE || CURRENT_GEAR_MODE_DISCHARGE))
             CURRENT_GEAR_MULT_DISCHARGE = clamp(val, 1, 50);
-        else if (strcmp(key, "CURRENT_GEAR_OFFSET") == 0 && (CURRENT_GEAR_MODE_CHARGE || CURRENT_GEAR_MODE_DISCHARGE))
-            CURRENT_GEAR_OFFSET = clamp(val, 0, 5);
         else if (strcmp(key, "CURRENT_GEAR_SMOOTH_ALPHA") == 0 && (CURRENT_GEAR_MODE_CHARGE || CURRENT_GEAR_MODE_DISCHARGE))
             CURRENT_GEAR_SMOOTH_ALPHA = clamp(val, 1, 100);
         else if (strcmp(key, "CURRENT_GEAR_MIN") == 0 && (CURRENT_GEAR_MODE_CHARGE || CURRENT_GEAR_MODE_DISCHARGE))
@@ -1575,22 +1576,28 @@ static void emergency_intervention(void) {
     debug_log(debug_emerg, "emerg 最终等级=%d forced_min=%d", emergency_level, forced_min_level);
 }
 
-// ======================== 电流-挡位映射模式 ========================
+// ======================== 电流-挡位映射 + 温度调整融合 ========================
 
 /**
- * 电流-挡位映射模式
- * 以电池电流为挡位调整依据，覆盖常规电池温度挡位调整。
- * 分为充电/放电两套逻辑，各自有独立开关。
+ * 电流-挡位映射 + 温度调整融合模式
+ *
+ * 融合设计：
+ *   - 电流 → EMA 平滑 → 倍率计算 → 推荐挡位（基础）
+ *   - 温度 → 在推荐挡位基础上累积偏移挡位（带冷却期）
+ *   - 推荐挡位变化时偏移量自动继承（跨过渡不丢失）
+ *   - 偏移量无上限（由 level_min/level_max 钳位）
  *
  * 计算流程：
  *   1. 读取带符号电池电流，判断方向（用户约定：负=充电，正=放电）
- *   2. 检查对应方向的开关是否开启，未开→返回（继续使用常规电池温度模式）
+ *   2. 检查对应方向的开关是否开启，未开→返回
  *   3. EMA 平滑（α=CURRENT_GEAR_SMOOTH_ALPHA）
  *   4. 推荐挡位 = 平滑值(0.01A) × 倍率 ÷ 100
- *   5. 推荐挡位 < CURRENT_GEAR_MIN → 返回（回退到基准模式）
- *   6. 温度偏移：电池温度偏离基准越远，在 ±CURRENT_GEAR_OFFSET 范围内调档
- *
- * 特点：无冷却期，无趋势豁免，无反补，清除现有状态
+ *   5. 推荐挡位 < CURRENT_GEAR_MIN → 复位轨迹，返回（回退到基准模式）
+ *   6. 偏移继承：推荐挡位变化时 curr_gear_temp_offset 自动保留
+ *   7. 温度偏移累积（带 curr_gear_temp_cooldown 冷却期）：
+ *      冷却中 → 递减冷却、不更新偏移
+ *      冷却结束 → 计算温度 delta（同 battery_control），累积到偏移
+ *   8. 最终挡位 = clamp(推荐 + 偏移, level_min, level_max)
  *
  * 返回值：1=已应用电流-挡位覆盖，0=未覆盖（应回退到常规模式）
  */
@@ -1599,7 +1606,6 @@ static int current_gear_override(void) {
     int val = read_sysfs_int(BATT_CURRENT_PATH);
     int ua10 = val / 10000;  // µA → 0.01A（截断后4位）
     if (ua10 == 0) {
-        // 接近零电流，跳过此模式让常规电池温度控制继续
         return 0;
     }
 
@@ -1621,8 +1627,6 @@ static int current_gear_override(void) {
     }
 
     // 4. 推荐挡位 = 平滑值(0.01A) × 倍率 ÷ 100
-    //    原 µA 公式：平滑值(µA) × 倍率 ÷ 1000000
-    //    转 0.01A 后：平滑值(0.01A) × 倍率 ÷ 100
     int multiplier = is_charging ? CURRENT_GEAR_MULT_CHARGE : CURRENT_GEAR_MULT_DISCHARGE;
     int recommended = (curr_gear_smooth_val * multiplier) / 100;
     recommended = clamp(recommended, level_min, level_max);
@@ -1631,40 +1635,64 @@ static int current_gear_override(void) {
               is_charging ? "充电" : "放电", abs_ua10, curr_gear_smooth_val,
               recommended, gear_label(recommended));
 
-    // 5. 低于回退阈值 → 返回，让常规电池温度控制继续
-    if (recommended < CURRENT_GEAR_MIN) return 0;
-
-    // 6. 温度偏移
+    // 5. 温度偏移管理
     int batt = read_battery_temp();
-    int offset = 0;
-    if (batt >= 0) {
-        int diff = batt - BATT_BASELINE;
-        int abs_diff = (diff >= 0) ? diff : -diff;
-        // 每跨越一个 BATT_ZONE_1 偏移 1 档
-        if (abs_diff >= BATT_ZONE_1) {
-            int raw = abs_diff / BATT_ZONE_1;
-            if (raw > CURRENT_GEAR_OFFSET) raw = CURRENT_GEAR_OFFSET;
-            offset = (diff > 0) ? raw : -raw;  // 热↑ 冷↓
+    if (curr_gear_rec > 0) {
+        // 已激活：正常累积温度偏移（带冷却期）
+        if (batt >= 0) {
+            if (curr_gear_temp_cooldown > 0) {
+                curr_gear_temp_cooldown--;
+            } else {
+                int diff = batt - BATT_BASELINE;
+                int ad = abs(diff);
+                int sign = (diff > 0) ? 1 : (diff < 0) ? -1 : 0;
+                int delta = 0;
+                if      (ad > BATT_ZONE_3) delta = 3 * sign;
+                else if (ad > BATT_ZONE_2) delta = 2 * sign;
+                else if (ad > BATT_ZONE_1) delta = 1 * sign;
+                if (delta != 0) {
+                    curr_gear_temp_offset += delta;
+                    curr_gear_temp_cooldown = BATT_COOLDOWN_CYCLES;
+                }
+            }
         }
+    } else {
+        // 初次进入/重新进入：以当前实际挡位为基准计算初始偏移
+        curr_gear_temp_offset = battery_fan_level - recommended;
     }
 
-    int final_level = recommended + offset;
+    // 6. 计算实际挡位 = 推荐 + 偏移
+    int final_level = recommended + curr_gear_temp_offset;
     final_level = clamp(final_level, level_min, level_max);
 
-    // 应用电流-挡位模式的结果
-    battery_fan_level = final_level;
-    batt_cooldown = 0;  // 无冷却期
+    // 7. 统一以实际挡位走阈值检查：低于阈值则退出/不进入电流映射
+    if (final_level < CURRENT_GEAR_MIN) {
+        curr_gear_rec = 0;
+        curr_gear_temp_offset = 0;
+        curr_gear_temp_cooldown = 0;
+        return 0;
+    }
 
-    // 清除反补/豁免状态（切换到该模式时不应保留旧状态）
+    // 偏移继承日志（推荐挡位变化时温度偏移自然保留）
+    if (curr_gear_rec > 0 && recommended != curr_gear_rec) {
+        debug_log(debug_batt, "curr_gear rec变化 %d→%d, temp_offset=%+d 继承",
+                  curr_gear_rec, recommended, curr_gear_temp_offset);
+    }
+    curr_gear_rec = recommended;
+    battery_fan_level = final_level;
+
+    // 清除反补/豁免状态（切换模式时不应保留旧状态）
     trend_override = 0;
     override_anchor_temp = -1;
     rev_comp_pending_abs = 0;
     rev_comp_pending_idle = 0;
     rev_comp_cooldown = 0;
-    last_batt_reading = -1;  // 复位温度跟踪，切回基准模式时重新初始化
+    last_batt_reading = -1;
+    batt_idle_cycles = 0;
+    batt_unchanged_count = 0;
 
-    debug_log(debug_batt, "curr_gear 最终 rec=%d offset=%+d gear=%d",
-              recommended, offset, gear_label(final_level));
+    debug_log(debug_batt, "curr_gear 融合 rec=%d temp_offset=%+d gear=%d",
+              recommended, curr_gear_temp_offset, gear_label(final_level));
     return 1;
 }
 

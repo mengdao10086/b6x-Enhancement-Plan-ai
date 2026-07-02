@@ -1,35 +1,14 @@
 # 项目记忆索引
 
-- [完整修复历程](参考资料/完整修复历程.md) — 全部 4 层 Bug 修复全记录（含早期反编译分析）
-- [LSPosed 模块源码](lsp模块(apk修复+温控接口)/app/src/main/java/com/example/waspwingtempctrl/MainHook.java) — MainHook.java（SET_TEMPERATURE 广播接收 + BLE 修复）
-- [智能温控 C 守护程序](magisk模块(智能温控)/tempctrl.c) — 智能温控算法源码（动态档位表，GEAR_N可配置，电池/CPU 双温控，profile.conf 配置热重载，温度趋势豁免）
-- [智能温控逻辑说明](magisk模块(智能温控)/逻辑说明.md) — 智能温控设计文档（运行逻辑、策略细节、注意事项）
-- [Magisk 模块框架](magisk模块(智能温控)/magisk模块框架/) — module.prop / service.sh / customize.sh / profile.conf
-（已合入[完整修复历程](参考资料/完整修复历程.md)）
-- [第一阶段修复](参考资料/完整修复历程.md#2-第一阶段apk-直接修改尝试失败) — smali 修改尝试记录（合入完整版第 2 章）
+> 快速定位文件。核心内容见各文件本身，此处只存链接。
 
-## 进程检测与控制流
-
-| 方向 | 方式 | 数据 |
-|------|------|------|
-| tempctrl → App 存活检测 | `stat(status 文件).mtime ≤ 16秒` | 每 5 秒检查 |
-| tempctrl → LSPosed 模块 | `am broadcast` | `com.flydigi.SET_TEMPERATURE` 带 7 参数 |
-| LSPosed 模块 → 散热器 | `WaspWingManager.setRunMode()` → BLE | 散热器控制指令 |
-
-## 核心逻辑
-
-- ~~FIFO 通信已废弃~~（KernelSU 下 App 进程写 `/data/local/tmp/` 权限不通）
-- tempctrl 通过 status 文件 mtime 每 5 秒检测 App 进程存活（模块心跳，超时 11 秒判死）
-- App 进程不存在 → 等待复活；复活后三值（RPM/制冷/温度）对齐匹配挡位，由 rate_limited_execute 按正常速率过渡
-- 断联时实际值保持不动（丢弃未执行变化量），无超时重置
-- 档位决策与执行分离：`main_loop` 纯计算，`rate_limited_execute` 按速率限制执行
-  - 风扇转速每周期最多 ±`RATE_LIMIT_RPM`（默认 250 RPM）
-  - 制冷片强度每周期最多 ±`RATE_LIMIT_COLD`（默认 20，固定功率模式）
-  - 目标温度每周期最多 ±`RATE_LIMIT_TEMP`（默认 2°C，智能温控模式）
-  - 溢出自然累积下周期，目标变化时从当前实际值重新计算
-- 电池档位继承：`battery_fan_level = final_level`，紧急退出后不会暴跌
-- 温度趋势豁免：降温不升档、升温不降档（最多豁免 `OVERRIDE_MAX` 次，默认 6）
-- 紧急干预：CPU 温度 + 电池电流双源，OR 入 AND 出，电流值不平滑
-- 退出紧急钳制：不再判断电池温度/充电电流，直接执行 AND 逻辑结果
-- 所有阈值通过 `profile.conf` 配置，修改后 mtime 热重载无需重启
-- App 前后台切换不影响控制（模块仍在接收广播）
+| 主题 | 位置 | 一句话 |
+|------|------|--------|
+| BLE 修复全记录 | [完整修复历程](参考资料/完整修复历程.md) | 4 层 Bug 链（扫描→UI→GATT→闪烁）的完整修复过程 |
+| LSPosed 模块源码 | [MainHook.java](lsp模块(apk修复+温控接口)/app/src/main/java/com/example/waspwingtempctrl/MainHook.java) | Xposed 钩子 + SET_TEMPERATURE 广播接收 |
+| 智能温控 C 源码 | [tempctrl.c](magisk模块(智能温控)/tempctrl.c) | 电池/CPU 双温控决策，profile.conf 热重载 |
+| 智能温控设计文档 | [逻辑说明.md](magisk模块(智能温控)/逻辑说明.md) | 运行逻辑、策略细节、配置参数映射 |
+| Magisk 模块框架 | [magisk模块框架/](magisk模块(智能温控)/magisk模块框架/) | module.prop / service.sh / customize.sh / profile.conf |
+| App 逆向分析 | [app运行逻辑.md](参考资料/apk逆向分析/app运行逻辑.md) | App 内部结构、BLE 通信流程、LiveData 数据链 |
+| 更新日志 | [CHANGELOG.md](参考资料/CHANGELOG.md) | v1.0 → v2.2 逐版本变更 |
+| 版本状态 | 当前版本 v2.2（电流-挡位融合模式），2026-07-03 | Android 16 BLE 修复已完成 |
