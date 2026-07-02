@@ -1,7 +1,7 @@
 # 飞智 B6X 增强计划 — Claude 指令
 
 ## 项目定位
-飞智 B6X 散热器开发者工具增强项目。**Android 16 BLE 修复已完成**，**智能温控 v2.1 已发布**。
+飞智 B6X 散热器开发者工具增强项目。**Android 16 BLE 修复已完成**，**智能温控 v2.2 已发布**。
 
 ### v2.2 概况（独立开关 + 电流-挡位映射 + 调试日志）
 - **独立开关**：`EMERG_CURRENT_ENABLED`（默认关闭）、`EMERG_CPU_ENABLED`、`REV_COMP_ENABLED`、`TREND_EXEMPT_ENABLED`，各功能模块独立控制
