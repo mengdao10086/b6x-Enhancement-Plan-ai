@@ -38,6 +38,7 @@ public class MainHook implements IXposedHookLoadPackage {
     private static int lastSetMode = 0;     // 上次 setRunMode 的 mode（用于 UI 闪烁修复）
     private static int lastSetColdOC = 0;   // 上次固定功率的 coldOC（用于 UI 闪烁修复）
     private static boolean bleConnected = false;  // BLE 连接状态（写入 status 文件供 tempctrl 读取）
+    private static Object lastWaspWingInfo = null;  // 散热器全参数回传（v2.3），在 onDeviceInfoUpdate 中捕获
 
     // ========== 智能温控广播接收器（v2.0） ==========
     // 接收 tempctrl 发送的 am broadcast，调用 setRunMode 控制散热器
@@ -116,7 +117,62 @@ public class MainHook implements IXposedHookLoadPackage {
     private static void writeStatusFile() {
         try {
             FileOutputStream fos = new FileOutputStream(STATUS_FILE);
-            fos.write(("BLE=" + (bleConnected ? "1" : "0") + "\n").getBytes());
+            StringBuilder sb = new StringBuilder();
+            sb.append("BLE=").append(bleConnected ? "1" : "0").append("\n");
+
+            // v2.3：散热器全参数回传
+            try {
+                if (lastWaspWingInfo != null) {
+                    // 运行模式：getRunMode() → int，0=固定功率(手动), 1=智能
+                    Object runMode = XposedHelpers.callMethod(lastWaspWingInfo, "getRunMode");
+                    if (runMode != null)
+                        sb.append("RUN_MODE=").append(runMode).append("\n");
+
+                    // 热端温度：getHotSurfaceTemperature() → byte(°C) → 0.1°C
+                    Object hot = XposedHelpers.callMethod(lastWaspWingInfo, "getHotSurfaceTemperature");
+                    if (hot != null)
+                        sb.append("HOT_TEMP=").append(((Number)hot).intValue() * 10).append("\n");
+
+                    // 冷端温度：getTemperature()(整数°C) + getTemperatureDecimal()(小数位) → 0.1°C
+                    Object cold = XposedHelpers.callMethod(lastWaspWingInfo, "getTemperature");
+                    Object coldDec = XposedHelpers.callMethod(lastWaspWingInfo, "getTemperatureDecimal");
+                    if (cold != null && coldDec != null) {
+                        int c = (Integer)cold;
+                        int d = (Integer)coldDec;
+                        if (d >= 10) d = (d + 5) / 10;  // 多位小数 → 四舍五入到 0.1°C
+                        sb.append("COLD_TEMP=").append(c * 10 + d).append("\n");
+                    }
+
+                    // 实际风扇转速（经超频逻辑折算）：getRealWindLevel()
+                    Object rpmReal = XposedHelpers.callMethod(lastWaspWingInfo, "getRealWindLevel");
+                    if (rpmReal != null)
+                        sb.append("RPM_REAL=").append(rpmReal).append("\n");
+
+                    // 风扇 PWM 原始值：getWindLevel()（跟在 RPM_REAL 之后）
+                    Object windLv = XposedHelpers.callMethod(lastWaspWingInfo, "getWindLevel");
+                    if (windLv != null)
+                        sb.append("RPM_LEVEL=").append(windLv).append("\n");
+
+                    // 实际制冷强度（经超频逻辑折算）：getRealColdLevel()
+                    Object coldReal = XposedHelpers.callMethod(lastWaspWingInfo, "getRealColdLevel");
+                    if (coldReal != null)
+                        sb.append("COLD_REAL=").append(coldReal).append("\n");
+
+                    // 制冷 PWM 原始值：getColdLevel()（跟在 COLD_REAL 之后）
+                    Object coldLv = XposedHelpers.callMethod(lastWaspWingInfo, "getColdLevel");
+                    if (coldLv != null)
+                        sb.append("COLD_LEVEL=").append(coldLv).append("\n");
+
+                    // 目标温度：getTargetTemperature() → int(°C) → 0.1°C
+                    Object tgtTemp = XposedHelpers.callMethod(lastWaspWingInfo, "getTargetTemperature");
+                    if (tgtTemp != null)
+                        sb.append("TARGET_TEMP=").append(((Integer)tgtTemp) * 10).append("\n");
+                }
+            } catch (Throwable t) {
+                XposedBridge.log(TAG + " 参数回传异常: " + t.getMessage());
+            }
+
+            fos.write(sb.toString().getBytes());
             fos.close();
         } catch (Exception e) {
             XposedBridge.log(TAG + " 写入状态文件失败: " + e.getMessage());
@@ -403,6 +459,7 @@ public class MainHook implements IXposedHookLoadPackage {
                         @Override
                         protected void afterHookedMethod(MethodHookParam param) {
                             Object info = param.args[0];
+                            lastWaspWingInfo = info;  // v2.3：捕获散热器全参数回传
 
                             // 修正 experimentalRunModeValue，阻止 App 原生逻辑触发 UI 闪烁
                             // 智能模式 mode=0 时设 0，固定功率 mode=1 时设 coldOC

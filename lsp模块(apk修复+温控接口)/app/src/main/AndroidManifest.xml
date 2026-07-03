@@ -18,6 +18,11 @@
             android:name="xposeddescription"
             android:value="修复了b6x超频软件在安卓16无法使用的问题，并为智能温控magisk模块提供控制接口" />
 
+        <!-- LSPosed 推荐作用域：管理器 > 模块 > 推荐勾选的应用 -->
+        <meta-data
+            android:name="xposedscope"
+            android:resource="@array/xposed_scope" />
+
         <!-- 无 Activity — 纯模块，安装后 LSPosed 中勾选即可 -->
 
     </application>

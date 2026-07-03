@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- LSPosed 推荐作用域：在管理器显示推荐勾选的应用 -->
+    <string-array name="xposed_scope">
+        <item>com.flydigi.waspwing.experimental</item>
+    </string-array>
+</resources>

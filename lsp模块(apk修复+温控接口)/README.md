@@ -8,7 +8,7 @@
 
 - **BLE 修复**：修复 Android 16 上飞智散热器开发者工具无法连接的 4 层连环 Bug（[完整修复历程](../参考资料/完整修复历程.md)）
 - **广播接口**：接收 `com.flydigi.SET_TEMPERATURE` 广播，将参数转发到 `WaspWingManager.setRunMode()`
-- **status 文件心跳**：每 5 秒写入 `BLE=0/1` 到 `/data/local/tmp/tempctrl.status`，供 tempctrl 检测存活
+- **status 文件心跳 + 散热器全参数回传**：每 5 秒写入 BLE 状态及散热器运行参数到 `/data/local/tmp/tempctrl.status`，供 tempctrl 读取。包含 10 个字段（详见 [status 文件协议](#status-文件协议)）
 - **CPU 占用修复**：修复 DefaultDispatcher 线程空队列忙等导致的 100% CPU 占用
 
 ---
@@ -68,6 +68,45 @@ app/src/main/
     ├── MainHook.java         ← 核心：Xposed 钩子 + 广播接收
     └── (其他辅助类)
 ```
+
+---
+
+## status 文件协议
+
+模块每 5 秒覆写 `/data/local/tmp/tempctrl.status`，包含 10 个字段供 tempctrl 守护进程解析：
+
+### 写入端（LSPosed 模块 → 文件）
+
+| 行 | 说明 | 来源 | 单位 |
+|----|------|------|------|
+| `BLE=0/1` | BLE 连接状态 | `onDeviceConnected` / `disconnect` 等事件 | bool |
+| `RUN_MODE=` | 散热器当前运行模式 | `WaspWingInfo.getRunMode()` | int（0=固定功率, 1=智能） |
+| `HOT_TEMP=` | 热端温度 | `getHotSurfaceTemperature()` byte ×10 | 0.1°C |
+| `COLD_TEMP=` | 冷端温度 | `getTemperature()` ×10 + `getTemperatureDecimal()` | 0.1°C |
+| `RPM_REAL=` | 实际风扇转速（经超频逻辑折算） | `getRealWindLevel()` | int |
+| `RPM_LEVEL=` | 风扇 PWM 原始值 | `getWindLevel()` | int |
+| `COLD_REAL=` | 实际制冷强度（经超频逻辑折算） | `getRealColdLevel()` | int |
+| `COLD_LEVEL=` | 制冷 PWM 原始值 | `getColdLevel()` | int |
+| `TARGET_TEMP=` | 散热器目标温度 | `getTargetTemperature()` int ×10 | 0.1°C |
+
+### 解析端（tempctrl `read_status_ble`）
+
+```
+BLE=1
+RUN_MODE=1
+HOT_TEMP=420        ← 42.0°C
+COLD_TEMP=58         ← 5.8°C
+RPM_REAL=77
+RPM_LEVEL=77
+COLD_REAL=115
+COLD_LEVEL=115
+TARGET_TEMP=180     ← 18.0°C
+```
+
+### 注意
+- 温度字段全部使用 0.1°C 内部单位（C 端 `atoi()` 直接解析，无需浮点）
+- 对比 `RPM_REAL` vs `RPM_LEVEL` 可判断散热器是否处于超频状态
+- `lastWaspWingInfo` 为 `null` 时只输出 `BLE=` 行（模块启动初期或 WaspWingInfo 未就绪）
 
 ---
 

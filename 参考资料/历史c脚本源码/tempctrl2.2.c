@@ -27,7 +27,6 @@
 #include <sys/stat.h>
 #include <sys/wait.h>
 #include <fcntl.h>
-#include <math.h>
 
 // ======================== 档位定义 ========================
 //
@@ -243,7 +242,6 @@ static int debug_exec    = 0;   // [执行下发] 速率限制/am broadcast 送�
 static int debug_conn    = 0;   // [连接状态] App 存活/BLE/重连对齐
 static int debug_config  = 0;   // [配置加载] 配置文件解析过程
 static int debug_main    = 0;   // [主循环] main_loop 流程跟踪
-static int debug_pid     = 0;   // [PID] PID 控制调试
 
 // ======================== 独立开关（可由 profile.conf 覆盖）===================
 static int EMERG_CURRENT_ENABLED = 0;   // 电流紧急独立开关，默认关闭（让位于电流-挡位映射）
@@ -328,46 +326,6 @@ static int app_ble_connected = 0;
 // --- 电流平滑状态（紧急退出用 EMA）---
 static int curr_smooth_val = 0;       // 平滑后的电流值（µA）
 static int curr_smooth_valid = 0;     // 平滑数据是否有效
-
-// --- PID 控制模式全局变量 ---
-static int ctrl_mode = 0;                 // CTRL_MODE: 0=gear, 1=PID
-
-// PID 参数
-static int pid_kp = 80;                   // PID_KP（÷1000）
-static int pid_ki = 20;                   // PID_KI（÷1000）
-static int pid_kd = 150;                  // PID_KD
-static int pid_integral_limit = 500;      // PID_INTEGRAL_LIMIT（÷1000）
-static int pid_batt_alpha = 30;           // PID_BATT_ALPHA（%，新值权重）
-static int pid_output_alpha = 50;         // PID_OUTPUT_ALPHA（%，新值权重）
-static int pid_cold_min = 1;              // PID_COLD_MIN
-static int pid_cold_max = 190;            // PID_COLD_MAX
-static int pid_cold_exp = 150;            // PID_COLD_EXP（÷100）
-static int pid_rpm_min = 2000;            // PID_RPM_MIN
-static int pid_rpm_max = 6000;            // PID_RPM_MAX
-static int pid_hot_map_min = 350;         // PID_HOT_MAP_MIN（0.1°C）
-static int pid_hot_map_max = 450;         // PID_HOT_MAP_MAX（0.1°C）
-
-// PID 运行状态
-static int pid_integral = 0;              // 积分累积值
-static int pid_prev_error = 0;            // 上周期误差（0.1°C）
-static int pid_batt_filtered = -1;        // EMA 滤波后电池温度
-static int pid_last_batt = -1;            // 上次参与 PID 计算的原始温度
-static time_t pid_last_change_time = 0;   // 上次温度变化时间戳
-static float pid_output_smoothed = 0.0f;  // 输出平滑值
-
-// PID 目标值（供 rate_limited_execute 读取）
-static int pid_target_rpm = 2000;
-static int pid_target_cold = 60;
-
-// 散热器回传参数（由 read_status_ble 解析，供 PID 分支使用）
-static int cooler_runmode = -1;           // 散热器实际运行模式
-static int cooler_hot_temp = -1;          // 热端温度（0.1°C）
-static int cooler_cold_temp = -1;         // 冷端温度（0.1°C）
-static int cooler_rpm_real = -1;          // 实际风扇转速
-static int cooler_rpm_level = -1;         // 风扇 PWM 原始值
-static int cooler_cold_real = -1;         // 实际制冷强度
-static int cooler_cold_level = -1;        // 制冷 PWM 原始值
-static int cooler_target_temp = -1;       // 目标温度（0.1°C）
 
 // 前向声明（配置系统函数位于 write_log/clamp 之前，C 要求先声明后使用）
 static void write_log(const char *fmt, ...);
@@ -587,33 +545,6 @@ static void load_config(const char *path) {
         else if (strcmp(key, "RATE_LIMIT_RPM") == 0)  RATE_LIMIT_RPM  = clamp(val, 50, 2000);
         else if (strcmp(key, "RATE_LIMIT_COLD") == 0) RATE_LIMIT_COLD = clamp(val, 1, 194);
         else if (strcmp(key, "RATE_LIMIT_TEMP") == 0) RATE_LIMIT_TEMP = clamp(val, 1, 30);
-        // --- PID 控制模式参数 ---
-        else if (strcmp(key, "CTRL_MODE") == 0) {
-            int new_mode = (val != 0) ? 1 : 0;
-            if (new_mode != ctrl_mode) {
-                ctrl_mode = new_mode;
-                last_sent_valid = 0;
-                if (new_mode == 1 && config_mtime != 0) {
-                    pid_align_from_gear();
-                }
-                write_log("配置 CTRL_MODE=%d", ctrl_mode);
-            }
-        }
-        else if (strcmp(key, "PID_KP") == 0)              pid_kp              = clamp(val, 1, 1000);
-        else if (strcmp(key, "PID_KI") == 0)              pid_ki              = clamp(val, 0, 1000);
-        else if (strcmp(key, "PID_KD") == 0)              pid_kd              = clamp(val, 0, 1000);
-        else if (strcmp(key, "PID_INTEGRAL_LIMIT") == 0)  pid_integral_limit  = clamp(val, 0, 1000);
-        else if (strcmp(key, "PID_BATT_ALPHA") == 0)      pid_batt_alpha      = clamp(val, 1, 100);
-        else if (strcmp(key, "PID_OUTPUT_ALPHA") == 0)    pid_output_alpha    = clamp(val, 1, 100);
-        else if (strcmp(key, "PID_COLD_MIN") == 0)         pid_cold_min        = clamp(val, 0, 194);
-        else if (strcmp(key, "PID_COLD_MAX") == 0)         pid_cold_max        = clamp(val, 0, 194);
-        else if (strcmp(key, "PID_COLD_EXP") == 0)         pid_cold_exp        = clamp(val, 50, 500);
-        else if (strcmp(key, "PID_RPM_MIN") == 0)          pid_rpm_min         = clamp(val, 1000, 6000);
-        else if (strcmp(key, "PID_RPM_MAX") == 0)          pid_rpm_max         = clamp(val, 1000, 6000);
-        else if (strcmp(key, "PID_HOT_MAP_MIN") == 0)      pid_hot_map_min     = clamp(val, 200, 500);
-        else if (strcmp(key, "PID_HOT_MAP_MAX") == 0)      pid_hot_map_max     = clamp(val, 200, 500);
-        // --- PID 调试开关 ---
-        else if (strcmp(key, "DEBUG_PID") == 0)            debug_pid           = (val != 0) ? 1 : 0;
         // 兼容旧名称
         else if (strcmp(key, "RPM_SMOOTH_STEP") == 0) RATE_LIMIT_RPM  = clamp(val, 50, 2000);
         else if (strcmp(key, "EMERG_EXIT_CAP_OFFSET") == 0) EMERG_EXIT_CAP_OFFSET = clamp(val, 0, 5);
@@ -839,10 +770,6 @@ static void write_log(const char *fmt, ...) {
 /** 调试日志宏：需要总开关 DEBUG_MODE=1 且对应分区开关=1 时才输出 */
 /* 注意：必须写成单行，多行续行在 NDK clang + CRLF 下会失效 */
 #define debug_log(flag, fmt, ...) do { if (debug_mode && (flag)) write_log("[DEBUG] " fmt, ##__VA_ARGS__); } while(0)
-#define pid_log(fmt, ...) \
-    do { if (debug_mode && debug_pid) \
-        write_log("[PID] " fmt, ##__VA_ARGS__); \
-    } while(0)
 static inline int clamp(int val, int lo, int hi) {
     if (val < lo) return lo;
     if (val > hi) return hi;
@@ -899,22 +826,6 @@ static void read_status_ble(void) {
         if (strncmp(line, "BLE=", 4) == 0) {
             int val = atoi(line + 4);
             app_ble_connected = val ? 1 : 0;
-        } else if (strncmp(line, "RUN_MODE=", 9) == 0) {
-            cooler_runmode = atoi(line + 9);
-        } else if (strncmp(line, "HOT_TEMP=", 9) == 0) {
-            cooler_hot_temp = atoi(line + 9);
-        } else if (strncmp(line, "COLD_TEMP=", 10) == 0) {
-            cooler_cold_temp = atoi(line + 10);
-        } else if (strncmp(line, "RPM_REAL=", 9) == 0) {
-            cooler_rpm_real = atoi(line + 9);
-        } else if (strncmp(line, "RPM_LEVEL=", 10) == 0) {
-            cooler_rpm_level = atoi(line + 10);
-        } else if (strncmp(line, "COLD_REAL=", 10) == 0) {
-            cooler_cold_real = atoi(line + 10);
-        } else if (strncmp(line, "COLD_LEVEL=", 11) == 0) {
-            cooler_cold_level = atoi(line + 11);
-        } else if (strncmp(line, "TARGET_TEMP=", 12) == 0) {
-            cooler_target_temp = atoi(line + 12);
         }
     }
     fclose(f);
@@ -1785,181 +1696,6 @@ static int current_gear_override(void) {
     return 1;
 }
 
-// ======================== PID 控制函数 ========================
-
-/**
- * PID 计算（温度变化时调用一次）
- * @param batt_10  电池温度（0.1°C），已 EMA 滤波
- * @param dt       自上次变化以来的实际秒数（钳位 3~30）
- * @return 归一化输出 0.0~1.0
- */
-static float pid_compute(int batt_10, float dt) {
-    int target_10 = BATT_BASELINE;
-    int error_10 = batt_10 - target_10;
-    float error = error_10 / 10.0f;
-
-    // P 项
-    float p = (pid_kp / 1000.0f) * error;
-
-    // I 项（积分分离：±1.0°C 内才累积）
-    if (error > -1.0f && error < 1.0f) {
-        pid_integral += (pid_ki / 1000.0f) * error * dt;
-    }
-    float i_limit = pid_integral_limit / 1000.0f;
-    if (pid_integral >  i_limit) pid_integral =  i_limit;
-    if (pid_integral < -i_limit) pid_integral = -i_limit;
-
-    // D 项（首次跳过）
-    float d = 0.0f;
-    if (pid_prev_error != 0 || pid_last_batt >= 0) {
-        d = (pid_kd / 1000.0f) * (error - pid_prev_error) / dt;
-    }
-    pid_prev_error = error;
-
-    // 钳位 0~1
-    float raw = p + pid_integral + d;
-    if (raw < 0.0f) raw = 0.0f;
-    if (raw > 1.0f) raw = 1.0f;
-    return raw;
-}
-
-/**
- * 热端温度线性映射：PID_HOT_MAP_MIN → PID_RPM_MIN, PID_HOT_MAP_MAX → PID_RPM_MAX
- */
-static int rpm_from_hot_end(int hot_10) {
-    int range = pid_hot_map_max - pid_hot_map_min;
-    if (range <= 0) return pid_rpm_min;
-    float t = (float)(hot_10 - pid_hot_map_min) / range;
-    if (t < 0.0f) t = 0.0f;
-    if (t > 1.0f) t = 1.0f;
-    return pid_rpm_min + (int)(t * (pid_rpm_max - pid_rpm_min));
-}
-
-/**
- * 冷强度指数映射：n^exp
- */
-static int rpm_from_cold_exp(int cold) {
-    int range = pid_cold_max - pid_cold_min;
-    if (range <= 0) return pid_rpm_min;
-    float n = (float)(cold - pid_cold_min) / range;
-    float n_exp = powf(n, pid_cold_exp / 100.0f);
-    return pid_rpm_min + (int)(n_exp * (pid_rpm_max - pid_rpm_min));
-}
-
-/**
- * 自加权合并：各以自身 RPM 为权重
- * 冷端无数据（cooler_hot_temp<=0）时退化为纯 exp
- */
-static int rpm_combine_weighted(int rpm_hot, int rpm_cold) {
-    if (rpm_hot <= 0) return rpm_cold;
-    if (rpm_hot + rpm_cold <= 0) return pid_rpm_min;
-    return (rpm_hot * rpm_hot + rpm_cold * rpm_cold) / (rpm_hot + rpm_cold);
-}
-
-/**
- * PID 输出 → 制冷强度 + 风扇转速（双路合并）
- */
-static void pid_map_output(float output, int *out_cold, int *out_rpm) {
-    int range = pid_cold_max - pid_cold_min;
-    if (range <= 0) range = 1;
-    int cold = pid_cold_min + (int)(output * range);
-    if (cold < pid_cold_min) cold = pid_cold_min;
-    if (cold > pid_cold_max) cold = pid_cold_max;
-
-    int rpm = rpm_from_cold_exp(cold);
-    if (cooler_hot_temp > 0) {
-        int rpm_hot = rpm_from_hot_end(cooler_hot_temp);
-        rpm = rpm_combine_weighted(rpm_hot, rpm);
-    }
-
-    *out_cold = cold;
-    *out_rpm  = rpm;
-}
-
-/**
- * 直接下发 AT 广播（PID 模式使用）
- * 与 apply_level 共享 last_* 去重缓存
- */
-static void apply_level_direct(int mode, int target,
-                               int rpm, int cold, int wl) {
-    if (last_sent_valid &&
-        mode == last_mode && rpm == last_windOC &&
-        cold == last_coldOC && wl == last_windLevel)
-        return;
-
-    char m_s[12], t_s[12], woc_s[12], coc_s[12], wl_s[12];
-    snprintf(m_s, sizeof(m_s), "%d", mode);
-    snprintf(t_s, sizeof(t_s), "%d", target);
-    snprintf(woc_s, sizeof(woc_s), "%d", rpm);
-    snprintf(coc_s, sizeof(coc_s), "%d", cold);
-    snprintf(wl_s, sizeof(wl_s), "%d", wl);
-
-    pid_t pid = fork();
-    if (pid < 0) {
-        write_log("fork 失败，跳过下发");
-        return;
-    }
-    if (pid == 0) {
-        int fd = open("/dev/null", O_WRONLY);
-        if (fd >= 0) {
-            dup2(fd, STDOUT_FILENO);
-            dup2(fd, STDERR_FILENO);
-            close(fd);
-        }
-        execlp("am", "am", "broadcast", "--user", "0",
-               "-a", "com.flydigi.SET_TEMPERATURE",
-               "--ei", "mode", m_s,
-               "--ei", "temperature", t_s,
-               "--ei", "windOC", woc_s,
-               "--ei", "coldOC", coc_s,
-               "--ei", "windLevel", wl_s,
-               "--ei", "modeCustom", "0",
-               "--ei", "extra", "0",
-               (char *)NULL);
-        _exit(127);
-    }
-    if (pid > 0) {
-        signal(SIGALRM, alarm_handler);
-        alarm(3);
-        int status;
-        if (waitpid(pid, &status, 0) == -1) {
-            write_log("am broadcast 超时");
-            kill(pid, SIGKILL);
-            waitpid(pid, NULL, 0);
-        }
-        alarm(0);
-        signal(SIGALRM, SIG_DFL);
-    }
-
-    pid_log("apply mode=%d windOC=%d coldOC=%d", mode, rpm, cold);
-
-    last_sent_valid    = 1;
-    last_mode          = mode;
-    last_target_temp   = target;
-    last_windOC        = rpm;
-    last_coldOC        = cold;
-    last_windLevel     = wl;
-}
-
-/**
- * CTRL_MODE 0→1 热切换时对齐 PID 初始值
- * 从当前 gear 状态映射到 PID 输出空间
- */
-static void pid_align_from_gear(void) {
-    float ratio = (float)(battery_fan_level - level_min) /
-                  (level_max - level_min);
-    pid_output_smoothed = ratio;
-    pid_target_rpm  = pid_rpm_min + (int)(ratio * (pid_rpm_max - pid_rpm_min));
-    pid_target_cold = pid_cold_min + (int)(ratio * (pid_cold_max - pid_cold_min));
-    pid_integral       = 0;
-    pid_prev_error     = 0;
-    pid_batt_filtered  = -1;
-    pid_last_batt      = -1;
-    pid_last_change_time = 0;
-    last_sent_valid    = 0;
-    write_log("PID 从 gear 对齐 ratio=%.2f rpm=%d cold=%d", ratio, pid_target_rpm, pid_target_cold);
-}
-
 // ======================== 主循环 ========================
 
 static void handle_signal(int sig) {
@@ -1977,24 +1713,6 @@ static void alarm_handler(int sig) {
  * 不在此处立即下发，防止部分执行后参数组合不协调
  */
 static void reconnect_align(void) {
-    // PID 模式：重置 PID 状态，actual 值由 rate_limited_execute 重新初始化
-    if (ctrl_mode == 1) {
-        pid_batt_filtered = -1;
-        pid_last_batt = -1;
-        pid_integral = 0;
-        pid_prev_error = 0;
-        pid_last_change_time = 0;
-        pid_output_smoothed = 0.0f;
-        actual_rpm = -1;
-        actual_cold = -1;
-        actual_target_temp = -1;
-        write_log("重连 PID 状态已重置");
-        last_batt_reading = -1;
-        first_run = 1;
-        return;
-    }
-
-    // ═══ gear 模式：保留现有逻辑 ═══
     debug_log(debug_conn, "reconnect_align actual_rpm=%d actual_cold=%d", actual_rpm, actual_cold);
     if (actual_rpm >= 0 && actual_cold >= 0) {
         int idx = match_nearest_gear_for_reconnect();
@@ -2032,31 +1750,6 @@ static int prev_emerg_level = 0;   // 记录上一轮紧急等级，退出紧急
  * 实现"还没变动完时也可以继续增加/减少要变动的数值"。
  */
 static void rate_limited_execute(void) {
-    // ═══ PID 模式：直接按 pid_target_* 限速下发 ═══
-    if (ctrl_mode == 1) {
-        if (actual_rpm < 0)  actual_rpm  = pid_rpm_min;
-        if (actual_cold < 0) actual_cold = pid_cold_min;
-
-        // RPM 限速（复用 RATE_LIMIT_RPM）
-        int diff_rpm = pid_target_rpm - actual_rpm;
-        if (abs(diff_rpm) > RATE_LIMIT_RPM)
-            actual_rpm += (diff_rpm > 0) ? RATE_LIMIT_RPM : -RATE_LIMIT_RPM;
-        else
-            actual_rpm = pid_target_rpm;
-
-        // COLD 限速（复用 RATE_LIMIT_COLD）
-        int diff_cold = pid_target_cold - actual_cold;
-        if (abs(diff_cold) > RATE_LIMIT_COLD)
-            actual_cold += (diff_cold > 0) ? RATE_LIMIT_COLD : -RATE_LIMIT_COLD;
-        else
-            actual_cold = pid_target_cold;
-
-        // 统一下发：固定功率模式 mode=1
-        apply_level_direct(1, 5, actual_rpm, actual_cold, 0);
-        return;
-    }
-
-    // ═══ 以下为现有 gear 模式逻辑 ═══
     int mode, target, windOC, coldOC, windLevel;
     build_params(target_level, &mode, &target, &windOC, &coldOC, &windLevel);
 
@@ -2125,64 +1818,6 @@ static void main_loop(void) {
         }
     }
 
-    // ═══ PID 模式：跳过档位逻辑，直接 PID 计算 ═══
-    if (ctrl_mode == 1) {
-        prev_emerg_level = emergency_level;
-        emergency_intervention();
-
-        // 读电池温度
-        int batt_raw = read_battery_temp();
-        if (batt_raw < 0) return;
-
-        // 输入 EMA 滤波（新值权重语义：alpha=新值占比）
-        if (pid_batt_filtered < 0) {
-            pid_batt_filtered = batt_raw;
-        } else {
-            pid_batt_filtered = (batt_raw * pid_batt_alpha +
-                                 pid_batt_filtered * (100 - pid_batt_alpha)) / 100;
-        }
-
-        // 温度变化时才执行 PID（首次 pid_last_batt<0 也会进入）
-        if (batt_raw != pid_last_batt) {
-            time_t now = time(NULL);
-            float dt = (float)(now - pid_last_change_time);
-            if (dt > 30.0f) dt = 30.0f;
-            if (dt < 3.0f)  dt = 3.0f;
-
-            float pid_out = pid_compute(pid_batt_filtered, dt);
-
-            // 输出 EMA 平滑（首次直接赋初值）
-            if (pid_output_smoothed < 0.001f && pid_last_batt < 0) {
-                pid_output_smoothed = pid_out;
-            } else {
-                pid_output_smoothed = (pid_output_alpha * pid_out +
-                                       (100 - pid_output_alpha) * pid_output_smoothed) / 100.0f;
-            }
-
-            // 紧急覆盖：将 gear 模式 forced_min_level 映射到 PID 输出空间
-            if (forced_min_level > 0 && emergency_level > 0) {
-                float min_out = (float)(forced_min_level - level_min) /
-                                (level_max - level_min);
-                if (pid_output_smoothed < min_out)
-                    pid_output_smoothed = min_out;
-            }
-
-            // 映射到物理值
-            pid_map_output(pid_output_smoothed,
-                           &pid_target_cold, &pid_target_rpm);
-
-            pid_log("epoch=%ld Tbatt=%d Ttgt=%d Thot=%d dt=%.0fs e=%.2f raw=%.2f sm=%.2f cold=%d rpm=%d",
-                     now, pid_batt_filtered, BATT_BASELINE, cooler_hot_temp,
-                     dt, (pid_batt_filtered - BATT_BASELINE) / 10.0f,
-                     pid_out, pid_output_smoothed, pid_target_cold, pid_target_rpm);
-
-            pid_last_batt = batt_raw;
-            pid_last_change_time = now;
-        }
-        return;  // PID 模式不执行后续档位逻辑
-    }
-
-    // ═══ 以下为现有 gear 模式逻辑（原封不动） ═══
     // 1. 紧急干预（CPU 温度 + 电池电流，更新 emergency_level）
     prev_emerg_level = emergency_level;
     emergency_intervention();
@@ -2356,12 +1991,6 @@ int main(int argc, char *argv[]) {
     battery_fan_level = load_gear();
     batt_cooldown = 0;
     target_level = battery_fan_level;
-
-    // PID 启动时对齐（此时 battery_fan_level 已初始化）
-    if (ctrl_mode == 1) {
-        pid_align_from_gear();
-    }
-
     write_log("脚本启动成功");
 
     // --- 等待模块就绪 + BLE 连接 ---
