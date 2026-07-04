@@ -374,6 +374,7 @@ static void write_log(const char *fmt, ...);
 static inline int clamp(int val, int lo, int hi);
 static void alarm_handler(int sig);
 static int match_nearest_gear_for_reconnect(void);
+static void pid_align_from_gear(void);
 
 /** 去除首尾空白，返回修剪后的起始指针 */
 static inline char *trim_line(char *line) {
