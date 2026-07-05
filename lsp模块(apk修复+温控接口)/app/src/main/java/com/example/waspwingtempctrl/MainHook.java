@@ -148,20 +148,10 @@ public class MainHook implements IXposedHookLoadPackage {
                     if (rpmReal != null)
                         sb.append("RPM_REAL=").append(rpmReal).append("\n");
 
-                    // 风扇 PWM 原始值：getWindLevel()（跟在 RPM_REAL 之后）
-                    Object windLv = XposedHelpers.callMethod(lastWaspWingInfo, "getWindLevel");
-                    if (windLv != null)
-                        sb.append("RPM_LEVEL=").append(windLv).append("\n");
-
                     // 实际制冷强度（经超频逻辑折算）：getRealColdLevel()
                     Object coldReal = XposedHelpers.callMethod(lastWaspWingInfo, "getRealColdLevel");
                     if (coldReal != null)
                         sb.append("COLD_REAL=").append(coldReal).append("\n");
-
-                    // 制冷 PWM 原始值：getColdLevel()（跟在 COLD_REAL 之后）
-                    Object coldLv = XposedHelpers.callMethod(lastWaspWingInfo, "getColdLevel");
-                    if (coldLv != null)
-                        sb.append("COLD_LEVEL=").append(coldLv).append("\n");
 
                     // 目标温度：getTargetTemperature() → int(°C) → 0.1°C
                     Object tgtTemp = XposedHelpers.callMethod(lastWaspWingInfo, "getTargetTemperature");

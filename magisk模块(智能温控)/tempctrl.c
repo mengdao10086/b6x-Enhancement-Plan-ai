@@ -221,6 +221,7 @@ static int CURRENT_SMOOTH_ALPHA = 25;   // 默认 α=0.25
 // --- 速率限制（每 5 秒周期最大变化量，可配置）---
 // 风扇转速限制（两种模式通用）
 static int RATE_LIMIT_RPM = 250;
+static int RATE_LIMIT_RPM_DOWN = 500;   // 降转速最大变化量（默认500/每5秒=100RPM/s）
 // 制冷片强度限制（固定功率模式时生效）
 static int RATE_LIMIT_COLD = 20;
 // 目标温度限制（智能温控模式时生效）
@@ -337,8 +338,8 @@ static int curr_smooth_valid = 0;     // 平滑数据是否有效
 static int ctrl_mode = 0;                 // CTRL_MODE: 0=gear, 1=PID
 
 // PID 参数
-static int pid_kp = 80;                   // PID_KP（÷1000）
-static int pid_ki = 20;                   // PID_KI（÷1000）
+static int pid_kp = 400;                  // PID_KP（÷1000，1°C→P=40%）
+static int pid_ki = 50;                   // PID_KI（÷1000，±1°C内累积）
 static int pid_kd = 150;                  // PID_KD
 static int pid_integral_limit = 500;      // PID_INTEGRAL_LIMIT（÷1000）
 static int pid_batt_alpha = 30;           // PID_BATT_ALPHA（%，新值权重）
@@ -358,6 +359,16 @@ static int pid_batt_filtered = -1;        // EMA 滤波后电池温度
 static int pid_last_batt = -1;            // 上次参与 PID 计算的原始温度
 static time_t pid_last_change_time = 0;   // 上次温度变化时间戳
 static float pid_output_smoothed = 0.0f;  // 输出平滑值
+
+// PID 输入补偿（加到电池温度，反映 CPU/电流额外发热）
+static int pid_cpu_comp_enabled = 1;       // PID_CPU_COMP_ENABLED: CPU 补偿开关
+static int pid_cpu_comp_divisor = 30;      // PID_CPU_COMP_DIVISOR: (cpu-batt 0.1°C)÷divisor→0.1°C
+static int pid_curr_comp_enabled = 1;      // PID_CURR_COMP_ENABLED: 电流补偿开关
+static int pid_curr_comp_threshold = 200;  // PID_CURR_COMP_THRESHOLD: 0.01A 阈值(200=2A)
+static int pid_curr_comp_divisor = 2;      // PID_CURR_COMP_DIVISOR: |A|÷divisor→°C
+static float pid_cpu_comp_smooth = 0.0f;   // CPU 补偿 EMA 平滑值（°C）
+static float pid_curr_comp_smooth = 0.0f;  // 电流补偿 EMA 平滑值（°C）
+static int pid_last_comp_10 = 0;           // 上次 PID 重算时的补偿值（0.1°C）
 
 // PID 目标值（供 rate_limited_execute 读取）
 static int pid_target_rpm = 2000;
@@ -478,10 +489,10 @@ static void load_config(const char *path) {
         if (!val_str) continue;
         int val = atoi(val_str);
 
-        if      (strcmp(key, "EMERG_CURRENT_ENABLED") == 0)   EMERG_CURRENT_ENABLED = (val != 0) ? 1 : 0;
-        else if (strcmp(key, "EMERG_CPU_ENABLED") == 0)       EMERG_CPU_ENABLED     = (val != 0) ? 1 : 0;
-        else if (strcmp(key, "REV_COMP_ENABLED") == 0)        REV_COMP_ENABLED      = (val != 0) ? 1 : 0;
-        else if (strcmp(key, "TREND_EXEMPT_ENABLED") == 0)    TREND_EXEMPT_ENABLED  = (val != 0) ? 1 : 0;
+        if      (strcmp(key, "EMERG_CURRENT_ENABLED") == 0)   EMERG_CURRENT_ENABLED = (val != 0);
+        else if (strcmp(key, "EMERG_CPU_ENABLED") == 0)       EMERG_CPU_ENABLED     = (val != 0);
+        else if (strcmp(key, "REV_COMP_ENABLED") == 0)        REV_COMP_ENABLED      = (val != 0);
+        else if (strcmp(key, "TREND_EXEMPT_ENABLED") == 0)    TREND_EXEMPT_ENABLED  = (val != 0);
         else if (strcmp(key, "CURRENT_GEAR_MODE") == 0) {
             int charge = CURRENT_GEAR_MODE_CHARGE, discharge = CURRENT_GEAR_MODE_DISCHARGE;
             if (sscanf(val_str, "%d %d", &charge, &discharge) >= 1) {
@@ -496,9 +507,9 @@ static void load_config(const char *path) {
                 EMERG_MODE_EXIT  = clamp(exit, 0, 1);
             }
         }
-        else if (strcmp(key, "DEBUG_MODE") == 0)              debug_mode           = (val != 0) ? 1 : 0;
-        else if (strcmp(key, "GEAR_CONFIG_ENABLED") == 0)     gear_config_enabled  = (val != 0) ? 1 : 0;
-        else if (strcmp(key, "CTRL_MODE") == 0)                ctrl_mode            = (val != 0) ? 1 : 0;
+        else if (strcmp(key, "DEBUG_MODE") == 0)              debug_mode           = (val != 0);
+        else if (strcmp(key, "GEAR_CONFIG_ENABLED") == 0)     gear_config_enabled  = (val != 0);
+        else if (strcmp(key, "CTRL_MODE") == 0)                ctrl_mode            = (val != 0);
     }
 
     // GEAR_CONFIG_ENABLED 关闭时忽略 GEAR_N，即使文件中有
@@ -515,7 +526,7 @@ static void load_config(const char *path) {
         write_log("配置 档位表将由 GEAR_N 定义");
     }
 
-    // ---- 第二遍扫描：解析全部参数 ----
+    // ---- 第二遍扫描：分组解析 ----
     rewind(f);
     int loaded = 0;
     GearConfigTemp config_gears[GEAR_TABLE_MAX];
@@ -524,38 +535,13 @@ static void load_config(const char *path) {
         char *key;
         char *val_str = config_parse_line(line, &key);
         if (!val_str) continue;
-
         int val = atoi(val_str);
 
-        // ---- 匹配 key ----
-        if      (strcmp(key, "BATT_BASELINE") == 0)        BATT_BASELINE      = clamp(val, 300, 500);
-        else if (strcmp(key, "BATT_ZONE_1") == 0)          BATT_ZONE_1        = clamp(val, 1, 100);
-        else if (strcmp(key, "BATT_ZONE_2") == 0)          BATT_ZONE_2        = clamp(val, 1, 100);
-        else if (strcmp(key, "BATT_ZONE_3") == 0)          BATT_ZONE_3        = clamp(val, 1, 100);
-        else if (strcmp(key, "CPU_EMERG_3") == 0)          CPU_EMERG_3        = clamp(val, 600, 1000);
-        else if (strcmp(key, "CPU_EMERG_2") == 0)          CPU_EMERG_2        = clamp(val, 500, 900);
-        else if (strcmp(key, "CPU_EMERG_1") == 0)          CPU_EMERG_1        = clamp(val, 400, 800);
-        else if (strcmp(key, "CPU_RECOVER_0") == 0)        CPU_RECOVER_0      = clamp(val, 300, 700);
-        else if (strcmp(key, "CPU_RECOVER_1") == 0)        CPU_RECOVER_1      = clamp(val, 400, 800);
-        else if (strcmp(key, "CPU_RECOVER_2") == 0)        CPU_RECOVER_2      = clamp(val, 500, 900);
-        else if (strcmp(key, "EMERG_FORCED_1") == 0)       EMERG_FORCED_1     = clamp(val, 0, 12);
-        else if (strcmp(key, "EMERG_FORCED_2") == 0)       EMERG_FORCED_2     = clamp(val, 0, 12);
-        else if (strcmp(key, "EMERG_FORCED_3") == 0)       EMERG_FORCED_3     = clamp(val, 0, 12);
-        else if (strcmp(key, "EMERG_FORCED_4") == 0)       EMERG_FORCED_4     = clamp(val, 0, 12);
-        else if (strcmp(key, "CPU_FILTER_ALPHA") == 0)     CPU_FILTER_ALPHA   = clamp(val, 1, 100);
-        else if (strcmp(key, "OVERRIDE_MAX") == 0)         OVERRIDE_MAX       = clamp(val, 0, 20);
-        else if (strcmp(key, "REV_COMP_T1") == 0)          REV_COMP_T1        = clamp(val, 1, 50);
-        else if (strcmp(key, "REV_COMP_T2") == 0)          REV_COMP_T2        = clamp(val, 1, 50);
-        else if (strcmp(key, "REV_COMP_T3") == 0)          REV_COMP_T3        = clamp(val, 1, 50);
-        else if (strcmp(key, "REV_COMP_COOLDOWN") == 0)   REV_COMP_COOLDOWN  = clamp(val, 0, 10);
-        // PEAK_DAMP_* 已移除（v2.1 改为 Sheet3 查表法）
-        else if (strcmp(key, "BATT_COOLDOWN_CYCLES") == 0) BATT_COOLDOWN_CYCLES = clamp(val, 0, 20);
-        else if (strcmp(key, "BATT_SKIP_MAX") == 0)        BATT_SKIP_MAX        = clamp(val, 0, 30);
-        else if (strcmp(key, "BATT_RECOVERY_M1") == 0)    BATT_RECOVERY_M1     = clamp(val, 1, 20);
-        else if (strcmp(key, "BATT_RECOVERY_M2") == 0)    BATT_RECOVERY_M2     = clamp(val, 1, 20);
-        else if (strcmp(key, "BATT_RECOVERY_M3") == 0)    BATT_RECOVERY_M3     = clamp(val, 1, 20);
-        else if (strcmp(key, "BATT_RECOVERY_PHASE_CYCLES") == 0) BATT_RECOVERY_PHASE_CYCLES = clamp(val, 1, 50);
-        else if (strcmp(key, "STATUS_TIMEOUT") == 0)       STATUS_TIMEOUT     = clamp(val, 5, 60);
+        // ═══════════════════════════════════════════════════════════
+        // [组 0] 无条件参数（放在最前，否则会被有 guard 的分组吞掉）
+        // ═══════════════════════════════════════════════════════════
+        if (0) {}
+        // ── 系统路径与缩放 ──
         else if (strcmp(key, "BATT_TEMP_PATH") == 0)
             config_read_path(BATT_TEMP_PATH, sizeof(BATT_TEMP_PATH), val_str);
         else if (strcmp(key, "CPU_TEMP_PATH_FMT") == 0)
@@ -565,8 +551,28 @@ static void load_config(const char *path) {
         else if (strcmp(key, "BATT_TEMP_DIVISOR") == 0)   BATT_TEMP_DIVISOR  = clamp(val, 1, 10000);
         else if (strcmp(key, "CPU_TEMP_DIVISOR") == 0)    CPU_TEMP_DIVISOR   = clamp(val, 1, 10000);
         else if (strcmp(key, "BATT_CURRENT_DIVISOR") == 0) BATT_CURRENT_DIVISOR = clamp(val, 1, 10000);
+        // ── 基础控制参数 ──
+        else if (strcmp(key, "BATT_BASELINE") == 0)        BATT_BASELINE      = clamp(val, 300, 500);
+        else if (strcmp(key, "BATT_ZONE_1") == 0)          BATT_ZONE_1        = clamp(val, 1, 100);
+        else if (strcmp(key, "BATT_ZONE_2") == 0)          BATT_ZONE_2        = clamp(val, 1, 100);
+        else if (strcmp(key, "BATT_ZONE_3") == 0)          BATT_ZONE_3        = clamp(val, 1, 100);
+        else if (strcmp(key, "BATT_COOLDOWN_CYCLES") == 0) BATT_COOLDOWN_CYCLES = clamp(val, 0, 20);
+        else if (strcmp(key, "BATT_SKIP_MAX") == 0)        BATT_SKIP_MAX        = clamp(val, 0, 30);
+        else if (strcmp(key, "BATT_RECOVERY_M1") == 0)    BATT_RECOVERY_M1     = clamp(val, 1, 20);
+        else if (strcmp(key, "BATT_RECOVERY_M2") == 0)    BATT_RECOVERY_M2     = clamp(val, 1, 20);
+        else if (strcmp(key, "BATT_RECOVERY_M3") == 0)    BATT_RECOVERY_M3     = clamp(val, 1, 20);
+        else if (strcmp(key, "BATT_RECOVERY_PHASE_CYCLES") == 0) BATT_RECOVERY_PHASE_CYCLES = clamp(val, 1, 50);
+        // ── CPU 紧急阈值（无条件解析，EMERG_CPU_ENABLED 运行时决定是否检查）──
+        else if (strcmp(key, "CPU_EMERG_3") == 0)          CPU_EMERG_3        = clamp(val, 600, 1000);
+        else if (strcmp(key, "CPU_EMERG_2") == 0)          CPU_EMERG_2        = clamp(val, 500, 900);
+        else if (strcmp(key, "CPU_EMERG_1") == 0)          CPU_EMERG_1        = clamp(val, 400, 800);
+        else if (strcmp(key, "CPU_RECOVER_2") == 0)        CPU_RECOVER_2      = clamp(val, 500, 900);
+        else if (strcmp(key, "CPU_RECOVER_1") == 0)        CPU_RECOVER_1      = clamp(val, 400, 800);
+        else if (strcmp(key, "CPU_RECOVER_0") == 0)        CPU_RECOVER_0      = clamp(val, 300, 700);
+        else if (strcmp(key, "CPU_FILTER_ALPHA") == 0)     CPU_FILTER_ALPHA   = clamp(val, 1, 100);
         else if (strcmp(key, "CPU_ZONE_MIN") == 0)          CPU_ZONE_MIN       = clamp(val, 0, 99);
         else if (strcmp(key, "CPU_ZONE_MAX") == 0)          CPU_ZONE_MAX       = clamp(val, 0, 99);
+        // ── 电流紧急阈值 ──
         else if (strcmp(key, "CURRENT_EMERG_3") == 0)       CURRENT_EMERG_3    = clamp(val, 100, 1500);
         else if (strcmp(key, "CURRENT_EMERG_2") == 0)       CURRENT_EMERG_2    = clamp(val, 100, 1500);
         else if (strcmp(key, "CURRENT_EMERG_1") == 0)       CURRENT_EMERG_1    = clamp(val, 100, 1500);
@@ -574,25 +580,26 @@ static void load_config(const char *path) {
         else if (strcmp(key, "CURRENT_RECOVER_1") == 0)     CURRENT_RECOVER_1  = clamp(val, 100, 1500);
         else if (strcmp(key, "CURRENT_RECOVER_0") == 0)     CURRENT_RECOVER_0  = clamp(val, 100, 1500);
         else if (strcmp(key, "CURRENT_SMOOTH_ALPHA") == 0)  CURRENT_SMOOTH_ALPHA = clamp(val, 1, 100);
-        // 独立开关 / 电流-挡位模式：已在预扫描中解析，此处跳过
-        else if (strcmp(key, "CURRENT_GEAR_MULT_CHARGE") == 0 && (CURRENT_GEAR_MODE_CHARGE || CURRENT_GEAR_MODE_DISCHARGE))
-            CURRENT_GEAR_MULT_CHARGE = clamp(val, 1, 50);
-        else if (strcmp(key, "CURRENT_GEAR_MULT_DISCHARGE") == 0 && (CURRENT_GEAR_MODE_CHARGE || CURRENT_GEAR_MODE_DISCHARGE))
-            CURRENT_GEAR_MULT_DISCHARGE = clamp(val, 1, 50);
-        else if (strcmp(key, "CURRENT_GEAR_SMOOTH_ALPHA") == 0 && (CURRENT_GEAR_MODE_CHARGE || CURRENT_GEAR_MODE_DISCHARGE))
-            CURRENT_GEAR_SMOOTH_ALPHA = clamp(val, 1, 100);
-        else if (strcmp(key, "CURRENT_GEAR_MIN") == 0 && (CURRENT_GEAR_MODE_CHARGE || CURRENT_GEAR_MODE_DISCHARGE))
-            CURRENT_GEAR_MIN = clamp(val, 1, 12);
-        else if (strcmp(key, "RATE_LIMIT_RPM") == 0)  RATE_LIMIT_RPM  = clamp(val, 50, 2000);
+        // ── 紧急覆盖参数 ──
+        else if (strcmp(key, "EMERG_FORCED_1") == 0)       EMERG_FORCED_1     = clamp(val, 0, 12);
+        else if (strcmp(key, "EMERG_FORCED_2") == 0)       EMERG_FORCED_2     = clamp(val, 0, 12);
+        else if (strcmp(key, "EMERG_FORCED_3") == 0)       EMERG_FORCED_3     = clamp(val, 0, 12);
+        else if (strcmp(key, "EMERG_FORCED_4") == 0)       EMERG_FORCED_4     = clamp(val, 0, 12);
+        else if (strcmp(key, "EMERG_EXIT_CAP_OFFSET") == 0) EMERG_EXIT_CAP_OFFSET = clamp(val, 0, 5);
+        else if (strcmp(key, "EMERG_STEP") == 0)              EMERG_STEP = clamp(val, 1, 12);
+        else if (strcmp(key, "EMERG_EXIT_BATT_THRESHOLD") == 0) EMERG_EXIT_BATT_THRESHOLD = clamp(val, 5, 50);
+        // ── 反补 / 豁免参数 ──
+        else if (strcmp(key, "OVERRIDE_MAX") == 0)         OVERRIDE_MAX       = clamp(val, 0, 20);
+        else if (strcmp(key, "REV_COMP_T1") == 0)          REV_COMP_T1        = clamp(val, 1, 50);
+        else if (strcmp(key, "REV_COMP_T2") == 0)          REV_COMP_T2        = clamp(val, 1, 50);
+        else if (strcmp(key, "REV_COMP_T3") == 0)          REV_COMP_T3        = clamp(val, 1, 50);
+        else if (strcmp(key, "REV_COMP_COOLDOWN") == 0)   REV_COMP_COOLDOWN  = clamp(val, 0, 10);
+        // ── 速率限制（无条件，作用于所有模式）──
+        else if (strcmp(key, "RATE_LIMIT_RPM_up") == 0)  RATE_LIMIT_RPM  = clamp(val, 50, 2000);
+        else if (strcmp(key, "RATE_LIMIT_RPM_DOWN") == 0) RATE_LIMIT_RPM_DOWN = clamp(val, 50, 2000);
         else if (strcmp(key, "RATE_LIMIT_COLD") == 0) RATE_LIMIT_COLD = clamp(val, 1, 194);
         else if (strcmp(key, "RATE_LIMIT_TEMP") == 0) RATE_LIMIT_TEMP = clamp(val, 1, 30);
-        // --- PID 控制模式参数 ---
-        else if (ctrl_mode == 1 && strcmp(key, "PID_KP") == 0)              pid_kp              = clamp(val, 1, 1000);
-        else if (ctrl_mode == 1 && strcmp(key, "PID_KI") == 0)              pid_ki              = clamp(val, 0, 1000);
-        else if (ctrl_mode == 1 && strcmp(key, "PID_KD") == 0)              pid_kd              = clamp(val, 0, 1000);
-        else if (ctrl_mode == 1 && strcmp(key, "PID_INTEGRAL_LIMIT") == 0)  pid_integral_limit  = clamp(val, 0, 1000);
-        else if (ctrl_mode == 1 && strcmp(key, "PID_BATT_ALPHA") == 0)      pid_batt_alpha      = clamp(val, 1, 100);
-        else if (ctrl_mode == 1 && strcmp(key, "PID_OUTPUT_ALPHA") == 0)    pid_output_alpha    = clamp(val, 1, 100);
+        // ── PID 映射范围（gear 模式也用到 pid_align_from_gear，故无条件）──
         else if (strcmp(key, "PID_COLD_MIN") == 0)         pid_cold_min        = clamp(val, 0, 194);
         else if (strcmp(key, "PID_COLD_MAX") == 0)         pid_cold_max        = clamp(val, 0, 194);
         else if (strcmp(key, "PID_COLD_EXP") == 0)         pid_cold_exp        = clamp(val, 50, 500);
@@ -600,35 +607,83 @@ static void load_config(const char *path) {
         else if (strcmp(key, "PID_RPM_MAX") == 0)          pid_rpm_max         = clamp(val, 1000, 6000);
         else if (strcmp(key, "PID_HOT_MAP_MIN") == 0)      pid_hot_map_min     = clamp(val, 200, 500);
         else if (strcmp(key, "PID_HOT_MAP_MAX") == 0)      pid_hot_map_max     = clamp(val, 200, 500);
-        // --- PID 调试开关 ---
-        else if (strcmp(key, "DEBUG_PID") == 0)            debug_pid           = (val != 0) ? 1 : 0;
-        // 兼容旧名称
-        else if (strcmp(key, "RPM_SMOOTH_STEP") == 0) RATE_LIMIT_RPM  = clamp(val, 50, 2000);
-        else if (strcmp(key, "EMERG_EXIT_CAP_OFFSET") == 0) EMERG_EXIT_CAP_OFFSET = clamp(val, 0, 5);
-        else if (strcmp(key, "EMERG_MODE") == 0) { /* 预扫描已处理 */ }
-        else if (strcmp(key, "EMERG_STEP") == 0)              EMERG_STEP = clamp(val, 1, 12);
-        else if (strcmp(key, "EMERG_EXIT_BATT_THRESHOLD") == 0) EMERG_EXIT_BATT_THRESHOLD = clamp(val, 5, 50);
-        else if (strcmp(key, "GEAR_CONFIG_ENABLED") == 0) { /* 预检已处理 */ }
+        // ── 系统参数 ──
+        else if (strcmp(key, "STATUS_TIMEOUT") == 0)       STATUS_TIMEOUT     = clamp(val, 5, 60);
         else if (strcmp(key, "LOG_MAX_KB") == 0)           LOG_MAX_KB         = clamp(val, 0, 1000);
         else if (strcmp(key, "LOG_FILE") == 0)
             config_read_path(log_file_path, sizeof(log_file_path), val_str);
+        // ── DEBUG_MODE 特殊处理（保留日志输出）──
         else if (strcmp(key, "DEBUG_MODE") == 0) {
-            debug_mode = (val != 0) ? 1 : 0;
+            debug_mode = (val != 0);
             write_log("配置 调试模式 %s", debug_mode ? "开启" : "关闭");
         }
-        else if (strcmp(key, "DEBUG_SENSOR") == 0 && debug_mode) { debug_sensor = (val != 0) ? 1 : 0; }
-        else if (strcmp(key, "DEBUG_EMERG") == 0 && debug_mode)   { debug_emerg   = (val != 0) ? 1 : 0; }
-        else if (strcmp(key, "DEBUG_BATT") == 0 && debug_mode)    { debug_batt    = (val != 0) ? 1 : 0; }
-        else if (strcmp(key, "DEBUG_EXEC") == 0 && debug_mode)    { debug_exec    = (val != 0) ? 1 : 0; }
-        else if (strcmp(key, "DEBUG_CONN") == 0 && debug_mode)    { debug_conn    = (val != 0) ? 1 : 0; }
-        else if (strcmp(key, "DEBUG_CONFIG") == 0 && debug_mode)  { debug_config  = (val != 0) ? 1 : 0; }
-        else if (strcmp(key, "DEBUG_MAIN") == 0 && debug_mode)    { debug_main    = (val != 0) ? 1 : 0; }
-        else if (strncmp(key, "GEAR_", 5) == 0) {
-            // GEAR_N=模式,目标温度(°C),风扇转速(RPM),制冷片强度
-            // 收集到临时数组，解析完成后按 config_n 排序填入连续档位表
-            int n = atoi(key + 5);
-            if (n < 1 || n > GEAR_TABLE_MAX || !gear_config_seen) continue;
+        // ── 开关类（已预扫描，第二遍吞掉避免 continue 不计数）──
+        else if (strcmp(key, "CTRL_MODE") == 0) { /* 预扫描已处理 */ }
+        else if (strcmp(key, "GEAR_CONFIG_ENABLED") == 0) { /* 预扫描已处理 */ }
+        else if (strcmp(key, "EMERG_CPU_ENABLED") == 0) { /* 预扫描已处理 */ }
+        else if (strcmp(key, "EMERG_CURRENT_ENABLED") == 0) { /* 预扫描已处理 */ }
+        else if (strcmp(key, "REV_COMP_ENABLED") == 0) { /* 预扫描已处理 */ }
+        else if (strcmp(key, "TREND_EXEMPT_ENABLED") == 0) { /* 预扫描已处理 */ }
+        else if (strcmp(key, "CURRENT_GEAR_MODE") == 0) { /* 预扫描已处理 */ }
+        else if (strcmp(key, "EMERG_MODE") == 0) { /* 预扫描已处理 */ }
+        // ── 兼容旧名称 ──
+        else if (strcmp(key, "RPM_SMOOTH_STEP") == 0) RATE_LIMIT_RPM  = clamp(val, 50, 2000);
 
+        // ═══════════════════════════════════════════════════════════
+        // [组 1] 电流-挡位子项：仅 CURRENT_GEAR_MODE 启用时生效
+        // ═══════════════════════════════════════════════════════════
+        else if (CURRENT_GEAR_MODE_CHARGE || CURRENT_GEAR_MODE_DISCHARGE) {
+            if      (strcmp(key, "CURRENT_GEAR_MULT_CHARGE") == 0)
+                CURRENT_GEAR_MULT_CHARGE = clamp(val, 1, 50);
+            else if (strcmp(key, "CURRENT_GEAR_MULT_DISCHARGE") == 0)
+                CURRENT_GEAR_MULT_DISCHARGE = clamp(val, 1, 50);
+            else if (strcmp(key, "CURRENT_GEAR_SMOOTH_ALPHA") == 0)
+                CURRENT_GEAR_SMOOTH_ALPHA = clamp(val, 1, 100);
+            else if (strcmp(key, "CURRENT_GEAR_MIN") == 0)
+                CURRENT_GEAR_MIN = clamp(val, 1, 12);
+        }
+
+        // ═══════════════════════════════════════════════════════════
+        // [组 2] PID 控制参数：仅 CTRL_MODE=1 时生效
+        // ═══════════════════════════════════════════════════════════
+        else if (ctrl_mode == 1) {
+            // PID 核心
+            if      (strcmp(key, "PID_KP") == 0)              pid_kp              = clamp(val, 1, 1000);
+            else if (strcmp(key, "PID_KI") == 0)              pid_ki              = clamp(val, 0, 1000);
+            else if (strcmp(key, "PID_KD") == 0)              pid_kd              = clamp(val, 0, 1000);
+            else if (strcmp(key, "PID_INTEGRAL_LIMIT") == 0)  pid_integral_limit  = clamp(val, 0, 1000);
+            else if (strcmp(key, "PID_BATT_ALPHA") == 0)      pid_batt_alpha      = clamp(val, 1, 100);
+            else if (strcmp(key, "PID_OUTPUT_ALPHA") == 0)    pid_output_alpha    = clamp(val, 1, 100);
+            // PID 输入补偿
+            else if (strcmp(key, "PID_CPU_COMP_ENABLED") == 0)   pid_cpu_comp_enabled   = (val != 0);
+            else if (strcmp(key, "PID_CPU_COMP_DIVISOR") == 0)   pid_cpu_comp_divisor   = clamp(val, 5, 200);
+            else if (strcmp(key, "PID_CURR_COMP_ENABLED") == 0)  pid_curr_comp_enabled  = (val != 0);
+            else if (strcmp(key, "PID_CURR_COMP_THRESHOLD") == 0) pid_curr_comp_threshold = clamp(val, 50, 1000);
+            else if (strcmp(key, "PID_CURR_COMP_DIVISOR") == 0)  pid_curr_comp_divisor  = clamp(val, 1, 50);
+            // PID 调试
+            else if (strcmp(key, "DEBUG_PID") == 0)            debug_pid           = (val != 0);
+        }
+
+        // ═══════════════════════════════════════════════════════════
+        // [组 3] 调试子项：仅 DEBUG_MODE=1 时生效
+        // ═══════════════════════════════════════════════════════════
+        else if (debug_mode) {
+            if      (strcmp(key, "DEBUG_SENSOR") == 0)  { debug_sensor = (val != 0); }
+            else if (strcmp(key, "DEBUG_EMERG") == 0)   { debug_emerg   = (val != 0); }
+            else if (strcmp(key, "DEBUG_BATT") == 0)    { debug_batt    = (val != 0); }
+            else if (strcmp(key, "DEBUG_EXEC") == 0)    { debug_exec    = (val != 0); }
+            else if (strcmp(key, "DEBUG_CONN") == 0)    { debug_conn    = (val != 0); }
+            else if (strcmp(key, "DEBUG_CONFIG") == 0)  { debug_config  = (val != 0); }
+            else if (strcmp(key, "DEBUG_MAIN") == 0)    { debug_main    = (val != 0); }
+        }
+
+        // ═══════════════════════════════════════════════════════════
+        // [组 4] 挡位表：仅 GEAR_CONFIG_ENABLED=1 时生效
+        // ═══════════════════════════════════════════════════════════
+        else if (strncmp(key, "GEAR_", 5) == 0) {
+            if (!gear_config_seen) continue;
+            int n = atoi(key + 5);
+            if (n < 1 || n > GEAR_TABLE_MAX) continue;
             int m, t, f, c;
             char *next;
             m = (int)strtol(val_str, &next, 10);
@@ -638,7 +693,6 @@ static void load_config(const char *path) {
             f = (int)strtol(next + 1, &next, 10);
             if (*next != ',') continue;
             c = (int)strtol(next + 1, NULL, 10);
-
             if (config_gear_count < GEAR_TABLE_MAX) {
                 config_gears[config_gear_count].config_n = n;
                 config_gears[config_gear_count].mode     = (m == 0) ? 0 : 1;
@@ -648,8 +702,8 @@ static void load_config(const char *path) {
                 config_gear_count++;
             }
         }
-        else { continue; }
 
+        else { continue; }
         loaded++;
     }
     fclose(f);
@@ -752,12 +806,9 @@ static int detect_config_path(void) {
 // ======================== 辅助函数 ========================
 
 /**
- * 写入日志（自动滚动：超上限后删除最早 1~2 行）
- * 日期格式：日+时间，无年月（例 "14 22:30:16"）
- * LOG_MAX_KB=0 时关闭日志
- *
- * 持有一个持久 FILE*，避免每行日志都 syscall open/close
- * 路径变化（热重载 LOG_FILE）时自动重开
+ * 写入日志（自动滚动：超上限后删除最早 2 行）。
+ * 日期格式：日+时间，无年月（例 "14 22:30:16"）。
+ * LOG_MAX_KB=0 时关闭日志。持持久 FILE* 避免每行 open/close。
  */
 static void write_log(const char *fmt, ...) {
     if (LOG_MAX_KB == 0) return;     // 日志关闭
@@ -832,6 +883,32 @@ static inline int clamp(int val, int lo, int hi) {
     return val;
 }
 
+/** 返回 x 的符号：正→1，负→-1，零→0 */
+static inline int sign_of(int x) {
+    if (x > 0) return 1;
+    if (x < 0) return -1;
+    return 0;
+}
+
+/** 限速步进：actual 向 desired 靠拢，每周期最多变 up_limit（升）或 down_limit（降） */
+static inline void rate_limit(int *actual, int desired, int up_limit, int down_limit) {
+    if (*actual < 0) { *actual = desired; return; }
+    int diff = desired - *actual;
+    int step = (diff > 0) ? up_limit : down_limit;
+    if (abs(diff) > step)
+        *actual += (diff > 0) ? step : -step;
+    else
+        *actual = desired;
+}
+
+/** 清除趋势豁免 / 反补累积状态 */
+static inline void reset_exempt_state(void) {
+    trend_override = 0;
+    override_anchor_temp = -1;
+    rev_comp_pending_abs = 0;
+    rev_comp_pending_idle = 0;
+}
+
 // ======================== 状态文件（模块心跳 + BLE 状态） ========================
 
 /**
@@ -881,7 +958,7 @@ static void read_status_ble(void) {
     while (fgets(line, sizeof(line), f)) {
         if (strncmp(line, "BLE=", 4) == 0) {
             int val = atoi(line + 4);
-            app_ble_connected = val ? 1 : 0;
+            app_ble_connected = (val != 0);
         } else if (strncmp(line, "RUN_MODE=", 9) == 0) {
             cooler_runmode = atoi(line + 9);
         } else if (strncmp(line, "HOT_TEMP=", 9) == 0) {
@@ -1082,19 +1159,10 @@ static int read_battery_current_abs(void) {
 // ======================== 控制参数计算与下发 ========================
 
 /**
- * 根据档位计算 setRunMode 的各参数
+ * 根据档位查表计算 setRunMode 参数（档位与风扇/制冷非线性）。
  *
- * 使用查表法，因为档位与风扇转速、目标温度之间不是线性关系。
- *
- * 智能温控模式（mode=0）：
- *   targetTemperature = 查表目标温度
- *   windLevel = 查表风扇转速上限 (RPM)
- *   windLevelOverclock / coldLevelOverclock = 0（此模式下不用）
- *
- * 固定功率模式（mode=1）：
- *   windLevelOverclock = 查表风扇固定转速 (RPM)
- *   coldLevelOverclock = 查表制冷片强度
- *   targetTemperature = 5°C（表值为 0，clamp(5,35) 后为 5，固件模式忽略此值）
+ * mode=0 智能温控：targetTemperature + windLevel（风扇上限）。
+ * mode=1 固定功率：windLevelOverclock（风扇）+ coldLevelOverclock（制冷）。
  */
 static void build_params(int level,
                          int *out_mode,
@@ -1190,46 +1258,16 @@ static int apply_level(int level) {
     level = clamp(level, level_min, level_max);
     build_params(level, &mode, &target, &windOC, &coldOC, &windLevel);
 
-    // ---- 风扇转速限速 ----
-    {
-        int desired = (mode == 0) ? windLevel : windOC;
-        if (actual_rpm < 0)
-            actual_rpm = desired;
-        else {
-            int diff = desired - actual_rpm;
-            if (abs(diff) > RATE_LIMIT_RPM)
-                actual_rpm += (diff > 0) ? RATE_LIMIT_RPM : -RATE_LIMIT_RPM;
-            else
-                actual_rpm = desired;
-        }
-    }
+    // 风扇转速限速（升降独立速率）
+    rate_limit(&actual_rpm, (mode == 0) ? windLevel : windOC,
+               RATE_LIMIT_RPM, RATE_LIMIT_RPM_DOWN);
 
-    // ---- 制冷强度限速 ----
-    {
-        if (actual_cold < 0)
-            actual_cold = coldOC;
-        else {
-            int diff = coldOC - actual_cold;
-            if (abs(diff) > RATE_LIMIT_COLD)
-                actual_cold += (diff > 0) ? RATE_LIMIT_COLD : -RATE_LIMIT_COLD;
-            else
-                actual_cold = coldOC;
-        }
-    }
+    // 制冷强度限速
+    rate_limit(&actual_cold, coldOC, RATE_LIMIT_COLD, RATE_LIMIT_COLD);
 
-    // ---- 目标温度限速（仅智能温控模式，固定功率传固定值无需限速）----
-    {
-        if (actual_target_temp < 0)
-            actual_target_temp = target;
-        else if (mode == 0) {
-            int diff = target - actual_target_temp;
-            if (abs(diff) > RATE_LIMIT_TEMP)
-                actual_target_temp += (diff > 0) ? RATE_LIMIT_TEMP : -RATE_LIMIT_TEMP;
-            else
-                actual_target_temp = target;
-        }
-        // mode==1 时 target 无意义，保持 actual_target_temp 不变
-    }
+    // 目标温度限速（仅智能温控模式；<0 时 rate_limit 直接初始化）
+    if (mode == 0 || actual_target_temp < 0)
+        rate_limit(&actual_target_temp, target, RATE_LIMIT_TEMP, RATE_LIMIT_TEMP);
 
     // ---- 用限速后的 actual_* 值替换查表值 ----
     if (mode == 0)
@@ -1279,7 +1317,7 @@ static int is_app_alive(void) {
     struct stat st;
     if (stat(status_file_path, &st) != 0) return 0;
     time_t now = time(NULL);
-    int alive = (now - st.st_mtime <= STATUS_TIMEOUT) ? 1 : 0;
+    int alive = (now - st.st_mtime <= STATUS_TIMEOUT);
     debug_log(debug_conn, "app_alive %d mtime_gap=%lds timeout=%ds", alive, (long)(now - st.st_mtime), STATUS_TIMEOUT);
     return alive;
 }
@@ -1287,22 +1325,14 @@ static int is_app_alive(void) {
 // ======================== 电池温度控制 ========================
 
 /**
- * 根据电池温度调整基础档位
- * 每 5 秒调用一次
+ * 根据电池温度调整基础档位，每 5 秒一次。
  *
- * 调整策略（基准温度 35.0°C）：
- *   偏差 ≤0.5°C  → 不变（死区）
- *   ±0.5~1.4°C  → ±1 档
- *   ±1.4~2.5°C  → ±2 档
- *   偏差 >2.5°C  → ±3 档
+ * 死区 ±ZONE_1 / ±1 档至 ZONE_2 / ±2 档至 ZONE_3 / ±3 档以上。
+ * 温度不变时跳过升降档；档位变动后冷却 BATT_COOLDOWN_CYCLES 周期。
+ * 紧急退出恢复期：将 ZONE 阈值乘以恢复倍率，降低灵敏度。
  *
- * 温度读数未变化时跳过升降档。
- * 每次档位变动后启动 BATT_COOLDOWN_CYCLES 周期冷却，期间跳过常规升降档。
- *
- * 反补查表（Sheet3 三区×双向×三级阈值）：
- *   三区：冷外区(≤基准-ZONE2) / 内区(±ZONE2内) / 热外区(≥基准+ZONE2)
- *   升温时：冷外 0.8→1 / 内区 0.5→1, 0.8→2 / 热外 0.3→1, 0.5→2, 0.8→3
- *   降温时：冷外 0.3→1, 0.5→2, 0.8→3 / 内区 0.5→1, 0.8→2 / 热外 0.8→1
+ * 反补查表：三区（冷外/内/热外）× 方向（升/降温）× 三级阈值（REV_COMP_T1/T2/T3）。
+ * 趋势豁免：反补被抑制时抬高生效阈值，锚点温度复位。
  */
 static void battery_control(void) {
     int batt = read_battery_temp();
@@ -1353,10 +1383,7 @@ static void battery_control(void) {
     }
     int diff = batt - BATT_BASELINE;
     int ad = abs(diff);
-    int sign;
-    if      (diff > 0) sign =  1;
-    else if (diff < 0) sign = -1;
-    else               sign =  0;
+    int sign = sign_of(diff);
     // 紧急退出恢复期：将 BATT_ZONE 阈值乘以恢复倍率，降低调档灵敏度
     int eff_z1 = BATT_ZONE_1 * batt_recovery_multiplier;
     int eff_z2 = BATT_ZONE_2 * batt_recovery_multiplier;
@@ -1537,22 +1564,12 @@ static void battery_control(void) {
 // ======================== 紧急干预（CPU+电流双源） ========================
 
 /**
- * 紧急干预（CPU 温度 + 电池电流双源）
- * 每 5 秒调用一次
+ * 紧急干预—CPU 温度 + 电池电流双源，每 5 秒一次。
  *
- * CPU 温度使用一阶低通滤波（α=CPU_FILTER_ALPHA）平滑
- * 电池电流：进入时用原始值（不平滑），退出时用 EMA 平滑值
- * 电流 EMA 平滑（α=CURRENT_SMOOTH_ALPHA）仅在紧急状态下累积，
- * 升档（紧急等级提高）时重置，降档时继续累积。
- *
- * 紧急等级 = cpu_level + current_level（各自 0~3，综合 0~6，上限 4）
- *   等级 1 → 强制最低档位 EMERG_FORCED_1（默认 6，固定 3050RPM/75）
- *   等级 2 → 强制最低档位 EMERG_FORCED_2（默认 8，固定 4000RPM/125）
- *   等级 3 → 强制最低档位 EMERG_FORCED_3（默认 10，固定 5000RPM/160）
- *   等级 4 → 强制最低档位 EMERG_FORCED_4（默认 12，固定 6000RPM/185）
- *   单源最高触发 3 级，4 级需双源叠加（≥3+1 或 2+2 等）
- *
- * 退出逻辑（AND）：降档时逐级检查双源恢复阈值后才允许下降，包括退出到 0
+ * CPU 温度经 EMA 滤波（α=CPU_FILTER_ALPHA）；电流进入用原始值，退出用 EMA 平滑。
+ * 等级 = cpu_level(0~3) + current_level(0~3)，综合上限 4 级。
+ * 升档即时响应（进入阈值）；降档逐级滞回（双源均低于恢复阈值才允许）。
+ * 等级 → 强制最低档位：EMERG_FORCED_1~4。
  */
 static void emergency_intervention(void) {
     // --- 1. CPU 温度读入与滤波 ---
@@ -1685,27 +1702,13 @@ static void emergency_intervention(void) {
 // ======================== 电流-挡位映射 + 温度调整融合 ========================
 
 /**
- * 电流-挡位映射 + 温度调整融合模式
+ * 电流-挡位映射 + 温度融合模式。
  *
- * 融合设计：
- *   - 电流 → EMA 平滑 → 倍率计算 → 推荐挡位（基础）
- *   - 温度 → 在推荐挡位基础上累积偏移挡位（带冷却期）
- *   - 推荐挡位变化时偏移量自动继承（跨过渡不丢失）
- *   - 偏移量无上限（由 level_min/level_max 钳位）
+ * 电流经 EMA 平滑 + 倍率 → 推荐挡位（基础）。
+ * 温度在推荐挡位上累积偏移（带冷却期），推荐挡位变化时偏移继承。
+ * 最终挡位 = clamp(推荐 + 偏移, level_min, level_max)。
  *
- * 计算流程：
- *   1. 读取带符号电池电流，判断方向（用户约定：负=充电，正=放电）
- *   2. 检查对应方向的开关是否开启，未开→返回
- *   3. EMA 平滑（α=CURRENT_GEAR_SMOOTH_ALPHA）
- *   4. 推荐挡位 = 平滑值(0.01A) × 倍率 ÷ 100
- *   5. 推荐挡位 < CURRENT_GEAR_MIN → 复位轨迹，返回（回退到基准模式）
- *   6. 偏移继承：推荐挡位变化时 curr_gear_temp_offset 自动保留
- *   7. 温度偏移累积（每周期计算，冷却期仅阻挡同方向继续累积）：
- *      温度 delta（同 battery_control 的偏差四区）→ 反方向/无冷却时直接累积
- *      冷却中且同方向 → 跳过累积，防止振荡
- *   8. 最终挡位 = clamp(推荐 + 偏移, level_min, level_max)
- *
- * 返回值：1=已应用电流-挡位覆盖，0=未覆盖（应回退到常规模式）
+ * 返回 1=已覆盖，0=回退常规模式。
  */
 static int current_gear_override(void) {
     // 1. 读取带符号电池电流（÷10000 转 0.01A 单位）
@@ -1748,7 +1751,7 @@ static int current_gear_override(void) {
         if (batt >= 0) {
             int diff = batt - BATT_BASELINE;
             int ad = abs(diff);
-            int sign = (diff > 0) ? 1 : (diff < 0) ? -1 : 0;
+            int sign = sign_of(diff);
             int delta = 0;
             if      (ad > BATT_ZONE_3) delta = 3 * sign;
             else if (ad > BATT_ZONE_2) delta = 2 * sign;
@@ -1792,10 +1795,7 @@ static int current_gear_override(void) {
     battery_fan_level = final_level;
 
     // 清除反补/豁免状态（切换模式时不应保留旧状态）
-    trend_override = 0;
-    override_anchor_temp = -1;
-    rev_comp_pending_abs = 0;
-    rev_comp_pending_idle = 0;
+    reset_exempt_state();
     rev_comp_cooldown = 0;
     last_batt_reading = -1;
     batt_idle_cycles = 0;
@@ -1903,27 +1903,11 @@ static void pid_map_output(float output, int *out_cold, int *out_rpm) {
  */
 static void apply_level_direct(int mode, int target,
                                int rpm, int cold, int wl) {
-    // ---- 制冷强度限速 ----
-    if (actual_cold < 0)
-        actual_cold = cold;
-    else {
-        int diff = cold - actual_cold;
-        if (abs(diff) > RATE_LIMIT_COLD)
-            actual_cold += (diff > 0) ? RATE_LIMIT_COLD : -RATE_LIMIT_COLD;
-        else
-            actual_cold = cold;
-    }
+    // 制冷强度限速
+    rate_limit(&actual_cold, cold, RATE_LIMIT_COLD, RATE_LIMIT_COLD);
 
-    // ---- 风扇转速限速 ----
-    if (actual_rpm < 0)
-        actual_rpm = rpm;
-    else {
-        int diff = rpm - actual_rpm;
-        if (abs(diff) > RATE_LIMIT_RPM)
-            actual_rpm += (diff > 0) ? RATE_LIMIT_RPM : -RATE_LIMIT_RPM;
-        else
-            actual_rpm = rpm;
-    }
+    // 风扇转速限速（升降独立速率）
+    rate_limit(&actual_rpm, rpm, RATE_LIMIT_RPM, RATE_LIMIT_RPM_DOWN);
 
     // ---- 去重检测（用限速后的 actual_* 值）----
     if (last_sent_valid &&
@@ -1955,12 +1939,15 @@ static void pid_align_from_gear(void) {
     pid_output_smoothed = ratio;
     pid_target_rpm  = pid_rpm_min + (int)(ratio * (pid_rpm_max - pid_rpm_min));
     pid_target_cold = pid_cold_min + (int)(ratio * (pid_cold_max - pid_cold_min));
-    pid_integral       = 0;
-    pid_prev_error     = 0;
-    pid_batt_filtered  = -1;
-    pid_last_batt      = -1;
+    pid_integral        = 0;
+    pid_prev_error      = 0;
+    pid_batt_filtered   = -1;
+    pid_last_batt       = -1;
     pid_last_change_time = 0;
-    last_sent_valid    = 0;
+    pid_cpu_comp_smooth  = 0.0f;
+    pid_curr_comp_smooth = 0.0f;
+    pid_last_comp_10     = 0;
+    last_sent_valid     = 0;
     write_log("PID 从 gear 对齐 ratio=%.2f rpm=%d cold=%d", ratio, pid_target_rpm, pid_target_cold);
 }
 
@@ -1983,11 +1970,14 @@ static void alarm_handler(int sig) {
 static void reconnect_align(void) {
     // PID 模式：重置 PID 状态，actual 值由 rate_limited_execute 重新初始化
     if (ctrl_mode == 1) {
-        pid_batt_filtered = -1;
-        pid_last_batt = -1;
-        pid_integral = 0;
-        pid_prev_error = 0;
+        pid_batt_filtered   = -1;
+        pid_last_batt       = -1;
+        pid_integral        = 0;
+        pid_prev_error      = 0;
         pid_last_change_time = 0;
+        pid_cpu_comp_smooth  = 0.0f;
+        pid_curr_comp_smooth = 0.0f;
+        pid_last_comp_10     = 0;
         pid_output_smoothed = 0.0f;
         actual_rpm = -1;
         actual_cold = -1;
@@ -2076,14 +2066,46 @@ static void main_loop(void) {
             pid_batt_filtered = EMA(batt_raw, pid_batt_filtered, pid_batt_alpha);
         }
 
-        // 温度变化时才执行 PID（首次 pid_last_batt<0 也会进入）
-        if (batt_raw != pid_last_batt) {
+        // ═══ 补偿值计算（每周期更新，不受电池温度变化限制） ═══
+        float cpu_comp = 0.0f, curr_comp = 0.0f;
+
+        if (pid_cpu_comp_enabled && cpu_weighted >= 0) {
+            float raw = (float)(cpu_weighted - batt_raw) / (pid_cpu_comp_divisor * 10);
+            if (raw < 0.0f) raw = 0.0f;
+            if (pid_last_batt < 0)
+                pid_cpu_comp_smooth = raw;
+            else
+                pid_cpu_comp_smooth = (CPU_FILTER_ALPHA * raw +
+                                      (100 - CPU_FILTER_ALPHA) * pid_cpu_comp_smooth) / 100.0f;
+            cpu_comp = pid_cpu_comp_smooth;
+        }
+
+        if (pid_curr_comp_enabled) {
+            int curr_cA = read_battery_current_abs();
+            if (curr_cA >= pid_curr_comp_threshold) {
+                float raw = (float)curr_cA / (pid_curr_comp_divisor * 100);
+                if (pid_last_batt < 0)
+                    pid_curr_comp_smooth = raw;
+                else
+                    pid_curr_comp_smooth = (CURRENT_GEAR_SMOOTH_ALPHA * raw +
+                                           (100 - CURRENT_GEAR_SMOOTH_ALPHA) * pid_curr_comp_smooth) / 100.0f;
+                curr_comp = pid_curr_comp_smooth;
+            }
+        }
+
+        float total_comp = cpu_comp + curr_comp;
+        int total_comp_10 = (int)(total_comp * 10 + 0.5f);
+
+        // 温度或补偿变化时才执行 PID（首次 pid_last_batt<0 也会进入）
+        if (batt_raw != pid_last_batt || total_comp_10 != pid_last_comp_10) {
             time_t now = time(NULL);
             float dt = (float)(now - pid_last_change_time);
             if (dt > 30.0f) dt = 30.0f;
             if (dt < 3.0f)  dt = 3.0f;
 
-            float pid_out = pid_compute(pid_batt_filtered, dt);
+            // 方案 A：补偿加到 PID 输入温度
+            int compensated_10 = pid_batt_filtered + total_comp_10;
+            float pid_out = pid_compute(compensated_10, dt);
 
             // 输出 EMA 平滑（首次直接赋初值）
             if (pid_output_smoothed < 0.001f && pid_last_batt < 0) {
@@ -2105,12 +2127,14 @@ static void main_loop(void) {
             pid_map_output(pid_output_smoothed,
                            &pid_target_cold, &pid_target_rpm);
 
-            pid_log("epoch=%ld Tbatt=%d Ttgt=%d Thot=%d dt=%.0fs e=%.2f raw=%.2f sm=%.2f cold=%d rpm=%d",
-                     now, pid_batt_filtered, BATT_BASELINE, cooler_hot_temp,
-                     dt, (pid_batt_filtered - BATT_BASELINE) / 10.0f,
+            pid_log("epoch=%ld Tbatt=%d+comp%+.1f(cpu%+.1f+curr%+.1f)=Tinp%d Ttgt=%d Thot=%d dt=%.0fs e=%.2f raw=%.2f sm=%.2f cold=%d rpm=%d",
+                     now, pid_batt_filtered, total_comp, cpu_comp, curr_comp,
+                     compensated_10, BATT_BASELINE, cooler_hot_temp,
+                     dt, (compensated_10 - BATT_BASELINE) / 10.0f,
                      pid_out, pid_output_smoothed, pid_target_cold, pid_target_rpm);
 
             pid_last_batt = batt_raw;
+            pid_last_comp_10 = total_comp_10;
             pid_last_change_time = now;
         }
         return;  // PID 模式不执行后续档位逻辑
@@ -2126,23 +2150,16 @@ static void main_loop(void) {
         batt_recovery_multiplier = 1;
         batt_recovery_cycles = 0;
         recovery_step = 0;
-        // 复位趋势豁免和反补累积，防止紧急期间的脏状态影响后续逻辑
-        trend_override = 0;
-        override_anchor_temp = -1;
-        rev_comp_pending_abs = 0;
-        rev_comp_pending_idle = 0;
+        // 清除趋势豁免/反补累积，防止紧急期间脏状态影响后续逻辑
+        reset_exempt_state();
     }
 
-    // 退出紧急 → 在 battery_control 之前启动恢复期，确保本周期即生效
-    // 同时复位趋势豁免/反补累积，避免退出紧急后因脏数据误调档
+    // 退出紧急 → 启动恢复期，清除趋势豁免/反补累积
     if (emergency_level < prev_emerg_level) {
         recovery_step = 1;
         batt_recovery_multiplier = BATT_RECOVERY_M1;
         batt_recovery_cycles = BATT_RECOVERY_PHASE_CYCLES;
-        trend_override = 0;
-        override_anchor_temp = -1;
-        rev_comp_pending_abs = 0;
-        rev_comp_pending_idle = 0;
+        reset_exempt_state();
     }
 
     // 2. 电池温度控制 / 电流-挡位映射模式
@@ -2302,6 +2319,9 @@ int main(int argc, char *argv[]) {
             pid_prev_error      = 0;
             pid_batt_filtered   = -1;
             pid_last_batt       = -1;
+            pid_cpu_comp_smooth  = 0.0f;
+            pid_curr_comp_smooth = 0.0f;
+            pid_last_comp_10     = 0;
             battery_fan_level   = (int)(ratio * (level_max - level_min) + level_min + 0.5f);
             if (battery_fan_level < level_min) battery_fan_level = level_min;
             if (battery_fan_level > level_max) battery_fan_level = level_max;
@@ -2407,7 +2427,7 @@ int main(int argc, char *argv[]) {
         main_loop();
 
         // ★ 速率限制执行（替代逐档变动 + RPM 平滑跟踪）
-        // 每周期最多变动 RATE_LIMIT_RPM RPM、RATE_LIMIT_COLD 制冷强度、
+        // 每周期最多变动 RATE_LIMIT_RPM(RPM升)/RATE_LIMIT_RPM_DOWN(RPM降)/RATE_LIMIT_COLD/
         // RATE_LIMIT_TEMP °C 目标温度，未完成部分自然累积到下周期
         // 目标档位变化时自动从当前实际值重新计算差值
         rate_limited_execute();

@@ -17,6 +17,8 @@
 - 持久化从档位号改为制冷强度：`save_gear`→`save_cold`，`load_gear`→`load_cold`；PID 模式也参与存档，重启不再丢失状态
 - `write_log` 日志滚动优化：超标后仅删除最早行而非全部重写
 - 冷却期逻辑：退出紧急时立即复位趋势豁免/反补累积，防止脏数据
+- 配置解析重构为分组结构：CTRL_MODE / CURRENT_GEAR_MODE / DEBUG_MODE 以 `else if` 外层分支组织子项，代码反映"大类→子项"层级
+- PID 输入补偿（方案 A）：CPU 温差和电池电流作为额外热源加到 PID 输入温度，每周期更新、独立触发 PID 重算，PID 日志增加补偿值分解输出
 
 ### Fixed
 - `compute_direct_cold_rpm` 除零 bug（`level_max==level_min` 时分母为 0）
