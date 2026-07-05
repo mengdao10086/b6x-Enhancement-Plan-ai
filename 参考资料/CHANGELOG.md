@@ -14,17 +14,20 @@
 ### Changed
 - 编译命令添加 `-ffunction-sections -fdata-sections -Wl,--gc-sections -Wl,--strip-all`，二进制体积减少约 30%
 - `read_status_ble()` 扩展为 10 字段解析（含 RUN_MODE/HOT_TEMP/COLD_TEMP/RPM_REAL/COLD_REAL 等散热器全参数回传）
+- 持久化从档位号改为制冷强度：`save_gear`→`save_cold`，`load_gear`→`load_cold`；PID 模式也参与存档，重启不再丢失状态
 - `write_log` 日志滚动优化：超标后仅删除最早行而非全部重写
 - 冷却期逻辑：退出紧急时立即复位趋势豁免/反补累积，防止脏数据
 
 ### Fixed
 - `compute_direct_cold_rpm` 除零 bug（`level_max==level_min` 时分母为 0）
 - 配置热重载 CTRL_MODE 切换未正确触发 PID 对齐
+- 电流-挡位映射模式下 `curr_gear_temp_offset` 被冷却期阻挡无法下降：冷却期内只减计数器不计算偏移，从 +91 归零需要约 10 分钟。修复后每周期都计算偏移，冷却期仅阻止同方向累积，反方向随时可调
 
 ### lsp模块
 - `writeStatusFile()` 扩展为完整的 10 行 status 协议（含散热器全参数回传）
 - 新增 `xposedscope` 元数据，管理器显示推荐作用域
 - 捕获 `onDeviceInfoUpdate` 参数对象供回传使用
+- 修复参数回传钩子指向：追加 `WaspWingViewModel.onDeviceInfoUpdate`（app 层），散热器数据实际经过此类而非 SDK 的 `WaspwingViewModel`
 
 ### 注意
 - DIRECT_COLD_MODE 已在 v2.3 开发过程中删除，未进入发布版本

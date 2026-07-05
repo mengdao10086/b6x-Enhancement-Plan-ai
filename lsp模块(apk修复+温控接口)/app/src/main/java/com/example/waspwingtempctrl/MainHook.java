@@ -477,6 +477,29 @@ public class MainHook implements IXposedHookLoadPackage {
                     });
             XposedBridge.log(TAG + " 已钩住 SDK WaspwingViewModel.onDeviceInfoUpdate");
 
+            // App 层 WaspWingViewModel 的 onDeviceInfoUpdate（散热器数据实际经过此类）
+            XposedHelpers.findAndHookMethod(appVm, "onDeviceInfoUpdate",
+                    waspInfoCls, new XC_MethodHook() {
+                        @Override
+                        protected void afterHookedMethod(MethodHookParam param) {
+                            Object info = param.args[0];
+                            lastWaspWingInfo = info;
+
+                            // 修正 experimentalRunModeValue
+                            try {
+                                XposedHelpers.setIntField(info, "experimentalRunModeValue",
+                                        lastSetMode == 1 ? lastSetColdOC : 0);
+                            } catch (Throwable t) { /* ok */ }
+
+                            Boolean connected = (Boolean) XposedHelpers.callMethod(info, "isConnected");
+                            Integer wind = (Integer) XposedHelpers.callMethod(info, "getRealWindLevel");
+                            XposedBridge.log(TAG + " [诊断] App.onDeviceInfoUpdate"
+                                    + " connected=" + connected
+                                    + " windLevel(real)=" + wind);
+                        }
+                    });
+            XposedBridge.log(TAG + " 已钩住 App WaspWingViewModel.onDeviceInfoUpdate");
+
         } catch (Exception e) {
             XposedBridge.log(TAG + " 钩诊断失败: " + e.getMessage());
         }

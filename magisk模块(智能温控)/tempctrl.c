@@ -903,10 +903,10 @@ static void read_status_ble(void) {
     fclose(f);
 }
 
-// ======================== 档位存档（持久化上次档位） ========================
+// ======================== 存档（持久化上次制冷强度） ========================
 
 /**
- * 设定齿轮存档路径（根据 /proc/self/exe 推导）
+ * 设定存档路径（根据 /proc/self/exe 推导）
  */
 static void set_gear_file_path(void) {
     char basename[64];
@@ -920,26 +920,26 @@ static void set_gear_file_path(void) {
 }
 
 /**
- * 保存档位到存档文件
+ * 保存制冷强度到存档文件
  */
-static void save_gear(int level) {
+static void save_cold(int cold) {
+    if (cold < 1) return;
     FILE *f = fopen(gear_file_path, "w");
     if (f) {
-        fprintf(f, "%d\n", level);
+        fprintf(f, "%d\n", cold);
         fclose(f);
     }
 }
 
 /**
- * 读取存档档位，失败返回 LEVEL_INIT
+ * 读取存档制冷强度，失败返回 -1
  */
-static int load_gear(void) {
+static int load_cold(void) {
     FILE *f = fopen(gear_file_path, "r");
-    if (!f) return LEVEL_INIT;
-    int val = LEVEL_INIT;
+    if (!f) return -1;
+    int val = -1;
     fscanf(f, "%d", &val);
     fclose(f);
-    if (val < level_min || val > level_max) return LEVEL_INIT;
     return val;
 }
 
@@ -1264,7 +1264,7 @@ static int apply_level(int level) {
     last_coldOC        = coldOC;
     last_windLevel     = windLevel;
 
-    save_gear(level);
+    save_cold(coldOC);
 
     return 1;
 }
@@ -1700,9 +1700,9 @@ static void emergency_intervention(void) {
  *   4. 推荐挡位 = 平滑值(0.01A) × 倍率 ÷ 100
  *   5. 推荐挡位 < CURRENT_GEAR_MIN → 复位轨迹，返回（回退到基准模式）
  *   6. 偏移继承：推荐挡位变化时 curr_gear_temp_offset 自动保留
- *   7. 温度偏移累积（带 curr_gear_temp_cooldown 冷却期）：
- *      冷却中 → 递减冷却、不更新偏移
- *      冷却结束 → 计算温度 delta（同 battery_control），累积到偏移
+ *   7. 温度偏移累积（每周期计算，冷却期仅阻挡同方向继续累积）：
+ *      温度 delta（同 battery_control 的偏差四区）→ 反方向/无冷却时直接累积
+ *      冷却中且同方向 → 跳过累积，防止振荡
  *   8. 最终挡位 = clamp(推荐 + 偏移, level_min, level_max)
  *
  * 返回值：1=已应用电流-挡位覆盖，0=未覆盖（应回退到常规模式）
@@ -1743,19 +1743,24 @@ static int current_gear_override(void) {
     // 5. 温度偏移管理
     int batt = read_battery_temp();
     if (curr_gear_rec > 0) {
-        // 已激活：正常累积温度偏移（带冷却期）
+        // 已激活：每周期根据当前温度差计算偏移（不受冷却期阻挡）
+        // 冷却期仅阻止同方向继续累积，但反方向（温度回归方向）始终允许
         if (batt >= 0) {
-            if (curr_gear_temp_cooldown > 0) {
-                curr_gear_temp_cooldown--;
-            } else {
-                int diff = batt - BATT_BASELINE;
-                int ad = abs(diff);
-                int sign = (diff > 0) ? 1 : (diff < 0) ? -1 : 0;
-                int delta = 0;
-                if      (ad > BATT_ZONE_3) delta = 3 * sign;
-                else if (ad > BATT_ZONE_2) delta = 2 * sign;
-                else if (ad > BATT_ZONE_1) delta = 1 * sign;
-                if (delta != 0) {
+            int diff = batt - BATT_BASELINE;
+            int ad = abs(diff);
+            int sign = (diff > 0) ? 1 : (diff < 0) ? -1 : 0;
+            int delta = 0;
+            if      (ad > BATT_ZONE_3) delta = 3 * sign;
+            else if (ad > BATT_ZONE_2) delta = 2 * sign;
+            else if (ad > BATT_ZONE_1) delta = 1 * sign;
+            if (delta != 0) {
+                if (curr_gear_temp_cooldown > 0) {
+                    // 冷却期：仅允许向零靠近，阻止同方向继续累积
+                    if ((delta > 0 && curr_gear_temp_offset < 0) ||
+                        (delta < 0 && curr_gear_temp_offset > 0)) {
+                        curr_gear_temp_offset += delta;
+                    }
+                } else {
                     curr_gear_temp_offset += delta;
                     curr_gear_temp_cooldown = BATT_COOLDOWN_CYCLES;
                 }
@@ -1936,6 +1941,8 @@ static void apply_level_direct(int mode, int target,
     last_windOC      = actual_rpm;
     last_coldOC      = actual_cold;
     last_windLevel   = wl;
+
+    save_cold(actual_cold);
 }
 
 /**
@@ -2279,15 +2286,50 @@ int main(int argc, char *argv[]) {
     create_status_file();
     set_gear_file_path();
 
-    // --- 初始化档位（继承上次档位，无存档用 LEVEL_INIT=5） ---
-    battery_fan_level = load_gear();
+    // --- 初始化制冷强度（继承上次制冷强度，无存档直接找默认挡位） ---
+    int stored_cold = load_cold();
+    if (stored_cold >= 1) {
+        if (ctrl_mode == 1) {
+            // PID 模式：从制冷强度直接对齐初始值
+            float ratio = (float)(stored_cold - pid_cold_min) /
+                          (pid_cold_max - pid_cold_min);
+            if (ratio < 0.0f) ratio = 0.0f;
+            if (ratio > 1.0f) ratio = 1.0f;
+            pid_output_smoothed = ratio;
+            pid_target_cold     = stored_cold;
+            pid_target_rpm      = pid_rpm_min + (int)(ratio * (pid_rpm_max - pid_rpm_min));
+            pid_integral        = 0;
+            pid_prev_error      = 0;
+            pid_batt_filtered   = -1;
+            pid_last_batt       = -1;
+            battery_fan_level   = (int)(ratio * (level_max - level_min) + level_min + 0.5f);
+            if (battery_fan_level < level_min) battery_fan_level = level_min;
+            if (battery_fan_level > level_max) battery_fan_level = level_max;
+            write_log("存档 恢复制冷=%d ratio=%.2f rpm=%d 挡位%d",
+                      stored_cold, ratio, pid_target_rpm, battery_fan_level);
+        } else {
+            // Gear 模式：找冷强度最接近的挡位
+            int nearest = LEVEL_INIT;
+            int min_diff = 9999;
+            for (int i = 0; i < gear_count; i++) {
+                int diff = abs(gear_table[i].cold - stored_cold);
+                if (diff < min_diff) {
+                    min_diff = diff;
+                    nearest = i + 1;
+                }
+            }
+            battery_fan_level = nearest;
+            write_log("存档 冷强度%d→挡位%d", stored_cold, nearest);
+        }
+    } else {
+        // 无存档：使用默认初始挡位
+        battery_fan_level = LEVEL_INIT;
+        if (ctrl_mode == 1) {
+            pid_align_from_gear();
+        }
+    }
     batt_cooldown = 0;
     target_level = battery_fan_level;
-
-    // PID 启动时对齐（此时 battery_fan_level 已初始化）
-    if (ctrl_mode == 1) {
-        pid_align_from_gear();
-    }
 
     write_log("脚本启动成功");
 
