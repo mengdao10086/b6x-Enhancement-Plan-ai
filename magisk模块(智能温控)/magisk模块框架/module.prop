@@ -1,6 +1,6 @@
 id=b6x-Enhancement-Plan
 name=飞智B6X增强计划
-version=v2.2
-versionCode=4
+version=v2.3
+versionCode=5
 author=灵,deepseek
 description=飞智B6X散热器智能温控增强模块，需要飞智散热器开发者工具在后台持续存活才能生效

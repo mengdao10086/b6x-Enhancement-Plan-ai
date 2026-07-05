@@ -48,15 +48,15 @@
 
 ### C 智能温控守护程序
 
+- **PID 连续无级调节**（v2.3）：CTRL_MODE=1 启用，P+I(积分分离±1°C)+D 控制 + 输入/输出双 EMA 滤波
+- **制冷→RPM 自动映射**：冷端指数映射 + 热端线性映射 + 自加权合并，PID/常规双模式共享映射引擎
 - **双源紧急干预**：CPU 温度 + 电池电流，OR 入 AND 出，4 级紧急 + 退出恢复期
 - **电池温度调档**：基准 35°C，四区策略（死区/±1/±2/±3 档），趋势豁免 + 反补查表
-- **电流-挡位映射 + 温度融合**（v2.2）：电池电流推荐基础档位，温度累积偏移，推荐挡位变化时偏移自动继承
-- **决策执行分离**：`main_loop` 纯计算，`rate_limited_execute` 三轴独立限速（RPM/制冷/温度）
+- **电流-挡位映射 + 温度融合**：电池电流推荐基础档位，温度累积偏移，推荐挡位变化时偏移自动继承
+- **限速统一下沉**：RPM/制冷/目标温度限速内建到下发函数内部，计算层只管传目标值
+- **决策执行分离**：`main_loop` 纯计算，`rate_limited_execute` 分发
 - **独立开关**：电流紧急/CPU 紧急/反补/趋势豁免各自独立控制
-- **调试日志系统**：`DEBUG_MODE` + 7 个分区，开启时自动关闭日志体积限制
-- **运行时配置**：所有参数通过 `profile.conf` 配置，mtime 热重载
-- **档位表可配置化**：`GEAR_N` 覆盖默认档位表
-- **双重检查存活**：status 文件 mtime 心跳 + BLE=1
+- **调试日志系统**：`DEBUG_MODE` + 8 个分区（含 PID），开启时自动关闭日志体积限制
 
 > 详细策略设计 → [逻辑说明.md](magisk模块(智能温控)/逻辑说明.md) · 版本变更 → [CHANGELOG.md](参考资料/CHANGELOG.md)
 
@@ -69,6 +69,7 @@
 ├── magisk模块(智能温控)/          ← C 守护程序源码 + Magisk 模块框架
 │   ├── tempctrl.c                 ← 核心 C 代码
 │   ├── 逻辑说明.md                ← 技术设计文档
+│   ├── PID方案实施计划.md          ← PID 实施方案（参考）
 │   └── magisk模块框架/            ← module.prop / service.sh / customize.sh / profile.conf
 ├── 参考资料/
 │   ├── 完整修复历程.md             ← BLE 4 层 Bug 修复全记录
@@ -76,10 +77,8 @@
 │   ├── apk逆向分析/               ← APK 反编译 + 运行逻辑分析
 │   │   ├── smali/                 ← 合并反编译输出（8865 文件）
 │   │   └── app运行逻辑.md         ← App 内部运行逻辑分析
-│   ├── smali修改重编译apk尝试/     ← smali 工具链 + DEX 修改产物
-│   └── 历史c脚本源码/             ← 历史 C 源码备份
+│   └── smali修改重编译apk尝试/     ← smali 工具链 + DEX 修改产物
 ├── .github/workflows/              ← CI 自动构建
-├── log.md                          ← 本地修改日志（git 已忽略）
 └── README.md                       ← 本文件
 ```
 
@@ -94,7 +93,7 @@
 **推荐使用 GitHub Actions 编译**（或本地 NDK arm64 交叉编译）：
 
 - CI 使用 NDK r27c，固定路径 `/opt/ndk`
-- 编译命令：`aarch64-linux-android21-clang -static -O2`
+- 编译命令：`aarch64-linux-android21-clang -static -O2 -ffunction-sections -fdata-sections -Wl,--gc-sections -Wl,--strip-all`
 - NDK 已配置 `actions/cache` 缓存（~700MB），首次后不再重复下载
 
 单一 Workflow（[build.yml](.github/workflows/build.yml)）自动检测变更模块编译：

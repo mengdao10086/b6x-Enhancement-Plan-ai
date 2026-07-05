@@ -133,7 +133,7 @@ jobs:
           CC=/opt/ndk/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android21-clang
           $CC --version > /dev/null 2>&1
           mkdir -p "CI记录"
-          $CC -static -O2 -o tempctrl "magisk模块(智能温控)/tempctrl.c" -lm > "CI记录/compile_ok.txt" 2>"CI记录/compile_err.txt"
+          $CC -static -O2 -ffunction-sections -fdata-sections -Wl,--gc-sections -Wl,--strip-all -o tempctrl "magisk模块(智能温控)/tempctrl.c" -lm > "CI记录/compile_ok.txt" 2>"CI记录/compile_err.txt"
           RC=$?
           echo "=== exit code: $RC ==="
           echo "=== stdout ==="

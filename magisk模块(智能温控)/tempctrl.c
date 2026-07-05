@@ -12,7 +12,7 @@
 // 编译（请使用 GitHub Actions CI，NDK r27c）：
 //   Termux 的 clang -static 链接 Termux 的 libc，非 Android libc，
 //   编译出的二进制在真机上 PT_TLS 对齐错误，不可用。
-//   NDK 编译命令：aarch64-linux-android21-clang -static -O2
+//   NDK 编译命令：aarch64-linux-android21-clang -static -O2 -ffunction-sections -fdata-sections -Wl,--gc-sections -Wl,--strip-all
 //   （NDK 静态编译后需要 python3 patch_tls.py 修复 PT_TLS 对齐）
 //
 // ================================================================
@@ -28,6 +28,10 @@
 #include <sys/wait.h>
 #include <fcntl.h>
 #include <math.h>
+
+// --- 通用宏 ---
+#define EMA(new_val, old_val, alpha_pct) \
+    (((new_val) * (alpha_pct) + (old_val) * (100 - (alpha_pct))) / 100)
 
 // ======================== 档位定义 ========================
 //
@@ -391,6 +395,25 @@ static inline void trim_right(char *s) {
     while (end > s && (*end == ' ' || *end == '\t')) *end-- = '\0';
 }
 
+/** 原地去除首尾空白及换行符，返回修剪后的起始指针 */
+static inline char *trim_value(char *s) {
+    char *p = s;
+    while (*p == ' ' || *p == '\t') p++;
+    char *end = p + strlen(p) - 1;
+    while (end > p && (*end == '\n' || *end == '\r' || *end == ' ' || *end == '\t'))
+        *end-- = '\0';
+    return p;
+}
+
+/** 从配置值字符串读取路径（trim + strncpy，空值跳过） */
+static void config_read_path(char *dest, size_t dest_size, char *src) {
+    char *v = trim_value(src);
+    if (*v) {
+        strncpy(dest, v, dest_size - 1);
+        dest[dest_size - 1] = '\0';
+    }
+}
+
 /**
  * 解析配置文件中的一行 KEY=VALUE。
  * 跳过注释（#开头）和空行，在 '=' 处分割，修剪 key 尾部空白。
@@ -420,6 +443,7 @@ static void load_config(const char *path) {
         write_log("配置 无法打开 %s", path);
         return;
     }
+    int old_ctrl_mode = ctrl_mode;  // 保存旧值，用于 PID 过渡检测
 
     // ---- 第一遍扫描：收集开关状态 ----
     // CONFIG_ENABLED / GEAR_CONFIG_ENABLED / GEAR_N 存在性一次性检测
@@ -474,6 +498,7 @@ static void load_config(const char *path) {
         }
         else if (strcmp(key, "DEBUG_MODE") == 0)              debug_mode           = (val != 0) ? 1 : 0;
         else if (strcmp(key, "GEAR_CONFIG_ENABLED") == 0)     gear_config_enabled  = (val != 0) ? 1 : 0;
+        else if (strcmp(key, "CTRL_MODE") == 0)                ctrl_mode            = (val != 0) ? 1 : 0;
     }
 
     // GEAR_CONFIG_ENABLED 关闭时忽略 GEAR_N，即使文件中有
@@ -531,27 +556,12 @@ static void load_config(const char *path) {
         else if (strcmp(key, "BATT_RECOVERY_M3") == 0)    BATT_RECOVERY_M3     = clamp(val, 1, 20);
         else if (strcmp(key, "BATT_RECOVERY_PHASE_CYCLES") == 0) BATT_RECOVERY_PHASE_CYCLES = clamp(val, 1, 50);
         else if (strcmp(key, "STATUS_TIMEOUT") == 0)       STATUS_TIMEOUT     = clamp(val, 5, 60);
-        else if (strcmp(key, "BATT_TEMP_PATH") == 0) {
-            char *v = val_str;
-            while (*v == ' ' || *v == '	') v++;
-            char *nl = v + strlen(v) - 1;
-            while (nl > v && (*nl == '\n' || *nl == '\r' || *nl == ' ' || *nl == '\t')) *nl-- = '\0';
-            if (*v) { strncpy(BATT_TEMP_PATH, v, sizeof(BATT_TEMP_PATH) - 1); BATT_TEMP_PATH[sizeof(BATT_TEMP_PATH) - 1] = '\0'; }
-        }
-        else if (strcmp(key, "CPU_TEMP_PATH_FMT") == 0) {
-            char *v = val_str;
-            while (*v == ' ' || *v == '	') v++;
-            char *nl = v + strlen(v) - 1;
-            while (nl > v && (*nl == '\n' || *nl == '\r' || *nl == ' ' || *nl == '\t')) *nl-- = '\0';
-            if (*v) { strncpy(CPU_TEMP_PATH_FMT, v, sizeof(CPU_TEMP_PATH_FMT) - 1); CPU_TEMP_PATH_FMT[sizeof(CPU_TEMP_PATH_FMT) - 1] = '\0'; }
-        }
-        else if (strcmp(key, "BATT_CURRENT_PATH") == 0) {
-            char *v = val_str;
-            while (*v == ' ' || *v == '	') v++;
-            char *nl = v + strlen(v) - 1;
-            while (nl > v && (*nl == '\n' || *nl == '\r' || *nl == ' ' || *nl == '\t')) *nl-- = '\0';
-            if (*v) { strncpy(BATT_CURRENT_PATH, v, sizeof(BATT_CURRENT_PATH) - 1); BATT_CURRENT_PATH[sizeof(BATT_CURRENT_PATH) - 1] = '\0'; }
-        }
+        else if (strcmp(key, "BATT_TEMP_PATH") == 0)
+            config_read_path(BATT_TEMP_PATH, sizeof(BATT_TEMP_PATH), val_str);
+        else if (strcmp(key, "CPU_TEMP_PATH_FMT") == 0)
+            config_read_path(CPU_TEMP_PATH_FMT, sizeof(CPU_TEMP_PATH_FMT), val_str);
+        else if (strcmp(key, "BATT_CURRENT_PATH") == 0)
+            config_read_path(BATT_CURRENT_PATH, sizeof(BATT_CURRENT_PATH), val_str);
         else if (strcmp(key, "BATT_TEMP_DIVISOR") == 0)   BATT_TEMP_DIVISOR  = clamp(val, 1, 10000);
         else if (strcmp(key, "CPU_TEMP_DIVISOR") == 0)    CPU_TEMP_DIVISOR   = clamp(val, 1, 10000);
         else if (strcmp(key, "BATT_CURRENT_DIVISOR") == 0) BATT_CURRENT_DIVISOR = clamp(val, 1, 10000);
@@ -564,19 +574,7 @@ static void load_config(const char *path) {
         else if (strcmp(key, "CURRENT_RECOVER_1") == 0)     CURRENT_RECOVER_1  = clamp(val, 100, 1500);
         else if (strcmp(key, "CURRENT_RECOVER_0") == 0)     CURRENT_RECOVER_0  = clamp(val, 100, 1500);
         else if (strcmp(key, "CURRENT_SMOOTH_ALPHA") == 0)  CURRENT_SMOOTH_ALPHA = clamp(val, 1, 100);
-        // --- 独立开关 ---
-        else if (strcmp(key, "EMERG_CURRENT_ENABLED") == 0)  EMERG_CURRENT_ENABLED = (val != 0) ? 1 : 0;
-        else if (strcmp(key, "EMERG_CPU_ENABLED") == 0)      EMERG_CPU_ENABLED     = (val != 0) ? 1 : 0;
-        else if (strcmp(key, "REV_COMP_ENABLED") == 0)       REV_COMP_ENABLED      = (val != 0) ? 1 : 0;
-        else if (strcmp(key, "TREND_EXEMPT_ENABLED") == 0)   TREND_EXEMPT_ENABLED  = (val != 0) ? 1 : 0;
-        // --- 电流-挡位映射模式 ---
-        else if (strcmp(key, "CURRENT_GEAR_MODE") == 0) {
-            int charge = CURRENT_GEAR_MODE_CHARGE, discharge = CURRENT_GEAR_MODE_DISCHARGE;
-            if (sscanf(val_str, "%d %d", &charge, &discharge) >= 1) {
-                CURRENT_GEAR_MODE_CHARGE    = clamp(charge, 0, 1);
-                CURRENT_GEAR_MODE_DISCHARGE = clamp(discharge, 0, 1);
-            }
-        }
+        // 独立开关 / 电流-挡位模式：已在预扫描中解析，此处跳过
         else if (strcmp(key, "CURRENT_GEAR_MULT_CHARGE") == 0 && (CURRENT_GEAR_MODE_CHARGE || CURRENT_GEAR_MODE_DISCHARGE))
             CURRENT_GEAR_MULT_CHARGE = clamp(val, 1, 50);
         else if (strcmp(key, "CURRENT_GEAR_MULT_DISCHARGE") == 0 && (CURRENT_GEAR_MODE_CHARGE || CURRENT_GEAR_MODE_DISCHARGE))
@@ -589,23 +587,12 @@ static void load_config(const char *path) {
         else if (strcmp(key, "RATE_LIMIT_COLD") == 0) RATE_LIMIT_COLD = clamp(val, 1, 194);
         else if (strcmp(key, "RATE_LIMIT_TEMP") == 0) RATE_LIMIT_TEMP = clamp(val, 1, 30);
         // --- PID 控制模式参数 ---
-        else if (strcmp(key, "CTRL_MODE") == 0) {
-            int new_mode = (val != 0) ? 1 : 0;
-            if (new_mode != ctrl_mode) {
-                ctrl_mode = new_mode;
-                last_sent_valid = 0;
-                if (new_mode == 1 && config_mtime != 0) {
-                    pid_align_from_gear();
-                }
-                write_log("配置 CTRL_MODE=%d", ctrl_mode);
-            }
-        }
-        else if (strcmp(key, "PID_KP") == 0)              pid_kp              = clamp(val, 1, 1000);
-        else if (strcmp(key, "PID_KI") == 0)              pid_ki              = clamp(val, 0, 1000);
-        else if (strcmp(key, "PID_KD") == 0)              pid_kd              = clamp(val, 0, 1000);
-        else if (strcmp(key, "PID_INTEGRAL_LIMIT") == 0)  pid_integral_limit  = clamp(val, 0, 1000);
-        else if (strcmp(key, "PID_BATT_ALPHA") == 0)      pid_batt_alpha      = clamp(val, 1, 100);
-        else if (strcmp(key, "PID_OUTPUT_ALPHA") == 0)    pid_output_alpha    = clamp(val, 1, 100);
+        else if (ctrl_mode == 1 && strcmp(key, "PID_KP") == 0)              pid_kp              = clamp(val, 1, 1000);
+        else if (ctrl_mode == 1 && strcmp(key, "PID_KI") == 0)              pid_ki              = clamp(val, 0, 1000);
+        else if (ctrl_mode == 1 && strcmp(key, "PID_KD") == 0)              pid_kd              = clamp(val, 0, 1000);
+        else if (ctrl_mode == 1 && strcmp(key, "PID_INTEGRAL_LIMIT") == 0)  pid_integral_limit  = clamp(val, 0, 1000);
+        else if (ctrl_mode == 1 && strcmp(key, "PID_BATT_ALPHA") == 0)      pid_batt_alpha      = clamp(val, 1, 100);
+        else if (ctrl_mode == 1 && strcmp(key, "PID_OUTPUT_ALPHA") == 0)    pid_output_alpha    = clamp(val, 1, 100);
         else if (strcmp(key, "PID_COLD_MIN") == 0)         pid_cold_min        = clamp(val, 0, 194);
         else if (strcmp(key, "PID_COLD_MAX") == 0)         pid_cold_max        = clamp(val, 0, 194);
         else if (strcmp(key, "PID_COLD_EXP") == 0)         pid_cold_exp        = clamp(val, 50, 500);
@@ -618,27 +605,13 @@ static void load_config(const char *path) {
         // 兼容旧名称
         else if (strcmp(key, "RPM_SMOOTH_STEP") == 0) RATE_LIMIT_RPM  = clamp(val, 50, 2000);
         else if (strcmp(key, "EMERG_EXIT_CAP_OFFSET") == 0) EMERG_EXIT_CAP_OFFSET = clamp(val, 0, 5);
-        else if (strcmp(key, "EMERG_MODE") == 0) {
-            int entry = EMERG_MODE_ENTRY, exit = EMERG_MODE_EXIT;
-            if (sscanf(val_str, "%d %d", &entry, &exit) >= 1) {
-                EMERG_MODE_ENTRY = clamp(entry, 0, 1);
-                EMERG_MODE_EXIT  = clamp(exit, 0, 1);
-            }
-        }
+        else if (strcmp(key, "EMERG_MODE") == 0) { /* 预扫描已处理 */ }
         else if (strcmp(key, "EMERG_STEP") == 0)              EMERG_STEP = clamp(val, 1, 12);
         else if (strcmp(key, "EMERG_EXIT_BATT_THRESHOLD") == 0) EMERG_EXIT_BATT_THRESHOLD = clamp(val, 5, 50);
         else if (strcmp(key, "GEAR_CONFIG_ENABLED") == 0) { /* 预检已处理 */ }
         else if (strcmp(key, "LOG_MAX_KB") == 0)           LOG_MAX_KB         = clamp(val, 0, 1000);
-        else if (strcmp(key, "LOG_FILE") == 0) {
-            char *v = val_str;
-            while (*v == ' ' || *v == '\t') v++;
-            char *nl = v + strlen(v) - 1;
-            while (nl > v && (*nl == '\n' || *nl == '\r' || *nl == ' ' || *nl == '\t')) *nl-- = '\0';
-            if (*v) {
-                strncpy(log_file_path, v, sizeof(log_file_path) - 1);
-                log_file_path[sizeof(log_file_path) - 1] = '\0';
-            }
-        }
+        else if (strcmp(key, "LOG_FILE") == 0)
+            config_read_path(log_file_path, sizeof(log_file_path), val_str);
         else if (strcmp(key, "DEBUG_MODE") == 0) {
             debug_mode = (val != 0) ? 1 : 0;
             write_log("配置 调试模式 %s", debug_mode ? "开启" : "关闭");
@@ -680,6 +653,15 @@ static void load_config(const char *path) {
         loaded++;
     }
     fclose(f);
+
+    // CTRL_MODE 变化过渡处理（预扫描已设新值，此处检测变化触发过渡）
+    if (ctrl_mode != old_ctrl_mode) {
+        last_sent_valid = 0;
+        if (ctrl_mode == 1 && config_mtime != 0) {
+            pid_align_from_gear();
+        }
+        write_log("配置 CTRL_MODE=%d", ctrl_mode);
+    }
 
     // ---- GEAR_N 后处理：排序重排为连续档位表，同步范围 ----
     if (gear_config_seen) {
@@ -1148,48 +1130,9 @@ static void build_params(int level,
 }
 
 /**
- * 下发控制参数（如有变化）
- * 通过 am broadcast 发送到 LSPosed 模块
- *
- * 注意：散热器每次调整都会暂时性能下降，所以参数无变化时必须跳过
- * 返回 1=已发送，0=跳过（无变化）
+ * 通过 am broadcast 下发控制参数到 LSPosed 模块（fork+exec，3s 超时）
  */
-static int apply_level(int level) {
-    int mode, target, windOC, coldOC, windLevel;
-
-    level = clamp(level, level_min, level_max);
-    build_params(level, &mode, &target, &windOC, &coldOC, &windLevel);
-
-    // ---- 速率限制实际值覆盖（由 rate_limited_execute 每周期维护）----
-    if (actual_rpm >= 0) {
-        if (mode == 0)
-            windLevel = actual_rpm;
-        else
-            windOC = actual_rpm;
-    }
-    if (actual_cold >= 0) {
-        coldOC = actual_cold;
-    }
-    if (actual_target_temp >= 0) {
-        target = actual_target_temp;
-    }
-
-    // ---- 去重检测 ----
-    if (last_sent_valid &&
-        mode      == last_mode &&
-        target    == last_target_temp &&
-        windOC    == last_windOC &&
-        coldOC    == last_coldOC &&
-        windLevel == last_windLevel)
-    {
-        debug_log(debug_exec, "apply_level 档位%d 参数无变化，跳过下发", gear_label(level));
-        return 0;   // 无变化，跳过
-    }
-
-    debug_log(debug_exec, "apply_level 下发 档位%d mode=%d target=%d windOC=%d coldOC=%d windLevel=%d",
-              gear_label(level), mode, target, windOC, coldOC, windLevel);
-
-    // ---- 直接执行 am（fork+execvp 避开 shell 进程） ----
+static void send_am_broadcast(int mode, int target, int windOC, int coldOC, int windLevel) {
     char m_s[12], t_s[12], woc_s[12], coc_s[12], wl_s[12];
     snprintf(m_s, sizeof(m_s), "%d", mode);
     snprintf(t_s, sizeof(t_s), "%d", target);
@@ -1199,12 +1142,10 @@ static int apply_level(int level) {
 
     pid_t pid = fork();
     if (pid < 0) {
-        // fork 失败（系统资源不足），跳过本周期
         write_log("fork 失败，跳过下发");
-        return 0;
+        return;
     }
     if (pid == 0) {
-        // 子进程：静默执行，stdout/stderr 重定向到 /dev/null
         int fd = open("/dev/null", O_WRONLY);
         if (fd >= 0) {
             dup2(fd, STDOUT_FILENO);
@@ -1221,21 +1162,99 @@ static int apply_level(int level) {
                "--ei", "modeCustom", "0",
                "--ei", "extra", "0",
                (char *)NULL);
-        _exit(127);  // 到达这里说明 exec 失败
+        _exit(127);
     }
-    if (pid > 0) {
-        // 父进程：限时等待子进程（3 秒超时，防止 am 卡死阻塞 daemon）
-        signal(SIGALRM, alarm_handler);
-        alarm(3);
-        int status;
-        if (waitpid(pid, &status, 0) == -1) {
-            write_log("am broadcast 超时");
-            kill(pid, SIGKILL);
-            waitpid(pid, NULL, 0);  // 回收僵尸
+    // 父进程：限时等待子进程（3 秒超时，防止 am 卡死阻塞 daemon）
+    signal(SIGALRM, alarm_handler);
+    alarm(3);
+    int status;
+    if (waitpid(pid, &status, 0) == -1) {
+        write_log("am broadcast 超时");
+        kill(pid, SIGKILL);
+        waitpid(pid, NULL, 0);
+    }
+    alarm(0);
+    signal(SIGALRM, SIG_DFL);
+}
+
+/**
+ * 下发控制参数（如有变化）
+ * 通过 am broadcast 发送到 LSPosed 模块
+ *
+ * 注意：散热器每次调整都会暂时性能下降，所以参数无变化时必须跳过
+ * 返回 1=已发送，0=跳过（无变化）
+ */
+static int apply_level(int level) {
+    int mode, target, windOC, coldOC, windLevel;
+
+    level = clamp(level, level_min, level_max);
+    build_params(level, &mode, &target, &windOC, &coldOC, &windLevel);
+
+    // ---- 风扇转速限速 ----
+    {
+        int desired = (mode == 0) ? windLevel : windOC;
+        if (actual_rpm < 0)
+            actual_rpm = desired;
+        else {
+            int diff = desired - actual_rpm;
+            if (abs(diff) > RATE_LIMIT_RPM)
+                actual_rpm += (diff > 0) ? RATE_LIMIT_RPM : -RATE_LIMIT_RPM;
+            else
+                actual_rpm = desired;
         }
-        alarm(0);
-        signal(SIGALRM, SIG_DFL);
     }
+
+    // ---- 制冷强度限速 ----
+    {
+        if (actual_cold < 0)
+            actual_cold = coldOC;
+        else {
+            int diff = coldOC - actual_cold;
+            if (abs(diff) > RATE_LIMIT_COLD)
+                actual_cold += (diff > 0) ? RATE_LIMIT_COLD : -RATE_LIMIT_COLD;
+            else
+                actual_cold = coldOC;
+        }
+    }
+
+    // ---- 目标温度限速（仅智能温控模式，固定功率传固定值无需限速）----
+    {
+        if (actual_target_temp < 0)
+            actual_target_temp = target;
+        else if (mode == 0) {
+            int diff = target - actual_target_temp;
+            if (abs(diff) > RATE_LIMIT_TEMP)
+                actual_target_temp += (diff > 0) ? RATE_LIMIT_TEMP : -RATE_LIMIT_TEMP;
+            else
+                actual_target_temp = target;
+        }
+        // mode==1 时 target 无意义，保持 actual_target_temp 不变
+    }
+
+    // ---- 用限速后的 actual_* 值替换查表值 ----
+    if (mode == 0)
+        windLevel = actual_rpm;
+    else
+        windOC = actual_rpm;
+    coldOC = actual_cold;
+    target = actual_target_temp;
+
+    // ---- 去重检测 ----
+    if (last_sent_valid &&
+        mode      == last_mode &&
+        target    == last_target_temp &&
+        windOC    == last_windOC &&
+        coldOC    == last_coldOC &&
+        windLevel == last_windLevel)
+    {
+        debug_log(debug_exec, "apply_level 档位%d 参数无变化，跳过下发", gear_label(level));
+        return 0;
+    }
+
+    debug_log(debug_exec, "apply_level 下发 档位%d mode=%d target=%d windOC=%d coldOC=%d windLevel=%d",
+              gear_label(level), mode, target, windOC, coldOC, windLevel);
+
+    send_am_broadcast(mode, target, windOC, coldOC, windLevel);
 
     // ---- 更新缓存 ----
     last_sent_valid    = 1;
@@ -1245,7 +1264,6 @@ static int apply_level(int level) {
     last_coldOC        = coldOC;
     last_windLevel     = windLevel;
 
-    // 每次下发成功后保存档位（用于下次启动时继承）
     save_gear(level);
 
     return 1;
@@ -1544,8 +1562,7 @@ static void emergency_intervention(void) {
             cpu_weighted = cpu_now;
             first_run = 0;
         } else {
-            cpu_weighted = (cpu_now * CPU_FILTER_ALPHA +
-                            cpu_weighted * (100 - CPU_FILTER_ALPHA)) / 100;
+            cpu_weighted = EMA(cpu_now, cpu_weighted, CPU_FILTER_ALPHA);
         }
     }
     int t = cpu_weighted;
@@ -1624,8 +1641,7 @@ static void emergency_intervention(void) {
             curr_smooth_val = cur_ua;
             curr_smooth_valid = 1;
         } else {
-            curr_smooth_val = (cur_ua * CURRENT_SMOOTH_ALPHA +
-                               curr_smooth_val * (100 - CURRENT_SMOOTH_ALPHA)) / 100;
+            curr_smooth_val = EMA(cur_ua, curr_smooth_val, CURRENT_SMOOTH_ALPHA);
         }
     }
 
@@ -1712,8 +1728,7 @@ static int current_gear_override(void) {
         curr_gear_smooth_val = abs_ua10;
         curr_gear_smooth_valid = 1;
     } else {
-        curr_gear_smooth_val = (abs_ua10 * CURRENT_GEAR_SMOOTH_ALPHA +
-                                curr_gear_smooth_val * (100 - CURRENT_GEAR_SMOOTH_ALPHA)) / 100;
+        curr_gear_smooth_val = EMA(abs_ua10, curr_gear_smooth_val, CURRENT_GEAR_SMOOTH_ALPHA);
     }
 
     // 4. 推荐挡位 = 平滑值(0.01A) × 倍率 ÷ 100
@@ -1878,68 +1893,49 @@ static void pid_map_output(float output, int *out_cold, int *out_rpm) {
 }
 
 /**
- * 直接下发 AT 广播（PID 模式使用）
+ * 直接下发 AT 广播（PID / 直接冷端模式使用）
  * 与 apply_level 共享 last_* 去重缓存
  */
 static void apply_level_direct(int mode, int target,
                                int rpm, int cold, int wl) {
+    // ---- 制冷强度限速 ----
+    if (actual_cold < 0)
+        actual_cold = cold;
+    else {
+        int diff = cold - actual_cold;
+        if (abs(diff) > RATE_LIMIT_COLD)
+            actual_cold += (diff > 0) ? RATE_LIMIT_COLD : -RATE_LIMIT_COLD;
+        else
+            actual_cold = cold;
+    }
+
+    // ---- 风扇转速限速 ----
+    if (actual_rpm < 0)
+        actual_rpm = rpm;
+    else {
+        int diff = rpm - actual_rpm;
+        if (abs(diff) > RATE_LIMIT_RPM)
+            actual_rpm += (diff > 0) ? RATE_LIMIT_RPM : -RATE_LIMIT_RPM;
+        else
+            actual_rpm = rpm;
+    }
+
+    // ---- 去重检测（用限速后的 actual_* 值）----
     if (last_sent_valid &&
-        mode == last_mode && rpm == last_windOC &&
-        cold == last_coldOC && wl == last_windLevel)
+        mode == last_mode && actual_rpm == last_windOC &&
+        actual_cold == last_coldOC && wl == last_windLevel)
         return;
 
-    char m_s[12], t_s[12], woc_s[12], coc_s[12], wl_s[12];
-    snprintf(m_s, sizeof(m_s), "%d", mode);
-    snprintf(t_s, sizeof(t_s), "%d", target);
-    snprintf(woc_s, sizeof(woc_s), "%d", rpm);
-    snprintf(coc_s, sizeof(coc_s), "%d", cold);
-    snprintf(wl_s, sizeof(wl_s), "%d", wl);
+    send_am_broadcast(mode, target, actual_rpm, actual_cold, wl);
 
-    pid_t pid = fork();
-    if (pid < 0) {
-        write_log("fork 失败，跳过下发");
-        return;
-    }
-    if (pid == 0) {
-        int fd = open("/dev/null", O_WRONLY);
-        if (fd >= 0) {
-            dup2(fd, STDOUT_FILENO);
-            dup2(fd, STDERR_FILENO);
-            close(fd);
-        }
-        execlp("am", "am", "broadcast", "--user", "0",
-               "-a", "com.flydigi.SET_TEMPERATURE",
-               "--ei", "mode", m_s,
-               "--ei", "temperature", t_s,
-               "--ei", "windOC", woc_s,
-               "--ei", "coldOC", coc_s,
-               "--ei", "windLevel", wl_s,
-               "--ei", "modeCustom", "0",
-               "--ei", "extra", "0",
-               (char *)NULL);
-        _exit(127);
-    }
-    if (pid > 0) {
-        signal(SIGALRM, alarm_handler);
-        alarm(3);
-        int status;
-        if (waitpid(pid, &status, 0) == -1) {
-            write_log("am broadcast 超时");
-            kill(pid, SIGKILL);
-            waitpid(pid, NULL, 0);
-        }
-        alarm(0);
-        signal(SIGALRM, SIG_DFL);
-    }
+    pid_log("apply mode=%d windOC=%d coldOC=%d", mode, actual_rpm, actual_cold);
 
-    pid_log("apply mode=%d windOC=%d coldOC=%d", mode, rpm, cold);
-
-    last_sent_valid    = 1;
-    last_mode          = mode;
-    last_target_temp   = target;
-    last_windOC        = rpm;
-    last_coldOC        = cold;
-    last_windLevel     = wl;
+    last_sent_valid  = 1;
+    last_mode        = mode;
+    last_target_temp = target;
+    last_windOC      = actual_rpm;
+    last_coldOC      = actual_cold;
+    last_windLevel   = wl;
 }
 
 /**
@@ -2026,88 +2022,19 @@ static void reconnect_align(void) {
 static int prev_emerg_level = 0;   // 记录上一轮紧急等级，退出紧急时用作档位上限
 
 /**
- * 速率限制执行（替代逐档变动 + RPM 平滑跟踪）
- * 每周期最多变动 RATE_LIMIT_RPM RPM、RATE_LIMIT_COLD 制冷强度、
- * RATE_LIMIT_TEMP °C 目标温度，未完成部分自然累积到下周期。
- * 目标档位变化时自动从当前实际值重新计算差值，
- * 实现"还没变动完时也可以继续增加/减少要变动的数值"。
+ * 按当前模式分发执行（限速统一下沉到 apply_level / apply_level_direct 内部）
+ * PID 模式：传 pid_target_* → apply_level_direct 内部限速
+ * Gear 模式：apply_level 内部限速
  */
 static void rate_limited_execute(void) {
-    // ═══ PID 模式：直接按 pid_target_* 限速下发 ═══
+    // ═══ PID 模式 ═══
     if (ctrl_mode == 1) {
-        if (actual_rpm < 0)  actual_rpm  = pid_rpm_min;
-        if (actual_cold < 0) actual_cold = pid_cold_min;
-
-        // RPM 限速（复用 RATE_LIMIT_RPM）
-        int diff_rpm = pid_target_rpm - actual_rpm;
-        if (abs(diff_rpm) > RATE_LIMIT_RPM)
-            actual_rpm += (diff_rpm > 0) ? RATE_LIMIT_RPM : -RATE_LIMIT_RPM;
-        else
-            actual_rpm = pid_target_rpm;
-
-        // COLD 限速（复用 RATE_LIMIT_COLD）
-        int diff_cold = pid_target_cold - actual_cold;
-        if (abs(diff_cold) > RATE_LIMIT_COLD)
-            actual_cold += (diff_cold > 0) ? RATE_LIMIT_COLD : -RATE_LIMIT_COLD;
-        else
-            actual_cold = pid_target_cold;
-
-        // 统一下发：固定功率模式 mode=1
-        apply_level_direct(1, 5, actual_rpm, actual_cold, 0);
+        // 限速已内建到 apply_level_direct，此处只管传目标值
+        apply_level_direct(1, 5, pid_target_rpm, pid_target_cold, 0);
         return;
     }
 
-    // ═══ 以下为现有 gear 模式逻辑 ═══
-    int mode, target, windOC, coldOC, windLevel;
-    build_params(target_level, &mode, &target, &windOC, &coldOC, &windLevel);
-
-debug_log(debug_exec, "rate_limit target_level=%d mode=%d target=%d windOC=%d coldOC=%d",
-
-          target_level, mode, target, windOC, coldOC);
-
-    // ---- 初始化实际值（首次运行或档位表变化后重置）----
-    if (actual_rpm < 0) {
-        actual_rpm = (mode == 0) ? windLevel : windOC;
-    }
-    if (actual_cold < 0) {
-        actual_cold = coldOC;
-    }
-    if (actual_target_temp < 0) {
-        actual_target_temp = target;
-    }
-
-    // ---- 速率限制：风扇 RPM（两种模式通用）----
-    {
-        int target_rpm = (mode == 0) ? windLevel : windOC;
-        int diff = target_rpm - actual_rpm;
-        if (abs(diff) > RATE_LIMIT_RPM) {
-            actual_rpm += (diff > 0) ? RATE_LIMIT_RPM : -RATE_LIMIT_RPM;
-        } else {
-            actual_rpm = target_rpm;  // 已收敛到目标
-        }
-    }
-
-    // ---- 速率限制：制冷片强度（固定功率模式）----
-    {
-        int diff = coldOC - actual_cold;
-        if (abs(diff) > RATE_LIMIT_COLD) {
-            actual_cold += (diff > 0) ? RATE_LIMIT_COLD : -RATE_LIMIT_COLD;
-        } else {
-            actual_cold = coldOC;
-        }
-    }
-
-    // ---- 速率限制：目标温度（智能温控模式）----
-    {
-        int diff = target - actual_target_temp;
-        if (abs(diff) > RATE_LIMIT_TEMP) {
-            actual_target_temp += (diff > 0) ? RATE_LIMIT_TEMP : -RATE_LIMIT_TEMP;
-        } else {
-            actual_target_temp = target;
-        }
-    }
-
-    // ---- 统一下发（apply_level 内部用 actual_rpm/actual_cold/actual_target_temp 覆盖）----
+    // ═══ Gear 模式：限速已内建到 apply_level ═══
     apply_level(target_level);
 }
 
@@ -2139,8 +2066,7 @@ static void main_loop(void) {
         if (pid_batt_filtered < 0) {
             pid_batt_filtered = batt_raw;
         } else {
-            pid_batt_filtered = (batt_raw * pid_batt_alpha +
-                                 pid_batt_filtered * (100 - pid_batt_alpha)) / 100;
+            pid_batt_filtered = EMA(batt_raw, pid_batt_filtered, pid_batt_alpha);
         }
 
         // 温度变化时才执行 PID（首次 pid_last_batt<0 也会进入）

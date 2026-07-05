@@ -2,6 +2,35 @@
 
 > 格式：[Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)
 
+## v2.3（2026-07-05）
+
+### Added
+- **PID 连续无级调节模式**（`CTRL_MODE=1`）：P+I(积分分离±1°C)+D 控制器，归一化输出 0~1，输入/输出双 EMA 滤波
+- **制冷→RPM 映射引擎**：冷端指数映射（`PID_COLD_EXP`）+ 热端线性映射 + 自加权合并，PID/常规模式共享
+- **限速统一下沉**：RPM/制冷/目标温度限速从 `rate_limited_execute` 内建到 `apply_level`/`apply_level_direct` 内部，计算层只管传目标值
+- **`CTRL_MODE` 加入配置预扫描**，PID 关闭时 PID 控制参数（KP/KI/KD 等）跳过加载
+- **`send_am_broadcast()`**：提取公共 fork+exec 代码，`apply_level`/`apply_level_direct` 共享
+
+### Changed
+- 编译命令添加 `-ffunction-sections -fdata-sections -Wl,--gc-sections -Wl,--strip-all`，二进制体积减少约 30%
+- `read_status_ble()` 扩展为 10 字段解析（含 RUN_MODE/HOT_TEMP/COLD_TEMP/RPM_REAL/COLD_REAL 等散热器全参数回传）
+- `write_log` 日志滚动优化：超标后仅删除最早行而非全部重写
+- 冷却期逻辑：退出紧急时立即复位趋势豁免/反补累积，防止脏数据
+
+### Fixed
+- `compute_direct_cold_rpm` 除零 bug（`level_max==level_min` 时分母为 0）
+- 配置热重载 CTRL_MODE 切换未正确触发 PID 对齐
+
+### lsp模块
+- `writeStatusFile()` 扩展为完整的 10 行 status 协议（含散热器全参数回传）
+- 新增 `xposedscope` 元数据，管理器显示推荐作用域
+- 捕获 `onDeviceInfoUpdate` 参数对象供回传使用
+
+### 注意
+- DIRECT_COLD_MODE 已在 v2.3 开发过程中删除，未进入发布版本
+
+---
+
 ## v2.2（2026-07-03）
 
 ### Added

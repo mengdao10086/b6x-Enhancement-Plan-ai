@@ -34,7 +34,7 @@ MUST 先在 `参考资料/` 搜索关键词，再考虑加诊断钩子。这里�
 ### 1.5 编译须知
 
 - C 守护程序 MUST 使用 GitHub Actions（NDK r27c）编译，**不得建议 Termux 编译**
-- 编译命令：`aarch64-linux-android21-clang -static -O2`
+- 编译命令：`aarch64-linux-android21-clang -static -O2 -ffunction-sections -fdata-sections -Wl,--gc-sections -Wl,--strip-all`
 - 每轮新对话和压缩上下文后的**首次 push** → MUST 跟踪 CI 检查是否报错
 
 ### 1.6 安全边界
