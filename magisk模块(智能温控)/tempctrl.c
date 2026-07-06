@@ -220,7 +220,7 @@ static int CURRENT_SMOOTH_ALPHA = 25;   // 默认 α=0.25
 
 // --- 速率限制（每 5 秒周期最大变化量，可配置）---
 // 风扇转速限制（两种模式通用）
-static int RATE_LIMIT_RPM = 250;
+static int RATE_LIMIT_RPM_UP = 250;
 static int RATE_LIMIT_RPM_DOWN = 500;   // 降转速最大变化量（默认500/每5秒=100RPM/s）
 // 制冷片强度限制（固定功率模式时生效）
 static int RATE_LIMIT_COLD = 20;
@@ -456,23 +456,17 @@ static void load_config(const char *path) {
     }
     int old_ctrl_mode = ctrl_mode;  // 保存旧值，用于 PID 过渡检测
 
-    // ---- 第一遍扫描：收集开关状态 ----
-    // CONFIG_ENABLED / GEAR_CONFIG_ENABLED / GEAR_N 存在性一次性检测
+    // ── 第一遍：总开关检测（找到后立即退出，避免全文件扫描）──
     char line[256];
     int enabled = 1;
-    int gear_config_enabled = 0;
-    int gear_any_seen = 0;
     while (fgets(line, sizeof(line), f)) {
         char *key;
         char *val_str = config_parse_line(line, &key);
         if (!val_str) continue;
-
-        if (strcmp(key, "CONFIG_ENABLED") == 0)
+        if (strcmp(key, "CONFIG_ENABLED") == 0) {
             enabled = atoi(val_str) != 0;
-        else if (strcmp(key, "GEAR_CONFIG_ENABLED") == 0)
-            gear_config_enabled = atoi(val_str) != 0;
-        else if (strncmp(key, "GEAR_", 5) == 0)
-            gear_any_seen = 1;
+            break;
+        }
     }
 
     if (!enabled) {
@@ -481,54 +475,10 @@ static void load_config(const char *path) {
         return;
     }
 
-    // ---- 开关预扫描：先解析所有开关/模式类参数，后续跳过关项细节 ----
-    rewind(f);
-    while (fgets(line, sizeof(line), f)) {
-        char *key;
-        char *val_str = config_parse_line(line, &key);
-        if (!val_str) continue;
-        int val = atoi(val_str);
-
-        if      (strcmp(key, "EMERG_CURRENT_ENABLED") == 0)   EMERG_CURRENT_ENABLED = (val != 0);
-        else if (strcmp(key, "EMERG_CPU_ENABLED") == 0)       EMERG_CPU_ENABLED     = (val != 0);
-        else if (strcmp(key, "REV_COMP_ENABLED") == 0)        REV_COMP_ENABLED      = (val != 0);
-        else if (strcmp(key, "TREND_EXEMPT_ENABLED") == 0)    TREND_EXEMPT_ENABLED  = (val != 0);
-        else if (strcmp(key, "CURRENT_GEAR_MODE") == 0) {
-            int charge = CURRENT_GEAR_MODE_CHARGE, discharge = CURRENT_GEAR_MODE_DISCHARGE;
-            if (sscanf(val_str, "%d %d", &charge, &discharge) >= 1) {
-                CURRENT_GEAR_MODE_CHARGE    = clamp(charge, 0, 1);
-                CURRENT_GEAR_MODE_DISCHARGE = clamp(discharge, 0, 1);
-            }
-        }
-        else if (strcmp(key, "EMERG_MODE") == 0) {
-            int entry = EMERG_MODE_ENTRY, exit = EMERG_MODE_EXIT;
-            if (sscanf(val_str, "%d %d", &entry, &exit) >= 1) {
-                EMERG_MODE_ENTRY = clamp(entry, 0, 1);
-                EMERG_MODE_EXIT  = clamp(exit, 0, 1);
-            }
-        }
-        else if (strcmp(key, "DEBUG_MODE") == 0)              debug_mode           = (val != 0);
-        else if (strcmp(key, "GEAR_CONFIG_ENABLED") == 0)     gear_config_enabled  = (val != 0);
-        else if (strcmp(key, "CTRL_MODE") == 0)                ctrl_mode            = (val != 0);
-    }
-
-    // GEAR_CONFIG_ENABLED 关闭时忽略 GEAR_N，即使文件中有
-    int gear_config_seen = gear_config_enabled && gear_any_seen;
-
-    // 有 GEAR_N → 清空档位表，后续只从配置读取
-    if (gear_config_seen) {
-        gear_count = 0;
-        level_max = 0;
-        memset(gear_table, 0, sizeof(gear_table));
-        actual_rpm = -1;
-        actual_cold = -1;
-        actual_target_temp = -1;  // 档位表变化，重置速率跟踪
-        write_log("配置 档位表将由 GEAR_N 定义");
-    }
-
-    // ---- 第二遍扫描：分组解析 ----
+    // ── 第二遍：全量单次扫描 ──
     rewind(f);
     int loaded = 0;
+    int gear_config_enabled = 0;
     GearConfigTemp config_gears[GEAR_TABLE_MAX];
     int config_gear_count = 0;
     while (fgets(line, sizeof(line), f)) {
@@ -595,7 +545,7 @@ static void load_config(const char *path) {
         else if (strcmp(key, "REV_COMP_T3") == 0)          REV_COMP_T3        = clamp(val, 1, 50);
         else if (strcmp(key, "REV_COMP_COOLDOWN") == 0)   REV_COMP_COOLDOWN  = clamp(val, 0, 10);
         // ── 速率限制（无条件，作用于所有模式）──
-        else if (strcmp(key, "RATE_LIMIT_RPM_up") == 0)  RATE_LIMIT_RPM  = clamp(val, 50, 2000);
+        else if (strcmp(key, "RATE_LIMIT_RPM_UP") == 0)  RATE_LIMIT_RPM_UP  = clamp(val, 50, 2000);
         else if (strcmp(key, "RATE_LIMIT_RPM_DOWN") == 0) RATE_LIMIT_RPM_DOWN = clamp(val, 50, 2000);
         else if (strcmp(key, "RATE_LIMIT_COLD") == 0) RATE_LIMIT_COLD = clamp(val, 1, 194);
         else if (strcmp(key, "RATE_LIMIT_TEMP") == 0) RATE_LIMIT_TEMP = clamp(val, 1, 30);
@@ -612,22 +562,34 @@ static void load_config(const char *path) {
         else if (strcmp(key, "LOG_MAX_KB") == 0)           LOG_MAX_KB         = clamp(val, 0, 1000);
         else if (strcmp(key, "LOG_FILE") == 0)
             config_read_path(log_file_path, sizeof(log_file_path), val_str);
-        // ── DEBUG_MODE 特殊处理（保留日志输出）──
+        // ── 开关/模式类（写在组 0 末尾，解析后供后续分组守卫使用）──
+        else if (strcmp(key, "CTRL_MODE") == 0)                ctrl_mode            = (val != 0);
+        else if (strcmp(key, "EMERG_CURRENT_ENABLED") == 0)   EMERG_CURRENT_ENABLED = (val != 0);
+        else if (strcmp(key, "EMERG_CPU_ENABLED") == 0)       EMERG_CPU_ENABLED     = (val != 0);
+        else if (strcmp(key, "REV_COMP_ENABLED") == 0)        REV_COMP_ENABLED      = (val != 0);
+        else if (strcmp(key, "TREND_EXEMPT_ENABLED") == 0)    TREND_EXEMPT_ENABLED  = (val != 0);
+        else if (strcmp(key, "CURRENT_GEAR_MODE") == 0) {
+            int charge = CURRENT_GEAR_MODE_CHARGE, discharge = CURRENT_GEAR_MODE_DISCHARGE;
+            if (sscanf(val_str, "%d %d", &charge, &discharge) >= 1) {
+                CURRENT_GEAR_MODE_CHARGE    = clamp(charge, 0, 1);
+                CURRENT_GEAR_MODE_DISCHARGE = clamp(discharge, 0, 1);
+            }
+        }
+        else if (strcmp(key, "EMERG_MODE") == 0) {
+            int entry = EMERG_MODE_ENTRY, exit = EMERG_MODE_EXIT;
+            if (sscanf(val_str, "%d %d", &entry, &exit) >= 1) {
+                EMERG_MODE_ENTRY = clamp(entry, 0, 1);
+                EMERG_MODE_EXIT  = clamp(exit, 0, 1);
+            }
+        }
         else if (strcmp(key, "DEBUG_MODE") == 0) {
             debug_mode = (val != 0);
             write_log("配置 调试模式 %s", debug_mode ? "开启" : "关闭");
         }
-        // ── 开关类（已预扫描，第二遍吞掉避免 continue 不计数）──
-        else if (strcmp(key, "CTRL_MODE") == 0) { /* 预扫描已处理 */ }
-        else if (strcmp(key, "GEAR_CONFIG_ENABLED") == 0) { /* 预扫描已处理 */ }
-        else if (strcmp(key, "EMERG_CPU_ENABLED") == 0) { /* 预扫描已处理 */ }
-        else if (strcmp(key, "EMERG_CURRENT_ENABLED") == 0) { /* 预扫描已处理 */ }
-        else if (strcmp(key, "REV_COMP_ENABLED") == 0) { /* 预扫描已处理 */ }
-        else if (strcmp(key, "TREND_EXEMPT_ENABLED") == 0) { /* 预扫描已处理 */ }
-        else if (strcmp(key, "CURRENT_GEAR_MODE") == 0) { /* 预扫描已处理 */ }
-        else if (strcmp(key, "EMERG_MODE") == 0) { /* 预扫描已处理 */ }
+        else if (strcmp(key, "GEAR_CONFIG_ENABLED") == 0)     gear_config_enabled  = (val != 0);
         // ── 兼容旧名称 ──
-        else if (strcmp(key, "RPM_SMOOTH_STEP") == 0) RATE_LIMIT_RPM  = clamp(val, 50, 2000);
+        else if (strcmp(key, "RPM_SMOOTH_STEP") == 0) RATE_LIMIT_RPM_UP  = clamp(val, 50, 2000);
+        else if (strcmp(key, "RATE_LIMIT_RPM_up") == 0) RATE_LIMIT_RPM_UP = clamp(val, 50, 2000);
 
         // ═══════════════════════════════════════════════════════════
         // [组 1] 电流-挡位子项：仅 CURRENT_GEAR_MODE 启用时生效
@@ -681,7 +643,7 @@ static void load_config(const char *path) {
         // [组 4] 挡位表：仅 GEAR_CONFIG_ENABLED=1 时生效
         // ═══════════════════════════════════════════════════════════
         else if (strncmp(key, "GEAR_", 5) == 0) {
-            if (!gear_config_seen) continue;
+            if (!gear_config_enabled) continue;
             int n = atoi(key + 5);
             if (n < 1 || n > GEAR_TABLE_MAX) continue;
             int m, t, f, c;
@@ -708,7 +670,7 @@ static void load_config(const char *path) {
     }
     fclose(f);
 
-    // CTRL_MODE 变化过渡处理（预扫描已设新值，此处检测变化触发过渡）
+    // CTRL_MODE 变化过渡处理
     if (ctrl_mode != old_ctrl_mode) {
         last_sent_valid = 0;
         if (ctrl_mode == 1 && config_mtime != 0) {
@@ -717,12 +679,18 @@ static void load_config(const char *path) {
         write_log("配置 CTRL_MODE=%d", ctrl_mode);
     }
 
-    // ---- GEAR_N 后处理：排序重排为连续档位表，同步范围 ----
-    if (gear_config_seen) {
+    // ── GEAR_N 后处理：排序重排为连续档位表，同步范围 ──
+    if (gear_config_enabled) {
         if (config_gear_count > 0) {
-            // 按配置编号排序，填入连续档位表
-            qsort(config_gears, config_gear_count, sizeof(GearConfigTemp), cmp_gear_config_n);
+            // 重置档位表，填入配置档位
             gear_count = 0;
+            level_max = 0;
+            memset(gear_table, 0, sizeof(gear_table));
+            actual_rpm = -1;
+            actual_cold = -1;
+            actual_target_temp = -1;
+
+            qsort(config_gears, config_gear_count, sizeof(GearConfigTemp), cmp_gear_config_n);
             for (int i = 0; i < config_gear_count; i++) {
                 gear_table[i].config_n = config_gears[i].config_n;
                 gear_table[i].mode     = config_gears[i].mode;
@@ -1260,7 +1228,7 @@ static int apply_level(int level) {
 
     // 风扇转速限速（升降独立速率）
     rate_limit(&actual_rpm, (mode == 0) ? windLevel : windOC,
-               RATE_LIMIT_RPM, RATE_LIMIT_RPM_DOWN);
+               RATE_LIMIT_RPM_UP, RATE_LIMIT_RPM_DOWN);
 
     // 制冷强度限速
     rate_limit(&actual_cold, coldOC, RATE_LIMIT_COLD, RATE_LIMIT_COLD);
@@ -1907,7 +1875,7 @@ static void apply_level_direct(int mode, int target,
     rate_limit(&actual_cold, cold, RATE_LIMIT_COLD, RATE_LIMIT_COLD);
 
     // 风扇转速限速（升降独立速率）
-    rate_limit(&actual_rpm, rpm, RATE_LIMIT_RPM, RATE_LIMIT_RPM_DOWN);
+    rate_limit(&actual_rpm, rpm, RATE_LIMIT_RPM_UP, RATE_LIMIT_RPM_DOWN);
 
     // ---- 去重检测（用限速后的 actual_* 值）----
     if (last_sent_valid &&
@@ -2427,7 +2395,7 @@ int main(int argc, char *argv[]) {
         main_loop();
 
         // ★ 速率限制执行（替代逐档变动 + RPM 平滑跟踪）
-        // 每周期最多变动 RATE_LIMIT_RPM(RPM升)/RATE_LIMIT_RPM_DOWN(RPM降)/RATE_LIMIT_COLD/
+        // 每周期最多变动 RATE_LIMIT_RPM_UP(RPM升)/RATE_LIMIT_RPM_DOWN(RPM降)/RATE_LIMIT_COLD/
         // RATE_LIMIT_TEMP °C 目标温度，未完成部分自然累积到下周期
         // 目标档位变化时自动从当前实际值重新计算差值
         rate_limited_execute();
