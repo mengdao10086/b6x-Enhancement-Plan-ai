@@ -6,52 +6,6 @@
 
 ---
 
-## 沟通偏好
-- 优先使用中文回复，除非有直接要求使用其他语言。专业术语和引用内容可以例外，但是要附加简短中文解释。
-
-## 安全边界
-- **在没有用户明确命令时：**
-  不要删除或修改：系统关键环境变量（如 `SystemRoot`、`WINDIR`）、敏感目录（`~/.ssh/`、`~/.gnupg/`）、**生产环境相关**的 `.env` 文件（如 `.env.production`）。
-  对于开发用途的 `.env`、`.env.local`，或是用户级环境变量，修改前必须先说明用途，用户确认后再执行。
-  项目内的配置文件（如 .eslintrc、tsconfig.json）如果有必要可以修改，但删除前需确认。
-  不要自动执行 git push、部署、发布和破坏性迁移。
-
-## 工具选择指引
-
-### 决策表
-
-| 场景 | 工具 | 命令 |
-|------|------|------|
-| 查函数签名 / 参数 / 接口定义 | **Token Savior** | `find_*` |
-| 查设计决策 / 上下文压缩 | **Token Savior** | `get_*` |
-| — | — | — |
-| 按概念搜代码在哪 | **codebase-memory-mcp** | `search_graph` |
-| 语义搜索（搜"发送"→publish） | **codebase-memory-mcp** | `search_graph` + semantic_query |
-| 架构全景 / 模块划分 | **codebase-memory-mcp** | `get_architecture` |
-| 函数调用链（谁调它 / 它调谁） | **codebase-memory-mcp** | `trace_path` |
-| 死代码检测（未使用函数） | **codebase-memory-mcp** | `search_graph(max_degree=0)` |
-| 跨服务 HTTP/gRPC 调用链 | **codebase-memory-mcp** | `query_graph(HTTP_CALLS)` |
-| 记录 / 查看架构决策 | **codebase-memory-mcp** | `manage_adr` |
-| 低 token 预算时的结构查询 | **codebase-memory-mcp** | 任何场景优先使用 |
-| — | — | — |
-| 评估改函数的风险 | **GitNexus** | `impact` |
-| 安全审计 / 污点追踪 | **GitNexus** | `explain` |
-| 按业务流程理解执行路径 | **GitNexus** | `processes` |
-| 重命名符号 | **GitNexus** | `rename` |
-| — | — | — |
-| 跨会话回忆 / 继续之前的工作 | **claude-mem** | `/mem-search` |
-
-### 独有能力速查（常规路径不满足时查这里）
-- **Token Savior**: 上下文压缩 / 设计决策检索
-- **codebase-memory-mcp**: 死代码检测 / ADR 管理 / 158 语言 / 语义搜索 / HTTP_CALLS 跨服务追踪 / <1ms 查询
-- **GitNexus**: 风险评级 / taint 安全审计 / 调用图感知重命名 / 业务流程分组 / PDG
-- **claude-mem**: 跨会话记忆
-
-### 兜底
-决策表未覆盖的场景 → 按 codebase-memory-mcp > GitNexus > Token Savior 次序尝试
-
----
-
 ## 1. Git 子模块
 
 - **本目录是 git 子模块**。所有 `git add/commit/push/pull` 必须在本目录内执行。
@@ -130,3 +84,48 @@ MUST 先在 `参考资料/` 搜索关键词，再考虑加诊断钩子。这里�
 - 版本变更统一放到 `CHANGELOG.md`。其他 md 提到版本变化时最多一句话，加 `详见 CHANGELOG.md`
 - 发现重复内容 → 删掉多余的那份，换成 `详见 [目标文件](path)`
 - 跨文件链接必须用相对路径，从引用文件所在位置出发计算
+
+<!-- gitnexus:start -->
+# GitNexus — Code Intelligence
+
+This project is indexed by GitNexus as **b6x-Enhancement-Plan-ai** (68911 symbols, 195863 relationships, 300 execution flows). Use the GitNexus MCP tools to understand code, assess impact, and navigate safely.
+
+> Index stale? Run `node .gitnexus/run.cjs analyze` from the project root — it auto-selects an available runner. No `.gitnexus/run.cjs` yet? `npx gitnexus analyze` (npm 11 crash → `npm i -g gitnexus`; #1939).
+
+## Always Do
+
+- **MUST run impact analysis before editing any symbol.** Before modifying a function, class, or method, run `impact({target: "symbolName", direction: "upstream"})` and report the blast radius (direct callers, affected processes, risk level) to the user.
+- **MUST run `detect_changes()` before committing** to verify your changes only affect expected symbols and execution flows. For regression review, compare against the default branch: `detect_changes({scope: "compare", base_ref: "main"})`.
+- **MUST warn the user** if impact analysis returns HIGH or CRITICAL risk before proceeding with edits.
+- When exploring unfamiliar code, use `query({search_query: "concept"})` to find execution flows instead of grepping. It returns process-grouped results ranked by relevance.
+- When you need full context on a specific symbol — callers, callees, which execution flows it participates in — use `context({name: "symbolName"})`.
+- For security review, `explain({target: "fileOrSymbol"})` lists taint findings (source→sink flows; needs `analyze --pdg`).
+
+## Never Do
+
+- NEVER edit a function, class, or method without first running `impact` on it.
+- NEVER ignore HIGH or CRITICAL risk warnings from impact analysis.
+- NEVER rename symbols with find-and-replace — use `rename` which understands the call graph.
+- NEVER commit changes without running `detect_changes()` to check affected scope.
+
+## Resources
+
+| Resource | Use for |
+|----------|---------|
+| `gitnexus://repo/b6x-Enhancement-Plan-ai/context` | Codebase overview, check index freshness |
+| `gitnexus://repo/b6x-Enhancement-Plan-ai/clusters` | All functional areas |
+| `gitnexus://repo/b6x-Enhancement-Plan-ai/processes` | All execution flows |
+| `gitnexus://repo/b6x-Enhancement-Plan-ai/process/{name}` | Step-by-step execution trace |
+
+## CLI
+
+| Task | Read this skill file |
+|------|---------------------|
+| Understand architecture / "How does X work?" | `.claude/skills/gitnexus/gitnexus-exploring/SKILL.md` |
+| Blast radius / "What breaks if I change X?" | `.claude/skills/gitnexus/gitnexus-impact-analysis/SKILL.md` |
+| Trace bugs / "Why is X failing?" | `.claude/skills/gitnexus/gitnexus-debugging/SKILL.md` |
+| Rename / extract / split / refactor | `.claude/skills/gitnexus/gitnexus-refactoring/SKILL.md` |
+| Tools, resources, schema reference | `.claude/skills/gitnexus/gitnexus-guide/SKILL.md` |
+| Index, status, clean, wiki CLI commands | `.claude/skills/gitnexus/gitnexus-cli/SKILL.md` |
+
+<!-- gitnexus:end -->

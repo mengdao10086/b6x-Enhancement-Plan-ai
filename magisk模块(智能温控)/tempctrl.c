@@ -221,7 +221,7 @@ static int CURRENT_SMOOTH_ALPHA = 25;   // 默认 α=0.25
 // --- 速率限制（每 5 秒周期最大变化量，可配置）---
 // 风扇转速限制（两种模式通用）
 static int RATE_LIMIT_RPM_UP = 250;
-static int RATE_LIMIT_RPM_DOWN = 500;   // 降转速最大变化量（默认500/每5秒=100RPM/s）
+static int RATE_LIMIT_RPM_DOWN = 250;
 // 制冷片强度限制（固定功率模式时生效）
 static int RATE_LIMIT_COLD = 20;
 // 目标温度限制（智能温控模式时生效）
@@ -338,12 +338,12 @@ static int curr_smooth_valid = 0;     // 平滑数据是否有效
 static int ctrl_mode = 0;                 // CTRL_MODE: 0=gear, 1=PID
 
 // PID 参数
-static int pid_kp = 400;                  // PID_KP（÷1000，1°C→P=40%）
+static int pid_kp = 300;                  // PID_KP（÷1000，1°C→P=40%）
 static int pid_ki = 50;                   // PID_KI（÷1000，±1°C内累积）
 static int pid_kd = 150;                  // PID_KD
 static int pid_integral_limit = 500;      // PID_INTEGRAL_LIMIT（÷1000）
-static int pid_batt_alpha = 30;           // PID_BATT_ALPHA（%，新值权重）
-static int pid_output_alpha = 50;         // PID_OUTPUT_ALPHA（%，新值权重）
+static int pid_batt_alpha = 33;           // PID_BATT_ALPHA（%，新值权重）
+static int pid_output_alpha = 33;         // PID_OUTPUT_ALPHA（%，新值权重）
 static int pid_cold_min = 1;              // PID_COLD_MIN
 static int pid_cold_max = 190;            // PID_COLD_MAX
 static int pid_cold_exp = 150;            // PID_COLD_EXP（÷100）
@@ -363,7 +363,7 @@ static float pid_output_smoothed = 0.0f;  // 输出平滑值
 // PID 输入补偿（加到电池温度，反映 CPU/电流额外发热）
 static int pid_cpu_comp_enabled = 1;       // PID_CPU_COMP_ENABLED: CPU 补偿开关
 static int pid_cpu_comp_divisor = 30;      // PID_CPU_COMP_DIVISOR: (cpu-batt 0.1°C)÷divisor→0.1°C
-static int pid_curr_comp_enabled = 1;      // PID_CURR_COMP_ENABLED: 电流补偿开关
+static int pid_curr_comp_enabled = 0;      // PID_CURR_COMP_ENABLED: 电流补偿开关（默认关）
 static int pid_curr_comp_threshold = 200;  // PID_CURR_COMP_THRESHOLD: 0.01A 阈值(200=2A)
 static int pid_curr_comp_divisor = 2;      // PID_CURR_COMP_DIVISOR: |A|÷divisor→°C
 static float pid_cpu_comp_smooth = 0.0f;   // CPU 补偿 EMA 平滑值（°C）
@@ -1916,7 +1916,7 @@ static void pid_align_from_gear(void) {
     pid_curr_comp_smooth = 0.0f;
     pid_last_comp_10     = 0;
     last_sent_valid     = 0;
-    write_log("PID 从 gear 对齐 ratio=%.2f rpm=%d cold=%d", ratio, pid_target_rpm, pid_target_cold);
+    write_log("PID 从 gear 对齐 ratio=%.2f cold=%d", ratio, pid_target_cold);
 }
 
 // ======================== 主循环 ========================
@@ -2018,11 +2018,8 @@ static void main_loop(void) {
         }
     }
 
-    // ═══ PID 模式：跳过档位逻辑，直接 PID 计算 ═══
+    // ═══ PID 模式：跳过档位/紧急逻辑，直接 PID 计算 ═══
     if (ctrl_mode == 1) {
-        prev_emerg_level = emergency_level;
-        emergency_intervention();
-
         // 读电池温度
         int batt_raw = read_battery_temp();
         if (batt_raw < 0) return;
@@ -2032,6 +2029,17 @@ static void main_loop(void) {
             pid_batt_filtered = batt_raw;
         } else {
             pid_batt_filtered = EMA(batt_raw, pid_batt_filtered, pid_batt_alpha);
+        }
+
+        // ═══ CPU 温度读入与滤波（用于补偿，无紧急逻辑） ═══
+        int cpu_now = read_cpu_temp_max();
+        if (cpu_now >= 0) {
+            if (first_run) {
+                cpu_weighted = cpu_now;
+                first_run = 0;
+            } else {
+                cpu_weighted = EMA(cpu_now, cpu_weighted, CPU_FILTER_ALPHA);
+            }
         }
 
         // ═══ 补偿值计算（每周期更新，不受电池温度变化限制） ═══
@@ -2083,19 +2091,11 @@ static void main_loop(void) {
                                        (100 - pid_output_alpha) * pid_output_smoothed) / 100.0f;
             }
 
-            // 紧急覆盖：将 gear 模式 forced_min_level 映射到 PID 输出空间
-            if (forced_min_level > 0 && emergency_level > 0) {
-                float min_out = (float)(forced_min_level - level_min) /
-                                (level_max - level_min);
-                if (pid_output_smoothed < min_out)
-                    pid_output_smoothed = min_out;
-            }
-
             // 映射到物理值
             pid_map_output(pid_output_smoothed,
                            &pid_target_cold, &pid_target_rpm);
 
-            pid_log("epoch=%ld Tbatt=%d+comp%+.1f(cpu%+.1f+curr%+.1f)=Tinp%d Ttgt=%d Thot=%d dt=%.0fs e=%.2f raw=%.2f sm=%.2f cold=%d rpm=%d",
+            write_log("[PID] epoch=%ld Tbatt=%d+comp%+.1f(cpu%+.1f+curr%+.1f)=Tinp%d Ttgt=%d Thot=%d dt=%.0fs e=%.2f raw=%.2f sm=%.2f cold=%d rpm=%d",
                      now, pid_batt_filtered, total_comp, cpu_comp, curr_comp,
                      compensated_10, BATT_BASELINE, cooler_hot_temp,
                      dt, (compensated_10 - BATT_BASELINE) / 10.0f,
@@ -2105,6 +2105,7 @@ static void main_loop(void) {
             pid_last_comp_10 = total_comp_10;
             pid_last_change_time = now;
         }
+
         return;  // PID 模式不执行后续档位逻辑
     }
 
@@ -2293,8 +2294,8 @@ int main(int argc, char *argv[]) {
             battery_fan_level   = (int)(ratio * (level_max - level_min) + level_min + 0.5f);
             if (battery_fan_level < level_min) battery_fan_level = level_min;
             if (battery_fan_level > level_max) battery_fan_level = level_max;
-            write_log("存档 恢复制冷=%d ratio=%.2f rpm=%d 挡位%d",
-                      stored_cold, ratio, pid_target_rpm, battery_fan_level);
+            write_log("存档 恢复制冷=%d ratio=%.2f rpm=%d",
+                      stored_cold, ratio, pid_target_rpm);
         } else {
             // Gear 模式：找冷强度最接近的挡位
             int nearest = LEVEL_INIT;
@@ -2307,7 +2308,7 @@ int main(int argc, char *argv[]) {
                 }
             }
             battery_fan_level = nearest;
-            write_log("存档 冷强度%d→挡位%d", stored_cold, nearest);
+            write_log("存档 制冷强度%d→挡位%d", stored_cold, nearest);
         }
     } else {
         // 无存档：使用默认初始挡位
