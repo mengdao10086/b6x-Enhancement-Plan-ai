@@ -1,0 +1,10 @@
+package a;
+
+import android.graphics.Typeface;
+
+/* JADX INFO: loaded from: D:\下载\Claude Code\scene_decompile\extracted\classes.dex */
+public abstract class ke {
+    public abstract void a(int i);
+
+    public abstract void b(Typeface typeface);
+}

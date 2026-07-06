@@ -1,0 +1,6 @@
+package a;
+
+/* JADX INFO: loaded from: D:\下载\Claude Code\scene_decompile\extracted\classes.dex */
+public interface r11 {
+    void b(int i);
+}
