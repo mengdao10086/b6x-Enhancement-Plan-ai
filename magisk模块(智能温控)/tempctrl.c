@@ -2095,11 +2095,18 @@ static void main_loop(void) {
             pid_map_output(pid_output_smoothed,
                            &pid_target_cold, &pid_target_rpm);
 
-            write_log("[PID] epoch=%ld Tbatt=%d+comp%+.1f(cpu%+.1f+curr%+.1f)=Tinp%d Ttgt=%d Thot=%d dt=%.0fs e=%.2f raw=%.2f sm=%.2f cold=%d rpm=%d",
+            // 常规 PID 日志：基准温度（+/-偏移） 制冷强度 风扇转速
+            write_log("[PID] %.1f(%+.1f)°C 冷%d RPM%d",
+                      BATT_BASELINE / 10.0f,
+                      (compensated_10 - BATT_BASELINE) / 10.0f,
+                      pid_target_cold, pid_target_rpm);
+
+            // 详细调试信息（仅 debug_pid 开启时输出）
+            pid_log("epoch=%ld Tbatt=%d+comp%+.1f(cpu%+.1f+curr%+.1f)=Tinp%d Ttgt=%d Thot=%d dt=%.0fs e=%.2f raw=%.2f sm=%.2f",
                      now, pid_batt_filtered, total_comp, cpu_comp, curr_comp,
                      compensated_10, BATT_BASELINE, cooler_hot_temp,
                      dt, (compensated_10 - BATT_BASELINE) / 10.0f,
-                     pid_out, pid_output_smoothed, pid_target_cold, pid_target_rpm);
+                     pid_out, pid_output_smoothed);
 
             pid_last_batt = batt_raw;
             pid_last_comp_10 = total_comp_10;
@@ -2272,32 +2279,10 @@ int main(int argc, char *argv[]) {
     create_status_file();
     set_gear_file_path();
 
-    // --- 初始化制冷强度（继承上次制冷强度，无存档直接找默认挡位） ---
-    int stored_cold = load_cold();
-    if (stored_cold >= 1) {
-        if (ctrl_mode == 1) {
-            // PID 模式：从制冷强度直接对齐初始值
-            float ratio = (float)(stored_cold - pid_cold_min) /
-                          (pid_cold_max - pid_cold_min);
-            if (ratio < 0.0f) ratio = 0.0f;
-            if (ratio > 1.0f) ratio = 1.0f;
-            pid_output_smoothed = ratio;
-            pid_target_cold     = stored_cold;
-            pid_target_rpm      = pid_rpm_min + (int)(ratio * (pid_rpm_max - pid_rpm_min));
-            pid_integral        = 0;
-            pid_prev_error      = 0;
-            pid_batt_filtered   = -1;
-            pid_last_batt       = -1;
-            pid_cpu_comp_smooth  = 0.0f;
-            pid_curr_comp_smooth = 0.0f;
-            pid_last_comp_10     = 0;
-            battery_fan_level   = (int)(ratio * (level_max - level_min) + level_min + 0.5f);
-            if (battery_fan_level < level_min) battery_fan_level = level_min;
-            if (battery_fan_level > level_max) battery_fan_level = level_max;
-            write_log("存档 恢复制冷=%d ratio=%.2f rpm=%d",
-                      stored_cold, ratio, pid_target_rpm);
-        } else {
-            // Gear 模式：找冷强度最接近的挡位
+    // --- Gear 模式初始化（与 cooler 状态无关，在 BLE 就绪前完成） ---
+    if (ctrl_mode != 1) {
+        int stored_cold = load_cold();
+        if (stored_cold >= 1) {
             int nearest = LEVEL_INIT;
             int min_diff = 9999;
             for (int i = 0; i < gear_count; i++) {
@@ -2309,16 +2294,12 @@ int main(int argc, char *argv[]) {
             }
             battery_fan_level = nearest;
             write_log("存档 制冷强度%d→挡位%d", stored_cold, nearest);
+        } else {
+            battery_fan_level = LEVEL_INIT;
         }
-    } else {
-        // 无存档：使用默认初始挡位
-        battery_fan_level = LEVEL_INIT;
-        if (ctrl_mode == 1) {
-            pid_align_from_gear();
-        }
+        batt_cooldown = 0;
+        target_level = battery_fan_level;
     }
-    batt_cooldown = 0;
-    target_level = battery_fan_level;
 
     write_log("脚本启动成功");
 
@@ -2342,6 +2323,55 @@ int main(int argc, char *argv[]) {
     }
     if (!running) goto exit;
 
+    // --- PID 模式初始化（需要 cooler 状态回传，放在 BLE 就绪后） ---
+    // 优先读取历史存档，其次读取 LSP 模块回传的实际制冷强度，最后回退到 gear 对齐
+    if (ctrl_mode == 1) {
+        float pid_ratio = 0.0f;
+        int pid_init_cold = 0;
+
+        int stored_cold = load_cold();
+        if (stored_cold >= 1) {
+            pid_ratio = (float)(stored_cold - pid_cold_min) /
+                        (pid_cold_max - pid_cold_min);
+            if (pid_ratio < 0.0f) pid_ratio = 0.0f;
+            if (pid_ratio > 1.0f) pid_ratio = 1.0f;
+            pid_init_cold = stored_cold;
+            write_log("存档 恢复制冷=%d ratio=%.2f rpm=%d",
+                      stored_cold, pid_ratio,
+                      pid_rpm_min + (int)(pid_ratio * (pid_rpm_max - pid_rpm_min)));
+        } else if (cooler_cold_real >= pid_cold_min) {
+            pid_ratio = (float)(cooler_cold_real - pid_cold_min) /
+                        (pid_cold_max - pid_cold_min);
+            if (pid_ratio < 0.0f) pid_ratio = 0.0f;
+            if (pid_ratio > 1.0f) pid_ratio = 1.0f;
+            pid_init_cold = cooler_cold_real;
+            write_log("LSP 回传承载 制冷=%d ratio=%.2f rpm=%d",
+                      cooler_cold_real, pid_ratio,
+                      pid_rpm_min + (int)(pid_ratio * (pid_rpm_max - pid_rpm_min)));
+        } else {
+            pid_align_from_gear();
+            goto pid_init_done;
+        }
+
+        pid_output_smoothed = pid_ratio;
+        pid_target_cold     = pid_init_cold;
+        pid_target_rpm      = pid_rpm_min + (int)(pid_ratio * (pid_rpm_max - pid_rpm_min));
+        pid_integral        = 0;
+        pid_prev_error      = 0;
+        pid_batt_filtered   = -1;
+        pid_last_batt       = -1;
+        pid_cpu_comp_smooth  = 0.0f;
+        pid_curr_comp_smooth = 0.0f;
+        pid_last_comp_10     = 0;
+        battery_fan_level   = (int)(pid_ratio * (level_max - level_min) + level_min + 0.5f);
+        if (battery_fan_level < level_min) battery_fan_level = level_min;
+        if (battery_fan_level > level_max) battery_fan_level = level_max;
+
+pid_init_done:
+        batt_cooldown = 0;
+        target_level = battery_fan_level;
+    }
+
     // --- 进入工作模式 ---
     app_was_alive = 1;
     batt_cooldown = 0;
@@ -2350,9 +2380,13 @@ int main(int argc, char *argv[]) {
     first_run = 1;
     last_batt_reading = -1;     // 重置电池温度跟踪，使首次 battery_control 视作新读数
 
-    // 强制首次下发
+    // 强制首次下发（PID 模式使用 apply_level_direct 避免走 Gear 表）
     last_sent_valid = 0;
-    apply_level(battery_fan_level);
+    if (ctrl_mode == 1) {
+        apply_level_direct(1, 5, pid_target_rpm, pid_target_cold, 0);
+    } else {
+        apply_level(battery_fan_level);
+    }
 
     // ---- 主控制循环：每 5 秒一次 ----
     // 循环开头先检测连接状态，断联时不执行 main_loop
