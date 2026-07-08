@@ -2,10 +2,11 @@
 
 > 格式：[Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)
 
-## v2.3（2026-07-05）
+## v2.3（2026-07-09）
 
 ### Added
 - **PID 连续无级调节模式**（`CTRL_MODE=1`）：P+I(积分分离±1°C)+D 控制器，归一化输出 0~1，输入/输出双 EMA 滤波
+- **BATT_SKIP_MAX 扩展到 PID 模式**：电池温度连续不变时跳过 PID 重算（CPU 读入/补偿计算/PID 计算），`BATT_SKIP_MAX` 周期后强制进入确保输出不过期。使用与 Gear 模式同个配置值
 - **制冷→RPM 映射引擎**：冷端指数映射（`PID_COLD_EXP`）+ 热端线性映射 + 自加权合并，PID/常规模式共享
 - **限速统一下沉**：RPM/制冷/目标温度限速从 `rate_limited_execute` 内建到 `apply_level`/`apply_level_direct` 内部，计算层只管传目标值
 - **`CTRL_MODE` 加入配置预扫描**，PID 关闭时 PID 控制参数（KP/KI/KD 等）跳过加载
@@ -24,12 +25,15 @@
 - `compute_direct_cold_rpm` 除零 bug（`level_max==level_min` 时分母为 0）
 - 配置热重载 CTRL_MODE 切换未正确触发 PID 对齐
 - 电流-挡位映射模式下 `curr_gear_temp_offset` 被冷却期阻挡无法下降：冷却期内只减计数器不计算偏移，从 +91 归零需要约 10 分钟。修复后每周期都计算偏移，冷却期仅阻止同方向累积，反方向随时可调
+- **配置解析 [组 1] `else if` 过度贪婪**：`CURRENT_GEAR_MODE` 默认开启时吞掉所有未匹配 Group 0 的 key，导致 PID 参数（含 `PID_KP`/`PID_KI`/`PID_KD`/`DEBUG_PID` 等）从未从 profile.conf 加载成功，全部使用硬编码默认值。修复：Group 1 额外检查 `strncmp(key, "CURRENT_GEAR_", 13) == 0`，非 `CURRENT_GEAR_*` key 正常透传到后续分组
+- **LSPosed `experimentalRunModeValue` 设错导致 App 自修复与 PID 竞争 BLE 命令队列**：原逻辑将 `experimentalRunModeValue` 设为 `lastSetColdOC`（如 189），App 自修复条件要求 `experimentalRunModeValue == realColdLevel + 1`，189 不等于 realCold+1（125→188），导致自修复每周期都发 `setExperimentalRunMode` 命令覆盖 PID 的 `setRunMode`。前台越久 BLE 队列越膨胀，PID 命令严重延迟，冷强度卡在自修复设定的值上。修复：改为 `realColdLevel + 1` 满足条件，自修复静默跳过
 
 ### lsp模块
 - `writeStatusFile()` 扩展为完整的 10 行 status 协议（含散热器全参数回传）
 - 新增 `xposedscope` 元数据，管理器显示推荐作用域
 - 捕获 `onDeviceInfoUpdate` 参数对象供回传使用
 - 修复参数回传钩子指向：追加 `WaspWingViewModel.onDeviceInfoUpdate`（app 层），散热器数据实际经过此类而非 SDK 的 `WaspwingViewModel`
+- **后台自动重连**：捕获 BLE 设备引用，断连后立即通过 `WaspWingManager.connectGattWith()` 经由 SDK 自身重连通道恢复连接，无需 Activity。支持远程断联（散热器出范围）和主动断联两种场景
 
 ### 注意
 - DIRECT_COLD_MODE 已在 v2.3 开发过程中删除，未进入发布版本

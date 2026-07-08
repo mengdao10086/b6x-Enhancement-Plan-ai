@@ -357,6 +357,7 @@ static int pid_integral = 0;              // 积分累积值
 static int pid_prev_error = 0;            // 上周期误差（0.1°C）
 static int pid_batt_filtered = -1;        // EMA 滤波后电池温度
 static int pid_last_batt = -1;            // 上次参与 PID 计算的原始温度
+static int pid_unchanged_count = 0;       // PID 温度不变跳过计数（≥BATT_SKIP_MAX 时强制重算）
 static time_t pid_last_change_time = 0;   // 上次温度变化时间戳
 static float pid_output_smoothed = 0.0f;  // 输出平滑值
 
@@ -594,7 +595,8 @@ static void load_config(const char *path) {
         // ═══════════════════════════════════════════════════════════
         // [组 1] 电流-挡位子项：仅 CURRENT_GEAR_MODE 启用时生效
         // ═══════════════════════════════════════════════════════════
-        else if (CURRENT_GEAR_MODE_CHARGE || CURRENT_GEAR_MODE_DISCHARGE) {
+        else if ((CURRENT_GEAR_MODE_CHARGE || CURRENT_GEAR_MODE_DISCHARGE) &&
+                 (strncmp(key, "CURRENT_GEAR_", 13) == 0)) {
             if      (strcmp(key, "CURRENT_GEAR_MULT_CHARGE") == 0)
                 CURRENT_GEAR_MULT_CHARGE = clamp(val, 1, 50);
             else if (strcmp(key, "CURRENT_GEAR_MULT_DISCHARGE") == 0)
@@ -1885,7 +1887,9 @@ static void apply_level_direct(int mode, int target,
 
     send_am_broadcast(mode, target, actual_rpm, actual_cold, wl);
 
-    pid_log("apply mode=%d windOC=%d coldOC=%d", mode, actual_rpm, actual_cold);
+    // 记录实际下发值（含限速后的值，方便诊断冷强度卡住问题）
+    write_log("[PID] 下发 冷%d RPM%d (目标冷%d RPM%d)",
+              actual_cold, actual_rpm, cold, rpm);
 
     last_sent_valid  = 1;
     last_mode        = mode;
@@ -2029,6 +2033,21 @@ static void main_loop(void) {
             pid_batt_filtered = batt_raw;
         } else {
             pid_batt_filtered = EMA(batt_raw, pid_batt_filtered, pid_batt_alpha);
+        }
+
+        // ═══ 温度不变跳过（BATT_SKIP_MAX，所有模式共享） ═══
+        // 电池温度连续不变时跳过 CPU 读入/补偿计算/PID 重算，
+        // 超限后强制进入确保输出不过期
+        if (batt_raw == pid_last_batt && pid_last_batt >= 0) {
+            if (++pid_unchanged_count < BATT_SKIP_MAX) {
+                debug_log(debug_pid, "PID 跳过周期 %d/%d",
+                          pid_unchanged_count, BATT_SKIP_MAX);
+                return;
+            }
+            pid_unchanged_count = 0;
+            debug_log(debug_pid, "PID 强制重算（跳过 %d 周期）", BATT_SKIP_MAX);
+        } else {
+            pid_unchanged_count = 0;
         }
 
         // ═══ CPU 温度读入与滤波（用于补偿，无紧急逻辑） ═══
