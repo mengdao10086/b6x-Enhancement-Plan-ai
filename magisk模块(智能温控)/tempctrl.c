@@ -335,7 +335,7 @@ static int curr_smooth_val = 0;       // 平滑后的电流值（µA）
 static int curr_smooth_valid = 0;     // 平滑数据是否有效
 
 // --- PID 控制模式全局变量 ---
-static int ctrl_mode = 0;                 // CTRL_MODE: 0=gear, 1=PID
+static int ctrl_mode = 1;                 // CTRL_MODE: 0=gear, 1=PID
 
 // PID 参数
 static int pid_kp = 300;                  // PID_KP（÷1000，1°C→P=40%）
