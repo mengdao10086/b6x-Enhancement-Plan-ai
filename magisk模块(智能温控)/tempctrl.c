@@ -238,6 +238,7 @@ static int actual_target_temp = -1;    // 当前实际目标温度（°C）
 // --- 日志路径（默认根据二进制名自动生成，可由 profile.conf 覆盖）---
 static char log_file_path[256] = "";
 static int LOG_MAX_KB = 7;          // 日志文件大小上限（KB），0=关闭日志
+static int log_trim_lines = 3;      // 日志超限时删除最早 N 行，0=不清理
 static FILE *log_fp = NULL;          // 持久的日志文件指针，避免每行都 fopen/fclose
 static char log_path_opened[256] = ""; // 已打开的文件路径（检测路径变化）
 static int debug_mode = 0;           // 调试日志总开关，=1 时启用各分区调试输出
@@ -336,6 +337,7 @@ static int curr_smooth_valid = 0;     // 平滑数据是否有效
 
 // --- PID 控制模式全局变量 ---
 static int ctrl_mode = 1;                 // CTRL_MODE: 0=gear, 1=PID
+static int gear_auto_fan = 1;             // GEAR_AUTO_FAN: 0=直接使用挡位表风扇, 1=自动映射+截断上限
 
 // PID 参数
 static int pid_kp = 300;                  // PID_KP（÷1000，1°C→P=40%）
@@ -391,6 +393,9 @@ static inline int clamp(int val, int lo, int hi);
 static void alarm_handler(int sig);
 static int match_nearest_gear_for_reconnect(void);
 static void pid_align_from_gear(void);
+static int rpm_from_hot_end(int hot_10);
+static int rpm_from_cold_exp(int cold);
+static int rpm_combine_weighted(int rpm_hot, int rpm_cold);
 
 /** 去除首尾空白，返回修剪后的起始指针 */
 static inline char *trim_line(char *line) {
@@ -552,9 +557,11 @@ static void load_config(const char *path) {
             else if (strcmp(key, "PID_RPM_MAX") == 0)          pid_rpm_max         = clamp(val, 1000, 6000);
             else if (strcmp(key, "PID_HOT_MAP_MIN") == 0)      pid_hot_map_min     = clamp(val, 200, 500);
             else if (strcmp(key, "PID_HOT_MAP_MAX") == 0)      pid_hot_map_max     = clamp(val, 200, 500);
+            else if (strcmp(key, "GEAR_AUTO_FAN") == 0)        gear_auto_fan       = (val != 0);
         }
         // ── 系统参数 ──
         else if (strcmp(key, "LOG_MAX_KB") == 0)           LOG_MAX_KB         = clamp(val, 0, 1000);
+        else if (strcmp(key, "LOG_TRIM_LINES") == 0)       log_trim_lines     = clamp(val, 0, 50);
         else if (strcmp(key, "LOG_FILE") == 0)
             config_read_path(log_file_path, sizeof(log_file_path), val_str);
         // ── 开关/模式类（写在组 0 末尾，解析后供后续分组守卫使用）──
@@ -781,7 +788,7 @@ static void write_log(const char *fmt, ...) {
 
     // 超标 → 滚动：先关 log_fp，再读-删-写，下次自动重开（调试模式下跳过限制，保留完整日志）
     struct stat st;
-    if (!debug_mode && stat(log_file_path, &st) == 0 && st.st_size > max_bytes) {
+    if (!debug_mode && log_trim_lines > 0 && stat(log_file_path, &st) == 0 && st.st_size > max_bytes) {
         if (log_fp) { fclose(log_fp); log_fp = NULL; }
         size_t sz = st.st_size;
         char *buf = malloc(sz + 1);
@@ -792,10 +799,10 @@ static void write_log(const char *fmt, ...) {
                 buf[rd] = '\0';
                 fclose(rf);
 
-                // 跳过前 2 个换行（删除最早 2 行）
+                // 跳过前 N 个换行（删除最早 N 行，行数由 log_trim_lines 配置）
                 int nl = 0;
                 char *tail = buf;
-                while (*tail && nl < 2) {
+                while (*tail && nl < log_trim_lines) {
                     if (*tail == '\n') nl++;
                     tail++;
                 }
@@ -1222,6 +1229,16 @@ static int apply_level(int level) {
     level = clamp(level, level_min, level_max);
     build_params(level, &mode, &target, &windOC, &coldOC, &windLevel);
 
+    // GEAR_AUTO_FAN：用冷端+热端双映射计算风扇转速，挡位表风扇转速变为截断上限
+    if (gear_auto_fan && mode == 1) {
+        int cap_rpm = windOC;
+        int calc_rpm = rpm_from_cold_exp(coldOC);
+        if (cooler_hot_temp > 0) {
+            calc_rpm = rpm_combine_weighted(rpm_from_hot_end(cooler_hot_temp), calc_rpm);
+        }
+        windOC = (calc_rpm < cap_rpm) ? calc_rpm : cap_rpm;
+    }
+
     // 风扇转速限速（升降独立速率）
     rate_limit(&actual_rpm, (mode == 0) ? windLevel : windOC,
                RATE_LIMIT_RPM_UP, RATE_LIMIT_RPM_DOWN);
@@ -1241,6 +1258,13 @@ static int apply_level(int level) {
     coldOC = actual_cold;
     target = actual_target_temp;
 
+    // ---- 向上取整到 50 的倍数 ----
+    int send_rpm = ((actual_rpm + 49) / 50) * 50;
+    if (mode == 0)
+        windLevel = send_rpm;
+    else
+        windOC = send_rpm;
+
     // ---- 去重检测 ----
     if (last_sent_valid &&
         mode      == last_mode &&
@@ -1252,9 +1276,6 @@ static int apply_level(int level) {
         debug_log(debug_exec, "apply_level 档位%d 参数无变化，跳过下发", gear_label(level));
         return 0;
     }
-
-    debug_log(debug_exec, "apply_level 下发 档位%d mode=%d target=%d windOC=%d coldOC=%d windLevel=%d",
-              gear_label(level), mode, target, windOC, coldOC, windLevel);
 
     send_am_broadcast(mode, target, windOC, coldOC, windLevel);
 
@@ -1873,18 +1894,21 @@ static void apply_level_direct(int mode, int target,
     // 风扇转速限速（升降独立速率）
     rate_limit(&actual_rpm, rpm, RATE_LIMIT_RPM_UP, RATE_LIMIT_RPM_DOWN);
 
+    // ---- 向上取整到 50 的倍数 ----
+    int send_rpm = ((actual_rpm + 49) / 50) * 50;
+
     // ---- 去重检测（用限速后的 actual_* 值）----
     if (last_sent_valid &&
-        mode == last_mode && actual_rpm == last_windOC &&
+        mode == last_mode && send_rpm == last_windOC &&
         actual_cold == last_coldOC && wl == last_windLevel)
         return;
 
-    send_am_broadcast(mode, target, actual_rpm, actual_cold, wl);
+    send_am_broadcast(mode, target, send_rpm, actual_cold, wl);
 
     last_sent_valid  = 1;
     last_mode        = mode;
     last_target_temp = target;
-    last_windOC      = actual_rpm;
+    last_windOC      = send_rpm;
     last_coldOC      = actual_cold;
     last_windLevel   = wl;
 
@@ -2104,13 +2128,7 @@ static void main_loop(void) {
             pid_map_output(pid_output_smoothed,
                            &pid_target_cold, &pid_target_rpm);
 
-            // 常规 PID 日志：基准温度（+/-偏移） 制冷强度 风扇转速
-            write_log("[PID] %.1f(%+.1f)°C 冷%d RPM%d",
-                      BATT_BASELINE / 10.0f,
-                      (compensated_10 - BATT_BASELINE) / 10.0f,
-                      pid_target_cold, pid_target_rpm);
-
-            // 详细调试信息（仅 debug_pid 开启时输出）
+            // 详细调试信息（仅 debug_pid 开启时输出，不含下发日志）
             pid_log("epoch=%ld Tbatt=%d+comp%+.1f(cpu%+.1f+curr%+.1f)=Tinp%d Ttgt=%d Thot=%d dt=%.0fs e=%.2f raw=%.2f sm=%.2f",
                      now, pid_batt_filtered, total_comp, cpu_comp, curr_comp,
                      compensated_10, BATT_BASELINE, cooler_hot_temp,

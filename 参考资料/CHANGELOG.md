@@ -5,14 +5,19 @@
 ## v2.3（2026-07-09）
 
 ### Added
+- **GEAR_AUTO_FAN**：挡位模式自动风扇转速（`profile.conf` [7] 挡位表段）。默认 =1，使用冷端强度+热端温度双映射计算风扇转速，挡位表风扇转速配置变为截断上限；=0 恢复旧行为
+- **LOG_TRIM_LINES**：日志超限时删除最早 N 行改为可配置（默认 3，0=不清理，`profile.conf` [1] 日志段）
 - **PID 连续无级调节模式**（`CTRL_MODE=1`）：P+I(积分分离±1°C)+D 控制器，归一化输出 0~1，输入/输出双 EMA 滤波
-- **BATT_SKIP_MAX 扩展到 PID 模式**：电池温度连续不变时跳过 PID 重算（CPU 读入/补偿计算/PID 计算），`BATT_SKIP_MAX` 周期后强制进入确保输出不过期。使用与 Gear 模式同个配置值
+- **BATT_SKIP_MAX 扩展到 PID 模式**：电池温度连续不变时跳过 PID 重算
 - **制冷→RPM 映射引擎**：冷端指数映射（`PID_COLD_EXP`）+ 热端线性映射 + 自加权合并，PID/常规模式共享
 - **限速统一下沉**：RPM/制冷/目标温度限速从 `rate_limited_execute` 内建到 `apply_level`/`apply_level_direct` 内部，计算层只管传目标值
 - **`CTRL_MODE` 加入配置预扫描**，PID 关闭时 PID 控制参数（KP/KI/KD 等）跳过加载
 - **`send_am_broadcast()`**：提取公共 fork+exec 代码，`apply_level`/`apply_level_direct` 共享
 
 ### Changed
+- **删除所有参数下发日志**：不再记录 `[PID] ...°C 冷... RPM...` 和 `apply_level 下发 档位...` 等包含实际下发参数的日志行，保留错误/跳过日志
+- **风扇转速向上取整到 50 的倍数**：所有通过 `am broadcast` 发送的 RPM 值自动 `((rpm + 49) / 50) * 50`
+- `write_log` 日志清理行数改为由 `LOG_TRIM_LINES` 控制（默认 3），硬编码 2 行删除已移除
 - 编译命令添加 `-ffunction-sections -fdata-sections -Wl,--gc-sections -Wl,--strip-all`，二进制体积减少约 30%
 - `read_status_ble()` 扩展为 10 字段解析（含 RUN_MODE/HOT_TEMP/COLD_TEMP/RPM_REAL/COLD_REAL 等散热器全参数回传）
 - 持久化从档位号改为制冷强度：`save_gear`→`save_cold`，`load_gear`→`load_cold`；PID 模式也参与存档，重启不再丢失状态
