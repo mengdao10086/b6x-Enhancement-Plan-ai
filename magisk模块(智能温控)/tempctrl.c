@@ -1881,10 +1881,6 @@ static void apply_level_direct(int mode, int target,
 
     send_am_broadcast(mode, target, actual_rpm, actual_cold, wl);
 
-    // 记录实际下发值（含限速后的值，方便诊断冷强度卡住问题）
-    write_log("[PID] 下发 冷%d RPM%d (目标冷%d RPM%d)",
-              actual_cold, actual_rpm, cold, rpm);
-
     last_sent_valid  = 1;
     last_mode        = mode;
     last_target_temp = target;
