@@ -20,6 +20,16 @@
 - 冷却期逻辑：退出紧急时立即复位趋势豁免/反补累积，防止脏数据
 - 配置解析重构为分组结构：CTRL_MODE / CURRENT_GEAR_MODE / DEBUG_MODE 以 `else if` 外层分支组织子项，代码反映"大类→子项"层级
 - PID 输入补偿（方案 A）：CPU 温差和电池电流作为额外热源加到 PID 输入温度，每周期更新、独立触发 PID 重算，PID 日志增加补偿值分解输出
+- **配置文件重构**：性能与调试开关分离层级
+  - `CONFIG_ENABLED` → `PERF_ENABLED`（只管理性能参数：挡位表、PID、紧急、速率限制等）
+  - `DEBUG_MODE` → `DEBUG_ENABLED`（提升为与 `PERF_ENABLED` 平级的独立总开关）
+  - 日志路径（`LOG_FILE`）和大小（`LOG_MAX_KB`）不再受任何总开关管理，持续生效
+  - 配置文件中「日志 & 调试」和「sysfs 路径与缩放」部分互换前后位置
+  - `load_config` 中 `perf_enabled` 守卫包裹所有性能参数；debug 子项分组独立于 `perf_enabled`
+  - `DEBUG_PID` 从 PID 分组移至调试子项分组，归 `DEBUG_ENABLED` 统一管理
+  - 所有 debug 分区开关默认值改为 0
+  - `PERF_ENABLED` 默认值改为 0（需用户主动开启）
+  - 移除 `STATUS_TIMEOUT` 配置项：默认值改为 12，不可从配置覆盖
 
 ### Fixed
 - `compute_direct_cold_rpm` 除零 bug（`level_max==level_min` 时分母为 0）

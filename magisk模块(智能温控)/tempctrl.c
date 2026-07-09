@@ -192,7 +192,7 @@ static int BATT_COOLDOWN_CYCLES = 3;
 static int BATT_SKIP_MAX = 6;
 
 // --- 状态文件超时（秒，可配置）---
-static int STATUS_TIMEOUT = 11;
+static int STATUS_TIMEOUT = 12;
 
 // --- sysfs 路径配置（可由 profile.conf 覆盖）---
 static char BATT_TEMP_PATH[128] = "/sys/class/power_supply/battery/temp";
@@ -457,23 +457,22 @@ static void load_config(const char *path) {
     }
     int old_ctrl_mode = ctrl_mode;  // 保存旧值，用于 PID 过渡检测
 
-    // ── 第一遍：总开关检测（找到后立即退出，避免全文件扫描）──
+    // ── 第一遍：性能总开关检测（找到后立即退出，避免全文件扫描）──
+    // PERF_ENABLED=0 时性能参数使用代码默认值，但日志/调试/sysfs 参数继续加载
     char line[256];
-    int enabled = 1;
+    int perf_enabled = 1;
     while (fgets(line, sizeof(line), f)) {
         char *key;
         char *val_str = config_parse_line(line, &key);
         if (!val_str) continue;
-        if (strcmp(key, "CONFIG_ENABLED") == 0) {
-            enabled = atoi(val_str) != 0;
+        if (strcmp(key, "PERF_ENABLED") == 0) {
+            perf_enabled = atoi(val_str) != 0;
             break;
         }
     }
 
-    if (!enabled) {
-        fclose(f);
-        write_log("配置 已禁用，使用默认参数");
-        return;
+    if (!perf_enabled) {
+        write_log("配置 性能参数已禁用（使用默认值），日志/调试继续加载");
     }
 
     // ── 第二遍：全量单次扫描 ──
@@ -502,64 +501,59 @@ static void load_config(const char *path) {
         else if (strcmp(key, "BATT_TEMP_DIVISOR") == 0)   BATT_TEMP_DIVISOR  = clamp(val, 1, 10000);
         else if (strcmp(key, "CPU_TEMP_DIVISOR") == 0)    CPU_TEMP_DIVISOR   = clamp(val, 1, 10000);
         else if (strcmp(key, "BATT_CURRENT_DIVISOR") == 0) BATT_CURRENT_DIVISOR = clamp(val, 1, 10000);
-        // ── 基础控制参数 ──
-        else if (strcmp(key, "BATT_BASELINE") == 0)        BATT_BASELINE      = clamp(val, 300, 500);
-        else if (strcmp(key, "BATT_ZONE_1") == 0)          BATT_ZONE_1        = clamp(val, 1, 100);
-        else if (strcmp(key, "BATT_ZONE_2") == 0)          BATT_ZONE_2        = clamp(val, 1, 100);
-        else if (strcmp(key, "BATT_ZONE_3") == 0)          BATT_ZONE_3        = clamp(val, 1, 100);
-        else if (strcmp(key, "BATT_COOLDOWN_CYCLES") == 0) BATT_COOLDOWN_CYCLES = clamp(val, 0, 20);
-        else if (strcmp(key, "BATT_SKIP_MAX") == 0)        BATT_SKIP_MAX        = clamp(val, 0, 30);
-        else if (strcmp(key, "BATT_RECOVERY_M1") == 0)    BATT_RECOVERY_M1     = clamp(val, 1, 20);
-        else if (strcmp(key, "BATT_RECOVERY_M2") == 0)    BATT_RECOVERY_M2     = clamp(val, 1, 20);
-        else if (strcmp(key, "BATT_RECOVERY_M3") == 0)    BATT_RECOVERY_M3     = clamp(val, 1, 20);
-        else if (strcmp(key, "BATT_RECOVERY_PHASE_CYCLES") == 0) BATT_RECOVERY_PHASE_CYCLES = clamp(val, 1, 50);
-        // ── CPU 紧急阈值（无条件解析，EMERG_CPU_ENABLED 运行时决定是否检查）──
-        else if (strcmp(key, "CPU_EMERG_3") == 0)          CPU_EMERG_3        = clamp(val, 600, 1000);
-        else if (strcmp(key, "CPU_EMERG_2") == 0)          CPU_EMERG_2        = clamp(val, 500, 900);
-        else if (strcmp(key, "CPU_EMERG_1") == 0)          CPU_EMERG_1        = clamp(val, 400, 800);
-        else if (strcmp(key, "CPU_RECOVER_2") == 0)        CPU_RECOVER_2      = clamp(val, 500, 900);
-        else if (strcmp(key, "CPU_RECOVER_1") == 0)        CPU_RECOVER_1      = clamp(val, 400, 800);
-        else if (strcmp(key, "CPU_RECOVER_0") == 0)        CPU_RECOVER_0      = clamp(val, 300, 700);
-        else if (strcmp(key, "CPU_FILTER_ALPHA") == 0)     CPU_FILTER_ALPHA   = clamp(val, 1, 100);
-        else if (strcmp(key, "CPU_ZONE_MIN") == 0)          CPU_ZONE_MIN       = clamp(val, 0, 99);
-        else if (strcmp(key, "CPU_ZONE_MAX") == 0)          CPU_ZONE_MAX       = clamp(val, 0, 99);
-        // ── 电流紧急阈值 ──
-        else if (strcmp(key, "CURRENT_EMERG_3") == 0)       CURRENT_EMERG_3    = clamp(val, 100, 1500);
-        else if (strcmp(key, "CURRENT_EMERG_2") == 0)       CURRENT_EMERG_2    = clamp(val, 100, 1500);
-        else if (strcmp(key, "CURRENT_EMERG_1") == 0)       CURRENT_EMERG_1    = clamp(val, 100, 1500);
-        else if (strcmp(key, "CURRENT_RECOVER_2") == 0)     CURRENT_RECOVER_2  = clamp(val, 100, 1500);
-        else if (strcmp(key, "CURRENT_RECOVER_1") == 0)     CURRENT_RECOVER_1  = clamp(val, 100, 1500);
-        else if (strcmp(key, "CURRENT_RECOVER_0") == 0)     CURRENT_RECOVER_0  = clamp(val, 100, 1500);
-        else if (strcmp(key, "CURRENT_SMOOTH_ALPHA") == 0)  CURRENT_SMOOTH_ALPHA = clamp(val, 1, 100);
-        // ── 紧急覆盖参数 ──
-        else if (strcmp(key, "EMERG_FORCED_1") == 0)       EMERG_FORCED_1     = clamp(val, 0, 12);
-        else if (strcmp(key, "EMERG_FORCED_2") == 0)       EMERG_FORCED_2     = clamp(val, 0, 12);
-        else if (strcmp(key, "EMERG_FORCED_3") == 0)       EMERG_FORCED_3     = clamp(val, 0, 12);
-        else if (strcmp(key, "EMERG_FORCED_4") == 0)       EMERG_FORCED_4     = clamp(val, 0, 12);
-        else if (strcmp(key, "EMERG_EXIT_CAP_OFFSET") == 0) EMERG_EXIT_CAP_OFFSET = clamp(val, 0, 5);
-        else if (strcmp(key, "EMERG_STEP") == 0)              EMERG_STEP = clamp(val, 1, 12);
-        else if (strcmp(key, "EMERG_EXIT_BATT_THRESHOLD") == 0) EMERG_EXIT_BATT_THRESHOLD = clamp(val, 5, 50);
-        // ── 反补 / 豁免参数 ──
-        else if (strcmp(key, "OVERRIDE_MAX") == 0)         OVERRIDE_MAX       = clamp(val, 0, 20);
-        else if (strcmp(key, "REV_COMP_T1") == 0)          REV_COMP_T1        = clamp(val, 1, 50);
-        else if (strcmp(key, "REV_COMP_T2") == 0)          REV_COMP_T2        = clamp(val, 1, 50);
-        else if (strcmp(key, "REV_COMP_T3") == 0)          REV_COMP_T3        = clamp(val, 1, 50);
-        else if (strcmp(key, "REV_COMP_COOLDOWN") == 0)   REV_COMP_COOLDOWN  = clamp(val, 0, 10);
-        // ── 速率限制（无条件，作用于所有模式）──
-        else if (strcmp(key, "RATE_LIMIT_RPM_UP") == 0)  RATE_LIMIT_RPM_UP  = clamp(val, 50, 2000);
-        else if (strcmp(key, "RATE_LIMIT_RPM_DOWN") == 0) RATE_LIMIT_RPM_DOWN = clamp(val, 50, 2000);
-        else if (strcmp(key, "RATE_LIMIT_COLD") == 0) RATE_LIMIT_COLD = clamp(val, 1, 194);
-        else if (strcmp(key, "RATE_LIMIT_TEMP") == 0) RATE_LIMIT_TEMP = clamp(val, 1, 30);
-        // ── PID 映射范围（gear 模式也用到 pid_align_from_gear，故无条件）──
-        else if (strcmp(key, "PID_COLD_MIN") == 0)         pid_cold_min        = clamp(val, 0, 194);
-        else if (strcmp(key, "PID_COLD_MAX") == 0)         pid_cold_max        = clamp(val, 0, 194);
-        else if (strcmp(key, "PID_COLD_EXP") == 0)         pid_cold_exp        = clamp(val, 50, 500);
-        else if (strcmp(key, "PID_RPM_MIN") == 0)          pid_rpm_min         = clamp(val, 1000, 6000);
-        else if (strcmp(key, "PID_RPM_MAX") == 0)          pid_rpm_max         = clamp(val, 1000, 6000);
-        else if (strcmp(key, "PID_HOT_MAP_MIN") == 0)      pid_hot_map_min     = clamp(val, 200, 500);
-        else if (strcmp(key, "PID_HOT_MAP_MAX") == 0)      pid_hot_map_max     = clamp(val, 200, 500);
+        // ── 性能参数（仅 PERF_ENABLED=1 时生效）──
+        else if (perf_enabled) {
+            if      (strcmp(key, "BATT_BASELINE") == 0)        BATT_BASELINE      = clamp(val, 300, 500);
+            else if (strcmp(key, "BATT_ZONE_1") == 0)          BATT_ZONE_1        = clamp(val, 1, 100);
+            else if (strcmp(key, "BATT_ZONE_2") == 0)          BATT_ZONE_2        = clamp(val, 1, 100);
+            else if (strcmp(key, "BATT_ZONE_3") == 0)          BATT_ZONE_3        = clamp(val, 1, 100);
+            else if (strcmp(key, "BATT_COOLDOWN_CYCLES") == 0) BATT_COOLDOWN_CYCLES = clamp(val, 0, 20);
+            else if (strcmp(key, "BATT_SKIP_MAX") == 0)        BATT_SKIP_MAX        = clamp(val, 0, 30);
+            else if (strcmp(key, "BATT_RECOVERY_M1") == 0)    BATT_RECOVERY_M1     = clamp(val, 1, 20);
+            else if (strcmp(key, "BATT_RECOVERY_M2") == 0)    BATT_RECOVERY_M2     = clamp(val, 1, 20);
+            else if (strcmp(key, "BATT_RECOVERY_M3") == 0)    BATT_RECOVERY_M3     = clamp(val, 1, 20);
+            else if (strcmp(key, "BATT_RECOVERY_PHASE_CYCLES") == 0) BATT_RECOVERY_PHASE_CYCLES = clamp(val, 1, 50);
+            else if (strcmp(key, "CPU_EMERG_3") == 0)          CPU_EMERG_3        = clamp(val, 600, 1000);
+            else if (strcmp(key, "CPU_EMERG_2") == 0)          CPU_EMERG_2        = clamp(val, 500, 900);
+            else if (strcmp(key, "CPU_EMERG_1") == 0)          CPU_EMERG_1        = clamp(val, 400, 800);
+            else if (strcmp(key, "CPU_RECOVER_2") == 0)        CPU_RECOVER_2      = clamp(val, 500, 900);
+            else if (strcmp(key, "CPU_RECOVER_1") == 0)        CPU_RECOVER_1      = clamp(val, 400, 800);
+            else if (strcmp(key, "CPU_RECOVER_0") == 0)        CPU_RECOVER_0      = clamp(val, 300, 700);
+            else if (strcmp(key, "CPU_FILTER_ALPHA") == 0)     CPU_FILTER_ALPHA   = clamp(val, 1, 100);
+            else if (strcmp(key, "CPU_ZONE_MIN") == 0)          CPU_ZONE_MIN       = clamp(val, 0, 99);
+            else if (strcmp(key, "CPU_ZONE_MAX") == 0)          CPU_ZONE_MAX       = clamp(val, 0, 99);
+            else if (strcmp(key, "CURRENT_EMERG_3") == 0)       CURRENT_EMERG_3    = clamp(val, 100, 1500);
+            else if (strcmp(key, "CURRENT_EMERG_2") == 0)       CURRENT_EMERG_2    = clamp(val, 100, 1500);
+            else if (strcmp(key, "CURRENT_EMERG_1") == 0)       CURRENT_EMERG_1    = clamp(val, 100, 1500);
+            else if (strcmp(key, "CURRENT_RECOVER_2") == 0)     CURRENT_RECOVER_2  = clamp(val, 100, 1500);
+            else if (strcmp(key, "CURRENT_RECOVER_1") == 0)     CURRENT_RECOVER_1  = clamp(val, 100, 1500);
+            else if (strcmp(key, "CURRENT_RECOVER_0") == 0)     CURRENT_RECOVER_0  = clamp(val, 100, 1500);
+            else if (strcmp(key, "CURRENT_SMOOTH_ALPHA") == 0)  CURRENT_SMOOTH_ALPHA = clamp(val, 1, 100);
+            else if (strcmp(key, "EMERG_FORCED_1") == 0)       EMERG_FORCED_1     = clamp(val, 0, 12);
+            else if (strcmp(key, "EMERG_FORCED_2") == 0)       EMERG_FORCED_2     = clamp(val, 0, 12);
+            else if (strcmp(key, "EMERG_FORCED_3") == 0)       EMERG_FORCED_3     = clamp(val, 0, 12);
+            else if (strcmp(key, "EMERG_FORCED_4") == 0)       EMERG_FORCED_4     = clamp(val, 0, 12);
+            else if (strcmp(key, "EMERG_EXIT_CAP_OFFSET") == 0) EMERG_EXIT_CAP_OFFSET = clamp(val, 0, 5);
+            else if (strcmp(key, "EMERG_STEP") == 0)              EMERG_STEP = clamp(val, 1, 12);
+            else if (strcmp(key, "EMERG_EXIT_BATT_THRESHOLD") == 0) EMERG_EXIT_BATT_THRESHOLD = clamp(val, 5, 50);
+            else if (strcmp(key, "OVERRIDE_MAX") == 0)         OVERRIDE_MAX       = clamp(val, 0, 20);
+            else if (strcmp(key, "REV_COMP_T1") == 0)          REV_COMP_T1        = clamp(val, 1, 50);
+            else if (strcmp(key, "REV_COMP_T2") == 0)          REV_COMP_T2        = clamp(val, 1, 50);
+            else if (strcmp(key, "REV_COMP_T3") == 0)          REV_COMP_T3        = clamp(val, 1, 50);
+            else if (strcmp(key, "REV_COMP_COOLDOWN") == 0)   REV_COMP_COOLDOWN  = clamp(val, 0, 10);
+            else if (strcmp(key, "RATE_LIMIT_RPM_UP") == 0)  RATE_LIMIT_RPM_UP  = clamp(val, 50, 2000);
+            else if (strcmp(key, "RATE_LIMIT_RPM_DOWN") == 0) RATE_LIMIT_RPM_DOWN = clamp(val, 50, 2000);
+            else if (strcmp(key, "RATE_LIMIT_COLD") == 0) RATE_LIMIT_COLD = clamp(val, 1, 194);
+            else if (strcmp(key, "RATE_LIMIT_TEMP") == 0) RATE_LIMIT_TEMP = clamp(val, 1, 30);
+            else if (strcmp(key, "PID_COLD_MIN") == 0)         pid_cold_min        = clamp(val, 0, 194);
+            else if (strcmp(key, "PID_COLD_MAX") == 0)         pid_cold_max        = clamp(val, 0, 194);
+            else if (strcmp(key, "PID_COLD_EXP") == 0)         pid_cold_exp        = clamp(val, 50, 500);
+            else if (strcmp(key, "PID_RPM_MIN") == 0)          pid_rpm_min         = clamp(val, 1000, 6000);
+            else if (strcmp(key, "PID_RPM_MAX") == 0)          pid_rpm_max         = clamp(val, 1000, 6000);
+            else if (strcmp(key, "PID_HOT_MAP_MIN") == 0)      pid_hot_map_min     = clamp(val, 200, 500);
+            else if (strcmp(key, "PID_HOT_MAP_MAX") == 0)      pid_hot_map_max     = clamp(val, 200, 500);
+        }
         // ── 系统参数 ──
-        else if (strcmp(key, "STATUS_TIMEOUT") == 0)       STATUS_TIMEOUT     = clamp(val, 5, 60);
         else if (strcmp(key, "LOG_MAX_KB") == 0)           LOG_MAX_KB         = clamp(val, 0, 1000);
         else if (strcmp(key, "LOG_FILE") == 0)
             config_read_path(log_file_path, sizeof(log_file_path), val_str);
@@ -583,7 +577,7 @@ static void load_config(const char *path) {
                 EMERG_MODE_EXIT  = clamp(exit, 0, 1);
             }
         }
-        else if (strcmp(key, "DEBUG_MODE") == 0) {
+        else if (strcmp(key, "DEBUG_ENABLED") == 0) {
             debug_mode = (val != 0);
             write_log("配置 调试模式 %s", debug_mode ? "开启" : "关闭");
         }
@@ -595,7 +589,7 @@ static void load_config(const char *path) {
         // ═══════════════════════════════════════════════════════════
         // [组 1] 电流-挡位子项：仅 CURRENT_GEAR_MODE 启用时生效
         // ═══════════════════════════════════════════════════════════
-        else if ((CURRENT_GEAR_MODE_CHARGE || CURRENT_GEAR_MODE_DISCHARGE) &&
+        else if (perf_enabled && (CURRENT_GEAR_MODE_CHARGE || CURRENT_GEAR_MODE_DISCHARGE) &&
                  (strncmp(key, "CURRENT_GEAR_", 13) == 0)) {
             if      (strcmp(key, "CURRENT_GEAR_MULT_CHARGE") == 0)
                 CURRENT_GEAR_MULT_CHARGE = clamp(val, 1, 50);
@@ -610,7 +604,7 @@ static void load_config(const char *path) {
         // ═══════════════════════════════════════════════════════════
         // [组 2] PID 控制参数：仅 CTRL_MODE=1 时生效
         // ═══════════════════════════════════════════════════════════
-        else if (ctrl_mode == 1) {
+        else if (perf_enabled && ctrl_mode == 1) {
             // PID 核心
             if      (strcmp(key, "PID_KP") == 0)              pid_kp              = clamp(val, 1, 1000);
             else if (strcmp(key, "PID_KI") == 0)              pid_ki              = clamp(val, 0, 1000);
@@ -624,12 +618,11 @@ static void load_config(const char *path) {
             else if (strcmp(key, "PID_CURR_COMP_ENABLED") == 0)  pid_curr_comp_enabled  = (val != 0);
             else if (strcmp(key, "PID_CURR_COMP_THRESHOLD") == 0) pid_curr_comp_threshold = clamp(val, 50, 1000);
             else if (strcmp(key, "PID_CURR_COMP_DIVISOR") == 0)  pid_curr_comp_divisor  = clamp(val, 1, 50);
-            // PID 调试
-            else if (strcmp(key, "DEBUG_PID") == 0)            debug_pid           = (val != 0);
+            // PID 调试（DEBUG_PID 现已移至调试分组，由 DEBUG_ENABLED 独立控制）
         }
 
         // ═══════════════════════════════════════════════════════════
-        // [组 3] 调试子项：仅 DEBUG_MODE=1 时生效
+        // [组 3] 调试子项：仅 DEBUG_ENABLED=1 时生效
         // ═══════════════════════════════════════════════════════════
         else if (debug_mode) {
             if      (strcmp(key, "DEBUG_SENSOR") == 0)  { debug_sensor = (val != 0); }
@@ -639,12 +632,13 @@ static void load_config(const char *path) {
             else if (strcmp(key, "DEBUG_CONN") == 0)    { debug_conn    = (val != 0); }
             else if (strcmp(key, "DEBUG_CONFIG") == 0)  { debug_config  = (val != 0); }
             else if (strcmp(key, "DEBUG_MAIN") == 0)    { debug_main    = (val != 0); }
+            else if (strcmp(key, "DEBUG_PID") == 0)     { debug_pid     = (val != 0); }
         }
 
         // ═══════════════════════════════════════════════════════════
         // [组 4] 挡位表：仅 GEAR_CONFIG_ENABLED=1 时生效
         // ═══════════════════════════════════════════════════════════
-        else if (strncmp(key, "GEAR_", 5) == 0) {
+        else if (perf_enabled && strncmp(key, "GEAR_", 5) == 0) {
             if (!gear_config_enabled) continue;
             int n = atoi(key + 5);
             if (n < 1 || n > GEAR_TABLE_MAX) continue;
