@@ -187,9 +187,12 @@ static int REV_COMP_COOLDOWN = 1;
 // 每次电池温度导致的档位变动后冻结多少周期（×5s），期内跳过常规升降档
 static int BATT_COOLDOWN_CYCLES = 3;
 
-// --- 温度不变最大跳过次数（可配置）---
-// 电池温度连续不变时最多跳过多少次 battery_control，之后强制进入
-static int BATT_SKIP_MAX = 6;
+// --- 电池温度文件 mtime 追踪（替代值比较跳过）---
+// `read_battery_temp` 先 stat 文件 mtime，有变化才读取
+// `batt_temp_updated` 通知各函数本周期温度是否更新（即使数值没变也认为更新）
+static time_t batt_temp_mtime = 0;    // 电池温度文件最后修改时间
+static int batt_cached_temp = -1;      // 最后一次读取的温度缓存
+static int batt_temp_updated = 0;      // 本周期温度是否更新
 
 // --- 状态文件超时（秒，可配置）---
 static int STATUS_TIMEOUT = 12;
@@ -292,7 +295,6 @@ static int batt_idle_cycles = 0;       // 自上次有效变化以来温度未�
 static int rev_comp_pending_abs = 0;   // 反补冷却期累积温差
 static int rev_comp_pending_idle = 0;  // 反补冷却期累积空闲周期
 static int last_batt_reading = -1;     // 上次读取的电池温度（变化检测 + 趋势判断）
-static int batt_unchanged_count = 0;   // 温度连续不变跳过次数（≥BATT_SKIP_MAX 时强制进入）
 static int trend_override = 0;         // 趋势豁免计数器（锚点温度复位机制使用）
 static int first_run = 1;              // 首次运行，滤波直接赋初值
 
@@ -359,7 +361,6 @@ static int pid_integral = 0;              // 积分累积值
 static int pid_prev_error = 0;            // 上周期误差（0.1°C）
 static int pid_batt_filtered = -1;        // EMA 滤波后电池温度
 static int pid_last_batt = -1;            // 上次参与 PID 计算的原始温度
-static int pid_unchanged_count = 0;       // PID 温度不变跳过计数（≥BATT_SKIP_MAX 时强制重算）
 static time_t pid_last_change_time = 0;   // 上次温度变化时间戳
 static float pid_output_smoothed = 0.0f;  // 输出平滑值
 
@@ -513,7 +514,6 @@ static void load_config(const char *path) {
             else if (strcmp(key, "BATT_ZONE_2") == 0)          BATT_ZONE_2        = clamp(val, 1, 100);
             else if (strcmp(key, "BATT_ZONE_3") == 0)          BATT_ZONE_3        = clamp(val, 1, 100);
             else if (strcmp(key, "BATT_COOLDOWN_CYCLES") == 0) BATT_COOLDOWN_CYCLES = clamp(val, 0, 20);
-            else if (strcmp(key, "BATT_SKIP_MAX") == 0)        BATT_SKIP_MAX        = clamp(val, 0, 30);
             else if (strcmp(key, "BATT_RECOVERY_M1") == 0)    BATT_RECOVERY_M1     = clamp(val, 1, 20);
             else if (strcmp(key, "BATT_RECOVERY_M2") == 0)    BATT_RECOVERY_M2     = clamp(val, 1, 20);
             else if (strcmp(key, "BATT_RECOVERY_M3") == 0)    BATT_RECOVERY_M3     = clamp(val, 1, 20);
@@ -1029,10 +1029,28 @@ static int read_thermal_zone_raw(int zone_id) {
  * 失败返回 -1
  */
 static int read_battery_temp(void) {
+    // 先 stat 检测文件修改时间戳
+    struct stat st;
+    int st_ok = (stat(BATT_TEMP_PATH, &st) == 0);
+
+    // 文件存在且 mtime 未变（非首次）→ 返回缓存，标记未更新
+    if (st_ok && batt_temp_mtime != 0 && st.st_mtime == batt_temp_mtime) {
+        batt_temp_updated = 0;
+        return batt_cached_temp;
+    }
+
+    // mtime 变化或首次 / stat 失败 → 正常读取
     int raw = read_sysfs_int(BATT_TEMP_PATH);
-    if (raw < 0) return -1;
+    if (raw < 0) {
+        batt_temp_updated = 0;
+        return -1;
+    }
     int val = raw / BATT_TEMP_DIVISOR;
-    debug_log(debug_sensor, "batt_temp 原始 %d 除数 %d = %d (%.1f°C)", raw, BATT_TEMP_DIVISOR, val, val / 10.0);
+    debug_log(debug_sensor, "batt_temp 原始 %d 除数 %d = %d (%.1f°C) mtime=%ld",
+              raw, BATT_TEMP_DIVISOR, val, val / 10.0, st_ok ? (long)st.st_mtime : 0L);
+    batt_cached_temp = val;
+    batt_temp_updated = 1;
+    if (st_ok) batt_temp_mtime = st.st_mtime;
     return val;
 }
 
@@ -1384,19 +1402,13 @@ static void battery_control(void) {
 
     int cur_idle = batt_idle_cycles;  // 快照：自上次有效变化以来已过的空闲周期数
 
-    // 温度值与上次调整时相同 → 计数跳过，超过 BATT_SKIP_MAX 次后强制进入
-    if (batt == last_batt_reading) {
+    // mtime 检测：sysfs 文件未更新时跳过本周期，仅递增空闲计数
+    if (!batt_temp_updated) {
         batt_idle_cycles++;
-        if (++batt_unchanged_count < BATT_SKIP_MAX) return;
-        batt_unchanged_count = 0;
-        // 温度没变时 delta 已在上次执行过，清零防齿轮漂移
-        delta = 0;
-        abs_change = 0;
-        batt_change = 0;
-    } else {
-        batt_unchanged_count = 0;
-        batt_idle_cycles = 0;
+        debug_log(debug_batt, "batt_ctrl 温度未更新，跳过本周期 (idle=%d)", batt_idle_cycles);
+        return;
     }
+    batt_idle_cycles = 0;
 
     int skip_delta = 0;  // =1 时本次不执行常规升降档
 
@@ -1784,7 +1796,6 @@ static int current_gear_override(void) {
     rev_comp_cooldown = 0;
     last_batt_reading = -1;
     batt_idle_cycles = 0;
-    batt_unchanged_count = 0;
 
     debug_log(debug_batt, "curr_gear 融合 rec=%d temp_offset=%+d gear=%d",
               recommended, curr_gear_temp_offset, gear_label(final_level));
@@ -2049,19 +2060,11 @@ static void main_loop(void) {
             pid_batt_filtered = EMA(batt_raw, pid_batt_filtered, pid_batt_alpha);
         }
 
-        // ═══ 温度不变跳过（BATT_SKIP_MAX，所有模式共享） ═══
-        // 电池温度连续不变时跳过 CPU 读入/补偿计算/PID 重算，
-        // 超限后强制进入确保输出不过期
-        if (batt_raw == pid_last_batt && pid_last_batt >= 0) {
-            if (++pid_unchanged_count < BATT_SKIP_MAX) {
-                debug_log(debug_pid, "PID 跳过周期 %d/%d",
-                          pid_unchanged_count, BATT_SKIP_MAX);
-                return;
-            }
-            pid_unchanged_count = 0;
-            debug_log(debug_pid, "PID 强制重算（跳过 %d 周期）", BATT_SKIP_MAX);
-        } else {
-            pid_unchanged_count = 0;
+        // ═══ 温度未更新跳过（mtime 检测替代 BATT_SKIP_MAX） ═══
+        // mtime 未变 → 跳过 PID 重算（包括 CPU 读入和补偿计算）
+        if (!batt_temp_updated && pid_last_batt >= 0) {
+            debug_log(debug_pid, "PID 跳过（温度未更新）");
+            return;
         }
 
         // ═══ CPU 温度读入与滤波（用于补偿，无紧急逻辑） ═══
