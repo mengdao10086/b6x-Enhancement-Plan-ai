@@ -1,0 +1,7 @@
+id=PID_CHG_MOD
+metamodule=0
+name=PID充电模块
+version=4.4
+versionCode=251209
+author=log
+description=[ 未运行！模块配置文件在/data/adb/modules/PID_CHG_MOD/配置，日志文件在同级目录PID_log ]
