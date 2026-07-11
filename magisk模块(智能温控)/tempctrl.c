@@ -348,7 +348,7 @@ static int pid_ki = 50;                   // PID_KI（÷1000，±1°C内累积�
 static int pid_kd = 150;                  // PID_KD
 static int pid_integral_limit = 500;      // PID_INTEGRAL_LIMIT（÷1000）
 static int pid_batt_alpha = 33;           // PID_BATT_ALPHA（%，新值权重）
-static int pid_output_alpha = 33;         // PID_OUTPUT_ALPHA（%，新值权重）
+static int pid_input_filter_enabled = 1;  // PID_INPUT_FILTER_ENABLED: 1=每周期滤波+PID重算, 0=无滤波+温度更新时用原始值重算
 static int pid_cold_min = 1;              // PID_COLD_MIN
 static int pid_cold_max = 190;            // PID_COLD_MAX
 static int pid_cold_exp = 150;            // PID_COLD_EXP（÷100）
@@ -363,7 +363,6 @@ static int pid_prev_error = 0;            // 上周期误差（float°C 的整�
 static int pid_batt_filtered = -1;        // EMA 滤波后电池温度
 static int pid_last_batt = -1;            // 上次参与 PID 计算的原始温度
 static time_t pid_last_change_time = 0;   // 上次温度变化时间戳
-static float pid_output_smoothed = 0.0f;  // 输出平滑值
 
 // PID 输入补偿（加到电池温度，反映 CPU/电流额外发热）
 static int pid_cpu_comp_enabled = 1;       // PID_CPU_COMP_ENABLED: CPU 补偿开关
@@ -374,6 +373,14 @@ static int pid_curr_comp_divisor = 2;      // PID_CURR_COMP_DIVISOR: |A|÷diviso
 static float pid_cpu_comp_smooth = 0.0f;   // CPU 补偿 EMA 平滑值（°C）
 static float pid_curr_comp_smooth = 0.0f;  // 电流补偿 EMA 平滑值（°C）
 static int pid_last_comp_10 = 0;           // 上次 PID 重算时的补偿值（0.1°C）
+
+// PID 输入滤波自适应开关参数
+static int pid_filter_auto_threshold_on = 22;   // PID_FILTER_AUTO_THRESHOLD_ON: 平滑周期数>此值(0.1周期)自动关闭滤波,默认2.2周期
+static int pid_filter_auto_threshold_off = 18;  // PID_FILTER_AUTO_THRESHOLD_OFF: 平滑周期数<此值(0.1周期)重新打开,默认1.8周期
+static int pid_filter_auto_alpha = 20;          // PID_FILTER_AUTO_ALPHA: 间隔EMA平滑系数(%)
+static int pid_filter_auto_disabled = 0;        // 运行时标志：1=自适应关闭了滤波（不修改配置文件值）
+static int pid_filter_interval_smooth = -1;     // 平滑后的温度更新周期数(0.1周期，如22=2.2周期)
+static int pid_idle_cycles = 0;                  // 自上次温度更新以来经过的周期数
 
 // PID 目标值（供 rate_limited_execute 读取）
 static int pid_target_rpm = 2000;
@@ -619,7 +626,10 @@ static void load_config(const char *path) {
             else if (strcmp(key, "PID_KD") == 0)              pid_kd              = clamp(val, 0, 1000);
             else if (strcmp(key, "PID_INTEGRAL_LIMIT") == 0)  pid_integral_limit  = clamp(val, 0, 1000);
             else if (strcmp(key, "PID_BATT_ALPHA") == 0)      pid_batt_alpha      = clamp(val, 1, 100);
-            else if (strcmp(key, "PID_OUTPUT_ALPHA") == 0)    pid_output_alpha    = clamp(val, 1, 100);
+            else if (strcmp(key, "PID_INPUT_FILTER_ENABLED") == 0) pid_input_filter_enabled = (val != 0);
+            else if (strcmp(key, "PID_FILTER_AUTO_THRESHOLD_ON") == 0)  pid_filter_auto_threshold_on  = clamp(val, 5, 100);
+            else if (strcmp(key, "PID_FILTER_AUTO_THRESHOLD_OFF") == 0) pid_filter_auto_threshold_off = clamp(val, 5, 100);
+            else if (strcmp(key, "PID_FILTER_AUTO_ALPHA") == 0)        pid_filter_auto_alpha         = clamp(val, 1, 100);
             // PID 输入补偿
             else if (strcmp(key, "PID_CPU_COMP_ENABLED") == 0)   pid_cpu_comp_enabled   = (val != 0);
             else if (strcmp(key, "PID_CPU_COMP_DIVISOR") == 0)   pid_cpu_comp_divisor   = clamp(val, 5, 200);
@@ -1934,7 +1944,6 @@ static void apply_level_direct(int mode, int target,
 static void pid_align_from_gear(void) {
     float ratio = (float)(battery_fan_level - level_min) /
                   (level_max - level_min);
-    pid_output_smoothed = ratio;
     pid_target_rpm  = pid_rpm_min + (int)(ratio * (pid_rpm_max - pid_rpm_min));
     pid_target_cold = pid_cold_min + (int)(ratio * (pid_cold_max - pid_cold_min));
     pid_integral        = 0;
@@ -1976,7 +1985,9 @@ static void reconnect_align(void) {
         pid_cpu_comp_smooth  = 0.0f;
         pid_curr_comp_smooth = 0.0f;
         pid_last_comp_10     = 0;
-        pid_output_smoothed = 0.0f;
+        pid_filter_interval_smooth = -1;
+        pid_filter_auto_disabled   = 0;
+        pid_idle_cycles             = 0;
         actual_rpm = -1;
         actual_cold = -1;
         actual_target_temp = -1;
@@ -2050,25 +2061,70 @@ static void main_loop(void) {
 
     // ═══ PID 模式：跳过档位/紧急逻辑，直接 PID 计算 ═══
     if (ctrl_mode == 1) {
-        // 读电池温度
         int batt_raw = read_battery_temp();
         if (batt_raw < 0) return;
 
-        // 输入 EMA 滤波（新值权重语义：alpha=新值占比）
-        if (pid_batt_filtered < 0) {
-            pid_batt_filtered = batt_raw;
+        // ── 温度更新周期跟踪（基于周期数，非时间） ──
+        if (batt_temp_updated) {
+            int gap = pid_idle_cycles + 1;  // 距离上次更新经过的周期数
+            if (pid_filter_interval_smooth < 0) {
+                pid_filter_interval_smooth = gap * 10;  // ×10 转 0.1周期
+            } else {
+                int old_s = pid_filter_interval_smooth;
+                pid_filter_interval_smooth = EMA(gap * 10, old_s, pid_filter_auto_alpha);
+                // 方向取整：平滑值增大→向上取整，减小→向下取整
+                if (pid_filter_interval_smooth > old_s) pid_filter_interval_smooth++;
+            }
+            pid_idle_cycles = 0;
         } else {
-            pid_batt_filtered = EMA(batt_raw, pid_batt_filtered, pid_batt_alpha);
+            pid_idle_cycles++;
         }
 
-        // ═══ 温度未更新跳过（mtime 检测替代 BATT_SKIP_MAX） ═══
-        // mtime 未变 → 跳过 PID 重算（包括 CPU 读入和补偿计算）
-        if (!batt_temp_updated && pid_last_batt >= 0) {
-            debug_log(debug_pid, "PID 跳过（温度未更新）");
-            return;
+        // ── 自适应滤波开关（仅在配置开启时生效，不修改配置文件值） ──
+        int filter_cfg_on = pid_input_filter_enabled;
+        if (filter_cfg_on && pid_filter_interval_smooth >= 0) {
+            if (pid_filter_auto_disabled) {
+                if (pid_filter_interval_smooth < pid_filter_auto_threshold_off) {
+                    pid_filter_auto_disabled = 0;
+                    write_log("滤波 自适应恢复（间隔%.1f周期 <%d.%d周期）",
+                              pid_filter_interval_smooth / 10.0,
+                              pid_filter_auto_threshold_off / 10, pid_filter_auto_threshold_off % 10);
+                }
+            } else {
+                if (pid_filter_interval_smooth > pid_filter_auto_threshold_on) {
+                    pid_filter_auto_disabled = 1;
+                    write_log("滤波 自适应关闭（间隔%.1f周期 >%d.%d周期）",
+                              pid_filter_interval_smooth / 10.0,
+                              pid_filter_auto_threshold_on / 10, pid_filter_auto_threshold_on % 10);
+                }
+            }
+        }
+        int filter_eff = filter_cfg_on && !pid_filter_auto_disabled;
+
+        // ── 根据有效滤波状态分支 ──
+        if (filter_eff) {
+            // 滤波模式：EMA 滤波 + 方向取整（增大→向上取整，减小→向下取整）
+            if (pid_batt_filtered < 0) {
+                pid_batt_filtered = batt_raw;
+            } else {
+                int old_f = pid_batt_filtered;
+                int numer = batt_raw * pid_batt_alpha + pid_batt_filtered * (100 - pid_batt_alpha);
+                int new_val = numer / 100;
+                if (new_val > old_f && numer % 100 > 0) {
+                    new_val++;  // 增大且有余数 → 向上取整
+                }
+                pid_batt_filtered = new_val;
+            }
+        } else {
+            // 无滤波模式：原始值直通，温度未更新则跳过本周期
+            pid_batt_filtered = batt_raw;
+            if (!batt_temp_updated && pid_last_batt >= 0) {
+                debug_log(debug_pid, "PID 跳过（温度未更新）");
+                return;
+            }
         }
 
-        // ═══ CPU 温度读入与滤波（用于补偿，无紧急逻辑） ═══
+        // ═══ CPU 温度读入与滤波（用于补偿，两模式共享） ═══
         int cpu_now = read_cpu_temp_max();
         if (cpu_now >= 0) {
             if (first_run) {
@@ -2079,7 +2135,7 @@ static void main_loop(void) {
             }
         }
 
-        // ═══ 补偿值计算（每周期更新，不受电池温度变化限制） ═══
+        // ═══ 补偿值计算（两模式共享） ═══
         float cpu_comp = 0.0f, curr_comp = 0.0f;
 
         if (pid_cpu_comp_enabled && cpu_weighted >= 0) {
@@ -2109,35 +2165,28 @@ static void main_loop(void) {
         float total_comp = cpu_comp + curr_comp;
         int total_comp_10 = (int)(total_comp * 10 + 0.5f);
 
-        // 温度或补偿变化时才执行 PID（首次 pid_last_batt<0 也会进入）
-        if (batt_raw != pid_last_batt || total_comp_10 != pid_last_comp_10) {
-            time_t now = time(NULL);
+        // ═══ PID 重算判定 ═══
+        // 滤波模式：每周期都重算 | 无滤波模式：温度或补偿变化时才重算
+        int should_recompute = filter_eff ||
+                               (batt_raw != pid_last_batt || total_comp_10 != pid_last_comp_10);
+
+        if (should_recompute) {
             float dt = (float)(now - pid_last_change_time);
             if (dt > 30.0f) dt = 30.0f;
             if (dt < 3.0f)  dt = 3.0f;
 
-            // 方案 A：补偿加到 PID 输入温度
-            int compensated_10 = pid_batt_filtered + total_comp_10;
+            int pid_input = (filter_eff ? pid_batt_filtered : batt_raw);
+            int compensated_10 = pid_input + total_comp_10;
             float pid_out = pid_compute(compensated_10, dt);
 
-            // 输出 EMA 平滑（首次直接赋初值）
-            if (pid_output_smoothed < 0.001f && pid_last_batt < 0) {
-                pid_output_smoothed = pid_out;
-            } else {
-                pid_output_smoothed = (pid_output_alpha * pid_out +
-                                       (100 - pid_output_alpha) * pid_output_smoothed) / 100.0f;
-            }
+            // 直接映射到物理值（无输出平滑）
+            pid_map_output(pid_out, &pid_target_cold, &pid_target_rpm);
 
-            // 映射到物理值
-            pid_map_output(pid_output_smoothed,
-                           &pid_target_cold, &pid_target_rpm);
-
-            // 详细调试信息（仅 debug_pid 开启时输出，不含下发日志）
-            pid_log("epoch=%ld Tbatt=%d+comp%+.1f(cpu%+.1f+curr%+.1f)=Tinp%d Ttgt=%d Thot=%d dt=%.0fs e=%.2f raw=%.2f sm=%.2f",
-                     now, pid_batt_filtered, total_comp, cpu_comp, curr_comp,
+            pid_log("epoch=%ld Tbatt=%d+comp%+.1f(cpu%+.1f+curr%+.1f)=Tinp%d Ttgt=%d Thot=%d dt=%.0fs e=%.2f out=%.2f",
+                     now, pid_input, total_comp, cpu_comp, curr_comp,
                      compensated_10, BATT_BASELINE, cooler_hot_temp,
                      dt, (compensated_10 - BATT_BASELINE) / 10.0f,
-                     pid_out, pid_output_smoothed);
+                     pid_out);
 
             pid_last_batt = batt_raw;
             pid_last_comp_10 = total_comp_10;
@@ -2384,7 +2433,6 @@ int main(int argc, char *argv[]) {
             goto pid_init_done;
         }
 
-        pid_output_smoothed = pid_ratio;
         pid_target_cold     = pid_init_cold;
         pid_target_rpm      = pid_rpm_min + (int)(pid_ratio * (pid_rpm_max - pid_rpm_min));
         pid_integral        = 0;

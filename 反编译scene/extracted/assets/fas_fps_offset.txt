@@ -1,4 +1,0 @@
-com.tencent.tmgp.pubgmhd=-10
-com.kurogame.mingchao=-20
-com.tencent.tmgp.cod=-10
-com.tencent.tmgp.dfm=-20

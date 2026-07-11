@@ -1,1 +1,0 @@
-[[ $(settings get global hide_error_dialogs) = "1" ]] && echo 1 || echo 0
