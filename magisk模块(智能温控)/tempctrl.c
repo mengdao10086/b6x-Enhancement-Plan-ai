@@ -27,6 +27,7 @@
 #include <sys/stat.h>
 #include <sys/wait.h>
 #include <fcntl.h>
+#include <limits.h>
 #include <math.h>
 
 // --- 通用宏 ---
@@ -358,7 +359,7 @@ static int pid_hot_map_max = 450;         // PID_HOT_MAP_MAX（0.1°C）
 
 // PID 运行状态
 static int pid_integral = 0;              // 积分累积值
-static int pid_prev_error = 0;            // 上周期误差（0.1°C）
+static int pid_prev_error = 0;            // 上周期误差（float°C 的整数截断，D 项需要差值）
 static int pid_batt_filtered = -1;        // EMA 滤波后电池温度
 static int pid_last_batt = -1;            // 上次参与 PID 计算的原始温度
 static time_t pid_last_change_time = 0;   // 上次温度变化时间戳
@@ -632,14 +633,14 @@ static void load_config(const char *path) {
         // [组 3] 调试子项：仅 DEBUG_ENABLED=1 时生效
         // ═══════════════════════════════════════════════════════════
         else if (debug_mode) {
-            if      (strcmp(key, "DEBUG_SENSOR") == 0)  { debug_sensor = (val != 0); }
-            else if (strcmp(key, "DEBUG_EMERG") == 0)   { debug_emerg   = (val != 0); }
-            else if (strcmp(key, "DEBUG_BATT") == 0)    { debug_batt    = (val != 0); }
-            else if (strcmp(key, "DEBUG_EXEC") == 0)    { debug_exec    = (val != 0); }
-            else if (strcmp(key, "DEBUG_CONN") == 0)    { debug_conn    = (val != 0); }
-            else if (strcmp(key, "DEBUG_CONFIG") == 0)  { debug_config  = (val != 0); }
-            else if (strcmp(key, "DEBUG_MAIN") == 0)    { debug_main    = (val != 0); }
-            else if (strcmp(key, "DEBUG_PID") == 0)     { debug_pid     = (val != 0); }
+            if      (strcmp(key, "DEBUG_SENSOR") == 0)  debug_sensor = (val != 0);
+            else if (strcmp(key, "DEBUG_EMERG") == 0)   debug_emerg   = (val != 0);
+            else if (strcmp(key, "DEBUG_BATT") == 0)    debug_batt    = (val != 0);
+            else if (strcmp(key, "DEBUG_EXEC") == 0)    debug_exec    = (val != 0);
+            else if (strcmp(key, "DEBUG_CONN") == 0)    debug_conn    = (val != 0);
+            else if (strcmp(key, "DEBUG_CONFIG") == 0)  debug_config  = (val != 0);
+            else if (strcmp(key, "DEBUG_MAIN") == 0)    debug_main    = (val != 0);
+            else if (strcmp(key, "DEBUG_PID") == 0)     debug_pid     = (val != 0);
         }
 
         // ═══════════════════════════════════════════════════════════
@@ -1123,8 +1124,8 @@ static int read_cpu_temp_max(void) {
         if (decic > max_temp) max_temp = decic;
     }
     if (max_temp >= 0) {
-        debug_log(debug_sensor, "cpu_temp zone=%.0f max=%d (%.1f°C)",
-                  (double)cpu_zone_count, max_temp, max_temp / 10.0);
+        debug_log(debug_sensor, "cpu_temp zone=%d max=%d (%.1f°C)",
+                  cpu_zone_count, max_temp, max_temp / 10.0);
     }
     return max_temp;
 }
@@ -1379,11 +1380,9 @@ static void battery_control(void) {
     }
 
     // 计算本周期温度变化量和常规升降档量（先算，给跳过逻辑参考）
-    int batt_change = 0, abs_change = 0;
-    if (last_batt_reading >= 0) {
-        batt_change = batt - last_batt_reading;
-        abs_change = abs(batt_change);
-    }
+    // last_batt_reading 必定 >= 0（上方已早退处理 <0 的情况）
+    int batt_change = batt - last_batt_reading;
+    int abs_change = abs(batt_change);
     int diff = batt - BATT_BASELINE;
     int ad = abs(diff);
     int sign = sign_of(diff);
@@ -1422,7 +1421,7 @@ static void battery_control(void) {
     if (rev_comp_cooldown > 0) rev_comp_cooldown--;
 
     // ═══════════════ 反补查表（Sheet3 三区×双向×三级阈值） ═══════════════
-    if (last_batt_reading >= 0 && abs_change > 0) {
+    if (abs_change > 0) {
         int trend_rev = (delta > 0 && batt < last_batt_reading) ||
                         (delta < 0 && batt > last_batt_reading);
         int dir = (batt_change > 0) ? 1 : -1;  // +1=升温, -1=降温
@@ -1434,112 +1433,112 @@ static void battery_control(void) {
 
         // 根据方向+区域查三级阈值（0.1°C 单位，999=无穷大）
         // REV_COMP_T1/T2/T3 默认 2/3/4 = 0.2°C / 0.3°C / 0.4°C 每周期，可通过 profile.conf 配置
-	        int t1 = 999, t2 = 999, t3 = 999;
-	        if (dir > 0) {
-	            if      (is_cold_outer) { t1 = REV_COMP_T3; }
-	            else if (in_inner_zone) { t1 = REV_COMP_T2; t2 = REV_COMP_T3; }
-	            else                   { t1 = REV_COMP_T1; t2 = REV_COMP_T2; t3 = REV_COMP_T3; }
-	        } else {
-	            if      (is_cold_outer) { t1 = REV_COMP_T1; t2 = REV_COMP_T2; t3 = REV_COMP_T3; }
-	            else if (in_inner_zone) { t1 = REV_COMP_T2; t2 = REV_COMP_T3; }
-	            else                   { t1 = REV_COMP_T3; }
-	        }
+        int t1 = 999, t2 = 999, t3 = 999;
+        if (dir > 0) {
+            if      (is_cold_outer) { t1 = REV_COMP_T3; }
+            else if (in_inner_zone) { t1 = REV_COMP_T2; t2 = REV_COMP_T3; }
+            else                   { t1 = REV_COMP_T1; t2 = REV_COMP_T2; t3 = REV_COMP_T3; }
+        } else {
+            if      (is_cold_outer) { t1 = REV_COMP_T1; t2 = REV_COMP_T2; t3 = REV_COMP_T3; }
+            else if (in_inner_zone) { t1 = REV_COMP_T2; t2 = REV_COMP_T3; }
+            else                   { t1 = REV_COMP_T3; }
+        }
 
-	        // 统一计算每周期速率（用于下方趋势豁免和反补）
-	        int total_abs = abs_change + rev_comp_pending_abs;
-	        int total_interval = (cur_idle + 1) + rev_comp_pending_idle;
-	        int rate = total_abs / total_interval;
-	        if (rate < 1) rate = 1;
+        // 统一计算每周期速率（用于下方趋势豁免和反补）
+        int total_abs = abs_change + rev_comp_pending_abs;
+        int total_interval = (cur_idle + 1) + rev_comp_pending_idle;
+        int rate = total_abs / total_interval;
+        if (rate < 1) rate = 1;
 
-	        // 计算跨过几个阈值（用于反补档位数和豁免范围判断）
-	        int steps = (rate > t1) + (rate > t2) + (rate > t3);
+        // 计算跨过几个阈值（用于反补档位数和豁免范围判断）
+        int steps = (rate > t1) + (rate > t2) + (rate > t3);
 
-	        // ═══ 趋势豁免（抬高生效阈值） ═══
-	        // 豁免阈值随速率提高而抬高：
-	        //   steps=0(T1未触发) → 豁免区间 [0, T1)（原行为）
-	        //   steps=1(T1已触发, T2未触发) → 豁免区间 [T1, T2)（抬至T1以上）
-	        //   steps=2(T2已触发, T3未触发) → 豁免区间 [T2, T3)（抬至T2以上）
-	        //   steps=3(T3已触发) → 始终不豁免
-	        //
-	        // 温度锚点复位：首次豁免记录当前温度为锚点。区间中间值（steps=0→T1/2,
-	        // steps=1→(T1+T2)/2, steps=2→(T2+T3)/2）作为偏移量：降温豁免用减号
-	        // （锚点-偏移量=复位阈值），升温豁免用加号（锚点+偏移量=复位阈值）。
-	        // 电池温度越过复位阈值后豁免计数器复位，下轮以新锚点重新开始
-	        if (TREND_EXEMPT_ENABLED && !in_cooldown && rev_comp_pending_abs == 0 && steps < 3) {
-	            if (trend_rev && battery_fan_level > level_min &&
-	                battery_fan_level < level_max)
-	            {
-	                if (trend_override == 0) {
-	                    // 首次豁免：记录锚点温度
-	                    override_anchor_temp = batt;
-	                    write_log("趋势豁免 %d", gear_label(battery_fan_level));
-	                    trend_override++;
-	                    skip_delta = 1;
-	                } else {
-	                    // 持续豁免中：计算当前区间中间值（0.1°C）
-	                    int band_mid;
-	                    if      (steps == 0) band_mid = REV_COMP_T1 / 2;
-	                    else if (steps == 1) band_mid = (REV_COMP_T1 + REV_COMP_T2) / 2;
-	                    else                 band_mid = (REV_COMP_T2 + REV_COMP_T3) / 2;
-	                    if (band_mid < 1) band_mid = 1;
+        // ═══ 趋势豁免（抬高生效阈值） ═══
+        // 豁免阈值随速率提高而抬高：
+        //   steps=0(T1未触发) → 豁免区间 [0, T1)（原行为）
+        //   steps=1(T1已触发, T2未触发) → 豁免区间 [T1, T2)（抬至T1以上）
+        //   steps=2(T2已触发, T3未触发) → 豁免区间 [T2, T3)（抬至T2以上）
+        //   steps=3(T3已触发) → 始终不豁免
+        //
+        // 温度锚点复位：首次豁免记录当前温度为锚点。区间中间值（steps=0→T1/2,
+        // steps=1→(T1+T2)/2, steps=2→(T2+T3)/2）作为偏移量：降温豁免用减号
+        // （锚点-偏移量=复位阈值），升温豁免用加号（锚点+偏移量=复位阈值）。
+        // 电池温度越过复位阈值后豁免计数器复位，下轮以新锚点重新开始
+        if (TREND_EXEMPT_ENABLED && !in_cooldown && rev_comp_pending_abs == 0 && steps < 3) {
+            if (trend_rev && battery_fan_level > level_min &&
+                battery_fan_level < level_max)
+            {
+                if (trend_override == 0) {
+                    // 首次豁免：记录锚点温度
+                    override_anchor_temp = batt;
+                    write_log("趋势豁免 %d", gear_label(battery_fan_level));
+                    trend_override++;
+                    skip_delta = 1;
+                } else {
+                    // 持续豁免中：计算当前区间中间值（0.1°C）
+                    int band_mid;
+                    if      (steps == 0) band_mid = REV_COMP_T1 / 2;
+                    else if (steps == 1) band_mid = (REV_COMP_T1 + REV_COMP_T2) / 2;
+                    else                 band_mid = (REV_COMP_T2 + REV_COMP_T3) / 2;
+                    if (band_mid < 1) band_mid = 1;
 
-	                    // 降温（delta<0，温度向基准降温）→ 锚点 - 中值 = 复位下限
-	                    // 升温（delta>0，温度向基准升温）→ 锚点 + 中值 = 复位上限
-	                    int reset_threshold;
-	                    int reset_triggered = 0;
-	                    if (delta < 0) {
-	                        reset_threshold = override_anchor_temp - band_mid;
-	                        if (batt <= reset_threshold) reset_triggered = 1;
-	                    } else {
-	                        reset_threshold = override_anchor_temp + band_mid;
-	                        if (batt >= reset_threshold) reset_triggered = 1;
-	                    }
+                    // 降温（delta<0，温度向基准降温）→ 锚点 - 中值 = 复位下限
+                    // 升温（delta>0，温度向基准升温）→ 锚点 + 中值 = 复位上限
+                    int reset_threshold;
+                    int reset_triggered = 0;
+                    if (delta < 0) {
+                        reset_threshold = override_anchor_temp - band_mid;
+                        if (batt <= reset_threshold) reset_triggered = 1;
+                    } else {
+                        reset_threshold = override_anchor_temp + band_mid;
+                        if (batt >= reset_threshold) reset_triggered = 1;
+                    }
 
-	                    if (reset_triggered) {
-	                        // 温度越过复位阈值 → 复位豁免
-	                        trend_override = 0;
-	                    } else {
-	                        trend_override++;
-	                        skip_delta = 1;
-	                    }
-	                }
-	            } else {
-	                trend_override = 0;
-	            }
-	        }
+                    if (reset_triggered) {
+                        // 温度越过复位阈值 → 复位豁免
+                        trend_override = 0;
+                    } else {
+                        trend_override++;
+                        skip_delta = 1;
+                    }
+                }
+            } else {
+                trend_override = 0;
+            }
+        }
 
-	        // ═══ 反补（不为全效豁免时执行） ═══
-	        if (REV_COMP_ENABLED && !skip_delta && (steps > 0 || rev_comp_pending_abs > 0)) {
-	            trend_override = 0;
+        // ═══ 反补（不为全效豁免时执行） ═══
+        if (REV_COMP_ENABLED && !skip_delta && (steps > 0 || rev_comp_pending_abs > 0)) {
+            trend_override = 0;
 
-	            if (rev_comp_cooldown == 0) {
-	                // 冷却已到 → 用速率查表执行反补
-	                int adjust = dir * steps;
+            if (rev_comp_cooldown == 0) {
+                // 冷却已到 → 用速率查表执行反补
+                int adjust = dir * steps;
 
-	                rev_comp_pending_abs = 0;
-	                rev_comp_pending_idle = 0;
+                rev_comp_pending_abs = 0;
+                rev_comp_pending_idle = 0;
 
-	                if (adjust != 0) {
-	                    int old = battery_fan_level;
-	                    battery_fan_level += adjust;
-	                    battery_fan_level = clamp(battery_fan_level, level_min, level_max);
-	                    skip_delta = 1;
-	                    if (old != battery_fan_level) {
-	                        batt_cooldown = BATT_COOLDOWN_CYCLES;
-	                        rev_comp_cooldown = REV_COMP_COOLDOWN;
-	                        write_log("过冲%d/%d 挡位%d（%+d）",
-	                                  rate / 10, rate % 10,
-	                                  gear_label(battery_fan_level), adjust);
-	                    }
-	                }
-	            } else {
-	                // 冷却期内累积温差和周期数，不做调整
-	                rev_comp_pending_abs = total_abs;
-	                rev_comp_pending_idle = total_interval;
-	                debug_log(debug_batt, "batt_ctrl 反补冷却中 累积 abs=%d 周期=%d", total_abs, total_interval);
-	            }
-	        }
-	    }
+                if (adjust != 0) {
+                    int old = battery_fan_level;
+                    battery_fan_level += adjust;
+                    battery_fan_level = clamp(battery_fan_level, level_min, level_max);
+                    skip_delta = 1;
+                    if (old != battery_fan_level) {
+                        batt_cooldown = BATT_COOLDOWN_CYCLES;
+                        rev_comp_cooldown = REV_COMP_COOLDOWN;
+                        write_log("过冲%d/%d 挡位%d（%+d）",
+                                  rate / 10, rate % 10,
+                                  gear_label(battery_fan_level), adjust);
+                    }
+                }
+            } else {
+                // 冷却期内累积温差和周期数，不做调整
+                rev_comp_pending_abs = total_abs;
+                rev_comp_pending_idle = total_interval;
+                debug_log(debug_batt, "batt_ctrl 反补冷却中 累积 abs=%d 周期=%d", total_abs, total_interval);
+            }
+        }
+    }
     // ---- 应用常规升降档（仅当未被豁免/反补跳过时） ----
     if (delta != 0 && !skip_delta) {
         int old = battery_fan_level;
@@ -1879,9 +1878,7 @@ static int rpm_combine_weighted(int rpm_hot, int rpm_cold) {
 static void pid_map_output(float output, int *out_cold, int *out_rpm) {
     int range = pid_cold_max - pid_cold_min;
     if (range <= 0) range = 1;
-    int cold = pid_cold_min + (int)(output * range);
-    if (cold < pid_cold_min) cold = pid_cold_min;
-    if (cold > pid_cold_max) cold = pid_cold_max;
+    int cold = clamp(pid_cold_min + (int)(output * range), pid_cold_min, pid_cold_max);
 
     int rpm = rpm_from_cold_exp(cold);
     if (cooler_hot_temp > 0) {
@@ -1914,6 +1911,10 @@ static void apply_level_direct(int mode, int target,
         actual_cold == last_coldOC && wl == last_windLevel)
         return;
 
+    // 偏差 = (滤波后电池温度 + 补偿) - 目标温度，取自上一周期 PID 计算的结果
+    int batt_10 = (pid_batt_filtered >= 0) ? pid_batt_filtered : BATT_BASELINE;
+    int dev_10 = batt_10 + pid_last_comp_10 - BATT_BASELINE;
+    pid_log("%+d° 冷%d RPM%d", dev_10 / 10, actual_cold, send_rpm);
     send_am_broadcast(mode, target, send_rpm, actual_cold, wl);
 
     last_sent_valid  = 1;
