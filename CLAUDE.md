@@ -64,9 +64,10 @@ MUST 先在 `参考资料/` 搜索关键词，再考虑加诊断钩子。这里�
 
 | 工具 | 位置 |
 |------|------|
-| `baksmali.jar` | `参考资料/smali修改重编译apk尝试/baksmali.jar` |
-| `smali.jar` | `参考资料/smali修改重编译apk尝试/smali.jar` |
-| `debug.keystore` | `参考资料/smali修改重编译apk尝试/debug.keystore` |
+| `baksmali.jar` | `../../工具/baksmali.jar`（集中目录） |
+| `smali.jar` | `../../工具/smali.jar` |
+| `debug.keystore` | `../../工具/debug.keystore` |
+| `jadx.jar` | `../../工具/jadx.jar` |
 
 ---
 
