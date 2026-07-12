@@ -375,12 +375,15 @@ static float pid_curr_comp_smooth = 0.0f;  // 电流补偿 EMA 平滑值（°C�
 static int pid_last_comp_10 = 0;           // 上次 PID 重算时的补偿值（0.1°C）
 
 // PID 输入滤波自适应开关参数
-static int pid_filter_auto_threshold_on = 22;   // PID_FILTER_AUTO_THRESHOLD_ON: 平滑周期数>此值(0.1周期)自动关闭滤波,默认2.2周期
-static int pid_filter_auto_threshold_off = 18;  // PID_FILTER_AUTO_THRESHOLD_OFF: 平滑周期数<此值(0.1周期)重新打开,默认1.8周期
+static int pid_filter_auto_threshold_on = 30;   // PID_FILTER_AUTO_THRESHOLD_ON: 平滑周期数>此值*0.1周期自动关闭滤波
+static int pid_filter_auto_threshold_off = 20;  // PID_FILTER_AUTO_THRESHOLD_OFF: 平滑周期数<此值*0.1周期重新打开
 static int pid_filter_auto_alpha = 20;          // PID_FILTER_AUTO_ALPHA: 间隔EMA平滑系数(%)
 static int pid_filter_auto_disabled = 0;        // 运行时标志：1=自适应关闭了滤波（不修改配置文件值）
 static int pid_filter_interval_smooth = -1;     // 平滑后的温度更新周期数(0.1周期，如22=2.2周期)
 static int pid_idle_cycles = 0;                  // 自上次温度更新以来经过的周期数
+
+// PID 滤波间隔 EMA 输入钳位（0.1周期），防止单次长间隙导致平滑值异常跳变
+#define PID_FILTER_GAP_MAX    100     // 最大输入值=10.0周期，超过此值被钳位
 
 // PID 目标值（供 rate_limited_execute 读取）
 static int pid_target_rpm = 2000;
@@ -1924,7 +1927,7 @@ static void apply_level_direct(int mode, int target,
     // 偏差 = (滤波后电池温度 + 补偿) - 目标温度，取自上一周期 PID 计算的结果
     int batt_10 = (pid_batt_filtered >= 0) ? pid_batt_filtered : BATT_BASELINE;
     int dev_10 = batt_10 + pid_last_comp_10 - BATT_BASELINE;
-    pid_log("%+d° 冷%d RPM%d", dev_10 / 10, actual_cold, send_rpm);
+    write_log("%+d° 冷%d RPM%d", dev_10 / 10, actual_cold, send_rpm);
     send_am_broadcast(mode, target, send_rpm, actual_cold, wl);
 
     last_sent_valid  = 1;
@@ -2072,7 +2075,10 @@ static void main_loop(void) {
                 pid_filter_interval_smooth = gap * 10;  // ×10 转 0.1周期
             } else {
                 int old_s = pid_filter_interval_smooth;
-                pid_filter_interval_smooth = EMA(gap * 10, old_s, pid_filter_auto_alpha);
+                // 钳位输入值：防单次长间隙（如传感器暂停更新数十周期）导致平滑值异常跳变
+                int raw_gap = gap * 10;
+                if (raw_gap > PID_FILTER_GAP_MAX) raw_gap = PID_FILTER_GAP_MAX;
+                pid_filter_interval_smooth = EMA(raw_gap, old_s, pid_filter_auto_alpha);
                 // 方向取整：平滑值增大→向上取整，减小→向下取整
                 if (pid_filter_interval_smooth > old_s) pid_filter_interval_smooth++;
             }
@@ -2087,16 +2093,16 @@ static void main_loop(void) {
             if (pid_filter_auto_disabled) {
                 if (pid_filter_interval_smooth < pid_filter_auto_threshold_off) {
                     pid_filter_auto_disabled = 0;
-                    write_log("滤波 自适应恢复（间隔%.1f周期 <%d.%d周期）",
-                              pid_filter_interval_smooth / 10.0,
-                              pid_filter_auto_threshold_off / 10, pid_filter_auto_threshold_off % 10);
+                    pid_log("滤波 自适应恢复（间隔%.1f周期 <%d.%d周期）",
+                             pid_filter_interval_smooth / 10.0,
+                             pid_filter_auto_threshold_off / 10, pid_filter_auto_threshold_off % 10);
                 }
             } else {
                 if (pid_filter_interval_smooth > pid_filter_auto_threshold_on) {
                     pid_filter_auto_disabled = 1;
-                    write_log("滤波 自适应关闭（间隔%.1f周期 >%d.%d周期）",
-                              pid_filter_interval_smooth / 10.0,
-                              pid_filter_auto_threshold_on / 10, pid_filter_auto_threshold_on % 10);
+                    pid_log("滤波 自适应关闭（间隔%.1f周期 >%d.%d周期）",
+                             pid_filter_interval_smooth / 10.0,
+                             pid_filter_auto_threshold_on / 10, pid_filter_auto_threshold_on % 10);
                 }
             }
         }
