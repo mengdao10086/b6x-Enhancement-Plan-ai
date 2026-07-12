@@ -2061,6 +2061,7 @@ static void main_loop(void) {
 
     // ═══ PID 模式：跳过档位/紧急逻辑，直接 PID 计算 ═══
     if (ctrl_mode == 1) {
+        time_t now = time(NULL);
         int batt_raw = read_battery_temp();
         if (batt_raw < 0) return;
 
