@@ -1,1 +1,0 @@
-rm -r /data/vendor/thermal/config*
