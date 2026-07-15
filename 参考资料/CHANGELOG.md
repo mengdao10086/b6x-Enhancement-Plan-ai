@@ -2,6 +2,14 @@
 
 > 格式：[Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)
 
+## v2.4（2026-07-17）
+
+### Changed
+- **配置解析重组**：去掉分组子守卫（CURRENT_GEAR_MODE/ctrl_mode/gear_config_enabled 等），PERF_ENABLED=1 时所有参数全量解析。只有两层：PERF_ENABLED 控制除 DEBUG_* 外的全部参数，DEBUG_ENABLED 控制 8 个调试子开关。LOG_FILE/LOG_MAX_KB 归 PERF_ENABLED 管理（不再固定解析）。配置文件参数顺序不再影响解析结果。
+
+### Fixed
+- 文档参数名与实际代码不一致问题（BATT_ZONE→BATT_BOUNDARY、BATT_RECOVERY→EMERG_RECOVERY_MULT、PID_* 前缀等）
+
 ## v2.3（2026-07-09）
 
 ### Added
@@ -28,7 +36,7 @@
 - **配置文件重构**：性能与调试开关分离层级
   - `CONFIG_ENABLED` → `PERF_ENABLED`（只管理性能参数：挡位表、PID、紧急、速率限制等）
   - `DEBUG_MODE` → `DEBUG_ENABLED`（提升为与 `PERF_ENABLED` 平级的独立总开关）
-  - 日志路径（`LOG_FILE`）和大小（`LOG_MAX_KB`）不再受任何总开关管理，持续生效
+  - 日志路径（`LOG_FILE`）和大小（`LOG_MAX_KB`）归 `PERF_ENABLED` 管理
   - 配置文件中「日志 & 调试」和「sysfs 路径与缩放」部分互换前后位置
   - `load_config` 中 `perf_enabled` 守卫包裹所有性能参数；debug 子项分组独立于 `perf_enabled`
   - `DEBUG_PID` 从 PID 分组移至调试子项分组，归 `DEBUG_ENABLED` 统一管理
