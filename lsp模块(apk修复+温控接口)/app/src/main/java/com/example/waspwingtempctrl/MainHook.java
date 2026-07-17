@@ -483,14 +483,14 @@ public class MainHook implements IXposedHookLoadPackage {
             XposedHelpers.findAndHookMethod(sdkVm, "onDeviceInfoUpdate",
                     waspInfoCls, new XC_MethodHook() {
                         @Override
-                        protected void afterHookedMethod(MethodHookParam param) {
+                        protected void beforeHookedMethod(MethodHookParam param) {
                             Object info = param.args[0];
                             lastWaspWingInfo = info;  // v2.3：捕获散热器全参数回传
 
-                            // 修正 experimentalRunModeValue，阻止 App 自修复逻辑触发 BLE 命令竞争
-                            // App 的条件：experimentalRunModeValue == realColdLevel + 1 → 跳过修复
-                            // 之前设成 lastSetColdOC（过大）导致条件永假，自修复每周期都发命令，
-                            // 和 PID 的 setRunMode 相互覆盖，队列膨胀后 PID 命令严重延迟。
+                            // 修正 experimentalRunModeValue，阻止 App 自修复触发 BLE 命令竞争
+                            // 必须在 original method 执行前修正，因为 self-repair 在
+                            // original method 内部检查条件并发命令。beforeHookedMethod
+                            // 确保值已修正，self-repair 检查通过后跳过无命令发出。
                             try {
                                 Object realCold = XposedHelpers.callMethod(info, "getRealColdLevel");
                                 if (realCold != null) {
@@ -506,17 +506,21 @@ public class MainHook implements IXposedHookLoadPackage {
                                     + " windLevel(real)=" + wind);
                         }
                     });
-            XposedBridge.log(TAG + " 已钩住 SDK WaspwingViewModel.onDeviceInfoUpdate");
+            XposedBridge.log(TAG + " 已钩住 SDK WaspwingViewModel.onDeviceInfoUpdate（beforeHook）");
 
-            // App 层 WaspWingViewModel 的 onDeviceInfoUpdate（散热器数据实际经过此类）
+            // App 层 WaspWingViewModel.onDeviceInfoUpdate — 自修复逻辑在此
+            // 方法先 postValue(info) 再检查 experimentalRunModeValue。
+            // 必须用 beforeHookedMethod 在 original 执行前修正值，
+            // 否则 self-repair 在 original 内部已发出 setExperimentalRunMode 命令。
             XposedHelpers.findAndHookMethod(appVm, "onDeviceInfoUpdate",
                     waspInfoCls, new XC_MethodHook() {
                         @Override
-                        protected void afterHookedMethod(MethodHookParam param) {
+                        protected void beforeHookedMethod(MethodHookParam param) {
                             Object info = param.args[0];
                             lastWaspWingInfo = info;
 
-                            // 同上：设 experimentalRunModeValue = realColdLevel + 1 阻止自修复
+                            // 设 experimentalRunModeValue = realColdLevel + 1
+                            // 满足 self-repair 的跳过条件，阻止 BLE 命令发出。
                             try {
                                 Object realCold = XposedHelpers.callMethod(info, "getRealColdLevel");
                                 if (realCold != null) {
@@ -532,7 +536,7 @@ public class MainHook implements IXposedHookLoadPackage {
                                     + " windLevel(real)=" + wind);
                         }
                     });
-            XposedBridge.log(TAG + " 已钩住 App WaspWingViewModel.onDeviceInfoUpdate");
+            XposedBridge.log(TAG + " 已钩住 App WaspWingViewModel.onDeviceInfoUpdate（beforeHook）");
 
         } catch (Exception e) {
             XposedBridge.log(TAG + " 钩诊断失败: " + e.getMessage());
@@ -651,6 +655,23 @@ public class MainHook implements IXposedHookLoadPackage {
                 }
             });
             XposedBridge.log(TAG + " 已钩住 WaspWingManager 构造函数");
+
+            // ===== 屏蔽 App 自修复：setExperimentalRunMode → 无操作 =====
+            // App 的 onDeviceInfoUpdate 中自修复逻辑会调用此方法发出 BLE 命令，
+            // 与 PID 的 setRunMode 竞争 BLE 队列。即使上面 beforeHookedMethod
+            // 已提前修正值，仍加一层安全网拦截其他路径的调用。
+            XposedHelpers.findAndHookMethod(mgrCls, "setExperimentalRunMode",
+                    boolean.class, Integer.class, Integer.class,
+                    new XC_MethodHook() {
+                        @Override
+                        protected void beforeHookedMethod(MethodHookParam param) {
+                            XposedBridge.log(TAG + " 拦截 setExperimentalRunMode("
+                                    + param.args[0] + ", " + param.args[1]
+                                    + ", " + param.args[2] + ")");
+                            param.setResult(null);  // 阻止 original method 执行
+                        }
+                    });
+            XposedBridge.log(TAG + " 已钩住 WaspWingManager.setExperimentalRunMode（已屏蔽）");
         } catch (Throwable t) {
             XposedBridge.log(TAG + " 钩 WaspWingManager 失败: " + t.getMessage());
         }
