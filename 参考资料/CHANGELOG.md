@@ -2,18 +2,11 @@
 
 > 格式：[Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)
 
-## v2.4（2026-07-17）
-
-### Changed
-- **配置解析重组**：去掉分组子守卫（CURRENT_GEAR_MODE/ctrl_mode/gear_config_enabled 等），PERF_ENABLED=1 时所有参数全量解析。只有两层：PERF_ENABLED 控制除 DEBUG_* 外的全部参数，DEBUG_ENABLED 控制 8 个调试子开关。LOG_FILE/LOG_MAX_KB 归 PERF_ENABLED 管理（不再固定解析）。配置文件参数顺序不再影响解析结果。
-
-### Fixed
-- 文档参数名与实际代码不一致问题（BATT_ZONE→BATT_BOUNDARY、BATT_RECOVERY→EMERG_RECOVERY_MULT、PID_* 前缀等）
 
 ## v2.3（2026-07-09）
 
 ### Added
-- **GEAR_AUTO_FAN**：挡位模式自动风扇转速（`profile.conf` [7] 挡位表段）。默认 =1，使用冷端强度+热端温度双映射计算风扇转速，挡位表风扇转速配置变为截断上限；=0 恢复旧行为
+- **GEAR_AUTO_FAN**：挡位模式自动风扇转速（`profile.conf` [8] 挡位表段）。默认 =1，使用冷端强度+热端温度双映射计算风扇转速，挡位表风扇转速配置变为截断上限；=0 恢复旧行为
 - **LOG_TRIM_LINES**：日志超限时删除最早 N 行改为可配置（默认 3，0=不清理，`profile.conf` [1] 日志段）
 - **PID 连续无级调节模式**（`CTRL_MODE=1`）：P+I(积分分离±1°C)+D 控制器，归一化输出 0~1，输入 EMA 滤波
 - **mtime 温度检测**（替代 `BATT_SKIP_MAX`）：通过 `stat()` 检查电池温度 sysfs 文件修改时间，仅 mtime 变化时读取，`batt_temp_updated` 标记通知各函数。Gear 和 PID 模式跳过逻辑改为「温度文件未更新 → 跳过」
@@ -23,6 +16,7 @@
 - **`send_am_broadcast()`**：提取公共 fork+exec 代码，`apply_level`/`apply_level_direct` 共享
 
 ### Changed
+- **配置解析重组**：去掉分组子守卫（CURRENT_GEAR_MODE/ctrl_mode/gear_config_enabled 等），PERF_ENABLED=1 时所有参数全量解析。只有两层：PERF_ENABLED 控制除 DEBUG_* 外的全部参数，DEBUG_ENABLED 控制 8 个调试子开关。LOG_FILE/LOG_MAX_KB 归 PERF_ENABLED 管理（不再固定解析）。配置文件参数顺序不再影响解析结果。
 - **删除所有参数下发日志**：不再记录 `[PID] ...°C 冷... RPM...` 和 `apply_level 下发 档位...` 等包含实际下发参数的日志行，保留错误/跳过日志
 - **风扇转速向上取整到 50 的倍数**：所有通过 `am broadcast` 发送的 RPM 值自动 `((rpm + 49) / 50) * 50`
 - `write_log` 日志清理行数改为由 `LOG_TRIM_LINES` 控制（默认 3），硬编码 2 行删除已移除
@@ -45,6 +39,7 @@
   - 移除 `STATUS_TIMEOUT` 配置项：默认值改为 12，不可从配置覆盖
 
 ### Fixed
+- 文档参数名与实际代码不一致问题（BATT_ZONE→BATT_BOUNDARY、BATT_RECOVERY→EMERG_RECOVERY_MULT、PID_* 前缀等）
 - `compute_direct_cold_rpm` 除零 bug（`level_max==level_min` 时分母为 0）
 - 配置热重载 CTRL_MODE 切换未正确触发 PID 对齐
 - 电流-挡位映射模式下 `curr_gear_temp_offset` 被冷却期阻挡无法下降：冷却期内只减计数器不计算偏移，从 +91 归零需要约 10 分钟。修复后每周期都计算偏移，冷却期仅阻止同方向累积，反方向随时可调

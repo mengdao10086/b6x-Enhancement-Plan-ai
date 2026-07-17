@@ -1953,7 +1953,10 @@ static void apply_gear_direct(int mode, int target,
     // 偏差 = (滤波后电池温度 + 补偿) - 目标温度，取自上一周期 PID 计算的结果
     int batt_10 = (pid_batt_filtered >= 0) ? pid_batt_filtered : BATT_BASELINE;
     int dev_10 = batt_10 + pid_last_comp_10 - BATT_BASELINE;
-    write_log("%+d° 冷%d RPM%d", dev_10 / 10, actual_cold, send_rpm);
+    int hot_deg = (cooler_hot_temp > 0) ? cooler_hot_temp / 10 : 0;
+    write_log("%d%+.1f° 冷%d 热%d° RPM%d",
+              BATT_BASELINE / 10, dev_10 / 10.0f,
+              actual_cold, hot_deg, send_rpm);
     send_am_broadcast(mode, target, send_rpm, actual_cold, wl);
 
     last_bcast_valid  = 1;
