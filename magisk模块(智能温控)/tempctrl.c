@@ -355,6 +355,7 @@ static int cold_map_start = 40;       // COLD_MAP_START: 风扇映射起始强�
 static int cold_map_exp = 150;            // COLD_MAP_EXP（÷100）
 static int fan_rpm_min = 2000;            // FAN_RPM_MIN
 static int fan_rpm_max = 6000;            // FAN_RPM_MAX
+static int fan_rpm_change_threshold = 100; // FAN_RPM_CHANGE_THRESHOLD
 static int hot_map_min = 350;         // HOT_MAP_MIN（0.1°C）
 static int hot_map_max = 450;         // HOT_MAP_MAX（0.1°C）
 
@@ -635,6 +636,7 @@ static void load_config(const char *path) {
         else if (strcmp(key, "COLD_MAP_EXP") == 0)         cold_map_exp        = clamp(val, 50, 500);
         else if (strcmp(key, "FAN_RPM_MIN") == 0)          fan_rpm_min         = clamp(val, 1000, 6000);
         else if (strcmp(key, "FAN_RPM_MAX") == 0)          fan_rpm_max         = clamp(val, 1000, 6000);
+        else if (strcmp(key, "FAN_RPM_CHANGE_THRESHOLD") == 0) fan_rpm_change_threshold = clamp(val, 0, 2000);
         else if (strcmp(key, "HOT_MAP_MIN") == 0)      hot_map_min     = clamp(val, 200, 500);
         else if (strcmp(key, "HOT_MAP_MAX") == 0)      hot_map_max     = clamp(val, 200, 500);
 
@@ -1292,7 +1294,10 @@ static int apply_gear(int level) {
     }
 
     // 风扇转速限速（升降独立速率）
-    rate_limit(&actual_rpm, (mode == 0) ? windLevel : windOC,
+    int desired_rpm = (mode == 0) ? windLevel : windOC;
+    if (fan_rpm_change_threshold > 0 && abs(desired_rpm - actual_rpm) <= fan_rpm_change_threshold)
+        desired_rpm = actual_rpm;
+    rate_limit(&actual_rpm, desired_rpm,
                RATE_LIMIT_RPM_UP, RATE_LIMIT_RPM_DOWN);
 
     // 制冷强度限速
@@ -1942,6 +1947,8 @@ static void apply_gear_direct(int mode, int target,
     rate_limit(&actual_cold, cold, RATE_LIMIT_COLD, RATE_LIMIT_COLD);
 
     // 风扇转速限速（升降独立速率）
+    if (fan_rpm_change_threshold > 0 && abs(rpm - actual_rpm) <= fan_rpm_change_threshold)
+        rpm = actual_rpm;
     rate_limit(&actual_rpm, rpm, RATE_LIMIT_RPM_UP, RATE_LIMIT_RPM_DOWN);
 
     // ---- 向上取整到 50 的倍数 ----
@@ -2127,14 +2134,14 @@ static void main_loop(void) {
             if (pid_filter_auto_off) {
                 if (pid_filter_interval_smooth < pid_filter_auto_threshold_off) {
                     pid_filter_auto_off = 0;
-                    pid_log("滤波 自适应恢复（间隔%.1f周期 <%d.%d周期）",
+                    pid_log("滤波 自适应恢复（间隔%.1f <%d.%d周期）",
                              pid_filter_interval_smooth / 10.0,
                              pid_filter_auto_threshold_off / 10, pid_filter_auto_threshold_off % 10);
                 }
             } else {
                 if (pid_filter_interval_smooth > pid_filter_auto_threshold_on) {
                     pid_filter_auto_off = 1;
-                    pid_log("滤波 自适应关闭（间隔%.1f周期 >%d.%d周期）",
+                    pid_log("滤波 自适应关闭（间隔%.1f >%d.%d周期）",
                              pid_filter_interval_smooth / 10.0,
                              pid_filter_auto_threshold_on / 10, pid_filter_auto_threshold_on % 10);
                 }
