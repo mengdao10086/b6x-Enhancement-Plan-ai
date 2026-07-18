@@ -1901,13 +1901,17 @@ static int rpm_from_cold_exp(int cold) {
 
 /**
  * 自加权合并：各以自身 RPM 为权重
- * 冷端无数据（cooler_hot_temp<=0）时退化为纯 exp
+ * 热端无数据（cooler_hot_temp<=0）时退化为纯 exp
+ * 权重值钳制到 [fan_rpm_min, fan_rpm_max]，避免某方值极小时权重接近无效；
+ * 输入值（实际转速）保持不变，仅影响权重占比
  */
 static int rpm_combine_weighted(int rpm_hot, int rpm_cold) {
     if (rpm_hot <= 0) return rpm_cold;
-    int sum = rpm_hot + rpm_cold;
-    if (sum <= 0) return 0;
-    return (rpm_hot * rpm_hot + rpm_cold * rpm_cold) / sum;
+    int w_hot = clamp(rpm_hot, fan_rpm_min, fan_rpm_max);
+    int w_cold = clamp(rpm_cold, fan_rpm_min, fan_rpm_max);
+    int sum = w_hot + w_cold;
+    if (sum <= 0) return fan_rpm_min;
+    return (w_hot * rpm_hot + w_cold * rpm_cold) / sum;
 }
 
 /**
