@@ -345,7 +345,7 @@ static int gear_auto_fan = 1;             // GEAR_AUTO_FAN: 0=直接使用挡位
 // PID 参数
 static int pid_kp = 300;                  // PID_KP（÷1000，1°C→P=40%）
 static int pid_ki = 50;                   // PID_KI（÷1000，±1°C内累积）
-static int pid_kd = 300;                  // PID_KD
+static int pid_kd = 240;                  // PID_KD
 static int pid_integral_limit = 500;      // PID_INTEGRAL_LIMIT（÷1000）
 static int pid_batt_alpha = 33;           // PID_BATT_ALPHA（%，新值权重）
 static int pid_input_filter_enabled = 1;  // PID_INPUT_FILTER_ENABLED: 1=每周期滤波+PID重算, 0=无滤波+温度更新时用原始值重算
