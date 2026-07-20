@@ -344,7 +344,10 @@ static int gear_auto_fan = 1;             // GEAR_AUTO_FAN: 0=直接使用挡位
 
 // PID 参数
 static int pid_kp = 300;                  // PID_KP（÷1000，1°C→P=40%）
-static int pid_ki = 50;                   // PID_KI（÷1000，±1°C内累积）
+static int pid_ki = 50;                   // PID_KI（÷1000）
+static int pid_ki_var_threshold = 25;     // PID_KI_VAR_THRESHOLD（0.1°C²，方差门控阈值，0=关闭）
+static int pid_ki_var_samples = 6;        // PID_KI_VAR_SAMPLES（方差计算采样数，2~20）
+static int pid_ki_deadband = 15;          // PID_KI_DEADBAND（0.1°C，积分分离死区回退阈值，0=禁止I项）
 static int pid_kd = 240;                  // PID_KD
 static int pid_integral_limit = 500;      // PID_INTEGRAL_LIMIT（÷1000）
 static int pid_batt_alpha = 33;           // PID_BATT_ALPHA（%，新值权重）
@@ -375,6 +378,12 @@ static int pid_curr_comp_divisor = 2;      // PID_CURR_COMP_DIVISOR: |A|÷diviso
 static float pid_cpu_comp_smooth = 0.0f;   // CPU 补偿 EMA 平滑值（°C）
 static float pid_curr_comp_smooth = 0.0f;  // 电流补偿 EMA 平滑值（°C）
 static int pid_last_comp_10 = 0;           // 上次 PID 重算时的补偿值（0.1°C）
+
+// PID 方差门控环形缓冲区（原始电池温度，仅温度更新时推入）
+#define PID_VAR_BUF_MAX  20       // 最大支持采样数（≥ PID_KI_VAR_SAMPLES 上限）
+static int pid_var_buffer[PID_VAR_BUF_MAX];  // 环形缓冲区
+static int pid_var_head = 0;       // 写入位置
+static int pid_var_count = 0;      // 当前有效采样数
 
 // PID 输入滤波自适应开关参数
 static int pid_filter_auto_threshold_on = 30;   // PID_FILTER_AUTO_THRESHOLD_ON: 平滑周期数>此值*0.1周期自动关闭滤波
@@ -618,6 +627,9 @@ static void load_config(const char *path) {
         else if (strcmp(key, "PID_KI") == 0)              pid_ki              = clamp(val, 0, 1000);
         else if (strcmp(key, "PID_KD") == 0)              pid_kd              = clamp(val, 0, 1000);
         else if (strcmp(key, "PID_INTEGRAL_LIMIT") == 0)  pid_integral_limit  = clamp(val, 0, 1000);
+        else if (strcmp(key, "PID_KI_VAR_THRESHOLD") == 0) pid_ki_var_threshold = clamp(val, 0, 200);
+        else if (strcmp(key, "PID_KI_VAR_SAMPLES") == 0)   pid_ki_var_samples   = clamp(val, 2, 20);
+        else if (strcmp(key, "PID_KI_DEADBAND") == 0)       pid_ki_deadband      = clamp(val, 0, 100);
         else if (strcmp(key, "PID_BATT_ALPHA") == 0)      pid_batt_alpha      = clamp(val, 1, 100);
         else if (strcmp(key, "PID_INPUT_FILTER_ENABLED") == 0) pid_input_filter_enabled = (val != 0);
         else if (strcmp(key, "PID_FILTER_AUTO_THRESHOLD_ON") == 0)  pid_filter_auto_threshold_on  = clamp(val, 5, 100);
@@ -1840,6 +1852,50 @@ static int gear_from_current(void) {
     return 1;
 }
 
+// ======================== PID 方差门控 ========================
+
+/**
+ * 推入温度采样（仅 batt_temp_updated 时调用，使用原始值）
+ */
+static void pid_var_push(int value) {
+    pid_var_buffer[pid_var_head] = value;
+    pid_var_head = (pid_var_head + 1) % PID_VAR_BUF_MAX;
+    if (pid_var_count < PID_VAR_BUF_MAX)
+        pid_var_count++;
+}
+
+/**
+ * 计算当前缓冲区方差 Σ(xi-mean)²/n（0.1°C² 单位）
+ * 采样不足时返回大值使方差门控不触发
+ */
+static int pid_var_compute(void) {
+    int n = pid_ki_var_samples;
+    if (n > pid_var_count) n = pid_var_count;
+    if (n < 2) return 999999;  // 采样不足
+
+    int sum = 0;
+    for (int i = 0; i < n; i++) {
+        int idx = (pid_var_head - n + i + PID_VAR_BUF_MAX) % PID_VAR_BUF_MAX;
+        sum += pid_var_buffer[idx];
+    }
+    int mean = sum / n;
+    int var_sum = 0;
+    for (int i = 0; i < n; i++) {
+        int idx = (pid_var_head - n + i + PID_VAR_BUF_MAX) % PID_VAR_BUF_MAX;
+        int dev = pid_var_buffer[idx] - mean;
+        var_sum += dev * dev;
+    }
+    return var_sum / n;
+}
+
+/**
+ * 重置方差门控状态（重连/启动时调用）
+ */
+static void pid_var_reset(void) {
+    pid_var_count = 0;
+    pid_var_head = 0;
+}
+
 // ======================== PID 控制函数 ========================
 
 /**
@@ -1856,8 +1912,20 @@ static float pid_compute(int batt_10, float dt) {
     // P 项
     float p = (pid_kp / 1000.0f) * error;
 
-    // I 项（积分分离：±1.0°C 内才累积）
-    if (error > -1.0f && error < 1.0f) {
+    // I 项（方差门控 + 死区回退）
+    // 方差门控：温度稳定（方差<阈值）时全温度段启用 I 累积
+    // 死区回退：方差门控未激活时，仅在 |error|<deadband 内累积
+    // 两者均不满足时冻结 I（防 windup）
+    int ki_active = 0;
+    if (pid_ki_var_threshold > 0 && pid_var_count >= 2) {
+        int v = pid_var_compute();
+        if (v < pid_ki_var_threshold) ki_active = 1;
+    }
+    if (!ki_active && pid_ki_deadband > 0) {
+        float db = pid_ki_deadband / 10.0f;
+        if (error > -db && error < db) ki_active = 1;
+    }
+    if (ki_active) {
         pid_integral_accum += (pid_ki / 1000.0f) * error * dt;
     }
     float i_limit = pid_integral_limit / 1000.0f;
@@ -1997,6 +2065,7 @@ static void pid_align_from_gear(void) {
     pid_cpu_comp_smooth  = 0.0f;
     pid_curr_comp_smooth = 0.0f;
     pid_last_comp_10     = 0;
+    pid_var_reset();
     last_bcast_valid     = 0;
     write_log("PID 从 gear 对齐 ratio=%.2f cold=%d", ratio, pid_align_cold);
 }
@@ -2031,6 +2100,7 @@ static void reconnect_align(void) {
         pid_filter_interval_smooth = -1;
         pid_filter_auto_off   = 0;
         temp_idle_cycles             = 0;
+        pid_var_reset();
         actual_rpm = -1;
         actual_cold = -1;
         actual_target_temp = -1;
@@ -2110,6 +2180,8 @@ static void main_loop(void) {
 
         // ── 温度更新周期跟踪（基于周期数，非时间） ──
         if (batt_temp_updated) {
+            // 推入方差采样（使用原始电池温度，非滤波值）
+            pid_var_push(batt_raw);
             int gap = temp_idle_cycles + 1;  // 距离上次更新经过的周期数
             if (pid_filter_interval_smooth < 0) {
                 pid_filter_interval_smooth = gap * 10;  // ×10 转 0.1周期
@@ -2230,11 +2302,11 @@ static void main_loop(void) {
             // 直接映射到物理值（无输出平滑）
             pid_map_output(pid_out, &pid_align_cold, &pid_align_rpm);
 
-            pid_log("epoch=%ld Tbatt=%d+comp%+.1f(cpu%+.1f+curr%+.1f)=Tinp%d Ttgt=%d Thot=%d dt=%.0fs e=%.2f out=%.2f",
+            pid_log("epoch=%ld Tbatt=%d+comp%+.1f(cpu%+.1f+curr%+.1f)=Tinp%d Ttgt=%d Thot=%d dt=%.0fs e=%.2f out=%.2f var=%d",
                      now, pid_input, total_comp, cpu_comp, curr_comp,
                      compensated_10, BATT_BASELINE, cooler_hot_temp,
                      dt, (compensated_10 - BATT_BASELINE) / 10.0f,
-                     pid_out);
+                     pid_out, pid_var_count >= 2 ? pid_var_compute() : -1);
 
             pid_last_batt = batt_raw;
             pid_last_comp_10 = total_comp_10;
@@ -2489,6 +2561,7 @@ int main(int argc, char *argv[]) {
         pid_cpu_comp_smooth  = 0.0f;
         pid_curr_comp_smooth = 0.0f;
         pid_last_comp_10     = 0;
+        pid_var_reset();
         batt_gear_base   = (int)(pid_ratio * (gear_max - gear_min) + gear_min + 0.5f);
         if (batt_gear_base < gear_min) batt_gear_base = gear_min;
         if (batt_gear_base > gear_max) batt_gear_base = gear_max;

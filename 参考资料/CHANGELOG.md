@@ -6,6 +6,9 @@
 ## v2.3（2026-07-09）
 
 ### Added
+- **PID I 项方差门控**（`PID_KI_VAR_THRESHOLD`）：将积分分离条件从固定 ±1°C 改为温度方差门控。温度稳定（方差<阈值）时 I 项全温度段启用，消除稳态静差；温度波动时冻结 I 防 windup。回退死区（`PID_KI_DEADBAND`，默认 ±1.5°C）在方差门控未激活时生效
+- **`PID_KI_VAR_SAMPLES`**：方差计算采样数（2~20，默认 6），仅温度更新时推入原始值
+- **`PID_KI_DEADBAND`**：积分分离死区（0.1°C，默认 ±1.5°C），方差门控未激活/采样不足时的回退阈值。设为 0 可完全禁止 I 项
 - **GEAR_AUTO_FAN**：挡位模式自动风扇转速（`profile.conf` [8] 挡位表段）。默认 =1，使用冷端强度+热端温度双映射计算风扇转速，挡位表风扇转速配置变为截断上限；=0 恢复旧行为
 - **LOG_TRIM_LINES**：日志超限时删除最早 N 行改为可配置（默认 3，0=不清理，`profile.conf` [1] 日志段）
 - **PID 连续无级调节模式**（`CTRL_MODE=1`）：P+I(积分分离±1°C)+D 控制器，归一化输出 0~1，输入 EMA 滤波
@@ -16,6 +19,8 @@
 - **`send_am_broadcast()`**：提取公共 fork+exec 代码，`apply_level`/`apply_level_direct` 共享
 
 ### Changed
+- `pid_compute` I 项条件从固定 `±1.0°C` 硬编码改为方差门控 + 死区回退双层逻辑（新增 `PID_KI_VAR_THRESHOLD`/`PID_KI_VAR_SAMPLES`/`PID_KI_DEADBAND`）
+- PID 调试日志每行末尾追加 `var=N` 显示当前方差值
 - **配置解析重组**：去掉分组子守卫（CURRENT_GEAR_MODE/ctrl_mode/gear_config_enabled 等），PERF_ENABLED=1 时所有参数全量解析。只有两层：PERF_ENABLED 控制除 DEBUG_* 外的全部参数，DEBUG_ENABLED 控制 8 个调试子开关。LOG_FILE/LOG_MAX_KB 归 PERF_ENABLED 管理（不再固定解析）。配置文件参数顺序不再影响解析结果。
 - **删除所有参数下发日志**：不再记录 `[PID] ...°C 冷... RPM...` 和 `apply_level 下发 档位...` 等包含实际下发参数的日志行，保留错误/跳过日志
 - **风扇转速向上取整到 50 的倍数**：所有通过 `am broadcast` 发送的 RPM 值自动 `((rpm + 49) / 50) * 50`
