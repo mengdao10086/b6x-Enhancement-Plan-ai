@@ -64,22 +64,22 @@
 
 ## 项目结构
 
-```
-├── lsp模块(apk修复+温控接口)/     ← LSPosed 模块（Android 项目）
-├── magisk模块(智能温控)/          ← C 守护程序源码 + Magisk 模块框架
-│   ├── tempctrl.c                 ← 核心 C 代码
-│   ├── 逻辑说明.md                ← 技术设计文档
-│   └── magisk模块框架/            ← module.prop / service.sh / customize.sh / profile.conf
-├── 参考资料/
-│   ├── 完整修复历程.md             ← BLE 4 层 Bug 修复全记录
-│   ├── CHANGELOG.md               ← 版本更新日志
-│   ├── apk逆向分析/               ← APK 反编译 + 运行逻辑分析
-│   │   ├── smali/                 ← 合并反编译输出（8865 文件）
-│   │   └── app运行逻辑.md         ← App 内部运行逻辑分析
-│   └── smali修改重编译apk尝试/     ← smali 工具链 + DEX 修改产物
-├── .github/workflows/              ← CI 自动构建
-└── README.md                       ← 本文件
-```
+<pre>
+├── <a href="lsp模块(apk修复+温控接口)/">lsp模块(apk修复+温控接口)/</a>     ← LSPosed 模块（Android 项目）
+├── <a href="magisk模块(智能温控)/">magisk模块(智能温控)/</a>          ← C 守护程序源码 + Magisk 模块框架
+│   ├── <a href="magisk模块(智能温控)/tempctrl.c">tempctrl.c</a>                 ← 核心 C 代码
+│   ├── <a href="magisk模块(智能温控)/逻辑说明.md">逻辑说明.md</a>                ← 技术设计文档
+│   └── <a href="magisk模块(智能温控)/magisk模块框架/">magisk模块框架/</a>            ← module.prop / service.sh / customize.sh / profile.conf / webroot/
+├── <a href="参考资料/">参考资料/</a>
+│   ├── <a href="参考资料/完整修复历程.md">完整修复历程.md</a>             ← BLE 4 层 Bug 修复全记录
+│   ├── <a href="参考资料/CHANGELOG.md">CHANGELOG.md</a>               ← 版本更新日志
+│   ├── <a href="参考资料/apk逆向分析/">apk逆向分析/</a>               ← APK 反编译 + 运行逻辑分析
+│   │   ├── <a href="参考资料/apk逆向分析/smali/">smali/</a>                 ← 合并反编译输出
+│   │   └── <a href="参考资料/apk逆向分析/app运行逻辑.md">app运行逻辑.md</a>         ← App 内部运行逻辑分析
+│   └── <a href="参考资料/smali修改重编译apk尝试/">smali修改重编译apk尝试/</a>     ← smali 工具链 + DEX 修改产物
+├── <a href=".github/workflows/">.github/workflows/</a>              ← CI 自动构建
+└── <a href="README.md">README.md</a>                       ← 本文件
+</pre>
 
 ---
 

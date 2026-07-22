@@ -34,6 +34,17 @@
 #define EMA(new_val, old_val, alpha_pct) \
     (((new_val) * (alpha_pct) + (old_val) * (100 - (alpha_pct))) / 100)
 
+/** 带方向取整的 EMA：平滑值向原始值方向取整，解决渐进无法到达的问题 */
+#define EMA_DIR(new_val, old_val, alpha_pct) \
+    ({ \
+        int _nv = (new_val); \
+        int _ov = (old_val); \
+        int _num = (_nv) * (alpha_pct) + (_ov) * (100 - (alpha_pct)); \
+        int _r = _num / 100; \
+        if (_nv > _ov && _num % 100 > 0) _r++; \
+        _r; \
+    })
+
 // ======================== 档位定义 ========================
 //
 // ⚠️ 不推荐使用智能温控模式（mode=0）：实测其风扇转速配置疑似并非强制生效，经常突破设定的上限，尤其在刚切换过去的瞬间。这会导致噪音突然变大，体验较差。全部固定功率模式的档位表已避免此问题。
@@ -1626,7 +1637,7 @@ static void emergency_intervention(void) {
             cpu_filtered_temp = cpu_now;
             first_run = 0;
         } else {
-            cpu_filtered_temp = EMA(cpu_now, cpu_filtered_temp, CPU_FILTER_ALPHA);
+            cpu_filtered_temp = EMA_DIR(cpu_now, cpu_filtered_temp, CPU_FILTER_ALPHA);
         }
     }
     int t = cpu_filtered_temp;
@@ -1705,7 +1716,7 @@ static void emergency_intervention(void) {
             curr_emerg_smooth_val = cur_ua;
             curr_emerg_smooth_valid = 1;
         } else {
-            curr_emerg_smooth_val = EMA(cur_ua, curr_emerg_smooth_val, CURRENT_SMOOTH_ALPHA);
+            curr_emerg_smooth_val = EMA_DIR(cur_ua, curr_emerg_smooth_val, CURRENT_SMOOTH_ALPHA);
         }
     }
 
@@ -1778,7 +1789,7 @@ static int gear_from_current(void) {
         curr_gear_smooth_val = abs_ua10;
         curr_gear_smooth_valid = 1;
     } else {
-        curr_gear_smooth_val = EMA(abs_ua10, curr_gear_smooth_val, CURRENT_GEAR_SMOOTH_ALPHA);
+        curr_gear_smooth_val = EMA_DIR(abs_ua10, curr_gear_smooth_val, CURRENT_GEAR_SMOOTH_ALPHA);
     }
 
     // 4. 推荐挡位 = 平滑值(0.01A) × 倍率 ÷ 100
@@ -1947,14 +1958,46 @@ static float pid_compute(int batt_10, float dt) {
 }
 
 /**
- * 热端温度线性映射：无上下限，低于 HOT_MAP_MIN 或高于 HOT_MAP_MAX 时线性外推
+ * 热端温度线性映射 + 双向滞回：无上下限，低于 HOT_MAP_MIN 或高于 HOT_MAP_MAX 时线性外推
  * 最终钳制在下发阶段（apply_gear / apply_gear_direct 内部）
+ *
+ * 滞回逻辑：
+ *   降温（hot_10 < prev_hot）→ 有效温度 = 实际 + 1°C，钳位 ≤ 上次 RPM
+ *   升温（hot_10 > prev_hot）→ 正常映射，但 RPM 不低于上次值
+ *   温度不变              → 保持上次输出
  */
 static int rpm_from_hot_end(int hot_10) {
+    static int prev_hot = -1;
+    static int prev_rpm = 0;
     int range = hot_map_max - hot_map_min;
     if (range <= 0) return 0;
-    float t = (float)(hot_10 - hot_map_min) / range;
-    return fan_rpm_min + (int)(t * (fan_rpm_max - fan_rpm_min));
+
+    // 温度不变 → 保持上次输出
+    if (prev_hot >= 0 && hot_10 == prev_hot)
+        return prev_rpm;
+
+    int eff_hot;
+    if (prev_hot >= 0 && hot_10 < prev_hot) {
+        // 降温滞回：有效温度 = 实际 + 1°C（0.1°C*10），使 RPM 滞后下降
+        eff_hot = hot_10 + 10;
+        if (eff_hot > hot_map_max) eff_hot = hot_map_max;
+    } else {
+        // 升温或首次 → 直通
+        eff_hot = hot_10;
+    }
+
+    float t = (float)(eff_hot - hot_map_min) / range;
+    int rpm = fan_rpm_min + (int)(t * (fan_rpm_max - fan_rpm_min));
+
+    // 双向钳位
+    if (prev_hot >= 0) {
+        if (hot_10 < prev_hot && rpm > prev_rpm) rpm = prev_rpm;  // 降温 ≥ 上次（滞回 +10 不超限）
+        if (hot_10 > prev_hot && rpm < prev_rpm) rpm = prev_rpm;  // 升温 ≥ 上次（防止微降反降 RPM）
+    }
+
+    prev_hot = hot_10;
+    prev_rpm = rpm;
+    return rpm;
 }
 
 /**
@@ -2230,8 +2273,8 @@ static void main_loop(void) {
                 int old_f = pid_batt_filtered;
                 int numer = batt_raw * pid_batt_alpha + pid_batt_filtered * (100 - pid_batt_alpha);
                 int new_val = numer / 100;
-                if (new_val > old_f && numer % 100 > 0) {
-                    new_val++;  // 增大且有余数 → 向上取整
+                if (batt_raw > old_f && numer % 100 > 0) {
+                    new_val++;  // 向原始值方向取整（反向自然截断，无需处理）
                 }
                 pid_batt_filtered = new_val;
             }
@@ -2251,7 +2294,7 @@ static void main_loop(void) {
                 cpu_filtered_temp = cpu_now;
                 first_run = 0;
             } else {
-                cpu_filtered_temp = EMA(cpu_now, cpu_filtered_temp, CPU_FILTER_ALPHA);
+                cpu_filtered_temp = EMA_DIR(cpu_now, cpu_filtered_temp, CPU_FILTER_ALPHA);
             }
         }
 
