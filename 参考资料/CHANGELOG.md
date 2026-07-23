@@ -34,6 +34,8 @@
 - PID 输入补偿（方案 A）：CPU 温差和电池电流作为额外热源加到 PID 输入温度，每周期更新、独立触发 PID 重算，PID 日志增加补偿值分解输出
 - **热端 RPM 双向滞回**（`rpm_from_hot_end`）：降温时有效温度 +1°C 使 RPM 滞后下降，升温时 RPM 不低于上次值（防止微升反降 RPM）
 - **EMA 方向取整**（`EMA_DIR`）：所有整数 EMA 平滑改用方向取整宏，基于原始值方向决定舍入（上升→向上取整，下降→自然截断），消除渐进无法到达的问题。影响：CPU 温度滤波、电流紧急/挡位平滑、PID 电池输入滤波
+- **速率限制温差动态化 + 0.1°C 精度**（`RATE_LIMIT_FAN_BASE`/`COLD_MULT`）：风扇升速和制冷强度速率不再固定，改为根据电池温度与基准温差（d=0.1°C）自动调整，使用 `d × mult / 10` 保留原始精度。风扇降速继续保持固定值。新增 `RATE_LIMIT_FAN_BASE`（双值：升基础值 升倍率）、`RATE_LIMIT_COLD_MULT` 配置参数
+- **配置格式重构**：13 组多键参数改为单参数连续值格式，减少配置行数。涉及：`CPU_ZONE`、`HOT_MAP`、`FAN_RPM`、`PID_FILTER_AUTO_THRESHOLD`、`PID_ALPHA`、`PID_COLD`、`BATT_BOUNDARY`、`CURRENT_GEAR_MULT`、`REV_COMP_T`、`EMERG_FORCED`、`EMERG_RECOVERY_MULT`、`CPU_EMERG`、`CURRENT_EMERG`。旧格式键名仍可向后兼容
 - **配置文件重构**：性能与调试开关分离层级
   - `CONFIG_ENABLED` → `PERF_ENABLED`（只管理性能参数：挡位表、PID、紧急、速率限制等）
   - `DEBUG_MODE` → `DEBUG_ENABLED`（提升为与 `PERF_ENABLED` 平级的独立总开关）
