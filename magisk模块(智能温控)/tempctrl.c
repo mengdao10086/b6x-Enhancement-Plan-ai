@@ -1774,7 +1774,7 @@ static void emergency_intervention(void) {
     // --- 7. 根据模式设定强制最低档位 ---
     if (EMERG_MODE_ENTRY == 0) {
         // 模式 0：查表强制最低档
-        static const int EMERG_FORCED_TABLE[] = {0, EMERG_FORCED_1, EMERG_FORCED_2, EMERG_FORCED_3, EMERG_FORCED_4};
+        const int EMERG_FORCED_TABLE[] = {0, EMERG_FORCED_1, EMERG_FORCED_2, EMERG_FORCED_3, EMERG_FORCED_4};
         if (emergency_level >= 1 && emergency_level <= 4)
             emerg_forced_gear = EMERG_FORCED_TABLE[emergency_level];
         else
