@@ -42,6 +42,7 @@
         int _num = (_nv) * (alpha_pct) + (_ov) * (100 - (alpha_pct)); \
         int _r = _num / 100; \
         if (_nv > _ov && _num % 100 > 0) _r++; \
+        else if (_nv < _ov && _num % 100 > 0) _r--; \
         _r; \
     })
 
@@ -140,10 +141,10 @@ static char BATT_TEMP_PATH[128] = "/sys/class/power_supply/battery/temp";
 static char CPU_TEMP_PATH_FMT[128] = "/sys/class/thermal/thermal_zone%d/temp";
 static char BATT_CURRENT_PATH[128] = "/sys/class/power_supply/battery/current_now";
 
-// --- sysfs 缩放系数（原始值 ÷ 缩放系数 = 内部单位 0.1°C / µA）---
+// --- sysfs 缩放系数（原始值 ÷ 缩放系数 = 内部单位 0.1°C）---
 static int BATT_TEMP_DIVISOR = 1;     // 电池温度原始值 0.1°C，无需缩放
 static int CPU_TEMP_DIVISOR = 100;    // CPU 温度原始值 m°C，÷100 转 0.1°C
-static int BATT_CURRENT_DIVISOR = 1;  // 电池电流原始值 µA，无需缩放
+static int BATT_CURRENT_DIVISOR = 10000;  // 电池电流原始值 µA ÷ 此值 → 0.01A
 
 // --- CPU 温度扫描范围（可配置）---
 // 首次运行在此范围内扫描有效的 thermal_zone，后续只扫命中的 zone
@@ -235,7 +236,6 @@ static int batt_gear_cooldown = 0;            // 电池调档冷却剩余周期
 // ======================== Gear 模式 — 紧急干预（CTRL_MODE=0）================
 // --- 独立开关 ---
 static int EMERG_CPU_ENABLED     = 1;         // CPU 温度紧急开关
-static int EMERG_CURRENT_ENABLED = 0;         // 电流紧急开关
 
 // --- CPU 温度紧急 ---
 static int CPU_EMERG_3   = 850;     // >85.0°C → 等级 3
@@ -248,18 +248,6 @@ static int CPU_FILTER_ALPHA = 25;   // CPU 滤波系数（%）
 // CPU 紧急运行状态
 static int cpu_filtered_temp = 250; // 加权 CPU 温度，初始 25.0°C
 static int first_run = 1;           // 首次运行，滤波直接赋初值
-
-// --- 电池电流紧急 ---
-static int CURRENT_EMERG_3 = 700;   // >7A → 等级 3
-static int CURRENT_EMERG_2 = 600;   // >6A → 等级 2
-static int CURRENT_EMERG_1 = 500;   // >5A → 等级 1
-static int CURRENT_RECOVER_2 = 600; // <6A → 从 3 降为 2
-static int CURRENT_RECOVER_1 = 500; // <5A → 从 2 降为 1
-static int CURRENT_RECOVER_0 = 400; // <4A → 退出紧急
-static int CURRENT_SMOOTH_ALPHA = 25;   // 电流退出 EMA 平滑系数（%）
-// 电流紧急运行状态
-static int curr_emerg_smooth_val   = 0;   // 平滑后的电流值（µA）
-static int curr_emerg_smooth_valid = 0;   // 平滑数据是否有效
 
 // --- 紧急干预模式 ---
 static int EMERG_MODE_ENTRY = 0;   // 0=查表强制最低档, 1=升档
@@ -296,8 +284,8 @@ static int log_trim_lines = 3;      // 日志超限时删除最早 N 行，0=不
 static FILE *log_fp = NULL;          // 持久的日志文件指针，避免每行都 fopen/fclose
 static char log_path_opened[256] = ""; // 已打开的文件路径（检测路径变化）
 static int debug_mode = 0;           // 调试日志总开关，=1 时启用各分区调试输出
-static int debug_sensor = 0;    // [传感器] 电池/CPU/电流读数
-static int debug_emerg   = 0;   // [紧急干预] CPU 温度/电流紧急等级计算
+static int debug_sensor = 0;    // [传感器] 电池/CPU 读数
+static int debug_emerg   = 0;   // [紧急干预] CPU 温度紧急等级计算
 static int debug_batt    = 0;   // [电池控制] 电池温度调档/恢复期/反补
 static int debug_exec    = 0;   // [执行下发] 速率限制/am broadcast 送参数
 static int debug_conn    = 0;   // [连接状态] App 存活/BLE/重连对齐
@@ -345,14 +333,38 @@ static int pid_var_buffer[PID_VAR_BUF_MAX];
 static int pid_var_head = 0;
 static int pid_var_count = 0;
 
-// --- 输入补偿（加到电池温度，反映 CPU/电流额外发热）---
+// ======================== PID 温度预测 ========================
+// 通过历史温度变化趋势预测电池温度的平衡点，提前给 PID 提供前馈信号
+#define PREDICT_BUF_MAX 32  // 缓冲区容量上限（≥ 可配置的 PID_PREDICT_BUF_N）
+
+typedef struct {
+    int temp;     // 真实电池温度（0.1°C）
+    int gap;      // 距离上个真实读数的周期数（≥1）
+} PredictPoint;
+
+// --- 预测配置参数 ---
+static int pid_predict_buf_n = 10;         // PID_PREDICT_WIN 第一值：温度记录缓冲区大小（3~32）
+static int pid_predict_win_n = 5;          // PID_PREDICT_WIN_N: 计算窗口（有效数据点数，3~10）
+static int pid_predict_min_points = 3;     // PID_PREDICT_MIN_POINTS: 最小可用数据点数（2~5）
+static int pid_predict_max_rise = 30;      // PID_PREDICT_MAX_RISE: 最大预测变化量（0.1°C，10~100）
+static int pid_predict_ramp_cycles = 3;    // PID_PREDICT_RAMP_CYCLES: Ramp-up 周期数（1~10，0=不渐进）
+static int pid_predict_min_delta = 2;      // PID_PREDICT_MIN_DELTA: 最小起始 delta（0.1°C/周期，1~10）
+static int pid_predict_heat_weight = 10;  // PID_PREDICT_MODE 第一值：升温预测权重（0~10，默认10=全效）
+static int pid_predict_cool_weight = 5;   // PID_PREDICT_MODE 第二值：降温预测权重（0~10，默认5=半效）
+static int pid_predict_alpha = 50;         // 预测平滑系数（%，PID_ALPHA 第三值）
+
+// --- 预测运行状态 ---
+static PredictPoint pid_predict_buf[PREDICT_BUF_MAX];
+static int pid_predict_buf_cnt = 0;        // 缓冲区有效条目数
+static int pid_predict_buf_head = 0;       // 环形缓冲区写指针
+static int pid_predict_smoothed = -1;      // 平滑后的预测温度（0.1°C），-1=未初始化
+static int pid_predict_was_active = 0;     // 上周期是否使用了预测模式
+static int pid_predict_consecutive = 0;    // 连续预测周期数（用于 ramp-up）
+
+// --- 输入补偿（加到电池温度，反映 CPU 额外发热）---
 static int pid_cpu_comp_enabled = 1;       // PID_CPU_COMP_ENABLED: CPU 补偿开关
 static int pid_cpu_comp_divisor = 30;      // PID_CPU_COMP_DIVISOR: (cpu-batt 0.1°C)÷divisor→0.1°C
-static int pid_curr_comp_enabled = 0;      // PID_CURR_COMP_ENABLED: 电流补偿开关（默认关）
-static int pid_curr_comp_threshold = 200;  // PID_CURR_COMP_THRESHOLD: 0.01A 阈值(200=2A)
-static int pid_curr_comp_divisor = 2;      // PID_CURR_COMP_DIVISOR: |A|÷divisor→°C
 static float pid_cpu_comp_smooth = 0.0f;   // CPU 补偿 EMA 平滑值（°C）
-static float pid_curr_comp_smooth = 0.0f;  // 电流补偿 EMA 平滑值（°C）
 static int pid_last_comp_10 = 0;           // 上次 PID 重算时的补偿值（0.1°C）
 
 // --- 输出映射与对齐 ---
@@ -553,7 +565,7 @@ static void load_config(const char *path) {
             config_read_path(BATT_CURRENT_PATH, sizeof(BATT_CURRENT_PATH), val_str);
         else if (strcmp(key, "BATT_TEMP_DIVISOR") == 0)   BATT_TEMP_DIVISOR  = clamp(val, 1, 10000);
         else if (strcmp(key, "CPU_TEMP_DIVISOR") == 0)    CPU_TEMP_DIVISOR   = clamp(val, 1, 10000);
-        else if (strcmp(key, "BATT_CURRENT_DIVISOR") == 0) BATT_CURRENT_DIVISOR = clamp(val, 1, 10000);
+        else if (strcmp(key, "BATT_CURRENT_DIVISOR") == 0) BATT_CURRENT_DIVISOR = clamp(val, 1, 100000);
 
         // --- 多值连续格式（空格分隔的 2~4 值）---
         else if (strcmp(key, "CPU_ZONE") == 0) {
@@ -573,8 +585,10 @@ static void load_config(const char *path) {
             if (sscanf(val_str, "%d %d", &a, &b) >= 2) { pid_filter_auto_threshold_on=clamp(a,5,100); pid_filter_auto_threshold_off=clamp(b,5,100); }
         }
         else if (strcmp(key, "PID_ALPHA") == 0) {
-            int a = pid_filter_auto_alpha, b = pid_batt_alpha;
-            if (sscanf(val_str, "%d %d", &a, &b) >= 2) { pid_filter_auto_alpha=clamp(a,1,100); pid_batt_alpha=clamp(b,1,100); }
+            int a = pid_filter_auto_alpha, b = pid_batt_alpha, c = pid_predict_alpha;
+            int n = sscanf(val_str, "%d %d %d", &a, &b, &c);
+            if (n >= 2) { pid_filter_auto_alpha=clamp(a,1,100); pid_batt_alpha=clamp(b,1,100); }
+            if (n >= 3) { pid_predict_alpha=clamp(c,1,100); }
         }
         else if (strcmp(key, "PID_COLD") == 0) {
             int a = pid_cold_min, b = pid_cold_max;
@@ -613,15 +627,6 @@ static void load_config(const char *path) {
                 CPU_RECOVER_1=CPU_EMERG_1; CPU_RECOVER_2=CPU_EMERG_2; // 自动同步恢复阈值
             }
         }
-        else if (strcmp(key, "CURRENT_EMERG") == 0) {
-            int v[4] = {CURRENT_RECOVER_0,CURRENT_EMERG_1,CURRENT_EMERG_2,CURRENT_EMERG_3};
-            if (sscanf(val_str, "%d %d %d %d", &v[0],&v[1],&v[2],&v[3]) >= 4) {
-                CURRENT_RECOVER_0=clamp(v[0],100,1500); CURRENT_EMERG_1=clamp(v[1],100,1500);
-                CURRENT_EMERG_2=clamp(v[2],100,1500);   CURRENT_EMERG_3=clamp(v[3],100,1500);
-                CURRENT_RECOVER_1=CURRENT_EMERG_1; CURRENT_RECOVER_2=CURRENT_EMERG_2;
-            }
-        }
-
         // --- 电池控制 ---
         else if (strcmp(key, "BATT_BASELINE") == 0)        BATT_BASELINE      = clamp(val, 300, 500);
         else if (strcmp(key, "BATT_COOLDOWN_CYCLES") == 0) BATT_COOLDOWN_CYCLES = clamp(val, 0, 20);
@@ -631,9 +636,6 @@ static void load_config(const char *path) {
 
         // --- CPU 紧急 ---
         else if (strcmp(key, "CPU_FILTER_ALPHA") == 0)     CPU_FILTER_ALPHA   = clamp(val, 1, 100);
-
-        // --- 电流紧急 ---
-        else if (strcmp(key, "CURRENT_SMOOTH_ALPHA") == 0)  CURRENT_SMOOTH_ALPHA = clamp(val, 1, 100);
 
         // --- 紧急强制与退出 ---
         else if (strcmp(key, "EMERG_EXIT_CAP_OFFSET") == 0) EMERG_EXIT_CAP_OFFSET = clamp(val, 0, 5);
@@ -673,9 +675,31 @@ static void load_config(const char *path) {
         else if (strcmp(key, "PID_INPUT_FILTER_ENABLED") == 0) pid_input_filter_enabled = (val != 0);
         else if (strcmp(key, "PID_CPU_COMP_ENABLED") == 0)   pid_cpu_comp_enabled   = (val != 0);
         else if (strcmp(key, "PID_CPU_COMP_DIVISOR") == 0)   pid_cpu_comp_divisor   = clamp(val, 5, 200);
-        else if (strcmp(key, "PID_CURR_COMP_ENABLED") == 0)  pid_curr_comp_enabled  = (val != 0);
-        else if (strcmp(key, "PID_CURR_COMP_THRESHOLD") == 0) pid_curr_comp_threshold = clamp(val, 50, 1000);
-        else if (strcmp(key, "PID_CURR_COMP_DIVISOR") == 0)  pid_curr_comp_divisor  = clamp(val, 1, 50);
+
+        // --- PID 温度预测 ---
+        else if (strcmp(key, "PID_PREDICT_WIN") == 0) {
+            int a = pid_predict_buf_n, b = pid_predict_win_n, c = pid_predict_min_points;
+            if (sscanf(val_str, "%d %d %d", &a, &b, &c) >= 3) {
+                pid_predict_buf_n      = clamp(a, 3, 32);
+                pid_predict_win_n      = clamp(b, 3, 10);
+                pid_predict_min_points = clamp(c, 2, 5);
+            }
+        }
+        else if (strcmp(key, "PID_PREDICT_RISE") == 0) {
+            int a = pid_predict_max_rise, b = pid_predict_ramp_cycles;
+            if (sscanf(val_str, "%d %d", &a, &b) >= 2) {
+                pid_predict_max_rise    = clamp(a, 10, 100);
+                pid_predict_ramp_cycles = clamp(b, 0, 10);
+            }
+        }
+        else if (strcmp(key, "PID_PREDICT_MIN_DELTA") == 0)      pid_predict_min_delta      = clamp(val, 1, 10);
+        else if (strcmp(key, "PID_PREDICT_MODE") == 0) {
+            int h = pid_predict_heat_weight, c = pid_predict_cool_weight;
+            if (sscanf(val_str, "%d %d", &h, &c) >= 1) {
+                pid_predict_heat_weight = clamp(h, 0, 10);
+                pid_predict_cool_weight = clamp(c, 0, 10);
+            }
+        }
 
         // --- PID 映射 ---
         else if (strcmp(key, "COLD_MAP_START") == 0)   cold_map_start  = clamp(val, 0, 194);
@@ -691,10 +715,14 @@ static void load_config(const char *path) {
         // --- 模式开关等 ---
         else if (strcmp(key, "CTRL_MODE") == 0)                ctrl_mode            = (val != 0);
         else if (strcmp(key, "GEAR_AUTO_FAN") == 0)        gear_auto_fan       = (val != 0);
-        else if (strcmp(key, "EMERG_CURRENT_ENABLED") == 0)   EMERG_CURRENT_ENABLED = (val != 0);
         else if (strcmp(key, "EMERG_CPU_ENABLED") == 0)       EMERG_CPU_ENABLED     = (val != 0);
-        else if (strcmp(key, "REV_COMP_ENABLED") == 0)        REV_COMP_ENABLED      = (val != 0);
-        else if (strcmp(key, "TREND_EXEMPT_ENABLED") == 0)    TREND_EXEMPT_ENABLED  = (val != 0);
+        else if (strcmp(key, "REV_COMP") == 0) {
+            int a = REV_COMP_ENABLED, b = TREND_EXEMPT_ENABLED;
+            if (sscanf(val_str, "%d %d", &a, &b) >= 1) {
+                REV_COMP_ENABLED     = (a != 0);
+                TREND_EXEMPT_ENABLED = (b != 0);
+            }
+        }
         else if (strcmp(key, "GEAR_CONFIG_ENABLED") == 0)     gear_config_enabled   = (val != 0);
         else if (strcmp(key, "CURRENT_GEAR_MODE") == 0) {
             int charge = CURRENT_GEAR_MODE_CHARGE, discharge = CURRENT_GEAR_MODE_DISCHARGE;
@@ -1129,6 +1157,18 @@ static int read_battery_temp(void) {
 }
 
 /**
+ * 读取电池电流，返回 0.01A 单位（正=放电，负=充电），失败返回 0。
+ */
+static int read_batt_current_ua10(void) {
+    int val = read_sysfs_int(BATT_CURRENT_PATH);
+    if (val == 0) return 0;
+    int ua10 = val / BATT_CURRENT_DIVISOR;
+    debug_log(debug_sensor, "batt_curr 原始 %d 除数 %d = %d (%.2fA)",
+              val, BATT_CURRENT_DIVISOR, ua10, ua10 / 100.0);
+    return ua10;
+}
+
+/**
  * 缓存已发现的 CPU 温度 zone（首次全量扫描后记录）
  */
 #define CPU_ZONE_MAX_CACHE 64
@@ -1203,21 +1243,6 @@ static int read_cpu_temp_max(void) {
     return max_temp;
 }
 
-/**
- * 读取电池电流绝对值（µA）
- * /sys/class/power_supply/battery/current_now
- * 正值=放电，负值=充电，本函数取绝对值
- * 返回值：µA 绝对值，读取失败返回 -1
- */
-static int read_battery_current_abs(void) {
-    int val = read_sysfs_int(BATT_CURRENT_PATH);
-    // 注意：不检查 val<0，因为放电时 current_now 为负值，这是正常现象
-    // 传感器读取出错时 val=-1，abs(-1)=1 远低于所有阈值，不影响判断
-    int abs_val = abs(val) / BATT_CURRENT_DIVISOR;
-    int cA = abs_val / 10000;  // µA → 0.01A（截断后4位，减小后续计算量）
-    debug_log(debug_sensor, "batt_current 原始 %d µA → %d (0.01A)", val, cA);
-    return cA;
-}
 
 // ======================== 控制参数计算与下发 ========================
 
@@ -1655,14 +1680,14 @@ static void battery_control(void) {
     last_batt_reading = batt;
 }
 
-// ======================== 紧急干预（CPU+电流双源） ========================
+// ======================== 紧急干预（CPU 温度） ========================
 
 /**
- * 紧急干预—CPU 温度 + 电池电流双源，每 5 秒一次。
+ * 紧急干预 — CPU 温度，每 5 秒一次。
  *
- * CPU 温度经 EMA 滤波（α=CPU_FILTER_ALPHA）；电流进入用原始值，退出用 EMA 平滑。
- * 等级 = cpu_level(0~3) + current_level(0~3)，综合上限 4 级。
- * 升档即时响应（进入阈值）；降档逐级滞回（双源均低于恢复阈值才允许）。
+ * CPU 温度经 EMA 滤波（α=CPU_FILTER_ALPHA）。
+ * 等级 = cpu_level(0~3)。
+ * 升档即时响应（进入阈值）；降档逐级滞回（低于恢复阈值才允许）。
  * 等级 → 强制最低档位：EMERG_FORCED_1~4。
  */
 static void emergency_intervention(void) {
@@ -1680,98 +1705,53 @@ static void emergency_intervention(void) {
     int cpu_valid = (cpu_now >= 0);
     debug_log(debug_emerg, "emerg CPU 原始%d 滤波%d 有效%d", cpu_now, t, cpu_valid);
 
-    // --- 2. 电池电流绝对值 ---
-    int cur_ua = read_battery_current_abs();
-    int cur_valid = (cur_ua >= 0);
-
     int prev_level = emergency_level;
     int new_level = emergency_level;
 
-    // --- 3. 计算单源级别（各自 0~3，用进入阈值） ---
+    // --- 2. 计算 CPU 紧急级别（0~3） ---
     int cpu_lvl = 0;
     if (cpu_valid && EMERG_CPU_ENABLED) {
         if      (t > CPU_EMERG_3) cpu_lvl = 3;
         else if (t > CPU_EMERG_2) cpu_lvl = 2;
         else if (t > CPU_EMERG_1) cpu_lvl = 1;
     }
-    int cur_lvl = 0;
-    if (cur_valid && EMERG_CURRENT_ENABLED) {
-        // 进入时用原始电流值
-        if      (cur_ua > CURRENT_EMERG_3) cur_lvl = 3;
-        else if (cur_ua > CURRENT_EMERG_2) cur_lvl = 2;
-        else if (cur_ua > CURRENT_EMERG_1) cur_lvl = 1;
-    }
-    debug_log(debug_emerg, "emerg cpu_lvl=%d cur_lvl=%d cur=%d(0.01A) combined=%d prev_level=%d",
-              cpu_lvl, cur_lvl, cur_ua, cpu_lvl + cur_lvl > 4 ? 4 : cpu_lvl + cur_lvl, prev_level);
+    debug_log(debug_emerg, "emerg cpu_lvl=%d prev_level=%d", cpu_lvl, prev_level);
 
-    // --- 4. 综合等级 = cpu_level + current_level（统一升降滞回） ---
-    // 升档：combined > 当前等级 → 立即跳升（进入阈值，快速响应）
-    // 降档：combined < 当前等级 → 逐级下降（恢复阈值滞回，防振荡）
-    // 单源最高 3 级，综合最高 4 级
-    int combined = cpu_lvl + cur_lvl;
-    if (combined > 4) combined = 4;
-
-    if (combined > emergency_level) {
-        // 升档：立即响应
-        new_level = combined;
-    } else if (combined < emergency_level) {
-        // 降档：双源都低于恢复阈值才允许降一级
-        // 注意：传感器读取失败时（!cpu_valid 或 !cur_valid）
-        //       cpu_ok/cur_ok 默认 0（保守），防止偶发读取失败导致误降级
+    // --- 3. 升降滞回 ---
+    // 升档：立即响应；降档：低于恢复阈值才逐级下降
+    if (cpu_lvl > emergency_level) {
+        new_level = cpu_lvl;
+    } else if (cpu_lvl < emergency_level) {
         int cpu_ok = 0;
         if (cpu_valid) {
             if      (emergency_level >= 3) cpu_ok = (t < CPU_RECOVER_2);
             else if (emergency_level >= 2) cpu_ok = (t < CPU_RECOVER_1);
             else                           cpu_ok = (t < CPU_RECOVER_0);
         }
-        int cur_ok = 0;
-        if (cur_valid) {
-            int cur_exit = curr_emerg_smooth_valid ? curr_emerg_smooth_val : cur_ua;
-            if      (emergency_level >= 3) cur_ok = (cur_exit < CURRENT_RECOVER_2);
-            else if (emergency_level >= 2) cur_ok = (cur_exit < CURRENT_RECOVER_1);
-            else                           cur_ok = (cur_exit < CURRENT_RECOVER_0);
-        }
-        if (cpu_ok && cur_ok) {
-            new_level = emergency_level - 1;  // 逐级下降
-            debug_log(debug_emerg, "emerg 降级 %d→%d（cpu_ok=%d cur_ok=%d）",
-                      emergency_level, new_level, cpu_ok, cur_ok);
+        if (cpu_ok) {
+            new_level = emergency_level - 1;
+            debug_log(debug_emerg, "emerg 降级 %d→%d（cpu_ok=1）",
+                      emergency_level, new_level);
         } else {
-            debug_log(debug_emerg, "emerg 保持 %d（cpu_ok=%d cur_ok=%d）",
-                      emergency_level, cpu_ok, cur_ok);
-        }
-    }
-    // combined == emergency_level → 保持当前等级
-
-    // --- 5. 电流平滑维护（紧急退出用 EMA） ---
-    // 升档时重置平滑（从新值重新累积）；降档不重置，直到完全退出
-    if (new_level > prev_level) {
-        curr_emerg_smooth_valid = 0;
-    }
-    if (cur_valid && emergency_level > 0) {
-        if (!curr_emerg_smooth_valid) {
-            curr_emerg_smooth_val = cur_ua;
-            curr_emerg_smooth_valid = 1;
-        } else {
-            curr_emerg_smooth_val = EMA_DIR(cur_ua, curr_emerg_smooth_val, CURRENT_SMOOTH_ALPHA);
+            debug_log(debug_emerg, "emerg 保持 %d（cpu_ok=0）",
+                      emergency_level);
         }
     }
 
-    // --- 6. 等级变化处理与日志 ---
+    // --- 4. 等级变化处理与日志 ---
     if (new_level != emergency_level) {
         int delta_e = new_level - emergency_level;
         int cpu_disp = cpu_valid ? cpu_now : t;
-        int cur_disp = cur_valid ? cur_ua : 0;
-        write_log("紧急%d（%s%d）cpu%d.%d cur%d.%d",
+        write_log("紧急%d（%s%d）cpu%d.%d",
                   new_level,
                   (delta_e >= 0 ? "+" : ""), delta_e,
-                  cpu_disp / 10, cpu_disp % 10,
-                  cur_disp / 1000000, (cur_disp / 100000) % 10);
+                  cpu_disp / 10, cpu_disp % 10);
 
         emergency_level = new_level;
         batt_gear_cooldown = BATT_COOLDOWN_CYCLES;
     }
 
-    // --- 7. 根据模式设定强制最低档位 ---
+    // --- 5. 根据模式设定强制最低档位 ---
     if (EMERG_MODE_ENTRY == 0) {
         // 模式 0：查表强制最低档
         const int EMERG_FORCED_TABLE[] = {0, EMERG_FORCED_1, EMERG_FORCED_2, EMERG_FORCED_3, EMERG_FORCED_4};
@@ -1803,9 +1783,8 @@ static void emergency_intervention(void) {
  * 返回 1=已覆盖，0=回退常规模式。
  */
 static int gear_from_current(void) {
-    // 1. 读取带符号电池电流（÷10000 转 0.01A 单位）
-    int val = read_sysfs_int(BATT_CURRENT_PATH);
-    int ua10 = val / 10000;  // µA → 0.01A（截断后4位）
+    // 1. 读取电池电流（0.01A 单位，正=放电，负=充电）
+    int ua10 = read_batt_current_ua10();
     if (ua10 == 0) {
         return 0;
     }
@@ -1939,6 +1918,116 @@ static int pid_var_compute(void) {
 static void pid_var_reset(void) {
     pid_var_count = 0;
     pid_var_head = 0;
+}
+
+// ======================== PID 温度预测 ========================
+
+/**
+ * 推入真实温度读数到预测缓冲区（仅 batt_temp_updated 时调用）
+ * @param batt_raw  原始电池温度（0.1°C）
+ * @param gap       距上次真实读数的周期数（temp_idle_cycles + 1）
+ */
+static void predict_push(int batt_raw, int gap) {
+    PredictPoint *e = &pid_predict_buf[pid_predict_buf_head];
+    e->temp = batt_raw;
+    e->gap = gap;
+    pid_predict_buf_head = (pid_predict_buf_head + 1) % pid_predict_buf_n;
+    if (pid_predict_buf_cnt < pid_predict_buf_n) pid_predict_buf_cnt++;
+}
+
+/**
+ * 温度平衡点预测。
+ *
+ * 算法：
+ *   1. 在缓冲区中扫描最近峰/谷作为趋势起点
+ *   2. 从峰/谷开始计算 per_cycle_delta（归一化温差，0.01°C/周期）
+ *   3. 在绝对值空间计算加速度（delta 变化量）均值
+ *   4. 迭代外推 delta 归零的点作为预测平衡温度
+ *
+ * @param batt_raw  本周期原始电池温度（0.1°C）
+ * @return 预测平衡温度（0.1°C），0 表示数据不足/无法预测
+ */
+static int predict_compute(int batt_raw) {
+    // ---- 1. 最小数据检查 ----
+    if (pid_predict_buf_cnt < 2) return 0;
+
+    // ---- 2. 取窗口 ----
+    int win_n = pid_predict_win_n;
+    if (pid_predict_buf_cnt < win_n) win_n = pid_predict_buf_cnt;
+    int win_start = (pid_predict_buf_head - win_n + pid_predict_buf_n) % pid_predict_buf_n;
+
+    // 窗口内访问宏
+#define BUF_AT(off) pid_predict_buf[(win_start + (off)) % pid_predict_buf_n]
+
+    // ---- 3. 峰/谷检测（窗口内扫描温度拐点） ----
+    int pivot = 0;
+    for (int i = win_n - 2; i >= 1; i--) {
+        int t_prev = BUF_AT(i - 1).temp;
+        int t_cur  = BUF_AT(i).temp;
+        int t_next = BUF_AT(i + 1).temp;
+        // 峰: 前升后降；谷: 前降后升（等号归入"不严格单调"侧，避免平顶误判）
+        if ((t_prev <= t_cur && t_cur > t_next) ||
+            (t_prev >= t_cur && t_cur < t_next)) {
+            pivot = i;
+            break;
+        }
+    }
+
+    // ---- 4. 可用数据点数检查 ----
+    int usable_points = win_n - pivot;
+    if (usable_points < pid_predict_min_points) return 0;
+
+    // ---- 5. 计算 per_cycle_delta（带符号 + 绝对值，0.01°C/周期）----
+    int pcd_signed[9], pcd_abs[9];
+    int pcd_cnt = 0;
+    for (int i = pivot; i < win_n - 1; i++) {
+        int diff = BUF_AT(i + 1).temp - BUF_AT(i).temp;
+        int g = BUF_AT(i + 1).gap;
+        pcd_signed[pcd_cnt] = (diff * 10) / g;
+        pcd_abs[pcd_cnt] = abs(pcd_signed[pcd_cnt]);
+        pcd_cnt++;
+    }
+    if (pcd_cnt < 2) return 0;  // 至少需要 2 个 delta 才能算加速度
+
+    // ---- 6. 稳定性检查：窗口内最大 |delta| < min_delta×2 → 温度几乎不变 ----
+    int max_pcd_abs = 0;
+    for (int i = 0; i < pcd_cnt; i++)
+        if (pcd_abs[i] > max_pcd_abs) max_pcd_abs = pcd_abs[i];
+    if (max_pcd_abs < pid_predict_min_delta * 2) return 0;
+
+    // ---- 7. 加速度均值（绝对值空间，统一处理升/降温） ----
+    int accel_sum = 0, accel_cnt = 0;
+    for (int i = 0; i < pcd_cnt - 1; i++) {
+        accel_sum += pcd_abs[i + 1] - pcd_abs[i];
+        accel_cnt++;
+    }
+    int avg_accel = accel_sum / accel_cnt;
+    if (avg_accel >= 0) return 0;  // 仍在加速，无法预测平衡点
+
+    // ---- 8. 方向权重（0=禁用，10=全效预测） ----
+    int sign = (pcd_signed[pcd_cnt - 1] >= 0) ? 1 : -1;
+    int weight = (sign >= 0) ? pid_predict_heat_weight : pid_predict_cool_weight;
+    if (weight <= 0) return 0;
+
+    // ---- 9. 迭代预测 ----
+    int cur_delta = pcd_abs[pcd_cnt - 1];
+    if (cur_delta < pid_predict_min_delta)
+        cur_delta = pid_predict_min_delta;
+
+    int sum_01c = 0;       // 累积预测变化量（0.01°C）
+    int last_valid = 0;    // 最后一个 cur_delta > 0 时的 sum
+    while (cur_delta > 0) {
+        sum_01c += cur_delta;
+        cur_delta += avg_accel;      // avg_accel < 0，delta 递减
+        if (cur_delta > 0) last_valid = sum_01c;
+    }
+    int predicted_10 = batt_raw + sign * (last_valid / 10);
+
+    // 按权重混合预测值与实际温度：weight=10 全效预测，weight=0 等同于实际温度
+    predicted_10 = (predicted_10 * weight + batt_raw * (10 - weight)) / 10;
+
+#undef BUF_AT
+    return predicted_10;
 }
 
 // ======================== PID 控制函数 ========================
@@ -2139,9 +2228,13 @@ static void pid_reset_core(void) {
     pid_last_batt = -1;
     pid_last_change_time = 0;
     pid_cpu_comp_smooth = 0.0f;
-    pid_curr_comp_smooth = 0.0f;
     pid_last_comp_10 = 0;
     pid_var_reset();
+    pid_predict_smoothed = -1;
+    pid_predict_was_active = 0;
+    pid_predict_consecutive = 0;
+    pid_predict_buf_cnt = 0;
+    pid_predict_buf_head = 0;
 }
 
 /**
@@ -2183,6 +2276,8 @@ static void reconnect_align(void) {
         pid_filter_interval_smooth = -1;
         pid_filter_auto_off = 0;
         temp_idle_cycles = 0;
+        pid_predict_buf_cnt = 0;
+        pid_predict_buf_head = 0;
         actual_rpm = -1;
         actual_cold = -1;
         actual_target_temp = -1;
@@ -2237,7 +2332,7 @@ static void rate_limited_execute(void) {
 
 /**
  * 单次控制循环（纯计算，不下发）
- * 配置重载 → 紧急干预（CPU+电流综合等级）→ 电池控制 → 保存目标档位
+ * 配置重载 → 紧急干预（CPU 温度）→ 电池控制 → 保存目标档位
  * 调用者在外部立即执行速率限制下发，本函数只做决策
  */
 static void main_loop(void) {
@@ -2266,6 +2361,8 @@ static void main_loop(void) {
             // 推入方差采样（使用原始电池温度，非滤波值）
             pid_var_push(batt_raw);
             int gap = temp_idle_cycles + 1;  // 距离上次更新经过的周期数
+            if (pid_predict_heat_weight > 0 || pid_predict_cool_weight > 0)
+                predict_push(batt_raw, gap);
             if (pid_filter_interval_smooth < 0) {
                 pid_filter_interval_smooth = gap * 10;  // ×10 转 0.1周期
             } else {
@@ -2338,8 +2435,8 @@ static void main_loop(void) {
             }
         }
 
-        // --- 补偿值计算（两模式共享） ---
-        float cpu_comp = 0.0f, curr_comp = 0.0f;
+        // --- CPU 补偿值计算 ---
+        float cpu_comp = 0.0f;
 
         if (pid_cpu_comp_enabled && cpu_filtered_temp >= 0) {
             float raw = (float)(cpu_filtered_temp - batt_raw) / (pid_cpu_comp_divisor * 10);
@@ -2352,21 +2449,64 @@ static void main_loop(void) {
             cpu_comp = pid_cpu_comp_smooth;
         }
 
-        if (pid_curr_comp_enabled) {
-            int curr_cA = read_battery_current_abs();
-            if (curr_cA >= pid_curr_comp_threshold) {
-                float raw = (float)curr_cA / (pid_curr_comp_divisor * 100);
-                if (pid_last_batt < 0)
-                    pid_curr_comp_smooth = raw;
-                else
-                    pid_curr_comp_smooth = (CURRENT_GEAR_SMOOTH_ALPHA * raw +
-                                           (100 - CURRENT_GEAR_SMOOTH_ALPHA) * pid_curr_comp_smooth) / 100.0f;
-                curr_comp = pid_curr_comp_smooth;
-            }
-        }
+        int total_comp_10 = (int)(cpu_comp * 10 + 0.5f);
 
-        float total_comp = cpu_comp + curr_comp;
-        int total_comp_10 = (int)(total_comp * 10 + 0.5f);
+        // --- 温度预测（在 PID 重算前，决定 pid_input 的来源） ---
+        int pid_input;
+        if (pid_predict_heat_weight > 0 || pid_predict_cool_weight > 0) {
+            int pred_raw = predict_compute(batt_raw);
+            if (pred_raw != 0) {
+                // 预测成功：ramp-up 渐进钳位（在平滑之前）
+                int max_rise = pid_predict_max_rise;
+                if (pid_predict_ramp_cycles > 0
+                    && pid_predict_consecutive < pid_predict_ramp_cycles) {
+                    max_rise = pid_predict_max_rise
+                               * (pid_predict_consecutive + 1)
+                               / pid_predict_ramp_cycles;
+                }
+                int clamped = clamp(pred_raw, batt_raw - max_rise, batt_raw + max_rise);
+
+                if (!pid_predict_was_active) {
+                    // 转换 IN：防跳变平滑
+                    int base = (pid_batt_filtered >= 0)
+                               ? pid_batt_filtered : batt_raw;
+                    pid_predict_smoothed = EMA_DIR(clamped, base,
+                                                    pid_predict_alpha);
+                } else {
+                    // 连续预测：轻量自平滑
+                    pid_predict_smoothed = EMA_DIR(clamped,
+                                                    pid_predict_smoothed,
+                                                    pid_predict_alpha);
+                }
+                pid_input = pid_predict_smoothed;
+                pid_predict_was_active = 1;
+                pid_predict_consecutive++;
+                pid_log("predict raw=%d(%.1f°C) clamp=%d smoothed=%d ramp=%d/%d",
+                         pred_raw, pred_raw / 10.0, clamped,
+                         pid_predict_smoothed,
+                         pid_predict_consecutive, pid_predict_ramp_cycles);
+            } else if (pid_predict_was_active) {
+                // 转换 OUT：防跳变平滑
+                pid_predict_smoothed = EMA_DIR(batt_raw,
+                                                pid_predict_smoothed,
+                                                pid_batt_alpha);
+                pid_input = pid_predict_smoothed;
+                pid_predict_was_active = 0;
+                pid_predict_consecutive = 0;
+                pid_log("predict out batt=%d smoothed=%d", batt_raw,
+                         pid_predict_smoothed);
+            } else {
+                // 连续不预测：使用滤波值
+                pid_input = (filter_eff ? pid_batt_filtered : batt_raw);
+                pid_predict_smoothed = pid_batt_filtered;
+            }
+        } else {
+            // 预测关闭：使用滤波值
+            pid_input = (filter_eff ? pid_batt_filtered : batt_raw);
+            pid_predict_smoothed = pid_batt_filtered;
+            pid_predict_was_active = 0;
+            pid_predict_consecutive = 0;
+        }
 
         // --- PID 重算判定 ---
         // 滤波模式：每周期都重算 | 无滤波模式：温度或补偿变化时才重算
@@ -2378,15 +2518,14 @@ static void main_loop(void) {
             if (dt > 30.0f) dt = 30.0f;
             if (dt < 3.0f)  dt = 3.0f;
 
-            int pid_input = (filter_eff ? pid_batt_filtered : batt_raw);
             int compensated_10 = pid_input + total_comp_10;
             float pid_out = pid_compute(compensated_10, dt);
 
             // 直接映射到物理值（无输出平滑）
             pid_map_output(pid_out, &pid_align_cold, &pid_align_rpm);
 
-            pid_log("epoch=%ld Tbatt=%d+comp%+.1f(cpu%+.1f+curr%+.1f)=Tinp%d Ttgt=%d Thot=%d dt=%.0fs e=%.2f out=%.2f var=%d",
-                     now, pid_input, total_comp, cpu_comp, curr_comp,
+            pid_log("epoch=%ld Tbatt=%d+comp%+.1f(cpu)=Tinp%d Ttgt=%d Thot=%d dt=%.0fs e=%.2f out=%.2f var=%d",
+                     now, pid_input, cpu_comp,
                      compensated_10, BATT_BASELINE, cooler_hot_temp,
                      dt, (compensated_10 - BATT_BASELINE) / 10.0f,
                      pid_out, pid_var_count >= 2 ? pid_var_compute() : -1);
@@ -2400,7 +2539,7 @@ static void main_loop(void) {
     }
 
     // --- Gear 模式逻辑 ---
-    // 1. 紧急干预（CPU 温度 + 电池电流，更新 emergency_level）
+    // 1. 紧急干预（CPU 温度，更新 emergency_level）
     prev_emerg_level = emergency_level;
     emergency_intervention();
 

@@ -1,6 +1,6 @@
 # Claude 指令 — 飞智 B6X 增强计划
 
-> 本文件仅包含 AI 操作规则。项目介绍见 [README.md](README.md)，版本变更见 [参考资料/CHANGELOG.md](参考资料/CHANGELOG.md)。
+> 本文件仅包含 AI 操作规则。项目介绍见 [README.md](README.md)，版本变更见 [CHANGELOG.md](CHANGELOG.md)。
 
 **重要**：本文件同时包含远程仓库和本地配置的内容，合并后使用以下整合规则。
 

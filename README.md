@@ -48,17 +48,17 @@
 
 ### C 智能温控守护程序
 
-- **PID 连续无级调节**（v2.3）：CTRL_MODE=1 启用，P+I(方差门控/死区回退)+D 控制 + 输入 EMA 滤波
+- **PID 连续无级调节**（v2.3）：CTRL_MODE=1 启用，P+I(方差门控/死区回退)+D 控制 + 输入 EMA 滤波 + CPU 补偿
+- **温度趋势预测**：基于历史每周期温差变化趋势预测温度稳定点，peak/valley 检测 + 线性减速模型 + 权重混合，消除 PID 冷静期等待
 - **制冷→RPM 自动映射**：冷端指数映射 + 热端线性映射 + 自加权合并，PID/常规双模式共享映射引擎
-- **双源紧急干预**：CPU 温度 + 电池电流，OR 入 AND 出，4 级紧急 + 退出恢复期
-- **电池温度调档**：基准 35°C，四区策略（死区/±1/±2/±3 档），趋势豁免 + 反补查表
+- **CPU 紧急干预**：CPU 温度平滑滤波，3 级紧急 + 退出恢复期
+- **电池温度调档**：基准 35°C，四区策略（死区/±1/±2/±3 档），趋势豁免 + 反补查表（合并 REV_COMP 配置）
 - **电流-挡位映射 + 温度融合**：电池电流推荐基础档位，温度累积偏移，推荐挡位变化时偏移自动继承
 - **限速统一下沉**：RPM/制冷/目标温度限速内建到下发函数内部，计算层只管传目标值
 - **决策执行分离**：`main_loop` 纯计算，`rate_limited_execute` 分发
-- **独立开关**：电流紧急/CPU 紧急/反补/趋势豁免各自独立控制
 - **调试日志系统**：`DEBUG_MODE` + 8 个分区（含 PID），开启时自动关闭日志体积限制
 
-> 详细策略设计 → [逻辑说明.md](magisk模块(智能温控)/逻辑说明.md) · 版本变更 → [CHANGELOG.md](参考资料/CHANGELOG.md)
+> 详细策略设计 → [逻辑说明.md](magisk模块(智能温控)/逻辑说明.md) · 版本变更 → [CHANGELOG.md](CHANGELOG.md)
 
 ---
 
@@ -70,9 +70,9 @@
 │   ├── <a href="magisk模块(智能温控)/tempctrl.c">tempctrl.c</a>                 ← 核心 C 代码
 │   ├── <a href="magisk模块(智能温控)/逻辑说明.md">逻辑说明.md</a>                ← 技术设计文档
 │   └── <a href="magisk模块(智能温控)/magisk模块框架/">magisk模块框架/</a>            ← module.prop / service.sh / customize.sh / profile.conf
+├── <a href="CHANGELOG.md">CHANGELOG.md</a>                   ← 版本更新日志
 ├── <a href="参考资料/">参考资料/</a>
 │   ├── <a href="参考资料/完整修复历程.md">完整修复历程.md</a>             ← BLE 4 层 Bug 修复全记录
-│   ├── <a href="参考资料/CHANGELOG.md">CHANGELOG.md</a>               ← 版本更新日志
 │   ├── <a href="参考资料/apk逆向分析/">apk逆向分析/</a>               ← APK 反编译 + 运行逻辑分析
 │   │   ├── <a href="参考资料/apk逆向分析/smali/">smali/</a>                 ← 合并反编译输出
 │   │   └── <a href="参考资料/apk逆向分析/app运行逻辑.md">app运行逻辑.md</a>         ← App 内部运行逻辑分析
