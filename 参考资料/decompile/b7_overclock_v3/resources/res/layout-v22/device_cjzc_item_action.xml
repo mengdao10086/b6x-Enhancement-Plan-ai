@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:gravity="center_vertical"
+    android:orientation="horizontal"
+    android:background="@drawable/cjzc_bg_item_action_normal"
+    android:paddingLeft="@dimen/qb_px_8"
+    android:paddingRight="@dimen/qb_px_8"
+    android:layout_width="match_parent"
+    android:layout_height="@dimen/qb_px_44"
+    android:paddingHorizontal="@dimen/qb_px_8">
+    <ImageView
+        android:id="@+id/image_action"
+        android:layout_width="@dimen/qb_px_24"
+        android:layout_height="@dimen/qb_px_24"/>
+    <TextView
+        android:textSize="@dimen/sp_14"
+        android:textColor="@color/color_black_33"
+        android:ellipsize="end"
+        android:id="@+id/name"
+        android:layout_width="0px"
+        android:layout_height="wrap_content"
+        android:lines="1"
+        android:layout_weight="1"
+        android:layout_marginStart="@dimen/qb_px_10"/>
+    <ImageView
+        android:id="@+id/image_key"
+        android:layout_width="@dimen/qb_px_32"
+        android:layout_height="@dimen/qb_px_24"
+        android:scaleType="fitCenter"/>
+</LinearLayout>

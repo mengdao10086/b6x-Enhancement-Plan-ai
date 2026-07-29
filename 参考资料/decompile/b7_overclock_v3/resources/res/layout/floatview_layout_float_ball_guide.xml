@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="utf-8"?>
+<RelativeLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:background="@color/color_000000_a90"
+    android:layout_width="wrap_content"
+    android:layout_height="wrap_content">
+    <ImageView
+        android:id="@+id/iv_float_ball"
+        android:layout_width="39dp"
+        android:layout_height="39dp"
+        android:layout_marginRight="224dp"
+        android:src="@drawable/float_ic_ball"
+        android:layout_alignParentRight="true"/>
+    <ImageView
+        android:layout_width="52dp"
+        android:layout_height="30dp"
+        android:layout_marginTop="31dp"
+        android:layout_marginRight="269dp"
+        android:src="@drawable/floating_guide_arraw_"
+        android:layout_alignParentRight="true"/>
+    <TextView
+        android:textSize="14sp"
+        android:textColor="@color/color_gray_F1"
+        android:id="@+id/tv_notice"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="68dp"
+        android:layout_marginRight="269dp"
+        android:text="@string/floatview_float_ball_guide_notice_gp_whole"
+        android:layout_alignParentRight="true"/>
+</RelativeLayout>

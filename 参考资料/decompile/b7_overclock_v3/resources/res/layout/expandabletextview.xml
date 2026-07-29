@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="utf-8"?>
+<merge xmlns:android="http://schemas.android.com/apk/res/android" xmlns:app="http://schemas.android.com/apk/res-auto">
+    <com.flydigi.base.widget.superlink.SuperLinkTextView
+        android:textSize="@dimen/sp_13"
+        android:textColor="@color/color_000000_a90"
+        android:id="@+id/expandable_text"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"/>
+    <top.androidman.SuperButton
+        android:id="@+id/expand_collapse"
+        android:background="@android:color/transparent"
+        android:paddingTop="@dimen/qb_px_4"
+        android:paddingBottom="@dimen/qb_px_4"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        app:textColor="@color/colorPrimary"
+        app:textSize="@dimen/sp_13"/>
+</merge>

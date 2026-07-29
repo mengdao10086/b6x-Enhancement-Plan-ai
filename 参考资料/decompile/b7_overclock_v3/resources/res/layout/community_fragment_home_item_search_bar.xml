@@ -1,0 +1,46 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android" xmlns:app="http://schemas.android.com/apk/res-auto"
+    android:gravity="center_vertical"
+    android:orientation="horizontal"
+    android:background="@color/color_white"
+    android:layout_width="match_parent"
+    android:layout_height="@dimen/qb_px_48">
+    <LinearLayout
+        android:id="@+id/area_search"
+        android:background="@color/color_000000_a04"
+        android:layout_width="0dp"
+        android:layout_height="wrap_content"
+        android:layout_marginLeft="@dimen/qb_px_10"
+        android:layout_marginRight="@dimen/qb_px_10"
+        android:layout_weight="1">
+        <top.androidman.SuperButton
+            android:gravity="center_vertical"
+            android:id="@+id/btn_search"
+            android:layout_width="wrap_content"
+            android:layout_height="@dimen/qb_px_32"
+            android:paddingStart="@dimen/qb_px_12"
+            android:paddingEnd="@dimen/qb_px_12"
+            app:background_normalColor="@color/transparent"
+            app:drawable_left="@drawable/ic_search"
+            app:iconColor="@color/color_000000_a50"
+            app:iconHeight="@dimen/qb_px_14"
+            app:iconPadding="@dimen/qb_px_8"
+            app:iconWidth="@dimen/qb_px_14"
+            app:text="@string/community_search_keyword_hint"
+            app:textColor="@color/color_000000_a30"
+            app:textSize="@dimen/sp_13"/>
+    </LinearLayout>
+    <top.androidman.SuperButton
+        android:id="@+id/btn_post"
+        android:layout_width="wrap_content"
+        android:layout_height="@dimen/qb_px_48"
+        android:paddingStart="@dimen/qb_px_10"
+        android:paddingEnd="@dimen/qb_px_10"
+        app:icon="@drawable/ic_rename"
+        app:iconHeight="@dimen/qb_px_12"
+        app:iconPadding="@dimen/qb_px_3"
+        app:iconWidth="@dimen/qb_px_12"
+        app:text="@string/community_title_publish_article"
+        app:textColor="@color/color_000000_a90"
+        app:textSize="@dimen/sp_12"/>
+</LinearLayout>

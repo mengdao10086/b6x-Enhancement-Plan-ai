@@ -1,0 +1,47 @@
+<?xml version="1.0" encoding="utf-8"?>
+<RelativeLayout xmlns:android="http://schemas.android.com/apk/res/android" xmlns:app="http://schemas.android.com/apk/res-auto"
+    android:layout_width="wrap_content"
+    android:layout_height="wrap_content">
+    <androidx.constraintlayout.widget.ConstraintLayout
+        android:id="@+id/layout_half"
+        android:background="@color/color_101010_a75"
+        android:layout_width="@dimen/qb_px_330"
+        android:layout_height="@dimen/qb_px_128">
+        <com.flydigi.float_view.widget.ExpandView
+            android:id="@+id/view_key_leftstick"
+            android:layout_width="@dimen/qb_px_64"
+            android:layout_height="@dimen/qb_px_64"
+            android:layout_marginStart="@dimen/qb_px_32"
+            app:layout_constraintBottom_toBottomOf="parent"
+            app:layout_constraintDimensionRatio="1:1"
+            app:layout_constraintStart_toStartOf="parent"
+            app:layout_constraintTop_toTopOf="parent"/>
+        <com.flydigi.float_view.widget.ExpandView
+            android:id="@+id/view_key_lt"
+            android:layout_width="@dimen/qb_px_28"
+            android:layout_height="@dimen/qb_px_28"
+            android:layout_marginStart="@dimen/qb_px_112"
+            app:layout_constraintBottom_toBottomOf="parent"
+            app:layout_constraintDimensionRatio="1:1"
+            app:layout_constraintStart_toStartOf="parent"
+            app:layout_constraintTop_toTopOf="parent"/>
+        <com.flydigi.float_view.widget.ExpandView
+            android:id="@+id/view_key_l3"
+            android:layout_width="@dimen/qb_px_28"
+            android:layout_height="@dimen/qb_px_28"
+            android:layout_marginStart="@dimen/qb_px_156"
+            app:layout_constraintBottom_toBottomOf="parent"
+            app:layout_constraintDimensionRatio="1:1"
+            app:layout_constraintStart_toStartOf="parent"
+            app:layout_constraintTop_toTopOf="parent"/>
+        <com.flydigi.float_view.widget.ExpandView
+            android:id="@+id/view_key_combo"
+            android:layout_width="@dimen/qb_px_28"
+            android:layout_height="@dimen/qb_px_28"
+            android:layout_marginStart="@dimen/qb_px_200"
+            app:layout_constraintBottom_toBottomOf="parent"
+            app:layout_constraintDimensionRatio="1:1"
+            app:layout_constraintStart_toStartOf="parent"
+            app:layout_constraintTop_toTopOf="parent"/>
+    </androidx.constraintlayout.widget.ConstraintLayout>
+</RelativeLayout>

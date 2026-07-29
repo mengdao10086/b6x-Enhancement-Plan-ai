@@ -1,0 +1,976 @@
+.class public Landroidx/constraintlayout/core/parser/CLParser;
+.super Ljava/lang/Object;
+.source "CLParser.java"
+
+
+# annotations
+.annotation system Ldalvik/annotation/MemberClasses;
+    value = {
+        Landroidx/constraintlayout/core/parser/CLParser$TYPE;
+    }
+.end annotation
+
+
+# static fields
+.field static DEBUG:Z = false
+
+
+# instance fields
+.field private hasComment:Z
+
+.field private lineNumber:I
+
+.field private mContent:Ljava/lang/String;
+
+
+# direct methods
+.method static constructor <clinit>()V
+    .registers 0
+
+    return-void
+.end method
+
+.method public constructor <init>(Ljava/lang/String;)V
+    .registers 3
+
+    invoke-direct {p0}, Ljava/lang/Object;-><init>()V
+
+    const/4 v0, 0x0
+
+    iput-boolean v0, p0, Landroidx/constraintlayout/core/parser/CLParser;->hasComment:Z
+
+    iput-object p1, p0, Landroidx/constraintlayout/core/parser/CLParser;->mContent:Ljava/lang/String;
+
+    return-void
+.end method
+
+.method private createElement(Landroidx/constraintlayout/core/parser/CLElement;ILandroidx/constraintlayout/core/parser/CLParser$TYPE;Z[C)Landroidx/constraintlayout/core/parser/CLElement;
+    .registers 9
+
+    sget-boolean v0, Landroidx/constraintlayout/core/parser/CLParser;->DEBUG:Z
+
+    if-eqz v0, :cond_24
+
+    sget-object v0, Ljava/lang/System;->out:Ljava/io/PrintStream;
+
+    new-instance v1, Ljava/lang/StringBuilder;
+
+    const-string v2, "CREATE "
+
+    invoke-direct {v1, v2}, Ljava/lang/StringBuilder;-><init>(Ljava/lang/String;)V
+
+    invoke-virtual {v1, p3}, Ljava/lang/StringBuilder;->append(Ljava/lang/Object;)Ljava/lang/StringBuilder;
+
+    move-result-object v1
+
+    const-string v2, " at "
+
+    invoke-virtual {v1, v2}, Ljava/lang/StringBuilder;->append(Ljava/lang/String;)Ljava/lang/StringBuilder;
+
+    move-result-object v1
+
+    aget-char v2, p5, p2
+
+    invoke-virtual {v1, v2}, Ljava/lang/StringBuilder;->append(C)Ljava/lang/StringBuilder;
+
+    move-result-object v1
+
+    invoke-virtual {v1}, Ljava/lang/StringBuilder;->toString()Ljava/lang/String;
+
+    move-result-object v1
+
+    invoke-virtual {v0, v1}, Ljava/io/PrintStream;->println(Ljava/lang/String;)V
+
+    :cond_24
+    sget-object v0, Landroidx/constraintlayout/core/parser/CLParser$1;->$SwitchMap$androidx$constraintlayout$core$parser$CLParser$TYPE:[I
+
+    invoke-virtual {p3}, Landroidx/constraintlayout/core/parser/CLParser$TYPE;->ordinal()I
+
+    move-result p3
+
+    aget p3, v0, p3
+
+    const/4 v0, 0x0
+
+    packed-switch p3, :pswitch_data_6a
+
+    move-object p3, v0
+
+    goto :goto_51
+
+    :pswitch_32
+    invoke-static {p5}, Landroidx/constraintlayout/core/parser/CLToken;->allocate([C)Landroidx/constraintlayout/core/parser/CLElement;
+
+    move-result-object p3
+
+    goto :goto_51
+
+    :pswitch_37
+    invoke-static {p5}, Landroidx/constraintlayout/core/parser/CLKey;->allocate([C)Landroidx/constraintlayout/core/parser/CLElement;
+
+    move-result-object p3
+
+    goto :goto_51
+
+    :pswitch_3c
+    invoke-static {p5}, Landroidx/constraintlayout/core/parser/CLNumber;->allocate([C)Landroidx/constraintlayout/core/parser/CLElement;
+
+    move-result-object p3
+
+    goto :goto_51
+
+    :pswitch_41
+    invoke-static {p5}, Landroidx/constraintlayout/core/parser/CLString;->allocate([C)Landroidx/constraintlayout/core/parser/CLElement;
+
+    move-result-object p3
+
+    goto :goto_51
+
+    :pswitch_46
+    invoke-static {p5}, Landroidx/constraintlayout/core/parser/CLArray;->allocate([C)Landroidx/constraintlayout/core/parser/CLElement;
+
+    move-result-object p3
+
+    goto :goto_4f
+
+    :pswitch_4b
+    invoke-static {p5}, Landroidx/constraintlayout/core/parser/CLObject;->allocate([C)Landroidx/constraintlayout/core/parser/CLObject;
+
+    move-result-object p3
+
+    :goto_4f
+    add-int/lit8 p2, p2, 0x1
+
+    :goto_51
+    if-nez p3, :cond_54
+
+    return-object v0
+
+    :cond_54
+    iget p5, p0, Landroidx/constraintlayout/core/parser/CLParser;->lineNumber:I
+
+    invoke-virtual {p3, p5}, Landroidx/constraintlayout/core/parser/CLElement;->setLine(I)V
+
+    if-eqz p4, :cond_5f
+
+    int-to-long p4, p2
+
+    invoke-virtual {p3, p4, p5}, Landroidx/constraintlayout/core/parser/CLElement;->setStart(J)V
+
+    :cond_5f
+    instance-of p2, p1, Landroidx/constraintlayout/core/parser/CLContainer;
+
+    if-eqz p2, :cond_68
+
+    check-cast p1, Landroidx/constraintlayout/core/parser/CLContainer;
+
+    invoke-virtual {p3, p1}, Landroidx/constraintlayout/core/parser/CLElement;->setContainer(Landroidx/constraintlayout/core/parser/CLContainer;)V
+
+    :cond_68
+    return-object p3
+
+    nop
+
+    :pswitch_data_6a
+    .packed-switch 0x1
+        :pswitch_4b
+        :pswitch_46
+        :pswitch_41
+        :pswitch_3c
+        :pswitch_37
+        :pswitch_32
+    .end packed-switch
+.end method
+
+.method private getNextJsonElement(ICLandroidx/constraintlayout/core/parser/CLElement;[C)Landroidx/constraintlayout/core/parser/CLElement;
+    .registers 12
+    .annotation system Ldalvik/annotation/Throws;
+        value = {
+            Landroidx/constraintlayout/core/parser/CLParsingException;
+        }
+    .end annotation
+
+    const/16 v0, 0x9
+
+    if-eq p2, v0, :cond_d5
+
+    const/16 v0, 0xa
+
+    if-eq p2, v0, :cond_d5
+
+    const/16 v0, 0xd
+
+    if-eq p2, v0, :cond_d5
+
+    const/16 v0, 0x20
+
+    if-eq p2, v0, :cond_d5
+
+    const/16 v0, 0x22
+
+    if-eq p2, v0, :cond_ba
+
+    const/16 v0, 0x27
+
+    if-eq p2, v0, :cond_ba
+
+    const/16 v0, 0x5b
+
+    if-eq p2, v0, :cond_ae
+
+    const/16 v0, 0x5d
+
+    if-eq p2, v0, :cond_9f
+
+    const/16 v0, 0x7b
+
+    if-eq p2, v0, :cond_93
+
+    const/16 v0, 0x7d
+
+    if-eq p2, v0, :cond_9f
+
+    packed-switch p2, :pswitch_data_d6
+
+    instance-of v0, p3, Landroidx/constraintlayout/core/parser/CLContainer;
+
+    if-eqz v0, :cond_6b
+
+    instance-of v0, p3, Landroidx/constraintlayout/core/parser/CLObject;
+
+    if-nez v0, :cond_6b
+
+    sget-object v4, Landroidx/constraintlayout/core/parser/CLParser$TYPE;->TOKEN:Landroidx/constraintlayout/core/parser/CLParser$TYPE;
+
+    const/4 v5, 0x1
+
+    move-object v1, p0
+
+    move-object v2, p3
+
+    move v3, p1
+
+    move-object v6, p4
+
+    invoke-direct/range {v1 .. v6}, Landroidx/constraintlayout/core/parser/CLParser;->createElement(Landroidx/constraintlayout/core/parser/CLElement;ILandroidx/constraintlayout/core/parser/CLParser$TYPE;Z[C)Landroidx/constraintlayout/core/parser/CLElement;
+
+    move-result-object p3
+
+    move-object p4, p3
+
+    check-cast p4, Landroidx/constraintlayout/core/parser/CLToken;
+
+    int-to-long v0, p1
+
+    invoke-virtual {p4, p2, v0, v1}, Landroidx/constraintlayout/core/parser/CLToken;->validate(CJ)Z
+
+    move-result p1
+
+    if-eqz p1, :cond_4a
+
+    goto/16 :goto_d5
+
+    :cond_4a
+    new-instance p1, Landroidx/constraintlayout/core/parser/CLParsingException;
+
+    new-instance p3, Ljava/lang/StringBuilder;
+
+    const-string v0, "incorrect token <"
+
+    invoke-direct {p3, v0}, Ljava/lang/StringBuilder;-><init>(Ljava/lang/String;)V
+
+    invoke-virtual {p3, p2}, Ljava/lang/StringBuilder;->append(C)Ljava/lang/StringBuilder;
+
+    move-result-object p2
+
+    const-string p3, "> at line "
+
+    invoke-virtual {p2, p3}, Ljava/lang/StringBuilder;->append(Ljava/lang/String;)Ljava/lang/StringBuilder;
+
+    move-result-object p2
+
+    iget p3, p0, Landroidx/constraintlayout/core/parser/CLParser;->lineNumber:I
+
+    invoke-virtual {p2, p3}, Ljava/lang/StringBuilder;->append(I)Ljava/lang/StringBuilder;
+
+    move-result-object p2
+
+    invoke-virtual {p2}, Ljava/lang/StringBuilder;->toString()Ljava/lang/String;
+
+    move-result-object p2
+
+    invoke-direct {p1, p2, p4}, Landroidx/constraintlayout/core/parser/CLParsingException;-><init>(Ljava/lang/String;Landroidx/constraintlayout/core/parser/CLElement;)V
+
+    throw p1
+
+    :cond_6b
+    sget-object v3, Landroidx/constraintlayout/core/parser/CLParser$TYPE;->KEY:Landroidx/constraintlayout/core/parser/CLParser$TYPE;
+
+    const/4 v4, 0x1
+
+    move-object v0, p0
+
+    move-object v1, p3
+
+    move v2, p1
+
+    move-object v5, p4
+
+    invoke-direct/range {v0 .. v5}, Landroidx/constraintlayout/core/parser/CLParser;->createElement(Landroidx/constraintlayout/core/parser/CLElement;ILandroidx/constraintlayout/core/parser/CLParser$TYPE;Z[C)Landroidx/constraintlayout/core/parser/CLElement;
+
+    move-result-object p3
+
+    goto/16 :goto_d5
+
+    :pswitch_78
+    const/4 p2, 0x1
+
+    add-int/2addr p1, p2
+
+    array-length v0, p4
+
+    if-ge p1, v0, :cond_d5
+
+    aget-char p1, p4, p1
+
+    const/16 p4, 0x2f
+
+    if-ne p1, p4, :cond_d5
+
+    iput-boolean p2, p0, Landroidx/constraintlayout/core/parser/CLParser;->hasComment:Z
+
+    goto/16 :goto_d5
+
+    :pswitch_87
+    sget-object v3, Landroidx/constraintlayout/core/parser/CLParser$TYPE;->NUMBER:Landroidx/constraintlayout/core/parser/CLParser$TYPE;
+
+    const/4 v4, 0x1
+
+    move-object v0, p0
+
+    move-object v1, p3
+
+    move v2, p1
+
+    move-object v5, p4
+
+    invoke-direct/range {v0 .. v5}, Landroidx/constraintlayout/core/parser/CLParser;->createElement(Landroidx/constraintlayout/core/parser/CLElement;ILandroidx/constraintlayout/core/parser/CLParser$TYPE;Z[C)Landroidx/constraintlayout/core/parser/CLElement;
+
+    move-result-object p3
+
+    goto :goto_d5
+
+    :cond_93
+    sget-object v3, Landroidx/constraintlayout/core/parser/CLParser$TYPE;->OBJECT:Landroidx/constraintlayout/core/parser/CLParser$TYPE;
+
+    const/4 v4, 0x1
+
+    move-object v0, p0
+
+    move-object v1, p3
+
+    move v2, p1
+
+    move-object v5, p4
+
+    invoke-direct/range {v0 .. v5}, Landroidx/constraintlayout/core/parser/CLParser;->createElement(Landroidx/constraintlayout/core/parser/CLElement;ILandroidx/constraintlayout/core/parser/CLParser$TYPE;Z[C)Landroidx/constraintlayout/core/parser/CLElement;
+
+    move-result-object p3
+
+    goto :goto_d5
+
+    :cond_9f
+    add-int/lit8 p2, p1, -0x1
+
+    int-to-long v0, p2
+
+    invoke-virtual {p3, v0, v1}, Landroidx/constraintlayout/core/parser/CLElement;->setEnd(J)V
+
+    invoke-virtual {p3}, Landroidx/constraintlayout/core/parser/CLElement;->getContainer()Landroidx/constraintlayout/core/parser/CLElement;
+
+    move-result-object p3
+
+    int-to-long p1, p1
+
+    invoke-virtual {p3, p1, p2}, Landroidx/constraintlayout/core/parser/CLElement;->setEnd(J)V
+
+    goto :goto_d5
+
+    :cond_ae
+    sget-object v3, Landroidx/constraintlayout/core/parser/CLParser$TYPE;->ARRAY:Landroidx/constraintlayout/core/parser/CLParser$TYPE;
+
+    const/4 v4, 0x1
+
+    move-object v0, p0
+
+    move-object v1, p3
+
+    move v2, p1
+
+    move-object v5, p4
+
+    invoke-direct/range {v0 .. v5}, Landroidx/constraintlayout/core/parser/CLParser;->createElement(Landroidx/constraintlayout/core/parser/CLElement;ILandroidx/constraintlayout/core/parser/CLParser$TYPE;Z[C)Landroidx/constraintlayout/core/parser/CLElement;
+
+    move-result-object p3
+
+    goto :goto_d5
+
+    :cond_ba
+    instance-of p2, p3, Landroidx/constraintlayout/core/parser/CLObject;
+
+    if-eqz p2, :cond_ca
+
+    sget-object v3, Landroidx/constraintlayout/core/parser/CLParser$TYPE;->KEY:Landroidx/constraintlayout/core/parser/CLParser$TYPE;
+
+    const/4 v4, 0x1
+
+    move-object v0, p0
+
+    move-object v1, p3
+
+    move v2, p1
+
+    move-object v5, p4
+
+    invoke-direct/range {v0 .. v5}, Landroidx/constraintlayout/core/parser/CLParser;->createElement(Landroidx/constraintlayout/core/parser/CLElement;ILandroidx/constraintlayout/core/parser/CLParser$TYPE;Z[C)Landroidx/constraintlayout/core/parser/CLElement;
+
+    move-result-object p3
+
+    goto :goto_d5
+
+    :cond_ca
+    sget-object v3, Landroidx/constraintlayout/core/parser/CLParser$TYPE;->STRING:Landroidx/constraintlayout/core/parser/CLParser$TYPE;
+
+    const/4 v4, 0x1
+
+    move-object v0, p0
+
+    move-object v1, p3
+
+    move v2, p1
+
+    move-object v5, p4
+
+    invoke-direct/range {v0 .. v5}, Landroidx/constraintlayout/core/parser/CLParser;->createElement(Landroidx/constraintlayout/core/parser/CLElement;ILandroidx/constraintlayout/core/parser/CLParser$TYPE;Z[C)Landroidx/constraintlayout/core/parser/CLElement;
+
+    move-result-object p3
+
+    :cond_d5
+    :goto_d5
+    :pswitch_d5
+    return-object p3
+
+    :pswitch_data_d6
+    .packed-switch 0x2b
+        :pswitch_87
+        :pswitch_d5
+        :pswitch_87
+        :pswitch_87
+        :pswitch_78
+        :pswitch_87
+        :pswitch_87
+        :pswitch_87
+        :pswitch_87
+        :pswitch_87
+        :pswitch_87
+        :pswitch_87
+        :pswitch_87
+        :pswitch_87
+        :pswitch_87
+        :pswitch_d5
+    .end packed-switch
+.end method
+
+.method public static parse(Ljava/lang/String;)Landroidx/constraintlayout/core/parser/CLObject;
+    .registers 2
+    .annotation system Ldalvik/annotation/Throws;
+        value = {
+            Landroidx/constraintlayout/core/parser/CLParsingException;
+        }
+    .end annotation
+
+    new-instance v0, Landroidx/constraintlayout/core/parser/CLParser;
+
+    invoke-direct {v0, p0}, Landroidx/constraintlayout/core/parser/CLParser;-><init>(Ljava/lang/String;)V
+
+    invoke-virtual {v0}, Landroidx/constraintlayout/core/parser/CLParser;->parse()Landroidx/constraintlayout/core/parser/CLObject;
+
+    move-result-object p0
+
+    return-object p0
+.end method
+
+
+# virtual methods
+.method public parse()Landroidx/constraintlayout/core/parser/CLObject;
+    .registers 17
+    .annotation system Ldalvik/annotation/Throws;
+        value = {
+            Landroidx/constraintlayout/core/parser/CLParsingException;
+        }
+    .end annotation
+
+    move-object/from16 v0, p0
+
+    iget-object v1, v0, Landroidx/constraintlayout/core/parser/CLParser;->mContent:Ljava/lang/String;
+
+    invoke-virtual {v1}, Ljava/lang/String;->toCharArray()[C
+
+    move-result-object v1
+
+    array-length v2, v1
+
+    const/4 v3, 0x1
+
+    iput v3, v0, Landroidx/constraintlayout/core/parser/CLParser;->lineNumber:I
+
+    const/4 v4, 0x0
+
+    move v5, v4
+
+    :goto_e
+    const/16 v6, 0xa
+
+    const/4 v7, -0x1
+
+    if-ge v5, v2, :cond_24
+
+    aget-char v8, v1, v5
+
+    const/16 v9, 0x7b
+
+    if-ne v8, v9, :cond_1a
+
+    goto :goto_25
+
+    :cond_1a
+    if-ne v8, v6, :cond_21
+
+    iget v6, v0, Landroidx/constraintlayout/core/parser/CLParser;->lineNumber:I
+
+    add-int/2addr v6, v3
+
+    iput v6, v0, Landroidx/constraintlayout/core/parser/CLParser;->lineNumber:I
+
+    :cond_21
+    add-int/lit8 v5, v5, 0x1
+
+    goto :goto_e
+
+    :cond_24
+    move v5, v7
+
+    :goto_25
+    if-eq v5, v7, :cond_18f
+
+    invoke-static {v1}, Landroidx/constraintlayout/core/parser/CLObject;->allocate([C)Landroidx/constraintlayout/core/parser/CLObject;
+
+    move-result-object v7
+
+    iget v8, v0, Landroidx/constraintlayout/core/parser/CLParser;->lineNumber:I
+
+    invoke-virtual {v7, v8}, Landroidx/constraintlayout/core/parser/CLObject;->setLine(I)V
+
+    int-to-long v8, v5
+
+    invoke-virtual {v7, v8, v9}, Landroidx/constraintlayout/core/parser/CLObject;->setStart(J)V
+
+    add-int/2addr v5, v3
+
+    move-object v8, v7
+
+    :goto_36
+    if-ge v5, v2, :cond_150
+
+    aget-char v9, v1, v5
+
+    if-ne v9, v6, :cond_41
+
+    iget v10, v0, Landroidx/constraintlayout/core/parser/CLParser;->lineNumber:I
+
+    add-int/2addr v10, v3
+
+    iput v10, v0, Landroidx/constraintlayout/core/parser/CLParser;->lineNumber:I
+
+    :cond_41
+    iget-boolean v10, v0, Landroidx/constraintlayout/core/parser/CLParser;->hasComment:Z
+
+    if-eqz v10, :cond_49
+
+    if-ne v9, v6, :cond_14a
+
+    iput-boolean v4, v0, Landroidx/constraintlayout/core/parser/CLParser;->hasComment:Z
+
+    :cond_49
+    if-nez v8, :cond_4d
+
+    goto/16 :goto_150
+
+    :cond_4d
+    invoke-virtual {v8}, Landroidx/constraintlayout/core/parser/CLElement;->isDone()Z
+
+    move-result v10
+
+    if-eqz v10, :cond_59
+
+    invoke-direct {v0, v5, v9, v8, v1}, Landroidx/constraintlayout/core/parser/CLParser;->getNextJsonElement(ICLandroidx/constraintlayout/core/parser/CLElement;[C)Landroidx/constraintlayout/core/parser/CLElement;
+
+    move-result-object v8
+
+    goto/16 :goto_131
+
+    :cond_59
+    instance-of v10, v8, Landroidx/constraintlayout/core/parser/CLObject;
+
+    const/16 v11, 0x7d
+
+    if-eqz v10, :cond_6f
+
+    if-ne v9, v11, :cond_69
+
+    add-int/lit8 v9, v5, -0x1
+
+    int-to-long v9, v9
+
+    invoke-virtual {v8, v9, v10}, Landroidx/constraintlayout/core/parser/CLElement;->setEnd(J)V
+
+    goto/16 :goto_131
+
+    :cond_69
+    invoke-direct {v0, v5, v9, v8, v1}, Landroidx/constraintlayout/core/parser/CLParser;->getNextJsonElement(ICLandroidx/constraintlayout/core/parser/CLElement;[C)Landroidx/constraintlayout/core/parser/CLElement;
+
+    move-result-object v8
+
+    goto/16 :goto_131
+
+    :cond_6f
+    instance-of v10, v8, Landroidx/constraintlayout/core/parser/CLArray;
+
+    const/16 v12, 0x5d
+
+    if-eqz v10, :cond_85
+
+    if-ne v9, v12, :cond_7f
+
+    add-int/lit8 v9, v5, -0x1
+
+    int-to-long v9, v9
+
+    invoke-virtual {v8, v9, v10}, Landroidx/constraintlayout/core/parser/CLElement;->setEnd(J)V
+
+    goto/16 :goto_131
+
+    :cond_7f
+    invoke-direct {v0, v5, v9, v8, v1}, Landroidx/constraintlayout/core/parser/CLParser;->getNextJsonElement(ICLandroidx/constraintlayout/core/parser/CLElement;[C)Landroidx/constraintlayout/core/parser/CLElement;
+
+    move-result-object v8
+
+    goto/16 :goto_131
+
+    :cond_85
+    instance-of v10, v8, Landroidx/constraintlayout/core/parser/CLString;
+
+    const-wide/16 v13, 0x1
+
+    if-eqz v10, :cond_a0
+
+    iget-wide v10, v8, Landroidx/constraintlayout/core/parser/CLElement;->start:J
+
+    long-to-int v10, v10
+
+    aget-char v10, v1, v10
+
+    if-ne v10, v9, :cond_131
+
+    iget-wide v9, v8, Landroidx/constraintlayout/core/parser/CLElement;->start:J
+
+    add-long/2addr v9, v13
+
+    invoke-virtual {v8, v9, v10}, Landroidx/constraintlayout/core/parser/CLElement;->setStart(J)V
+
+    add-int/lit8 v9, v5, -0x1
+
+    int-to-long v9, v9
+
+    invoke-virtual {v8, v9, v10}, Landroidx/constraintlayout/core/parser/CLElement;->setEnd(J)V
+
+    goto/16 :goto_131
+
+    :cond_a0
+    instance-of v15, v8, Landroidx/constraintlayout/core/parser/CLToken;
+
+    if-eqz v15, :cond_d4
+
+    move-object v15, v8
+
+    check-cast v15, Landroidx/constraintlayout/core/parser/CLToken;
+
+    int-to-long v3, v5
+
+    invoke-virtual {v15, v9, v3, v4}, Landroidx/constraintlayout/core/parser/CLToken;->validate(CJ)Z
+
+    move-result v3
+
+    if-eqz v3, :cond_af
+
+    goto :goto_d4
+
+    :cond_af
+    new-instance v1, Landroidx/constraintlayout/core/parser/CLParsingException;
+
+    new-instance v2, Ljava/lang/StringBuilder;
+
+    const-string v3, "parsing incorrect token "
+
+    invoke-direct {v2, v3}, Ljava/lang/StringBuilder;-><init>(Ljava/lang/String;)V
+
+    invoke-virtual {v15}, Landroidx/constraintlayout/core/parser/CLToken;->content()Ljava/lang/String;
+
+    move-result-object v3
+
+    invoke-virtual {v2, v3}, Ljava/lang/StringBuilder;->append(Ljava/lang/String;)Ljava/lang/StringBuilder;
+
+    move-result-object v2
+
+    const-string v3, " at line "
+
+    invoke-virtual {v2, v3}, Ljava/lang/StringBuilder;->append(Ljava/lang/String;)Ljava/lang/StringBuilder;
+
+    move-result-object v2
+
+    iget v3, v0, Landroidx/constraintlayout/core/parser/CLParser;->lineNumber:I
+
+    invoke-virtual {v2, v3}, Ljava/lang/StringBuilder;->append(I)Ljava/lang/StringBuilder;
+
+    move-result-object v2
+
+    invoke-virtual {v2}, Ljava/lang/StringBuilder;->toString()Ljava/lang/String;
+
+    move-result-object v2
+
+    invoke-direct {v1, v2, v15}, Landroidx/constraintlayout/core/parser/CLParsingException;-><init>(Ljava/lang/String;Landroidx/constraintlayout/core/parser/CLElement;)V
+
+    throw v1
+
+    :cond_d4
+    :goto_d4
+    instance-of v3, v8, Landroidx/constraintlayout/core/parser/CLKey;
+
+    if-nez v3, :cond_da
+
+    if-eqz v10, :cond_f5
+
+    :cond_da
+    iget-wide v3, v8, Landroidx/constraintlayout/core/parser/CLElement;->start:J
+
+    long-to-int v3, v3
+
+    aget-char v3, v1, v3
+
+    const/16 v4, 0x27
+
+    if-eq v3, v4, :cond_e7
+
+    const/16 v4, 0x22
+
+    if-ne v3, v4, :cond_f5
+
+    :cond_e7
+    if-ne v3, v9, :cond_f5
+
+    iget-wide v3, v8, Landroidx/constraintlayout/core/parser/CLElement;->start:J
+
+    add-long/2addr v3, v13
+
+    invoke-virtual {v8, v3, v4}, Landroidx/constraintlayout/core/parser/CLElement;->setStart(J)V
+
+    add-int/lit8 v3, v5, -0x1
+
+    int-to-long v3, v3
+
+    invoke-virtual {v8, v3, v4}, Landroidx/constraintlayout/core/parser/CLElement;->setEnd(J)V
+
+    :cond_f5
+    invoke-virtual {v8}, Landroidx/constraintlayout/core/parser/CLElement;->isDone()Z
+
+    move-result v3
+
+    if-nez v3, :cond_131
+
+    if-eq v9, v11, :cond_115
+
+    if-eq v9, v12, :cond_115
+
+    const/16 v3, 0x2c
+
+    if-eq v9, v3, :cond_115
+
+    const/16 v3, 0x20
+
+    if-eq v9, v3, :cond_115
+
+    const/16 v3, 0x9
+
+    if-eq v9, v3, :cond_115
+
+    const/16 v3, 0xd
+
+    if-eq v9, v3, :cond_115
+
+    if-eq v9, v6, :cond_115
+
+    const/16 v3, 0x3a
+
+    if-ne v9, v3, :cond_131
+
+    :cond_115
+    add-int/lit8 v3, v5, -0x1
+
+    int-to-long v3, v3
+
+    invoke-virtual {v8, v3, v4}, Landroidx/constraintlayout/core/parser/CLElement;->setEnd(J)V
+
+    if-eq v9, v11, :cond_11f
+
+    if-ne v9, v12, :cond_131
+
+    :cond_11f
+    invoke-virtual {v8}, Landroidx/constraintlayout/core/parser/CLElement;->getContainer()Landroidx/constraintlayout/core/parser/CLElement;
+
+    move-result-object v8
+
+    invoke-virtual {v8, v3, v4}, Landroidx/constraintlayout/core/parser/CLElement;->setEnd(J)V
+
+    instance-of v9, v8, Landroidx/constraintlayout/core/parser/CLKey;
+
+    if-eqz v9, :cond_131
+
+    invoke-virtual {v8}, Landroidx/constraintlayout/core/parser/CLElement;->getContainer()Landroidx/constraintlayout/core/parser/CLElement;
+
+    move-result-object v8
+
+    invoke-virtual {v8, v3, v4}, Landroidx/constraintlayout/core/parser/CLElement;->setEnd(J)V
+
+    :cond_131
+    :goto_131
+    invoke-virtual {v8}, Landroidx/constraintlayout/core/parser/CLElement;->isDone()Z
+
+    move-result v3
+
+    if-eqz v3, :cond_14a
+
+    instance-of v3, v8, Landroidx/constraintlayout/core/parser/CLKey;
+
+    if-eqz v3, :cond_146
+
+    move-object v3, v8
+
+    check-cast v3, Landroidx/constraintlayout/core/parser/CLKey;
+
+    iget-object v3, v3, Landroidx/constraintlayout/core/parser/CLKey;->mElements:Ljava/util/ArrayList;
+
+    invoke-virtual {v3}, Ljava/util/ArrayList;->size()I
+
+    move-result v3
+
+    if-lez v3, :cond_14a
+
+    :cond_146
+    invoke-virtual {v8}, Landroidx/constraintlayout/core/parser/CLElement;->getContainer()Landroidx/constraintlayout/core/parser/CLElement;
+
+    move-result-object v8
+
+    :cond_14a
+    add-int/lit8 v5, v5, 0x1
+
+    const/4 v3, 0x1
+
+    const/4 v4, 0x0
+
+    goto/16 :goto_36
+
+    :cond_150
+    :goto_150
+    if-eqz v8, :cond_172
+
+    invoke-virtual {v8}, Landroidx/constraintlayout/core/parser/CLElement;->isDone()Z
+
+    move-result v1
+
+    if-nez v1, :cond_172
+
+    instance-of v1, v8, Landroidx/constraintlayout/core/parser/CLString;
+
+    if-eqz v1, :cond_166
+
+    iget-wide v3, v8, Landroidx/constraintlayout/core/parser/CLElement;->start:J
+
+    long-to-int v1, v3
+
+    const/4 v3, 0x1
+
+    add-int/2addr v1, v3
+
+    int-to-long v4, v1
+
+    invoke-virtual {v8, v4, v5}, Landroidx/constraintlayout/core/parser/CLElement;->setStart(J)V
+
+    goto :goto_167
+
+    :cond_166
+    const/4 v3, 0x1
+
+    :goto_167
+    add-int/lit8 v1, v2, -0x1
+
+    int-to-long v4, v1
+
+    invoke-virtual {v8, v4, v5}, Landroidx/constraintlayout/core/parser/CLElement;->setEnd(J)V
+
+    invoke-virtual {v8}, Landroidx/constraintlayout/core/parser/CLElement;->getContainer()Landroidx/constraintlayout/core/parser/CLElement;
+
+    move-result-object v8
+
+    goto :goto_150
+
+    :cond_172
+    sget-boolean v1, Landroidx/constraintlayout/core/parser/CLParser;->DEBUG:Z
+
+    if-eqz v1, :cond_18e
+
+    sget-object v1, Ljava/lang/System;->out:Ljava/io/PrintStream;
+
+    new-instance v2, Ljava/lang/StringBuilder;
+
+    const-string v3, "Root: "
+
+    invoke-direct {v2, v3}, Ljava/lang/StringBuilder;-><init>(Ljava/lang/String;)V
+
+    invoke-virtual {v7}, Landroidx/constraintlayout/core/parser/CLObject;->toJSON()Ljava/lang/String;
+
+    move-result-object v3
+
+    invoke-virtual {v2, v3}, Ljava/lang/StringBuilder;->append(Ljava/lang/String;)Ljava/lang/StringBuilder;
+
+    move-result-object v2
+
+    invoke-virtual {v2}, Ljava/lang/StringBuilder;->toString()Ljava/lang/String;
+
+    move-result-object v2
+
+    invoke-virtual {v1, v2}, Ljava/io/PrintStream;->println(Ljava/lang/String;)V
+
+    :cond_18e
+    return-object v7
+
+    :cond_18f
+    new-instance v1, Landroidx/constraintlayout/core/parser/CLParsingException;
+
+    const-string v2, "invalid json content"
+
+    const/4 v3, 0x0
+
+    invoke-direct {v1, v2, v3}, Landroidx/constraintlayout/core/parser/CLParsingException;-><init>(Ljava/lang/String;Landroidx/constraintlayout/core/parser/CLElement;)V
+
+    throw v1
+.end method

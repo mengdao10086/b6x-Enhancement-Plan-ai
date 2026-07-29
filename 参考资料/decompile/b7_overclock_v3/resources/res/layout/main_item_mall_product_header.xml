@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<TextView xmlns:android="http://schemas.android.com/apk/res/android"
+    android:textSize="@dimen/sp_20"
+    android:textStyle="bold"
+    android:textColor="@color/color_000000_a90"
+    android:paddingTop="@dimen/qb_px_24"
+    android:paddingBottom="@dimen/qb_px_12"
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content"
+    android:text="@string/app_title_mall_product_selected"
+    android:paddingStart="@dimen/qb_px_16"
+    android:paddingEnd="@dimen/qb_px_16"/>

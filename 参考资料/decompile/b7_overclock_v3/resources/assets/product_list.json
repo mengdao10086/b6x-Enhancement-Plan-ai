@@ -1,0 +1,180 @@
+{
+  "version": 134,
+  "products": [
+    {
+      "sections": [
+        {
+          "devices": [
+            {
+              "device_name": "黄蜂2",
+              "list_pic": "device_ic_wasp2",
+              "device_type": "wasp2",
+              "type": 1
+            },
+            {
+              "device_name": "Q1",
+              "list_pic": "device_ic_q1",
+              "device_type": "q1",
+              "type": 1
+            },
+            {
+              "device_name": "八爪鱼",
+              "list_pic": "device_ic_apex",
+              "device_type": "apex",
+              "type": 1
+            },
+            {
+              "device_name": "Wee 2T",
+              "list_pic": "device_ic_wee2t",
+              "device_type": "wee2t",
+              "type": 1
+            },
+            {
+              "device_name": "蜂刺",
+              "list_pic": "device_ic_fc",
+              "device_type": "fc",
+              "type": 3
+            },
+            {
+              "device_name": "银狐",
+              "list_pic": "device_ic_cyberfox",
+              "device_type": "cyberfox",
+              "type": 2
+            }
+          ],
+          "category": "热门"
+        }
+      ],
+      "category": "热门"
+    },
+    {
+      "sections": [
+        {
+          "devices": [
+            {
+              "device_name": "黄蜂2",
+              "list_pic": "device_ic_wasp2",
+              "device_type": "wasp2",
+              "type": 1
+            },
+            {
+              "device_name": "黄蜂2 Pro",
+              "list_pic": "device_ic_wasp2pro",
+              "device_type": "wasp2t",
+              "type": 1
+            },
+            {
+              "device_name": "蓝蜂",
+              "list_pic": "device_ic_wasp_bt",
+              "device_type": "waspbt",
+              "type": 1
+            },
+            {
+              "device_name": "黄蜂 N\/X",
+              "list_pic": "device_ic_wasp",
+              "device_type": "wasp",
+              "type": 1
+            },
+            {
+              "device_name": "蜂刺",
+              "list_pic": "device_ic_fc",
+              "device_type": "fc",
+              "type": 3
+            }
+          ],
+          "category": "单手手柄"
+        },
+        {
+          "devices": [
+            {
+              "device_name": "Wee 2T",
+              "list_pic": "device_ic_wee2t",
+              "device_type": "wee2t",
+              "type": 1
+            },
+            {
+              "device_name": "Wee 2",
+              "list_pic": "device_ic_wee2",
+              "device_type": "wee2",
+              "type": 1
+            },
+            {
+              "device_name": "Wee",
+              "list_pic": "device_ic_wee",
+              "device_type": "wee",
+              "type": 1
+            }
+          ],
+          "category": "双手手柄"
+        }
+      ],
+      "category": "手游手柄"
+    },
+    {
+      "sections": [
+        {
+          "devices": [
+            {
+              "device_name": "八爪鱼",
+              "list_pic": "device_ic_apex",
+              "device_type": "apex",
+              "type": 1
+            },
+            {
+              "device_name": "黑武士 X8 Pro",
+              "list_pic": "device_ic_x8",
+              "device_type": "x8p",
+              "type": 1
+            },
+            {
+              "device_name": "黑武士 X9 系列",
+              "list_pic": "device_ic_x9",
+              "device_type": "x9",
+              "type": 1
+            }
+          ],
+          "category": "多平台手柄"
+        }
+      ],
+      "category": "多平台手柄"
+    },
+    {
+      "sections": [
+        {
+          "devices": [
+            {
+              "device_name": "Q1",
+              "list_pic": "device_ic_q1",
+              "device_type": "q1",
+              "type": 1
+            },
+            {
+              "device_name": "木蝎",
+              "list_pic": "device_ic_d1",
+              "device_type": "d1",
+              "type": 1
+            }
+          ],
+          "category": "游戏键鼠"
+        }
+      ],
+      "category": "游戏键鼠"
+    },
+    {
+      "sections": [
+        {
+          "devices": [
+            {
+              "device_name": "银狐",
+              "list_pic": "device_ic_cyberfox",
+              "device_type": "cyberfox",
+              "type": 2
+            }
+          ],
+          "category": "蓝牙耳机"
+        }
+      ],
+      "category": "蓝牙耳机"
+    }
+  ]
+}

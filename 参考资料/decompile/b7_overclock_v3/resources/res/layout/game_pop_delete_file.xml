@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:gravity="center"
+    android:background="@drawable/main_bg_pop_more"
+    android:layout_width="wrap_content"
+    android:layout_height="wrap_content">
+    <TextView
+        android:textSize="@dimen/sp_14"
+        android:textColor="@color/colorTextPrimary"
+        android:gravity="center"
+        android:layout_gravity="center_vertical"
+        android:id="@+id/tv_delete_file"
+        android:background="?attr/selectableItemBackground"
+        android:padding="@dimen/qb_px_8"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:text="@string/game_delete_apk"/>
+</LinearLayout>

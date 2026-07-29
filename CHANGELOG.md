@@ -3,6 +3,36 @@
 > 格式：[Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)
 
 
+## v2.5（2026-07-30）
+
+### Added
+- **B7X 散热器支持**（`com.fdg.flashplay.farsef`）：LSPosed 模块扩展至双设备，自动检测包名选择 B6X/B7X 钩子集
+- **B7X WaspWingManager 混淆名 fallback**：`t9.j` — 先试原名 `com.flydigi.sdk.waspwing.WaspWingManager`，失败则自动回退混淆名
+- **双 status 文件协议**：`tempctrl_b6x.status` + `tempctrl_b7x.status`，文件名区分设备，各自用 BLE=0/1
+- **`CONNECTED_AT` 字段**：status 文件新增连接时间戳，供 tempctrl 仲裁"先连者优先"
+- **`B7X_PID_COLD_MAX` / `B7X_FAN_RPM_MAX`**：profile.conf 可配置的 B7X 设备上限（默认 250 / 8000）
+- **`select_active_device()` 仲裁**：单 tempctrl 实例读取双文件自动选择当前控制设备
+
+### Changed
+- **tempctrl 单例双设备**：从单文件单设备改为单进程双设备仲裁架构
+- **`update_active_limits()`**：运行时根据 active_device 切换 B6X (194/6000) / B7X (255/8000) 限制
+- **广播协议**：B7X 使用独立 Action `com.flydigi.SET_TEMPERATURE_B7`，避免与 B6X 冲突
+- **`B7X_COLD_MAX` 保持硬编码**：gear 模式安全兜底上限，PID 模式由 `B7X_PID_COLD_MAX` 可配置控制
+- **参考资料目录重构**：`apk逆向分析/` → `decompile/`，APK 文件集中至 `apk_original/`
+
+### lsp模块
+- **多包名支持**：`handleLoadPackage` 按 `PACKAGE_B6X` / `PACKAGE_B7X` 分流
+- **B6X 固定上限**不变（制冷 194 / 风扇 6000）
+- **B7X 专属广播 Action**：`com.flydigi.SET_TEMPERATURE_B7`
+- **B7X 不需求 `checkBluetoothPermission` 修复**（targetSdk=29）
+
+### magisk模块
+- **`read_status_ble_both()`**：双文件并行读取 BLE + CONNECTED_AT
+- **`send_am_broadcast()`**：根据 active_device 选广播 Action
+- **配置热重载后自动恢复设备限制**：`load_config` → `update_active_limits()`
+
+---
+
 ## v2.4（2026-07-29）
 
 ### Added

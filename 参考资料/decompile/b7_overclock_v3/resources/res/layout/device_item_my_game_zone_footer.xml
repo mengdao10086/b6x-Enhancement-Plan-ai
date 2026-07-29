@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:orientation="vertical"
+    android:background="@color/white"
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content">
+    <LinearLayout
+        android:gravity="center"
+        android:layout_gravity="center"
+        android:id="@+id/ll_add"
+        android:background="@drawable/device_bg_add_game"
+        android:layout_width="match_parent"
+        android:layout_height="@dimen/qb_px_44"
+        android:foreground="?attr/selectableItemBackground"
+        android:layout_marginStart="@dimen/qb_px_16"
+        android:layout_marginEnd="@dimen/qb_px_16">
+        <TextView
+            android:textSize="@dimen/sp_16"
+            android:textColor="@color/colorPrimary"
+            android:gravity="center"
+            android:id="@+id/tv_add"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="@string/device_add_game"
+            android:drawablePadding="@dimen/qb_px_8"
+            android:drawableStart="@drawable/ic_plus_color_primary"/>
+    </LinearLayout>
+</LinearLayout>

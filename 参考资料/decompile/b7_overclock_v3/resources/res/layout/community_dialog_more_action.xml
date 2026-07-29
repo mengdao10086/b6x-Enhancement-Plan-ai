@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="utf-8"?>
+<FrameLayout xmlns:android="http://schemas.android.com/apk/res/android" xmlns:app="http://schemas.android.com/apk/res-auto"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent">
+    <androidx.constraintlayout.widget.ConstraintLayout
+        android:layout_gravity="bottom|center_horizontal"
+        android:layout_width="@dimen/qb_px_340"
+        android:layout_height="wrap_content"
+        android:layout_marginBottom="@dimen/qb_px_10">
+        <Button
+            android:textSize="@dimen/sp_16"
+            android:textColor="@color/colorAccentRed"
+            android:id="@+id/btn_delete"
+            android:background="@color/color_white"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginBottom="@dimen/qb_px_8"
+            android:text="@string/delete"
+            app:layout_constraintBottom_toTopOf="@+id/btn_cancel"
+            app:layout_constraintEnd_toEndOf="parent"
+            app:layout_constraintStart_toStartOf="parent"
+            style="@style/Widget.AppCompat.Button.Borderless"/>
+        <Button
+            android:textSize="@dimen/sp_16"
+            android:textColor="@color/colorPrimary"
+            android:id="@+id/btn_cancel"
+            android:background="@color/color_white"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="@string/cancel"
+            app:layout_constraintBottom_toBottomOf="parent"
+            app:layout_constraintEnd_toEndOf="parent"
+            app:layout_constraintStart_toStartOf="parent"
+            style="@style/Widget.AppCompat.Button.Borderless"/>
+    </androidx.constraintlayout.widget.ConstraintLayout>
+</FrameLayout>

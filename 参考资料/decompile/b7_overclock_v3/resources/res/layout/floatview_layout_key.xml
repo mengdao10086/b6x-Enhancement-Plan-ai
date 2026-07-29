@@ -1,0 +1,45 @@
+<?xml version="1.0" encoding="utf-8"?>
+<RelativeLayout xmlns:android="http://schemas.android.com/apk/res/android" xmlns:app="http://schemas.android.com/apk/res-auto"
+    android:gravity="center"
+    android:layout_width="wrap_content"
+    android:layout_height="wrap_content">
+    <ImageView
+        android:id="@+id/iv_bg"
+        android:visibility="gone"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:src="@drawable/bg_selected_for_key"
+        android:layout_centerInParent="true"/>
+    <androidx.appcompat.widget.AppCompatTextView
+        android:gravity="center"
+        android:id="@+id/tv_key"
+        android:background="@drawable/floatview_shape_bg_key"
+        android:padding="@dimen/qb_px_4"
+        android:visibility="gone"
+        android:layout_width="@dimen/qb_px_28"
+        android:layout_height="@dimen/qb_px_28"
+        android:maxLines="1"
+        android:singleLine="false"
+        android:layout_centerInParent="true"
+        app:autoSizeMaxTextSize="@dimen/sp_16"
+        app:autoSizeMinTextSize="6sp"
+        app:autoSizeStepGranularity="1sp"
+        app:autoSizeTextType="uniform"/>
+    <ImageView
+        android:id="@+id/iv_key"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_centerInParent="true"/>
+    <TextView
+        android:textSize="@dimen/sp_9"
+        android:textColor="@color/white"
+        android:gravity="center"
+        android:id="@+id/tv_number"
+        android:visibility="gone"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="@dimen/qb_px_3"
+        android:layout_alignParentTop="true"
+        android:layout_marginEnd="@dimen/qb_px_3"
+        android:layout_alignParentEnd="true"/>
+</RelativeLayout>

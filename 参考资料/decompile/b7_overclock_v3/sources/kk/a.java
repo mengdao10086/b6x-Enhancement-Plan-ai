@@ -1,0 +1,12 @@
+package kk;
+
+/* JADX INFO: loaded from: classes5.dex */
+public final class a {
+    public static final void a(Object obj) {
+        throw new UnsupportedOperationException("This function can only be used privately");
+    }
+
+    public static final void b(Object obj) {
+        throw new UnsupportedOperationException("This function can only be used privately");
+    }
+}

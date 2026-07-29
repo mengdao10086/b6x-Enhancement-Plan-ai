@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="utf-8"?>
+<RelativeLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:gravity="center_vertical"
+    android:background="@color/white"
+    android:paddingLeft="@dimen/qb_px_16"
+    android:paddingRight="@dimen/qb_px_16"
+    android:layout_width="match_parent"
+    android:layout_height="@dimen/qb_px_36"
+    android:layout_marginTop="@dimen/qb_px_8"
+    android:paddingHorizontal="@dimen/qb_px_16">
+    <TextView
+        android:textSize="@dimen/sp_16"
+        android:textColor="@color/colorTextPrimary"
+        android:id="@+id/tv_game_cat"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="@dimen/qb_px_16"
+        android:layout_centerVertical="true"/>
+    <TextView
+        android:textSize="@dimen/sp_12"
+        android:textColor="@color/colorTextSecondary"
+        android:gravity="center_vertical"
+        android:id="@+id/tv_more"
+        android:background="?attr/selectableItemBackground"
+        android:padding="@dimen/qb_px_8"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:text="@string/more"
+        android:layout_centerVertical="true"
+        android:drawableEnd="@drawable/ic_more_right"
+        android:layout_alignParentEnd="true"/>
+</RelativeLayout>
