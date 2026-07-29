@@ -22,7 +22,8 @@ done
 cp "$MODDIR/tempctrl" /data/local/tmp/tempctrl
 chmod 755 /data/local/tmp/tempctrl
 
-# 3. 首次启用
+# 3. 清空上次日志并首次启动
+> /cache/tempctrl.log
 start_tempctrl
 
 # 4. 每隔5分钟检查一次进程状态

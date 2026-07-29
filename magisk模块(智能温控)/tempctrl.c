@@ -348,10 +348,10 @@ static int pid_predict_win_n = 5;          // PID_PREDICT_WIN_N: 计算窗口（
 static int pid_predict_min_points = 3;     // PID_PREDICT_MIN_POINTS: 最小可用数据点数（2~5）
 static int pid_predict_max_rise = 30;      // PID_PREDICT_MAX_RISE: 最大预测变化量（0.1°C，10~100）
 static int pid_predict_ramp_cycles = 3;    // PID_PREDICT_RAMP_CYCLES: Ramp-up 周期数（1~10，0=不渐进）
-static int pid_predict_min_delta = 2;      // PID_PREDICT_MIN_DELTA: 最小起始 delta（0.1°C/周期，1~10）
+static int pid_predict_min_delta = 3;      // PID_PREDICT_MIN_DELTA: 最小起始 delta（0.1°C/周期，1~10）
 static int pid_predict_heat_weight = 10;  // PID_PREDICT_MODE 第一值：升温预测权重（0~10，默认10=全效）
-static int pid_predict_cool_weight = 5;   // PID_PREDICT_MODE 第二值：降温预测权重（0~10，默认5=半效）
-static int pid_predict_alpha = 50;         // 预测平滑系数（%，PID_ALPHA 第三值）
+static int pid_predict_cool_weight = 3;   // PID_PREDICT_MODE 第二值：降温预测权重（0~10）
+static int pid_predict_alpha = 33;         // 预测平滑系数（%，PID_ALPHA 第三值）
 
 // --- 预测运行状态 ---
 static PredictPoint pid_predict_buf[PREDICT_BUF_MAX];
@@ -2129,13 +2129,24 @@ static int rpm_from_hot_end(int hot_10) {
  * 最终钳制在下发阶段（apply_gear / apply_gear_direct 内部）
  */
 static int rpm_from_cold_exp(int cold) {
+    static int cold_rpm_smoothed = -1;  // 0.25 EMA 平滑
     int range = pid_cold_max - cold_map_start;
     if (range <= 0) return 0;
     float n = (float)(cold - cold_map_start) / range;
+    int raw_rpm;
     if (n < 0.0f)
-        return fan_rpm_min + (int)(n * (fan_rpm_max - fan_rpm_min));
-    float n_exp = powf(n, cold_map_exp / 100.0f);
-    return fan_rpm_min + (int)(n_exp * (fan_rpm_max - fan_rpm_min));
+        raw_rpm = fan_rpm_min + (int)(n * (fan_rpm_max - fan_rpm_min));
+    else {
+        float n_exp = powf(n, cold_map_exp / 100.0f);
+        raw_rpm = fan_rpm_min + (int)(n_exp * (fan_rpm_max - fan_rpm_min));
+    }
+    // 0.25 EMA 平滑，防止风扇转速跳变
+    if (cold_rpm_smoothed < 0) {
+        cold_rpm_smoothed = raw_rpm;
+    } else {
+        cold_rpm_smoothed = EMA_DIR(raw_rpm, cold_rpm_smoothed, 25);
+    }
+    return cold_rpm_smoothed;
 }
 
 /**
