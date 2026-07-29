@@ -3,6 +3,26 @@
 > 格式：[Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)
 
 
+## v2.4（2026-07-29）
+
+### Added
+- **温度趋势预测算法**（`PID_PREDICT_MODE/WIN/RISE/MIN_DELTA`）：基于历史每周期温差变化趋势预测温度稳定点，peak/valley 检测 + per-cycle delta 归一化 + 线性减速模型 + 权重混合（加热/冷却独立权重），消除 PID 冷静期等待。含 ramp-up 渐进限制和过渡平滑
+- **`read_batt_current_ua10()`**：封装电池电流读取，内部用 `BATT_CURRENT_DIVISOR` 做 µA→0.01A 转换，调用方直接使用 0.01A 单位值
+- **`BATT_CURRENT_DIVISOR`**：电池电流缩放系数（默认 10000，可配置），替换硬编码 `÷10000`
+
+### Changed
+- **PID 输入增加温度预测层**：预测值经 ramp-up 钳位 + 权重混合后参与 PID 计算，`PID_ALPHA` 扩展为三值（新增预测平滑系数 50%）
+- **反补/趋势豁免合并配置**：`REV_COMP_ENABLED` + `TREND_EXEMPT_ENABLED` → `REV_COMP=1 1`（双值开关）
+- **紧急单源化**：`emergency_intervention()` 从 CPU+电流双源简化为 CPU 单源，紧急等级从 4 级降为 3 级；ramp-up 钳位精简（7 行 → 1 行 clamp），整体代码量 -25 行
+
+### Removed
+- **PID 电流补偿**：删除 `PID_CURR_COMP_ENABLED/THRESHOLD/DIVISOR` 全部逻辑
+- **Gear 电流紧急**：删除 `CURRENT_EMERG/SMOOTH_ALPHA/EMERG_CURRENT_ENABLED` 全部逻辑
+- **`read_battery_current_abs()`**：无调用方死代码
+- **`BATT_CURRENT_DIVISOR` 旧实现**：后以新设计恢复
+
+---
+
 ## v2.3（2026-07-09）
 
 ### Added
@@ -13,9 +33,6 @@
 - **mtime 温度检测**（替代 `BATT_SKIP_MAX`）：通过 `stat()` 检查电池温度 sysfs 文件修改时间，仅 mtime 变化时读取，`batt_temp_updated` 标记通知各函数。Gear 和 PID 模式跳过逻辑改为「温度文件未更新 → 跳过」
 - **制冷→RPM 映射引擎**：冷端指数映射（`PID_COLD_EXP`）+ 热端线性映射 + 自加权合并，PID/常规模式共享
 - **限速统一下沉**：RPM/制冷/目标温度限速从 `rate_limited_execute` 内建到 `apply_level`/`apply_level_direct` 内部，计算层只管传目标值
-- **温度趋势预测算法**（`PID_PREDICT_MODE/WIN/RISE/MIN_DELTA`）：基于历史每周期温差变化趋势预测温度稳定点，peak/valley 检测 + per-cycle delta 归一化 + 线性减速模型 + 权重混合（加热/冷却独立权重），消除 PID 冷静期等待。含 ramp-up 渐进限制和过渡平滑
-- **`read_batt_current_ua10()`**：封装电池电流读取，内部用 `BATT_CURRENT_DIVISOR` 做 µA→0.01A 转换，调用方直接使用 0.01A 单位值
-- **`BATT_CURRENT_DIVISOR`**：电池电流缩放系数（默认 10000，可配置），替换硬编码 `÷10000`
 
 ### Changed
 - **`pid_compute` 改为方差门控 + 死区回退**：从固定 `±1.0°C` 硬编码改为双层逻辑（新增 `PID_KI_VAR_THRESHOLD/SAMPLES/DEADBAND`）
@@ -29,15 +46,7 @@
 - **EMA 方向取整**（`EMA_DIR`）：所有整数 EMA 平滑改用方向取整宏，基于原始值方向决定舍入（上升→向上取整，下降→自然截断），消除渐进无法到达的问题。影响：CPU 温度滤波、电流紧急/挡位平滑、PID 电池输入滤波
 - **速率限制温差动态化 + 0.1°C 精度**（`RATE_LIMIT_FAN_BASE`/`COLD_MULT`）：风扇升速和制冷强度速率不再固定，改为根据电池温度与基准温差（d=0.1°C）自动调整，使用 `d × mult / 10` 保留原始精度。风扇降速继续保持固定值。新增 `RATE_LIMIT_FAN_BASE`（双值：升基础值 升倍率）、`RATE_LIMIT_COLD_MULT` 配置参数
 - **配置系统重构**：PERF_ENABLED/DEBUG_ENABLED 双层守卫替代分组子守卫；13 组多键参数改为连续值格式；`STATUS_TIMEOUT` 移除；配置参数顺序不再影响解析结果
-- **PID 输入增加温度预测层**：预测值经 ramp-up 钳位 + 权重混合后参与 PID 计算，`PID_ALPHA` 扩展为三值（新增预测平滑系数 50%）
-- **反补/趋势豁免合并配置**：`REV_COMP_ENABLED` + `TREND_EXEMPT_ENABLED` → `REV_COMP=1 1`（双值开关）
-- **紧急单源化**：`emergency_intervention()` 从 CPU+电流双源简化为 CPU 单源，紧急等级从 4 级降为 3 级；ramp-up 钳位精简（7 行 → 1 行 clamp），整体代码量 -25 行
-
-### Removed
-- **PID 电流补偿**：删除 `PID_CURR_COMP_ENABLED/THRESHOLD/DIVISOR` 全部逻辑
-- **Gear 电流紧急**：删除 `CURRENT_EMERG/SMOOTH_ALPHA/EMERG_CURRENT_ENABLED` 全部逻辑
-- **`read_battery_current_abs()`**：无调用方死代码
-- **`BATT_CURRENT_DIVISOR` 旧实现**：后以新设计恢复
+- **PID 输入补偿**：引入 CPU 温差和电池电流作为额外模拟热源
 
 ### Fixed
 - **文档参数名与实际代码不一致**：BATT_ZONE→BATT_BOUNDARY、BATT_RECOVERY→EMERG_RECOVERY_MULT、PID_* 前缀等
