@@ -55,9 +55,11 @@ MUST 先在 `参考资料/` 搜索关键词，再考虑加诊断钩子。这里�
 | `magisk模块(智能温控)/逻辑说明.md` | 技术设计文档 |
 | `magisk模块(智能温控)/magisk模块框架/profile.conf` | 运行时配置参数 |
 | `lsp模块(apk修复+温控接口)/app/src/main/java/.../MainHook.java` | LSPosed 模块核心 |
-| `参考资料/完整修复历程.md` | BLE 4 层 Bug 修复全记录 |
-| `参考资料/apk逆向分析/app运行逻辑.md` | App 内部运行逻辑分析 |
-| `参考资料/apk逆向分析/smali/` | APK 反编译 smali 代码 |
+| `参考资料/完整修复历程.md` | BLE 4 层 Bug 修复全记录 + B7X/B8X 分析 |
+| `参考资料/decompile/app运行逻辑.md` | App 内部运行逻辑分析 |
+| `参考资料/decompile/b6_overclock_v2/` | B6X 超频工具 V2 反编译 |
+| `参考资料/decompile/b7_overclock_v3/` | B7X 超频工具 V3 反编译（含混淆分析） |
+| `参考资料/decompile/b8x/` | B8X 超频工具 V2 反编译（360 加固，未适配） |
 | `参考资料/smali修改重编译apk尝试/` | smali 工具链产物 |
 
 ### 工具路径

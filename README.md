@@ -2,7 +2,7 @@
 
 [![自动构建](https://github.com/mengdao10086/b6x-Enhancement-Plan-ai/actions/workflows/build.yml/badge.svg)](https://github.com/mengdao10086/b6x-Enhancement-Plan-ai/actions/workflows/build.yml)
 
-飞智 B6X 散热器开发者工具的增强方案。修复了 Android 16 上的 BLE 兼容性问题，并扩展了智能温控功能。
+飞智 B6X/B7X 散热器的增强方案。修复了 Android 16 上的 BLE 兼容性问题，扩展了智能温控功能，支持双设备共存仲裁。
 
 ---
 
@@ -10,30 +10,30 @@
 
 | 组件 | 路径 | 说明 | 状态 |
 |------|------|------|------|
-| **LSPosed 模块** | [lsp模块(apk修复+温控接口)/](lsp模块(apk修复+温控接口)/) | 提供散热器控制接口 | ✅ v2.3 |
-| **C 守护程序** | [magisk模块(智能温控)/](magisk模块(智能温控)/) | 使用 LSPosed 模块接口控制散热器 | ✅ v2.3 |
+| **LSPosed 模块** | [lsp模块(apk修复+温控接口)/](lsp模块(apk修复+温控接口)/) | 提供散热器控制接口（B6X + B7X） | ✅ v2.5 |
+| **C 守护程序** | [magisk模块(智能温控)/](magisk模块(智能温控)/) | 使用 LSPosed 模块接口控制散热器（单实例双设备仲裁） | ✅ v2.5 |
 
 ---
 
 ## 架构概览
 
 ```
- ┌─ 手机 ────────────────────────────────────────┐
- │                                               │
- │  飞智 App 进程              Root 进程          │
- │  ┌──────────────────┐     ┌────────────────┐ │
- │  │ LSPosed 模块     │ stat │ tempctrl       │ │
- │  │ (MainHook.java)  │◄────│ C 守护程序      │  │
- │  │                  │ 心跳 │ main_loop 5s   │ │
- │  │ ←─ am broadcast ─│─────│ 读传感器→决策   │  │
- │  │   SET_TEMPERATURE│ 指令 │ →am broadcast  │ │
- │  │       ↓          │     └────────────────┘ │
- │  │ WaspWingManager  │                         │
- │  │ .setRunMode()    │                         │
- │  │     ↓            │                         │
- │  │    BLE → 散热器  │                         │
- │  └──────────────────┘                         │
- └───────────────────────────────────────────────┘
+ ┌─ 手机 ─────────────────────────────────────────────────┐
+ │                                                        │
+ │  B6X App 进程         B7X App 进程     Root 进程        │
+ │ ┌──────────────────┐ ┌──────────────┐ ┌──────────────┐│
+ │ │ LSPosed 模块     │ │ LSPosed 模块 │ │ tempctrl     ││
+ │ │ B6X 钩子集       │ │ B7X 钩子集   │ │ 单实例仲裁   ││
+ │ │                  │ │              │ │              ││
+ │ │ ←─ am broadcast │ │← am broadcast│ │ 双 status  ││
+ │ │   SET_TEMPERATURE│ │ SET_TEMP_B7  │ │ 文件心跳     ││
+ │ │       ↓          │ │    ↓         │ │ →选active    ││
+ │ │ WaspWingManager  │ │ t9.j(混淆)   │ │ →am broadcast││
+ │ │ .setRunMode()    │ │ .setRunMode()│ │ 5s 周期      ││
+ │ │     ↓            │ │    ↓         │ └──────────────┘│
+ │ │  BLE → B6X 散热器 │ │ BLE → B7X   │                 │
+ │ └──────────────────┘ └──────────────┘                 │
+ └────────────────────────────────────────────────────────┘
 ```
 
 ---
@@ -43,11 +43,15 @@
 ### LSPosed 模块
 
 - 修复 Android 16 BLE 无法连接的 4 层连环 Bug → [完整修复历程](参考资料/完整修复历程.md)
-- 提供 `com.flydigi.SET_TEMPERATURE` 广播接收器，支持 7 参数完整控制
+- 提供广播接收器（B6X：`com.flydigi.SET_TEMPERATURE` / B7X：`com.flydigi.SET_TEMPERATURE_B7`），支持 7 参数完整控制
+- 双 status 文件心跳：`tempctrl_b6x.status` + `tempctrl_b7x.status`，含 `CONNECTED_AT` 时间戳供仲裁
+- 自动检测设备类型（B6X 原名 WaspWingManager / B7X 混淆 t9.j fallback）
 - 修复 DefaultDispatcher 线程 100% CPU 占用（空队列忙等）
 
 ### C 智能温控守护程序
 
+- **双设备仲裁**（v2.5）：单实例读取双 status 文件，`select_active_device()` 仲裁"先连者优先"，运行时按设备切换限幅参数
+- **B7X 硬件支持**：独立上限变量（`B7X_COLD_MAX=255` / `B7X_FAN_RPM_MAX=8000`），选广播 Action（`SET_TEMPERATURE_B7`），配置热重载后自动恢复设备限制
 - **PID 连续无级调节**（v2.3）：CTRL_MODE=1 启用，P+I(方差门控/死区回退)+D 控制 + 输入 EMA 滤波 + CPU 补偿
 - **温度趋势预测**：基于历史每周期温差变化趋势预测温度稳定点，peak/valley 检测 + 线性减速模型 + 权重混合，消除 PID 冷静期等待
 - **制冷→RPM 自动映射**：冷端指数映射 + 热端线性映射 + 自加权合并，PID/常规双模式共享映射引擎
@@ -72,10 +76,9 @@
 │   └── <a href="magisk模块(智能温控)/magisk模块框架/">magisk模块框架/</a>            ← module.prop / service.sh / customize.sh / profile.conf
 ├── <a href="CHANGELOG.md">CHANGELOG.md</a>                   ← 版本更新日志
 ├── <a href="参考资料/">参考资料/</a>
-│   ├── <a href="参考资料/完整修复历程.md">完整修复历程.md</a>             ← BLE 4 层 Bug 修复全记录
-│   ├── <a href="参考资料/apk逆向分析/">apk逆向分析/</a>               ← APK 反编译 + 运行逻辑分析
-│   │   ├── <a href="参考资料/apk逆向分析/smali/">smali/</a>                 ← 合并反编译输出
-│   │   └── <a href="参考资料/apk逆向分析/app运行逻辑.md">app运行逻辑.md</a>         ← App 内部运行逻辑分析
+│   ├── <a href="参考资料/完整修复历程.md">完整修复历程.md</a>             ← BLE 4 层 Bug 修复全记录 + B8X 分析
+│   ├── <a href="参考资料/decompile/">decompile/</a>                  ← APK 反编译输出
+│   │   └── <a href="参考资料/decompile/app运行逻辑.md">app运行逻辑.md</a>            ← App 内部运行逻辑分析
 │   └── <a href="参考资料/smali修改重编译apk尝试/">smali修改重编译apk尝试/</a>     ← smali 工具链 + DEX 修改产物
 ├── <a href=".github/workflows/">.github/workflows/</a>              ← CI 自动构建
 └── <a href="README.md">README.md</a>                       ← 本文件
@@ -123,7 +126,7 @@
 | 默认分支 | `main` |
 | 模块编译 | Android Studio 打开 `lsp模块(apk修复+温控接口)/` → Build APK |
 | C 编译 | **仅限 GitHub Actions**（NDK r27c） |
-| 模块安装 | LSPosed 勾选模块 → 作用域 `com.flydigi.waspwing.experimental` → 强制停止 App |
+| 模块安装 | LSPosed 勾选模块 → 作用域 `com.flydigi.waspwing.experimental` + `com.fdg.flashplay.farsef` → 强制停止 App |
 
 ---
 

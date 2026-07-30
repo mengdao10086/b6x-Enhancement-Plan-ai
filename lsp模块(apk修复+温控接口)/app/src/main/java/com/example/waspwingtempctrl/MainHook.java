@@ -343,6 +343,7 @@ public class MainHook implements IXposedHookLoadPackage {
         } catch (Exception e) {
             XposedBridge.log(TAG + " 钩 BluetoothViewModel 失败: " + e.getMessage());
         }
+        } // end if (deviceType == 6)
 
         // ========== B6X 专属：修复 #3（权限）+ 诊断钩子 ==========
         if (deviceType == 6) {
