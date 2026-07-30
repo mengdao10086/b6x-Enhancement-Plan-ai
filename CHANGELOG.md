@@ -31,6 +31,11 @@
 - **`send_am_broadcast()`**：根据 active_device 选广播 Action
 - **配置热重载后自动恢复设备限制**：`load_config` → `update_active_limits()`
 
+### B8X 分析
+- **B8X超频工具V2** Manifest 分析完成：包名 `com.fdg.flashplay.farb8x`，360 加固，BLE 层改用 GAIAGATTBLEService（非 WaspWing SDK）
+- **未适配**：360 加固需运行时脱壳 + 架构不兼容现有钩子体系 + 用户决定暂不进行
+- 详见 [完整修复历程 第8节](参考资料/完整修复历程.md#8-b8x-超频工具-v2-分析记录) 和 [反编译报告](参考资料/decompile/b8x/反编译报告.md)
+
 ---
 
 ## v2.4（2026-07-29）

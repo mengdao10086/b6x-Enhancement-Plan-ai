@@ -656,34 +656,6 @@ public class MainHook implements IXposedHookLoadPackage {
                     + t.getMessage());
         }
 
-        // ========== 智能温控唤醒：B6ExperimentalActivity.onResume ==========
-        try {
-            Class<?> b6ExpAct = lpparam.classLoader.loadClass(
-                    "com.flydigi.waspwing.experimental.B6ExperimentalActivity");
-
-            XposedHelpers.findAndHookMethod(b6ExpAct, "onResume",
-                    new XC_MethodHook() {
-                        @Override
-                        protected void afterHookedMethod(MethodHookParam param) {
-                            try {
-                                // 通过 Activity 的 ViewModel 检查 BLE 连接状态
-                                // B6ExperimentalActivity 中 getViewModel() 返回 BluetoothViewModel
-                                Object vm = XposedHelpers.callMethod(param.thisObject, "getViewModel");
-                                Object connLd = XposedHelpers.getObjectField(vm, "_connectLiveData");
-                                Boolean isConnected = (Boolean) XposedHelpers.callMethod(connLd, "getValue");
-
-                                if (isConnected != null && isConnected) {
-                                    XposedBridge.log(TAG + " onResume + BLE 已连接（tempctrl 通过 status 文件检测）");
-                                } else {
-                                    XposedBridge.log(TAG + " onResume 但 BLE 未连接，不唤醒");
-                                }
-                            } catch (Exception e) {
-                                // ViewModel 可能不存在或方法不同，跳过
-                                XposedBridge.log(TAG + " onResume 检查 BLE 状态失败: " + e.getMessage());
-                            }
-                        }
-                    });
-
         // ========== 智能温控唤醒（仅 B6X）：B6ExperimentalActivity.onResume ==========
         if (deviceType == 6) {
             try {

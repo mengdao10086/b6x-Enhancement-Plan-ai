@@ -8,11 +8,11 @@
 # 设置二进制可执行权限
 set_perm "$MODPATH/tempctrl" 0 0 0755
 
-# 设置配置文件权限（可读可写，保护隐私）
-set_perm "$MODPATH/profile.conf" 0 0 0644
-
 # 设置 service.sh 可执行
 set_perm "$MODPATH/service.sh" 0 0 0755
 
 # 设置卸载脚本可执行
 set_perm "$MODPATH/uninstall.sh" 0 0 0755
+
+# 设置配置文件权限
+set_perm "$MODPATH/profile.conf" 0 0 0644
