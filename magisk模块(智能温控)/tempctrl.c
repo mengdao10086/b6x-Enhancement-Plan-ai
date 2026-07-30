@@ -401,12 +401,16 @@ static int batt_cached_temp = -1;      // 最后一次读取的温度缓存
 static int batt_temp_updated = 0;      // 本周期温度是否更新
 
 // --- 连接状态 ---
-static int STATUS_TIMEOUT = 12;
+static int STATUS_TIMEOUT = 7;   // v2.6：默认 7 秒（profile.conf 可配置）
 static int app_was_alive = 0;
-// 双 status 文件路径（文件名区分设备，各自用 BLE=0/1）
+// 双 status 文件路径（文件名区分设备，各自用 BLE=0/6/7）
 static char status_file_path_b6[512] = "/data/local/tmp/tempctrl_b6x.status";
 static char status_file_path_b7[512] = "/data/local/tmp/tempctrl_b7x.status";
 static char gear_file_path[512] = "";
+
+// 双 app 包名（v2.6 双 app 存活仲裁）
+#define APP_PKG_B6X "com.flydigi.waspwing.experimental"
+#define APP_PKG_B7X "com.fdg.flashplay.farsef"
 
 // 双设备 BLE 连接状态
 static int b6_connected = 0;        // B6X: BLE 是否已连接
@@ -414,6 +418,12 @@ static int b7_connected = 0;        // B7X: BLE 是否已连接
 static time_t b6_connected_at = 0;  // B6X 连接时间戳（用于仲裁"先连"）
 static time_t b7_connected_at = 0;  // B7X 连接时间戳
 static int app_ble_connected = 0;   // 兼容旧代码，指向当前 active_device
+
+// v2.6：实际连接的设备型号 + app 进程启动时间
+static int b6_model = 0;            // B6X app 连接的设备型号：0=未知, 6=B6X, 7=B7X
+static int b7_model = 0;            // B7X app 连接的设备型号
+static time_t b6_boot_at = 0;       // B6X app 进程启动时间戳（BOOT_AT）
+static time_t b7_boot_at = 0;       // B7X app 进程启动时间戳
 
 // --- 档位模式自动风扇 ---
 static int gear_auto_fan = 1;   // GEAR_AUTO_FAN: 0=直通, 1=自动映射+截断
@@ -740,6 +750,7 @@ static void load_config(const char *path) {
         else if (strcmp(key, "LOG_TRIM_LINES") == 0)       log_trim_lines     = clamp(val, 0, 50);
         else if (strcmp(key, "LOG_FILE") == 0)
             config_read_path(log_file_path, sizeof(log_file_path), val_str);
+        else if (strcmp(key, "STATUS_TIMEOUT") == 0)       STATUS_TIMEOUT     = clamp(val, 3, 60);
 
         // --- 模式开关等 ---
         else if (strcmp(key, "CTRL_MODE") == 0)                ctrl_mode            = (val != 0);
@@ -1055,17 +1066,26 @@ static void create_status_files(void) {
 /**
  * 读取单个 status 文件的 BLE 连接状态和连接时间戳
  */
-static void read_single_status(const char *path, int *out_connected, time_t *out_connected_at) {
+static void read_single_status(const char *path, int *out_connected, time_t *out_connected_at,
+                               int *out_model, time_t *out_boot_at) {
     *out_connected = 0;
     *out_connected_at = 0;
+    if (out_model)   *out_model = 0;
+    if (out_boot_at) *out_boot_at = 0;
     FILE *f = fopen(path, "r");
     if (!f) return;
     char line[64];
     while (fgets(line, sizeof(line), f)) {
         if (strncmp(line, "BLE=", 4) == 0) {
-            *out_connected = (atoi(line + 4) != 0);
+            // v2.6：BLE 字段 0/6/7（0=未连接, 6=B6X 型号, 7=B7X 型号）
+            int ble = atoi(line + 4);
+            *out_connected = (ble != 0);
+            if (out_model && (ble == 6 || ble == 7)) *out_model = ble;
+            // 旧版 BLE=1：已连接但型号未知，由调用方按文件路径兜底
         } else if (strncmp(line, "CONNECTED_AT=", 13) == 0) {
             *out_connected_at = (time_t)atol(line + 13);
+        } else if (strncmp(line, "BOOT_AT=", 8) == 0) {
+            if (out_boot_at) *out_boot_at = (time_t)atol(line + 8);
         }
     }
     fclose(f);
@@ -1075,8 +1095,11 @@ static void read_single_status(const char *path, int *out_connected, time_t *out
  * 读取双状态文件中的 BLE 连接状态
  */
 static void read_status_ble_both(void) {
-    read_single_status(status_file_path_b6, &b6_connected, &b6_connected_at);
-    read_single_status(status_file_path_b7, &b7_connected, &b7_connected_at);
+    read_single_status(status_file_path_b6, &b6_connected, &b6_connected_at, &b6_model, &b6_boot_at);
+    read_single_status(status_file_path_b7, &b7_connected, &b7_connected_at, &b7_model, &b7_boot_at);
+    // 旧版 BLE=1 型号未知 → 按文件路径兜底
+    if (b6_connected && b6_model == 0) b6_model = 6;
+    if (b7_connected && b7_model == 0) b7_model = 7;
 }
 
 /**
@@ -1105,7 +1128,12 @@ static DeviceType select_active_device(void) {
  * 切换设备时调用
  */
 static void update_active_limits(void) {
-    if (active_device == DEVICE_B7X) {
+    // v2.6：按 status 回传的实际设备型号选择限制，而非按包名猜测。
+    // （B7X app 可能连接 B6X 散热器，实际型号以 status 的 BLE=0/6/7 为准）
+    int model = (active_device == DEVICE_B7X) ? b7_model : b6_model;
+    if (model != 6 && model != 7)
+        model = (active_device == DEVICE_B7X) ? 7 : 6;  // 型号未知按包名兜底
+    if (model == 7) {
         active_cold_max = B7X_COLD_MAX;       // 硬编码安全上限（gear 模式，不可配）
         active_fan_max  = b7x_fan_rpm_max;    // 可配置，默认 B7X_FAN_RPM_MAX
         active_pid_cold_max = b7x_pid_cold_max; // 可配置，默认 B7X_COLD_MAX
@@ -1562,6 +1590,153 @@ static int is_app_alive(void) {
               (active_device == DEVICE_B7X) ? "B7X" : "B6X",
               alive, (long)(now - st.st_mtime), STATUS_TIMEOUT);
     return alive;
+}
+
+// ======================== 双 app 存活仲裁（v2.6） ========================
+// 需求：B6X 两个 app 最多一个后台存活，优先保留正在控制/更贴合命令者。
+// 仲裁优先级：BLE 连接 → 命令符合度 → BOOT_AT 更早 → 老 app（B6X）兜底。
+
+// 双 app 散热器回传实际值（命令符合度比较用）
+static int b6_rpm_real = -1, b6_cold_real = -1;
+static int b7_rpm_real = -1, b7_cold_real = -1;
+
+/** 读取单个 status 文件的散热器实际转速/制冷 */
+static void read_single_rpm_cold(const char *path, int *out_rpm, int *out_cold) {
+    *out_rpm = -1;
+    *out_cold = -1;
+    FILE *f = fopen(path, "r");
+    if (!f) return;
+    char line[64];
+    while (fgets(line, sizeof(line), f)) {
+        if (strncmp(line, "RPM_REAL=", 9) == 0)
+            *out_rpm = atoi(line + 9);
+        else if (strncmp(line, "COLD_REAL=", 10) == 0)
+            *out_cold = atoi(line + 10);
+    }
+    fclose(f);
+}
+
+/** 同时读取双 status 的散热器回传实际值 */
+static void read_both_cooler_rpm_cold(void) {
+    read_single_rpm_cold(status_file_path_b6, &b6_rpm_real, &b6_cold_real);
+    read_single_rpm_cold(status_file_path_b7, &b7_rpm_real, &b7_cold_real);
+}
+
+/** 检测指定包名的 app 进程是否在运行 */
+static int app_process_running(const char *pkg) {
+    char cmd[256];
+    snprintf(cmd, sizeof(cmd), "pgrep -f %s > /dev/null 2>&1", pkg);
+    return (system(cmd) == 0);
+}
+
+/** 判断指定包名是否为当前前台/top Activity（dumpsys 开销约 100~300ms，仅在要 kill 时调用） */
+static int is_foreground_pkg(const char *pkg) {
+    // 优先窗口焦点 mCurrentFocus（最准确），退化为 topResumedActivity/mResumedActivity
+    // grep -m1 截断管道，dumpsys 收到 SIGPIPE 提前退出，实际开销远低于完整 dumpsys
+    char cmd[1024];
+    snprintf(cmd, sizeof(cmd),
+             "dumpsys window 2>/dev/null | grep -m1 'mCurrentFocus='; "
+             "dumpsys activity activities 2>/dev/null | grep -m1 -E 'topResumedActivity|mResumedActivity'");
+    FILE *fp = popen(cmd, "r");
+    if (!fp) return 0;
+    char line[1024];
+    int fg = 0;
+    while (fgets(line, sizeof(line), fp)) {
+        if (strstr(line, pkg)) { fg = 1; break; }
+    }
+    pclose(fp);
+    return fg;
+}
+
+/** 强制停止指定包名的 app（干净停止，LSP 正常清理，status mtime 停住） */
+static void force_stop_app(const char *pkg) {
+    char cmd[256];
+    snprintf(cmd, sizeof(cmd), "am force-stop %s", pkg);
+    int rc = system(cmd);
+    write_log("进程管理 force-stop %s (rc=%d)", pkg, rc);
+}
+
+/**
+ * 命令符合度：回传散热器实际值 与 daemon 最近下发目标值 的归一化偏差。
+ * |实际−目标|/范围 各取 0~1000，两路相加 → 0~2000；偏差小 = 控制链路越贴合。
+ * 范围按实际设备型号区分（B6X 与 B7X 的 RPM/制冷上限不同）。
+ */
+static int command_deviation(int model, int rpm_real, int cold_real) {
+    int fan_range, cold_range;
+    if (model == 7) {
+        fan_range  = b7x_fan_rpm_max - fan_rpm_min;   // 默认 8000-2000
+        cold_range = B7X_COLD_MAX - 1;                // 255-1
+    } else {
+        fan_range  = fan_rpm_max - fan_rpm_min;       // B6X 配置上限，默认 6000-2000
+        cold_range = COLD_MAX - COLD_MIN;             // 194-1
+    }
+    if (fan_range <= 0)  fan_range = 1;
+    if (cold_range <= 0) cold_range = 1;
+    long dev = 0;
+    if (rpm_real >= 0 && last_rpm >= 0)
+        dev += labs((long)(rpm_real - last_rpm)) * 1000L / fan_range;
+    else
+        dev += 1000;   // 无回传视为最大偏差
+    if (cold_real >= 0 && last_cold >= 0)
+        dev += labs((long)(cold_real - last_cold)) * 1000L / cold_range;
+    else
+        dev += 1000;
+    return (int)dev;
+}
+
+/**
+ * 双 app 存活仲裁（v2.6）：每 5 秒调用，read_status_ble_both 之后。
+ * 两个 app 都存活才仲裁，保留优先级：
+ *   1. 一个 BLE 已连接 → 保留它
+ *   2. 都未连接 → 命令符合度（回传实际值更贴近 daemon 下发目标者）
+ *   3. 仍无法区分 → BOOT_AT 更早开启者
+ *   4. 兜底 → 保留老 app（B6X 开发者工具）
+ * 被淘汰者非 top-app/foreground 时 am force-stop（在前台则等下一周期）。
+ */
+static void arbitrate_apps(void) {
+    int b6_alive = app_process_running(APP_PKG_B6X);
+    int b7_alive = app_process_running(APP_PKG_B7X);
+    if (!b6_alive || !b7_alive) {
+        // 只有一个（或没有）存活，无需仲裁
+        return;
+    }
+
+    DeviceType keep;
+    // 优先级 1：BLE 连接状态（一台散热器只会被一个 app 连接，不存在双 BLE=1）
+    if (b6_connected && !b7_connected) {
+        keep = DEVICE_B6X;
+    } else if (!b6_connected && b7_connected) {
+        keep = DEVICE_B7X;
+    } else {
+        // 都未连接（或理论不存在的双连接防御）：命令符合度 → BOOT_AT → B6X
+        read_both_cooler_rpm_cold();
+        int dev6 = command_deviation(b6_model, b6_rpm_real, b6_cold_real);
+        int dev7 = command_deviation(b7_model, b7_rpm_real, b7_cold_real);
+        if (dev6 < dev7) {
+            keep = DEVICE_B6X;
+        } else if (dev7 < dev6) {
+            keep = DEVICE_B7X;
+        } else {
+            // 命令符合度无法区分 → 更早开启者
+            if (b6_boot_at > 0 && b7_boot_at > 0)
+                keep = (b6_boot_at <= b7_boot_at) ? DEVICE_B6X : DEVICE_B7X;
+            else if (b6_boot_at > 0)
+                keep = DEVICE_B6X;
+            else if (b7_boot_at > 0)
+                keep = DEVICE_B7X;
+            else
+                keep = DEVICE_B6X;  // 老 app 兜底
+        }
+    }
+
+    // 被淘汰者在前台则不 kill，等下一周期再试
+    if (keep == DEVICE_B6X) {
+        if (!is_foreground_pkg(APP_PKG_B7X))
+            force_stop_app(APP_PKG_B7X);
+    } else {
+        if (!is_foreground_pkg(APP_PKG_B6X))
+            force_stop_app(APP_PKG_B6X);
+    }
 }
 
 // ======================== 电池温度控制 ========================
@@ -2933,6 +3108,7 @@ pid_init_done:
     while (running) {
         // 1. 读取双状态文件 + 仲裁
         read_status_ble_both();
+        arbitrate_apps();  // v2.6：双 app 存活仲裁（两个 app 最多一个后台存活）
         DeviceType new_device = select_active_device();
 
         // 2. 设备切换检测：当前设备断联时尝试切换到另一台

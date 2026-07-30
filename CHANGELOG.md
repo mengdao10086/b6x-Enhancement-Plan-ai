@@ -3,6 +3,29 @@
 > 格式：[Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)
 
 
+## v2.6（2026-07-31）
+
+### Added
+- **双 app 存活仲裁**（magisk）：B6X 开发者工具（`com.flydigi.waspwing.experimental`）与 B7X 游戏厅（`com.fdg.flashplay.farsef`）最多一个后台存活。`arbitrate_apps()` 每 5 秒检测，被淘汰者非前台时 `am force-stop`
+- **仲裁优先级**：BLE 已连接 → 命令符合度（回传实际 RPM/制冷 与 daemon 下发目标的归一化偏差）→ BOOT_AT 更早开启 → 老 app（B6X）兜底
+- **BLE 字段 0/6/7 设备型号回传**：status 文件 `BLE` 从 0/1 改为 0/6/7（0=未连接, 6=B6X 型号, 7=B7X 型号），旧版 `BLE=1` 兼容按文件路径兜底
+- **`BOOT_AT` 字段**：LSP 在 Application.onCreate 记录进程启动时间戳，供仲裁"更早开启"
+- **B7X 型号识别**：B7X app 可能连接 B6X 散热器，LSP 钩 SDK `onDeviceInfoUpdate` 读 `deviceCode` 修正实际型号；`update_active_limits()` 改按实际型号选限制（修复 B7X app 连 B6X 时误用 255/8000 上限）
+- **B6X 启动自动进入设置界面**（LSP）：引导页（MainActivity）可见期间 BLE 连接成功 → 自动跳 `B6ExperimentalActivity`，跳过"开始设置"页。事件驱动无轮询，`enteredSetup` 防止回引导页被弹回
+- **`STATUS_TIMEOUT` 配置**：App 心跳超时默认 12→7 秒，`profile.conf` 可配置（3~60）
+
+### lsp模块
+- status 协议：`BLE=0/6/7` + `BOOT_AT`
+- B7X SDK `onDeviceInfoUpdate` 型号识别钩子（连 B6X 设备时型号修正为 6）
+- B6X `MainActivity` 生命周期钩子（onResume/onPause/onDestroy）+ `B6ExperimentalActivity.onCreate` → 自动进入设置界面
+
+### magisk模块
+- `arbitrate_apps()` / `command_deviation()` / `is_foreground_pkg()`（dumpsys 窗口焦点优先）/ `force_stop_app()`（am force-stop）
+- `read_single_status` 扩展解析 BLE 型号 + BOOT_AT；`update_active_limits` 按实际型号
+- `STATUS_TIMEOUT` 默认 7 秒 + `profile.conf` 配置项
+
+---
+
 ## v2.5（2026-07-30）
 
 ### Added
