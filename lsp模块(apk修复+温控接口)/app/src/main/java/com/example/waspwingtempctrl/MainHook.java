@@ -35,6 +35,7 @@ public class MainHook implements IXposedHookLoadPackage {
 
     // ========== 多设备支持（v2.5） ==========
     private static final String PACKAGE_B6X = "com.flydigi.waspwing.experimental";
+    private static final String PACKAGE_B6X_NEW = "com.flydigi.waspwing.experimentanliuliu";
     private static final String PACKAGE_B7X = "com.fdg.flashplay.farsef";
     private static final String TAG = "[WaspWingTempCtrl]";
     // 双文件路径
@@ -45,6 +46,7 @@ public class MainHook implements IXposedHookLoadPackage {
     private static int lastSetMode = 0;     // 上次 setRunMode 的 mode
     private static int lastSetColdOC = 0;   // 上次固定功率的 coldOC
     private static int deviceType = 0;      // 0=无连接, 6=B6X, 7=B7X
+    private static boolean isNewB6XApp = false;  // v2.5：当前进程是否为新版 B6X app（决定 BLE=1/2）
     private static boolean bleConnected = false;  // BLE 连接状态（供写 status 文件）
     private static long bleConnectedTimestamp = 0; // 连接 Unix 时间戳（CONNECTED_AT）
     private static String currentStatusFile = STATUS_FILE_B6; // 当前选中的 status 文件
@@ -140,10 +142,15 @@ public class MainHook implements IXposedHookLoadPackage {
         try {
             FileOutputStream fos = new FileOutputStream(currentStatusFile);
             StringBuilder sb = new StringBuilder();
-            // BLE 字段 0/6/7：0=未连接, 6=B6X 型号, 7=B7X 型号；旧版 1=已连接但型号未知（C 侧按文件路径兜底）
+            // BLE 字段：0=未连接；B7X=型号编码(6/7)；B6X 用 1/2 区分两个 app（1=老 app, 2=新 app）
             int bleVal = 0;
-            if (bleConnected)
-                bleVal = (connectedModel == 6 || connectedModel == 7) ? connectedModel : 1;
+            if (bleConnected) {
+                if (deviceType == 7) {
+                    bleVal = (connectedModel == 6 || connectedModel == 7) ? connectedModel : 7;  // B7X 保持型号编码
+                } else {
+                    bleVal = isNewB6XApp ? 2 : 1;   // B6X：新 app=2，老 app=1
+                }
+            }
             sb.append("BLE=").append(bleVal).append("\n");
             sb.append("CONNECTED_AT=").append(bleConnectedTimestamp).append("\n");
             sb.append("BOOT_AT=").append(bootTimestamp).append("\n");
@@ -234,9 +241,11 @@ public class MainHook implements IXposedHookLoadPackage {
         XposedBridge.log(TAG + " LoadPackage: " + lpparam.packageName);
 
         // 判断设备类型
-        if (lpparam.packageName.equals(PACKAGE_B6X)) {
+        if (lpparam.packageName.equals(PACKAGE_B6X)
+                || lpparam.packageName.equals(PACKAGE_B6X_NEW)) {
             deviceType = 6;
             currentStatusFile = STATUS_FILE_B6;
+            isNewB6XApp = lpparam.packageName.equals(PACKAGE_B6X_NEW);
         } else if (lpparam.packageName.equals(PACKAGE_B7X)) {
             deviceType = 7;
             currentStatusFile = STATUS_FILE_B7;
@@ -271,6 +280,7 @@ public class MainHook implements IXposedHookLoadPackage {
                                 if (connectedModel != 6 && connectedModel != 7)
                                     connectedModel = (deviceType == 7) ? 7 : 6;  // 型号未知按包名兜底
                                 XposedBridge.log(TAG + " 控制器：扫描已停止，" + getDeviceLabel() + " BLE 已连接");
+                                writeStatusFile();  // v2.5：连接事件立刻写 status 文件
                             } catch (Exception e) {
                                 XposedBridge.log(TAG + " 控制器修复异常: " + e.getMessage());
                             }
@@ -400,6 +410,7 @@ public class MainHook implements IXposedHookLoadPackage {
                             }
                             XposedBridge.log(TAG + " BLE 断联"
                                     + " device=" + (lastDevice != null ? lastDevice.getAddress() : "null"));
+                            writeStatusFile();  // v2.5：断连事件立刻写 status 文件
                         }
                     });
             XposedBridge.log(TAG + " 已钩住 BluetoothGatt.disconnect（状态标记）");
@@ -476,6 +487,7 @@ public class MainHook implements IXposedHookLoadPackage {
                                 }
                                 XposedBridge.log(TAG + " BLE 断联（onConnectionStateChange）"
                                         + " device=" + (lastDevice != null ? lastDevice.getAddress() : "null"));
+                                writeStatusFile();  // v2.5：远程断连立刻写 status 文件
                             }
                         }
                     });
@@ -498,6 +510,7 @@ public class MainHook implements IXposedHookLoadPackage {
                             }
                             XposedBridge.log(TAG + " BLE 已连接（onGattConnected）"
                                     + " device=" + (lastDevice != null ? lastDevice.getAddress() : "null"));
+                            writeStatusFile();  // v2.5：连接事件立刻写 status 文件
                             // 检查 discoverServices 结果
                             if (gatt != null) {
                                 XposedBridge.log(TAG + " [诊断]   services="
@@ -582,12 +595,6 @@ public class MainHook implements IXposedHookLoadPackage {
                                             ((Integer) realCold) + 1);
                                 }
                             } catch (Throwable t) { /* ok */ }
-
-                            Boolean connected = (Boolean) XposedHelpers.callMethod(info, "isConnected");
-                            Integer wind = (Integer) XposedHelpers.callMethod(info, "getRealWindLevel");
-                            XposedBridge.log(TAG + " [诊断] App.onDeviceInfoUpdate"
-                                    + " connected=" + connected
-                                    + " windLevel(real)=" + wind);
                         }
                     });
             XposedBridge.log(TAG + " 已钩住 App WaspWingViewModel.onDeviceInfoUpdate（beforeHook）");
@@ -614,6 +621,7 @@ public class MainHook implements IXposedHookLoadPackage {
                             }
                             XposedBridge.log(TAG + " BLE 断联 device="
                                     + (lastDevice != null ? lastDevice.getAddress() : "null"));
+                            writeStatusFile();  // v2.5：断连事件立刻写 status 文件
                         }
                     });
             XposedBridge.log(TAG + " 已钩住 BluetoothGatt.disconnect（双设备通用）");
@@ -691,7 +699,7 @@ public class MainHook implements IXposedHookLoadPackage {
         if (deviceType == 6) {
             try {
                 Class<?> b6ExpAct = lpparam.classLoader.loadClass(
-                        "com.flydigi.waspwing.experimental.B6ExperimentalActivity");
+                        "com.example.extool.B6ExperimentalActivity");
 
                 XposedHelpers.findAndHookMethod(b6ExpAct, "onResume",
                         new XC_MethodHook() {
@@ -720,29 +728,38 @@ public class MainHook implements IXposedHookLoadPackage {
             }
         } // end B6X-only hooks
 
-        // ========== B6X 启动自动进入设置界面（v2.6，事件驱动） ==========
-        // 引导页（MainActivity）可见期间 BLE 连接成功 → 自动跳 B6ExperimentalActivity
-        // 生命周期钩子维护 currentGuideActivity；enteredSetup 防止"回引导页被弹回"
+        // ========== B6X 启动自动进入设置界面（v2.5 修复，事件驱动） ==========
+        // Bug1 修复：反编译确认 MainActivity extends AppCompatActivity 且仅重写 onCreate（无 onResume），
+        // findAndHookMethod 只查声明方法、不搜继承链 → 原精确钩子必然失败（bug 根因）。
+        // 改钩基类 android.app.Activity 的 onResume/onPause/onDestroy（经 AppCompatActivity super 链同样触发），
+        // 用 isMainActivity() 识别 MainActivity；enteredSetup 防止"回引导页被弹回"
         if (deviceType == 6) {
             try {
-                Class<?> mainAct = lpparam.classLoader.loadClass("com.example.extool.MainActivity");
-                XposedHelpers.findAndHookMethod(mainAct, "onResume", new XC_MethodHook() {
+                XposedHelpers.findAndHookMethod(android.app.Activity.class, "onResume", new XC_MethodHook() {
                     @Override
                     protected void afterHookedMethod(MethodHookParam param) {
-                        currentGuideActivity = (Activity) param.thisObject;
-                        autoEnterSetup();  // 已连接则立即跳；未连接则等 onGattConnected 触发
+                        if (isMainActivity(param.thisObject)) {
+                            currentGuideActivity = (Activity) param.thisObject;
+                            autoEnterSetup();  // 已连接则立即跳；未连接则等 onGattConnected 触发
+                        }
                     }
                 });
-                XposedHelpers.findAndHookMethod(mainAct, "onPause", new XC_MethodHook() {
+                XposedHelpers.findAndHookMethod(android.app.Activity.class, "onPause", new XC_MethodHook() {
                     @Override
                     protected void beforeHookedMethod(MethodHookParam param) {
-                        currentGuideActivity = null;
+                        if (isMainActivity(param.thisObject)
+                                && currentGuideActivity == param.thisObject) {
+                            currentGuideActivity = null;
+                        }
                     }
                 });
-                XposedHelpers.findAndHookMethod(mainAct, "onDestroy", new XC_MethodHook() {
+                XposedHelpers.findAndHookMethod(android.app.Activity.class, "onDestroy", new XC_MethodHook() {
                     @Override
                     protected void beforeHookedMethod(MethodHookParam param) {
-                        currentGuideActivity = null;
+                        if (isMainActivity(param.thisObject)
+                                && currentGuideActivity == param.thisObject) {
+                            currentGuideActivity = null;
+                        }
                     }
                 });
                 Class<?> b6ExpAct = lpparam.classLoader.loadClass("com.example.extool.B6ExperimentalActivity");
@@ -752,7 +769,7 @@ public class MainHook implements IXposedHookLoadPackage {
                         enteredSetup = true;  // 已进入过设置界面，此后不再自动跳
                     }
                 });
-                XposedBridge.log(TAG + " 已钩住 MainActivity/B6ExperimentalActivity（自动进入设置界面）");
+                XposedBridge.log(TAG + " 已钩住 Activity 基类生命周期（MainActivity 自动进入设置界面）");
             } catch (Throwable t) {
                 XposedBridge.log(TAG + " 钩自动进入设置界面失败: " + t.getMessage());
             }
@@ -870,6 +887,21 @@ public class MainHook implements IXposedHookLoadPackage {
             if (code.startsWith("b6")) return 6;
         } catch (Throwable t) { /* 忽略 */ }
         return 0;
+    }
+
+    /**
+     * v2.5：判断对象是否为 B6X app 的 MainActivity。
+     * 模块编译期类路径不含 app 类（build.gradle 仅 xposed api 依赖），不能直接写 instanceof，
+     * 改用 app 类加载器 loadClass + isInstance（语义等同 instanceof；MainActivity 为 final 类无子类）。
+     */
+    private static boolean isMainActivity(Object obj) {
+        try {
+            Class<?> cls = obj.getClass().getClassLoader()
+                    .loadClass("com.example.extool.MainActivity");
+            return cls.isInstance(obj);
+        } catch (Throwable t) {
+            return false;
+        }
     }
 
     /**

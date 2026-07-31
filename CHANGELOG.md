@@ -3,59 +3,57 @@
 > 格式：[Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)
 
 
-## v2.6（2026-07-31）
-
-### Added
-- **双 app 存活仲裁**（magisk）：B6X 开发者工具（`com.flydigi.waspwing.experimental`）与 B7X 游戏厅（`com.fdg.flashplay.farsef`）最多一个后台存活。`arbitrate_apps()` 每 5 秒检测，被淘汰者非前台时 `am force-stop`
-- **仲裁优先级**：BLE 已连接 → 命令符合度（回传实际 RPM/制冷 与 daemon 下发目标的归一化偏差）→ BOOT_AT 更早开启 → 老 app（B6X）兜底
-- **BLE 字段 0/6/7 设备型号回传**：status 文件 `BLE` 从 0/1 改为 0/6/7（0=未连接, 6=B6X 型号, 7=B7X 型号），旧版 `BLE=1` 兼容按文件路径兜底
-- **`BOOT_AT` 字段**：LSP 在 Application.onCreate 记录进程启动时间戳，供仲裁"更早开启"
-- **B7X 型号识别**：B7X app 可能连接 B6X 散热器，LSP 钩 SDK `onDeviceInfoUpdate` 读 `deviceCode` 修正实际型号；`update_active_limits()` 改按实际型号选限制（修复 B7X app 连 B6X 时误用 255/8000 上限）
-- **B6X 启动自动进入设置界面**（LSP）：引导页（MainActivity）可见期间 BLE 连接成功 → 自动跳 `B6ExperimentalActivity`，跳过"开始设置"页。事件驱动无轮询，`enteredSetup` 防止回引导页被弹回
-- **`STATUS_TIMEOUT` 配置**：App 心跳超时默认 12→7 秒，`profile.conf` 可配置（3~60）
-
-### lsp模块
-- status 协议：`BLE=0/6/7` + `BOOT_AT`
-- B7X SDK `onDeviceInfoUpdate` 型号识别钩子（连 B6X 设备时型号修正为 6）
-- B6X `MainActivity` 生命周期钩子（onResume/onPause/onDestroy）+ `B6ExperimentalActivity.onCreate` → 自动进入设置界面
-
-### magisk模块
-- `arbitrate_apps()` / `command_deviation()` / `is_foreground_pkg()`（dumpsys 窗口焦点优先）/ `force_stop_app()`（am force-stop）
-- `read_single_status` 扩展解析 BLE 型号 + BOOT_AT；`update_active_limits` 按实际型号
-- `STATUS_TIMEOUT` 默认 7 秒 + `profile.conf` 配置项
-
----
-
 ## v2.5（2026-07-30）
 
 ### Added
-- **B7X 散热器支持**（`com.fdg.flashplay.farsef`）：LSPosed 模块扩展至双设备，自动检测包名选择 B6X/B7X 钩子集
-- **B7X WaspWingManager 混淆名 fallback**：`t9.j` — 先试原名 `com.flydigi.sdk.waspwing.WaspWingManager`，失败则自动回退混淆名
-- **双 status 文件协议**：`tempctrl_b6x.status` + `tempctrl_b7x.status`，文件名区分设备，各自用 BLE=0/1
-- **`CONNECTED_AT` 字段**：status 文件新增连接时间戳，供 tempctrl 仲裁"先连者优先"
-- **`B7X_PID_COLD_MAX` / `B7X_FAN_RPM_MAX`**：profile.conf 可配置的 B7X 设备上限（默认 250 / 8000）
-- **`select_active_device()` 仲裁**：单 tempctrl 实例读取双文件自动选择当前控制设备
+- **B7X 散热器支持**：模块扩展到双设备，自动识别 B6X/B7X app 并加载对应控制逻辑
+- **双 status 文件协议**：B6X/B7X 各自独立状态文件，互不干扰
+- **连接时间记录**：状态文件新增连接时间，供"先连者优先"仲裁
+- **B7X 设备上限可配置**：新增 B7X 专用的制冷/风扇上限配置
+- **双设备自动选择**：单进程读取双文件，自动选择当前控制的散热器
+- **双 app 存活仲裁**：两个 app 最多一个后台存活，被淘汰者非前台时自动停止
+- **仲裁优先级**：BLE 已连接 → 控制链路贴合度 → 启动更早 → 老 app（B6X）兜底
+- **设备型号识别**：B7X app 连接 B6X 散热器时能正确识别实际型号、选用对应上限
+- **B6X 自动进入设置界面**：引导页期间连接成功 → 自动跳设置页，跳过"开始设置"
+- **心跳超时阈值可配置**：App 失去响应判定时长可调（默认 12→7 秒）
+- **新 B6X app（B6 B6X 超频工具 V2）全功能支持**：修复蓝牙连接后一直"扫描中"的 bug，新 app 的蓝牙连接/温控/自动跳转全面生效
+- **老 app 自动跳转修复**：连接散热器后引导页能自动进入设置界面
+- **制冷强度限速智能方向感知**：电池 ≥37.5°C 禁止降低制冷强度，≤32.5°C 禁止升高（防过冷），基础值从 10 提高到 25
 
 ### Changed
 - **tempctrl 单例双设备**：从单文件单设备改为单进程双设备仲裁架构
-- **`update_active_limits()`**：运行时根据 active_device 切换 B6X (194/6000) / B7X (255/8000) 限制
-- **广播协议**：B7X 使用独立 Action `com.flydigi.SET_TEMPERATURE_B7`，避免与 B6X 冲突
-- **`B7X_COLD_MAX` 保持硬编码**：gear 模式安全兜底上限，PID 模式由 `B7X_PID_COLD_MAX` 可配置控制
-- **参考资料目录重构**：`apk逆向分析/` → `decompile/`，APK 文件集中至 `apk_original/`
+- **运行时按设备切换上限**：根据实际连接的设备自动切换 B6X/B7X 的制冷/风扇上限
+- **广播协议区分设备**：B7X 使用独立广播通道，避免与 B6X 冲突
+- **B7X 制冷上限保持硬编码安全值**：挡位模式用安全兜底，PID 模式可配置
+- **参考资料目录重构**：反编译产物集中管理，APK 文件统一存放
+- **双 app 存活仲裁对象调整**：改为在两个 B6X app 之间，保留正在连接散热器的那一个、无连接时保留老 app；B7X 不再参与
+- **连接状态反馈更及时**：蓝牙连接/断开瞬间即写入状态文件（此前固定 5 秒间隔）
+- **控制循环节奏自适应**：根据状态文件更新时间自动调整循环间隔
+- **心跳超时收紧**：失去响应判定从 7 秒缩短到 5 秒（固定）
+
+### Removed
+- **命令符合度 / 启动先后比较**：两个 app 共用同一状态文件后无法区分各自参数，相关逻辑移除（不影响正常使用）
 
 ### lsp模块
-- **多包名支持**：`handleLoadPackage` 按 `PACKAGE_B6X` / `PACKAGE_B7X` 分流
+- **多 app 支持**：两个 B6X app + B7X app 自动分流，互不干扰
 - **B6X 固定上限**不变（制冷 194 / 风扇 6000）
-- **B7X 专属广播 Action**：`com.flydigi.SET_TEMPERATURE_B7`
-- **B7X 不需求 `checkBluetoothPermission` 修复**（targetSdk=29）
+- **B7X 独立广播通道**
+- **B7X 无需蓝牙权限修复**（targetSdk 不同）
+- **状态协议区分**：B6X 文件用 1/2 区分两个 app 的连接，B7X 文件用设备型号编码
+- **连接事件即时写状态**：连接/断开瞬间更新状态文件（此前仅 5 秒周期线程）
+- **自动跳转修复**：改挂基类生命周期钩子，两个 B6X app 都生效
+- **B7X 型号识别**：连 B6X 设备时修正型号，避免误用 255/8000 上限
 
 ### magisk模块
-- **`read_status_ble_both()`**：双文件并行读取 BLE + CONNECTED_AT
-- **`send_am_broadcast()`**：根据 active_device 选广播 Action
-- **配置热重载后自动恢复设备限制**：`load_config` → `update_active_limits()`
+- **双文件并行读取**：同时读取两个状态文件的连接状态与设备型号
+- **按当前设备选广播通道**
+- **配置热重载后自动恢复设备上限**
+- **双 app 存活仲裁**（两个 B6X app）+ 前台检测 + 非前台自动停止
+- **状态解析**：B6X 文件解析连接者（1=老 app / 2=新 app），B7X 文件保持型号编码
+- **心跳超时固定 5 秒**
 
 ### B8X 分析
-- **B8X超频工具V2** Manifest 分析完成：包名 `com.fdg.flashplay.farb8x`，360 加固，BLE 层改用 GAIAGATTBLEService（非 WaspWing SDK）
+- **B8X超频工具V2** Manifest 分析完成：360 加固，蓝牙层改用独立 SDK（非 WaspWing SDK）
 - **未适配**：360 加固需运行时脱壳 + 架构不兼容现有钩子体系 + 用户决定暂不进行
 - 详见 [完整修复历程 第8节](参考资料/完整修复历程.md#8-b8x-超频工具-v2-分析记录) 和 [反编译报告](参考资料/decompile/b8x/反编译报告.md)
 
@@ -64,81 +62,77 @@
 ## v2.4（2026-07-29）
 
 ### Added
-- **温度趋势预测算法**（`PID_PREDICT_MODE/WIN/RISE/MIN_DELTA`）：基于历史每周期温差变化趋势预测温度稳定点，peak/valley 检测 + per-cycle delta 归一化 + 线性减速模型 + 权重混合（加热/冷却独立权重），消除 PID 冷静期等待。含 ramp-up 渐进限制和过渡平滑
-- **`read_batt_current_ua10()`**：封装电池电流读取，内部用 `BATT_CURRENT_DIVISOR` 做 µA→0.01A 转换，调用方直接使用 0.01A 单位值
-- **`BATT_CURRENT_DIVISOR`**：电池电流缩放系数（默认 10000，可配置），替换硬编码 `÷10000`
+- **温度趋势预测**：根据历史温度变化趋势提前预判走向，消除 PID 等待延迟，控制更跟手（含渐进限制与过渡平滑，加热/冷却分开调节）
+- **电池电流读取统一封装**：内部统一单位换算，调用方直接用规范单位，减少重复代码
 
 ### Changed
-- **PID 输入增加温度预测层**：预测值经 ramp-up 钳位 + 权重混合后参与 PID 计算，`PID_ALPHA` 扩展为三值（新增预测平滑系数 50%）
-- **反补/趋势豁免合并配置**：`REV_COMP_ENABLED` + `TREND_EXEMPT_ENABLED` → `REV_COMP=1 1`（双值开关）
-- **紧急单源化**：`emergency_intervention()` 从 CPU+电流双源简化为 CPU 单源，紧急等级从 4 级降为 3 级；ramp-up 钳位精简（7 行 → 1 行 clamp），整体代码量 -25 行
+- **PID 输入加入温度预测层**：预测值参与计算，**可能**可以进一步压制温度波动
+- **反补与趋势豁免合并成一个配置项**：两个开关并成一组
+- **紧急干预简化**：从 CPU+电流双信号源改为 CPU 单源，紧急等级从 4 级降到 3 级，逻辑更精简
 
 ### Removed
-- **PID 电流补偿**：删除 `PID_CURR_COMP_ENABLED/THRESHOLD/DIVISOR` 全部逻辑
-- **Gear 电流紧急**：删除 `CURRENT_EMERG/SMOOTH_ALPHA/EMERG_CURRENT_ENABLED` 全部逻辑
-- **`read_battery_current_abs()`**：无调用方死代码
-- **`BATT_CURRENT_DIVISOR` 旧实现**：后以新设计恢复
+- **PID 电流补偿**：该功能整体移除
+- **Gear 电流紧急**：该功能整体移除
+- **无用死代码清理**
 
 ---
 
 ## v2.3（2026-07-09）
 
 ### Added
-- **PID I 项方差门控 + 采样/死区**（`PID_KI_VAR_THRESHOLD/SAMPLES/DEADBAND`）：将积分分离条件从固定 ±1°C 改为温度方差门控。温度稳定（方差<阈值）时 I 项全温度段启用，消除稳态静差；温度波动时冻结 I 防 windup。回退死区（默认 ±1.5°C）在方差门控未激活或采样不足时生效
-- **GEAR_AUTO_FAN**：挡位模式自动风扇转速（`profile.conf` [8] 挡位表段）。默认 =1，使用冷端强度+热端温度双映射计算风扇转速，挡位表风扇转速配置变为截断上限；=0 恢复旧行为
-- **LOG_TRIM_LINES**：日志超限时删除最早 N 行改为可配置（默认 3，0=不清理，`profile.conf` [1] 日志段）
-- **PID 连续无级调节模式**（`CTRL_MODE=1`）：P+I(积分分离±1°C)+D 控制器，归一化输出 0~1，输入 EMA 滤波
-- **mtime 温度检测**（替代 `BATT_SKIP_MAX`）：通过 `stat()` 检查电池温度 sysfs 文件修改时间，仅 mtime 变化时读取，`batt_temp_updated` 标记通知各函数。Gear 和 PID 模式跳过逻辑改为「温度文件未更新 → 跳过」
-- **制冷→RPM 映射引擎**：冷端指数映射（`PID_COLD_EXP`）+ 热端线性映射 + 自加权合并，PID/常规模式共享
-- **限速统一下沉**：RPM/制冷/目标温度限速从 `rate_limited_execute` 内建到 `apply_level`/`apply_level_direct` 内部，计算层只管传目标值
+- **PID 温度平稳时启用积分**：温度稳定时消除控制偏差，温度波动时冻结积分防过冲
+- **挡位模式自动算风扇转速**：按冷端强度 + 热端温度自动决定风扇快慢，挡位表里设的风扇转速变为上限
+- **日志清理行数可配置**：日志超限时删多少行可调（0=不清理）
+- **PID 连续无级调节模式**：可替代档位式控制，制冷强度连续平滑变化
+- **温度变化才读取传感器**：温度文件没更新就不读，减少无效操作
+- **制冷强度→风扇转速映射引擎**：冷端与热端信号综合决定风扇转速
+- **限速逻辑统一下沉**：各模式共用同一套限速执行，计算层只管给目标值
 
 ### Changed
-- **`pid_compute` 改为方差门控 + 死区回退**：从固定 `±1.0°C` 硬编码改为双层逻辑（新增 `PID_KI_VAR_THRESHOLD/SAMPLES/DEADBAND`）
-- **删除所有参数下发日志**：不再记录 `[PID] ...°C 冷... RPM...` 和 `apply_level 下发 档位...` 等包含实际下发参数的日志行，保留错误/跳过日志
-- **风扇 RPM 取整至 50 倍数**：`am broadcast` 发送的 RPM 值自动取整
-- **日志管理优化**：`LOG_TRIM_LINES` 控制清理行数（默认 3），滚动只删最早行
-- **编译优化**：段裁剪 + strip，二进制体积减少约 80%
-- **`read_status_ble()` 扩展至 10 字段**：解析 RUN_MODE/HOT_TEMP/COLD_TEMP/RPM_REAL/COLD_REAL 等散热器全参数回传
-- **持久化改为制冷强度**：`save_gear`→`save_cold`，`load_gear`→`load_cold`；PID 模式也参与存档，重启不再丢失状态
-- **热端 RPM 双向滞回**（`rpm_from_hot_end`）：降温时有效温度 +1°C 使 RPM 滞后下降，升温时 RPM 不低于上次值（防止微升反降 RPM）
-- **EMA 方向取整**（`EMA_DIR`）：所有整数 EMA 平滑改用方向取整宏，基于原始值方向决定舍入（上升→向上取整，下降→自然截断），消除渐进无法到达的问题。影响：CPU 温度滤波、电流紧急/挡位平滑、PID 电池输入滤波
-- **速率限制温差动态化 + 0.1°C 精度**（`RATE_LIMIT_FAN_BASE`/`COLD_MULT`）：风扇升速和制冷强度速率不再固定，改为根据电池温度与基准温差（d=0.1°C）自动调整，使用 `d × mult / 10` 保留原始精度。风扇降速继续保持固定值。新增 `RATE_LIMIT_FAN_BASE`（双值：升基础值 升倍率）、`RATE_LIMIT_COLD_MULT` 配置参数
-- **配置系统重构**：PERF_ENABLED/DEBUG_ENABLED 双层守卫替代分组子守卫；13 组多键参数改为连续值格式；`STATUS_TIMEOUT` 移除；配置参数顺序不再影响解析结果
-- **PID 输入补偿**：引入 CPU 温差和电池电流作为额外模拟热源
+- **PID 积分策略改为按温度稳定性动态启用**
+- **删除所有含实际下发参数的日志**：只保留错误和跳转日志，减少日志噪音
+- **风扇转速发送值取整到 50 倍数**
+- **编译优化**：二进制体积缩小约 80%
+- **状态文件协议扩展**：新增散热器全参数回传（运行模式、冷热端温度、实际转速/制冷、目标温度）
+- **重启不丢状态**：改为持久化制冷强度，PID 模式也参与存档
+- **热端风扇响应双向滞回**：降温时风扇不急着降、升温时风扇不低于上次值，防止温度微动引起风扇抖动
+- **平滑计算方向取整**：上升向上取整、下降向下取整，消除"渐进永远到不了目标"的问题
+- **限速随温差自动调整**：温差越大变化越快，保留 0.1°C 精度
+- **配置系统重构**：双层总开关替代分组开关，多值参数改连续格式，参数顺序不再影响解析
+- **PID 输入增加 CPU 温差和电池电流作为额外热源参考**
 
 ### Fixed
-- **文档参数名与实际代码不一致**：BATT_ZONE→BATT_BOUNDARY、BATT_RECOVERY→EMERG_RECOVERY_MULT、PID_* 前缀等
-- **`compute_direct_cold_rpm` 除零 bug**：`level_max==level_min` 时分母为 0
-- **配置热重载 CTRL_MODE 切换未触发 PID 对齐**
-- **电流-挡位映射冷却期阻止偏移下降**：`curr_gear_temp_offset` 从 +91 归零需约 10 分钟，修复后冷却期仅阻止同方向累积，反方向随时可调
-- **配置解析 [组 1] `else if` 过度贪婪**：`CURRENT_GEAR_MODE` 默认开启时吞掉所有未匹配 Group 0 的 key，导致 PID 参数（含 `PID_KP`/`PID_KI`/`PID_KD`/`DEBUG_PID` 等）从未从 profile.conf 加载成功，全部使用硬编码默认值。修复：Group 1 额外检查 `strncmp(key, "CURRENT_GEAR_", 13) == 0`，非 `CURRENT_GEAR_*` key 正常透传到后续分组
-- **LSPosed `experimentalRunModeValue` 设错导致 App 自修复与 PID 竞争 BLE 命令队列**：原逻辑将 `experimentalRunModeValue` 设为 `lastSetColdOC`（如 189），App 自修复条件要求 `experimentalRunModeValue == realColdLevel + 1`，189 不等于 realCold+1（125→188），导致自修复每周期都发 `setExperimentalRunMode` 命令覆盖 PID 的 `setRunMode`。前台越久 BLE 队列越膨胀，PID 命令严重延迟，冷强度卡在自修复设定的值上。修复：改为 `realColdLevel + 1` 满足条件，自修复静默跳过
+- **文档参数名与实际代码不一致**
+- **极端配置下除零崩溃**：配置上下限相等时不再崩
+- **配置热重载切换控制模式后 PID 未重新对齐**
+- **电流-挡位映射冷却期阻止偏移回落**：冷却期只挡同方向累积，反向调整随时生效
+- **配置解析吞掉 PID 参数**：某组配置默认开启时把后续 PID 参数全吞了，导致配置从未生效，已修复
+- **App 自修复与温控抢蓝牙命令**：修复后自修复正确跳过，不再与温控竞争（否则越用越卡、制冷卡在旧值）
 
 ### lsp模块
-- **`writeStatusFile()` 扩展**：完整的 10 行 status 协议（含散热器全参数回传）
-- **`xposedscope` 元数据**：管理器显示推荐作用域
-- **`onDeviceInfoUpdate` 参数捕获**：供散热器数据回传使用
-- **修复参数回传钩子指向**：追加 `WaspWingViewModel.onDeviceInfoUpdate`（app 层），散热器数据实际经过此类而非 SDK 的 `WaspwingViewModel`
-- **后台自动重连**：捕获 BLE 设备引用，断连后立即通过 `WaspWingManager.connectGattWith()` 经由 SDK 自身重连通道恢复连接，无需 Activity。支持远程断联（散热器出范围）和主动断联两种场景
+- **状态文件扩展**：完整的散热器全参数回传
+- **管理器显示推荐作用域**
+- **散热器数据从正确位置捕获**：修正了抓取回传数据的钩子指向
+- **后台自动重连**：断开后无需打开 app 自动重连，支持远程断连和主动断连两种场景
 
 ### 注意
-- **DIRECT_COLD_MODE 未进入发布版本**：在 v2.3 开发过程中删除
+- **直接冷端模式未进入发布版本**：在 v2.3 开发过程中删除
 
 ---
 
 ## v2.2（2026-07-03）
 
 ### Added
-- **电流-挡位映射 + 温度融合模式**：以电池电流为推荐挡位依据，温度在此基础累积偏移（带冷却期）。分充电/放电两套倍率，`CURRENT_GEAR_MODE` 两数字开关控制。推荐挡位变化时偏移自动继承，无偏移上限
-- **独立开关**：`EMERG_CURRENT_ENABLED`（默认关闭）、`EMERG_CPU_ENABLED`、`REV_COMP_ENABLED`、`TREND_EXEMPT_ENABLED`，各功能模块独立控制，配置文件热重载即生效
-- **调试日志系统**：`DEBUG_MODE` 总开关 + 7 个分区开关（传感器/紧急/电池/执行/连接/配置/主循环），开启时自动关闭日志体积限制
-- **配置预扫描**：`load_config` 先解析所有开关/模式参数，关闭时跳过对应详细参数，提升热重载效率
+- **电流-挡位映射 + 温度融合**：以电池电流为主要依据定档位，温度在此基础上微调（带冷却期），充电/放电分开调节，档位变化时温度偏移自动保留
+- **各功能独立开关**：紧急干预、反补、趋势豁免等可单独开关，配置热重载即时生效
+- **调试日志系统**：总开关 + 按模块分区开关，开启时自动放开日志量限制
+- **配置预扫描**：先解析开关再加载参数，热重载更快
 
 ### Changed
-- **电流单位优化**：原始 µA ÷10000 转 0.01A 内部单位，放电负值不再被当作传感器错误
-- **`CURRENT_GEAR_MODE` 默认改为 `1 1`**：充电放电全开
-- **`CURRENT_GEAR_OFFSET` 参数删除**：温度偏移不再设上限，由 `level_min`/`level_max` 钳位
-- **电流映射冷却行为统一**：遵守 `BATT_COOLDOWN_CYCLES` 配置
+- **电流单位优化**：内部统一换算，放电负值不再被误判为传感器错误
+- **充电/放电调节默认全开**
+- **温度偏移不再设上限**：由档位上下限自然约束
+- **电流映射冷却行为统一**：遵守同一冷却配置
 
 ### lsp模块
 无更新
@@ -148,26 +142,26 @@
 ## v2.1（2026-06-18）
 
 ### Added
-- **档位表可配置化**：`profile.conf` 支持 `GEAR_N=模式,目标°C,风扇RPM,制冷强度` 自定义覆盖，自动扩展档位数量
-- **紧急 4 级**（需 CPU + 电流双源叠加）
-- **紧急进入退出可选策略**：升档模式 / 降档模式，由 `EMERG_MODE` 控制
-- **电池第三区间阈值**（`BATT_ZONE_3`）
-- **紧急退出恢复期**：BATT_ZONE 阈值 ×6→×4→×2→1 逐步恢复全灵敏度，`BATT_RECOVERY_PHASE_CYCLES` 可配置
-- **反补独立冷却**（`REV_COMP_COOLDOWN`）
-- **速率限制参数可调**：`RATE_LIMIT_RPM`、`RATE_LIMIT_COLD`、`RATE_LIMIT_TEMP`
+- **档位表可配置化**：自定义档位数量与每档参数，自动扩展
+- **紧急干预 4 级**：需 CPU + 电流双信号叠加触发
+- **紧急进入/退出策略可选**：升档或降档两种模式
+- **电池第三区间阈值**：更细的温度分区
+- **紧急退出恢复期**：退出后阈值逐步恢复灵敏度，避免反复触发
+- **反补独立冷却**：反补生效后冻结几轮，期间只累积不调整
+- **速率限制参数可调**：各参数每周期最大变化量可配置
 
 ### Changed
-- **默认档位表改为全部固定功率模式**：智能温控模式的风扇转速上限非强制生效，易突破上限导致噪音突增
-- **决策与执行分离**：`main_loop` 纯计算不下发，`rate_limited_execute` 负责带速率限制执行
-- **逐档变动→每周期限速**：改为限制每个参数单次循环的变化量
-- **CPU 温度扫描优化**：仅保留温度最高的 20 个 zone
-- **电流紧急降级使用 EMA 平滑**
-- **反补改为平均每周期温差计算**：温差÷空闲周期数，支持冷却期累积
+- **默认档位表改为全部固定功率模式**：避免风扇转速上限不强制导致噪音突增
+- **决策与执行分离**：计算层只算目标值，执行层带限速逐步到达
+- **逐档变动改为每周期限速**：每个参数单次循环最多变化限速量
+- **CPU 温度扫描优化**：只保留温度最高的若干区域
+- **电流紧急降级用平滑处理**
+- **反补按平均每周期温差计算**：支持冷却期累积
 
 ### Fixed
-- **风扇每周期转速限制失效**：RPM 平滑跟踪修复
-- **高温时退出紧急的降档幅度限制**
-- **断开重连温度突变屏蔽**
+- **风扇每周期转速限制失效**
+- **高温退出紧急时降档幅度超限**
+- **断开重连时温度突变屏蔽**
 
 ### lsp模块
 - **基础 bug 修复**
@@ -177,19 +171,19 @@
 ## v2.0（2026-06-15）
 
 ### Added
-- **C 智能温控守护程序（tempctrl）**：电池/CPU 双温控决策，通过 `am broadcast` 发送指令到 LSPosed 模块
-- **LSPosed 广播接收器**：`com.flydigi.SET_TEMPERATURE` 支持 7 参数完整控制
-- **双重检查存活检测**：status 文件 mtime 心跳 + BLE=1
-- **阈值运行时可配置**：`profile.conf` 支持 mtime 热重载
-- **查表法档位系统**：1~12 级，趋势豁免 + 峰值反补合并逻辑
+- **C 智能温控守护程序**：电池/CPU 双温控决策，通过广播指令控制散热器
+- **LSPosed 广播接收器**：接收守护程序指令，完整控制散热器
+- **双重检查存活检测**：心跳 + 蓝牙连接状态双保险
+- **阈值运行时可配置**：配置文件热重载，无需重启
+- **查表法档位系统**：1~12 级，带趋势豁免 + 峰值反补
 
 ### Changed
-- **FIFO 通信→status 文件**：改用 status 文件心跳
-- **pgrep 进程检测→mtime 检测**：改用 mtime 心跳 + BLE=1 双重检查
-- **日志 File\* 持久化**：替代每行 open/close，超限自动滚动
+- **通信方式改为状态文件**：守护程序与模块通过状态文件交互
+- **进程检测改为心跳 + 蓝牙状态双重检查**
+- **日志持久化**：连续写入文件，超限自动滚动
 
 ### Fixed
-- **DefaultDispatcher 线程 100% CPU 占用**：`runFetchLoop` 空队列忙等修复
+- **DefaultDispatcher 线程 100% CPU 占用**：空队列忙等修复
 - **脚本数组越界导致最高档风扇转速异常**
 
 ---
@@ -197,10 +191,10 @@
 ## v1.0（2026-06-08）
 
 ### Added
-- **LSPosed 模块修复 BLE 连接**：`MainHook.java` 修复 Android 16 BLE 无法连接问题
+- **LSPosed 模块修复 BLE 连接**：修复 Android 16 蓝牙连不上散热器的问题
 
 ### Fixed
-- **第 1 层**：设备连接后扫描不停止，钩 `onDeviceConnected` → `stopScan()`
-- **第 2 层**：UI 不更新，钩 `onDeviceConnected` → 手动更新 LiveData
-- **第 3 层**：GATT 服务发现不触发，强制 `checkBluetoothPermission()` 返回 true（Android 16 暗坑）
-- **第 4 层**：智能温控 UI 闪烁，去掉 `convertFromDevice` 早期创建 WaspWingInfo
+- **第 1 层**：设备连接后扫描不停止 → 连接后自动停扫
+- **第 2 层**：界面状态不更新 → 连接后手动刷新界面
+- **第 3 层**：GATT 服务发现不触发 → 绕过 Android 16 权限检查暗坑
+- **第 4 层**：智能温控界面闪烁 → 去掉多余的实例创建
