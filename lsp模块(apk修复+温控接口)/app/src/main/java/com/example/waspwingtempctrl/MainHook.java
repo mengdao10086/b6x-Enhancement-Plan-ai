@@ -130,8 +130,8 @@ public class MainHook implements IXposedHookLoadPackage {
                 }
             }, filter, Context.RECEIVER_EXPORTED);
             XposedBridge.log(TAG + " 已注册 SET_TEMPERATURE 广播接收器 (RECEIVER_EXPORTED)");
-        } catch (Exception e) {
-            XposedBridge.log(TAG + " 注册广播接收器失败: " + e.getMessage());
+        } catch (Throwable t) {
+            XposedBridge.log(TAG + " 注册广播接收器失败: " + t.getMessage());
         }
     }
 
@@ -281,15 +281,15 @@ public class MainHook implements IXposedHookLoadPackage {
                                     connectedModel = (deviceType == 7) ? 7 : 6;  // 型号未知按包名兜底
                                 XposedBridge.log(TAG + " 控制器：扫描已停止，" + getDeviceLabel() + " BLE 已连接");
                                 writeStatusFile();  // v2.5：连接事件立刻写 status 文件
-                            } catch (Exception e) {
-                                XposedBridge.log(TAG + " 控制器修复异常: " + e.getMessage());
+                            } catch (Throwable t) {
+                                XposedBridge.log(TAG + " 控制器修复异常: " + t.getMessage());
                             }
                         }
                     }
             );
             XposedBridge.log(TAG + " 已钩住 AbstractBluetoothController.onDeviceConnected");
-        } catch (Exception e) {
-            XposedBridge.log(TAG + " 钩控制器失败: " + e.getMessage());
+        } catch (Throwable t) {
+            XposedBridge.log(TAG + " 钩控制器失败: " + t.getMessage());
         }
 
         // ========== 修复 #2（仅 B6X）：ViewModel 层 — 连接后更新 UI LiveData ==========
@@ -349,23 +349,23 @@ public class MainHook implements IXposedHookLoadPackage {
                                             XposedBridge.log(TAG + " waspWingInfo 已更新 (connected=true)");
                                         }
                                         // currentInfo == null：不创建新对象，等正常数据流填充
-                                    } catch (Exception e2) {
+                                    } catch (Throwable t) {
                                         XposedBridge.log(TAG + " 更新 waspWingInfo 失败: "
-                                                + e2.getMessage());
+                                                + t.getMessage());
                                     }
                                 }
 
                                 XposedBridge.log(TAG + " ViewModel 修复完成");
-                            } catch (Exception e) {
-                                XposedBridge.log(TAG + " ViewModel 修复异常: " + e.getMessage());
+                            } catch (Throwable t) {
+                                XposedBridge.log(TAG + " ViewModel 修复异常: " + t.getMessage());
                             }
                         }
                     }
             );
 
             XposedBridge.log(TAG + " 已钩住 BluetoothViewModel.onDeviceConnected");
-        } catch (Exception e) {
-            XposedBridge.log(TAG + " 钩 BluetoothViewModel 失败: " + e.getMessage());
+        } catch (Throwable t) {
+            XposedBridge.log(TAG + " 钩 BluetoothViewModel 失败: " + t.getMessage());
         }
         } // end if (deviceType == 6)
 
@@ -599,8 +599,8 @@ public class MainHook implements IXposedHookLoadPackage {
                     });
             XposedBridge.log(TAG + " 已钩住 App WaspWingViewModel.onDeviceInfoUpdate（beforeHook）");
 
-        } catch (Exception e) {
-            XposedBridge.log(TAG + " 钩诊断失败: " + e.getMessage());
+        } catch (Throwable t) {
+            XposedBridge.log(TAG + " 钩诊断失败: " + t.getMessage());
         }
 
         } // end if (deviceType == 6)
@@ -682,9 +682,9 @@ public class MainHook implements IXposedHookLoadPackage {
 
                         XposedBridge.log(TAG
                                 + " runFetchLoop 队列已替换（空待 sleep 50ms）");
-                    } catch (Exception e) {
+                    } catch (Throwable t) {
                         XposedBridge.log(TAG
-                                + " runFetchLoop 队列替换失败: " + e.getMessage());
+                                + " runFetchLoop 队列替换失败: " + t.getMessage());
                     }
                 }
             });
@@ -715,8 +715,8 @@ public class MainHook implements IXposedHookLoadPackage {
                                     } else {
                                         XposedBridge.log(TAG + " onResume 但 BLE 未连接，不唤醒");
                                     }
-                                } catch (Exception e) {
-                                    XposedBridge.log(TAG + " onResume 检查 BLE 状态失败: " + e.getMessage());
+                                } catch (Throwable t) {
+                                    XposedBridge.log(TAG + " onResume 检查 BLE 状态失败: " + t.getMessage());
                                 }
                             }
                         });

@@ -3,6 +3,7 @@
     <!-- LSPosed 推荐作用域：在管理器显示推荐勾选的应用 -->
     <string-array name="xposed_scope">
         <item>com.flydigi.waspwing.experimental</item>
+        <item>com.flydigi.waspwing.experimentanliuliu</item>
         <item>com.fdg.flashplay.farsef</item>
     </string-array>
 </resources>
