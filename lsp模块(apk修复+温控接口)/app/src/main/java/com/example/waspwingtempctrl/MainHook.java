@@ -831,6 +831,24 @@ public class MainHook implements IXposedHookLoadPackage {
             }
         }
 
+        // ========== B7X 专属：c0.s1() 权限检查强制 true（修复 Android 16 连接失败） ==========
+        // 根因：B7X 旧版 SDK 用 c0.s1() 检查 BLUETOOTH_CONNECT 权限，Android 16 上返回 false，
+        // 导致 connectGatt / discoverServices 都不执行 → 连接超时报"连接出现异常"。
+        if (deviceType == 7) {
+            try {
+                Class<?> c0Cls = lpparam.classLoader.loadClass("com.flydigi.sdk.bluetooth.c0");
+                XposedHelpers.findAndHookMethod(c0Cls, "s1", new XC_MethodHook() {
+                    @Override
+                    protected void afterHookedMethod(MethodHookParam param) {
+                        param.setResult(true);   // 跳过 BLUETOOTH_CONNECT 权限检查，让连接流程走完
+                    }
+                });
+                XposedBridge.log(TAG + " 已钩住 c0.s1()（强制返回 true，修复 B7X 连接）");
+            } catch (Throwable t) {
+                XposedBridge.log(TAG + " 钩 c0.s1() 失败: " + t.getMessage());
+            }
+        }
+
         // ========== B7X 型号识别（v2.6）：B7X app 可能连 B6X 散热器 ==========
         // 钩 SDK 层 onDeviceInfoUpdate 读 deviceCode → connectedModel，
         // 修正 B7X 包名兜底（7）为实际连接的型号（B7X app 连 B6X 设备时为 6）
