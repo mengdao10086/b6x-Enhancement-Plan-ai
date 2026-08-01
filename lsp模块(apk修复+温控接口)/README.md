@@ -90,8 +90,9 @@ app/src/main/
 
 | 行 | 说明 | 来源 | 单位 |
 |----|------|------|------|
-| `BLE=0/1` | BLE 连接状态 | `onDeviceConnected` / `disconnect` 等事件 | bool |
-| `CONNECTED_AT=` | 连接时间戳（Unix 秒），供"先连者优先"仲裁 | `System.currentTimeMillis()/1000` | Unix timestamp |
+| `BLE=0/1/2/6/7` | BLE 状态与连接者编码：0=未连接；B6X 文件 1=老 app / 2=新 app；B7X 文件 6/7=实际连接的散热器型号（B7X app 连 B6X 型号设备时=6） | `bleOwnerCode()`（B6X 按包名 1/2；B7X 按 `connectedModel` 6/7） | int |
+| `CONNECTED_AT=` | 连接时间戳（Unix 秒），供"先连者优先"仲裁；断连保留、重连刷新 | `System.currentTimeMillis()/1000` | Unix timestamp |
+| `BLE_OWNER_LAST=<值> <时间>` | 上次连接者（1/2/6/7）+ 连接时间（Unix 秒）；连接时更新、断连保留、型号修正时同步值 | `bleLastOwner` + `bleLastOwnerAt` | int int |
 | `RUN_MODE=` | 散热器当前运行模式 | `WaspWingInfo.getRunMode()` | int（0=固定功率, 1=智能） |
 | `HOT_TEMP=` | 热端温度 | `getHotSurfaceTemperature()` byte ×10 | 0.1°C |
 | `COLD_TEMP=` | 冷端温度 | `getTemperature()` ×10 + `getTemperatureDecimal()` | 0.1°C |
@@ -114,8 +115,8 @@ TARGET_TEMP=180     ← 18.0°C
 
 ### 注意
 - 温度字段全部使用 0.1°C 内部单位（C 端 `atoi()` 直接解析，无需浮点）
-- `lastWaspWingInfo` 为 `null` 时只输出 `BLE=` + `CONNECTED_AT=` 行（模块启动初期或 WaspWingInfo 未就绪）
-- 文件名区分设备，文件内部 `BLE=0/1` 不变（不再用不同数字区分设备）
+- `lastWaspWingInfo` 为 `null` 时只输出 `BLE=` + `CONNECTED_AT=` + `BLE_OWNER_LAST=` 行（模块启动初期或 WaspWingInfo 未就绪）
+- 文件名区分设备；文件内部 `BLE=` 按设备编码：B6X 文件 1/2（区分两个 app），B7X 文件 6/7（实际散热器型号），断连统一为 0
 
 ---
 

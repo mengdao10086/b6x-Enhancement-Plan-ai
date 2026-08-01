@@ -181,7 +181,7 @@ static int fan_rpm_change_threshold = 100; // 变化阈值（0=不限制）
 
 // ======================== 速率限制 ========================
 // --- 固定值 ---
-static int RATE_LIMIT_RPM_DOWN = 250;
+static int RATE_LIMIT_RPM_DOWN = 400;
 static int RATE_LIMIT_COLD = 25;   // 制冷强度升降速基础值：升速=base+dev×mult/10，降速=base-dev×mult/10，负值→0=禁止该方向
 static int RATE_LIMIT_TEMP = 2;
 
@@ -304,6 +304,8 @@ static int debug_pid     = 0;   // [PID] PID 控制调试
 // ======================== 配置文件系统 ========================
 // 配置文件路径（自动检测或 --config 指定）
 static char config_path[256] = "";
+// 卸载脚本路径（由 config_path 推导：$MODDIR/uninstall.sh，用于记录自定义日志路径）
+static char uninstall_script_path[256] = "";
 // 配置文件的最后修改时间（用于热重载检测）
 static time_t config_mtime = 0;
 
@@ -315,9 +317,9 @@ static int pid_kd = 240;                  // PID_KD
 static int pid_integral_limit = 800;      // PID_INTEGRAL_LIMIT（÷1000）
 
 // --- KI 方差门控 ---
-static int pid_ki_var_threshold = 25;     // PID_KI_VAR_THRESHOLD（0.1°C²，0=关闭）
+static int pid_ki_var_threshold = 50;     // PID_KI_VAR_THRESHOLD（0.1°C²，0=关闭）
 static int pid_ki_var_samples = 6;        // PID_KI_VAR_SAMPLES（采样数，2~20）
-static int pid_ki_deadband = 15;          // PID_KI_DEADBAND（0.1°C，0=禁止I项）
+static int pid_ki_deadband = 20;          // PID_KI_DEADBAND（0.1°C，0=禁止I项）
 
 // --- 输入滤波 ---
 static int pid_input_filter_enabled = 1;  // PID_INPUT_FILTER_ENABLED: 1=每周期滤波+PID重算
@@ -386,9 +388,7 @@ static int cooler_runmode = -1;           // 散热器实际运行模式
 static int cooler_hot_temp = -1;          // 热端温度（0.1°C）
 static int cooler_cold_temp = -1;         // 冷端温度（0.1°C）
 static int cooler_rpm_real = -1;          // 实际风扇转速
-static int cooler_rpm_level = -1;         // 风扇 PWM 原始值
 static int cooler_cold_real = -1;         // 实际制冷强度
-static int cooler_cold_level = -1;        // 制冷 PWM 原始值
 static int cooler_target_temp = -1;       // 目标温度（0.1°C）
 
 // ======================== 全局运行状态 ========================
@@ -408,9 +408,10 @@ static char status_file_path_b6[512] = "/data/local/tmp/tempctrl_b6x.status";
 static char status_file_path_b7[512] = "/data/local/tmp/tempctrl_b7x.status";
 static char gear_file_path[512] = "";
 
-// 双 B6X app 包名（v2.5 双 app 存活仲裁，farsef/B7X 已退出仲裁）
+// 三方 app 包名（v2.7：farsef 在最近连 B6X 散热器时也参与仲裁）
 #define APP_PKG_B6X_OLD "com.flydigi.waspwing.experimental"
 #define APP_PKG_B6X_NEW "com.flydigi.waspwing.experimentanliuliu"
+#define APP_PKG_B7X "com.fdg.flashplay.farsef"
 
 // 双设备 BLE 连接状态
 static int b6_connected = 0;        // B6X: BLE 是否已连接
@@ -424,13 +425,20 @@ static int b6_owner = 0;            // B6X: BLE 连接 owner（0=无, 1=老 app,
 static int b6_model = 0;            // B6X app 连接的设备型号：0=未知, 6=B6X, 7=B7X
 static int b7_model = 0;            // B7X app 连接的设备型号
 
+// v2.7：BLE_OWNER_LAST 上次连接者（B6X 文件 1/2；B7X 文件 6/7；跨文件合并取时间最新者）
+static int b6_last_owner = 0;
+static time_t b6_last_at = 0;
+static int b7_last_owner = 0;
+static time_t b7_last_at = 0;
+static int last_owner = 0;       // 全局最近连接者（合并后：1/2/6/7，0=无）
+static time_t last_owner_at = 0; // 对应连接时间
+
 // --- 档位模式自动风扇 ---
 static int gear_auto_fan = 1;   // GEAR_AUTO_FAN: 0=直通, 1=自动映射+截断
 
 // ======================== 双设备仲裁（v2.5） ========================
 typedef enum { DEVICE_NONE = 0, DEVICE_B6X, DEVICE_B7X } DeviceType;
 static DeviceType active_device = DEVICE_NONE;      // 当前控制的设备
-static DeviceType prev_active_device = DEVICE_NONE;  // 上次控制的设备
 
 // 运行时动态限制（根据 active_device 设置）
 static int active_cold_max = COLD_MAX;      // 当前设备制冷上限（gear 模式）
@@ -522,6 +530,45 @@ static char *config_parse_line(char *line, char **out_key) {
  *   - 两者都关闭时跳过全部解析，使用代码默认值
  * 去掉了更低层的条件守卫（CURRENT_GEAR_MODE/ctrl_mode/gear_config_enabled 等子守卫）
  */
+/**
+ * 将日志路径追加到卸载脚本 uninstall.sh（幂等），供卸载时清理用户自定义日志文件。
+ * 用户修改 LOG_FILE 后热重载，新路径会被记录；脚本中已存在的路径不重复追加。
+ * uninstall_script_path 由 config_path（$MODDIR/profile.conf）推导。
+ */
+static void record_log_path_for_uninstall(const char *path) {
+    if (path == NULL || path[0] == '\0') return;
+    // 懒初始化：从 config_path 推导 $MODDIR/uninstall.sh
+    if (uninstall_script_path[0] == '\0' && config_path[0] != '\0') {
+        char *slash = strrchr(config_path, '/');
+        if (slash) {
+            int len = (int)(slash - config_path);
+            snprintf(uninstall_script_path, sizeof(uninstall_script_path),
+                     "%.*s/uninstall.sh", len, config_path);
+        }
+    }
+    if (uninstall_script_path[0] == '\0') return;
+
+    // 幂等检查：脚本中已存在该路径的 rm 行则跳过
+    char needle[512];
+    snprintf(needle, sizeof(needle), "rm -f %s", path);
+    FILE *f = fopen(uninstall_script_path, "r");
+    char line[512];
+    int found = 0;
+    if (f) {
+        while (fgets(line, sizeof(line), f)) {
+            if (strstr(line, needle)) { found = 1; break; }
+        }
+        fclose(f);
+    }
+    if (found) return;
+
+    f = fopen(uninstall_script_path, "a");
+    if (f) {
+        fprintf(f, "rm -f %s\n", path);
+        fclose(f);
+    }
+}
+
 static void load_config(const char *path) {
     FILE *f = fopen(path, "r");
     if (!f) {
@@ -747,8 +794,10 @@ static void load_config(const char *path) {
         // --- 日志与系统 ---
         else if (strcmp(key, "LOG_MAX_KB") == 0)           LOG_MAX_KB         = clamp(val, 0, 1000);
         else if (strcmp(key, "LOG_TRIM_LINES") == 0)       log_trim_lines     = clamp(val, 0, 50);
-        else if (strcmp(key, "LOG_FILE") == 0)
+        else if (strcmp(key, "LOG_FILE") == 0) {
             config_read_path(log_file_path, sizeof(log_file_path), val_str);
+            record_log_path_for_uninstall(log_file_path);  // v2.5：记录自定义日志路径供卸载清理
+        }
 
         // --- 模式开关等 ---
         else if (strcmp(key, "CTRL_MODE") == 0)                ctrl_mode            = (val != 0);
@@ -1065,6 +1114,7 @@ static void create_status_files(void) {
  * 读取单个 status 文件的 BLE 连接状态和连接时间戳
  * is_b6_file=1：B6X 文件，BLE=0/1/2（0=未连接, 1=老 app 连接, 2=新 app 连接），ble 即 b6_owner
  * is_b6_file=0：B7X 文件，BLE=0/6/7（0=未连接, 6=B6X 型号, 7=B7X 型号）
+ * 两文件均解析 BLE_OWNER_LAST=<owner> <at>（B6X 文件 1/2，B7X 文件 6/7），存入全局 b6/b7_last_*
  */
 static void read_single_status(const char *path, int is_b6_file,
                                int *out_connected, time_t *out_connected_at,
@@ -1088,6 +1138,13 @@ static void read_single_status(const char *path, int is_b6_file,
             }
         } else if (strncmp(line, "CONNECTED_AT=", 13) == 0) {
             *out_connected_at = (time_t)atol(line + 13);
+        } else if (strncmp(line, "BLE_OWNER_LAST=", 15) == 0) {
+            int owner = 0;
+            long at = 0;
+            if (sscanf(line + 15, "%d %ld", &owner, &at) == 2 && owner > 0) {
+                if (is_b6_file) { b6_last_owner = owner; b6_last_at = (time_t)at; }
+                else { b7_last_owner = owner; b7_last_at = (time_t)at; }
+            }
         }
     }
     fclose(f);
@@ -1103,6 +1160,10 @@ static void read_status_ble_both(void) {
     if (b6_connected && b6_model == 0) b6_model = 6;
     // B7X BLE≠6/7（旧编码 1/2）→ 按文件路径兜底型号 7
     if (b7_connected && b7_model == 0) b7_model = 7;
+    // v2.7：BLE_OWNER_LAST 跨文件合并——取最近一次连接者（时间最新者）。
+    // 时间戳相等（同秒连接，1 秒分辨率）时固定选 B6X 侧；两文件均无记录时 last_owner=0
+    if (b7_last_at > b6_last_at) { last_owner = b7_last_owner; last_owner_at = b7_last_at; }
+    else { last_owner = b6_last_owner; last_owner_at = b6_last_at; }
 }
 
 /**
@@ -1156,8 +1217,8 @@ static void read_cooler_params(void) {
 
     // 先重置所有参数
     cooler_runmode = -1; cooler_hot_temp = -1; cooler_cold_temp = -1;
-    cooler_rpm_real = -1; cooler_rpm_level = -1; cooler_cold_real = -1;
-    cooler_cold_level = -1; cooler_target_temp = -1;
+    cooler_rpm_real = -1; cooler_cold_real = -1;
+    cooler_target_temp = -1;
 
     FILE *f = fopen(path, "r");
     if (!f) return;
@@ -1173,12 +1234,8 @@ static void read_cooler_params(void) {
             cooler_cold_temp = atoi(line + 10);
         } else if (strncmp(line, "RPM_REAL=", 9) == 0) {
             cooler_rpm_real = atoi(line + 9);
-        } else if (strncmp(line, "RPM_LEVEL=", 10) == 0) {
-            cooler_rpm_level = atoi(line + 10);
         } else if (strncmp(line, "COLD_REAL=", 10) == 0) {
             cooler_cold_real = atoi(line + 10);
-        } else if (strncmp(line, "COLD_LEVEL=", 11) == 0) {
-            cooler_cold_level = atoi(line + 11);
         } else if (strncmp(line, "TARGET_TEMP=", 12) == 0) {
             cooler_target_temp = atoi(line + 12);
         }
@@ -1631,30 +1688,49 @@ static int is_foreground_pkg(const char *pkg) {
 /** 强制停止指定包名的 app（干净停止，LSP 正常清理，status mtime 停住） */
 static void force_stop_app(const char *pkg) {
     char cmd[256];
-    snprintf(cmd, sizeof(cmd), "am force-stop %s", pkg);
+    // 输出重定向到 /dev/null，避免泄漏进 /cache/tempctrl.log（service.sh 把 stdout/stderr 指向日志）
+    snprintf(cmd, sizeof(cmd), "am force-stop %s > /dev/null 2>&1", pkg);
     int rc = system(cmd);
     write_log("进程管理 force-stop %s (rc=%d)", pkg, rc);
 }
 
 /**
- * 双 B6X app 存活仲裁（v2.5）：每 5 秒调用，read_status_ble_both 之后。
- * 两个 app 都存活才仲裁，保留 BLE 连接者（b6_owner=1 老 / =2 新），无法区分时保留老 app。
+ * 三方 app 存活仲裁（v2.7）：每 5 秒调用，read_status_ble_both 之后。
+ * 老/新 B6X app 始终参与；farsef 只在最近连接的是 B6X 散热器（BLE_OWNER_LAST==6）时参与，
+ * 连 B7X 设备（==7）时不参与（控制另一台设备，不应被杀）。
+ * 优先保留 BLE_OWNER_LAST 值代表的 app（1→老, 2→新, 6→farsef）；保留者涉及 farsef 时，
+ * 与另一方（B6X app）的连接时间比较，保留更晚者。无 last_owner 时回退当前连接者 b6_owner。
  * 被淘汰者非 top-app/foreground 时 am force-stop（在前台则等下一周期）。
  */
 static void arbitrate_apps(void) {
     int old_alive = app_process_running(APP_PKG_B6X_OLD);
     int new_alive = app_process_running(APP_PKG_B6X_NEW);
-    if (!old_alive || !new_alive) return;  // 只有一个（或没有）存活，无需仲裁
-    // b6_owner: 1=老 app 连接，2=新 app 连接，0=无
-    const char *keep = APP_PKG_B6X_OLD;   // 兜底保留老 app
-    if (b6_owner == 2) keep = APP_PKG_B6X_NEW;
+    int far_alive = app_process_running(APP_PKG_B7X);
+    int far_in = far_alive && (last_owner == 6);  // farsef 上次连的是 B6X 散热器才参与
+    if (old_alive + new_alive + far_in < 2) return;  // 只有一个（或没有）存活，无需仲裁
+
+    // 优先保留 BLE_OWNER_LAST 值代表的 app；无记录时回退当前连接者 b6_owner；兜底老 app
+    const char *keep = APP_PKG_B6X_OLD;
+    if (last_owner == 2) keep = APP_PKG_B6X_NEW;
+    else if (last_owner == 1) keep = APP_PKG_B6X_OLD;
+    else if (last_owner == 6 && far_alive) keep = APP_PKG_B7X;  // farsef 已死时不得保留它，回退 b6_owner 兜底
+    else if (b6_owner == 2) keep = APP_PKG_B6X_NEW;
     else if (b6_owner == 1) keep = APP_PKG_B6X_OLD;
-    // 淘汰另一方（非前台才 force-stop）
-    if (keep == APP_PKG_B6X_OLD) {
-        if (!is_foreground_pkg(APP_PKG_B6X_NEW)) force_stop_app(APP_PKG_B6X_NEW);
-    } else {
-        if (!is_foreground_pkg(APP_PKG_B6X_OLD)) force_stop_app(APP_PKG_B6X_OLD);
-    }
+
+    // 保留者涉及 farsef：与另一方（B6X app）的连接时间比较，保留更晚者。
+    // 注意：B6X app 连接事件会同时更新本文件 CONNECTED_AT 与 BLE_OWNER_LAST，
+    // 故常规流程下 b6_connected_at 与 b6_last_at 同值、此分支实际不可达；
+    // 保留作为对写入方时序不一致 / 旧版 LSP 的防御性兜底。
+    if (keep == APP_PKG_B7X && b6_connected_at > last_owner_at)
+        keep = (b6_owner == 2) ? APP_PKG_B6X_NEW : APP_PKG_B6X_OLD;
+
+    // 淘汰其他存活参与者（非前台才 force-stop）
+    if (old_alive && keep != APP_PKG_B6X_OLD && !is_foreground_pkg(APP_PKG_B6X_OLD))
+        force_stop_app(APP_PKG_B6X_OLD);
+    if (new_alive && keep != APP_PKG_B6X_NEW && !is_foreground_pkg(APP_PKG_B6X_NEW))
+        force_stop_app(APP_PKG_B6X_NEW);
+    if (far_in && keep != APP_PKG_B7X && !is_foreground_pkg(APP_PKG_B7X))
+        force_stop_app(APP_PKG_B7X);
 }
 
 // ======================== 电池温度控制 ========================
@@ -3084,6 +3160,7 @@ pid_init_done:
         if (!app_proc_ok || !app_ble_connected) {
             write_log("%s 连接丢失，检查另一设备...\n",
                       (active_device == DEVICE_B7X) ? "B7X" : "B6X");
+            app_was_alive = 0;  // 复活后走 reconnect_align 重新对齐实际值
             // next loop iteration will re-arbitrate
             sleep(5);
             continue;

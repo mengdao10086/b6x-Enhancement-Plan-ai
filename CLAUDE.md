@@ -42,6 +42,7 @@ MUST 先在 `参考资料/` 搜索关键词，再考虑加诊断钩子。这里�
 - 不得自动执行 git push、部署、发布、破坏性迁移
 - `git commit` 由用户手动执行，AI 不得自动提交
 - 修改 `.env` 前需说明用途，用户确认后再执行
+- **版本号不自动更新**：`module.prop`、`build.gradle.kts` versionName、`CHANGELOG.md` 等版本号一律保持现状，不因审查/清理/重构主动修改；需要改版本号由用户明确要求
 
 ---
 
@@ -91,7 +92,7 @@ MUST 先在 `参考资料/` 搜索关键词，再考虑加诊断钩子。这里�
 <!-- gitnexus:start -->
 # GitNexus — Code Intelligence
 
-This project is indexed by GitNexus as **b6x-Enhancement-Plan-ai** (363464 symbols, 1003351 relationships, 300 execution flows). Use the GitNexus MCP tools to understand code, assess impact, and navigate safely.
+This project is indexed by GitNexus as **b6x-Enhancement-Plan-ai** (363513 symbols, 1003409 relationships, 300 execution flows). Use the GitNexus MCP tools to understand code, assess impact, and navigate safely.
 
 > Index stale? Run `node .gitnexus/run.cjs analyze` from the project root — it auto-selects an available runner. No `.gitnexus/run.cjs` yet? `npx gitnexus analyze` (npm 11 crash → `npm i -g gitnexus`; #1939).
 
