@@ -1,0 +1,80 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<title>飞智B6X增强计划 · 智能温控</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body class="pin-fixed">
+<div class="app">
+
+  <!-- ============ 顶部横滑容器：曲线 | 日志 ============ -->
+  <header class="top" id="top">
+    <div class="top-bar">
+      <div class="seg" id="seg">
+        <button class="seg-btn active" data-panel="chart">实时曲线</button>
+        <button class="seg-btn" data-panel="log">日志</button>
+      </div>
+      <button class="icon-btn" id="pinBtn" title="切换固定/滚动隐藏">
+        <svg viewBox="0 0 24 24" width="18" height="18"><path fill="currentColor" d="M16 9V4h1a1 1 0 0 0 0-2H7a1 1 0 0 0 0 2h1v5a3 3 0 0 1-3 3 1 1 0 0 0 0 2h6v7a1 1 0 0 0 2 0v-7h6a1 1 0 0 0 0-2 3 3 0 0 1-3-3z"/></svg>
+      </button>
+    </div>
+    <div class="top-slider" id="topSlider">
+      <section class="panel panel-chart" id="panelChart">
+        <div class="chart-tools">
+          <div class="chart-window" id="chartWindow"></div>
+          <div class="series" id="seriesToggle"></div>
+        </div>
+        <div class="chart-wrap"><canvas id="chart"></canvas></div>
+        <div class="live" id="liveRow"></div>
+      </section>
+      <section class="panel panel-log" id="panelLog">
+        <div class="log-tools">
+          <input class="search" id="logFilter" type="search" placeholder="关键词过滤…">
+          <button class="icon-btn" id="logFollowBtn" title="跟随底部">▾</button>
+        </div>
+        <pre class="log-view" id="logView"></pre>
+      </section>
+    </div>
+  </header>
+
+  <!-- ============ 配置区 ============ -->
+  <main class="config" id="config">
+    <div id="loadStatus" class="banner warn">加载中…</div>
+    <details class="diag" id="uiDiag" open>
+      <summary>UI 诊断日志</summary>
+      <pre id="uiDiagBody"></pre>
+    </details>
+    <div id="bridgeBanner" class="banner warn hidden"></div>
+    <div id="groups"></div>
+  </main>
+
+
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script>
+  // 诊断：确认 JS 是否执行 + 桥接全局形态。app.js 初始化成功后会覆盖此内容
+  (function () {
+    var el = document.getElementById('loadStatus');
+    function set(t) { if (el) { el.textContent = t; } }
+    try {
+      var w = window, p = [];
+      p.push('kernelsu=' + typeof w.kernelsu);
+      if (w.kernelsu) {
+        p.push('console.exec=' + (w.kernelsu.console && typeof w.kernelsu.console.exec));
+        p.push('exec=' + typeof w.kernelsu.exec);
+      }
+      p.push('ksu=' + typeof w.ksu);
+      if (w.ksu) p.push('ksu.exec=' + typeof w.ksu.exec);
+      p.push('mMRL=' + typeof w.mMRL);
+      set('JS 运行中 · ' + p.join('  '));
+    } catch (e) { set('JS 运行中 · 检测异常: ' + e.message); }
+  })();
+</script>
+<script src="schema.js"></script>
+<script src="app.js"></script>
+</body>
+</html>

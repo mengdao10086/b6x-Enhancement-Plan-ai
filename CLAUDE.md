@@ -30,6 +30,7 @@ MUST 先在 `参考资料/` 搜索关键词，再考虑加诊断钩子。这里�
 - 重命名符号 MUST 用 `rename`（不得文本替换）
 - 改完后 MUST 运行 `detect_changes()` 检查影响范围
 - 风险 HIGH/CRITICAL → MUST 先告知用户再继续
+- 普通日志降级为 debug 时，必须用**对应功能分区的子开关**（如配置加载→`debug_config`、传感器→`debug_sensor`、PID→`debug_pid`），不得用通用 `write_log` 或乱选分区。注意 C 宏按文本顺序生效，调用点位于宏定义之前时需把 `debug_log`/`pid_log` 宏上移
 
 ## 5. 编译须知
 
@@ -57,10 +58,11 @@ MUST 先在 `参考资料/` 搜索关键词，再考虑加诊断钩子。这里�
 | `magisk模块(智能温控)/magisk模块框架/profile.conf` | 运行时配置参数 |
 | `lsp模块(apk修复+温控接口)/app/src/main/java/.../MainHook.java` | LSPosed 模块核心 |
 | `参考资料/完整修复历程.md` | BLE 4 层 Bug 修复全记录 + B7X/B8X 分析 |
-| `参考资料/decompile/app运行逻辑.md` | App 内部运行逻辑分析 |
+| `反编译分析/总览.md` | 反编译技术文档总览（所有 app 分析索引） |
+| `反编译分析/飞智散热器开发者工具运行逻辑.md` | App 内部运行逻辑分析 |
 | `参考资料/decompile/b6_overclock_v2/` | B6X 超频工具 V2 反编译 |
-| `参考资料/decompile/b7_overclock_v3/` | B7X 超频工具 V3 反编译（含混淆分析） |
-| `参考资料/decompile/b8x/` | B8X 超频工具 V2 反编译（360 加固，未适配） |
+| `参考资料/decompile/b7_overclock_v3/` | B7X 超频工具 V3 反编译（含混淆分析），分析见 `反编译分析/B7X超频V3反编译报告.md` |
+| `参考资料/decompile/b8x/` | B8X 超频工具 V2 反编译（加固，静态不可分析），见 `反编译分析/B8X加固壳层分析.md` |
 | `参考资料/smali修改重编译apk尝试/` | smali 工具链产物 |
 
 ### 工具路径
@@ -92,7 +94,7 @@ MUST 先在 `参考资料/` 搜索关键词，再考虑加诊断钩子。这里�
 <!-- gitnexus:start -->
 # GitNexus — Code Intelligence
 
-This project is indexed by GitNexus as **b6x-Enhancement-Plan-ai** (363513 symbols, 1003409 relationships, 300 execution flows). Use the GitNexus MCP tools to understand code, assess impact, and navigate safely.
+This project is indexed by GitNexus as **b6x-Enhancement-Plan-ai** (689 symbols, 1023 relationships, 37 execution flows). Use the GitNexus MCP tools to understand code, assess impact, and navigate safely.
 
 > Index stale? Run `node .gitnexus/run.cjs analyze` from the project root — it auto-selects an available runner. No `.gitnexus/run.cjs` yet? `npx gitnexus analyze` (npm 11 crash → `npm i -g gitnexus`; #1939).
 
