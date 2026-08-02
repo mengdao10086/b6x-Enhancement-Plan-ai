@@ -1,8 +1,0 @@
-package kotlin;
-
-/* JADX INFO: loaded from: classes5.dex */
-public interface z<T> {
-    boolean a();
-
-    T getValue();
-}

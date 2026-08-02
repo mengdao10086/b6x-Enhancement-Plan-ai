@@ -1,5 +1,0 @@
-package com.arialyy.aria.core.listener;
-
-/* JADX INFO: loaded from: classes2.dex */
-public interface IUploadListener extends IEventListener {
-}

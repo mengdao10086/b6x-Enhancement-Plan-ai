@@ -42,3 +42,9 @@ log.md
 酷安图文.txt
 参考资料/_pid_analysis/
 参考资料/PID充电模块重版本4.4.zip
+
+# 反编译/二进制产物（移出 git 追踪，磁盘保留，不索引）
+参考资料/decompile/
+参考资料/smali_patching_attempts/
+参考资料/apk_original/
+参考资料/c_historical_sources/
