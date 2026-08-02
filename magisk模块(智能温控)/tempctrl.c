@@ -34,7 +34,10 @@
 #define EMA(new_val, old_val, alpha_pct) \
     (((new_val) * (alpha_pct) + (old_val) * (100 - (alpha_pct))) / 100)
 
-/** 带方向取整的 EMA：平滑值向原始值方向取整，解决渐进无法到达的问题 */
+/** 带方向取整的 EMA：平滑值向原始值方向取整，解决渐进无法到达的问题
+ *  上升（_nv>_ov）：向上取整 → 向新值方向
+ *  下降（_nv<_ov）：_num/100 截断已是向下取整（向新值方向），无需再调整
+ */
 #define EMA_DIR(new_val, old_val, alpha_pct) \
     ({ \
         int _nv = (new_val); \
@@ -42,7 +45,6 @@
         int _num = (_nv) * (alpha_pct) + (_ov) * (100 - (alpha_pct)); \
         int _r = _num / 100; \
         if (_nv > _ov && _num % 100 > 0) _r++; \
-        else if (_nv < _ov && _num % 100 > 0) _r--; \
         _r; \
     })
 
@@ -61,7 +63,7 @@
 #define LEVEL_INIT          5     // 无存档时的默认初始档位
 #define GEAR_TABLE_MAX      32    // 最大支持档位数（支持自动扩展）
 
-// --- 档位表（动态，可通过 profile.conf 的 GEAR_N 配置覆盖）---
+// --- 档位表（动态，可通过 profile.conf 的 GEAR_B6X_N / GEAR_B7X_N 配置覆盖）---
 // 每条包含：模式(0=智能温控, 1=固定功率), 目标温度(°C), 风扇转速(RPM), 制冷片强度(0-194)
 typedef struct {
     int mode;       // 0=智能温控, 1=固定功率
@@ -71,17 +73,24 @@ typedef struct {
     int config_n;   // 配置中的原始档位编号（日志显示用，无空洞时同 runtime level）
 } GearEntry;
 
-static GearEntry gear_table[GEAR_TABLE_MAX];
-static int gear_count = 0;     // 实际档位数，0=尚未初始化
+// 双设备独立档位表（B6X / B7X），活动表指针随 active_device 切换
+static GearEntry gear_table_b6[GEAR_TABLE_MAX];
+static GearEntry gear_table_b7[GEAR_TABLE_MAX];
+static GearEntry *gear_table = gear_table_b6;  // 活动表指针
+static int gear_count_b6 = 0;    // B6X 实际档位数
+static int gear_count_b7 = 0;    // B7X 实际档位数
 static int gear_min = 1;
-static int gear_max = 12;     // 默认 12 档（由 init_gear_table 设定）
+static int gear_max_b6 = 12;     // B6X 默认 12 档
+static int gear_max_b7 = 12;     // B7X 默认 12 档
+static int gear_count = 12;      // 活动表档位数（select_gear_table 同步）
+static int gear_max = 12;        // 活动表最大档（select_gear_table 同步）
 
 // 默认档位表（依实测散热曲线标定，全部固定功率模式）
-// 格式：GEAR_<档位N>=<模式>,<目标温度°C>,<风扇RPM>,<制冷强度>
+// 格式：GEAR_B6X_<档位N>=<模式>,<目标温度°C>,<风扇RPM>,<制冷强度>（B7X 用 GEAR_B7X_ 前缀）
 // 范围：N=1~32, 模式=0(智能)或1(固定), 目标=5~35°C, 风扇=2000~6000, 制冷=1~194
 // 注意：模式 0 时制冷强度失效（散热器自行管理），模式 1 时目标温度无效
-// 例：GEAR_12=1,0,6000,190 表示 12 档固定功率，6000RPM，制冷 190
-//     GEAR_5=0,16,2650,0   表示  5 档智能温控，16°C，风扇上限 2650RPM
+// 例：GEAR_B6X_12=1,0,6000,190 表示 12 档固定功率，6000RPM，制冷 190
+//     GEAR_B6X_5=0,16,2650,0   表示  5 档智能温控，16°C，风扇上限 2650RPM
 static const GearEntry DEFAULT_GEAR_TABLE[12] = {
     {1, 0, 2000,  5,  1},    // Level 1   α待机
     {1, 0, 2000, 10,  2},    // Level 2
@@ -98,19 +107,23 @@ static const GearEntry DEFAULT_GEAR_TABLE[12] = {
 };
 
 /**
- * 初始化默认档位表
- * 程序启动时调用。若 profile.conf 包含 GEAR_N 配置，load_config 将覆盖之。
+ * 初始化默认档位表（B6X / B7X 各一套，内容相同）
+ * 程序启动时调用。若 profile.conf 包含 GEAR_B6X_N / GEAR_B7X_N 配置，load_config 将覆盖之。
  */
 static void init_gear_table(void) {
-    gear_count = 12;
+    gear_count_b6 = 12; gear_max_b6 = 12;
+    gear_count_b7 = 12; gear_max_b7 = 12;
     gear_min = 1;
-    gear_max = 12;
-    for (int i = 0; i < gear_count; i++) {
-        gear_table[i] = DEFAULT_GEAR_TABLE[i];
+    for (int i = 0; i < 12; i++) {
+        gear_table_b6[i] = DEFAULT_GEAR_TABLE[i];
+        gear_table_b7[i] = DEFAULT_GEAR_TABLE[i];
     }
+    gear_table = gear_table_b6;   // 默认活动表：B6X
+    gear_count = gear_count_b6;
+    gear_max   = gear_max_b6;
 }
 
-/** GEAR_N 配置解析临时结构体（用于排序后填入连续档位表） */
+/** GEAR_B6X_N / GEAR_B7X_N 配置解析临时结构体（用于排序后填入连续档位表） */
 typedef struct {
     int config_n;   // 配置中的原始档位编号
     int mode;
@@ -138,10 +151,10 @@ static inline int gear_label(int level) {
 #define B7X_COLD_MAX       255
 #define B7X_FAN_RPM_MAX    8000
 
-// B7X 可配置上限（profile.conf 可覆盖，默认=硬件上限）
-// B6X 同类参数 FAN_RPM / PID_COLD 在 profile.conf 中配置
-static int b7x_pid_cold_max = B7X_COLD_MAX;   // B7X_PID_COLD_MAX
-static int b7x_fan_rpm_max  = B7X_FAN_RPM_MAX; // B7X_FAN_RPM_MAX
+// B7X 上限（FAN_RPM / PID_COLD 第三值，可配置，暂时与 B6X 一致）
+// B7X_COLD_MAX / B7X_FAN_RPM_MAX 宏保留为 clamp 安全上界
+static int b7_pid_cold_max = 190;   // FAN_RPM/PID_COLD 第三值（B7X），默认同 B6X
+static int b7_fan_rpm_max  = 6000;  // FAN_RPM 第三值（B7X），默认同 B6X
 
 // ======================== 系统路径与缩放 ========================
 // --- sysfs 路径配置（可由 profile.conf 覆盖）---
@@ -159,7 +172,7 @@ static int BATT_CURRENT_DIVISOR = 10000;  // 电池电流原始值 µA ÷ 此值
 static int CPU_ZONE_MIN = 0;
 static int CPU_ZONE_MAX = 99;
 
-// ======================== 通用参数（PID 和 Gear 共用）================
+// ======================== 通用参数（PID 和 Gear 共用）========================
 // --- 基准温度 ---
 static int BATT_BASELINE = 350;     // 基准温度 35.0°C
 
@@ -169,6 +182,7 @@ static int ctrl_mode = 1;           // CTRL_MODE: 0=gear, 1=PID
 // --- 冷端→风扇映射 ---
 static int cold_map_start = 40;     // 映射起始强度，低于此值时线性外推下限
 static int cold_map_exp = 150;      // n^exp（÷100，150=1.50），>1 低冷慢转
+static int rpm_smooth_alpha = 33;   // RPM_SMOOTH_ALPHA：冷/热端→风扇转速映射的 EMA 平滑系数（百分比，1~99）
 
 // --- 热端映射范围 ---
 static int hot_map_min = 350;       // HOT_MAP_MIN（0.1°C）
@@ -177,18 +191,18 @@ static int hot_map_max = 450;       // HOT_MAP_MAX（0.1°C）
 // --- 风扇转速范围 ---
 static int fan_rpm_min = 2000;      // FAN_RPM_MIN
 static int fan_rpm_max = 6000;      // FAN_RPM_MAX
-static int fan_rpm_change_threshold = 100; // 变化阈值（0=不限制）
+static int fan_rpm_change_threshold = 200; // 变化阈值（0=不限制；仅风扇降低时防抖，距最低转速<阈值×1.5 时失效）
 
 // ======================== 速率限制 ========================
 // --- 固定值 ---
-static int RATE_LIMIT_RPM_DOWN = 400;
+static int RATE_LIMIT_FAN_DOWN = 400;
 static int RATE_LIMIT_COLD = 25;   // 制冷强度升降速基础值：升速=base+dev×mult/10，降速=base-dev×mult/10，负值→0=禁止该方向
 static int RATE_LIMIT_TEMP = 2;
 
 // --- 动态值（根据电池温差自动调整）---
 static int RATE_LIMIT_COLD_MULT = 10;  // 制冷强度倍率：升速/降速 = base ± dev(0.1°C) × mult / 10
-static int RATE_LIMIT_FAN_BASE = 200;  // 风扇升速基础值：RPM_UP = base + d × mult / 10
-static int RATE_LIMIT_FAN_MULT = 50;   // 风扇升速倍率（RATE_LIMIT_FAN_BASE 双值第二位）
+static int RATE_LIMIT_FAN_UP = 200;   // 风扇升速基础值：RPM_UP = base + d × mult / 10
+static int RATE_LIMIT_FAN_MULT = 50;  // 风扇升速倍率（RATE_LIMIT_FAN_UP 双值第二位）
 static int cycle_batt_temp = -1;       // 本周期电池温度（-1=未就绪）
 
 // ======================== 实际值 ========================
@@ -287,7 +301,7 @@ static int emerg_forced_gear = 0;   // 紧急强制最低档位
 // ======================== 日志与调试 ========================
 // --- 日志路径（默认根据二进制名自动生成，可由 profile.conf 覆盖）---
 static char log_file_path[256] = "";
-static int LOG_MAX_KB = 7;          // 日志文件大小上限（KB），0=关闭日志
+static int LOG_MAX = 7680;          // 日志文件大小上限（字节），0=关闭日志
 static int log_trim_lines = 3;      // 日志超限时删除最早 N 行，0=不清理
 static FILE *log_fp = NULL;          // 持久的日志文件指针，避免每行都 fopen/fclose
 static char log_path_opened[256] = ""; // 已打开的文件路径（检测路径变化）
@@ -359,8 +373,8 @@ static int pid_predict_min_points = 3;     // PID_PREDICT_MIN_POINTS: 最小可�
 static int pid_predict_max_rise = 30;      // PID_PREDICT_MAX_RISE: 最大预测变化量（0.1°C，10~100）
 static int pid_predict_ramp_cycles = 3;    // PID_PREDICT_RAMP_CYCLES: Ramp-up 周期数（1~10，0=不渐进）
 static int pid_predict_min_delta = 3;      // PID_PREDICT_MIN_DELTA: 最小起始 delta（0.1°C/周期，1~10）
-static int pid_predict_heat_weight = 10;  // PID_PREDICT_MODE 第一值：升温预测权重（0~10，默认10=全效）
-static int pid_predict_cool_weight = 3;   // PID_PREDICT_MODE 第二值：降温预测权重（0~10）
+static int pid_predict_heat_weight = 10;  // PID_PREDICT_WEIGHT 第一值：升温预测权重（0~10，默认10=全效）
+static int pid_predict_cool_weight = 3;   // PID_PREDICT_WEIGHT 第二值：降温预测权重（0~10）
 static int pid_predict_alpha = 33;         // 预测平滑系数（%，PID_ALPHA 第三值）
 
 // --- 预测运行状态 ---
@@ -384,12 +398,10 @@ static int pid_align_rpm = 2000;          // PID 目标 RPM（供 rate_limited_e
 static int pid_align_cold = 1;            // PID 目标制冷强度
 
 // ======================== 散热器回传参数 ========================
-static int cooler_runmode = -1;           // 散热器实际运行模式
 static int cooler_hot_temp = -1;          // 热端温度（0.1°C）
 static int cooler_cold_temp = -1;         // 冷端温度（0.1°C）
 static int cooler_rpm_real = -1;          // 实际风扇转速
 static int cooler_cold_real = -1;         // 实际制冷强度
-static int cooler_target_temp = -1;       // 目标温度（0.1°C）
 
 // ======================== 全局运行状态 ========================
 // --- 信号 ---
@@ -444,6 +456,19 @@ static DeviceType active_device = DEVICE_NONE;      // 当前控制的设备
 static int active_cold_max = COLD_MAX;      // 当前设备制冷上限（gear 模式）
 static int active_fan_max  = 6000;          // 当前设备风扇上限
 static int active_pid_cold_max = 190;       // 当前设备 PID 制冷上限
+
+/** 根据 active_device 切换活动档位表指针与计数（B6X/B7X 独立表） */
+static void select_gear_table(void) {
+    if (active_device == DEVICE_B7X) {
+        gear_table = gear_table_b7;
+        gear_count = gear_count_b7;
+        gear_max   = gear_max_b7;
+    } else {
+        gear_table = gear_table_b6;
+        gear_count = gear_count_b6;
+        gear_max   = gear_max_b6;
+    }
+}
 // ================================================================
 
 // --- 发送去重缓存 ---
@@ -466,6 +491,53 @@ static void pid_align_from_gear(void);
 static int rpm_from_hot_end(int hot_10);
 static int rpm_from_cold_exp(int cold);
 static int rpm_combine_weighted(int rpm_hot, int rpm_cold);
+
+/** 解析 GEAR_B6X_N / GEAR_B7X_N 配置值 "模式,目标温度°C,风扇RPM,制冷强度" */
+static int parse_gear_config_line(const char *val_str, GearConfigTemp *out) {
+    int m, t, f, c;
+    char *next;
+    m = (int)strtol(val_str, &next, 10);
+    if (*next != ',') return 0;
+    t = (int)strtol(next + 1, &next, 10);
+    if (*next != ',') return 0;
+    f = (int)strtol(next + 1, &next, 10);
+    if (*next != ',') return 0;
+    c = (int)strtol(next + 1, NULL, 10);
+    out->mode    = (m == 0) ? 0 : 1;
+    out->target  = clamp(t, 5, 35);
+    out->fan_rpm = clamp(f, 2000, 6000);
+    out->cold    = clamp(c, 1, 194);
+    return 1;
+}
+
+/**
+ * 用配置档位表重建 B6X/B7X 独立档位表（按配置编号升序排为连续档位表）。
+ * 无有效配置时回退到默认档位表。
+ */
+static void rebuild_gear_table(GearEntry *table, GearConfigTemp *configs, int count,
+                               int *out_count, int *out_max, const char *tag) {
+    if (count > 0) {
+        *out_count = 0;
+        *out_max = 0;
+        memset(table, 0, sizeof(*table) * GEAR_TABLE_MAX);
+        qsort(configs, count, sizeof(GearConfigTemp), cmp_gear_config_n);
+        for (int i = 0; i < count; i++) {
+            table[i].config_n = configs[i].config_n;
+            table[i].mode     = configs[i].mode;
+            table[i].target   = configs[i].target;
+            table[i].fan_rpm  = configs[i].fan_rpm;
+            table[i].cold     = configs[i].cold;
+            (*out_count)++;
+        }
+        *out_max = *out_count;
+        write_log("配置 %s 档位表 %d 级 (1~%d)", tag, *out_count, *out_max);
+    } else {
+        for (int i = 0; i < 12; i++) table[i] = DEFAULT_GEAR_TABLE[i];
+        *out_count = 12;
+        *out_max = 12;
+        write_log("配置 %s 档位表无效，使用默认档位表 (%d 级)", tag, *out_count);
+    }
+}
 
 /** 去除首尾空白，返回修剪后的起始指针 */
 static inline char *trim_line(char *line) {
@@ -611,10 +683,11 @@ static void load_config(const char *path) {
 
     // --- 第二遍：全量单次扫描，仅分两层（PERF/DEBUG），无子守卫 ---
     rewind(f);
-    int loaded = 0;
     int gear_config_enabled = 0;
-    GearConfigTemp config_gears[GEAR_TABLE_MAX];
-    int config_gear_count = 0;
+    GearConfigTemp config_gears_b6[GEAR_TABLE_MAX];
+    GearConfigTemp config_gears_b7[GEAR_TABLE_MAX];
+    int config_gear_count_b6 = 0;
+    int config_gear_count_b7 = 0;
     while (fgets(line, sizeof(line), f)) {
         char *key;
         char *val_str = config_parse_line(line, &key);
@@ -631,12 +704,11 @@ static void load_config(const char *path) {
             else if (strcmp(key, "DEBUG_CONFIG") == 0)  debug_config = (val != 0);
             else if (strcmp(key, "DEBUG_MAIN") == 0)    debug_main   = (val != 0);
             else if (strcmp(key, "DEBUG_PID") == 0)     debug_pid    = (val != 0);
-            loaded++;
             continue;
         }
 
         // --- 性能参数：仅 PERF_ENABLED=1 时解析（含除 DEBUG_* 外的全部参数） ---
-        //     无子守卫：路径/CURRENT_GEAR_*/PID_*/GEAR_N/模式开关等全部在此层
+        //     无子守卫：路径/CURRENT_GEAR_*/PID_*/GEAR_B6X_N/GEAR_B7X_N/模式开关等全部在此层
         if (!perf_enabled) continue;
 
         // --- 系统路径与缩放 ---
@@ -660,10 +732,11 @@ static void load_config(const char *path) {
             if (sscanf(val_str, "%d %d", &a, &b) >= 2) { hot_map_min = clamp(a,200,500); hot_map_max = clamp(b,200,500); }
         }
         else if (strcmp(key, "FAN_RPM") == 0) {
-            int a = fan_rpm_min, b = fan_rpm_max;
-            if (sscanf(val_str, "%d %d", &a, &b) >= 2) { fan_rpm_min = clamp(a,1000,6000); fan_rpm_max = clamp(b,1000,6000); }
+            int a = fan_rpm_min, b = fan_rpm_max, c = b7_fan_rpm_max;
+            int n = sscanf(val_str, "%d %d %d", &a, &b, &c);
+            if (n >= 2) { fan_rpm_min = clamp(a,1000,6000); fan_rpm_max = clamp(b,1000,6000); }
+            if (n >= 3) { b7_fan_rpm_max = clamp(c, 2000, B7X_FAN_RPM_MAX); }
         }
-        else if (strcmp(key, "B7X_FAN_RPM_MAX") == 0) b7x_fan_rpm_max = clamp(val, 2000, 10000);
         else if (strcmp(key, "PID_FILTER_AUTO_THRESHOLD") == 0) {
             int a = pid_filter_auto_threshold_on, b = pid_filter_auto_threshold_off;
             if (sscanf(val_str, "%d %d", &a, &b) >= 2) { pid_filter_auto_threshold_on=clamp(a,5,100); pid_filter_auto_threshold_off=clamp(b,5,100); }
@@ -675,10 +748,11 @@ static void load_config(const char *path) {
             if (n >= 3) { pid_predict_alpha=clamp(c,1,100); }
         }
         else if (strcmp(key, "PID_COLD") == 0) {
-            int a = pid_cold_min, b = pid_cold_max;
-            if (sscanf(val_str, "%d %d", &a, &b) >= 2) { pid_cold_min=clamp(a,0,194); pid_cold_max=clamp(b,0,194); }
+            int a = pid_cold_min, b = pid_cold_max, c = b7_pid_cold_max;
+            int n = sscanf(val_str, "%d %d %d", &a, &b, &c);
+            if (n >= 2) { pid_cold_min=clamp(a,0,194); pid_cold_max=clamp(b,0,194); }
+            if (n >= 3) { b7_pid_cold_max = clamp(c, 1, B7X_COLD_MAX); }
         }
-        else if (strcmp(key, "B7X_PID_COLD_MAX") == 0) b7x_pid_cold_max = clamp(val, 1, B7X_COLD_MAX);
         else if (strcmp(key, "BATT_BOUNDARY") == 0) {
             int v[3] = {BATT_BOUNDARY_1,BATT_BOUNDARY_2,BATT_BOUNDARY_3};
             if (sscanf(val_str, "%d %d %d", &v[0],&v[1],&v[2]) >= 3)
@@ -732,7 +806,7 @@ static void load_config(const char *path) {
         else if (strcmp(key, "REV_COMP_COOLDOWN") == 0)   REV_COMP_COOLDOWN  = clamp(val, 0, 10);
 
         // --- 速率限制 ---
-        else if (strcmp(key, "RATE_LIMIT_RPM_DOWN") == 0) RATE_LIMIT_RPM_DOWN = clamp(val, 50, 2000);
+        else if (strcmp(key, "RATE_LIMIT_FAN_DOWN") == 0) RATE_LIMIT_FAN_DOWN = clamp(val, 50, 2000);
         else if (strcmp(key, "RATE_LIMIT_COLD") == 0) {
             int base = RATE_LIMIT_COLD, mult = RATE_LIMIT_COLD_MULT;
             if (sscanf(val_str, "%d %d", &base, &mult) >= 1) {
@@ -741,10 +815,10 @@ static void load_config(const char *path) {
             }
         }
         else if (strcmp(key, "RATE_LIMIT_TEMP") == 0) RATE_LIMIT_TEMP = clamp(val, 1, 30);
-        else if (strcmp(key, "RATE_LIMIT_FAN_BASE") == 0) {
-            int rise = RATE_LIMIT_FAN_BASE, mult = RATE_LIMIT_FAN_MULT;
+        else if (strcmp(key, "RATE_LIMIT_FAN_UP") == 0) {
+            int rise = RATE_LIMIT_FAN_UP, mult = RATE_LIMIT_FAN_MULT;
             if (sscanf(val_str, "%d %d", &rise, &mult) >= 1) {
-                RATE_LIMIT_FAN_BASE   = clamp(rise, 50, 2000);
+                RATE_LIMIT_FAN_UP   = clamp(rise, 50, 2000);
                 RATE_LIMIT_FAN_MULT = clamp(mult, 1, 200);
             }
         }
@@ -778,7 +852,7 @@ static void load_config(const char *path) {
             }
         }
         else if (strcmp(key, "PID_PREDICT_MIN_DELTA") == 0)      pid_predict_min_delta      = clamp(val, 1, 10);
-        else if (strcmp(key, "PID_PREDICT_MODE") == 0) {
+        else if (strcmp(key, "PID_PREDICT_WEIGHT") == 0) {
             int h = pid_predict_heat_weight, c = pid_predict_cool_weight;
             if (sscanf(val_str, "%d %d", &h, &c) >= 1) {
                 pid_predict_heat_weight = clamp(h, 0, 10);
@@ -789,10 +863,11 @@ static void load_config(const char *path) {
         // --- PID 映射 ---
         else if (strcmp(key, "COLD_MAP_START") == 0)   cold_map_start  = clamp(val, 0, 194);
         else if (strcmp(key, "COLD_MAP_EXP") == 0)         cold_map_exp        = clamp(val, 50, 500);
+        else if (strcmp(key, "RPM_SMOOTH_ALPHA") == 0)     rpm_smooth_alpha    = clamp(val, 1, 99);
         else if (strcmp(key, "FAN_RPM_CHANGE_THRESHOLD") == 0) fan_rpm_change_threshold = clamp(val, 0, 2000);
 
         // --- 日志与系统 ---
-        else if (strcmp(key, "LOG_MAX_KB") == 0)           LOG_MAX_KB         = clamp(val, 0, 1000);
+        else if (strcmp(key, "LOG_MAX") == 0)              LOG_MAX            = clamp(val, 0, 1048576);
         else if (strcmp(key, "LOG_TRIM_LINES") == 0)       log_trim_lines     = clamp(val, 0, 50);
         else if (strcmp(key, "LOG_FILE") == 0) {
             config_read_path(log_file_path, sizeof(log_file_path), val_str);
@@ -834,31 +909,28 @@ static void load_config(const char *path) {
                 CURRENT_GEAR_MIN = clamp(val, 1, 12);
         }
 
-        // --- 档位表（无 gear_config_enabled 子守卫，收集后由后处理判断）---
-        else if (strncmp(key, "GEAR_", 5) == 0) {
-            int n = atoi(key + 5);
+        // --- 档位表（无 gear_config_enabled 子守卫，收集后由后处理判断）
+        //    GEAR_B6X_N=…（B6X），GEAR_B7X_N=…（B7X），两表独立配置 ---
+        else if (strncmp(key, "GEAR_B7X_", 9) == 0) {
+            int n = atoi(key + 9);
             if (n < 1 || n > GEAR_TABLE_MAX) continue;
-            int m, t, f, c;
-            char *next;
-            m = (int)strtol(val_str, &next, 10);
-            if (*next != ',') continue;
-            t = (int)strtol(next + 1, &next, 10);
-            if (*next != ',') continue;
-            f = (int)strtol(next + 1, &next, 10);
-            if (*next != ',') continue;
-            c = (int)strtol(next + 1, NULL, 10);
-            if (config_gear_count < GEAR_TABLE_MAX) {
-                config_gears[config_gear_count].config_n = n;
-                config_gears[config_gear_count].mode     = (m == 0) ? 0 : 1;
-                config_gears[config_gear_count].target   = clamp(t, 5, 35);
-                config_gears[config_gear_count].fan_rpm  = clamp(f, 2000, 6000);
-                config_gears[config_gear_count].cold     = clamp(c, 1, 194);
-                config_gear_count++;
+            if (config_gear_count_b7 < GEAR_TABLE_MAX &&
+                parse_gear_config_line(val_str, &config_gears_b7[config_gear_count_b7])) {
+                config_gears_b7[config_gear_count_b7].config_n = n;
+                config_gear_count_b7++;
+            }
+        }
+        else if (strncmp(key, "GEAR_B6X_", 9) == 0) {
+            int n = atoi(key + 9);
+            if (n < 1 || n > GEAR_TABLE_MAX) continue;
+            if (config_gear_count_b6 < GEAR_TABLE_MAX &&
+                parse_gear_config_line(val_str, &config_gears_b6[config_gear_count_b6])) {
+                config_gears_b6[config_gear_count_b6].config_n = n;
+                config_gear_count_b6++;
             }
         }
 
         else { continue; }
-        loaded++;
     }
     fclose(f);
 
@@ -871,34 +943,19 @@ static void load_config(const char *path) {
         write_log("配置 CTRL_MODE=%d", ctrl_mode);
     }
 
-    // --- GEAR_N 后处理：排序重排为连续档位表，同步范围 ---
+    // --- GEAR_B6X_N / GEAR_B7X_N 后处理：B6X/B7X 各排序重排为连续档位表 ---
     if (gear_config_enabled) {
-        if (config_gear_count > 0) {
-            // 重置档位表，填入配置档位
-            gear_count = 0;
-            gear_max = 0;
-            memset(gear_table, 0, sizeof(gear_table));
-            actual_rpm = -1;
-            actual_cold = -1;
-            actual_target_temp = -1;
+        rebuild_gear_table(gear_table_b6, config_gears_b6, config_gear_count_b6,
+                           &gear_count_b6, &gear_max_b6, "b6x");
+        rebuild_gear_table(gear_table_b7, config_gears_b7, config_gear_count_b7,
+                           &gear_count_b7, &gear_max_b7, "b7x");
 
-            qsort(config_gears, config_gear_count, sizeof(GearConfigTemp), cmp_gear_config_n);
-            for (int i = 0; i < config_gear_count; i++) {
-                gear_table[i].config_n = config_gears[i].config_n;
-                gear_table[i].mode     = config_gears[i].mode;
-                gear_table[i].target   = config_gears[i].target;
-                gear_table[i].fan_rpm  = config_gears[i].fan_rpm;
-                gear_table[i].cold     = config_gears[i].cold;
-                gear_count++;
-            }
-            gear_max = gear_count;
-            batt_gear_base = clamp(batt_gear_base, gear_min, gear_max);
-            write_log("配置 档位表 %d 级 (1~%d)", gear_count, gear_max);
-        } else {
-            // 所有 GEAR_N 行格式无效，回退到默认档位表
-            init_gear_table();
-            write_log("配置 GEAR_N 全部无效，使用默认档位表 (%d 级)", gear_count);
-        }
+        // 切换活动表指针与计数，同步范围
+        select_gear_table();
+        actual_rpm = -1;
+        actual_cold = -1;
+        actual_target_temp = -1;
+        batt_gear_base = clamp(batt_gear_base, gear_min, gear_max);
     }
 
 }
@@ -968,12 +1025,12 @@ static int detect_config_path(void) {
 /**
  * 写入日志（自动滚动：超上限后删除最早 3 行）。
  * 日期格式：日+时间，无年月（例 "14 22:30:16"）。
- * LOG_MAX_KB=0 时关闭日志。持持久 FILE* 避免每行 open/close。
+ * LOG_MAX=0 时关闭日志。持持久 FILE* 避免每行 open/close。
  */
 static void write_log(const char *fmt, ...) {
-    if (LOG_MAX_KB == 0) return;     // 日志关闭
+    if (LOG_MAX == 0) return;     // 日志关闭
 
-    int max_bytes = LOG_MAX_KB * 1024;
+    int max_bytes = LOG_MAX;
 
     // 超标 → 滚动：先关 log_fp，再读-删-写，下次自动重开（调试模式下跳过限制，保留完整日志）
     struct stat st;
@@ -1198,14 +1255,17 @@ static void update_active_limits(void) {
     if (model != 6 && model != 7)
         model = (active_device == DEVICE_B7X) ? 7 : 6;  // 型号未知按包名兜底
     if (model == 7) {
-        active_cold_max = B7X_COLD_MAX;       // 硬编码安全上限（gear 模式，不可配）
-        active_fan_max  = b7x_fan_rpm_max;    // 可配置，默认 B7X_FAN_RPM_MAX
-        active_pid_cold_max = b7x_pid_cold_max; // 可配置，默认 B7X_COLD_MAX
+        active_cold_max = COLD_MAX;           // gear 模式硬上限：B7X 暂时与 B6X 一致（COLD_MAX）
+        active_fan_max  = b7_fan_rpm_max;    // FAN_RPM 第三值（B7X），默认同 B6X
+        active_pid_cold_max = b7_pid_cold_max; // PID_COLD 第三值（B7X），默认同 B6X
     } else {
         active_cold_max = COLD_MAX;           // 硬编码安全上限（gear 模式，不可配）
         active_fan_max  = fan_rpm_max;        // 使用 profile.conf 中的配置值
         active_pid_cold_max = pid_cold_max;   // 使用 profile.conf 中的配置值
     }
+
+    // 切换活动档位表（B6X/B7X 独立表）
+    select_gear_table();
 }
 
 /**
@@ -1216,9 +1276,8 @@ static void read_cooler_params(void) {
     const char *path = (active_device == DEVICE_B7X) ? status_file_path_b7 : status_file_path_b6;
 
     // 先重置所有参数
-    cooler_runmode = -1; cooler_hot_temp = -1; cooler_cold_temp = -1;
+    cooler_hot_temp = -1; cooler_cold_temp = -1;
     cooler_rpm_real = -1; cooler_cold_real = -1;
-    cooler_target_temp = -1;
 
     FILE *f = fopen(path, "r");
     if (!f) return;
@@ -1226,8 +1285,6 @@ static void read_cooler_params(void) {
     while (fgets(line, sizeof(line), f)) {
         if (strncmp(line, "BLE=", 4) == 0) {
             app_ble_connected = (atoi(line + 4) != 0);
-        } else if (strncmp(line, "RUN_MODE=", 9) == 0) {
-            cooler_runmode = atoi(line + 9);
         } else if (strncmp(line, "HOT_TEMP=", 9) == 0) {
             cooler_hot_temp = atoi(line + 9);
         } else if (strncmp(line, "COLD_TEMP=", 10) == 0) {
@@ -1236,17 +1293,9 @@ static void read_cooler_params(void) {
             cooler_rpm_real = atoi(line + 9);
         } else if (strncmp(line, "COLD_REAL=", 10) == 0) {
             cooler_cold_real = atoi(line + 10);
-        } else if (strncmp(line, "TARGET_TEMP=", 12) == 0) {
-            cooler_target_temp = atoi(line + 12);
         }
     }
     fclose(f);
-}
-
-// 兼容旧接口（部分调用点尚未迁移时使用）
-static void read_status_ble(void) {
-    read_status_ble_both();
-    app_ble_connected = b6_connected || b7_connected;
 }
 
 // ======================== 存档（持久化上次制冷强度） ========================
@@ -1544,7 +1593,7 @@ static void calc_dynamic_rates(int *out_fan_up, int *out_cold_up, int *out_cold_
     if (cycle_batt_temp >= 0) {
         d = abs(cycle_batt_temp - BATT_BASELINE);
     }
-    *out_fan_up = RATE_LIMIT_FAN_BASE + d * RATE_LIMIT_FAN_MULT / 10;
+    *out_fan_up = RATE_LIMIT_FAN_UP + d * RATE_LIMIT_FAN_MULT / 10;
     if (*out_fan_up > 2000) *out_fan_up = 2000;
     // 制冷强度：有符号温差 dev，升速/降速独立；负值 → clamp 到 0（禁止该方向）
     int dev = 0;
@@ -1553,6 +1602,32 @@ static void calc_dynamic_rates(int *out_fan_up, int *out_cold_up, int *out_cold_
     int down = RATE_LIMIT_COLD - dev * RATE_LIMIT_COLD_MULT / 10;
     *out_cold_up   = (up   > 0) ? up   : 0;
     *out_cold_down = (down > 0) ? down : 0;
+}
+
+/**
+ * 限速下沉：制冷强度升降独立限速 + 风扇转速升降独立限速（含降速防抖）。
+ * 返回限速后的实际风扇转速，向上取整到 50 的倍数并钳制到设备范围。
+ *
+ * 防抖仅在下降低于阈值内时生效（上升自由爬升，避免数周期锁死）；
+ * 距最低转速 < 阈值×1.5 时防抖失效（接近最低转速无需防突降噪音）。
+ */
+static int rate_limit_fan_cold(int desired_rpm, int desired_cold) {
+    int fan_up, cold_up, cold_down;
+    calc_dynamic_rates(&fan_up, &cold_up, &cold_down);
+
+    // 制冷强度限速（升降独立，负值方向已 clamp 到 0）
+    rate_limit(&actual_cold, desired_cold, cold_up, cold_down);
+
+    // 风扇转速限速（升降独立速率）
+    int near_min_rpm = (actual_rpm - fan_rpm_min) < fan_rpm_change_threshold * 3 / 2;
+    if (fan_rpm_change_threshold > 0 && !near_min_rpm &&
+        desired_rpm < actual_rpm && (actual_rpm - desired_rpm) <= fan_rpm_change_threshold)
+        desired_rpm = actual_rpm;
+    rate_limit(&actual_rpm, desired_rpm, fan_up, RATE_LIMIT_FAN_DOWN);
+
+    // ---- 向上取整到 50 的倍数 ----
+    int send_rpm = ((actual_rpm + 49) / 50) * 50;
+    return clamp(send_rpm, fan_rpm_min, active_fan_max);
 }
 
 /**
@@ -1578,17 +1653,9 @@ static int apply_gear(int level) {
         windOC = (calc_rpm < cap_rpm) ? calc_rpm : cap_rpm;
     }
 
-    // 风扇转速限速（升降独立速率）
+    // 风扇转速限速（升降独立）+ 制冷强度限速（升降独立，负值方向已 clamp 到 0），含降速防抖
     int desired_rpm = (mode == 0) ? windLevel : windOC;
-    if (fan_rpm_change_threshold > 0 && abs(desired_rpm - actual_rpm) <= fan_rpm_change_threshold)
-        desired_rpm = actual_rpm;
-    int this_fan_up, this_cold_up, this_cold_down;
-    calc_dynamic_rates(&this_fan_up, &this_cold_up, &this_cold_down);
-    rate_limit(&actual_rpm, desired_rpm,
-               this_fan_up, RATE_LIMIT_RPM_DOWN);
-
-    // 制冷强度限速（升降独立，负值方向已 clamp 到 0）
-    rate_limit(&actual_cold, coldOC, this_cold_up, this_cold_down);
+    int send_rpm = rate_limit_fan_cold(desired_rpm, coldOC);
 
     // 目标温度限速（仅智能温控模式；<0 时 rate_limit 直接初始化）
     if (mode == 0 || actual_target_temp < 0)
@@ -1602,9 +1669,7 @@ static int apply_gear(int level) {
     coldOC = actual_cold;
     target = actual_target_temp;
 
-    // ---- 向上取整到 50 的倍数 ----
-    int send_rpm = ((actual_rpm + 49) / 50) * 50;
-    send_rpm = clamp(send_rpm, fan_rpm_min, active_fan_max);
+    // ---- 风扇转速向上取整到 50 的倍数（rate_limit_fan_cold 已钳制到设备范围）----
     if (mode == 0)
         windLevel = send_rpm;
     else
@@ -1650,7 +1715,7 @@ static int is_app_alive(void) {
     time_t now = time(NULL);
     int alive = (now - st.st_mtime <= STATUS_TIMEOUT);
     debug_log(debug_conn, "app_alive device=%s %d mtime_gap=%lds timeout=%ds",
-              (active_device == DEVICE_B7X) ? "B7X" : "B6X",
+              (active_device == DEVICE_B7X) ? "b7x" : "b6x",
               alive, (long)(now - st.st_mtime), STATUS_TIMEOUT);
     return alive;
 }
@@ -1690,8 +1755,7 @@ static void force_stop_app(const char *pkg) {
     char cmd[256];
     // 输出重定向到 /dev/null，避免泄漏进 /cache/tempctrl.log（service.sh 把 stdout/stderr 指向日志）
     snprintf(cmd, sizeof(cmd), "am force-stop %s > /dev/null 2>&1", pkg);
-    int rc = system(cmd);
-    write_log("进程管理 force-stop %s (rc=%d)", pkg, rc);
+    system(cmd);
 }
 
 /**
@@ -2365,44 +2429,53 @@ static float pid_compute(int batt_10, float dt) {
 }
 
 /**
- * 热端温度线性映射 + 双向滞回：无上下限，低于 HOT_MAP_MIN 或高于 HOT_MAP_MAX 时线性外推
+ * 热端温度线性映射 + EMA 平滑 + 双向滞回：无上下限，低于 HOT_MAP_MIN 或高于 HOT_MAP_MAX 时线性外推
  * 最终钳制在下发阶段（apply_gear / apply_gear_direct 内部）
  *
- * 滞回逻辑：
- *   降温（hot_10 < prev_hot）→ 有效温度 = 实际 + 1°C，钳位 ≤ 上次 RPM
- *   升温（hot_10 > prev_hot）→ 正常映射，但 RPM 不低于上次值
- *   温度不变              → 保持上次输出
+ * 平滑：输入先经 RPM_SMOOTH_ALPHA EMA 平滑（与冷端共用系数）
+ * 滞回（基于平滑后的值）：
+ *   降温（hot_s < prev_hot）→ 有效温度 = 实际 + 1°C，钳位 ≤ 上次 RPM
+ *   升温（hot_s > prev_hot）→ 正常映射，但 RPM 不低于上次值
+ *   平滑值不变             → 保持上次输出
  */
 static int rpm_from_hot_end(int hot_10) {
-    static int prev_hot = -1;
+    static int prev_hot = -1;   // 上一轮平滑后的温度
     static int prev_rpm = 0;
     int range = hot_map_max - hot_map_min;
     if (range <= 0) return 0;
 
-    // 温度不变 → 保持上次输出
-    if (prev_hot >= 0 && hot_10 == prev_hot)
+    // EMA 平滑输入温度（首次直取）
+    int hot_s;
+    if (prev_hot < 0) {
+        hot_s = hot_10;
+    } else {
+        hot_s = EMA_DIR(hot_10, prev_hot, rpm_smooth_alpha);
+    }
+
+    // 平滑后温度不变 → 保持上次输出
+    if (hot_s == prev_hot)
         return prev_rpm;
 
     int eff_hot;
-    if (prev_hot >= 0 && hot_10 < prev_hot) {
-        // 降温滞回：有效温度 = 实际 + 1°C（0.1°C*10），使 RPM 滞后下降
-        eff_hot = hot_10 + 10;
+    if (hot_s < prev_hot) {
+        // 降温滞回：有效温度 = 平滑值 + 1°C（0.1°C*10），使 RPM 滞后下降
+        eff_hot = hot_s + 10;
         if (eff_hot > hot_map_max) eff_hot = hot_map_max;
     } else {
         // 升温或首次 → 直通
-        eff_hot = hot_10;
+        eff_hot = hot_s;
     }
 
     float t = (float)(eff_hot - hot_map_min) / range;
     int rpm = fan_rpm_min + (int)(t * (active_fan_max - fan_rpm_min));
 
-    // 双向钳位
+    // 双向钳位（基于平滑值）
     if (prev_hot >= 0) {
-        if (hot_10 < prev_hot && rpm > prev_rpm) rpm = prev_rpm;  // 降温 ≥ 上次（滞回 +10 不超限）
-        if (hot_10 > prev_hot && rpm < prev_rpm) rpm = prev_rpm;  // 升温 ≥ 上次（防止微降反降 RPM）
+        if (hot_s < prev_hot && rpm > prev_rpm) rpm = prev_rpm;  // 降温 ≥ 上次（滞回 +10 不超限）
+        if (hot_s > prev_hot && rpm < prev_rpm) rpm = prev_rpm;  // 升温 ≥ 上次（防止微降反降 RPM）
     }
 
-    prev_hot = hot_10;
+    prev_hot = hot_s;
     prev_rpm = rpm;
     return rpm;
 }
@@ -2413,7 +2486,7 @@ static int rpm_from_hot_end(int hot_10) {
  * 最终钳制在下发阶段（apply_gear / apply_gear_direct 内部）
  */
 static int rpm_from_cold_exp(int cold) {
-    static int cold_rpm_smoothed = -1;  // 0.25 EMA 平滑
+    static int cold_rpm_smoothed = -1;  // RPM_SMOOTH_ALPHA EMA 平滑
     int range = active_pid_cold_max - cold_map_start;
     if (range <= 0) return 0;
     float n = (float)(cold - cold_map_start) / range;
@@ -2424,11 +2497,11 @@ static int rpm_from_cold_exp(int cold) {
         float n_exp = powf(n, cold_map_exp / 100.0f);
         raw_rpm = fan_rpm_min + (int)(n_exp * (active_fan_max - fan_rpm_min));
     }
-    // 0.25 EMA 平滑，防止风扇转速跳变
+    // EMA 平滑，防止风扇转速跳变（系数可配置 RPM_SMOOTH_ALPHA）
     if (cold_rpm_smoothed < 0) {
         cold_rpm_smoothed = raw_rpm;
     } else {
-        cold_rpm_smoothed = EMA_DIR(raw_rpm, cold_rpm_smoothed, 25);
+        cold_rpm_smoothed = EMA_DIR(raw_rpm, cold_rpm_smoothed, rpm_smooth_alpha);
     }
     return cold_rpm_smoothed;
 }
@@ -2472,20 +2545,8 @@ static void pid_map_output(float output, int *out_cold, int *out_rpm) {
  */
 static void apply_gear_direct(int mode, int target,
                                int rpm, int cold, int wl) {
-    int this_fan_up, this_cold_up, this_cold_down;
-    calc_dynamic_rates(&this_fan_up, &this_cold_up, &this_cold_down);
-
-    // 制冷强度限速（升降独立，负值方向已 clamp 到 0）
-    rate_limit(&actual_cold, cold, this_cold_up, this_cold_down);
-
-    // 风扇转速限速（升降独立速率）
-    if (fan_rpm_change_threshold > 0 && abs(rpm - actual_rpm) <= fan_rpm_change_threshold)
-        rpm = actual_rpm;
-    rate_limit(&actual_rpm, rpm, this_fan_up, RATE_LIMIT_RPM_DOWN);
-
-    // ---- 向上取整到 50 的倍数 ----
-    int send_rpm = ((actual_rpm + 49) / 50) * 50;
-    send_rpm = clamp(send_rpm, fan_rpm_min, active_fan_max);
+    // 限速下沉：制冷强度 + 风扇转速（升降独立），含降速防抖
+    int send_rpm = rate_limit_fan_cold(rpm, cold);
 
     // ---- 去重检测（用限速后的 actual_* 值）----
     if (last_bcast_valid &&
@@ -2497,8 +2558,9 @@ static void apply_gear_direct(int mode, int target,
     int batt_10 = (pid_batt_filtered >= 0) ? pid_batt_filtered : BATT_BASELINE;
     int dev_10 = batt_10 + pid_last_comp_10 - BATT_BASELINE;
     int hot_deg = (cooler_hot_temp > 0) ? cooler_hot_temp / 10 : 0;
-    write_log("%d%+.1f° 冷%d 热%d° RPM%d",
+    write_log("%d%+.1f° %s 冷%d 热%d° RPM%d",
               BATT_BASELINE / 10, dev_10 / 10.0f,
+              (active_device == DEVICE_B7X) ? "b7x" : "b6x",
               actual_cold, hot_deg, send_rpm);
     send_am_broadcast(mode, target, send_rpm, actual_cold, wl);
 
@@ -2544,6 +2606,21 @@ static void pid_align_from_gear(void) {
     pid_reset_core();
     last_bcast_valid     = 0;
     write_log("PID 从 gear 对齐 ratio=%.2f cold=%d", ratio, pid_align_cold);
+}
+
+/**
+ * 按制冷强度参考值对齐 PID 初始输出。
+ * @param cold_ref 制冷强度参考值（存档值或 LSP 回传实际值）
+ * @param cold_max 参考值所在档位的制冷上限（存档用 pid_cold_max，LSP 用 active_pid_cold_max）
+ * @return 对齐比例（0~1），用于映射基础档位
+ */
+static float pid_ratio_from_cold(int cold_ref, int cold_max) {
+    float ratio = (float)(cold_ref - pid_cold_min) / (cold_max - pid_cold_min);
+    if (ratio < 0.0f) ratio = 0.0f;
+    if (ratio > 1.0f) ratio = 1.0f;
+    pid_align_cold = cold_ref;
+    pid_align_rpm  = fan_rpm_min + (int)(ratio * (active_fan_max - fan_rpm_min));
+    return ratio;
 }
 
 // ======================== 主循环 ========================
@@ -2975,7 +3052,7 @@ int main(int argc, char *argv[]) {
     signal(SIGINT,  handle_signal);
     debug_log(debug_main, "main 启动 ALPHA=%d ZONE=%d~%d", CPU_FILTER_ALPHA, CPU_ZONE_MIN, CPU_ZONE_MAX);
 
-    // --- 初始化默认档位表（load_config 中 GEAR_N 可覆盖） ---
+    // --- 初始化默认档位表（load_config 中 GEAR_B6X_N / GEAR_B7X_N 可覆盖） ---
     init_gear_table();
 
     // --- 日志路径、配置加载 ---
@@ -3032,7 +3109,7 @@ int main(int argc, char *argv[]) {
         if (dev != DEVICE_NONE) {
             active_device = dev;
             update_active_limits();
-            write_log("初始设备 %s", (active_device == DEVICE_B7X) ? "B7X" : "B6X");
+            write_log("初始设备 %s", (active_device == DEVICE_B7X) ? "b7x" : "b6x");
             read_cooler_params();
             break;
         }
@@ -3047,25 +3124,13 @@ int main(int argc, char *argv[]) {
 
         int stored_cold = load_cold();
         if (stored_cold >= 1) {
-            pid_ratio = (float)(stored_cold - pid_cold_min) /
-                        (pid_cold_max - pid_cold_min);
-            if (pid_ratio < 0.0f) pid_ratio = 0.0f;
-            if (pid_ratio > 1.0f) pid_ratio = 1.0f;
-            pid_align_cold = stored_cold;
-            pid_align_rpm  = fan_rpm_min + (int)(pid_ratio * (active_fan_max - fan_rpm_min));
+            pid_ratio = pid_ratio_from_cold(stored_cold, pid_cold_max);
             write_log("存档 恢复制冷=%d ratio=%.2f rpm=%d",
-                      stored_cold, pid_ratio,
-                      fan_rpm_min + (int)(pid_ratio * (active_fan_max - fan_rpm_min)));
+                      stored_cold, pid_ratio, pid_align_rpm);
         } else if (cooler_cold_real >= pid_cold_min) {
-            pid_ratio = (float)(cooler_cold_real - pid_cold_min) /
-                        (active_pid_cold_max - pid_cold_min);
-            if (pid_ratio < 0.0f) pid_ratio = 0.0f;
-            if (pid_ratio > 1.0f) pid_ratio = 1.0f;
-            pid_align_cold = cooler_cold_real;
-            pid_align_rpm  = fan_rpm_min + (int)(pid_ratio * (active_fan_max - fan_rpm_min));
+            pid_ratio = pid_ratio_from_cold(cooler_cold_real, active_pid_cold_max);
             write_log("LSP 回传承载 制冷=%d ratio=%.2f rpm=%d",
-                      cooler_cold_real, pid_ratio,
-                      fan_rpm_min + (int)(pid_ratio * (active_fan_max - fan_rpm_min)));
+                      cooler_cold_real, pid_ratio, pid_align_rpm);
         } else {
             pid_align_from_gear();
             goto pid_init_done;
@@ -3111,7 +3176,7 @@ pid_init_done:
                 // 所有设备都断联
                 if (active_device != DEVICE_NONE) {
                     write_log("%s 已断开，无其他设备可切换\n",
-                              (active_device == DEVICE_B7X) ? "B7X" : "B6X");
+                              (active_device == DEVICE_B7X) ? "b7x" : "b6x");
                 }
                 active_device = DEVICE_NONE;
                 app_was_alive = 0;
@@ -3128,7 +3193,7 @@ pid_init_done:
                         read_cooler_params();
                         reconnect_align();
                         write_log("设备恢复 %s",
-                                  (active_device == DEVICE_B7X) ? "B7X" : "B6X");
+                                  (active_device == DEVICE_B7X) ? "b7x" : "b6x");
                         break;
                     }
                 }
@@ -3136,8 +3201,8 @@ pid_init_done:
             } else {
                 // 切换到另一台在线设备
                 write_log("切换 %s → %s",
-                          (active_device == DEVICE_B7X) ? "B7X" : "B6X",
-                          (new_device == DEVICE_B7X) ? "B7X" : "B6X");
+                          (active_device == DEVICE_B7X) ? "b7x" : "b6x",
+                          (new_device == DEVICE_B7X) ? "b7x" : "b6x");
                 active_device = new_device;
                 update_active_limits();
                 last_bcast_valid = 0;
@@ -3153,13 +3218,13 @@ pid_init_done:
         // 3. 读取 active_device 的散热器回传参数
         read_cooler_params();
         debug_log(debug_conn, "main 当前设备=%s ble=%d",
-                  (active_device == DEVICE_B7X) ? "B7X" : "B6X", app_ble_connected);
+                  (active_device == DEVICE_B7X) ? "b7x" : "b6x", app_ble_connected);
 
         // 4. 存活检测
         int app_proc_ok = is_app_alive();
         if (!app_proc_ok || !app_ble_connected) {
             write_log("%s 连接丢失，检查另一设备...\n",
-                      (active_device == DEVICE_B7X) ? "B7X" : "B6X");
+                      (active_device == DEVICE_B7X) ? "b7x" : "b6x");
             app_was_alive = 0;  // 复活后走 reconnect_align 重新对齐实际值
             // next loop iteration will re-arbitrate
             sleep(5);
