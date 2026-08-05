@@ -21,32 +21,25 @@ window.B6X_SCHEMA = {
       subKeys: ["DEBUG_SENSOR", "DEBUG_EMERG", "DEBUG_BATT", "DEBUG_EXEC",
                 "DEBUG_CONN", "DEBUG_CONFIG", "DEBUG_MAIN", "DEBUG_PID"]
     },
+    // [0] 总开关：组头开关 PERF_ENABLED + 通用参数子面板（复用 [1] 的开关+子面板机制）
     {
-      id: "g0", title: "[0] 总开关", master: null, masterKey: "PERF_ENABLED",
+      id: "g0", title: "[0] 总开关", master: "PERF_ENABLED",
       headerSwitch: "PERF_ENABLED",
-      keys: []
+      keys: [],
+      subKeys: ["RATE_LIMIT_FAN_UP", "RATE_LIMIT_FAN_DOWN", "FAN_RPM_CHANGE_THRESHOLD",
+                "RATE_LIMIT_COLD", "RATE_LIMIT_TEMP", "BATT_BASELINE",
+                "COLD_MAP_START", "COLD_MAP_EXP", "HOT_MAP", "RPM_SMOOTH_ALPHA", "FAN_RPM"]
     },
+    // 控制模式 + PID：组头开关 CTRL_MODE（=1 PID / =0 Gear）+ PID 参数子面板（复用 [1] 机制）
     {
-      id: "g2", title: "[2] sysfs 路径与缩放", master: "PERF_ENABLED",
-      keys: ["BATT_TEMP_PATH", "BATT_TEMP_DIVISOR", "BATT_CURRENT_PATH",
-             "BATT_CURRENT_DIVISOR", "CPU_TEMP_PATH_FMT", "CPU_TEMP_DIVISOR",
-             "CPU_ZONE", "LOG_FILE", "LOG_MAX", "LOG_TRIM_LINES"]
-    },
-    {
-      id: "g3", title: "[3] 通用参数", master: "PERF_ENABLED",
-      keys: ["RATE_LIMIT_FAN_UP", "RATE_LIMIT_FAN_DOWN", "FAN_RPM_CHANGE_THRESHOLD",
-             "RATE_LIMIT_COLD", "RATE_LIMIT_TEMP", "BATT_BASELINE",
-             "COLD_MAP_START", "COLD_MAP_EXP", "HOT_MAP", "RPM_SMOOTH_ALPHA", "FAN_RPM"]
-    },
-    {
-      // 控制模式：CTRL_MODE=1 时显示本组（PID 无级调节）
-      id: "g4", title: "[4] PID 模式控制", master: "PERF_ENABLED",
-      mode: { key: "CTRL_MODE", on: "1" },
-      keys: ["PID_KP", "PID_KI", "PID_INTEGRAL_LIMIT", "PID_KI_VAR_THRESHOLD",
-             "PID_KI_VAR_SAMPLES", "PID_KI_DEADBAND", "PID_KD", "PID_INPUT_FILTER_ENABLED",
-             "PID_FILTER_AUTO_THRESHOLD", "PID_ALPHA", "PID_CPU_COMP_ENABLED",
-             "PID_CPU_COMP_DIVISOR", "PID_PREDICT_WEIGHT", "PID_PREDICT_WIN",
-             "PID_PREDICT_RISE", "PID_PREDICT_MIN_DELTA", "PID_COLD"]
+      id: "g4", title: "[4] PID 模式控制", master: "CTRL_MODE",
+      headerSwitch: "CTRL_MODE",
+      keys: [],
+      subKeys: ["PID_KP", "PID_KI", "PID_INTEGRAL_LIMIT", "PID_KI_VAR_THRESHOLD",
+                "PID_KI_VAR_SAMPLES", "PID_KI_DEADBAND", "PID_KD", "PID_INPUT_FILTER_ENABLED",
+                "PID_FILTER_AUTO_THRESHOLD", "PID_ALPHA", "PID_CPU_COMP_ENABLED",
+                "PID_CPU_COMP_DIVISOR", "PID_PREDICT_WEIGHT", "PID_PREDICT_WIN",
+                "PID_PREDICT_RISE", "PID_PREDICT_MIN_DELTA", "PID_COLD"]
     },
     {
       // 控制模式：CTRL_MODE=0 时显示本组（含原 [5]电池控制 + [6]紧急干预 + [7]挡位表）
@@ -61,11 +54,15 @@ window.B6X_SCHEMA = {
              "EMERG_RECOVERY_PHASE_CYCLES",
              "GEAR_CONFIG_ENABLED", "GEAR_AUTO_FAN"],
       gearTables: ["GEAR_B6X_", "GEAR_B7X_"]
+    },
+    // [2] sysfs 路径与缩放：独立组，排最底
+    {
+      id: "g2", title: "[2] sysfs 路径与缩放", master: "PERF_ENABLED",
+      keys: ["BATT_TEMP_PATH", "BATT_TEMP_DIVISOR", "BATT_CURRENT_PATH",
+             "BATT_CURRENT_DIVISOR", "CPU_TEMP_PATH_FMT", "CPU_TEMP_DIVISOR",
+             "CPU_ZONE", "LOG_FILE", "LOG_MAX", "LOG_TRIM_LINES"]
     }
   ],
-
-  // 控制模式选择器：渲染在 PID / Gear 分组之前，始终可见
-  modeSwitch: { key: "CTRL_MODE" },
 
   keys: {
     // ---- [0] ----

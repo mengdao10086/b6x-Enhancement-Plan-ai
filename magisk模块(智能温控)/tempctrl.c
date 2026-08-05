@@ -409,7 +409,7 @@ static int pid_last_comp_10 = 0;           // 上次 PID 重算时的补偿值�
 // --- 输出映射与对齐 ---
 static int pid_cold_min = 1;              // PID_COLD_MIN
 static int pid_cold_max = 190;            // PID_COLD_MAX
-static int pid_align_rpm = 2000;          // PID 目标 RPM（供 rate_limited_execute 读取）
+static int pid_align_rpm = 2000;          // PID 目标 RPM（仅初始化对齐与日志使用；风扇下发已由 compute_fan_target 独立计算）
 static int pid_align_cold = 1;            // PID 目标制冷强度
 
 // ======================== 散热器回传参数 ========================
@@ -510,6 +510,7 @@ static void pid_align_from_gear(void);
 static int rpm_from_hot_end(int hot_10);
 static int rpm_from_cold_exp(int cold);
 static int rpm_combine_weighted(int rpm_hot, int rpm_cold);
+static int compute_fan_target(void);
 
 /** 调试日志宏：需要总开关 DEBUG_MODE=1 且对应分区开关=1 时才输出 */
 /* 注意：必须写成单行，多行续行在 NDK clang + CRLF 下会失效 */
@@ -1681,13 +1682,10 @@ static int apply_gear(int level) {
     // 制冷强度限速（升降独立，负值方向已 clamp 到 0）
     rate_limit_cold(coldOC);
 
-    // GEAR_AUTO_FAN：用限速后的实际制冷 + 热端双映射计算风扇转速，挡位表风扇转速变为截断上限
+    // GEAR_AUTO_FAN：独立风扇目标（基于限速后实际制冷 + 热端），挡位表风扇转速变为截断上限
     if (gear_auto_fan && mode == 1) {
         int cap_rpm = windOC;
-        int calc_rpm = rpm_from_cold_exp(actual_cold);
-        if (cooler_hot_temp > 0) {
-            calc_rpm = rpm_combine_weighted(rpm_from_hot_end(cooler_hot_temp), calc_rpm);
-        }
+        int calc_rpm = compute_fan_target();
         windOC = (calc_rpm < cap_rpm) ? calc_rpm : cap_rpm;
     }
 
@@ -2574,21 +2572,24 @@ static int rpm_combine_weighted(int rpm_hot, int rpm_cold) {
 }
 
 /**
- * PID 输出 → 制冷强度 + 风扇转速（双路合并）
+ * 独立风扇目标计算：冷端指数映射（基于限速后实际制冷）+ 热端线性映射加权合并。
+ * 与 PID/Gear 输出解耦：每周期下发前由 rate_limited_execute / apply_gear 单独调用。
  */
-static void pid_map_output(float output, int *out_cold, int *out_rpm) {
+static int compute_fan_target(void) {
+    int rpm = rpm_from_cold_exp(actual_cold);
+    if (cooler_hot_temp > 0) {
+        rpm = rpm_combine_weighted(rpm_from_hot_end(cooler_hot_temp), rpm);
+    }
+    return rpm;
+}
+
+/**
+ * PID 输出 → 制冷强度（风扇目标已由 compute_fan_target 独立计算，不再在此输出）
+ */
+static void pid_map_output(float output, int *out_cold) {
     int range = active_pid_cold_max - pid_cold_min;
     if (range <= 0) range = 1;
-    int cold = clamp(pid_cold_min + (int)(output * range), pid_cold_min, active_pid_cold_max);
-
-    int rpm = rpm_from_cold_exp(cold);
-    if (cooler_hot_temp > 0) {
-        int rpm_hot = rpm_from_hot_end(cooler_hot_temp);
-        rpm = rpm_combine_weighted(rpm_hot, rpm);
-    }
-
-    *out_cold = cold;
-    *out_rpm  = rpm;
+    *out_cold = clamp(pid_cold_min + (int)(output * range), pid_cold_min, active_pid_cold_max);
 }
 
 /**
@@ -2596,21 +2597,13 @@ static void pid_map_output(float output, int *out_cold, int *out_rpm) {
  * 与 apply_gear 共享 last_* 去重缓存
  */
 static void apply_gear_direct(int mode, int target,
-                               int cold, int wl) {
-    // 限速下沉：先限速制冷强度，再用限速后的实际制冷重算风扇目标
-    //（冷端指数映射 + 热端线性映射加权合并），最后限速风扇
-    rate_limit_cold(cold);
+                               int send_rpm, int cold, int wl) {
+    // 纯下发：制冷限速与风扇目标已由 rate_limited_execute 完成，此处只去重/日志/广播
 
-    int calc_rpm = rpm_from_cold_exp(actual_cold);
-    if (cooler_hot_temp > 0) {
-        calc_rpm = rpm_combine_weighted(rpm_from_hot_end(cooler_hot_temp), calc_rpm);
-    }
-    int send_rpm = rate_limit_fan(calc_rpm);
-
-    // ---- 去重检测（用限速后的 actual_* 值）----
+    // ---- 去重检测 ----
     if (last_bcast_valid &&
         mode == last_mode && send_rpm == last_rpm &&
-        actual_cold == last_cold && wl == last_wind_level)
+        cold == last_cold && wl == last_wind_level)
         return;
 
     // 偏差 = (滤波后电池温度 + 补偿) - 目标温度，取自上一周期 PID 计算的结果
@@ -2620,17 +2613,17 @@ static void apply_gear_direct(int mode, int target,
     write_log("%d%+.1f° %s 冷%d 热%d° RPM%d",
               BATT_BASELINE / 10, dev_10 / 10.0f,
               (active_device == DEVICE_B7X) ? "b7x" : "b6x",
-              actual_cold, hot_deg, send_rpm);
-    send_am_broadcast(mode, target, send_rpm, actual_cold, wl);
+              cold, hot_deg, send_rpm);
+    send_am_broadcast(mode, target, send_rpm, cold, wl);
 
     last_bcast_valid   = 1;
     last_mode          = mode;
     last_target_temp   = target;
     last_rpm           = send_rpm;
-    last_cold          = actual_cold;
+    last_cold          = cold;
     last_wind_level    = wl;
 
-    save_cold(actual_cold);
+    save_cold(cold);
 }
 
 /**
@@ -2751,14 +2744,15 @@ static int prev_emerg_level = 0;
  * Gear 模式：apply_gear 内部限速
  */
 static void rate_limited_execute(void) {
-    // --- PID 模式 ---
+    // --- PID 模式：制冷限速 → 独立风扇计算（不跟 PID 输出）→ 风扇限速 → 纯下发 ---
     if (ctrl_mode == 1) {
-        // 限速已内建到 apply_gear_direct，此处只管传目标值
-        apply_gear_direct(1, 5, pid_align_cold, 0);
+        rate_limit_cold(pid_align_cold);
+        int send_rpm = rate_limit_fan(compute_fan_target());
+        apply_gear_direct(1, 5, send_rpm, actual_cold, 0);
         return;
     }
 
-    // --- Gear 模式：限速已内建到 apply_gear ---
+    // --- Gear 模式：限速已内建到 apply_gear（GEAR_AUTO_FAN 分支同样独立计算风扇） ---
     apply_gear(final_gear);
 }
 
@@ -2961,7 +2955,7 @@ static void main_loop(void) {
             float pid_out = pid_compute(compensated_10, dt);
 
             // 直接映射到物理值（无输出平滑）
-            pid_map_output(pid_out, &pid_align_cold, &pid_align_rpm);
+            pid_map_output(pid_out, &pid_align_cold);
 
             pid_log("epoch=%ld Tbatt=%d+comp%+.1f(cpu)=Tinp%d Ttgt=%d Thot=%d dt=%.0fs e=%.2f out=%.2f var=%d",
                      now, pid_input, cpu_comp,
@@ -3253,7 +3247,9 @@ pid_init_done:
     // 强制首次下发（PID 模式使用 apply_gear_direct 避免走 Gear 表）
     last_bcast_valid = 0;
     if (ctrl_mode == 1) {
-        apply_gear_direct(1, 5, pid_align_cold, 0);
+        rate_limit_cold(pid_align_cold);
+        int send_rpm = rate_limit_fan(compute_fan_target());
+        apply_gear_direct(1, 5, send_rpm, actual_cold, 0);
     } else {
         apply_gear(batt_gear_base);
     }

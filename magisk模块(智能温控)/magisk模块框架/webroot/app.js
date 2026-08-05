@@ -148,13 +148,14 @@
     manualCollapse: {},   // 本会话手动折叠的分组（不持久）
     samples: [],
     series: [
-      // 顺序与实时数值列一致；默认除 CPU 外全显示；axis 决定走左/右纵轴
+      // 图例顺序；默认除 CPU 外全显示；axis 决定走左/右纵轴
+      // （实时数值列顺序由 updateLiveRow 独立维护，不受本数组顺序影响）
       { key: 'batt', label: '电池℃', color: '#f44336', on: true, unit: '°C', axis: 'left' },
-      { key: 'cpu', label: 'CPU℃', color: '#ff9800', on: false, unit: '°C', axis: 'left' },
       { key: 'coldReal', label: '制冷', color: '#4caf50', on: true, unit: '', axis: 'right' },
       { key: 'rpm', label: '风扇rpm', color: '#9c27b0', on: true, unit: 'rpm', axis: 'left' },
       { key: 'cold', label: '冷端℃', color: '#2196f3', on: true, unit: '°C', axis: 'left' },
-      { key: 'hot', label: '热端℃', color: '#e91e63', on: true, unit: '°C', axis: 'left' }
+      { key: 'hot', label: '热端℃', color: '#e91e63', on: true, unit: '°C', axis: 'left' },
+      { key: 'cpu', label: 'CPU℃', color: '#ff9800', on: false, unit: '°C', axis: 'left' }
     ],
     logText: '',
     logFilter: '',
@@ -215,7 +216,6 @@
 
   function updateCollapse() {
     var perfOn = masterOn('PERF_ENABLED');
-    var debugOn = masterOn('DEBUG_ENABLED');
     var modeVal = S.values['CTRL_MODE'] !== undefined ? S.values['CTRL_MODE'] : '1'; // 未读到时默认 PID
     SCHEMA.groups.forEach(function (g) {
       var head = $('head-' + g.id), chev = $('chev-' + g.id), badge = $('badge-' + g.id);
@@ -241,12 +241,15 @@
         head.classList.toggle('off', off);
         if (badge) badge.classList.toggle('hidden', !off);
         chev.textContent = open ? '▾' : '▸';
-      } else if (g.master === 'DEBUG_ENABLED') {
+      } else if (g.headerSwitch && g.subKeys) {
+        // 开关驱动子面板（[1] 日志&调试、[0] 通用参数、控制模式&PID 共用）：
+        // 开关关 → 子面板折叠，可手动展开查看/编辑（不改总开关）
+        var swOn = masterOn(g.headerSwitch);
         var sub = $('sub-' + g.id);
-        open = debugOn ? !S.manualCollapse[g.id] : !!S.manualExpand[g.id];
+        open = swOn ? !S.manualCollapse[g.id] : !!S.manualExpand[g.id];
         sub.classList.toggle('collapsed', !open);
-        head.classList.toggle('off', !debugOn);
-        if (badge) badge.classList.toggle('hidden', debugOn);
+        head.classList.toggle('off', !swOn);
+        if (badge) badge.classList.toggle('hidden', swOn);
         chev.textContent = open ? '▾' : '▸';
       }
     });
@@ -894,16 +897,7 @@
   function renderGroups() {
     var root = $('groups');
     root.innerHTML = '';
-    var modeRendered = false;
     SCHEMA.groups.forEach(function (g) {
-      // 控制模式开关：渲染在 PID / Gear 分组之前，始终可见（无论当前处于哪种模式）
-      if (g.mode && !modeRendered) {
-        modeRendered = true;
-        var ms = document.createElement('div');
-        ms.className = 'mode-switch';
-        ms.appendChild(buildControl('CTRL_MODE'));
-        root.appendChild(ms);
-      }
       root.appendChild(buildGroup(g));
     });
   }
