@@ -10,20 +10,21 @@ window.B6X_SCHEMA = {
   statusB7: "/data/local/tmp/tempctrl_b7x.status",
   gearFile: "/data/local/tmp/tempctrl.gear",
   dataFile: "/data/local/tmp/tempctrl_webui.data",  // C 每 1s 写入的曲线数据文件
-  chartWindowOptions: [30, 60, 90, 120, 180, 240],
+  chartWindowOptions: [60, 90, 120, 180, 240, 360, 480],
 
   groups: [
-    {
-      id: "g0", title: "[0] 总开关", master: null, masterKey: "PERF_ENABLED",
-      headerSwitch: "PERF_ENABLED",
-      keys: []
-    },
+    // [1] 日志 & 调试 置于总开关上方
     {
       id: "g1", title: "[1] 日志 & 调试", master: "DEBUG_ENABLED",
       headerSwitch: "DEBUG_ENABLED",
       keys: [],
       subKeys: ["DEBUG_SENSOR", "DEBUG_EMERG", "DEBUG_BATT", "DEBUG_EXEC",
                 "DEBUG_CONN", "DEBUG_CONFIG", "DEBUG_MAIN", "DEBUG_PID"]
+    },
+    {
+      id: "g0", title: "[0] 总开关", master: null, masterKey: "PERF_ENABLED",
+      headerSwitch: "PERF_ENABLED",
+      keys: []
     },
     {
       id: "g2", title: "[2] sysfs 路径与缩放", master: "PERF_ENABLED",
@@ -34,11 +35,13 @@ window.B6X_SCHEMA = {
     {
       id: "g3", title: "[3] 通用参数", master: "PERF_ENABLED",
       keys: ["RATE_LIMIT_FAN_UP", "RATE_LIMIT_FAN_DOWN", "FAN_RPM_CHANGE_THRESHOLD",
-             "RATE_LIMIT_COLD", "RATE_LIMIT_TEMP", "CTRL_MODE", "BATT_BASELINE",
+             "RATE_LIMIT_COLD", "RATE_LIMIT_TEMP", "BATT_BASELINE",
              "COLD_MAP_START", "COLD_MAP_EXP", "HOT_MAP", "RPM_SMOOTH_ALPHA", "FAN_RPM"]
     },
     {
+      // 控制模式：CTRL_MODE=1 时显示本组（PID 无级调节）
       id: "g4", title: "[4] PID 模式控制", master: "PERF_ENABLED",
+      mode: { key: "CTRL_MODE", on: "1" },
       keys: ["PID_KP", "PID_KI", "PID_INTEGRAL_LIMIT", "PID_KI_VAR_THRESHOLD",
              "PID_KI_VAR_SAMPLES", "PID_KI_DEADBAND", "PID_KD", "PID_INPUT_FILTER_ENABLED",
              "PID_FILTER_AUTO_THRESHOLD", "PID_ALPHA", "PID_CPU_COMP_ENABLED",
@@ -46,24 +49,23 @@ window.B6X_SCHEMA = {
              "PID_PREDICT_RISE", "PID_PREDICT_MIN_DELTA", "PID_COLD"]
     },
     {
-      id: "g5", title: "[5] Gear 模式 — 电池控制", master: "PERF_ENABLED",
+      // 控制模式：CTRL_MODE=0 时显示本组（含原 [5]电池控制 + [6]紧急干预 + [7]挡位表）
+      id: "g5", title: "Gear 模式", master: "PERF_ENABLED",
+      mode: { key: "CTRL_MODE", on: "0" },
       keys: ["BATT_BOUNDARY", "BATT_COOLDOWN_CYCLES", "CURRENT_GEAR_MODE",
              "CURRENT_GEAR_MULT", "CURRENT_GEAR_SMOOTH_ALPHA", "CURRENT_GEAR_MIN",
-             "REV_COMP", "REV_COMP_T", "REV_COMP_COOLDOWN", "TREND_RESET_THRESHOLD"]
-    },
-    {
-      id: "g6", title: "[6] Gear 模式 — 紧急干预", master: "PERF_ENABLED",
-      keys: ["EMERG_CPU_ENABLED", "CPU_EMERG", "CPU_FILTER_ALPHA", "EMERG_MODE",
+             "REV_COMP", "REV_COMP_T", "REV_COMP_COOLDOWN", "TREND_RESET_THRESHOLD",
+             "EMERG_CPU_ENABLED", "CPU_EMERG", "CPU_FILTER_ALPHA", "EMERG_MODE",
              "EMERG_FORCED", "EMERG_EXIT_CAP_OFFSET", "EMERG_STEP",
              "EMERG_EXIT_BATT_THRESHOLD", "EMERG_RECOVERY_MULT",
-             "EMERG_RECOVERY_PHASE_CYCLES"]
-    },
-    {
-      id: "g7", title: "[7] Gear 模式 — 挡位表", master: "PERF_ENABLED",
-      keys: ["GEAR_CONFIG_ENABLED", "GEAR_AUTO_FAN"],
+             "EMERG_RECOVERY_PHASE_CYCLES",
+             "GEAR_CONFIG_ENABLED", "GEAR_AUTO_FAN"],
       gearTables: ["GEAR_B6X_", "GEAR_B7X_"]
     }
   ],
+
+  // 控制模式选择器：渲染在 PID / Gear 分组之前，始终可见
+  modeSwitch: { key: "CTRL_MODE" },
 
   keys: {
     // ---- [0] ----

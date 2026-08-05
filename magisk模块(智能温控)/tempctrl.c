@@ -213,6 +213,9 @@ static int RATE_LIMIT_COLD_MULT = 10;  // 制冷强度倍率：升速/降速 = b
 static int RATE_LIMIT_FAN_UP = 200;   // 风扇升速基础值：RPM_UP = base + d × mult / 10
 static int RATE_LIMIT_FAN_MULT = 50;  // 风扇升速倍率（RATE_LIMIT_FAN_UP 双值第二位）
 static int cycle_batt_temp = -1;       // 本周期电池温度（-1=未就绪）
+// --- 1s 采集缓存：5s 控制块直接读缓存，不再重复读 sysfs/状态文件 ---
+static int cached_batt_raw = -1;   // 电池温度（0.1°C），保留上次成功值抗抖
+static int cached_cpu_now  = -1;   // CPU 最高温度（0.1°C），保留上次成功值抗抖
 
 // ======================== 实际值 ========================
 // 始终向目标档位的表格值靠拢，每周期最多变动速率限制的量
@@ -335,7 +338,7 @@ static time_t config_mtime = 0;
 // ======================== PID 模式控制（CTRL_MODE=1）================
 // --- 核心参数 ---
 static int pid_kp = 300;                  // PID_KP（÷1000，1°C→P=40%）
-static int pid_ki = 50;                   // PID_KI（÷1000）
+static int pid_ki = 75;                   // PID_KI（÷1000）
 static int pid_kd = 240;                  // PID_KD
 static int pid_integral_limit = 800;      // PID_INTEGRAL_LIMIT（÷1000）
 
@@ -433,7 +436,7 @@ static char status_file_path_b7[512] = "/data/local/tmp/tempctrl_b7x.status";
 
 // WebUI 曲线数据文件（每 1 秒一行，滚动保留最大曲线窗口秒数）
 #define WEBUI_DATA_PATH       "/data/local/tmp/tempctrl_webui.data"
-#define WEBUI_DATA_MAX_LINES  240   // = 曲线最大时间挡位（秒）
+#define WEBUI_DATA_MAX_LINES  480   // = 曲线最大时间挡位（秒）
 static char gear_file_path[512] = "";
 
 // 三方 app 包名（v2.7：farsef 在最近连 B6X 散热器时也参与仲裁）
@@ -689,21 +692,22 @@ static void load_config(const char *path) {
         }
     }
 
-    if (!perf_enabled && !found_debug) {
-        debug_log(debug_config, "配置 PERF=0 且 DEBUG=0，跳过解析");
-        fclose(f);
-        return;
-    }
-
-    if (perf_enabled) {
-        write_log("配置 自定义性能参数 启用");
-    }
-
+    // debug_mode 必须在提前 return 之前更新：PERF=0 且 DEBUG=0 时也要清零，
+    // 否则 debug_mode 保持旧值 → 分区开关不重解析、debug 日志继续输出
     if (found_debug) {
         debug_mode = 1;
         write_log("配置 调试日志 开启");
     } else {
         debug_mode = 0;
+    }
+
+    if (!perf_enabled && !found_debug) {
+        fclose(f);   // PERF=0 且 DEBUG=0：debug_mode 已清零，跳过解析
+        return;
+    }
+
+    if (perf_enabled) {
+        write_log("配置 自定义性能参数 启用");
     }
 
     // --- 第二遍：全量单次扫描，仅分两层（PERF/DEBUG），无子守卫 ---
@@ -1629,14 +1633,27 @@ static void calc_dynamic_rates(int *out_fan_up, int *out_cold_up, int *out_cold_
  * 防抖仅在下降低于阈值内时生效（上升自由爬升，避免数周期锁死）；
  * 距最低转速 < 阈值×1.5 时防抖失效（接近最低转速无需防突降噪音）。
  */
-static int rate_limit_fan_cold(int desired_rpm, int desired_cold) {
+/**
+ * 制冷强度限速（升降独立，负值方向已 clamp 到 0）。
+ * 更新 actual_cold；调用方随后用限速后的实际制冷重算风扇目标。
+ */
+static void rate_limit_cold(int desired_cold) {
+    int fan_up, cold_up, cold_down;
+    calc_dynamic_rates(&fan_up, &cold_up, &cold_down);
+    rate_limit(&actual_cold, desired_cold, cold_up, cold_down);
+}
+
+/**
+ * 风扇转速限速（升降独立速率，含降速防抖）。
+ * 返回限速后的实际风扇转速，向上取整到 50 的倍数并钳制到设备范围。
+ *
+ * 防抖仅在下降低于阈值内时生效（上升自由爬升，避免数周期锁死）；
+ * 距最低转速 < 阈值×1.5 时防抖失效（接近最低转速无需防突降噪音）。
+ */
+static int rate_limit_fan(int desired_rpm) {
     int fan_up, cold_up, cold_down;
     calc_dynamic_rates(&fan_up, &cold_up, &cold_down);
 
-    // 制冷强度限速（升降独立，负值方向已 clamp 到 0）
-    rate_limit(&actual_cold, desired_cold, cold_up, cold_down);
-
-    // 风扇转速限速（升降独立速率）
     int near_min_rpm = (actual_rpm - fan_rpm_min) < fan_rpm_change_threshold * 3 / 2;
     if (fan_rpm_change_threshold > 0 && !near_min_rpm &&
         desired_rpm < actual_rpm && (actual_rpm - desired_rpm) <= fan_rpm_change_threshold)
@@ -1661,19 +1678,22 @@ static int apply_gear(int level) {
     level = clamp(level, gear_min, gear_max);
     build_params(level, &mode, &target, &windOC, &coldOC, &windLevel);
 
-    // GEAR_AUTO_FAN：用冷端+热端双映射计算风扇转速，挡位表风扇转速变为截断上限
+    // 制冷强度限速（升降独立，负值方向已 clamp 到 0）
+    rate_limit_cold(coldOC);
+
+    // GEAR_AUTO_FAN：用限速后的实际制冷 + 热端双映射计算风扇转速，挡位表风扇转速变为截断上限
     if (gear_auto_fan && mode == 1) {
         int cap_rpm = windOC;
-        int calc_rpm = rpm_from_cold_exp(coldOC);
+        int calc_rpm = rpm_from_cold_exp(actual_cold);
         if (cooler_hot_temp > 0) {
             calc_rpm = rpm_combine_weighted(rpm_from_hot_end(cooler_hot_temp), calc_rpm);
         }
         windOC = (calc_rpm < cap_rpm) ? calc_rpm : cap_rpm;
     }
 
-    // 风扇转速限速（升降独立）+ 制冷强度限速（升降独立，负值方向已 clamp 到 0），含降速防抖
+    // 风扇转速限速（升降独立，含降速防抖）
     int desired_rpm = (mode == 0) ? windLevel : windOC;
-    int send_rpm = rate_limit_fan_cold(desired_rpm, coldOC);
+    int send_rpm = rate_limit_fan(desired_rpm);
 
     // 目标温度限速（仅智能温控模式；<0 时 rate_limit 直接初始化）
     if (mode == 0 || actual_target_temp < 0)
@@ -1687,7 +1707,7 @@ static int apply_gear(int level) {
     coldOC = actual_cold;
     target = actual_target_temp;
 
-    // ---- 风扇转速向上取整到 50 的倍数（rate_limit_fan_cold 已钳制到设备范围）----
+    // ---- 风扇转速向上取整到 50 的倍数（rate_limit_fan 已钳制到设备范围）----
     if (mode == 0)
         windLevel = send_rpm;
     else
@@ -1828,7 +1848,7 @@ static void arbitrate_apps(void) {
  * 趋势豁免：反补被抑制时抬高生效阈值，锚点温度复位。
  */
 static void battery_control(void) {
-    int batt = read_battery_temp();
+    int batt = cached_batt_raw;   // 1s 采集缓存
     if (batt < 0) {
         temp_idle_cycles++;  // 传感器偶发失败时递增空闲计数，保证温差归一化正确
         return;
@@ -2057,8 +2077,8 @@ static void battery_control(void) {
  * 等级 → 强制最低档位：EMERG_FORCED_1~4。
  */
 static void emergency_intervention(void) {
-    // --- 1. CPU 温度读入与滤波 ---
-    int cpu_now = read_cpu_temp_max();
+    // --- 1. CPU 温度读入与滤波（1s 采集缓存） ---
+    int cpu_now = cached_cpu_now;
     if (cpu_now >= 0) {
         if (first_run) {
             cpu_filtered_temp = cpu_now;
@@ -2180,8 +2200,8 @@ static int gear_from_current(void) {
               is_charging ? "充电" : "放电", abs_ua10, curr_gear_smooth_val,
               recommended, gear_label(recommended));
 
-    // 5. 温度偏移管理
-    int batt = read_battery_temp();
+    // 5. 温度偏移管理（1s 采集缓存）
+    int batt = cached_batt_raw;
     if (curr_gear_recommended > 0) {
         // 已激活：每周期根据当前温度差计算偏移（不受冷却期阻挡）
         // 冷却期仅阻止同方向继续累积，但反方向（温度回归方向）始终允许
@@ -2576,9 +2596,16 @@ static void pid_map_output(float output, int *out_cold, int *out_rpm) {
  * 与 apply_gear 共享 last_* 去重缓存
  */
 static void apply_gear_direct(int mode, int target,
-                               int rpm, int cold, int wl) {
-    // 限速下沉：制冷强度 + 风扇转速（升降独立），含降速防抖
-    int send_rpm = rate_limit_fan_cold(rpm, cold);
+                               int cold, int wl) {
+    // 限速下沉：先限速制冷强度，再用限速后的实际制冷重算风扇目标
+    //（冷端指数映射 + 热端线性映射加权合并），最后限速风扇
+    rate_limit_cold(cold);
+
+    int calc_rpm = rpm_from_cold_exp(actual_cold);
+    if (cooler_hot_temp > 0) {
+        calc_rpm = rpm_combine_weighted(rpm_from_hot_end(cooler_hot_temp), calc_rpm);
+    }
+    int send_rpm = rate_limit_fan(calc_rpm);
 
     // ---- 去重检测（用限速后的 actual_* 值）----
     if (last_bcast_valid &&
@@ -2727,7 +2754,7 @@ static void rate_limited_execute(void) {
     // --- PID 模式 ---
     if (ctrl_mode == 1) {
         // 限速已内建到 apply_gear_direct，此处只管传目标值
-        apply_gear_direct(1, 5, pid_align_rpm, pid_align_cold, 0);
+        apply_gear_direct(1, 5, pid_align_cold, 0);
         return;
     }
 
@@ -2760,7 +2787,7 @@ static void main_loop(void) {
     // --- PID 模式：跳过档位/紧急逻辑，直接 PID 计算 ---
     if (ctrl_mode == 1) {
         time_t now = time(NULL);
-        int batt_raw = read_battery_temp();
+        int batt_raw = cached_batt_raw;   // 1s 采集缓存
         if (batt_raw < 0) return;
 
         // --- 温度更新周期跟踪（基于周期数，非时间） ---
@@ -2835,7 +2862,7 @@ static void main_loop(void) {
         }
 
         // --- CPU 温度读入与滤波（用于补偿，两模式共享） ---
-        int cpu_now = read_cpu_temp_max();
+        int cpu_now = cached_cpu_now;   // 1s 采集缓存
         if (cpu_now >= 0) {
             if (first_run) {
                 cpu_filtered_temp = cpu_now;
@@ -2995,7 +3022,7 @@ static void main_loop(void) {
     //    否则 → 不退出（保持当前档位）
     //    注意：恢复期启动已在步骤 1 中完成，此处只做 cap/drop
     if (emergency_level < prev_emerg_level) {
-        int batt_temp = read_battery_temp();
+        int batt_temp = cached_batt_raw;   // 1s 采集缓存
         enum { EXIT_NONE = 0, EXIT_HALF = 1, EXIT_FULL = 2 };
         int exit_mode = EXIT_FULL;
         if (batt_temp >= 0) {
@@ -3086,7 +3113,7 @@ static int match_nearest_gear_for_reconnect(void) {
 // ======================== 程序入口 ========================
 
 /**
- * 每 1 秒采集一次并写入 WebUI 曲线数据文件（滚动保留 240 行）。
+ * 每 1 秒采集一次并写入 WebUI 曲线数据文件（滚动保留 480 行）。
  * 行格式：epoch,电池(0.1°C),CPU(0.1°C),热端(0.1°C),冷端(0.1°C),实际转速,实际制冷,目标制冷
  * 未就绪的值为 -1，WebUI 端忽略该采样点。
  */
@@ -3094,6 +3121,9 @@ static void write_webui_data(void) {
     int batt = read_battery_temp();
     int cpu  = read_cpu_temp_max();
     read_cooler_params();   // 更新 cooler_* 全局（热/冷端、实际转速、实际制冷）
+    // 1s 采集缓存：5s 控制块直接读缓存，不再重复读 sysfs/状态文件（保留上次成功值抗抖）
+    if (batt >= 0) cached_batt_raw = batt;
+    if (cpu  >= 0) cached_cpu_now  = cpu;
     char buf[WEBUI_DATA_MAX_LINES][96];
     int n = 0;
     FILE *rf = fopen(WEBUI_DATA_PATH, "r");
@@ -3223,13 +3253,13 @@ pid_init_done:
     // 强制首次下发（PID 模式使用 apply_gear_direct 避免走 Gear 表）
     last_bcast_valid = 0;
     if (ctrl_mode == 1) {
-        apply_gear_direct(1, 5, pid_align_rpm, pid_align_cold, 0);
+        apply_gear_direct(1, 5, pid_align_cold, 0);
     } else {
         apply_gear(batt_gear_base);
     }
 
     // ---- 主循环：1 秒节拍（采集 + 控制分离） ----
-    // 每 1s：采集电池/CPU/散热器回传 → 写 WebUI 曲线数据文件（滚动 240 行）
+    // 每 1s：采集电池/CPU/散热器回传 → 写 WebUI 曲线数据文件（滚动 480 行）
     // 每 5s（时间判定）：执行控制（仲裁/存活/主循环/限速下发）；原"5 秒间隔对齐"已删除
     time_t last_ctrl = 0;
     while (running) {
@@ -3269,8 +3299,7 @@ pid_init_done:
                 continue;   // 无可用设备，5s 后重试
             }
 
-            // 3. 读取 active_device 的散热器回传参数
-            read_cooler_params();
+            // 3. 散热器回传参数（cooler_*）由 1s 采集路径维护，此处直接用缓存
             debug_log(debug_conn, "main 当前设备=%s ble=%d",
                       (active_device == DEVICE_B7X) ? "b7x" : "b6x", app_ble_connected);
 
@@ -3292,7 +3321,7 @@ pid_init_done:
             main_loop();
 
             // ★ 速率限制执行（替代逐档变动 + RPM 平滑跟踪）
-            cycle_batt_temp = read_battery_temp();
+            cycle_batt_temp = cached_batt_raw;   // 1s 采集缓存
             rate_limited_execute();
         }
 

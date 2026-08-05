@@ -28,10 +28,6 @@
 
   // ---------- 小工具 ----------
   function $(id) { return document.getElementById(id); }
-  function setLoadStatus(t) {
-    var el = $('loadStatus');
-    if (el) { el.textContent = t; el.classList.remove('err'); el.classList.remove('hidden'); }
-  }
   function uiLog(msg) {
     var el = $('uiDiagBody');
     if (el) {
@@ -152,12 +148,13 @@
     manualCollapse: {},   // 本会话手动折叠的分组（不持久）
     samples: [],
     series: [
-      { key: 'batt', label: '电池°C', color: '#f44336', on: true, unit: '°C' },
-      { key: 'cpu', label: 'CPU°C', color: '#ff9800', on: true, unit: '°C' },
-      { key: 'hot', label: '热端°C', color: '#e91e63', on: false, unit: '°C' },
-      { key: 'cold', label: '冷端°C', color: '#2196f3', on: false, unit: '°C' },
-      { key: 'coldReal', label: '制冷', color: '#4caf50', on: false, unit: '' },
-      { key: 'rpm', label: '风扇rpm', color: '#9c27b0', on: false, unit: 'rpm' }
+      // 顺序与实时数值列一致；默认除 CPU 外全显示；axis 决定走左/右纵轴
+      { key: 'batt', label: '电池℃', color: '#f44336', on: true, unit: '°C', axis: 'left' },
+      { key: 'cpu', label: 'CPU℃', color: '#ff9800', on: false, unit: '°C', axis: 'left' },
+      { key: 'coldReal', label: '制冷', color: '#4caf50', on: true, unit: '', axis: 'right' },
+      { key: 'rpm', label: '风扇rpm', color: '#9c27b0', on: true, unit: 'rpm', axis: 'left' },
+      { key: 'cold', label: '冷端℃', color: '#2196f3', on: true, unit: '°C', axis: 'left' },
+      { key: 'hot', label: '热端℃', color: '#e91e63', on: true, unit: '°C', axis: 'left' }
     ],
     logText: '',
     logFilter: '',
@@ -168,7 +165,7 @@
   function parseConfig(text) {
     var lines = text.split('\n');
     return lines.map(function (raw) {
-      var m = raw.match(/^([A-Za-z0-9_]+)=(.*)$/);
+      var m = raw.match(/^([A-Za-z0-9_]+)=([^\r\n]*)/);   // 兼容 CRLF/LF 行尾
       if (m) {
         // 剥离行内注释（如 LOG_MAX=7936   # 字节），与 C 解析器行为一致（atoi/sscanf 停在非数字处）
         var value = m[2].replace(/\s*#.*$/, '');
@@ -199,7 +196,7 @@
       if (el.type === 'checkbox') el.checked = (val !== '0');
       else if (el.tagName === 'INPUT' && !el.dataset.rowField) el.value = val;
     }
-    if (key === 'PERF_ENABLED' || key === 'DEBUG_ENABLED') updateCollapse();
+    if (key === 'PERF_ENABLED' || key === 'DEBUG_ENABLED' || key === 'CTRL_MODE') updateCollapse();
     scheduleSave();
   }
 
@@ -219,12 +216,25 @@
   function updateCollapse() {
     var perfOn = masterOn('PERF_ENABLED');
     var debugOn = masterOn('DEBUG_ENABLED');
+    var modeVal = S.values['CTRL_MODE'] !== undefined ? S.values['CTRL_MODE'] : '1'; // 未读到时默认 PID
     SCHEMA.groups.forEach(function (g) {
       var head = $('head-' + g.id), chev = $('chev-' + g.id), badge = $('badge-' + g.id);
       var body = $('body-' + g.id);
       if (!head || !body) return;
       var open, off;
-      if (g.master === 'PERF_ENABLED') {
+      if (g.mode) {
+        // 模式分组：非活动模式完全隐藏；活动模式受 PERF 总开关折叠控制
+        var match = modeVal === g.mode.on;
+        var sec = $('group-' + g.id);
+        if (sec) sec.classList.toggle('mode-hidden', !match);
+        if (!match) return;
+        open = perfOn ? !S.manualCollapse[g.id] : !!S.manualExpand[g.id];
+        off = !perfOn;
+        body.classList.toggle('collapsed', !open);
+        head.classList.toggle('off', off);
+        if (badge) badge.classList.toggle('hidden', !off);
+        chev.textContent = open ? '▾' : '▸';
+      } else if (g.master === 'PERF_ENABLED') {
         open = perfOn ? !S.manualCollapse[g.id] : !!S.manualExpand[g.id];
         off = !perfOn;
         body.classList.toggle('collapsed', !open);
@@ -588,7 +598,8 @@
 
   // ---------- 曲线数据：读 C 每 1s 写的数据文件（无现场采样，减少 exec） ----------
   function parseDataLines(text) {
-    // 行格式：epoch,电池,CPU,热端,冷端,实际转速,实际制冷,目标制冷（未就绪为 -1）
+    // 行格式：epoch,电池(0.1°C),CPU(0.1°C),热端(0.1°C),冷端(0.1°C),实际转速,实际制冷,目标制冷（未就绪为 -1）
+    // 温度统一 ÷10 → °C（一位小数）；转速/制冷保持原值
     var out = [];
     var lines = String(text || '').split('\n');
     for (var i = 0; i < lines.length; i++) {
@@ -599,8 +610,8 @@
       var rpm = num(5), coldReal = num(6), gearCold = num(7);
       out.push({
         t: e,
-        batt: batt != null && batt >= 0 ? batt : null,
-        cpu: cpu != null && cpu >= 0 ? cpu : null,
+        batt: batt != null && batt >= 0 ? batt / 10 : null,
+        cpu: cpu != null && cpu >= 0 ? cpu / 10 : null,
         hot: hot != null && hot >= 0 ? hot / 10 : null,
         cold: cold != null && cold >= 0 ? cold / 10 : null,
         rpm: rpm != null && rpm >= 0 ? rpm : null,
@@ -623,17 +634,16 @@
 
   function updateLiveRow(o) {
     var bits = [];
-    if (o.batt != null) bits.push('电池 ' + (o.batt / 10).toFixed(1) + '°C');
-    if (o.cpu != null) bits.push('CPU ' + (o.cpu / 10).toFixed(1) + '°C');
-    if (o.gearCold != null) bits.push('目标制冷 ' + o.gearCold);
-    if (o.coldReal != null) bits.push('实际制冷 ' + o.coldReal);
+    if (o.batt != null) bits.push('电池 ' + o.batt.toFixed(1) + '°C');
+    if (o.cpu != null) bits.push('CPU ' + o.cpu.toFixed(1) + '°C');
+    if (o.coldReal != null) bits.push('制冷 ' + o.coldReal);
     if (o.rpm != null) bits.push('风扇 ' + o.rpm + 'rpm');
-    if (o.hot != null) bits.push('热端 ' + o.hot.toFixed(1) + '°C');
     if (o.cold != null) bits.push('冷端 ' + o.cold.toFixed(1) + '°C');
+    if (o.hot != null) bits.push('热端 ' + o.hot.toFixed(1) + '°C');
     $('liveRow').textContent = bits.length ? bits.join(' · ') : '等待数据…';
   }
 
-  // ---------- 曲线 ----------
+  // ---------- 曲线（双纵轴：左 ℃/rpm，右 cold） ----------
   function drawChart() {
     var cv = $('chart'), dpr = window.devicePixelRatio || 1;
     var cw = cv.clientWidth, ch = cv.clientHeight;
@@ -642,43 +652,75 @@
     var ctx = cv.getContext('2d');
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     ctx.clearRect(0, 0, cw, ch);
-    var padL = 34, padR = 8, padT = 10, padB = 4;
+    var padL = 36, padR = 36, padT = 16, padB = 4;
     var W = cw - padL - padR, H = ch - padT - padB;
-    var data = S.samples.slice(-(S.window || 60));   // 只画最近 window 秒
-    var enabled = S.series.filter(function (s) { return s.on; });
-    if (data.length < 2 || !enabled.length) {
+    var data = S.samples.slice(-(S.window || 240));   // 只画最近 window 秒
+    var leftSeries = S.series.filter(function (s) { return s.on && s.axis === 'left'; });
+    var rightSeries = S.series.filter(function (s) { return s.on && s.axis === 'right'; });
+    if (data.length < 2 || (!leftSeries.length && !rightSeries.length)) {
       ctx.fillStyle = '#888'; ctx.font = '12px system-ui';
       ctx.fillText(data.length < 2 ? '采样中…' : '无曲线', padL + W / 2 - 24, padT + H / 2);
       return;
     }
-    var min = Infinity, max = -Infinity;
-    enabled.forEach(function (s) {
-      data.forEach(function (d) { if (d[s.key] == null) return; if (d[s.key] < min) min = d[s.key]; if (d[s.key] > max) max = d[s.key]; });
-    });
-    if (!isFinite(min)) { return; }
-    var span = (max - min) || 1;
-    min -= span * 0.12; max += span * 0.12;
-    // Y 轴刻度
-    ctx.font = '10px system-ui'; ctx.fillStyle = '#888'; ctx.textAlign = 'right';
-    for (var i = 0; i <= 4; i++) {
-      var val = min + (max - min) * i / 4;
-      var y = padT + H * (1 - i / 4);
-      ctx.fillText(val.toFixed(val >= 100 ? 0 : 1), padL - 4, y + 3);
-      ctx.strokeStyle = 'rgba(128,128,128,0.15)';
-      ctx.beginPath(); ctx.moveTo(padL, y); ctx.lineTo(padL + W, y); ctx.stroke();
-    }
-    enabled.forEach(function (s) {
-      ctx.strokeStyle = s.color; ctx.lineWidth = 1.6;
-      ctx.beginPath();
-      var started = false;
-      data.forEach(function (d) {
-        if (d[s.key] == null) return;
-        var x = padL + W * (data.length === 1 ? 0.5 : (data.indexOf(d) / (data.length - 1)));
-        var y = padT + H * (1 - (d[s.key] - min) / (max - min));
-        if (started) ctx.lineTo(x, y); else { ctx.moveTo(x, y); started = true; }
+    // 取值：左轴 = 温度(℃) 或 风扇转速÷100；右轴 = 制冷强度
+    function leftV(s, d) { return s.key === 'rpm' ? (d.rpm == null ? null : d.rpm / 100) : d[s.key]; }
+    function rightV(s, d) { return d[s.key]; }
+    // 计算一轴的范围（上下各留 10% 余量）
+    function range(series, getV) {
+      var mn = Infinity, mx = -Infinity;
+      series.forEach(function (s) {
+        data.forEach(function (d) { var v = getV(s, d); if (v == null) return; if (v < mn) mn = v; if (v > mx) mx = v; });
       });
-      ctx.stroke();
-    });
+      if (!isFinite(mn) || !isFinite(mx)) return null;
+      var sp = (mx - mn) || 1;
+      return { min: mn - sp * 0.1, max: mx + sp * 0.1 };
+    }
+    var L = range(leftSeries, leftV), R = range(rightSeries, rightV);
+    function yOf(axis, v) { return padT + H * (1 - (v - axis.min) / (axis.max - axis.min)); }
+    ctx.font = '10px system-ui'; ctx.fillStyle = '#888';
+    // 左轴刻度 + 网格
+    if (L) {
+      ctx.textAlign = 'right';
+      for (var i = 0; i <= 4; i++) {
+        var val = L.min + (L.max - L.min) * i / 4;
+        var y = yOf(L, val);
+        ctx.fillText(val.toFixed(1), padL - 4, y + 3);
+        ctx.strokeStyle = 'rgba(128,128,128,0.15)';
+        ctx.beginPath(); ctx.moveTo(padL, y); ctx.lineTo(padL + W, y); ctx.stroke();
+      }
+      // 轴标题靠左绘制：允许向右突出到曲线区内（避免标题过长挤压曲线横向空间）
+      ctx.textAlign = 'left';
+      ctx.fillText('℃/百rpm', 2, padT - 2);
+    }
+    // 右轴刻度
+    if (R) {
+      ctx.textAlign = 'left';
+      for (var j = 0; j <= 4; j++) {
+        var rval = R.min + (R.max - R.min) * j / 4;
+        var ry = yOf(R, rval);
+        ctx.fillText(rval.toFixed(0), padL + W + 4, ry + 3);
+      }
+      ctx.fillText('cold', padL + W + 4, padT - 2);
+      ctx.textAlign = 'right';
+    }
+    // 画线
+    function plot(series, getV, axis) {
+      series.forEach(function (s) {
+        ctx.strokeStyle = s.color; ctx.lineWidth = 1.6;
+        ctx.beginPath();
+        var started = false;
+        data.forEach(function (d) {
+          var v = getV(s, d);
+          if (v == null) return;
+          var x = padL + W * (data.length === 1 ? 0.5 : (data.indexOf(d) / (data.length - 1)));
+          var y = yOf(axis, v);
+          if (started) ctx.lineTo(x, y); else { ctx.moveTo(x, y); started = true; }
+        });
+        ctx.stroke();
+      });
+    }
+    plot(leftSeries, leftV, L);
+    plot(rightSeries, rightV, R);
   }
 
   // ---------- 日志 ----------
@@ -740,15 +782,15 @@
       seg.querySelectorAll('.seg-btn').forEach(function (b) { b.classList.toggle('active', b.dataset.panel === name); });
     }, { passive: true });
     $('pinBtn').addEventListener('click', function () {
-      var pinned = document.body.classList.toggle('pin-scroll');
+      var pinned = document.body.classList.toggle('pin-fixed');
+      document.body.classList.toggle('pin-scroll', !pinned);   // 互斥：移除另一类，避免 CSS 冲突锁死
       $('pinBtn').classList.toggle('active', pinned);
     });
   }
 
   // ---------- 曲线控件 ----------
   function setChartWindow(v) {
-    S.windowCustom = false;
-    S.window = parseInt(v, 10) || 60;
+    S.window = parseInt(v, 10) || 240;
     storeSet('b6xChartWindow', String(S.window));
     updateWindowUI();
     drawChart();
@@ -756,21 +798,15 @@
 
   function updateWindowUI() {
     var wbox = $('chartWindow');
-    var isCustom = S.windowCustom || SCHEMA.chartWindowOptions.indexOf(S.window) === -1;
     wbox.querySelectorAll('.win-btn').forEach(function (x) {
-      var on = isCustom ? x.dataset.w === 'custom' : x.dataset.w === String(S.window);
-      x.classList.toggle('active', on);
+      x.classList.toggle('active', x.dataset.w === String(S.window));
     });
-    var cin = wbox.querySelector('.win-input');
-    if (cin) {
-      cin.style.display = isCustom ? '' : 'none';
-      if (isCustom) cin.value = S.window;
-    }
   }
 
   function initChartUI() {
-    S.window = parseInt(storeGet('b6xChartWindow') || '60', 10) || 60;
-    S.windowCustom = SCHEMA.chartWindowOptions.indexOf(S.window) === -1;
+    var w = parseInt(storeGet('b6xChartWindow') || '240', 10);
+    if (SCHEMA.chartWindowOptions.indexOf(w) === -1) w = 240;   // 旧自定义值回落默认挡位
+    S.window = w;
     var wbox = $('chartWindow');
     SCHEMA.chartWindowOptions.forEach(function (v) {
       var b = document.createElement('button');
@@ -780,27 +816,6 @@
       b.addEventListener('click', function () { setChartWindow(v); });
       wbox.appendChild(b);
     });
-    var cb = document.createElement('button');
-    cb.className = 'win-btn';
-    cb.textContent = '自定义';
-    cb.dataset.w = 'custom';
-    cb.addEventListener('click', function () {
-      S.windowCustom = true;
-      updateWindowUI();
-      var cin = wbox.querySelector('.win-input');
-      if (cin) cin.focus();
-    });
-    wbox.appendChild(cb);
-    var cin = document.createElement('input');
-    cin.type = 'number'; cin.min = 5; cin.max = 600;
-    cin.className = 'win-input';
-    cin.placeholder = '秒';
-    cin.addEventListener('change', function () {
-      var n = parseInt(cin.value, 10);
-      if (isNaN(n) || n < 5 || n > 600) { toast('请输入 5~600 秒', 'err'); updateWindowUI(); return; }
-      setChartWindow(n);
-    });
-    wbox.appendChild(cin);
     updateWindowUI();
 
     var st = $('seriesToggle');
@@ -869,7 +884,7 @@
     updateCollapse();
     if (errText) reportError(errText);
     else if (!Bridge.available) reportError('未检测到 WebUI 桥接 — 请在 KernelSU / KSU-Next / APatch 管理器内打开本模块 WebUI');
-    else setLoadStatus('已加载 · 桥接=' + (Bridge.kind || '?'));
+    else uiLog('已加载 · 桥接=' + (Bridge.kind || '?'));   // 合并进 UI 诊断日志（默认收起）
     refreshCurve();                    // 曲线：读 C 数据文件，每秒一次
     setInterval(refreshCurve, 1000);
     refreshLog();                      // 日志：5 秒刷新一次（增量缓存，减少 exec）
@@ -879,7 +894,18 @@
   function renderGroups() {
     var root = $('groups');
     root.innerHTML = '';
-    SCHEMA.groups.forEach(function (g) { root.appendChild(buildGroup(g)); });
+    var modeRendered = false;
+    SCHEMA.groups.forEach(function (g) {
+      // 控制模式开关：渲染在 PID / Gear 分组之前，始终可见（无论当前处于哪种模式）
+      if (g.mode && !modeRendered) {
+        modeRendered = true;
+        var ms = document.createElement('div');
+        ms.className = 'mode-switch';
+        ms.appendChild(buildControl('CTRL_MODE'));
+        root.appendChild(ms);
+      }
+      root.appendChild(buildGroup(g));
+    });
   }
 
   // 测试钩子：仅当 window.__B6X_TEST__ 显式开启时暴露内部（生产 WebView 无此全局，无影响）
