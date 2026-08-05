@@ -9,7 +9,7 @@
 - **BLE 修复**：修复 Android 16 上飞智散热器工具（B6X + B7X）无法连接的 4 层连环 Bug（[完整修复历程](../参考资料/完整修复历程.md)）
 - **双设备支持**：自动检测包名选择 B6X（`com.flydigi.waspwing.experimental`）或 B7X（`com.fdg.flashplay.farsef`）钩子集，B7X WaspWingManager 混淆名 `t9.j` 自动 fallback
 - **双广播接口**：接收 `com.flydigi.SET_TEMPERATURE`（B6X）或 `com.flydigi.SET_TEMPERATURE_B7`（B7X）广播，将参数转发到对应 SDK 的 `setRunMode()`
-- **双 status 文件心跳**：每 5 秒写入 BLE 状态及散热器运行参数到 `/data/local/tmp/tempctrl_b6x.status` / `tempctrl_b7x.status`，含 `CONNECTED_AT` 时间戳供仲裁
+- **双 status 文件心跳**：每 1 秒写入 BLE 状态及散热器运行参数到 `/data/local/tmp/tempctrl_b6x.status` / `tempctrl_b7x.status`，含 `CONNECTED_AT` 时间戳供仲裁
 - **CPU 占用修复**：修复 DefaultDispatcher 线程空队列忙等导致的 100% CPU 占用
 
 ---
@@ -77,7 +77,7 @@ app/src/main/
 
 ## status 文件协议
 
-模块每 5 秒覆写两个 status 文件，按设备类型选路径：
+模块每 1 秒覆写两个 status 文件，按设备类型选路径：
 
 | 设备 | 路径 |
 |------|------|

@@ -126,7 +126,7 @@ setExperimentalRunMode(
 ## 附：与 b6_devtool（散热器开发者工具）的对比
 
 两 app 同源（同架构、同 SDK、同 `B6ExperimentalActivity` 命名）：
-- `app运行逻辑.md` 已覆盖 b6_devtool 的 BLE 四层修复流程（见 `完整修复历程.md`）
+- `飞智散热器开发者工具运行逻辑.md` 已覆盖 b6_devtool 的 BLE 四层修复流程（见 `完整修复历程.md`）
 - 本 V2 版聚焦**实验模式超频**，是 b6x 增强计划的直接研究标的
 
 > 注：B8X 超频工具 V2 为加固 APK，无法静态分析，见 [B8X加固壳层分析.md](B8X加固壳层分析.md)。

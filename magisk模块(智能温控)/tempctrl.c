@@ -264,7 +264,8 @@ static int trend_exempt_count = 0;
 // --- 电池控制运行状态 ---
 static int batt_gear_base = 0;                // 电池控制决定的基础档位
 static int last_batt_reading = -1;            // 上次读取的电池温度
-static int temp_idle_cycles = 0;              // 温度未变的周期数
+static int temp_idle_cycles = 0;              // 温度值连续未变的控制周期数
+static int BATT_SKIP_MAX = 6;                 // 值连续未变达到此上限时强制处理一次（防卡死，可配置）
 static int batt_gear_cooldown = 0;            // 电池调档冷却剩余周期
 
 // ======================== Gear 模式 — 紧急干预（CTRL_MODE=0）================
@@ -422,10 +423,11 @@ static int cooler_cold_real = -1;         // 实际制冷强度
 // --- 信号 ---
 static volatile int running = 1;
 
-// --- 电池温度 mtime 追踪（替代值比较跳过）---
-static time_t batt_temp_mtime = 0;    // 电池温度文件最后修改时间
-static int batt_cached_temp = -1;      // 最后一次读取的温度缓存
-static int batt_temp_updated = 0;      // 本周期温度是否更新
+// --- 电池温度数值追踪（Scene 式：定时轮询 + 值比较，不依赖 sysfs mtime）---
+static int batt_cached_temp = -1;        // 最后一次读取的温度缓存
+static int batt_temp_updated = 0;        // 最近一次 1s 采集值是否变化（供采样 push 判定）
+static int batt_changed_since_ctrl = 0;  // 自上次 5s 控制以来，1s 层是否检测到过温度变化（累积）
+static int batt_window_changed = 0;      // 当前控制周期快照（main_loop 入口设置，供跳过判定）
 
 // --- 连接状态 ---
 static int STATUS_TIMEOUT = 3;   // v2.5：LSP 每 1 秒写一次 status，mtime 超 3s 判死
@@ -443,6 +445,11 @@ static char gear_file_path[512] = "";
 #define APP_PKG_B6X_OLD "com.flydigi.waspwing.experimental"
 #define APP_PKG_B6X_NEW "com.flydigi.waspwing.experimentanliuliu"
 #define APP_PKG_B7X "com.fdg.flashplay.farsef"
+
+// v2.8：自动拉起散热器 app（优先上次使用的 app）
+static int APP_LAUNCH_ENABLED = 1;      // 总开关：1=允许自动拉起，0=关闭
+static time_t last_launch_attempt = 0;  // 上次拉起尝试时间（冷却用）
+#define APP_LAUNCH_COOLDOWN 60          // 两次拉起最小间隔（秒）
 
 // 双设备 BLE 连接状态
 static int b6_connected = 0;        // B6X: BLE 是否已连接
@@ -690,6 +697,8 @@ static void load_config(const char *path) {
             perf_enabled = atoi(val_str) != 0;
         } else if (strcmp(key, "DEBUG_ENABLED") == 0) {
             found_debug = atoi(val_str) != 0;
+        } else if (strcmp(key, "APP_LAUNCH_ENABLED") == 0) {
+            APP_LAUNCH_ENABLED = (atoi(val_str) != 0);   // 任何模式下都生效（含 PERF=0/DEBUG=0）
         }
     }
 
@@ -845,6 +854,7 @@ static void load_config(const char *path) {
             }
         }
         else if (strcmp(key, "RATE_LIMIT_TEMP") == 0) RATE_LIMIT_TEMP = clamp(val, 1, 30);
+        else if (strcmp(key, "BATT_SKIP_MAX") == 0) BATT_SKIP_MAX = clamp(val, 1, 60);
         else if (strcmp(key, "RATE_LIMIT_FAN_UP") == 0) {
             int rise = RATE_LIMIT_FAN_UP, mult = RATE_LIMIT_FAN_MULT;
             if (sscanf(val_str, "%d %d", &rise, &mult) >= 1) {
@@ -1399,28 +1409,19 @@ static int read_thermal_zone_raw(int zone_id) {
  * 失败返回 -1
  */
 static int read_battery_temp(void) {
-    // 先 stat 检测文件修改时间戳
-    struct stat st;
-    int st_ok = (stat(BATT_TEMP_PATH, &st) == 0);
-
-    // 文件存在且 mtime 未变（非首次）→ 返回缓存，标记未更新
-    if (st_ok && batt_temp_mtime != 0 && st.st_mtime == batt_temp_mtime) {
-        batt_temp_updated = 0;
-        return batt_cached_temp;
-    }
-
-    // mtime 变化或首次 / stat 失败 → 正常读取
+    // Scene 式：定时轮询 + 纯数值比较，不依赖 sysfs mtime。
+    // 部分内核的 sysfs 温度文件 mtime 更新不可靠（不随值变化更新），原 mtime 判断
+    // 会导致温度实际在变却被判"未更新"而大量跳过。改为值比较：值变化才标记更新。
     int raw = read_sysfs_int(BATT_TEMP_PATH);
     if (raw < 0) {
         batt_temp_updated = 0;
         return -1;
     }
     int val = raw / BATT_TEMP_DIVISOR;
-    debug_log(debug_sensor, "batt_temp 原始 %d 除数 %d = %d (%.1f°C) mtime=%ld",
-              raw, BATT_TEMP_DIVISOR, val, val / 10.0, st_ok ? (long)st.st_mtime : 0L);
+    debug_log(debug_sensor, "batt_temp 原始 %d 除数 %d = %d (%.1f°C)",
+              raw, BATT_TEMP_DIVISOR, val, val / 10.0);
+    batt_temp_updated = (val != batt_cached_temp);   // 值变化才标记更新
     batt_cached_temp = val;
-    batt_temp_updated = 1;
-    if (st_ok) batt_temp_mtime = st.st_mtime;
     return val;
 }
 
@@ -1795,6 +1796,30 @@ static void force_stop_app(const char *pkg) {
 }
 
 /**
+ * 自动拉起上次使用的散热器 app（v2.8），带冷却防止反复拉起被杀。
+ * 包名按 last_owner 选择：2→新 B6X app，6/7→farsef，其余/无记录→老 B6X app。
+ * 仅在 APP_LAUNCH_ENABLED=1 且目标 app 未运行时执行。
+ */
+static void launch_last_app(void) {
+    if (!APP_LAUNCH_ENABLED) return;
+    time_t now = time(NULL);
+    if (now - last_launch_attempt < APP_LAUNCH_COOLDOWN) return;
+    last_launch_attempt = now;
+
+    const char *pkg;
+    if      (last_owner == 2)                     pkg = APP_PKG_B6X_NEW;
+    else if (last_owner == 6 || last_owner == 7)  pkg = APP_PKG_B7X;
+    else                                          pkg = APP_PKG_B6X_OLD;  // 无记录/老 app
+    if (app_process_running(pkg)) return;   // 已在运行不重复拉
+
+    char cmd[256];
+    snprintf(cmd, sizeof(cmd),
+             "monkey -p %s -c android.intent.category.LAUNCHER 1 > /dev/null 2>&1", pkg);
+    system(cmd);
+    write_log("自动拉起散热器 app %s", pkg);
+}
+
+/**
  * 三方 app 存活仲裁（v2.7）：每 5 秒调用，read_status_ble_both 之后。
  * 老/新 B6X app 始终参与；farsef 只在最近连接的是 B6X 散热器（BLE_OWNER_LAST==6）时参与，
  * 连 B7X 设备（==7）时不参与（控制另一台设备，不应被杀）。
@@ -1807,6 +1832,13 @@ static void arbitrate_apps(void) {
     int new_alive = app_process_running(APP_PKG_B6X_NEW);
     int far_alive = app_process_running(APP_PKG_B7X);
     int far_in = far_alive && (last_owner == 6);  // farsef 上次连的是 B6X 散热器才参与
+
+    // v2.8：无任何散热器 app 存活 → 自动拉起上次使用的 app（复用下方 keep 的选择逻辑，冷却节流）
+    if (old_alive + new_alive + far_alive == 0) {
+        launch_last_app();
+        return;
+    }
+
     if (old_alive + new_alive + far_in < 2) return;  // 只有一个（或没有）存活，无需仲裁
 
     // 优先保留 BLE_OWNER_LAST 值代表的 app；无记录时回退当前连接者 b6_owner；兜底老 app
@@ -1848,8 +1880,7 @@ static void arbitrate_apps(void) {
 static void battery_control(void) {
     int batt = cached_batt_raw;   // 1s 采集缓存
     if (batt < 0) {
-        temp_idle_cycles++;  // 传感器偶发失败时递增空闲计数，保证温差归一化正确
-        return;
+        return;   // 无有效温度，跳过本周期（idle 已由 main_loop 入口统一维护）
     }
 
     // --- 紧急退出恢复期：阶段推进（用 emerg_recovery_phase 索引，不依赖具体倍率值）---
@@ -1908,13 +1939,13 @@ static void battery_control(void) {
 
     int cur_idle = temp_idle_cycles;  // 快照：自上次有效变化以来已过的空闲周期数
 
-    // mtime 检测：sysfs 文件未更新时跳过本周期，仅递增空闲计数
-    if (!batt_temp_updated) {
-        temp_idle_cycles++;
+    // 温度跳过判定：1s 层检测到值变化（batt_window_changed）→ 进计算；
+    // 未变但 idle 未达 BATT_SKIP_MAX → 跳过；达上限 → 强制处理一次（防卡死）。
+    // idle 递增已由 main_loop 入口统一维护，此处不再自增。
+    if (!batt_window_changed && temp_idle_cycles < BATT_SKIP_MAX) {
         debug_log(debug_batt, "batt_ctrl 温度未更新，跳过本周期 (idle=%d)", temp_idle_cycles);
         return;
     }
-    temp_idle_cycles = 0;
 
     int skip_delta = 0;  // =1 时本次不执行常规升降档
 
@@ -2695,6 +2726,9 @@ static void alarm_handler(int sig) {
  * 不在此处立即下发，防止部分执行后参数组合不协调
  */
 static void reconnect_align(void) {
+    // 清空温度窗口累积标志，避免重连后误判"窗口内变过"
+    batt_changed_since_ctrl = 0;
+    batt_window_changed = 0;
     // PID 模式：重置 PID 状态，actual 值由 rate_limited_execute 重新初始化
     if (ctrl_mode == 1) {
         pid_reset_core();
@@ -2762,6 +2796,13 @@ static void rate_limited_execute(void) {
  * 调用者在外部立即执行速率限制下发，本函数只做决策
  */
 static void main_loop(void) {
+    // 温度窗口变化判定：自上次 5s 控制以来，1s 采集层是否检测到值变化。
+    // 防漏判：温度在窗口内变过又回到原位时，当前采样值虽与上次相同，但 1s 层累积标志已置位。
+    batt_window_changed = batt_changed_since_ctrl;
+    batt_changed_since_ctrl = 0;                 // 开启新窗口
+    if (batt_window_changed) temp_idle_cycles = 0;
+    else temp_idle_cycles++;
+
     // 0. 检查配置文件是否更新（热重载）
     debug_log(debug_main, "main_loop 开始 emergency=%d forced_min=%d battery_fan=%d target=%d",
               emergency_level, emerg_forced_gear, batt_gear_base, final_gear);
@@ -2785,6 +2826,7 @@ static void main_loop(void) {
         if (batt_raw < 0) return;
 
         // --- 温度更新周期跟踪（基于周期数，非时间） ---
+        // idle 递增已由 main_loop 入口按窗口变化统一维护，此处只做采样 push
         if (batt_temp_updated) {
             // 推入方差采样（使用原始电池温度，非滤波值）
             pid_var_push(batt_raw);
@@ -2803,10 +2845,8 @@ static void main_loop(void) {
                 // 方向取整：平滑值增大→向上取整，减小→向下取整
                 if (pid_filter_interval_smooth > old_s) pid_filter_interval_smooth++;
             }
-            temp_idle_cycles = 0;
-        } else {
-            temp_idle_cycles++;
         }
+        // else：值未变，不推入新样本（idle 已由入口维护，避免重复递增）
 
         // --- 自适应滤波开关（仅在配置开启时生效，不修改配置文件值） ---
         int filter_cfg_on = pid_input_filter_enabled;
@@ -2847,10 +2887,10 @@ static void main_loop(void) {
                 pid_batt_filtered = new_val;
             }
         } else {
-            // 无滤波模式：原始值直通，温度未更新则跳过本周期
+            // 无滤波模式：原始值直通；1s 层未变过且 idle 未达上限则跳过本周期
             pid_batt_filtered = batt_raw;
-            if (!batt_temp_updated && pid_last_batt >= 0) {
-                debug_log(debug_pid, "PID 跳过（温度未更新）");
+            if (!batt_window_changed && temp_idle_cycles < BATT_SKIP_MAX && pid_last_batt >= 0) {
+                debug_log(debug_pid, "PID 跳过（温度未更新 idle=%d）", temp_idle_cycles);
                 return;
             }
         }
@@ -3117,6 +3157,7 @@ static void write_webui_data(void) {
     read_cooler_params();   // 更新 cooler_* 全局（热/冷端、实际转速、实际制冷）
     // 1s 采集缓存：5s 控制块直接读缓存，不再重复读 sysfs/状态文件（保留上次成功值抗抖）
     if (batt >= 0) cached_batt_raw = batt;
+    if (batt_temp_updated) batt_changed_since_ctrl = 1;  // 1s 层累积：自上次控制以来值变过
     if (cpu  >= 0) cached_cpu_now  = cpu;
     char buf[WEBUI_DATA_MAX_LINES][96];
     int n = 0;
@@ -3203,6 +3244,7 @@ int main(int argc, char *argv[]) {
             read_cooler_params();
             break;
         }
+        arbitrate_apps();   // v2.8：等待设备期间无 app 存活则自动拉起上次使用的 app（冷却节流）
         sleep(5);
     }
     if (!running) goto exit;

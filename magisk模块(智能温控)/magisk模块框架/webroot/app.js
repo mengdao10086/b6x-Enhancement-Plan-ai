@@ -612,7 +612,9 @@
     var text = rebuildConfig();
     var r = await Bridge.exec('echo ' + b64(text) + ' | base64 -d > ' + CFG);
     if (r.errno !== 0) { toast('保存失败: ' + (r.stderr || 'errno ' + r.errno), 'err'); return; }
-    S.dirty = {}; S.dirtySpecial = false; S.manualExpand = {}; S.manualCollapse = {};
+    S.dirty = {}; S.dirtySpecial = false;
+    // 保存只重置 dirty，不清空 S.manualExpand/S.manualCollapse：
+    // 折叠状态是会话级 UI 状态，保存配置不应重置它，否则切模式触发保存会把手动展开的分组折叠回去
     updateCollapse();
     toast('已保存');
   }

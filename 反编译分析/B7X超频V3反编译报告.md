@@ -90,7 +90,7 @@ WaspWingInfo {
     String deviceCode;          // 设备代码 ("b3", "b5", "b5p", "b6", "b6x", "b7", "b7x")
     String firmwareVersion;
     int windLevel;              // 风速等级 (B7: 4500~5500, 或 120~255)
-    int coldLevel;              // 制冷等级 (B7: 104=省电, 149=标准, 155=强力, 254=极强)
+    int coldLevel;              // 制冷等级 (B7: 104=省电, 149=标准, 155=强力, 250=极强)
     int temperature;            // 当前温度
     int runMode;                // 运行模式 (0=智能, 1=手动, 2=超频, 3=实验智能)
     int targetTemperature;      // 目标温度 (智能模式, 范围 -16~16℃)

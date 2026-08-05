@@ -49,11 +49,13 @@
 
 ### C 智能温控守护程序
 
-- **双设备 + 三方 app 存活仲裁**：按状态文件选择当前设备；在 B6X 两个 app 与 farsef 之间做存活仲裁，保留上次连接者
+- **双设备 + 三方 app 存活仲裁**：按状态文件选择当前设备；在 B6X 两个 app 与 farsef 之间做存活仲裁，保留上次连接者；无 app 存活时自动拉起上次使用的 app（`APP_LAUNCH_ENABLED` 可关闭）
 - **PID 连续无级调节**：P+I+D 控制 + 温度趋势预测 + 输入滤波
 - **制冷→风扇自动映射**：冷端指数 + 热端线性映射，双端 EMA 平滑系数可配置（`RPM_SMOOTH_ALPHA`），速率限制统一内建
 - **降速防抖**：风扇下降方向阈值防抖（可配置 `FAN_RPM_CHANGE_THRESHOLD`），上升自由爬升
 - **风扇转速独立计算**：每周期下发前用限速后的实际制冷强度 + 热面温度独立计算风扇目标，不跟随 PID/Gear 输出，避免滞后
+- **温度变化检测（值比较）**：每秒读取温度值、有变化才进入计算；5 秒控制周期检查最近 1 秒采集数据，温度在窗口内变过不漏判；值连续未变达 `BATT_SKIP_MAX`（默认 6）时强制处理防卡死
+- **自动拉起散热器 app**：无散热器 app 存活时自动拉起上次使用的 app（`APP_LAUNCH_ENABLED` 开关，默认开启，冷却 60s）
 - **CPU 紧急干预**：3 级紧急 + 退出恢复期
 - **内置 WebUI 配置界面**：KSU 管理器模块页直接可视化调参（KSU-Next / APatch 支持，Magisk 需宿主应用）、实时曲线与日志，详见 [逻辑说明.md](magisk模块(智能温控)/逻辑说明.md)
 - **配置热重载**：profile.conf 修改后无需重启即生效
@@ -73,9 +75,9 @@
 ├── <a href="CHANGELOG.md">CHANGELOG.md</a>                   ← 版本更新日志
 ├── <a href="参考资料/">参考资料/</a>
 │   ├── <a href="参考资料/完整修复历程.md">完整修复历程.md</a>             ← BLE 4 层 Bug 修复全记录 + B8X 分析
-│   ├── <a href="参考资料/decompile/">decompile/</a>                  ← APK 反编译输出
-│   │   └── <a href="参考资料/decompile/app运行逻辑.md">app运行逻辑.md</a>            ← App 内部运行逻辑分析
+│   ├── <a href="参考资料/decompile/">decompile/</a>                  ← APK 反编译产物（不进 git）
 │   └── <a href="参考资料/smali修改重编译apk尝试/">smali修改重编译apk尝试/</a>     ← smali 工具链 + DEX 修改产物
+├── <a href="反编译分析/">反编译分析/</a>                   ← 各 app 反编译分析文档（总览见 <a href="反编译分析/总览.md">总览.md</a>）
 ├── <a href=".github/workflows/">.github/workflows/</a>              ← CI 自动构建
 └── <a href="README.md">README.md</a>                       ← 本文件
 </pre>

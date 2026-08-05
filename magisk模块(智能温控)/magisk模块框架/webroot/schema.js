@@ -28,7 +28,8 @@ window.B6X_SCHEMA = {
       keys: [],
       subKeys: ["RATE_LIMIT_FAN_UP", "RATE_LIMIT_FAN_DOWN", "FAN_RPM_CHANGE_THRESHOLD",
                 "RATE_LIMIT_COLD", "RATE_LIMIT_TEMP", "BATT_BASELINE",
-                "COLD_MAP_START", "COLD_MAP_EXP", "HOT_MAP", "RPM_SMOOTH_ALPHA", "FAN_RPM"]
+                "COLD_MAP_START", "COLD_MAP_EXP", "HOT_MAP", "RPM_SMOOTH_ALPHA", "FAN_RPM",
+                "APP_LAUNCH_ENABLED", "BATT_SKIP_MAX"]
     },
     // [4] 控制模式：PID 与 Gear 同一窗口。组头开关 CTRL_MODE 仅切换模式（1=PID / 0=Gear），
     // 不控制折叠；展开/折叠由 PERF_ENABLED 总开关驱动（master）。组内按模式切换显示参数面板
@@ -69,8 +70,7 @@ window.B6X_SCHEMA = {
     PERF_ENABLED: { type: "switch", label: "性能参数总开关", desc: "" },
 
     // ---- [1] ----
-    DEBUG_ENABLED: { type: "switch", label: "调试日志总开关",
-      desc: "关闭时下方子开关折叠；可手动展开查看/编辑。=1 开启调试分区输出" },
+    DEBUG_ENABLED: { type: "switch", label: "调试日志总开关", desc: "" },
     DEBUG_SENSOR: { type: "switch", label: "传感器读数", desc: "电池/CPU/电流读数调试日志" },
     DEBUG_EMERG:  { type: "switch", label: "紧急干预", desc: "紧急等级计算调试日志" },
     DEBUG_BATT:   { type: "switch", label: "电池温度控制", desc: "电池温度调档/恢复期/反补调试日志" },
@@ -114,6 +114,10 @@ window.B6X_SCHEMA = {
       desc: "升速=base+dev×mult/10，降速=base-dev×mult/10；负值→0=禁止该方向" },
     RATE_LIMIT_TEMP: { type: "int", min: 1, max: 30, label: "目标温度限速（°C）",
       desc: "目标温度每周期最大变化量（智能温控模式）" },
+    APP_LAUNCH_ENABLED: { type: "switch", label: "自动拉起散热器 app",
+      desc: "无散热器 app 存活时自动拉起上次使用的 app（启动等待/运行中断连时，冷却 60s）" },
+    BATT_SKIP_MAX: { type: "int", min: 1, max: 60, label: "温度未变强制处理周期",
+      desc: "温度值连续未变达 N 周期时强制进入一次计算，防止温度文件卡死控制停摆" },
     CTRL_MODE: { type: "switch", label: "控制模式", desc: "" },
     BATT_BASELINE: { type: "int", min: 300, max: 500, label: "基准温度（0.1°C）",
       desc: "电池温度与此值计算偏差，PID 和 Gear 共用" },
