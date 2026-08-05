@@ -53,7 +53,9 @@
 - **PID 连续无级调节**：P+I+D 控制 + 温度趋势预测 + 输入滤波
 - **制冷→风扇自动映射**：冷端指数 + 热端线性映射，双端 EMA 平滑系数可配置（`RPM_SMOOTH_ALPHA`），速率限制统一内建
 - **降速防抖**：风扇下降方向阈值防抖（可配置 `FAN_RPM_CHANGE_THRESHOLD`），上升自由爬升
+- **风扇转速独立计算**：每周期下发前用限速后的实际制冷强度 + 热面温度独立计算风扇目标，不跟随 PID/Gear 输出，避免滞后
 - **CPU 紧急干预**：3 级紧急 + 退出恢复期
+- **内置 WebUI 配置界面**：KSU 管理器模块页直接可视化调参（KSU-Next / APatch 支持，Magisk 需宿主应用）、实时曲线与日志，详见 [逻辑说明.md](magisk模块(智能温控)/逻辑说明.md)
 - **配置热重载**：profile.conf 修改后无需重启即生效
 
 > 详细策略设计 → [逻辑说明.md](magisk模块(智能温控)/逻辑说明.md) · 版本变更 → [CHANGELOG.md](CHANGELOG.md)
@@ -67,7 +69,7 @@
 ├── <a href="magisk模块(智能温控)/">magisk模块(智能温控)/</a>          ← C 守护程序源码 + Magisk 模块框架
 │   ├── <a href="magisk模块(智能温控)/tempctrl.c">tempctrl.c</a>                 ← 核心 C 代码
 │   ├── <a href="magisk模块(智能温控)/逻辑说明.md">逻辑说明.md</a>                ← 技术设计文档
-│   └── <a href="magisk模块(智能温控)/magisk模块框架/">magisk模块框架/</a>            ← module.prop / service.sh / customize.sh / profile.conf
+│   └── <a href="magisk模块(智能温控)/magisk模块框架/">magisk模块框架/</a>            ← module.prop / service.sh / customize.sh / profile.conf / webroot/
 ├── <a href="CHANGELOG.md">CHANGELOG.md</a>                   ← 版本更新日志
 ├── <a href="参考资料/">参考资料/</a>
 │   ├── <a href="参考资料/完整修复历程.md">完整修复历程.md</a>             ← BLE 4 层 Bug 修复全记录 + B8X 分析

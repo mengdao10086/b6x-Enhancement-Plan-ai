@@ -222,19 +222,14 @@
       var body = $('body-' + g.id);
       if (!head || !body) return;
       var open, off;
-      if (g.mode) {
-        // 模式分组：非活动模式完全隐藏；活动模式受 PERF 总开关折叠控制
-        var match = modeVal === g.mode.on;
-        var sec = $('group-' + g.id);
-        if (sec) sec.classList.toggle('mode-hidden', !match);
-        if (!match) return;
-        open = perfOn ? !S.manualCollapse[g.id] : !!S.manualExpand[g.id];
-        off = !perfOn;
-        body.classList.toggle('collapsed', !open);
-        head.classList.toggle('off', off);
-        if (badge) badge.classList.toggle('hidden', !off);
-        chev.textContent = open ? '▾' : '▸';
-      } else if (g.master === 'PERF_ENABLED') {
+      // 模式子面板（[4] 控制模式）：CTRL_MODE 开关仅切换显示哪个面板，不控制折叠
+      if (g.modePanels) {
+        g.modePanels.forEach(function (p) {
+          var sub = $('sub-' + g.id + '-' + p.when);
+          if (sub) sub.classList.toggle('mode-hidden', modeVal !== p.when);
+        });
+      }
+      if (g.master === 'PERF_ENABLED') {
         open = perfOn ? !S.manualCollapse[g.id] : !!S.manualExpand[g.id];
         off = !perfOn;
         body.classList.toggle('collapsed', !open);
@@ -395,27 +390,50 @@
       body.appendChild(sub);
     }
 
-    // g7：档位表
-    if (g.gearTables) {
-      g.gearTables.forEach(function (family) {
-        var box = document.createElement('div');
-        box.className = 'gear-box';
-        box.innerHTML = '<div class="gear-title">' + (family === 'GEAR_B6X_' ? 'B6X 档位表' : 'B7X 档位表') + '</div>';
-        var table = document.createElement('div');
-        table.id = 'gearTable-' + family.replace(/_/g, '-');
-        table.className = 'gear-table';
-        box.appendChild(table);
-        var addBtn = document.createElement('button');
-        addBtn.className = 'btn-add';
-        addBtn.textContent = '+ 添加档位';
-        addBtn.addEventListener('click', function () { addGearRow(family); });
-        box.appendChild(addBtn);
-        body.appendChild(box);
-        renderGearTable(table, family);
+    // 档位表
+    if (g.gearTables) appendGearBoxes(body, g.gearTables);
+
+    // 模式子面板（[4] 控制模式）：CTRL_MODE 切换显示的参数面板（PID / Gear 同一窗口）
+    if (g.modePanels) {
+      g.modePanels.forEach(function (p) {
+        var sub = document.createElement('div');
+        sub.id = 'sub-' + g.id + '-' + p.when;
+        sub.className = 'group-body sub-panel';
+        if (p.title) {
+          var pt = document.createElement('div');
+          pt.className = 'sub-panel-title';
+          pt.textContent = p.title;
+          sub.appendChild(pt);
+        }
+        p.keys.forEach(function (k) {
+          if (SCHEMA.keys[k]) sub.appendChild(buildControl(k));
+        });
+        if (p.gearTables) appendGearBoxes(sub, p.gearTables);
+        body.appendChild(sub);
       });
     }
 
     return sec;
+  }
+
+  // 档位表容器（普通分组或模式子面板共用）
+  function appendGearBoxes(container, gearTables) {
+    gearTables.forEach(function (family) {
+      var box = document.createElement('div');
+      box.className = 'gear-box';
+      box.innerHTML = '<div class="gear-title">' + (family === 'GEAR_B6X_' ? 'B6X 档位表' : 'B7X 档位表') + '</div>';
+      var table = document.createElement('div');
+      table.id = 'gearTable-' + family.replace(/_/g, '-');
+      table.className = 'gear-table';
+      box.appendChild(table);
+      var addBtn = document.createElement('button');
+      addBtn.className = 'btn-add';
+      addBtn.textContent = '+ 添加档位';
+      addBtn.addEventListener('click', function () { addGearRow(family); });
+      box.appendChild(addBtn);
+      container.appendChild(box);
+      renderGearTable(table, family);
+    });
   }
 
   // ---------- 档位表 ----------
@@ -865,7 +883,9 @@
         uiLog('配置解析: 共' + S.items.length + '行, PERF_ENABLED=' + JSON.stringify(S.values.PERF_ENABLED) + ', 键数=' + Object.keys(S.values).length);
         var emptyKeys = [];
         SCHEMA.groups.forEach(function (g) {
-          (g.keys || []).concat(g.subKeys || []).concat(g.headerSwitch ? [g.headerSwitch] : []).forEach(function (k) {
+          var gk = (g.keys || []).concat(g.subKeys || []).concat(g.headerSwitch ? [g.headerSwitch] : []);
+          (g.modePanels || []).forEach(function (p) { gk = gk.concat(p.keys || []); });
+          gk.forEach(function (k) {
             if (SCHEMA.keys[k] && (S.values[k] === undefined || S.values[k] === '')) emptyKeys.push(k);
           });
         });

@@ -150,7 +150,7 @@ body.pin-scroll { padding-bottom: 54px; }
   display: flex; align-items: center; gap: 8px; padding: 9px 10px; cursor: pointer;
   user-select: none; -webkit-user-select: none;
 }
-.group-head .chev { color: var(--muted); font-size: 11px; width: 12px; }
+.group-head .chev { color: var(--muted); font-size: 13px; width: 14px; }  /* ▸/▾ 视觉约 2/3 汉字宽 */
 .group-head .g-title { font-weight: 600; font-size: 13px; }
 .group-head .g-note { color: var(--muted); font-size: 11px; margin-left: auto; text-align: right; }
 .group-head .head-switch { margin-left: auto; }
@@ -163,6 +163,8 @@ body.pin-scroll { padding-bottom: 54px; }
 
 /* 非活动模式分组完全隐藏 */
 .group.mode-hidden { display: none; }
+/* 模式子面板（[4] 控制模式）非活动面板隐藏 */
+.sub-panel.mode-hidden { display: none; }
 
 .group-body { padding: 2px 10px 10px; }
 .group-body.collapsed { display: none; }
@@ -170,6 +172,9 @@ body.pin-scroll { padding-bottom: 54px; }
   margin-top: 8px; padding-top: 8px; border-top: 1px dashed var(--border);
   background: var(--surface2); border-radius: 8px;
 }
+.sub-panel-title { font-size: 12px; font-weight: 600; padding: 0 0 6px; }
+/* 模式子面板内的档位表：换回卡片底色避免与面板同色 */
+.sub-panel .gear-box { background: var(--surface); }
 
 /* ---------- 控件 ---------- */
 .ctrl {
