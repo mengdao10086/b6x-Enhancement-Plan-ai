@@ -339,7 +339,7 @@ static time_t config_mtime = 0;
 // --- 核心参数 ---
 static int pid_kp = 300;                  // PID_KP（÷1000，1°C→P=40%）
 static int pid_ki = 75;                   // PID_KI（÷1000）
-static int pid_kd = 240;                  // PID_KD
+static int pid_kd = 200;                  // PID_KD
 static int pid_integral_limit = 800;      // PID_INTEGRAL_LIMIT（÷1000）
 
 // --- KI 方差门控 ---
