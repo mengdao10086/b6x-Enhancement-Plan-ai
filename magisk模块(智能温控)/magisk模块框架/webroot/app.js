@@ -168,7 +168,7 @@
   function parseConfig(text) {
     var lines = text.split('\n');
     return lines.map(function (raw) {
-      var m = raw.match(/^([A-Za-z0-9_]+)=(.*)$/);
+      var m = raw.match(/^([A-Za-z0-9_]+)=([^\r\n]*)/);   // 兼容 CRLF/LF 行尾
       if (m) {
         // 剥离行内注释（如 LOG_MAX=7936   # 字节），与 C 解析器行为一致（atoi/sscanf 停在非数字处）
         var value = m[2].replace(/\s*#.*$/, '');
