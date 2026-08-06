@@ -9,6 +9,8 @@ import android.content.Context;
 import android.content.Intent;
 import android.content.IntentFilter;
 import android.os.Bundle;
+import android.os.Handler;
+import android.os.Looper;
 
 import java.io.BufferedReader;
 import java.io.FileOutputStream;
@@ -60,7 +62,9 @@ public class MainHook implements IXposedHookLoadPackage {
     private static volatile int bleLastOwner = 0;             // 上次连接者（BLE_OWNER_LAST 值：1/2=B6X app, 6/7=farsef 连的型号）；断连保留
     private static volatile long bleLastOwnerAt = 0;          // 上次连接时间戳（Unix 秒，与 bleLastOwner 配套，断连保留）
     private static volatile Activity currentGuideActivity = null;  // 当前可见的 MainActivity（引导页）
-    private static volatile boolean autoLaunchPending = false;     // 自动拉起标志已读取，待 onResume 后台化（v2.8）
+    private static volatile boolean autoLaunchPending = false;     // 自动拉起标志已读取，待进入设置界面后后台化（v2.8）
+    private static final Handler mainHandler = new Handler(Looper.getMainLooper());
+    private static final int AUTO_LAUNCH_TIMEOUT_MS = 2000;        // 兜底：自动进入设置失败时仍退后台
     private static volatile boolean enteredSetup = false;         // 本进程是否已进入过设置界面
 
     // ========== 后台自动重连（v2.4） ==========
@@ -913,7 +917,7 @@ public class MainHook implements IXposedHookLoadPackage {
         }
     }
 
-    /** 自动拉起模式：读到 b6x_auto_launch 标志的 Activity 在 onResume 后后台化（v2.8） */
+    /** 自动拉起模式：读到 b6x_auto_launch 标志的 Activity 在进入设置界面（第一个非引导页 onResume）后后台化（v2.8） */
     private static void hookAutoLaunch(XC_LoadPackage.LoadPackageParam lpparam) {
         try {
             XposedHelpers.findAndHookMethod(Activity.class, "onCreate", Bundle.class,
@@ -926,6 +930,7 @@ public class MainHook implements IXposedHookLoadPackage {
                                 if (intent != null && "1".equals(intent.getStringExtra(AUTO_LAUNCH_EXTRA))) {
                                     intent.removeExtra(AUTO_LAUNCH_EXTRA);  // 只后台化一次，避免用户手动打开时又被切走
                                     autoLaunchPending = true;
+                                    scheduleAutoLaunchTimeout(act);  // 兜底：自动进入设置失败时仍退后台，避免一直停前台
                                 }
                             } catch (Throwable t) {
                                 XposedBridge.log(TAG + " auto_launch 标志读取失败: " + t.getMessage());
@@ -936,18 +941,51 @@ public class MainHook implements IXposedHookLoadPackage {
                 @Override
                 protected void afterHookedMethod(MethodHookParam param) {
                     if (!autoLaunchPending) return;
+                    Activity act = (Activity) param.thisObject;
+                    if (isMainActivity(act)) return;   // 引导页：等自动跳转到设置界面后再退后台
+                    // 已离开引导页（B6X=进入设置界面；farsef 无引导页概念，首个 Activity 即退）
                     autoLaunchPending = false;
-                    try {
-                        ((Activity) param.thisObject).moveTaskToBack(true);   // 界面已就绪，必定成功；连接由后台重连线程完成
-                        XposedBridge.log(TAG + " 自动拉起模式：app 已切后台");
-                    } catch (Throwable t) {
-                        XposedBridge.log(TAG + " auto_launch 后台化失败: " + t.getMessage());
-                    }
+                    cancelAutoLaunchTimeout();
+                    backgroundActivity(act);
                 }
             });
             XposedBridge.log(TAG + " 已钩住 Activity.onCreate/onResume（b6x_auto_launch 后台化）");
         } catch (Throwable t) {
             XposedBridge.log(TAG + " 钩 auto_launch 失败: " + t.getMessage());
+        }
+    }
+
+    /** 自动拉起：把当前任务切到后台（界面已就绪，必定成功；连接由后台重连线程完成） */
+    private static void backgroundActivity(Activity act) {
+        try {
+            act.moveTaskToBack(true);
+            XposedBridge.log(TAG + " 自动拉起模式：app 已切后台");
+        } catch (Throwable t) {
+            XposedBridge.log(TAG + " auto_launch 后台化失败: " + t.getMessage());
+        }
+    }
+
+    // 兜底超时：自动进入设置界面未触发（startActivity 失败等）时 2s 后仍退后台
+    private static Runnable autoLaunchTimeoutRunnable = null;
+
+    private static void scheduleAutoLaunchTimeout(final Activity act) {
+        cancelAutoLaunchTimeout();
+        autoLaunchTimeoutRunnable = new Runnable() {
+            @Override
+            public void run() {
+                autoLaunchTimeoutRunnable = null;
+                if (!autoLaunchPending) return;
+                autoLaunchPending = false;
+                backgroundActivity(act);
+            }
+        };
+        mainHandler.postDelayed(autoLaunchTimeoutRunnable, AUTO_LAUNCH_TIMEOUT_MS);
+    }
+
+    private static void cancelAutoLaunchTimeout() {
+        if (autoLaunchTimeoutRunnable != null) {
+            mainHandler.removeCallbacks(autoLaunchTimeoutRunnable);
+            autoLaunchTimeoutRunnable = null;
         }
     }
 
