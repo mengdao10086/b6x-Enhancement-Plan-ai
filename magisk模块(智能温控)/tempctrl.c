@@ -328,6 +328,7 @@ static int debug_config  = 0;   // [配置加载] 配置文件解析过程
 static int debug_main    = 0;   // [主循环] main_loop 流程跟踪
 static int debug_pid     = 0;   // [PID] PID 控制调试
 static int debug_launch  = 0;   // [自动拉起] 目标选择/回退/跳过（结果成功/失败为普通日志，不归此分区）
+static int debug_fan     = 0;   // [风扇] 转速计算/限速/下发
 
 // ======================== 配置文件系统 ========================
 // 配置文件路径（自动检测或 --config 指定）
@@ -762,6 +763,7 @@ static void load_config(const char *path) {
             else if (strcmp(key, "DEBUG_MAIN") == 0)    debug_main   = (val != 0);
             else if (strcmp(key, "DEBUG_PID") == 0)     debug_pid    = (val != 0);
             else if (strcmp(key, "DEBUG_LAUNCH") == 0)  debug_launch = (val != 0);
+            else if (strcmp(key, "DEBUG_FAN") == 0)     debug_fan    = (val != 0);
             continue;
         }
 
@@ -1683,7 +1685,11 @@ static int rate_limit_fan(int desired_rpm) {
 
     // ---- 向上取整到 50 的倍数 ----
     int send_rpm = ((actual_rpm + 49) / 50) * 50;
-    return clamp(send_rpm, fan_rpm_min, active_fan_max);
+    send_rpm = clamp(send_rpm, fan_rpm_min, active_fan_max);
+    debug_log(debug_fan, "rpm 限速 desired=%d → %d（防抖保持=%d）", desired_rpm, send_rpm,
+              (fan_rpm_change_threshold > 0 && !near_min_rpm &&
+               desired_rpm < actual_rpm && (actual_rpm - desired_rpm) <= fan_rpm_change_threshold));
+    return send_rpm;
 }
 
 /**
@@ -1848,10 +1854,13 @@ static const char *resolve_launch_pkg(void) {
  * 仅在 APP_LAUNCH_ENABLED=1 且目标 app 已安装、未运行时执行。
  */
 static void launch_last_app(void) {
-    if (!APP_LAUNCH_ENABLED) return;
     time_t now = time(NULL);
-    if (now - last_launch_attempt < APP_LAUNCH_COOLDOWN) return;
+    if (now - last_launch_attempt < APP_LAUNCH_COOLDOWN) return;   // 冷却节流（含开关关闭，避免断联刷屏）
     last_launch_attempt = now;
+    if (!APP_LAUNCH_ENABLED) {
+        debug_log(debug_launch, "自动拉起 开关关闭，跳过");
+        return;
+    }
 
     const char *pkg = resolve_launch_pkg();
     debug_log(debug_launch, "自动拉起 目标 %s（last_owner=%d）", pkg, last_owner);
@@ -2575,6 +2584,10 @@ static float pid_compute(int batt_10, float dt) {
 static int rpm_from_hot_end(int hot_10) {
     static int prev_hot = -1;   // 上一轮平滑后的温度
     static int prev_rpm = 0;
+    if (hot_10 <= 0) {
+        debug_log(debug_fan, "rpm 热端 ≤0（%d），保持上次 %d", hot_10, prev_rpm);
+        return prev_rpm;   // v2.9：热端 ≤0（异常/未就绪）时保持上次输出，避免映射漂移
+    }
     int range = hot_map_max - hot_map_min;
     if (range <= 0) return 0;
 
@@ -2611,6 +2624,7 @@ static int rpm_from_hot_end(int hot_10) {
 
     prev_hot = hot_s;
     prev_rpm = rpm;
+    debug_log(debug_fan, "rpm 热端 hot=%d(平滑%d) → %d", hot_10, hot_s, rpm);
     return rpm;
 }
 
@@ -2637,6 +2651,7 @@ static int rpm_from_cold_exp(int cold) {
     } else {
         cold_rpm_smoothed = EMA_DIR(raw_rpm, cold_rpm_smoothed, rpm_smooth_alpha);
     }
+    debug_log(debug_fan, "rpm 冷端 exp cold=%d → %d", cold, cold_rpm_smoothed);
     return cold_rpm_smoothed;
 }
 
@@ -2660,10 +2675,12 @@ static int rpm_combine_weighted(int rpm_hot, int rpm_cold) {
  * 与 PID/Gear 输出解耦：每周期下发前由 rate_limited_execute / apply_gear 单独调用。
  */
 static int compute_fan_target(void) {
-    int rpm = rpm_from_cold_exp(actual_cold);
-    if (cooler_hot_temp > 0) {
-        rpm = rpm_combine_weighted(rpm_from_hot_end(cooler_hot_temp), rpm);
+    int rpm_cold = rpm_from_cold_exp(actual_cold);
+    int rpm = rpm_cold;
+    if (cooler_hot_temp >= 0) {   // v2.9：热端 ≤0（0=异常 0°）也进入，由 rpm_from_hot_end 保持上次值
+        rpm = rpm_combine_weighted(rpm_from_hot_end(cooler_hot_temp), rpm_cold);
     }
+    debug_log(debug_fan, "rpm 目标 冷端=%d 热端=%d → %d", rpm_cold, cooler_hot_temp, rpm);
     return rpm;
 }
 
@@ -3399,6 +3416,7 @@ pid_init_done:
             if (!app_proc_ok || !app_ble_connected) {
                 write_log("%s 连接丢失，检查另一设备...\n",
                           (active_device == DEVICE_B7X) ? "b7x" : "b6x");
+                launch_last_app();   // v2.9：断联时也尝试拉起散热器 app（无 app 存活时真正拉起；存活时 debug 提示）
                 app_was_alive = 0;  // 复活后走 reconnect_align 重新对齐实际值
                 continue;
             }

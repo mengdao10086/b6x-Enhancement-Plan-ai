@@ -13,17 +13,17 @@ window.B6X_SCHEMA = {
   chartWindowOptions: [60, 90, 120, 180, 240, 360, 480],
 
   groups: [
-    // [1] 日志 & 调试 置于总开关上方
+    // [0] 日志 & 调试（置顶，调试便捷）
     {
-      id: "g1", title: "[1] 日志 & 调试", master: "DEBUG_ENABLED",
+      id: "g1", title: "[0] 日志 & 调试", master: "DEBUG_ENABLED",
       headerSwitch: "DEBUG_ENABLED",
       keys: [],
       subKeys: ["DEBUG_SENSOR", "DEBUG_EMERG", "DEBUG_BATT", "DEBUG_EXEC",
-                "DEBUG_CONN", "DEBUG_CONFIG", "DEBUG_MAIN", "DEBUG_PID", "DEBUG_LAUNCH"]
+                "DEBUG_CONN", "DEBUG_CONFIG", "DEBUG_MAIN", "DEBUG_PID", "DEBUG_LAUNCH", "DEBUG_FAN"]
     },
-    // [0] 总开关：组头开关 PERF_ENABLED + 通用参数子面板（复用 [1] 的开关+子面板机制）
+    // [1] 总开关：组头开关 PERF_ENABLED + 通用参数子面板（复用开关+子面板机制）
     {
-      id: "g0", title: "[0] 总开关", master: "PERF_ENABLED",
+      id: "g0", title: "[1] 总开关", master: "PERF_ENABLED",
       headerSwitch: "PERF_ENABLED",
       keys: [],
       subKeys: ["RATE_LIMIT_FAN_UP", "RATE_LIMIT_FAN_DOWN", "FAN_RPM_CHANGE_THRESHOLD",
@@ -31,16 +31,10 @@ window.B6X_SCHEMA = {
                 "COLD_MAP_START", "COLD_MAP_EXP", "HOT_MAP", "RPM_SMOOTH_ALPHA", "FAN_RPM",
                 "BATT_SKIP_MAX"]
     },
-    // [3] 自动拉起散热器 app：独立分组，开关常显在组头（不随其它开关折叠隐藏），
-    // 开关驱动说明区折叠（=1 展开显示说明，=0 仅显示开关）
-    {
-      id: "g3", title: "[3] 自动拉起散热器 app", headerSwitch: "APP_LAUNCH_ENABLED",
-      keys: []
-    },
-    // [4] 控制模式：PID 与 Gear 同一窗口。组头开关 CTRL_MODE 仅切换模式（1=PID / 0=Gear），
+    // [2] 控制模式：PID 与 Gear 同一窗口。组头开关 CTRL_MODE 仅切换模式（1=PID / 0=Gear），
     // 不控制折叠；展开/折叠由 PERF_ENABLED 总开关驱动（master）。组内按模式切换显示参数面板
     {
-      id: "g4", title: "[4] 控制模式", master: "PERF_ENABLED",
+      id: "g4", title: "[2] 控制模式", master: "PERF_ENABLED",
       headerSwitch: "CTRL_MODE",
       keys: [],
       modePanels: [
@@ -62,13 +56,18 @@ window.B6X_SCHEMA = {
           gearTables: ["GEAR_B6X_", "GEAR_B7X_"] }
       ]
     },
-    // [2] sysfs 路径与缩放：独立大类（SYSFS_ENABLED 开关控制加载），排最底
+    // [3] sysfs 路径与缩放：独立大类（SYSFS_ENABLED 开关控制加载）
     {
-      id: "g2", title: "[2] sysfs 路径与缩放", headerSwitch: "SYSFS_ENABLED",
+      id: "g2", title: "[3] sysfs 路径与缩放", headerSwitch: "SYSFS_ENABLED",
       keys: [],
       subKeys: ["BATT_TEMP_PATH", "BATT_TEMP_DIVISOR", "BATT_CURRENT_PATH",
                 "BATT_CURRENT_DIVISOR", "CPU_TEMP_PATH_FMT", "CPU_TEMP_DIVISOR",
                 "CPU_ZONE", "LOG_FILE", "LOG_MAX", "LOG_TRIM_LINES"]
+    },
+    // [4] 自动拉起散热器 app：独立分组，开关常显在组头；说明区常显（无折叠内容，不渲染小三角）
+    {
+      id: "g3", title: "[4] 自动拉起散热器 app", headerSwitch: "APP_LAUNCH_ENABLED",
+      keys: []
     }
   ],
 
@@ -88,8 +87,10 @@ window.B6X_SCHEMA = {
     DEBUG_PID:    { type: "switch", label: "PID", desc: "PID 模式调试日志（需开 DEBUG_ENABLED）" },
     DEBUG_LAUNCH: { type: "switch", label: "自动拉起", value: "0",
       desc: "自动拉起散热器 app 的决策过程（目标选择/回退/跳过），拉起成功/失败始终输出" },
+    DEBUG_FAN: { type: "switch", label: "风扇", value: "0",
+      desc: "风扇转速计算/限速/下发调试日志" },
 
-    // ---- [2] 路径与缩放 ----
+    // ---- [7] 路径与缩放 ----
     SYSFS_ENABLED: { type: "switch", label: "sysfs 路径与缩放开关", desc: "" },
     BATT_TEMP_PATH: { type: "path", label: "电池温度 sysfs",
       desc: "不同机型位置可能不同，可自行修改" },
@@ -112,7 +113,7 @@ window.B6X_SCHEMA = {
     LOG_TRIM_LINES: { type: "int", min: 0, max: 50, label: "日志超限清理行数",
       desc: "删除最早 N 行，0=不清理" },
 
-    // ---- [3] 通用 ----
+    // ---- [2] 通用 ----
     RATE_LIMIT_FAN_UP: { type: "multi", fields: [{ label: "升速基础值", min: 50, max: 2000 }, { label: "升速倍率", min: 1, max: 200 }],
       label: "风扇升速限制", desc: "值 = 基础值 + d(0.1°C) × 倍率 / 10" },
     RATE_LIMIT_FAN_DOWN: { type: "int", min: 50, max: 2000, label: "风扇降速限制",
@@ -125,7 +126,7 @@ window.B6X_SCHEMA = {
     RATE_LIMIT_TEMP: { type: "int", min: 1, max: 30, label: "目标温度限速（°C）",
       desc: "目标温度每周期最大变化量（智能温控模式）" },
     APP_LAUNCH_ENABLED: { type: "switch", label: "自动拉起散热器 app",
-      desc: "无散热器 app 存活时自动拉起上次使用的 app（启动等待/运行中断连时，冷却 60s）" },
+      desc: "无散热器 app 存活时自动拉起上次使用的 app" },
     BATT_SKIP_MAX: { type: "int", min: 1, max: 60, label: "温度未变强制处理周期",
       desc: "温度值连续未变达 N 周期时强制进入一次计算，防止温度文件卡死控制停摆" },
     CTRL_MODE: { type: "switch", label: "控制模式", desc: "" },
@@ -143,7 +144,7 @@ window.B6X_SCHEMA = {
     FAN_RPM: { type: "multi", fields: [{ label: "最低转速", min: 1000, max: 6000 }, { label: "最高转速(B6X)", min: 1000, max: 6000 }, { label: "最高转速(B7X)", min: 2000, max: 6000 }],
       label: "风扇转速范围", desc: "B6X/B7X 共用，B7X 暂与 B6X 一致" },
 
-    // ---- [4] PID ----
+    // ---- [3] PID ----
     PID_KP: { type: "int", min: 1, max: 1000, label: "KP 比例", desc: "÷1000；过大震荡，过小偏慢（推荐 200~500）" },
     PID_KI: { type: "int", min: 0, max: 1000, label: "KI 积分", desc: "受方差门控+死区双重控制；过大降温滞后（推荐 30~80）" },
     PID_INTEGRAL_LIMIT: { type: "int", min: 0, max: 1000, label: "KI 积分上限",
@@ -177,7 +178,7 @@ window.B6X_SCHEMA = {
     PID_COLD: { type: "multi", fields: [{ label: "下限", min: 0, max: 194 }, { label: "上限(B6X)", min: 0, max: 194 }, { label: "上限(B7X)", min: 1, max: 190 }],
       label: "制冷强度范围", desc: "B7X 上限暂与 B6X 一致" },
 
-    // ---- [5] Gear 电池 ----
+    // ---- [4] Gear 电池 ----
     BATT_BOUNDARY: { type: "multi", fields: [{ label: "死区", min: 1, max: 100 }, { label: "±1档边界", min: 1, max: 100 }, { label: "±2档边界", min: 1, max: 100 }],
       label: "三区间阈值（0.1°C）", desc: "死区与 ±1/±2 档边界" },
     BATT_COOLDOWN_CYCLES: { type: "int", min: 0, max: 20, label: "档位变动冷却周期",
@@ -200,7 +201,7 @@ window.B6X_SCHEMA = {
     TREND_RESET_THRESHOLD: { type: "int", min: 0, max: 20, label: "趋势豁免锚点复位阈值",
       desc: "以区间中值为偏移量计算复位阈值，越过则复位豁免计数器" },
 
-    // ---- [6] Gear 紧急 ----
+    // ---- [5] Gear 紧急 ----
     EMERG_CPU_ENABLED: { type: "switch", label: "CPU 温度紧急开关", desc: "=0 禁用" },
     CPU_EMERG: { type: "multi", fields: [{ label: "退出紧急", min: 300, max: 700 }, { label: "进入1级", min: 400, max: 800 }, { label: "进入2级", min: 500, max: 900 }, { label: "进入3级", min: 600, max: 1000 }],
       label: "CPU 紧急阈值（0.1°C）",
@@ -222,7 +223,7 @@ window.B6X_SCHEMA = {
     EMERG_RECOVERY_PHASE_CYCLES: { type: "int", min: 1, max: 50, label: "恢复阶段周期数",
       desc: "每阶段持续 N 周期" },
 
-    // ---- [7] 档位表 ----
+    // ---- [6] 档位表 ----
     GEAR_CONFIG_ENABLED: { type: "switch", label: "自定义档位表开关",
       desc: "=1 使用下方 GEAR_N，=0 使用代码默认表" },
     GEAR_AUTO_FAN: { type: "switch", label: "档位表自动风扇转速",

@@ -224,10 +224,10 @@ input[type=number] { -moz-appearance: textfield; }
 .switch input:checked + i { background: var(--accent); border-color: var(--accent); }
 .switch input:checked + i::after { transform: translateX(18px); }
 
-/* 控制模式大开关（[4] 控制模式组头） */
-.group-head .head-switch.mode-switch .switch { width: 52px; height: 28px; }
-.group-head .head-switch.mode-switch .switch i::after { width: 22px; height: 22px; left: 2px; top: 2px; }
-.group-head .head-switch.mode-switch .switch input:checked + i::after { transform: translateX(24px); }
+/* 控制模式大开关（[2] 控制模式组头）：label.switch 自身即 .head-switch.mode-switch，直接作用于自身 */
+.group-head .head-switch.mode-switch { width: 52px; height: 28px; }
+.group-head .head-switch.mode-switch i::after { width: 22px; height: 22px; left: 2px; top: 2px; }
+.group-head .head-switch.mode-switch input:checked + i::after { transform: translateX(24px); }
 
 /* ---------- 档位表 ---------- */
 .gear-box { margin-top: 10px; padding: 8px; background: var(--surface2); border-radius: 8px; }

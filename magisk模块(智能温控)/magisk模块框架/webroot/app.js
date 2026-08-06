@@ -210,7 +210,14 @@
   // ---------- 折叠逻辑：开关驱动 + 手动展开仅查看/编辑（不改总开关） ----------
   function masterOn(key) { return S.values[key] !== '0'; }
 
+  // 分组是否有可折叠内容（子面板/模式面板/档位表/直接参数）；无折叠内容的分组（如 [4] 自动拉起）
+  // 不渲染小三角、不响应组头点击，说明区常显
+  function hasCollapsible(g) {
+    return !!(g.subKeys || g.modePanels || g.gearTables || (g.keys && g.keys.length));
+  }
+
   function onHeaderClick(g) {
+    if (!hasCollapsible(g)) return;   // 无折叠内容（如 [4] 自动拉起），组头点击无动作
     if (g.master) {
       if (masterOn(g.master)) S.manualCollapse[g.id] = !S.manualCollapse[g.id]; // 会话级折叠
       else S.manualExpand[g.id] = !S.manualExpand[g.id]; // 手动展开仅查看，不改总开关
@@ -235,11 +242,12 @@
     }
     S._prevPerf = perfOn;
     SCHEMA.groups.forEach(function (g) {
+      if (!hasCollapsible(g)) return;   // 无折叠内容（如 [4] 自动拉起）：说明区常显，不处理折叠
       var head = $('head-' + g.id), chev = $('chev-' + g.id), badge = $('badge-' + g.id);
       var body = $('body-' + g.id);
       if (!head || !body) return;
       var open, off;
-      // 模式子面板（[4] 控制模式）：PID / Gear 横滑切换（滑动由 CTRL_MODE 驱动，见 setValue/initModeSlider）
+      // 模式子面板（[2] 控制模式）：PID / Gear 横滑切换（滑动由 CTRL_MODE 驱动，见 setValue/initModeSlider）
       if (g.master === 'PERF_ENABLED') {
         open = perfOn ? !S.manualCollapse[g.id] : !!S.manualExpand[g.id];
         off = !perfOn;
@@ -248,12 +256,12 @@
         if (badge) badge.classList.toggle('hidden', !off);
         chev.classList.toggle('on', open);
       } else if (g.headerSwitch) {
-        // 开关驱动子面板（[1] 日志&调试、[0] 通用参数、[3] 自动拉起等）：
-        // 开关关 → 子面板/说明区折叠，可手动展开查看/编辑（不改总开关）
+        // 开关驱动子面板（[0] 日志&调试、[3] sysfs 等）：
+        // 开关关 → 折叠整个 body（含子面板），消除空 body 的 padding 残留（"下巴长"）；
+        // 可手动展开查看/编辑（不改总开关）
         var swOn = masterOn(g.headerSwitch);
-        var sub = $('sub-' + g.id) || body;
         open = swOn ? !S.manualCollapse[g.id] : !!S.manualExpand[g.id];
-        sub.classList.toggle('collapsed', !open);
+        body.classList.toggle('collapsed', !open);
         head.classList.toggle('off', !swOn);
         if (badge) badge.classList.toggle('hidden', swOn);
         chev.classList.toggle('on', open);
@@ -377,7 +385,7 @@
     var head = document.createElement('header');
     head.id = 'head-' + g.id;
     head.className = 'group-head';
-    head.innerHTML = '<span class="chev" id="chev-' + g.id + '"></span>' +
+    head.innerHTML = (hasCollapsible(g) ? '<span class="chev" id="chev-' + g.id + '"></span>' : '') +
       '<span class="g-title">' + esc(g.title) + '</span>' +
       '<span class="badge hidden" id="badge-' + g.id + '">未生效</span>';
     if (g.headerSwitch && SCHEMA.keys[g.headerSwitch]) {
