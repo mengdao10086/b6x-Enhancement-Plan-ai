@@ -10,7 +10,7 @@ window.B6X_SCHEMA = {
   statusB7: "/data/local/tmp/tempctrl_b7x.status",
   gearFile: "/data/local/tmp/tempctrl.gear",
   dataFile: "/data/local/tmp/tempctrl_webui.data",  // C 每 1s 写入的曲线数据文件
-  chartWindowOptions: [60, 90, 120, 180, 240, 360, 480],
+  chartWindowOptions: [120, 180, 240, 360, 480, 720],
 
   groups: [
     // [0] 日志 & 调试（置顶，调试便捷）

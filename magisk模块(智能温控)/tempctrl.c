@@ -3,7 +3,7 @@
 // ================================================================
 //
 // 运行环境：Magisk / KernelSU 模块，由 service.sh 启动并守护
-// App 进程检测：pgrep -f com.flydigi.waspwing.experimental
+// App 进程检测：直读 /proc/<pid>/cmdline 精确比对包名（不经 shell，避免 pgrep 自匹配误判）
 // 控制指令：am broadcast → LSPosed 模块 → WaspWingManager.setRunMode
 //
 // 温度单位：整型 0.1°C（电池原生单位，CPU m°C ÷ 100）
@@ -27,6 +27,7 @@
 #include <sys/stat.h>
 #include <sys/wait.h>
 #include <fcntl.h>
+#include <dirent.h>
 #include <limits.h>
 #include <math.h>
 
@@ -440,7 +441,7 @@ static char status_file_path_b7[512] = "/data/local/tmp/tempctrl_b7x.status";
 
 // WebUI 曲线数据文件（每 1 秒一行，滚动保留最大曲线窗口秒数）
 #define WEBUI_DATA_PATH       "/data/local/tmp/tempctrl_webui.data"
-#define WEBUI_DATA_MAX_LINES  480   // = 曲线最大时间挡位（秒）
+#define WEBUI_DATA_MAX_LINES  720   // = 曲线最大时间挡位（秒）
 static char gear_file_path[512] = "";
 
 // 三方 app 包名（v2.7：farsef 在最近连 B6X 散热器时也参与仲裁）
@@ -1786,11 +1787,43 @@ static int is_app_alive(void) {
 // 需求：B6X 两个 app 最多一个后台存活，保留 BLE 连接者（b6_owner），无法区分时保留老 app。
 // farsef（B7X app）已退出仲裁；B7X 设备由 select_active_device 单独处理。
 
-/** 检测指定包名的 app 进程是否在运行 */
+/**
+ * 检测指定包名的 app 进程是否在运行。
+ * 直读 /proc/<pid>/cmdline 做精确比对，不经 shell：
+ *   - 整参等于包名（app 进程 argv[0]=进程名/包名）
+ *   - 或 --nice-name=<包名>（zygote 派生的标准格式）
+ * 避免 system("pgrep -f <pkg>") 时临时 shell 自身命令行含包名造成的自匹配误判。
+ */
 static int app_process_running(const char *pkg) {
-    char cmd[256];
-    snprintf(cmd, sizeof(cmd), "pgrep -f %s > /dev/null 2>&1", pkg);
-    return (system(cmd) == 0);
+    DIR *d = opendir("/proc");
+    if (!d) return 0;
+    struct dirent *de;
+    char buf[4096];
+    int found = 0;
+    while (!found && (de = readdir(d)) != NULL) {
+        if (de->d_name[0] < '0' || de->d_name[0] > '9') continue;   // 只扫数字 PID
+        char path[64];
+        snprintf(path, sizeof(path), "/proc/%s/cmdline", de->d_name);
+        int fd = open(path, O_RDONLY);
+        if (fd < 0) continue;
+        ssize_t n = read(fd, buf, sizeof(buf) - 1);
+        close(fd);
+        if (n <= 0) continue;
+        buf[n] = '\0';
+        // NUL 分隔的参数逐个精确比对
+        for (char *tok = buf; tok < buf + n; ) {
+            size_t len = strnlen(tok, (size_t)(buf + n - tok));
+            if (len > 0 &&
+                (strcmp(tok, pkg) == 0 ||
+                 (strncmp(tok, "--nice-name=", 12) == 0 && strcmp(tok + 12, pkg) == 0))) {
+                found = 1;
+                break;
+            }
+            tok += len + 1;
+        }
+    }
+    closedir(d);
+    return found;
 }
 
 /** 判断指定包名是否为当前前台/top Activity（dumpsys 开销约 100~300ms，仅在要 kill 时调用） */

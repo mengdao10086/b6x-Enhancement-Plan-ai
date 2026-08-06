@@ -749,7 +749,7 @@
     ctx.clearRect(0, 0, cw, ch);
     var padL = 36, padR = 36, padT = 16, padB = 4;
     var W = cw - padL - padR, H = ch - padT - padB;
-    var data = S.samples.slice(-(S.window || 240));   // 只画最近 window 秒
+    var data = S.samples.slice(-(S.window || 360));   // 只画最近 window 秒
     var leftSeries = S.series.filter(function (s) { return s.on && s.axis === 'left'; });
     var rightSeries = S.series.filter(function (s) { return s.on && s.axis === 'right'; });
     if (data.length < 2 || (!leftSeries.length && !rightSeries.length)) {
@@ -888,7 +888,7 @@
 
   // ---------- 曲线控件 ----------
   function setChartWindow(v) {
-    S.window = parseInt(v, 10) || 240;
+    S.window = parseInt(v, 10) || 360;
     storeSet('b6xChartWindow', String(S.window));
     updateWindowUI();
     drawChart();
@@ -902,8 +902,8 @@
   }
 
   function initChartUI() {
-    var w = parseInt(storeGet('b6xChartWindow') || '240', 10);
-    if (SCHEMA.chartWindowOptions.indexOf(w) === -1) w = 240;   // 旧自定义值回落默认挡位
+    var w = parseInt(storeGet('b6xChartWindow') || '360', 10);
+    if (SCHEMA.chartWindowOptions.indexOf(w) === -1) w = 360;   // 旧自定义值回落默认挡位
     S.window = w;
     var wbox = $('chartWindow');
     SCHEMA.chartWindowOptions.forEach(function (v) {
