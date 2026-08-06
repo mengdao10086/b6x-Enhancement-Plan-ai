@@ -63,7 +63,14 @@ public class MainHook implements IXposedHookLoadPackage {
     private static volatile long bleLastOwnerAt = 0;          // 上次连接时间戳（Unix 秒，与 bleLastOwner 配套，断连保留）
     private static volatile Activity currentGuideActivity = null;  // 当前可见的 MainActivity（引导页）
     private static volatile boolean autoLaunchPending = false;     // 自动拉起标志已读取，待进入设置界面后后台化（v2.8）
-    private static final Handler mainHandler = new Handler(Looper.getMainLooper());
+    // 注意：不能在静态初始化里直接 new Handler(Looper.getMainLooper())——模块类在 Zygote fork 阶段即被加载，
+    // 此时主线程 Looper 尚未创建，getMainLooper() 返回 null 会抛 NPE，导致整个模块加载失败（所有钩子失效）。
+    // 懒加载：首次用到（Activity.onCreate 主线程）时才创建。
+    private static Handler sMainHandler = null;
+    private static Handler mainHandler() {
+        if (sMainHandler == null) sMainHandler = new Handler(Looper.getMainLooper());
+        return sMainHandler;
+    }
     private static final int AUTO_LAUNCH_TIMEOUT_MS = 2000;        // 兜底：自动进入设置失败时仍退后台
     private static volatile boolean enteredSetup = false;         // 本进程是否已进入过设置界面
 
@@ -979,12 +986,12 @@ public class MainHook implements IXposedHookLoadPackage {
                 backgroundActivity(act);
             }
         };
-        mainHandler.postDelayed(autoLaunchTimeoutRunnable, AUTO_LAUNCH_TIMEOUT_MS);
+        mainHandler().postDelayed(autoLaunchTimeoutRunnable, AUTO_LAUNCH_TIMEOUT_MS);
     }
 
     private static void cancelAutoLaunchTimeout() {
         if (autoLaunchTimeoutRunnable != null) {
-            mainHandler.removeCallbacks(autoLaunchTimeoutRunnable);
+            mainHandler().removeCallbacks(autoLaunchTimeoutRunnable);
             autoLaunchTimeoutRunnable = null;
         }
     }
