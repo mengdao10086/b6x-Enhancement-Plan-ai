@@ -1880,10 +1880,24 @@ static const char *resolve_launch_pkg(void) {
 }
 
 /**
+ * 返回指定包名的 launcher Activity 类名；未知包返回 NULL。
+ * 这些 app 的 launcher 未导出/非标准 filter，隐式 `am start -a MAIN -c LAUNCHER -p <包名>`
+ * 解析不到（报 "unable to resolve Intent"），必须用显式组件 `-n <包名>/<类名>` 启动
+ * （桌面 launcher 也是这么起的）。
+ */
+static const char *launcher_activity(const char *pkg) {
+    if (strcmp(pkg, APP_PKG_B6X_OLD) == 0 || strcmp(pkg, APP_PKG_B6X_NEW) == 0)
+        return "com.example.extool.MainActivity";
+    if (strcmp(pkg, APP_PKG_B7X) == 0)
+        return "com.game.motionelf.activity.ActivityStart";
+    return NULL;
+}
+
+/**
  * 自动拉起上次使用的散热器 app（v2.8），带冷却防止反复拉起被杀。
  * 包名按 last_owner 选择：2→新 B6X app，6/7→farsef，其余/无记录→老 B6X app；
  * 目标 B6X app 未安装时回退另一个 B6X app。
- * 拉起用 am start + b6x_auto_launch 标志（LSP 读到后连接完成自动后台化，几乎无感）。
+ * 拉起用 am start（显式 launcher 组件 -n）+ b6x_auto_launch 标志（LSP 读到后连接完成自动后台化，几乎无感）。
  * 仅在 APP_LAUNCH_ENABLED=1 且目标 app 已安装、未运行时执行。
  */
 static void launch_last_app(void) {
@@ -1906,10 +1920,16 @@ static void launch_last_app(void) {
         return;
     }
 
+    // 优先显式组件（launcher 未导出/非标准 filter 时隐式解析失败）；未知 launcher 回退 -p
+    const char *act = launcher_activity(pkg);
     char cmd[320];
-    snprintf(cmd, sizeof(cmd),
-             "am start -a android.intent.action.MAIN -c android.intent.category.LAUNCHER "
-             "-p %s --es b6x_auto_launch 1 > /dev/null 2>&1", pkg);
+    if (act)
+        snprintf(cmd, sizeof(cmd),
+                 "am start -n %s/%s --es b6x_auto_launch 1 > /dev/null 2>&1", pkg, act);
+    else
+        snprintf(cmd, sizeof(cmd),
+                 "am start -a android.intent.action.MAIN -c android.intent.category.LAUNCHER "
+                 "-p %s --es b6x_auto_launch 1 > /dev/null 2>&1", pkg);
     int rc = system(cmd);
     write_log("自动拉起散热器 app %s（后台化）rc=%d", pkg, rc);
 }
