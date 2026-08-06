@@ -548,6 +548,18 @@ static int parse_gear_config_line(const char *val_str, GearConfigTemp *out) {
     return 1;
 }
 
+/** 收集 GEAR_B6X_N / GEAR_B7X_N 配置到临时表（编号越界或表满时跳过） */
+static void collect_gear_config(const char *key, const char *val_str,
+                                GearConfigTemp *configs, int *count) {
+    int n = atoi(key + 9);
+    if (n < 1 || n > GEAR_TABLE_MAX) return;
+    if (*count < GEAR_TABLE_MAX &&
+        parse_gear_config_line(val_str, &configs[*count])) {
+        configs[*count].config_n = n;
+        (*count)++;
+    }
+}
+
 /**
  * 用配置档位表重建 B6X/B7X 独立档位表（按配置编号升序排为连续档位表）。
  * 无有效配置时回退到默认档位表。
@@ -975,22 +987,10 @@ static void load_config(const char *path) {
         // --- 档位表（无 gear_config_enabled 子守卫，收集后由后处理判断）
         //    GEAR_B6X_N=…（B6X），GEAR_B7X_N=…（B7X），两表独立配置 ---
         else if (strncmp(key, "GEAR_B7X_", 9) == 0) {
-            int n = atoi(key + 9);
-            if (n < 1 || n > GEAR_TABLE_MAX) continue;
-            if (config_gear_count_b7 < GEAR_TABLE_MAX &&
-                parse_gear_config_line(val_str, &config_gears_b7[config_gear_count_b7])) {
-                config_gears_b7[config_gear_count_b7].config_n = n;
-                config_gear_count_b7++;
-            }
+            collect_gear_config(key, val_str, config_gears_b7, &config_gear_count_b7);
         }
         else if (strncmp(key, "GEAR_B6X_", 9) == 0) {
-            int n = atoi(key + 9);
-            if (n < 1 || n > GEAR_TABLE_MAX) continue;
-            if (config_gear_count_b6 < GEAR_TABLE_MAX &&
-                parse_gear_config_line(val_str, &config_gears_b6[config_gear_count_b6])) {
-                config_gears_b6[config_gear_count_b6].config_n = n;
-                config_gear_count_b6++;
-            }
+            collect_gear_config(key, val_str, config_gears_b6, &config_gear_count_b6);
         }
 
         else { continue; }
@@ -1163,6 +1163,14 @@ static inline int sign_of(int x) {
     return 0;
 }
 
+/** 温差绝对值 → 档位偏移量（三区间阈值：1/2/3 档） */
+static inline int temp_delta_by_boundary(int ad, int z1, int z2, int z3) {
+    if (ad > z3) return 3;
+    if (ad > z2) return 2;
+    if (ad > z1) return 1;
+    return 0;
+}
+
 /** 限速步进：actual 向 desired 靠拢，每周期最多变 up_limit（升）或 down_limit（降） */
 static inline void rate_limit(int *actual, int desired, int up_limit, int down_limit) {
     if (*actual < 0) { *actual = desired; return; }
@@ -1182,17 +1190,18 @@ static inline void reset_exempt_state(void) {
     rev_comp_pending_idle = 0;
 }
 
-// ======================== 状态文件（模块心跳 + BLE 状态） ========================
-
-/**
- * 根据二进制名设定状态文件路径
- * 例：tempctrl → /data/local/tmp/tempctrl.status
- */
-static void set_default_status_path(void) {
-    // 双设备使用硬编码路径，无需从 exe 名推导
-    // status_file_path_b6 / _b7 已在全局初始化时设好
-    (void)0;  // 占位，避免空函数体（路径信息已由全局初始化时的日志覆盖）
+/** CPU 温度 EMA 滤波：首次直取，此后按 CPU_FILTER_ALPHA 平滑 */
+static void update_cpu_filtered(int cpu_now) {
+    if (cpu_now < 0) return;
+    if (first_run) {
+        cpu_filtered_temp = cpu_now;
+        first_run = 0;
+    } else {
+        cpu_filtered_temp = EMA_DIR(cpu_now, cpu_filtered_temp, CPU_FILTER_ALPHA);
+    }
 }
+
+// ======================== 状态文件（模块心跳 + BLE 状态） ========================
 
 /**
  * 创建（或触摸）状态文件，设 0666 权限
@@ -1724,11 +1733,7 @@ static int apply_gear(int level) {
     if (mode == 0 || actual_target_temp < 0)
         rate_limit(&actual_target_temp, target, RATE_LIMIT_TEMP, RATE_LIMIT_TEMP);
 
-    // ---- 用限速后的 actual_* 值替换查表值 ----
-    if (mode == 0)
-        windLevel = actual_rpm;
-    else
-        windOC = actual_rpm;
+    // ---- 用限速后的实际值替换查表值 ----
     coldOC = actual_cold;
     target = actual_target_temp;
 
@@ -1845,19 +1850,22 @@ static int is_foreground_pkg(const char *pkg) {
     return fg;
 }
 
+/** 构建命令并静默执行（输出重定向到 /dev/null），返回 system() 退出码 */
+static int run_cmd_silent(const char *fmt, const char *arg) {
+    char cmd[256];
+    snprintf(cmd, sizeof(cmd), fmt, arg);
+    return system(cmd);
+}
+
 /** 强制停止指定包名的 app（干净停止，LSP 正常清理，status mtime 停住） */
 static void force_stop_app(const char *pkg) {
-    char cmd[256];
     // 输出重定向到 /dev/null，避免泄漏进 /cache/tempctrl.log（service.sh 把 stdout/stderr 指向日志）
-    snprintf(cmd, sizeof(cmd), "am force-stop %s > /dev/null 2>&1", pkg);
-    system(cmd);
+    run_cmd_silent("am force-stop %s > /dev/null 2>&1", pkg);
 }
 
 /** 判断指定包名是否已安装（pm path 有输出即已安装） */
 static int app_installed(const char *pkg) {
-    char cmd[256];
-    snprintf(cmd, sizeof(cmd), "pm path %s > /dev/null 2>&1", pkg);
-    return (system(cmd) == 0);
+    return (run_cmd_silent("pm path %s > /dev/null 2>&1", pkg) == 0);
 }
 
 /**
@@ -1934,6 +1942,12 @@ static void launch_last_app(void) {
     write_log("自动拉起散热器 app %s（后台化）rc=%d", pkg, rc);
 }
 
+/** 淘汰存活参与者：非保留者且非前台时 force-stop（在前台则等下周期再试） */
+static void evict_app_if_eligible(int alive, const char *keep, const char *pkg) {
+    if (alive && keep != pkg && !is_foreground_pkg(pkg))
+        force_stop_app(pkg);
+}
+
 /**
  * 三方 app 存活仲裁（v2.7）：每 5 秒调用，read_status_ble_both 之后。
  * 老/新 B6X app 始终参与；farsef 只在最近连接的是 B6X 散热器（BLE_OWNER_LAST==6）时参与，
@@ -1972,12 +1986,9 @@ static void arbitrate_apps(void) {
         keep = (b6_owner == 2) ? APP_PKG_B6X_NEW : APP_PKG_B6X_OLD;
 
     // 淘汰其他存活参与者（非前台才 force-stop）
-    if (old_alive && keep != APP_PKG_B6X_OLD && !is_foreground_pkg(APP_PKG_B6X_OLD))
-        force_stop_app(APP_PKG_B6X_OLD);
-    if (new_alive && keep != APP_PKG_B6X_NEW && !is_foreground_pkg(APP_PKG_B6X_NEW))
-        force_stop_app(APP_PKG_B6X_NEW);
-    if (far_in && keep != APP_PKG_B7X && !is_foreground_pkg(APP_PKG_B7X))
-        force_stop_app(APP_PKG_B7X);
+    evict_app_if_eligible(old_alive, keep, APP_PKG_B6X_OLD);
+    evict_app_if_eligible(new_alive, keep, APP_PKG_B6X_NEW);
+    evict_app_if_eligible(far_in, keep, APP_PKG_B7X);
 }
 
 // ======================== 电池温度控制 ========================
@@ -2043,11 +2054,7 @@ static void battery_control(void) {
     int eff_z1 = BATT_BOUNDARY_1 * emerg_recovery_mult;
     int eff_z2 = BATT_BOUNDARY_2 * emerg_recovery_mult;
     int eff_z3 = BATT_BOUNDARY_3 * emerg_recovery_mult;
-    int delta = 0;
-    if      (ad > eff_z3) delta = 3;
-    else if (ad > eff_z2) delta = 2;
-    else if (ad > eff_z1) delta = 1;
-    delta *= sign;
+    int delta = temp_delta_by_boundary(ad, eff_z1, eff_z2, eff_z3) * sign;
 
     debug_log(debug_batt, "batt_ctrl temp=%d (%.1f°C) diff=%d ad=%d sign=%d eff_z=[%d/%d/%d] delta=%d rec_mul=%d",
               batt, batt / 10.0, diff, ad, sign, eff_z1, eff_z2, eff_z3, delta, emerg_recovery_mult);
@@ -2223,14 +2230,7 @@ static void battery_control(void) {
 static void emergency_intervention(void) {
     // --- 1. CPU 温度读入与滤波（1s 采集缓存） ---
     int cpu_now = cached_cpu_now;
-    if (cpu_now >= 0) {
-        if (first_run) {
-            cpu_filtered_temp = cpu_now;
-            first_run = 0;
-        } else {
-            cpu_filtered_temp = EMA_DIR(cpu_now, cpu_filtered_temp, CPU_FILTER_ALPHA);
-        }
-    }
+    update_cpu_filtered(cpu_now);
     int t = cpu_filtered_temp;
     int cpu_valid = (cpu_now >= 0);
     debug_log(debug_emerg, "emerg CPU 原始%d 滤波%d 有效%d", cpu_now, t, cpu_valid);
@@ -2353,10 +2353,7 @@ static int gear_from_current(void) {
             int diff = batt - BATT_BASELINE;
             int ad = abs(diff);
             int sign = sign_of(diff);
-            int delta = 0;
-            if      (ad > BATT_BOUNDARY_3) delta = 3 * sign;
-            else if (ad > BATT_BOUNDARY_2) delta = 2 * sign;
-            else if (ad > BATT_BOUNDARY_1) delta = 1 * sign;
+            int delta = temp_delta_by_boundary(ad, BATT_BOUNDARY_1, BATT_BOUNDARY_2, BATT_BOUNDARY_3) * sign;
             if (delta != 0) {
                 if (curr_gear_temp_cooldown > 0) {
                     // 冷却期：仅允许向零靠近，阻止同方向继续累积
@@ -2853,13 +2850,12 @@ static void reconnect_align(void) {
     batt_changed_since_ctrl = 0;
     batt_window_changed = 0;
     // PID 模式：重置 PID 状态，actual 值由 rate_limited_execute 重新初始化
+    // （pid_predict_buf_* 已在 pid_reset_core 中清零）
     if (ctrl_mode == 1) {
         pid_reset_core();
         pid_filter_interval_smooth = -1;
         pid_filter_auto_off = 0;
         temp_idle_cycles = 0;
-        pid_predict_buf_cnt = 0;
-        pid_predict_buf_head = 0;
         actual_rpm = -1;
         actual_cold = -1;
         actual_target_temp = -1;
@@ -3001,13 +2997,7 @@ static void main_loop(void) {
             if (pid_batt_filtered < 0) {
                 pid_batt_filtered = batt_raw;
             } else {
-                int old_f = pid_batt_filtered;
-                int numer = batt_raw * pid_batt_alpha + pid_batt_filtered * (100 - pid_batt_alpha);
-                int new_val = numer / 100;
-                if (batt_raw > old_f && numer % 100 > 0) {
-                    new_val++;  // 向原始值方向取整（反向自然截断，无需处理）
-                }
-                pid_batt_filtered = new_val;
+                pid_batt_filtered = EMA_DIR(batt_raw, pid_batt_filtered, pid_batt_alpha);
             }
         } else {
             // 无滤波模式：原始值直通；1s 层未变过且 idle 未达上限则跳过本周期
@@ -3020,14 +3010,7 @@ static void main_loop(void) {
 
         // --- CPU 温度读入与滤波（用于补偿，两模式共享） ---
         int cpu_now = cached_cpu_now;   // 1s 采集缓存
-        if (cpu_now >= 0) {
-            if (first_run) {
-                cpu_filtered_temp = cpu_now;
-                first_run = 0;
-            } else {
-                cpu_filtered_temp = EMA_DIR(cpu_now, cpu_filtered_temp, CPU_FILTER_ALPHA);
-            }
-        }
+        update_cpu_filtered(cpu_now);
 
         // --- CPU 补偿值计算 ---
         float cpu_comp = 0.0f;
@@ -3326,7 +3309,7 @@ int main(int argc, char *argv[]) {
     }
 
     // --- 双状态文件 + 档位存档初始化 ---
-    set_default_status_path();
+    // 状态文件路径已由全局初始化设好（status_file_path_b6/_b7 硬编码）
     create_status_files();
     set_gear_file_path();
 
@@ -3392,9 +3375,8 @@ int main(int argc, char *argv[]) {
         }
 
         pid_reset_core();
-        batt_gear_base   = (int)(pid_ratio * (gear_max - gear_min) + gear_min + 0.5f);
-        if (batt_gear_base < gear_min) batt_gear_base = gear_min;
-        if (batt_gear_base > gear_max) batt_gear_base = gear_max;
+        batt_gear_base = clamp((int)(pid_ratio * (gear_max - gear_min) + gear_min + 0.5f),
+                               gear_min, gear_max);
 
 pid_init_done:
         batt_gear_cooldown = 0;

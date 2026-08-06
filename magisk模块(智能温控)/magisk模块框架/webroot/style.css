@@ -240,8 +240,7 @@ input[type=number] { -moz-appearance: textfield; }
   box-sizing: border-box;
 }
 .gear-row.dragging { background: var(--accent); color: #fff; border-radius: 6px; box-shadow: 0 4px 12px rgba(0,0,0,.35); }
-.gear-row.dragging input, .gear-row.dragging .gear-n { color: #fff; }
-.gear-row.dragging .btn-del { color: #fff; }
+.gear-row.dragging input, .gear-row.dragging .gear-n, .gear-row.dragging .btn-del { color: #fff; }
 .gear-table.dragmode .gear-row:not(.dragging) { opacity: .55; }
 .gear-n { text-align: center; color: var(--muted); }
 .btn-del {

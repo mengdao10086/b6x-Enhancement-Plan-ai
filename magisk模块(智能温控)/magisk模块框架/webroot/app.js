@@ -209,6 +209,7 @@
 
   // ---------- 折叠逻辑：开关驱动 + 手动展开仅查看/编辑（不改总开关） ----------
   function masterOn(key) { return S.values[key] !== '0'; }
+  function ctrlMode() { return S.values['CTRL_MODE'] !== undefined ? S.values['CTRL_MODE'] : '1'; }
 
   // 分组是否有可折叠内容（子面板/模式面板/档位表/直接参数）；无折叠内容的分组（如 [4] 自动拉起）
   // 不渲染小三角、不响应组头点击，说明区常显
@@ -246,32 +247,29 @@
       var head = $('head-' + g.id), chev = $('chev-' + g.id), badge = $('badge-' + g.id);
       var body = $('body-' + g.id);
       if (!head || !body) return;
-      var open, off;
       // 模式子面板（[2] 控制模式）：PID / Gear 横滑切换（滑动由 CTRL_MODE 驱动，见 setValue/initModeSlider）
+      // 展开状态统一规则：master 组跟 PERF_ENABLED，headerSwitch 组跟开关；手动展开/折叠为会话级，不改总开关
+      var on;
       if (g.master === 'PERF_ENABLED') {
-        open = perfOn ? !S.manualCollapse[g.id] : !!S.manualExpand[g.id];
-        off = !perfOn;
-        body.classList.toggle('collapsed', !open);
-        head.classList.toggle('off', off);
-        if (badge) badge.classList.toggle('hidden', !off);
-        chev.classList.toggle('on', open);
+        on = perfOn;
         if (g.modePanels) {   // [2] 控制模式：seg 按钮 active 跟随 CTRL_MODE
-          var ctrlMode = S.values['CTRL_MODE'] !== undefined ? S.values['CTRL_MODE'] : '1';
+          var cm = ctrlMode();
           head.querySelectorAll('.seg-btn').forEach(function (b) {
-            b.classList.toggle('active', b.dataset.mode === ctrlMode);
+            b.classList.toggle('active', b.dataset.mode === cm);
           });
         }
       } else if (g.headerSwitch) {
         // 开关驱动子面板（[0] 日志&调试、[3] sysfs 等）：
-        // 开关关 → 折叠整个 body（含子面板），消除空 body 的 padding 残留（"下巴长"）；
-        // 可手动展开查看/编辑（不改总开关）
-        var swOn = masterOn(g.headerSwitch);
-        open = swOn ? !S.manualCollapse[g.id] : !!S.manualExpand[g.id];
-        body.classList.toggle('collapsed', !open);
-        head.classList.toggle('off', !swOn);
-        if (badge) badge.classList.toggle('hidden', swOn);
-        chev.classList.toggle('on', open);
+        // 开关关 → 折叠整个 body（含子面板），消除空 body 的 padding 残留（"下巴长"）
+        on = masterOn(g.headerSwitch);
+      } else {
+        return;   // 无开关驱动（当前 schema 不存在，防御性保留）：不处理折叠
       }
+      var open = on ? !S.manualCollapse[g.id] : !!S.manualExpand[g.id];
+      body.classList.toggle('collapsed', !open);
+      head.classList.toggle('off', !on);
+      if (badge) badge.classList.toggle('hidden', on);
+      chev.classList.toggle('on', open);
     });
   }
 
@@ -285,7 +283,7 @@
   function initModeSlider() {
     var ms = $('mode-slider-g4');
     if (!ms) return;
-    var initVal = S.values['CTRL_MODE'] !== undefined ? S.values['CTRL_MODE'] : '1';
+    var initVal = ctrlMode();
     ms.scrollLeft = initVal === '1' ? 0 : ms.clientWidth;   // 初始对齐当前模式（无动画）
     // 滚动停止后才同步 CTRL_MODE：滚动过程实时 setValue 会经 setValue→scrollModePanel 反向触发 scrollTo，
     // 造成点击开关时值被滚过中点前的判定改回（抖动回原位）、惯性滑动被 smooth 接管而卡顿。
@@ -293,15 +291,15 @@
     var syncMode = debounce(function () {
       var p = ms.scrollLeft / Math.max(1, ms.clientWidth);
       var newVal = p > 0.5 ? '0' : '1';
-      var cur = S.values['CTRL_MODE'] !== undefined ? S.values['CTRL_MODE'] : '1';
+      var cur = ctrlMode();
       if (newVal !== cur) setValue('CTRL_MODE', newVal, { noScroll: true });
     }, 120);
     ms.addEventListener('scroll', syncMode, { passive: true });
   }
 
   // ---------- 控件构建 ----------
-  function buildSwitchEl(key) {
-    var val = S.values[key] !== undefined ? S.values[key] : '0';
+  function buildSwitchEl(key, defVal) {
+    var val = S.values[key] !== undefined ? S.values[key] : (defVal !== undefined ? defVal : '0');
     var lab = document.createElement('label');
     lab.className = 'switch';
     var cb = document.createElement('input');
@@ -321,13 +319,7 @@
     var val = S.values[key] !== undefined ? S.values[key] : def.value || '';
 
     if (def.type === 'switch') {
-      var lab = document.createElement('label');
-      lab.className = 'switch';
-      var cb = document.createElement('input');
-      cb.type = 'checkbox'; cb.dataset.key = key; cb.checked = (val !== '0');
-      cb.addEventListener('change', function () { setValue(key, cb.checked ? '1' : '0'); });
-      lab.appendChild(cb); lab.appendChild(document.createElement('i'));
-      wrap.appendChild(lab);
+      wrap.appendChild(buildSwitchEl(key, def.value || ''));
     } else if (def.type === 'int') {
       wrap.appendChild(buildNumInput(key, val, def.min, def.max, def.step || 1, def.unit || ''));
     } else if (def.type === 'multi') {
@@ -360,8 +352,9 @@
   function buildNumInput(key, val, min, max, step, placeholder) {
     var inp = document.createElement('input');
     inp.type = 'number'; inp.min = min; inp.max = max; inp.step = step;
+    var isRow = key.indexOf('::') === -1;
     inp.dataset.key = key; inp.dataset.multiKey = key;
-    if (key.indexOf('::') === -1) inp.dataset.rowField = '1';
+    if (isRow) inp.dataset.rowField = '1';
     inp.value = val;
     fitInput(inp);
     inp.addEventListener('input', function () {
@@ -369,7 +362,7 @@
       if (!isNaN(n)) {
         if (n < min) { inp.value = min; n = min; }
         if (n > max) { inp.value = max; n = max; }
-        if (key.indexOf('::') === -1) setValue(key, String(n)); // multi 子输入不直接写 dirty
+        if (isRow) setValue(key, String(n)); // multi 子输入不直接写 dirty
       }
       fitInput(inp);
     });
@@ -383,6 +376,14 @@
   }
 
   // ---------- 分组渲染 ----------
+  // 分组首行说明（头部开关说明 / 分组说明共用）
+  function appendNote(container, text) {
+    var note = document.createElement('div');
+    note.className = 'group-note';
+    note.textContent = text;
+    container.appendChild(note);
+  }
+
   function buildGroup(g) {
     var sec = document.createElement('section');
     sec.className = 'group' + (g.master === 'PERF_ENABLED' || g.master === 'DEBUG_ENABLED' ? ' mastergroup' : '');
@@ -429,17 +430,9 @@
 
     // 头部开关的说明：作为分组首行说明（原"独立条目"的说明迁到这里）
     if (g.headerSwitch && SCHEMA.keys[g.headerSwitch] && String(SCHEMA.keys[g.headerSwitch].desc).trim()) {
-      var hnote = document.createElement('div');
-      hnote.className = 'group-note';
-      hnote.textContent = SCHEMA.keys[g.headerSwitch].desc;
-      body.appendChild(hnote);
+      appendNote(body, SCHEMA.keys[g.headerSwitch].desc);
     }
-    if (g.note) {
-      var gnote = document.createElement('div');
-      gnote.className = 'group-note';
-      gnote.textContent = g.note;
-      body.appendChild(gnote);
-    }
+    if (g.note) appendNote(body, g.note);
 
     // 控件
     g.keys.forEach(function (k) {
@@ -694,24 +687,19 @@
   // ---------- 曲线数据：读 C 每 1s 写的数据文件（无现场采样，减少 exec） ----------
   function parseDataLines(text) {
     // 行格式：epoch,电池(0.1°C),CPU(0.1°C),热端(0.1°C),冷端(0.1°C),实际转速,实际制冷,目标制冷（未就绪为 -1）
-    // 温度统一 ÷10 → °C（一位小数）；转速/制冷保持原值
+    // 温度列 ×0.1°C → °C（负数/未就绪视为 null）；转速/制冷列保持原值
     var out = [];
     var lines = String(text || '').split('\n');
+    function num(j) { var n = parseInt(p[j], 10); return isNaN(n) ? null : n; }
+    function temp(v) { return v != null && v >= 0 ? v / 10 : null; }
+    function raw(v) { return v != null && v >= 0 ? v : null; }
     for (var i = 0; i < lines.length; i++) {
       var p = lines[i].trim().split(',');
       if (p.length < 8) continue;
-      function num(j) { var n = parseInt(p[j], 10); return isNaN(n) ? null : n; }
-      var e = num(0), batt = num(1), cpu = num(2), hot = num(3), cold = num(4);
-      var rpm = num(5), coldReal = num(6), gearCold = num(7);
       out.push({
-        t: e,
-        batt: batt != null && batt >= 0 ? batt / 10 : null,
-        cpu: cpu != null && cpu >= 0 ? cpu / 10 : null,
-        hot: hot != null && hot >= 0 ? hot / 10 : null,
-        cold: cold != null && cold >= 0 ? cold / 10 : null,
-        rpm: rpm != null && rpm >= 0 ? rpm : null,
-        coldReal: coldReal != null && coldReal >= 0 ? coldReal : null,
-        gearCold: gearCold != null && gearCold >= 0 ? gearCold : null
+        t: num(0),
+        batt: temp(num(1)), cpu: temp(num(2)), hot: temp(num(3)), cold: temp(num(4)),
+        rpm: raw(num(5)), coldReal: raw(num(6)), gearCold: raw(num(7))
       });
     }
     return out;
@@ -804,13 +792,13 @@
         ctx.strokeStyle = s.color; ctx.lineWidth = 1.6;
         ctx.beginPath();
         var started = false;
-        data.forEach(function (d) {
-          var v = getV(s, d);
-          if (v == null) return;
-          var x = padL + W * (data.length === 1 ? 0.5 : (data.indexOf(d) / (data.length - 1)));
+        for (var di = 0; di < data.length; di++) {
+          var v = getV(s, data[di]);
+          if (v == null) continue;
+          var x = padL + W * (data.length === 1 ? 0.5 : (di / (data.length - 1)));
           var y = yOf(axis, v);
           if (started) ctx.lineTo(x, y); else { ctx.moveTo(x, y); started = true; }
-        });
+        }
         ctx.stroke();
       });
     }
@@ -864,9 +852,12 @@
   function initTop() {
     var slider = $('topSlider');
     var seg = $('seg');
+    function setSegActive(name) {
+      seg.querySelectorAll('.seg-btn').forEach(function (b) { b.classList.toggle('active', b.dataset.panel === name); });
+    }
     function goTo(name) {
       slider.scrollTo({ left: name === 'log' ? slider.clientWidth : 0, behavior: 'smooth' });
-      seg.querySelectorAll('.seg-btn').forEach(function (b) { b.classList.toggle('active', b.dataset.panel === name); });
+      setSegActive(name);
     }
     seg.querySelectorAll('.seg-btn').forEach(function (b) {
       b.addEventListener('click', function () { goTo(b.dataset.panel); });
@@ -875,8 +866,7 @@
     // 造成点击切换时先高亮目标→又闪回旧面板→滚过中点再高亮目标（闪烁）
     var syncSeg = debounce(function () {
       var p = slider.scrollLeft / Math.max(1, slider.clientWidth);
-      var name = p > 0.5 ? 'log' : 'chart';
-      seg.querySelectorAll('.seg-btn').forEach(function (b) { b.classList.toggle('active', b.dataset.panel === name); });
+      setSegActive(p > 0.5 ? 'log' : 'chart');
     }, 120);
     slider.addEventListener('scroll', syncSeg, { passive: true });
     $('pinBtn').addEventListener('click', function () {
