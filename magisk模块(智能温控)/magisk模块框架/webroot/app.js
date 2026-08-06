@@ -40,7 +40,9 @@
     var val = String(inp.value || '');
     var ph = inp.placeholder || '';
     var len = Math.max(val.length, ph.length, 1);
-    inp.style.width = (len + 1) + 'ch';
+    // 修正：ch 单位只计内容宽，输入框 box-sizing:border-box 另有左右 padding(7px×2)+border(1px×2)=16px，
+    // 长数字（日志上限/缩放系数等）会被截掉末位。补上该偏移。
+    inp.style.width = 'calc(' + (len + 1) + 'ch + 16px)';
   }
   function debounce(fn, ms) {
     var t;
@@ -311,11 +313,14 @@
 
   function buildControl(key) {
     var def = SCHEMA.keys[key];
+
+    // 标签区：label + 说明
     var wrap = document.createElement('div');
     wrap.className = 'ctrl';
     wrap.innerHTML = '<div class="ctrl-label">' + esc(def.label) +
       (String(def.desc).trim() ? '<div class="ctrl-desc">' + esc(def.desc) + '</div>' : '') + '</div>';
 
+    // 控件区：按类型分发构建
     var val = S.values[key] !== undefined ? S.values[key] : def.value || '';
 
     if (def.type === 'switch') {
@@ -349,6 +354,15 @@
     return wrap;
   }
 
+  // 数字输入框钳制到 [min,max]，并把钳制后的值同步回 input.value；输入非数字返回 null
+  function clampNumInput(inp, min, max) {
+    var n = parseInt(inp.value, 10);
+    if (isNaN(n)) return null;
+    if (n < min) { inp.value = min; n = min; }
+    if (n > max) { inp.value = max; n = max; }
+    return n;
+  }
+
   function buildNumInput(key, val, min, max, step, placeholder) {
     var inp = document.createElement('input');
     inp.type = 'number'; inp.min = min; inp.max = max; inp.step = step;
@@ -358,12 +372,8 @@
     inp.value = val;
     fitInput(inp);
     inp.addEventListener('input', function () {
-      var n = parseInt(inp.value, 10);
-      if (!isNaN(n)) {
-        if (n < min) { inp.value = min; n = min; }
-        if (n > max) { inp.value = max; n = max; }
-        if (isRow) setValue(key, String(n)); // multi 子输入不直接写 dirty
-      }
+      var n = clampNumInput(inp, min, max);
+      if (n != null && isRow) setValue(key, String(n)); // multi 子输入不直接写 dirty
       fitInput(inp);
     });
     if (placeholder) inp.placeholder = placeholder;
@@ -615,12 +625,8 @@
   }
 
   function onGearFieldInput(ref, idx, inp) {
-    var n = parseInt(inp.value, 10);
     var f = SCHEMA.gearRow.fields[idx];
-    if (!isNaN(n)) {
-      if (n < f.min) { inp.value = f.min; n = f.min; }
-      if (n > f.max) { inp.value = f.max; n = f.max; }
-    }
+    clampNumInput(inp, f.min, f.max);
     ref.parts[idx] = inp.value;
     S.values[ref.key] = ref.parts.join(',');
     S.dirty[ref.key] = true;
@@ -869,10 +875,13 @@
       setSegActive(p > 0.5 ? 'log' : 'chart');
     }, 120);
     slider.addEventListener('scroll', syncSeg, { passive: true });
+    // 图钉：图标蓝底状态完全由 body 的 pin-fixed 类驱动（初始/点击后都走 syncPinState），
+    // 不依赖 classList.toggle 返回值，避免个别 WebView 下图标常蓝。
     $('pinBtn').addEventListener('click', function () {
-      var pinned = document.body.classList.toggle('pin-fixed');
+      document.body.classList.toggle('pin-fixed');
+      var pinned = document.body.classList.contains('pin-fixed');
       document.body.classList.toggle('pin-scroll', !pinned);   // 互斥：移除另一类，避免 CSS 冲突锁死
-      $('pinBtn').classList.toggle('active', pinned);
+      syncPinState();
     });
   }
 
@@ -933,6 +942,37 @@
     $('logFollowBtn').addEventListener('click', function () { S.manualScroll = false; scrollLogBottom(); $('logFollowBtn').classList.remove('off'); });
   }
 
+  // ---------- 模式面板：自适应高度横滑（容器高度跟随激活面板，消除空区） ----------
+  function syncModeHeight() {
+    var ms = $('mode-slider-g4');
+    if (!ms) return;
+    var p = ms.scrollLeft / Math.max(1, ms.clientWidth);
+    var idx = p > 0.5 ? 1 : 0;
+    var panels = ms.querySelectorAll('.mode-panel');
+    if (!panels[idx]) return;
+    // 面板底相对容器顶的距离（含 margin），设为容器高度则面板完整可见
+    var h = panels[idx].getBoundingClientRect().bottom - ms.getBoundingClientRect().top;
+    if (h > 0) ms.style.height = h + 'px';   // >0 防收起时误设 0
+  }
+
+  function initModeHeight() {
+    var ms = $('mode-slider-g4');
+    if (!ms) return;
+    var settle = debounce(syncModeHeight, 80);
+    ms.addEventListener('scroll', settle, { passive: true });
+    if (window.ResizeObserver) {
+      // 面板内容（档位表增删等）变化时联动容器高度
+      var ro = new ResizeObserver(syncModeHeight);
+      ms.querySelectorAll('.mode-panel').forEach(function (p) { ro.observe(p); });
+    }
+    syncModeHeight();
+  }
+
+  // 图钉状态同步：仅固定时蓝色（蓝底 = body 有 pin-fixed）
+  function syncPinState() {
+    $('pinBtn').classList.toggle('active', document.body.classList.contains('pin-fixed'));
+  }
+
   // ---------- 启动 ----------
   async function init() {
     var errText = null;
@@ -969,9 +1009,11 @@
       errText = (errText ? errText + ' | ' : '') + '渲染异常: ' + e.message;
     }
     initTop();
+    syncPinState();
     initChartUI();
     initLogUI();
     initModeSlider();
+    initModeHeight();
     updateCollapse();
     if (errText) reportError(errText);
     else if (!Bridge.available) reportError('未检测到 WebUI 桥接 — 请在 KernelSU / KSU-Next / APatch 管理器内打开本模块 WebUI');

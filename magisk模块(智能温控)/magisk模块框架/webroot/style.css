@@ -51,7 +51,6 @@ body.pin-fixed .config { flex: 1; overflow-y: auto; min-height: 0; }
 body.pin-scroll .app { display: block; }
 body.pin-scroll .top { height: 30dvh; }
 body.pin-scroll .config { overflow: visible; }
-body.pin-scroll { padding-bottom: 54px; }
 
 /* ---------- 顶部横滑容器 ---------- */
 .top {
@@ -127,7 +126,6 @@ body.pin-scroll { padding-bottom: 54px; }
 #logFollowBtn.off { opacity: .4; }
 
 /* ---------- 配置区 ---------- */
-.config { padding-bottom: 56px; }  /* 给底部保存条让位 */
 .banner {
   margin: 8px 10px; padding: 8px 10px; border-radius: 8px; font-size: 12px;
 }
@@ -160,7 +158,6 @@ body.pin-scroll { padding-bottom: 54px; }
 }
 .group-head .chev.on { transform: rotate(90deg); }
 .group-head .g-title { font-weight: 600; font-size: 13px; }
-.group-head .g-note { color: var(--muted); font-size: 11px; margin-left: auto; text-align: right; }
 .group-head .head-switch { margin-left: auto; }
 .group-head.off .g-title { color: var(--muted); }
 .group-note { font-size: 11px; color: var(--muted); padding: 4px 0 6px; border-bottom: 1px solid rgba(128,128,128,.12); margin-bottom: 2px; }
@@ -171,9 +168,11 @@ body.pin-scroll { padding-bottom: 54px; }
 
 /* 控制模式横滑（[4] 控制模式：PID / Gear 两侧，类似顶部曲线/日志） */
 .mode-slider {
-  display: flex; overflow-x: auto; margin-top: 8px;
+  display: flex; overflow-x: auto; overflow-y: hidden; margin-top: 8px;
+  align-items: flex-start;   /* 各模式面板各自高度，避免参数少的模式下方留整块灰底空区 */
   scroll-snap-type: x mandatory;
   -webkit-overflow-scrolling: touch;
+  transition: height .18s ease;   /* 自适应高度：滚动停稳后容器高度平滑伸缩到激活面板 */
 }
 .mode-slider::-webkit-scrollbar { display: none; }
 .mode-panel { flex: 0 0 100%; min-width: 100%; scroll-snap-align: start; }
@@ -252,20 +251,6 @@ input[type=number] { -moz-appearance: textfield; }
   margin-top: 8px; width: 100%; padding: 6px; border: 1px dashed var(--border);
   background: transparent; color: var(--accent); border-radius: 7px; font-size: 12px; cursor: pointer;
 }
-
-/* ---------- 保存条 ---------- */
-.savebar {
-  position: fixed; left: 0; right: 0; bottom: 0; z-index: 50;
-  display: flex; align-items: center; gap: 10px;
-  padding: 8px 12px calc(8px + env(safe-area-inset-bottom, 0px));
-  background: var(--surface); border-top: 1px solid var(--border);
-}
-.save-info { flex: 1; font-size: 12px; color: var(--muted); }
-.btn-save {
-  border: 0; background: var(--accent); color: #fff; border-radius: 9px;
-  padding: 9px 22px; font-size: 14px; font-weight: 600; cursor: pointer;
-}
-.btn-save:disabled { opacity: .4; cursor: default; }
 
 /* ---------- toast ---------- */
 .toast {

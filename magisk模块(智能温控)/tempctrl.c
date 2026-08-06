@@ -133,11 +133,6 @@ typedef struct {
     int cold;
 } GearConfigTemp;
 
-/** 按配置编号升序排序（供 qsort 使用） */
-static int cmp_gear_config_n(const void *a, const void *b) {
-    return ((const GearConfigTemp*)a)->config_n - ((const GearConfigTemp*)b)->config_n;
-}
-
 /** 防呆排序：按制冷强度升序，同级按风扇转速升序（供 qsort 使用） */
 static int cmp_gear_config_cold(const void *a, const void *b) {
     const GearConfigTemp *x = (const GearConfigTemp *)a;
@@ -343,7 +338,7 @@ static time_t config_mtime = 0;
 // --- 核心参数 ---
 static int pid_kp = 300;                  // PID_KP（÷1000，1°C→P=40%）
 static int pid_ki = 75;                   // PID_KI（÷1000）
-static int pid_kd = 200;                  // PID_KD
+static int pid_kd = 300;                  // PID_KD
 static int pid_integral_limit = 800;      // PID_INTEGRAL_LIMIT（÷1000）
 
 // --- KI 方差门控 ---
@@ -519,9 +514,6 @@ static inline int clamp(int val, int lo, int hi);
 static void alarm_handler(int sig);
 static int match_nearest_gear_for_reconnect(void);
 static void pid_align_from_gear(void);
-static int rpm_from_hot_end(int hot_10);
-static int rpm_from_cold_exp(int cold);
-static int rpm_combine_weighted(int rpm_hot, int rpm_cold);
 static int compute_fan_target(void);
 
 /** 调试日志宏：需要总开关 DEBUG_MODE=1 且对应分区开关=1 时才输出 */
@@ -1165,6 +1157,11 @@ static inline int sign_of(int x) {
     return 0;
 }
 
+/** 设备代号（日志显示用）：B7X→"b7x"，其余→"b6x" */
+static const char *device_tag_of(DeviceType dev) {
+    return (dev == DEVICE_B7X) ? "b7x" : "b6x";
+}
+
 /** 温差绝对值 → 档位偏移量（三区间阈值：1/2/3 档） */
 static inline int temp_delta_by_boundary(int ad, int z1, int z2, int z3) {
     if (ad > z3) return 3;
@@ -1662,13 +1659,6 @@ static void calc_dynamic_rates(int *out_fan_up, int *out_cold_up, int *out_cold_
 }
 
 /**
- * 限速下沉：制冷强度升降独立限速 + 风扇转速升降独立限速（含降速防抖）。
- * 返回限速后的实际风扇转速，向上取整到 50 的倍数并钳制到设备范围。
- *
- * 防抖仅在下降低于阈值内时生效（上升自由爬升，避免数周期锁死）；
- * 距最低转速 < 阈值×1.5 时防抖失效（接近最低转速无需防突降噪音）。
- */
-/**
  * 制冷强度限速（升降独立，负值方向已 clamp 到 0）。
  * 更新 actual_cold；调用方随后用限速后的实际制冷重算风扇目标。
  */
@@ -1785,7 +1775,7 @@ static int is_app_alive(void) {
     time_t now = time(NULL);
     int alive = (now - st.st_mtime <= STATUS_TIMEOUT);
     debug_log(debug_conn, "app_alive device=%s %d mtime_gap=%lds timeout=%ds",
-              (active_device == DEVICE_B7X) ? "b7x" : "b6x",
+              device_tag_of(active_device),
               alive, (long)(now - st.st_mtime), STATUS_TIMEOUT);
     return alive;
 }
@@ -2765,7 +2755,7 @@ static void apply_gear_direct(int mode, int target,
     int hot_deg = (cooler_hot_temp > 0) ? cooler_hot_temp / 10 : 0;
     write_log("%d%+.1f° %s 冷%d 热%d° RPM%d",
               BATT_BASELINE / 10, dev_10 / 10.0f,
-              (active_device == DEVICE_B7X) ? "b7x" : "b6x",
+              device_tag_of(active_device),
               cold, hot_deg, send_rpm);
     send_am_broadcast(mode, target, send_rpm, cold, wl);
 
@@ -3349,7 +3339,7 @@ int main(int argc, char *argv[]) {
         if (dev != DEVICE_NONE) {
             active_device = dev;
             update_active_limits();
-            write_log("初始设备 %s", (active_device == DEVICE_B7X) ? "b7x" : "b6x");
+            write_log("初始设备 %s", device_tag_of(active_device));
             read_cooler_params();
             break;
         }
@@ -3425,7 +3415,7 @@ pid_init_done:
                     // 所有设备都断联
                     if (active_device != DEVICE_NONE) {
                         write_log("%s 已断开，无其他设备可切换\n",
-                                  (active_device == DEVICE_B7X) ? "b7x" : "b6x");
+                                  device_tag_of(active_device));
                     }
                     active_device = DEVICE_NONE;
                     app_was_alive = 0;
@@ -3433,8 +3423,8 @@ pid_init_done:
                 } else {
                     // 切换到另一台在线设备
                     write_log("切换 %s → %s",
-                              (active_device == DEVICE_B7X) ? "b7x" : "b6x",
-                              (new_device == DEVICE_B7X) ? "b7x" : "b6x");
+                              device_tag_of(active_device),
+                              device_tag_of(new_device));
                     active_device = new_device;
                     update_active_limits();
                     last_bcast_valid = 0;
@@ -3447,13 +3437,13 @@ pid_init_done:
 
             // 3. 散热器回传参数（cooler_*）由 1s 采集路径维护，此处直接用缓存
             debug_log(debug_conn, "main 当前设备=%s ble=%d",
-                      (active_device == DEVICE_B7X) ? "b7x" : "b6x", app_ble_connected);
+                      device_tag_of(active_device), app_ble_connected);
 
             // 4. 存活检测
             int app_proc_ok = is_app_alive();
             if (!app_proc_ok || !app_ble_connected) {
                 write_log("%s 连接丢失，检查另一设备...\n",
-                          (active_device == DEVICE_B7X) ? "b7x" : "b6x");
+                          device_tag_of(active_device));
                 launch_last_app();   // v2.9：断联时也尝试拉起散热器 app（无 app 存活时真正拉起；存活时 debug 提示）
                 app_was_alive = 0;  // 复活后走 reconnect_align 重新对齐实际值
                 continue;

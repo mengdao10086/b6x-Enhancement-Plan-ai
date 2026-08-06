@@ -1,6 +1,8 @@
 # 技术债与未解决问题记录
 
-> 规则：只记录**可观察的现象与事实**（时间、版本、日志、复现条件、已验证排除项），**不记录分析推测与根因结论**——未确认的推测可能误导后续排查。根因定位后再回来补记结论。
+> 规则：
+> - **未解决的问题**：只记录**可观察的现象与事实**（时间、版本、日志、复现条件、已验证排除项），**不记录分析推测与根因结论**——未确认的推测可能误导后续排查。
+> - **已解决的问题**：说明清楚**问题原因与解决思路**，供后续参考（根因确认后补记结论）。
 
 ## 未解决区
 
@@ -58,3 +60,24 @@
 - 温度变化检测由"sysfs 文件 mtime 判断"改为**纯数值比较**（每秒读温度值，值与上次缓存不同才标记更新）。mtime 判断不可靠（疑似部分内核的 sysfs 温度文件 mtime 不随值变化更新），是大量跳过源头
 - 5s 控制周期跳过判定改用"自上次控制以来 1s 层值变化累积"窗口判断，温度在窗口内变过又回到原位也不会漏判
 - 恢复 `BATT_SKIP_MAX`（默认 6，可配置）卡死保护：值连续未变达上限时强制进入一次计算
+
+### 3. LSP 模块加载失败导致所有钩子失效（2026-08-06 发现，已解决）
+
+**现象**：重编 LSP 模块后，散热器 app 无论哪种方式打开都不自动跳转设置界面，且 Android 16 蓝牙"一直扫描中"修复失效——两者分属不同钩子路径（`autoStartSetup` 与 `hookControllerStopScan`），同时失效指向模块整体未加载，而非某个钩子逻辑。
+
+**日志样例**（LSPosed 模块日志 `modules_2026-08-06T*.log`）：
+
+```
+Failed to load class com.example.waspwingtempctrl.MainHook
+java.lang.ExceptionInInitializerError
+Caused by: java.lang.NullPointerException: Attempt to read from field 'android.os.MessageQueue android.os.Looper.mQueue' on a null object reference in method 'void android.os.Handler.<init>'
+	at com.example.waspwingtempctrl.MainHook.<clinit>(MainHook.java:66)
+```
+
+（同一错误在每次进程 fork 时重复出现）
+
+**根因（已确认）**：`MainHook` 静态初始化里写了 `new Handler(Looper.getMainLooper())`。模块类在 **Zygote fork 阶段**即被加载（栈帧 `Zygote.forkUsap`），此刻主线程 Looper 尚未创建，`getMainLooper()` 返回 null，`new Handler(null)` 抛 NPE → `ExceptionInInitializerError` → 模块类初始化失败、所有钩子不注册。
+
+**修正（2026-08-06，已真机验证）**：Handler 改为**懒加载**——静态字段仅声明，`mainHandler()` 方法首次调用（Activity.onCreate 主线程，Looper 必已就绪）时才创建；`postDelayed`/`removeCallbacks` 两个调用点改走 `mainHandler()`。
+
+**教训**：LSP 模块类的静态初始化不能依赖主线程 Looper/UI 等运行时资源——模块类加载时机早于 app 主线程就绪，凡需 Handler 一律懒加载。

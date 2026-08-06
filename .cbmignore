@@ -1,0 +1,4 @@
+# codebase-memory-mcp 自定义忽略规则（gitignore 语法）
+# 解除内置跳过：内置名单会跳过任何名为 example 的目录，
+# 导致 LSP 模块的 com.example 包（MainHook.java）不被索引。这里用否定恢复。
+!**/app/src/main/java/com/example/

@@ -259,96 +259,94 @@ public class MainHook implements IXposedHookLoadPackage {
 
     // ========== 各 Hook 分区实现 ==========
 
+    /**
+     * 标准 hook 样板：loadClass + findAndHookMethod + 成功/失败日志。
+     * 等价于原逐段 try/catch 写法（loadClass 或 findAndHookMethod 抛错都打 failLog）。
+     * successLog 传 null 时不打成功日志（如 Application.onCreate 原本无成功日志）。
+     */
+    private static void hookClassMethod(ClassLoader cl, String className, String methodName,
+                                        String successLog, String failLog,
+                                        Object... parameterTypesAndCallback) {
+        try {
+            Class<?> clazz = cl.loadClass(className);
+            XposedHelpers.findAndHookMethod(clazz, methodName, parameterTypesAndCallback);
+            if (successLog != null) {
+                XposedBridge.log(TAG + " 已钩住 " + successLog);
+            }
+        } catch (Throwable t) {
+            XposedBridge.log(TAG + " " + failLog + ": " + t.getMessage());
+        }
+    }
+
     /** 修复 #1：控制器层 — 设备连接后停扫描（双设备共用） */
     private static void hookControllerStopScan(XC_LoadPackage.LoadPackageParam lpparam) {
-        try {
-            Class<?> controllerClass = lpparam.classLoader.loadClass(
-                    "com.flydigi.sdk.bluetooth.AbstractBluetoothController");
-
-            XposedHelpers.findAndHookMethod(
-                    controllerClass,
-                    "onDeviceConnected",
-                    BluetoothDevice.class,
-                    new XC_MethodHook() {
-                        @Override
-                        protected void afterHookedMethod(MethodHookParam param) {
+        hookClassMethod(lpparam.classLoader, "com.flydigi.sdk.bluetooth.AbstractBluetoothController",
+                "onDeviceConnected", "AbstractBluetoothController.onDeviceConnected", "钩控制器失败",
+                BluetoothDevice.class, new XC_MethodHook() {
+                    @Override
+                    protected void afterHookedMethod(MethodHookParam param) {
+                        try {
+                            // L4：先记录连接状态，再停扫描——即使 stopScan/字段名在未来版本变化也不丢状态
+                            markConnected(null);  // onDeviceConnected 无 gatt 参数，不保存设备引用
                             try {
-                                // L4：先记录连接状态，再停扫描——即使 stopScan/字段名在未来版本变化也不丢状态
-                                markConnected(null);  // onDeviceConnected 无 gatt 参数，不保存设备引用
-                                try {
-                                    Object controller = param.thisObject;
-                                    XposedHelpers.callMethod(controller, "stopScan");
-                                    XposedHelpers.setBooleanField(controller, "inScanning", false);
-                                } catch (Throwable t) {
-                                    XposedBridge.log(TAG + " 控制器停扫描失败(忽略): " + t.getMessage());
-                                }
-                                XposedBridge.log(TAG + " 控制器：扫描已停止，" + getDeviceLabel() + " BLE 已连接");
-                                writeStatusFile();  // v2.5：连接事件立刻写 status 文件
+                                Object controller = param.thisObject;
+                                XposedHelpers.callMethod(controller, "stopScan");
+                                XposedHelpers.setBooleanField(controller, "inScanning", false);
                             } catch (Throwable t) {
-                                XposedBridge.log(TAG + " 控制器修复异常: " + t.getMessage());
+                                XposedBridge.log(TAG + " 控制器停扫描失败(忽略): " + t.getMessage());
                             }
+                            XposedBridge.log(TAG + " 控制器：扫描已停止，" + getDeviceLabel() + " BLE 已连接");
+                            writeStatusFile();  // v2.5：连接事件立刻写 status 文件
+                        } catch (Throwable t) {
+                            XposedBridge.log(TAG + " 控制器修复异常: " + t.getMessage());
                         }
-                    });
-            XposedBridge.log(TAG + " 已钩住 AbstractBluetoothController.onDeviceConnected");
-        } catch (Throwable t) {
-            XposedBridge.log(TAG + " 钩控制器失败: " + t.getMessage());
-        }
+                    }
+                });
     }
 
     /** 修复 #2（仅 B6X）：ViewModel 层 — 连接后更新 UI LiveData */
     private static void hookB6ViewModelFix(XC_LoadPackage.LoadPackageParam lpparam) {
-        try {
-            Class<?> btVmClass = lpparam.classLoader.loadClass(
-                    "com.example.extool.BluetoothViewModel");
+        hookClassMethod(lpparam.classLoader, "com.example.extool.BluetoothViewModel",
+                "onDeviceConnected", "BluetoothViewModel.onDeviceConnected", "钩 BluetoothViewModel 失败",
+                BluetoothDevice.class, new XC_MethodHook() {
+                    @Override
+                    protected void beforeHookedMethod(MethodHookParam param) {
+                        try {
+                            BluetoothDevice device = (BluetoothDevice) param.args[0];
+                            Object vm = param.thisObject;
 
-            XposedHelpers.findAndHookMethod(
-                    btVmClass,
-                    "onDeviceConnected",
-                    BluetoothDevice.class,
-                    new XC_MethodHook() {
-                        @Override
-                        protected void beforeHookedMethod(MethodHookParam param) {
-                            try {
-                                BluetoothDevice device = (BluetoothDevice) param.args[0];
-                                Object vm = param.thisObject;
+                            // 停止扫描
+                            XposedHelpers.callMethod(vm, "stopScan");
 
-                                // 停止扫描
-                                XposedHelpers.callMethod(vm, "stopScan");
+                            if (device != null) {
+                                String name = device.getName();
+                                String addr = device.getAddress();
 
-                                if (device != null) {
-                                    String name = device.getName();
-                                    String addr = device.getAddress();
+                                // 更新基础 LiveData
+                                Object nameMd = XposedHelpers.getObjectField(
+                                        vm, "_bluetoothNameLiveData");
+                                XposedHelpers.callMethod(nameMd, "postValue", name);
 
-                                    // 更新基础 LiveData
-                                    Object nameMd = XposedHelpers.getObjectField(
-                                            vm, "_bluetoothNameLiveData");
-                                    XposedHelpers.callMethod(nameMd, "postValue", name);
+                                Object macMd = XposedHelpers.getObjectField(
+                                        vm, "_macLiveData");
+                                XposedHelpers.callMethod(macMd, "postValue", addr);
 
-                                    Object macMd = XposedHelpers.getObjectField(
-                                            vm, "_macLiveData");
-                                    XposedHelpers.callMethod(macMd, "postValue", addr);
+                                Object connMd = XposedHelpers.getObjectField(
+                                        vm, "_connectLiveData");
+                                XposedHelpers.callMethod(connMd, "postValue", true);
 
-                                    Object connMd = XposedHelpers.getObjectField(
-                                            vm, "_connectLiveData");
-                                    XposedHelpers.callMethod(connMd, "postValue", true);
-
-                                    // v2.7：原 _waspWingInfo 修正块已删除——
-                                    // 反编译确认 BluetoothViewModel 直接 extends ViewModel，无 _waspWingInfo 字段
-                                    // （该字段在 com.example.extool.WaspWingViewModel 上），此块必然 NoSuchFieldError。
-                                    // 状态回传由 SDK/App 层 onDeviceInfoUpdate 钩子接管（lastWaspWingInfo）。
-                                }
-
-                                XposedBridge.log(TAG + " ViewModel 修复完成");
-                            } catch (Throwable t) {
-                                XposedBridge.log(TAG + " ViewModel 修复异常: " + t.getMessage());
+                                // v2.7：原 _waspWingInfo 修正块已删除——
+                                // 反编译确认 BluetoothViewModel 直接 extends ViewModel，无 _waspWingInfo 字段
+                                // （该字段在 com.example.extool.WaspWingViewModel 上），此块必然 NoSuchFieldError。
+                                // 状态回传由 SDK/App 层 onDeviceInfoUpdate 钩子接管（lastWaspWingInfo）。
                             }
-                        }
-                    });
 
-            XposedBridge.log(TAG + " 已钩住 BluetoothViewModel.onDeviceConnected");
-        } catch (Throwable t) {
-            XposedBridge.log(TAG + " 钩 BluetoothViewModel 失败: " + t.getMessage());
-        }
+                            XposedBridge.log(TAG + " ViewModel 修复完成");
+                        } catch (Throwable t) {
+                            XposedBridge.log(TAG + " ViewModel 修复异常: " + t.getMessage());
+                        }
+                    }
+                });
     }
 
     /** 修复 #3/#4 + 诊断钩子（仅 B6X） */
@@ -610,53 +608,42 @@ public class MainHook implements IXposedHookLoadPackage {
                         XposedHelpers.setObjectField(ctrl,
                                 "mConcurrentLinkedQueue", wrapped);
 
-                        XposedBridge.log(TAG
-                                + " runFetchLoop 队列已替换（空待 sleep 50ms）");
+                        XposedBridge.log(TAG + " runFetchLoop 队列已替换（空待 sleep 50ms）");
                     } catch (Throwable t) {
-                        XposedBridge.log(TAG
-                                + " runFetchLoop 队列替换失败: " + t.getMessage());
+                        XposedBridge.log(TAG + " runFetchLoop 队列替换失败: " + t.getMessage());
                     }
                 }
             });
             XposedBridge.log(TAG + " 已钩住 AbstractDataInteractionController 构造"
                     + "（修复 runFetchLoop CPU 满载）");
         } catch (Throwable t) {
-            XposedBridge.log(TAG + " 钩 AbstractDataInteractionController 失败: "
-                    + t.getMessage());
+            XposedBridge.log(TAG + " 钩 AbstractDataInteractionController 失败: " + t.getMessage());
         }
     }
 
     /** B6X 专属：智能温控唤醒 + 启动自动进入设置界面 */
     private static void hookB6Activity(XC_LoadPackage.LoadPackageParam lpparam) {
         // ========== 智能温控唤醒：B6ExperimentalActivity.onResume ==========
-        try {
-            Class<?> b6ExpAct = lpparam.classLoader.loadClass(
-                    "com.example.extool.B6ExperimentalActivity");
+        hookClassMethod(lpparam.classLoader, "com.example.extool.B6ExperimentalActivity",
+                "onResume", "B6ExperimentalActivity.onResume", "钩 B6ExperimentalActivity 失败",
+                new XC_MethodHook() {
+                    @Override
+                    protected void afterHookedMethod(MethodHookParam param) {
+                        try {
+                            Object vm = XposedHelpers.callMethod(param.thisObject, "getViewModel");
+                            Object connLd = XposedHelpers.getObjectField(vm, "_connectLiveData");
+                            Boolean isConnected = (Boolean) XposedHelpers.callMethod(connLd, "getValue");
 
-            XposedHelpers.findAndHookMethod(b6ExpAct, "onResume",
-                    new XC_MethodHook() {
-                        @Override
-                        protected void afterHookedMethod(MethodHookParam param) {
-                            try {
-                                Object vm = XposedHelpers.callMethod(param.thisObject, "getViewModel");
-                                Object connLd = XposedHelpers.getObjectField(vm, "_connectLiveData");
-                                Boolean isConnected = (Boolean) XposedHelpers.callMethod(connLd, "getValue");
-
-                                if (isConnected != null && isConnected) {
-                                    XposedBridge.log(TAG + " onResume + BLE 已连接");
-                                } else {
-                                    XposedBridge.log(TAG + " onResume 但 BLE 未连接，不唤醒");
-                                }
-                            } catch (Throwable t) {
-                                XposedBridge.log(TAG + " onResume 检查 BLE 状态失败: " + t.getMessage());
+                            if (isConnected != null && isConnected) {
+                                XposedBridge.log(TAG + " onResume + BLE 已连接");
+                            } else {
+                                XposedBridge.log(TAG + " onResume 但 BLE 未连接，不唤醒");
                             }
+                        } catch (Throwable t) {
+                            XposedBridge.log(TAG + " onResume 检查 BLE 状态失败: " + t.getMessage());
                         }
-                    });
-
-            XposedBridge.log(TAG + " 已钩住 B6ExperimentalActivity.onResume");
-        } catch (Throwable t) {
-            XposedBridge.log(TAG + " 钩 B6ExperimentalActivity 失败: " + t.getMessage());
-        }
+                    }
+                });
 
         // ========== B6X 启动自动进入设置界面（v2.5 修复，事件驱动） ==========
         // Bug1 修复：反编译确认 MainActivity extends AppCompatActivity 且仅重写 onCreate（无 onResume），
@@ -765,18 +752,14 @@ public class MainHook implements IXposedHookLoadPackage {
         // ========== c0.s1() 权限检查强制 true（修复 Android 16 连接失败） ==========
         // 根因：B7X 旧版 SDK 用 c0.s1() 检查 BLUETOOTH_CONNECT 权限，Android 16 上返回 false，
         // 导致 connectGatt / discoverServices 都不执行 → 连接超时报"连接出现异常"。
-        try {
-            Class<?> c0Cls = lpparam.classLoader.loadClass("com.flydigi.sdk.bluetooth.c0");
-            XposedHelpers.findAndHookMethod(c0Cls, "s1", new XC_MethodHook() {
-                @Override
-                protected void afterHookedMethod(MethodHookParam param) {
-                    param.setResult(true);   // 跳过 BLUETOOTH_CONNECT 权限检查，让连接流程走完
-                }
-            });
-            XposedBridge.log(TAG + " 已钩住 c0.s1()（强制返回 true，修复 b7x 连接）");
-        } catch (Throwable t) {
-            XposedBridge.log(TAG + " 钩 c0.s1() 失败: " + t.getMessage());
-        }
+        hookClassMethod(lpparam.classLoader, "com.flydigi.sdk.bluetooth.c0",
+                "s1", "c0.s1()（强制返回 true，修复 b7x 连接）", "钩 c0.s1() 失败",
+                new XC_MethodHook() {
+                    @Override
+                    protected void afterHookedMethod(MethodHookParam param) {
+                        param.setResult(true);   // 跳过 BLUETOOTH_CONNECT 权限检查，让连接流程走完
+                    }
+                });
 
         // ========== B7X 完整混淆适配（v2.7） ==========
         // 依据 b7_overclock_v3 反编译（com.fdg.flashplay.farsef）：
@@ -804,84 +787,67 @@ public class MainHook implements IXposedHookLoadPackage {
         }
 
         // H1 + H2：连接成功 → 置状态 + 型号识别 + 捕获参数 + 写状态
-        try {
-            Class<?> ctrl7 = lpparam.classLoader.loadClass("com.flydigi.sdk.waspwing.a");
-            XposedHelpers.findAndHookMethod(ctrl7, "S1",
-                    BluetoothGatt.class, new XC_MethodHook() {
-                        @Override
-                        protected void afterHookedMethod(MethodHookParam param) {
-                            try {
-                                // 型号未知先按包名兜底，随后 X.getDeviceCode() 修正（见 captureInfoFromController）
-                                markConnected((BluetoothGatt) param.args[0]);
-                                captureInfoFromController(param.thisObject);
-                                XposedBridge.log(TAG + " b7x BLE 已连接（a.S1） device="
-                                        + (lastDevice != null ? lastDevice.getAddress() : "null")
-                                        + " model=" + connectedModel);
-                                writeStatusFile();
-                            } catch (Throwable t) {
-                                XposedBridge.log(TAG + " b7x S1 钩子异常: " + t.getMessage());
-                            }
+        hookClassMethod(lpparam.classLoader, "com.flydigi.sdk.waspwing.a",
+                "S1", "b7x a.S1（连接状态 + 型号识别）", "钩 b7x a.S1 失败",
+                BluetoothGatt.class, new XC_MethodHook() {
+                    @Override
+                    protected void afterHookedMethod(MethodHookParam param) {
+                        try {
+                            // 型号未知先按包名兜底，随后 X.getDeviceCode() 修正（见 captureInfoFromController）
+                            markConnected((BluetoothGatt) param.args[0]);
+                            captureInfoFromController(param.thisObject);
+                            XposedBridge.log(TAG + " b7x BLE 已连接（a.S1） device="
+                                    + (lastDevice != null ? lastDevice.getAddress() : "null")
+                                    + " model=" + connectedModel);
+                            writeStatusFile();
+                        } catch (Throwable t) {
+                            XposedBridge.log(TAG + " b7x S1 钩子异常: " + t.getMessage());
                         }
-                    });
-            XposedBridge.log(TAG + " 已钩住 b7x a.S1（连接状态 + 型号识别）");
-        } catch (Throwable t) {
-            XposedBridge.log(TAG + " 钩 b7x a.S1 失败: " + t.getMessage());
-        }
+                    }
+                });
 
         // H2：数据分发 → 刷新全参数回传 + 型号修正（B7X app 连 B6X 设备时在此 7→6）+ M3 同步 owner
-        try {
-            Class<?> ctrl7 = lpparam.classLoader.loadClass("com.flydigi.sdk.waspwing.a");
-            XposedHelpers.findAndHookMethod(ctrl7, "Z0",
-                    UUID.class, byte[].class, new XC_MethodHook() {
-                        @Override
-                        protected void afterHookedMethod(MethodHookParam param) {
-                            captureInfoFromController(param.thisObject);
-                        }
-                    });
-            XposedBridge.log(TAG + " 已钩住 b7x a.Z0（数据回传 + 型号识别）");
-        } catch (Throwable t) {
-            XposedBridge.log(TAG + " 钩 b7x a.Z0 失败: " + t.getMessage());
-        }
+        hookClassMethod(lpparam.classLoader, "com.flydigi.sdk.waspwing.a",
+                "Z0", "b7x a.Z0（数据回传 + 型号识别）", "钩 b7x a.Z0 失败",
+                UUID.class, byte[].class, new XC_MethodHook() {
+                    @Override
+                    protected void afterHookedMethod(MethodHookParam param) {
+                        captureInfoFromController(param.thisObject);
+                    }
+                });
 
         // M7：断连（远程/本地统一入口 a.T1）→ 置未连接 + 写状态
-        try {
-            Class<?> ctrl7 = lpparam.classLoader.loadClass("com.flydigi.sdk.waspwing.a");
-            XposedHelpers.findAndHookMethod(ctrl7, "T1",
-                    BluetoothGatt.class, new XC_MethodHook() {
-                        @Override
-                        protected void afterHookedMethod(MethodHookParam param) {
-                            try {
-                                markDisconnected((BluetoothGatt) param.args[0]);
-                                XposedBridge.log(TAG + " b7x BLE 断联（a.T1） device="
-                                        + (lastDevice != null ? lastDevice.getAddress() : "null"));
-                                writeStatusFile();
-                            } catch (Throwable t) {
-                                XposedBridge.log(TAG + " b7x T1 钩子异常: " + t.getMessage());
-                            }
+        hookClassMethod(lpparam.classLoader, "com.flydigi.sdk.waspwing.a",
+                "T1", "b7x a.T1（断连检测）", "钩 b7x a.T1 失败",
+                BluetoothGatt.class, new XC_MethodHook() {
+                    @Override
+                    protected void afterHookedMethod(MethodHookParam param) {
+                        try {
+                            markDisconnected((BluetoothGatt) param.args[0]);
+                            XposedBridge.log(TAG + " b7x BLE 断联（a.T1） device="
+                                    + (lastDevice != null ? lastDevice.getAddress() : "null"));
+                            writeStatusFile();
+                        } catch (Throwable t) {
+                            XposedBridge.log(TAG + " b7x T1 钩子异常: " + t.getMessage());
                         }
-                    });
-            XposedBridge.log(TAG + " 已钩住 b7x a.T1（断连检测）");
-        } catch (Throwable t) {
-            XposedBridge.log(TAG + " 钩 b7x a.T1 失败: " + t.getMessage());
-        }
+                    }
+                });
     }
 
     /** 广播接收器注册 + 定时状态写入 */
     private static void hookApplicationCreate(XC_LoadPackage.LoadPackageParam lpparam) {
-        try {
-            Class<?> appClass = lpparam.classLoader.loadClass("android.app.Application");
-            XposedHelpers.findAndHookMethod(appClass, "onCreate", new XC_MethodHook() {
-                @Override
-                protected void afterHookedMethod(MethodHookParam param) {
-                    Context ctx = (Context) param.thisObject;
-                    registerTemperatureReceiver(ctx);
-                    restoreLastDevice();   // v2.8：冷启动恢复上次设备引用，后台重连自动接管
-                    startPeriodicStatusWrite();
-                }
-            });
-        } catch (Throwable t) {
-            XposedBridge.log(TAG + " 钩 Application.onCreate 失败: " + t.getMessage());
-        }
+        // 成功日志留空：原实现注册成功后不打日志，保持行为一致
+        hookClassMethod(lpparam.classLoader, "android.app.Application", "onCreate",
+                null, "钩 Application.onCreate 失败",
+                new XC_MethodHook() {
+                    @Override
+                    protected void afterHookedMethod(MethodHookParam param) {
+                        Context ctx = (Context) param.thisObject;
+                        registerTemperatureReceiver(ctx);
+                        restoreLastDevice();   // v2.8：冷启动恢复上次设备引用，后台重连自动接管
+                        startPeriodicStatusWrite();
+                    }
+                });
     }
 
     // ========== v2.8：上次设备持久化 + 自动拉起后台化 ==========

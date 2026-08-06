@@ -5,16 +5,10 @@
 # 刷入时 Magisk/KSU 自动执行：设置文件权限 + 询问自动拉起开关
 # ============================================================
 
-# 设置二进制可执行权限
+# 设置模块文件权限（可执行文件 0755，配置文件 0644）
 set_perm "$MODPATH/tempctrl" 0 0 0755
-
-# 设置 service.sh 可执行
 set_perm "$MODPATH/service.sh" 0 0 0755
-
-# 设置卸载脚本可执行
 set_perm "$MODPATH/uninstall.sh" 0 0 0755
-
-# 设置配置文件权限
 set_perm "$MODPATH/profile.conf" 0 0 0644
 
 # ============================================================
@@ -39,10 +33,12 @@ KEY_PRESSED=0
 for i in 1 2 3 4 5 6 7 8 9 10; do
     KEY=$(timeout 1 getevent -c 1 -lq 2>/dev/null | grep -o 'KEY_VOLUME[A-Z]*' | head -1)
     case "$KEY" in
-        KEY_VOLUMEUP)   LAUNCH_ENABLED=1; KEY_PRESSED=1; break;;
-        KEY_VOLUMEDOWN) LAUNCH_ENABLED=0; KEY_PRESSED=1; break;;
-        *) ;;  # 读到其它键事件忽略，继续等音量键
+        KEY_VOLUMEUP)   LAUNCH_ENABLED=1 ;;
+        KEY_VOLUMEDOWN) LAUNCH_ENABLED=0 ;;
+        *) continue ;;  # 读到其它键事件忽略，继续等音量键
     esac
+    KEY_PRESSED=1
+    break
 done
 
 if [ "$KEY_PRESSED" = 1 ]; then
