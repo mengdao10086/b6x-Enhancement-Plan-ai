@@ -658,6 +658,7 @@ public class MainHook implements IXposedHookLoadPackage {
                     if (isMainActivity(param.thisObject)) {
                         currentGuideActivity = (Activity) param.thisObject;
                         autoEnterSetup();  // 已连接则立即跳；未连接则等 onGattConnected 触发
+                        autoStartSetup();  // v2.9：冷启动自动进入设置界面（等效点"开始设置"），其 onResume 会 tryConnect()
                     }
                 }
             });
@@ -1031,6 +1032,36 @@ public class MainHook implements IXposedHookLoadPackage {
             });
         } catch (Throwable t) {
             XposedBridge.log(TAG + " 自动进入设置界面 loadClass 失败: " + t.getMessage());
+        }
+    }
+
+    /**
+     * v2.9：冷启动自动进入设置界面（等效自动点"开始设置"）。
+     * B6ExperimentalActivity.onResume 会在未连接时调用 tryConnect() 发起连接；
+     * 连接成功后既有 autoEnterSetup（onGattConnected）路径可继续接管。
+     * enteredSetup 防重入：已进入过设置界面 / 从设置返回引导页时不再触发。
+     */
+    private static void autoStartSetup() {
+        if (enteredSetup || bleConnected || currentGuideActivity == null) return;
+        final Activity act = currentGuideActivity;
+        currentGuideActivity = null;  // 先清空去重，防止重复跳转
+        try {
+            final Class<?> b6ExpCls = act.getClassLoader()
+                    .loadClass("com.example.extool.B6ExperimentalActivity");
+            act.runOnUiThread(new Runnable() {
+                @Override
+                public void run() {
+                    try {
+                        Intent intent = new Intent(act, b6ExpCls);
+                        act.startActivity(intent);
+                        XposedBridge.log(TAG + " 冷启动自动进入设置界面（自动连接）");
+                    } catch (Throwable t) {
+                        XposedBridge.log(TAG + " 冷启动进入设置界面失败: " + t.getMessage());
+                    }
+                }
+            });
+        } catch (Throwable t) {
+            XposedBridge.log(TAG + " 冷启动进入设置界面 loadClass 失败: " + t.getMessage());
         }
     }
 
