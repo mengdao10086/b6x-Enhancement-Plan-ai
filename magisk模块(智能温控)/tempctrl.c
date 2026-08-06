@@ -327,6 +327,7 @@ static int debug_conn    = 0;   // [连接状态] App 存活/BLE/重连对齐
 static int debug_config  = 0;   // [配置加载] 配置文件解析过程
 static int debug_main    = 0;   // [主循环] main_loop 流程跟踪
 static int debug_pid     = 0;   // [PID] PID 控制调试
+static int debug_launch  = 0;   // [自动拉起] 目标选择/回退/跳过（结果成功/失败为普通日志，不归此分区）
 
 // ======================== 配置文件系统 ========================
 // 配置文件路径（自动检测或 --config 指定）
@@ -760,6 +761,7 @@ static void load_config(const char *path) {
             else if (strcmp(key, "DEBUG_CONFIG") == 0)  debug_config = (val != 0);
             else if (strcmp(key, "DEBUG_MAIN") == 0)    debug_main   = (val != 0);
             else if (strcmp(key, "DEBUG_PID") == 0)     debug_pid    = (val != 0);
+            else if (strcmp(key, "DEBUG_LAUNCH") == 0)  debug_launch = (val != 0);
             continue;
         }
 
@@ -1828,10 +1830,13 @@ static const char *resolve_launch_pkg(void) {
     if      (last_owner == 2)                     pkg = APP_PKG_B6X_NEW;
     else if (last_owner == 6 || last_owner == 7)  pkg = APP_PKG_B7X;
     else                                          pkg = APP_PKG_B6X_OLD;  // 无记录/老 app
-    if (pkg == APP_PKG_B6X_OLD && !app_installed(pkg) && app_installed(APP_PKG_B6X_NEW))
+    if (pkg == APP_PKG_B6X_OLD && !app_installed(pkg) && app_installed(APP_PKG_B6X_NEW)) {
+        debug_log(debug_launch, "自动拉起 老 B6X app 未安装，改用新 app");
         pkg = APP_PKG_B6X_NEW;
-    else if (pkg == APP_PKG_B6X_NEW && !app_installed(pkg) && app_installed(APP_PKG_B6X_OLD))
+    } else if (pkg == APP_PKG_B6X_NEW && !app_installed(pkg) && app_installed(APP_PKG_B6X_OLD)) {
+        debug_log(debug_launch, "自动拉起 新 B6X app 未安装，改用老 app");
         pkg = APP_PKG_B6X_OLD;
+    }
     return pkg;
 }
 
@@ -1849,18 +1854,22 @@ static void launch_last_app(void) {
     last_launch_attempt = now;
 
     const char *pkg = resolve_launch_pkg();
+    debug_log(debug_launch, "自动拉起 目标 %s（last_owner=%d）", pkg, last_owner);
     if (!app_installed(pkg)) {
         write_log("自动拉起 目标 app 未安装 %s", pkg);
         return;
     }
-    if (app_process_running(pkg)) return;   // 已在运行不重复拉
+    if (app_process_running(pkg)) {
+        debug_log(debug_launch, "自动拉起 目标已在运行 %s，跳过", pkg);
+        return;
+    }
 
     char cmd[320];
     snprintf(cmd, sizeof(cmd),
              "am start -a android.intent.action.MAIN -c android.intent.category.LAUNCHER "
              "-p %s --es b6x_auto_launch 1 > /dev/null 2>&1", pkg);
-    system(cmd);
-    write_log("自动拉起散热器 app %s（后台化）", pkg);
+    int rc = system(cmd);
+    write_log("自动拉起散热器 app %s（后台化）rc=%d", pkg, rc);
 }
 
 /**

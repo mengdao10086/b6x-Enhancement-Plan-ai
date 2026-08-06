@@ -19,7 +19,7 @@ window.B6X_SCHEMA = {
       headerSwitch: "DEBUG_ENABLED",
       keys: [],
       subKeys: ["DEBUG_SENSOR", "DEBUG_EMERG", "DEBUG_BATT", "DEBUG_EXEC",
-                "DEBUG_CONN", "DEBUG_CONFIG", "DEBUG_MAIN", "DEBUG_PID"]
+                "DEBUG_CONN", "DEBUG_CONFIG", "DEBUG_MAIN", "DEBUG_PID", "DEBUG_LAUNCH"]
     },
     // [0] 总开关：组头开关 PERF_ENABLED + 通用参数子面板（复用 [1] 的开关+子面板机制）
     {
@@ -29,7 +29,13 @@ window.B6X_SCHEMA = {
       subKeys: ["RATE_LIMIT_FAN_UP", "RATE_LIMIT_FAN_DOWN", "FAN_RPM_CHANGE_THRESHOLD",
                 "RATE_LIMIT_COLD", "RATE_LIMIT_TEMP", "BATT_BASELINE",
                 "COLD_MAP_START", "COLD_MAP_EXP", "HOT_MAP", "RPM_SMOOTH_ALPHA", "FAN_RPM",
-                "APP_LAUNCH_ENABLED", "BATT_SKIP_MAX"]
+                "BATT_SKIP_MAX"]
+    },
+    // [3] 自动拉起散热器 app：独立分组，开关常显在组头（不随其它开关折叠隐藏），
+    // 开关驱动说明区折叠（=1 展开显示说明，=0 仅显示开关）
+    {
+      id: "g3", title: "[3] 自动拉起散热器 app", headerSwitch: "APP_LAUNCH_ENABLED",
+      keys: []
     },
     // [4] 控制模式：PID 与 Gear 同一窗口。组头开关 CTRL_MODE 仅切换模式（1=PID / 0=Gear），
     // 不控制折叠；展开/折叠由 PERF_ENABLED 总开关驱动（master）。组内按模式切换显示参数面板
@@ -80,10 +86,11 @@ window.B6X_SCHEMA = {
     DEBUG_CONFIG: { type: "switch", label: "配置加载", desc: "配置文件解析过程调试日志" },
     DEBUG_MAIN:   { type: "switch", label: "主循环", desc: "主循环流程跟踪调试日志" },
     DEBUG_PID:    { type: "switch", label: "PID", desc: "PID 模式调试日志（需开 DEBUG_ENABLED）" },
+    DEBUG_LAUNCH: { type: "switch", label: "自动拉起", value: "0",
+      desc: "自动拉起散热器 app 的决策过程（目标选择/回退/跳过），拉起成功/失败始终输出" },
 
     // ---- [2] 路径与缩放 ----
-    SYSFS_ENABLED: { type: "switch", label: "sysfs 路径与缩放开关",
-      desc: "=1 加载下方路径与缩放配置；=0 使用代码默认路径" },
+    SYSFS_ENABLED: { type: "switch", label: "sysfs 路径与缩放开关", desc: "" },
     BATT_TEMP_PATH: { type: "path", label: "电池温度 sysfs",
       desc: "不同机型位置可能不同，可自行修改" },
     BATT_TEMP_DIVISOR: { type: "int", min: 1, max: 10000, label: "电池温度缩放系数",

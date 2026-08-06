@@ -42,6 +42,10 @@
     var len = Math.max(val.length, ph.length, 1);
     inp.style.width = (len + 1) + 'ch';
   }
+  function debounce(fn, ms) {
+    var t;
+    return function () { clearTimeout(t); t = setTimeout(fn, ms); };
+  }
   // 安全的 localStorage 包装（WebView 禁用/测试环境时静默降级）
   function storeGet(k) { try { return window.localStorage ? window.localStorage.getItem(k) : null; } catch (e) { return null; } }
   function storeSet(k, v) { try { if (window.localStorage) window.localStorage.setItem(k, v); } catch (e) {} }
@@ -189,7 +193,8 @@
     }).join('\n');
   }
 
-  function setValue(key, val) {
+  function setValue(key, val, opts) {
+    opts = opts || {};
     S.values[key] = val;
     S.dirty[key] = true;
     var el = document.querySelector('[data-key="' + key.replace(/"/g, '\\"') + '"]');
@@ -198,7 +203,7 @@
       else if (el.tagName === 'INPUT' && !el.dataset.rowField) el.value = val;
     }
     if (key === 'PERF_ENABLED' || key === 'DEBUG_ENABLED' || key === 'CTRL_MODE') updateCollapse();
-    if (key === 'CTRL_MODE') scrollModePanel(val);   // 控制模式：横滑到对应面板
+    if (key === 'CTRL_MODE' && !opts.noScroll) scrollModePanel(val);   // 控制模式：横滑到对应面板（滚动同步时 noScroll 不触发）
     scheduleSave();
   }
 
@@ -217,6 +222,18 @@
 
   function updateCollapse() {
     var perfOn = masterOn('PERF_ENABLED');
+    // 总开关状态变化：控制模式（master=PERF_ENABLED 的组）展开跟随总开关（幂等）——
+    // 打开→确保展开（清 manualCollapse），关闭→确保折叠（清 manualExpand）；
+    // 总开关不变时保留手动折叠/展开（manualCollapse/manualExpand 不被清除）
+    if (S._prevPerf !== undefined && S._prevPerf !== perfOn) {
+      SCHEMA.groups.forEach(function (g) {
+        if (g.master === 'PERF_ENABLED') {
+          if (perfOn) delete S.manualCollapse[g.id];
+          else delete S.manualExpand[g.id];
+        }
+      });
+    }
+    S._prevPerf = perfOn;
     SCHEMA.groups.forEach(function (g) {
       var head = $('head-' + g.id), chev = $('chev-' + g.id), badge = $('badge-' + g.id);
       var body = $('body-' + g.id);
@@ -230,11 +247,11 @@
         head.classList.toggle('off', off);
         if (badge) badge.classList.toggle('hidden', !off);
         chev.classList.toggle('on', open);
-      } else if (g.headerSwitch && g.subKeys) {
-        // 开关驱动子面板（[1] 日志&调试、[0] 通用参数、控制模式&PID 共用）：
-        // 开关关 → 子面板折叠，可手动展开查看/编辑（不改总开关）
+      } else if (g.headerSwitch) {
+        // 开关驱动子面板（[1] 日志&调试、[0] 通用参数、[3] 自动拉起等）：
+        // 开关关 → 子面板/说明区折叠，可手动展开查看/编辑（不改总开关）
         var swOn = masterOn(g.headerSwitch);
-        var sub = $('sub-' + g.id);
+        var sub = $('sub-' + g.id) || body;
         open = swOn ? !S.manualCollapse[g.id] : !!S.manualExpand[g.id];
         sub.classList.toggle('collapsed', !open);
         head.classList.toggle('off', !swOn);
@@ -256,12 +273,16 @@
     if (!ms) return;
     var initVal = S.values['CTRL_MODE'] !== undefined ? S.values['CTRL_MODE'] : '1';
     ms.scrollLeft = initVal === '1' ? 0 : ms.clientWidth;   // 初始对齐当前模式（无动画）
-    ms.addEventListener('scroll', function () {
+    // 滚动停止后才同步 CTRL_MODE：滚动过程实时 setValue 会经 setValue→scrollModePanel 反向触发 scrollTo，
+    // 造成点击开关时值被滚过中点前的判定改回（抖动回原位）、惯性滑动被 smooth 接管而卡顿。
+    // 同步用 noScroll，只更新值+保存，不触发滚动。
+    var syncMode = debounce(function () {
       var p = ms.scrollLeft / Math.max(1, ms.clientWidth);
       var newVal = p > 0.5 ? '0' : '1';
       var cur = S.values['CTRL_MODE'] !== undefined ? S.values['CTRL_MODE'] : '1';
-      if (newVal !== cur) setValue('CTRL_MODE', newVal);   // 滑到哪侧即切换模式（触发保存）
-    }, { passive: true });
+      if (newVal !== cur) setValue('CTRL_MODE', newVal, { noScroll: true });
+    }, 120);
+    ms.addEventListener('scroll', syncMode, { passive: true });
   }
 
   // ---------- 控件构建 ----------
@@ -281,7 +302,7 @@
     var wrap = document.createElement('div');
     wrap.className = 'ctrl';
     wrap.innerHTML = '<div class="ctrl-label">' + esc(def.label) +
-      (def.desc ? '<div class="ctrl-desc">' + esc(def.desc) + '</div>' : '') + '</div>';
+      (String(def.desc).trim() ? '<div class="ctrl-desc">' + esc(def.desc) + '</div>' : '') + '</div>';
 
     var val = S.values[key] !== undefined ? S.values[key] : def.value || '';
 
@@ -375,7 +396,7 @@
     sec.appendChild(body);
 
     // 头部开关的说明：作为分组首行说明（原"独立条目"的说明迁到这里）
-    if (g.headerSwitch && SCHEMA.keys[g.headerSwitch] && SCHEMA.keys[g.headerSwitch].desc) {
+    if (g.headerSwitch && SCHEMA.keys[g.headerSwitch] && String(SCHEMA.keys[g.headerSwitch].desc).trim()) {
       var hnote = document.createElement('div');
       hnote.className = 'group-note';
       hnote.textContent = SCHEMA.keys[g.headerSwitch].desc;
@@ -818,11 +839,14 @@
     seg.querySelectorAll('.seg-btn').forEach(function (b) {
       b.addEventListener('click', function () { goTo(b.dataset.panel); });
     });
-    slider.addEventListener('scroll', function () {
+    // 滚动停止后才按最终位置同步高亮：滚动过程实时判定会在平滑滚动刚起步时把高亮改回旧面板，
+    // 造成点击切换时先高亮目标→又闪回旧面板→滚过中点再高亮目标（闪烁）
+    var syncSeg = debounce(function () {
       var p = slider.scrollLeft / Math.max(1, slider.clientWidth);
       var name = p > 0.5 ? 'log' : 'chart';
       seg.querySelectorAll('.seg-btn').forEach(function (b) { b.classList.toggle('active', b.dataset.panel === name); });
-    }, { passive: true });
+    }, 120);
+    slider.addEventListener('scroll', syncSeg, { passive: true });
     $('pinBtn').addEventListener('click', function () {
       var pinned = document.body.classList.toggle('pin-fixed');
       document.body.classList.toggle('pin-scroll', !pinned);   // 互斥：移除另一类，避免 CSS 冲突锁死
