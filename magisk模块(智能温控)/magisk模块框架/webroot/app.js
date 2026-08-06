@@ -255,6 +255,12 @@
         head.classList.toggle('off', off);
         if (badge) badge.classList.toggle('hidden', !off);
         chev.classList.toggle('on', open);
+        if (g.modePanels) {   // [2] 控制模式：seg 按钮 active 跟随 CTRL_MODE
+          var ctrlMode = S.values['CTRL_MODE'] !== undefined ? S.values['CTRL_MODE'] : '1';
+          head.querySelectorAll('.seg-btn').forEach(function (b) {
+            b.classList.toggle('active', b.dataset.mode === ctrlMode);
+          });
+        }
       } else if (g.headerSwitch) {
         // 开关驱动子面板（[0] 日志&调试、[3] sysfs 等）：
         // 开关关 → 折叠整个 body（含子面板），消除空 body 的 padding 残留（"下巴长"）；
@@ -389,18 +395,36 @@
       '<span class="g-title">' + esc(g.title) + '</span>' +
       '<span class="badge hidden" id="badge-' + g.id + '">未生效</span>';
     if (g.headerSwitch && SCHEMA.keys[g.headerSwitch]) {
-      var swEl = buildSwitchEl(g.headerSwitch);
-      swEl.classList.add('head-switch');
-      if (g.id === 'g4') swEl.classList.add('mode-switch');   // 控制模式大开关
-      swEl.addEventListener('click', function (e) { e.stopPropagation(); });
-      head.appendChild(swEl);
+      if (g.modePanels) {
+        // [2] 控制模式：PID / Gear 分段按钮（类似顶部实时曲线/日志），点击切换模式并横滑面板
+        var seg = document.createElement('div');
+        seg.className = 'seg head-switch';
+        g.modePanels.forEach(function (p) {
+          var btn = document.createElement('button');
+          btn.type = 'button';
+          btn.className = 'seg-btn';
+          btn.dataset.mode = p.when;
+          btn.textContent = (p.when === '1') ? 'PID' : 'Gear';
+          btn.addEventListener('click', function (e) {
+            e.stopPropagation();
+            setValue('CTRL_MODE', p.when);
+          });
+          seg.appendChild(btn);
+        });
+        head.appendChild(seg);
+      } else {
+        var swEl = buildSwitchEl(g.headerSwitch);
+        swEl.classList.add('head-switch');
+        swEl.addEventListener('click', function (e) { e.stopPropagation(); });
+        head.appendChild(swEl);
+      }
     }
     head.addEventListener('click', function () { onHeaderClick(g); });
     sec.appendChild(head);
 
     var body = document.createElement('div');
     body.id = 'body-' + g.id;
-    body.className = 'group-body';
+    body.className = 'group-body' + (hasCollapsible(g) ? '' : ' compact');
     sec.appendChild(body);
 
     // 头部开关的说明：作为分组首行说明（原"独立条目"的说明迁到这里）
