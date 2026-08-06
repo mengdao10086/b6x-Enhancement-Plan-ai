@@ -454,6 +454,8 @@ static int APP_LAUNCH_ENABLED = 0;      // 总开关：1=允许自动拉起，0=
 static time_t last_launch_attempt = 0;  // 上次拉起尝试时间（冷却用）
 #define APP_LAUNCH_COOLDOWN 60          // 两次拉起最小间隔（秒）
 
+#define BOOT_START_DELAY_SEC 30         // 脚本启动成功后延迟开始运行（等待系统/蓝牙就绪，避开开机初期拉起 app 闪烁）
+
 // 双设备 BLE 连接状态
 static int b6_connected = 0;        // B6X: BLE 是否已连接
 static int b7_connected = 0;        // B7X: BLE 是否已连接
@@ -3336,6 +3338,7 @@ int main(int argc, char *argv[]) {
     }
 
     write_log("脚本启动成功");
+    sleep(BOOT_START_DELAY_SEC);   // 延迟开始运行：等待系统/蓝牙就绪（守护进程保持存活，watchdog 不会误重启）
 
     // --- 等待任一设备模块就绪 + BLE 连接 ---
     // 双 status 文件各自有 BLE 连接标志（B6X=0/1/2, B7X=0/6/7），读到 BLE≠0 即代表该设备已连

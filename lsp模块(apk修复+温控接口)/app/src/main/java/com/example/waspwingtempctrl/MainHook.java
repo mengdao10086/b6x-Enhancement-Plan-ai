@@ -60,6 +60,7 @@ public class MainHook implements IXposedHookLoadPackage {
     private static volatile int bleLastOwner = 0;             // 上次连接者（BLE_OWNER_LAST 值：1/2=B6X app, 6/7=farsef 连的型号）；断连保留
     private static volatile long bleLastOwnerAt = 0;          // 上次连接时间戳（Unix 秒，与 bleLastOwner 配套，断连保留）
     private static volatile Activity currentGuideActivity = null;  // 当前可见的 MainActivity（引导页）
+    private static volatile boolean autoLaunchPending = false;     // 自动拉起标志已读取，待 onResume 后台化（v2.8）
     private static volatile boolean enteredSetup = false;         // 本进程是否已进入过设置界面
 
     // ========== 后台自动重连（v2.4） ==========
@@ -912,7 +913,7 @@ public class MainHook implements IXposedHookLoadPackage {
         }
     }
 
-    /** 自动拉起模式：读到 b6x_auto_launch 标志的 Activity 立即后台化（v2.8） */
+    /** 自动拉起模式：读到 b6x_auto_launch 标志的 Activity 在 onResume 后后台化（v2.8） */
     private static void hookAutoLaunch(XC_LoadPackage.LoadPackageParam lpparam) {
         try {
             XposedHelpers.findAndHookMethod(Activity.class, "onCreate", Bundle.class,
@@ -923,15 +924,28 @@ public class MainHook implements IXposedHookLoadPackage {
                                 Activity act = (Activity) param.thisObject;
                                 Intent intent = act.getIntent();
                                 if (intent != null && "1".equals(intent.getStringExtra(AUTO_LAUNCH_EXTRA))) {
-                                    act.moveTaskToBack(true);   // 连接由后台重连线程完成
-                                    XposedBridge.log(TAG + " 自动拉起模式：app 已切后台");
+                                    intent.removeExtra(AUTO_LAUNCH_EXTRA);  // 只后台化一次，避免用户手动打开时又被切走
+                                    autoLaunchPending = true;
                                 }
                             } catch (Throwable t) {
-                                XposedBridge.log(TAG + " auto_launch 处理失败: " + t.getMessage());
+                                XposedBridge.log(TAG + " auto_launch 标志读取失败: " + t.getMessage());
                             }
                         }
                     });
-            XposedBridge.log(TAG + " 已钩住 Activity.onCreate（b6x_auto_launch 后台化）");
+            XposedHelpers.findAndHookMethod(Activity.class, "onResume", new XC_MethodHook() {
+                @Override
+                protected void afterHookedMethod(MethodHookParam param) {
+                    if (!autoLaunchPending) return;
+                    autoLaunchPending = false;
+                    try {
+                        ((Activity) param.thisObject).moveTaskToBack(true);   // 界面已就绪，必定成功；连接由后台重连线程完成
+                        XposedBridge.log(TAG + " 自动拉起模式：app 已切后台");
+                    } catch (Throwable t) {
+                        XposedBridge.log(TAG + " auto_launch 后台化失败: " + t.getMessage());
+                    }
+                }
+            });
+            XposedBridge.log(TAG + " 已钩住 Activity.onCreate/onResume（b6x_auto_launch 后台化）");
         } catch (Throwable t) {
             XposedBridge.log(TAG + " 钩 auto_launch 失败: " + t.getMessage());
         }
