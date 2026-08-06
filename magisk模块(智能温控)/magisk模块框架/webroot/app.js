@@ -198,6 +198,7 @@
       else if (el.tagName === 'INPUT' && !el.dataset.rowField) el.value = val;
     }
     if (key === 'PERF_ENABLED' || key === 'DEBUG_ENABLED' || key === 'CTRL_MODE') updateCollapse();
+    if (key === 'CTRL_MODE') scrollModePanel(val);   // 控制模式：横滑到对应面板
     scheduleSave();
   }
 
@@ -216,26 +217,19 @@
 
   function updateCollapse() {
     var perfOn = masterOn('PERF_ENABLED');
-    var modeVal = S.values['CTRL_MODE'] !== undefined ? S.values['CTRL_MODE'] : '1'; // 未读到时默认 PID
     SCHEMA.groups.forEach(function (g) {
       var head = $('head-' + g.id), chev = $('chev-' + g.id), badge = $('badge-' + g.id);
       var body = $('body-' + g.id);
       if (!head || !body) return;
       var open, off;
-      // 模式子面板（[4] 控制模式）：CTRL_MODE 开关仅切换显示哪个面板，不控制折叠
-      if (g.modePanels) {
-        g.modePanels.forEach(function (p) {
-          var sub = $('sub-' + g.id + '-' + p.when);
-          if (sub) sub.classList.toggle('mode-hidden', modeVal !== p.when);
-        });
-      }
+      // 模式子面板（[4] 控制模式）：PID / Gear 横滑切换（滑动由 CTRL_MODE 驱动，见 setValue/initModeSlider）
       if (g.master === 'PERF_ENABLED') {
         open = perfOn ? !S.manualCollapse[g.id] : !!S.manualExpand[g.id];
         off = !perfOn;
         body.classList.toggle('collapsed', !open);
         head.classList.toggle('off', off);
         if (badge) badge.classList.toggle('hidden', !off);
-        chev.textContent = open ? '▾' : '▸';
+        chev.classList.toggle('on', open);
       } else if (g.headerSwitch && g.subKeys) {
         // 开关驱动子面板（[1] 日志&调试、[0] 通用参数、控制模式&PID 共用）：
         // 开关关 → 子面板折叠，可手动展开查看/编辑（不改总开关）
@@ -245,9 +239,29 @@
         sub.classList.toggle('collapsed', !open);
         head.classList.toggle('off', !swOn);
         if (badge) badge.classList.toggle('hidden', swOn);
-        chev.textContent = open ? '▾' : '▸';
+        chev.classList.toggle('on', open);
       }
     });
+  }
+
+  // ---------- 控制模式横滑（PID / Gear 两侧，类似顶部曲线/日志） ----------
+  function scrollModePanel(modeVal) {
+    var ms = $('mode-slider-g4');
+    if (!ms) return;
+    ms.scrollTo({ left: modeVal === '1' ? 0 : ms.clientWidth, behavior: 'smooth' });
+  }
+
+  function initModeSlider() {
+    var ms = $('mode-slider-g4');
+    if (!ms) return;
+    var initVal = S.values['CTRL_MODE'] !== undefined ? S.values['CTRL_MODE'] : '1';
+    ms.scrollLeft = initVal === '1' ? 0 : ms.clientWidth;   // 初始对齐当前模式（无动画）
+    ms.addEventListener('scroll', function () {
+      var p = ms.scrollLeft / Math.max(1, ms.clientWidth);
+      var newVal = p > 0.5 ? '0' : '1';
+      var cur = S.values['CTRL_MODE'] !== undefined ? S.values['CTRL_MODE'] : '1';
+      if (newVal !== cur) setValue('CTRL_MODE', newVal);   // 滑到哪侧即切换模式（触发保存）
+    }, { passive: true });
   }
 
   // ---------- 控件构建 ----------
@@ -342,12 +356,13 @@
     var head = document.createElement('header');
     head.id = 'head-' + g.id;
     head.className = 'group-head';
-    head.innerHTML = '<span class="chev" id="chev-' + g.id + '">▸</span>' +
+    head.innerHTML = '<span class="chev" id="chev-' + g.id + '"></span>' +
       '<span class="g-title">' + esc(g.title) + '</span>' +
       '<span class="badge hidden" id="badge-' + g.id + '">未生效</span>';
     if (g.headerSwitch && SCHEMA.keys[g.headerSwitch]) {
       var swEl = buildSwitchEl(g.headerSwitch);
       swEl.classList.add('head-switch');
+      if (g.id === 'g4') swEl.classList.add('mode-switch');   // 控制模式大开关
       swEl.addEventListener('click', function (e) { e.stopPropagation(); });
       head.appendChild(swEl);
     }
@@ -393,12 +408,15 @@
     // 档位表
     if (g.gearTables) appendGearBoxes(body, g.gearTables);
 
-    // 模式子面板（[4] 控制模式）：CTRL_MODE 切换显示的参数面板（PID / Gear 同一窗口）
+    // 模式子面板（[4] 控制模式）：PID / Gear 两侧横滑切换（类似顶部实时曲线/日志）
     if (g.modePanels) {
+      var slider = document.createElement('div');
+      slider.className = 'mode-slider';
+      slider.id = 'mode-slider-' + g.id;
       g.modePanels.forEach(function (p) {
         var sub = document.createElement('div');
         sub.id = 'sub-' + g.id + '-' + p.when;
-        sub.className = 'group-body sub-panel';
+        sub.className = 'group-body sub-panel mode-panel';
         if (p.title) {
           var pt = document.createElement('div');
           pt.className = 'sub-panel-title';
@@ -409,8 +427,9 @@
           if (SCHEMA.keys[k]) sub.appendChild(buildControl(k));
         });
         if (p.gearTables) appendGearBoxes(sub, p.gearTables);
-        body.appendChild(sub);
+        slider.appendChild(sub);
       });
+      body.appendChild(slider);
     }
 
     return sec;
@@ -906,6 +925,7 @@
     initTop();
     initChartUI();
     initLogUI();
+    initModeSlider();
     updateCollapse();
     if (errText) reportError(errText);
     else if (!Bridge.available) reportError('未检测到 WebUI 桥接 — 请在 KernelSU / KSU-Next / APatch 管理器内打开本模块 WebUI');

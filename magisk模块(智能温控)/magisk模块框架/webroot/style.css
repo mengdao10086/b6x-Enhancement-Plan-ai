@@ -150,7 +150,15 @@ body.pin-scroll { padding-bottom: 54px; }
   display: flex; align-items: center; gap: 8px; padding: 9px 10px; cursor: pointer;
   user-select: none; -webkit-user-select: none;
 }
-.group-head .chev { color: var(--muted); font-size: 13px; width: 14px; }  /* ▸/▾ 视觉约 2/3 汉字宽 */
+/* 折叠小三角：原生风格（与 UI 诊断日志的折叠标记一致） */
+.group-head .chev {
+  display: inline-block; width: 0; height: 0; flex: 0 0 auto;
+  border-left: 5px solid var(--muted);
+  border-top: 4px solid transparent;
+  border-bottom: 4px solid transparent;
+  transition: transform .15s;
+}
+.group-head .chev.on { transform: rotate(90deg); }
 .group-head .g-title { font-weight: 600; font-size: 13px; }
 .group-head .g-note { color: var(--muted); font-size: 11px; margin-left: auto; text-align: right; }
 .group-head .head-switch { margin-left: auto; }
@@ -161,10 +169,14 @@ body.pin-scroll { padding-bottom: 54px; }
 }
 .badge.hidden { display: none; }
 
-/* 非活动模式分组完全隐藏 */
-.group.mode-hidden { display: none; }
-/* 模式子面板（[4] 控制模式）非活动面板隐藏 */
-.sub-panel.mode-hidden { display: none; }
+/* 控制模式横滑（[4] 控制模式：PID / Gear 两侧，类似顶部曲线/日志） */
+.mode-slider {
+  display: flex; overflow-x: auto; margin-top: 8px;
+  scroll-snap-type: x mandatory;
+  -webkit-overflow-scrolling: touch;
+}
+.mode-slider::-webkit-scrollbar { display: none; }
+.mode-panel { flex: 0 0 100%; min-width: 100%; scroll-snap-align: start; }
 
 .group-body { padding: 2px 10px 10px; }
 .group-body.collapsed { display: none; }
@@ -211,6 +223,11 @@ input[type=number] { -moz-appearance: textfield; }
 }
 .switch input:checked + i { background: var(--accent); border-color: var(--accent); }
 .switch input:checked + i::after { transform: translateX(18px); }
+
+/* 控制模式大开关（[4] 控制模式组头） */
+.group-head .head-switch.mode-switch .switch { width: 52px; height: 28px; }
+.group-head .head-switch.mode-switch .switch i::after { width: 22px; height: 22px; left: 2px; top: 2px; }
+.group-head .head-switch.mode-switch .switch input:checked + i::after { transform: translateX(24px); }
 
 /* ---------- 档位表 ---------- */
 .gear-box { margin-top: 10px; padding: 8px; background: var(--surface2); border-radius: 8px; }

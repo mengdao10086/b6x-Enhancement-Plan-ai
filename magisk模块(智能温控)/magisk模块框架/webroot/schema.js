@@ -56,12 +56,13 @@ window.B6X_SCHEMA = {
           gearTables: ["GEAR_B6X_", "GEAR_B7X_"] }
       ]
     },
-    // [2] sysfs 路径与缩放：独立组，排最底
+    // [2] sysfs 路径与缩放：独立大类（SYSFS_ENABLED 开关控制加载），排最底
     {
-      id: "g2", title: "[2] sysfs 路径与缩放", master: "PERF_ENABLED",
-      keys: ["BATT_TEMP_PATH", "BATT_TEMP_DIVISOR", "BATT_CURRENT_PATH",
-             "BATT_CURRENT_DIVISOR", "CPU_TEMP_PATH_FMT", "CPU_TEMP_DIVISOR",
-             "CPU_ZONE", "LOG_FILE", "LOG_MAX", "LOG_TRIM_LINES"]
+      id: "g2", title: "[2] sysfs 路径与缩放", headerSwitch: "SYSFS_ENABLED",
+      keys: [],
+      subKeys: ["BATT_TEMP_PATH", "BATT_TEMP_DIVISOR", "BATT_CURRENT_PATH",
+                "BATT_CURRENT_DIVISOR", "CPU_TEMP_PATH_FMT", "CPU_TEMP_DIVISOR",
+                "CPU_ZONE", "LOG_FILE", "LOG_MAX", "LOG_TRIM_LINES"]
     }
   ],
 
@@ -81,6 +82,8 @@ window.B6X_SCHEMA = {
     DEBUG_PID:    { type: "switch", label: "PID", desc: "PID 模式调试日志（需开 DEBUG_ENABLED）" },
 
     // ---- [2] 路径与缩放 ----
+    SYSFS_ENABLED: { type: "switch", label: "sysfs 路径与缩放开关",
+      desc: "=1 加载下方路径与缩放配置；=0 使用代码默认路径" },
     BATT_TEMP_PATH: { type: "path", label: "电池温度 sysfs",
       desc: "不同机型位置可能不同，可自行修改" },
     BATT_TEMP_DIVISOR: { type: "int", min: 1, max: 10000, label: "电池温度缩放系数",

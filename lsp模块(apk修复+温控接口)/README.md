@@ -11,6 +11,7 @@
 - **双广播接口**：接收 `com.flydigi.SET_TEMPERATURE`（B6X）或 `com.flydigi.SET_TEMPERATURE_B7`（B7X）广播，将参数转发到对应 SDK 的 `setRunMode()`
 - **双 status 文件心跳**：每 1 秒写入 BLE 状态及散热器运行参数到 `/data/local/tmp/tempctrl_b6x.status` / `tempctrl_b7x.status`，含 `CONNECTED_AT` 时间戳供仲裁
 - **CPU 占用修复**：修复 DefaultDispatcher 线程空队列忙等导致的 100% CPU 占用
+- **上次设备持久化 + 启动自动连接**：连接时保存散热器 MAC，app 冷启动后自动恢复并重连，无需手动点"开始设置"；配合守护进程自动拉起（`b6x_auto_launch` 标志）实现拉起即连、自动后台化
 
 ---
 

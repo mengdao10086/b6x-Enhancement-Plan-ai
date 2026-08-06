@@ -447,7 +447,7 @@ static char gear_file_path[512] = "";
 #define APP_PKG_B7X "com.fdg.flashplay.farsef"
 
 // v2.8：自动拉起散热器 app（优先上次使用的 app）
-static int APP_LAUNCH_ENABLED = 1;      // 总开关：1=允许自动拉起，0=关闭
+static int APP_LAUNCH_ENABLED = 0;      // 总开关：1=允许自动拉起，0=关闭（默认关，刷入时可选开）
 static time_t last_launch_attempt = 0;  // 上次拉起尝试时间（冷却用）
 #define APP_LAUNCH_COOLDOWN 60          // 两次拉起最小间隔（秒）
 
@@ -677,6 +677,20 @@ static void record_log_path_for_uninstall(const char *path) {
     }
 }
 
+/** sysfs 路径与缩放层键集合（SYSFS_ENABLED=1 时解析，独立于性能/调试总开关） */
+static int is_sysfs_key(const char *key) {
+    return strcmp(key, "BATT_TEMP_PATH") == 0
+        || strcmp(key, "BATT_TEMP_DIVISOR") == 0
+        || strcmp(key, "BATT_CURRENT_PATH") == 0
+        || strcmp(key, "BATT_CURRENT_DIVISOR") == 0
+        || strcmp(key, "CPU_TEMP_PATH_FMT") == 0
+        || strcmp(key, "CPU_TEMP_DIVISOR") == 0
+        || strcmp(key, "CPU_ZONE") == 0
+        || strcmp(key, "LOG_FILE") == 0
+        || strcmp(key, "LOG_MAX") == 0
+        || strcmp(key, "LOG_TRIM_LINES") == 0;
+}
+
 static void load_config(const char *path) {
     FILE *f = fopen(path, "r");
     if (!f) {
@@ -689,6 +703,7 @@ static void load_config(const char *path) {
     char line[256];
     int perf_enabled = 1;
     int found_debug = 0;
+    int found_sysfs = 0;
     while (fgets(line, sizeof(line), f)) {
         char *key;
         char *val_str = config_parse_line(line, &key);
@@ -697,6 +712,8 @@ static void load_config(const char *path) {
             perf_enabled = atoi(val_str) != 0;
         } else if (strcmp(key, "DEBUG_ENABLED") == 0) {
             found_debug = atoi(val_str) != 0;
+        } else if (strcmp(key, "SYSFS_ENABLED") == 0) {
+            found_sysfs = atoi(val_str) != 0;   // sysfs 路径与缩放独立大类
         } else if (strcmp(key, "APP_LAUNCH_ENABLED") == 0) {
             APP_LAUNCH_ENABLED = (atoi(val_str) != 0);   // 任何模式下都生效（含 PERF=0/DEBUG=0）
         }
@@ -711,8 +728,8 @@ static void load_config(const char *path) {
         debug_mode = 0;
     }
 
-    if (!perf_enabled && !found_debug) {
-        fclose(f);   // PERF=0 且 DEBUG=0：debug_mode 已清零，跳过解析
+    if (!perf_enabled && !found_debug && !found_sysfs) {
+        fclose(f);   // PERF/DEBUG/SYSFS 全关：跳过解析
         return;
     }
 
@@ -746,27 +763,35 @@ static void load_config(const char *path) {
             continue;
         }
 
-        // --- 性能参数：仅 PERF_ENABLED=1 时解析（含除 DEBUG_* 外的全部参数） ---
-        //     无子守卫：路径/CURRENT_GEAR_*/PID_*/GEAR_B6X_N/GEAR_B7X_N/模式开关等全部在此层
+        // --- sysfs 路径与缩放层（SYSFS_ENABLED=1 时加载，独立于性能/调试总开关） ---
+        if (found_sysfs && is_sysfs_key(key)) {
+            if      (strcmp(key, "BATT_TEMP_PATH") == 0)
+                config_read_path(BATT_TEMP_PATH, sizeof(BATT_TEMP_PATH), val_str);
+            else if (strcmp(key, "CPU_TEMP_PATH_FMT") == 0)
+                config_read_path(CPU_TEMP_PATH_FMT, sizeof(CPU_TEMP_PATH_FMT), val_str);
+            else if (strcmp(key, "BATT_CURRENT_PATH") == 0)
+                config_read_path(BATT_CURRENT_PATH, sizeof(BATT_CURRENT_PATH), val_str);
+            else if (strcmp(key, "BATT_TEMP_DIVISOR") == 0)   BATT_TEMP_DIVISOR  = clamp(val, 1, 10000);
+            else if (strcmp(key, "CPU_TEMP_DIVISOR") == 0)    CPU_TEMP_DIVISOR   = clamp(val, 1, 10000);
+            else if (strcmp(key, "BATT_CURRENT_DIVISOR") == 0) BATT_CURRENT_DIVISOR = clamp(val, 1, 100000);
+            else if (strcmp(key, "CPU_ZONE") == 0) {
+                int a = CPU_ZONE_MIN, b = CPU_ZONE_MAX;
+                if (sscanf(val_str, "%d %d", &a, &b) >= 2) { CPU_ZONE_MIN = clamp(a,0,99); CPU_ZONE_MAX = clamp(b,0,99); }
+            }
+            else if (strcmp(key, "LOG_MAX") == 0)              LOG_MAX            = clamp(val, 0, 1048576);
+            else if (strcmp(key, "LOG_TRIM_LINES") == 0)       log_trim_lines     = clamp(val, 0, 50);
+            else if (strcmp(key, "LOG_FILE") == 0) {
+                config_read_path(log_file_path, sizeof(log_file_path), val_str);
+                record_log_path_for_uninstall(log_file_path);  // v2.5：记录自定义日志路径供卸载清理
+            }
+            continue;
+        }
+
+        // --- 性能参数：仅 PERF_ENABLED=1 时解析（不含 DEBUG_*/sysfs 路径键） ---
         if (!perf_enabled) continue;
 
-        // --- 系统路径与缩放 ---
-        if      (strcmp(key, "BATT_TEMP_PATH") == 0)
-            config_read_path(BATT_TEMP_PATH, sizeof(BATT_TEMP_PATH), val_str);
-        else if (strcmp(key, "CPU_TEMP_PATH_FMT") == 0)
-            config_read_path(CPU_TEMP_PATH_FMT, sizeof(CPU_TEMP_PATH_FMT), val_str);
-        else if (strcmp(key, "BATT_CURRENT_PATH") == 0)
-            config_read_path(BATT_CURRENT_PATH, sizeof(BATT_CURRENT_PATH), val_str);
-        else if (strcmp(key, "BATT_TEMP_DIVISOR") == 0)   BATT_TEMP_DIVISOR  = clamp(val, 1, 10000);
-        else if (strcmp(key, "CPU_TEMP_DIVISOR") == 0)    CPU_TEMP_DIVISOR   = clamp(val, 1, 10000);
-        else if (strcmp(key, "BATT_CURRENT_DIVISOR") == 0) BATT_CURRENT_DIVISOR = clamp(val, 1, 100000);
-
         // --- 多值连续格式（空格分隔的 2~4 值）---
-        else if (strcmp(key, "CPU_ZONE") == 0) {
-            int a = CPU_ZONE_MIN, b = CPU_ZONE_MAX;
-            if (sscanf(val_str, "%d %d", &a, &b) >= 2) { CPU_ZONE_MIN = clamp(a,0,99); CPU_ZONE_MAX = clamp(b,0,99); }
-        }
-        else if (strcmp(key, "HOT_MAP") == 0) {
+        if (strcmp(key, "HOT_MAP") == 0) {
             int a = hot_map_min, b = hot_map_max;
             if (sscanf(val_str, "%d %d", &a, &b) >= 2) { hot_map_min = clamp(a,200,500); hot_map_max = clamp(b,200,500); }
         }
@@ -906,14 +931,6 @@ static void load_config(const char *path) {
         else if (strcmp(key, "COLD_MAP_EXP") == 0)         cold_map_exp        = clamp(val, 50, 500);
         else if (strcmp(key, "RPM_SMOOTH_ALPHA") == 0)     rpm_smooth_alpha    = clamp(val, 1, 99);
         else if (strcmp(key, "FAN_RPM_CHANGE_THRESHOLD") == 0) fan_rpm_change_threshold = clamp(val, 0, 2000);
-
-        // --- 日志与系统 ---
-        else if (strcmp(key, "LOG_MAX") == 0)              LOG_MAX            = clamp(val, 0, 1048576);
-        else if (strcmp(key, "LOG_TRIM_LINES") == 0)       log_trim_lines     = clamp(val, 0, 50);
-        else if (strcmp(key, "LOG_FILE") == 0) {
-            config_read_path(log_file_path, sizeof(log_file_path), val_str);
-            record_log_path_for_uninstall(log_file_path);  // v2.5：记录自定义日志路径供卸载清理
-        }
 
         // --- 模式开关等 ---
         else if (strcmp(key, "CTRL_MODE") == 0)                ctrl_mode            = (val != 0);
@@ -1795,10 +1812,35 @@ static void force_stop_app(const char *pkg) {
     system(cmd);
 }
 
+/** 判断指定包名是否已安装（pm path 有输出即已安装） */
+static int app_installed(const char *pkg) {
+    char cmd[256];
+    snprintf(cmd, sizeof(cmd), "pm path %s > /dev/null 2>&1", pkg);
+    return (system(cmd) == 0);
+}
+
+/**
+ * 解析自动拉起的包名：优先 BLE_OWNER_LAST 记录的上次连接者；
+ * 目标 B6X app 未安装时回退另一个 B6X app（老 app 未安装→新 app，反之亦然）。
+ */
+static const char *resolve_launch_pkg(void) {
+    const char *pkg;
+    if      (last_owner == 2)                     pkg = APP_PKG_B6X_NEW;
+    else if (last_owner == 6 || last_owner == 7)  pkg = APP_PKG_B7X;
+    else                                          pkg = APP_PKG_B6X_OLD;  // 无记录/老 app
+    if (pkg == APP_PKG_B6X_OLD && !app_installed(pkg) && app_installed(APP_PKG_B6X_NEW))
+        pkg = APP_PKG_B6X_NEW;
+    else if (pkg == APP_PKG_B6X_NEW && !app_installed(pkg) && app_installed(APP_PKG_B6X_OLD))
+        pkg = APP_PKG_B6X_OLD;
+    return pkg;
+}
+
 /**
  * 自动拉起上次使用的散热器 app（v2.8），带冷却防止反复拉起被杀。
- * 包名按 last_owner 选择：2→新 B6X app，6/7→farsef，其余/无记录→老 B6X app。
- * 仅在 APP_LAUNCH_ENABLED=1 且目标 app 未运行时执行。
+ * 包名按 last_owner 选择：2→新 B6X app，6/7→farsef，其余/无记录→老 B6X app；
+ * 目标 B6X app 未安装时回退另一个 B6X app。
+ * 拉起用 am start + b6x_auto_launch 标志（LSP 读到后连接完成自动后台化，几乎无感）。
+ * 仅在 APP_LAUNCH_ENABLED=1 且目标 app 已安装、未运行时执行。
  */
 static void launch_last_app(void) {
     if (!APP_LAUNCH_ENABLED) return;
@@ -1806,17 +1848,19 @@ static void launch_last_app(void) {
     if (now - last_launch_attempt < APP_LAUNCH_COOLDOWN) return;
     last_launch_attempt = now;
 
-    const char *pkg;
-    if      (last_owner == 2)                     pkg = APP_PKG_B6X_NEW;
-    else if (last_owner == 6 || last_owner == 7)  pkg = APP_PKG_B7X;
-    else                                          pkg = APP_PKG_B6X_OLD;  // 无记录/老 app
+    const char *pkg = resolve_launch_pkg();
+    if (!app_installed(pkg)) {
+        write_log("自动拉起 目标 app 未安装 %s", pkg);
+        return;
+    }
     if (app_process_running(pkg)) return;   // 已在运行不重复拉
 
-    char cmd[256];
+    char cmd[320];
     snprintf(cmd, sizeof(cmd),
-             "monkey -p %s -c android.intent.category.LAUNCHER 1 > /dev/null 2>&1", pkg);
+             "am start -a android.intent.action.MAIN -c android.intent.category.LAUNCHER "
+             "-p %s --es b6x_auto_launch 1 > /dev/null 2>&1", pkg);
     system(cmd);
-    write_log("自动拉起散热器 app %s", pkg);
+    write_log("自动拉起散热器 app %s（后台化）", pkg);
 }
 
 /**

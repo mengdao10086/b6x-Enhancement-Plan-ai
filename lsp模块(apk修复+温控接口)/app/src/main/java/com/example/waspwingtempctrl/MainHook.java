@@ -1,13 +1,16 @@
 package com.example.waspwingtempctrl;
 
 import android.app.Activity;
+import android.bluetooth.BluetoothAdapter;
 import android.bluetooth.BluetoothDevice;
 import android.bluetooth.BluetoothGatt;
 import android.content.BroadcastReceiver;
 import android.content.Context;
 import android.content.Intent;
 import android.content.IntentFilter;
+import android.os.Bundle;
 
+import java.io.BufferedReader;
 import java.io.FileOutputStream;
 import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.UUID;
@@ -40,6 +43,8 @@ public class MainHook implements IXposedHookLoadPackage {
     // 双文件路径
     private static final String STATUS_FILE_B6 = "/data/local/tmp/tempctrl_b6x.status";
     private static final String STATUS_FILE_B7 = "/data/local/tmp/tempctrl_b7x.status";
+    private static final String LAST_DEV_FILE = "/data/local/tmp/tempctrl_last_dev";  // v2.8：上次连接的散热器 MAC（持久化，冷启动自动连接用）
+    private static final String AUTO_LAUNCH_EXTRA = "b6x_auto_launch";               // v2.8：tempctrl 拉起 app 时携带的标志（LSP 读到后自动后台化）
 
     private static Object capturedWaspWingMgr = null;  // 构造函数钩子捕获的实例
     private static int deviceType = 0;      // 0=无连接, 6=B6X, 7=B7X
@@ -237,6 +242,7 @@ public class MainHook implements IXposedHookLoadPackage {
         hookWaspWingManagerCapture(lpparam);          // 捕获 WaspWingManager 实例（双设备）
         if (deviceType == 7) hookB7Obfuscated(lpparam);     // c0.s1 + 混淆适配（仅 B7X）
         hookApplicationCreate(lpparam);               // 广播接收器 + 定时状态写入（双设备）
+        hookAutoLaunch(lpparam);                      // v2.8：自动拉起标志 → Activity 后台化（双设备）
     }
 
     // ========== 各 Hook 分区实现 ==========
@@ -856,11 +862,77 @@ public class MainHook implements IXposedHookLoadPackage {
                 protected void afterHookedMethod(MethodHookParam param) {
                     Context ctx = (Context) param.thisObject;
                     registerTemperatureReceiver(ctx);
+                    restoreLastDevice();   // v2.8：冷启动恢复上次设备引用，后台重连自动接管
                     startPeriodicStatusWrite();
                 }
             });
         } catch (Throwable t) {
             XposedBridge.log(TAG + " 钩 Application.onCreate 失败: " + t.getMessage());
+        }
+    }
+
+    // ========== v2.8：上次设备持久化 + 自动拉起后台化 ==========
+
+    /** 持久化上次连接的散热器 MAC（供冷启动自动连接 / 自动拉起使用） */
+    private static void saveLastDeviceAddress(String addr) {
+        try {
+            Process p = Runtime.getRuntime().exec(new String[]{"sh", "-c",
+                    "echo " + addr + " > /data/local/tmp/tempctrl_last_dev"});
+            p.waitFor();
+        } catch (Throwable t) {
+            XposedBridge.log(TAG + " 保存设备 MAC 失败: " + t.getMessage());
+        }
+    }
+
+    /** 读取持久化的上次设备 MAC；无记录返回 null */
+    private static String loadLastDeviceAddress() {
+        try {
+            BufferedReader br = new BufferedReader(new java.io.FileReader(LAST_DEV_FILE));
+            String line = br.readLine();
+            br.close();
+            return (line != null && !line.trim().isEmpty()) ? line.trim() : null;
+        } catch (Throwable t) {
+            return null;
+        }
+    }
+
+    /** 冷启动恢复上次设备引用，使后台自动重连在启动后即可工作（v2.8） */
+    private static void restoreLastDevice() {
+        if (lastDevice != null || bleConnected) return;
+        String addr = loadLastDeviceAddress();
+        if (addr == null) return;
+        try {
+            BluetoothAdapter adapter = BluetoothAdapter.getDefaultAdapter();
+            if (adapter == null) return;
+            lastDevice = adapter.getRemoteDevice(addr);
+            XposedBridge.log(TAG + " 已恢复上次设备 " + addr + "，后台重连将自动接管");
+        } catch (Throwable t) {
+            XposedBridge.log(TAG + " 恢复上次设备失败: " + t.getMessage());
+        }
+    }
+
+    /** 自动拉起模式：读到 b6x_auto_launch 标志的 Activity 立即后台化（v2.8） */
+    private static void hookAutoLaunch(XC_LoadPackage.LoadPackageParam lpparam) {
+        try {
+            XposedHelpers.findAndHookMethod(Activity.class, "onCreate", Bundle.class,
+                    new XC_MethodHook() {
+                        @Override
+                        protected void afterHookedMethod(MethodHookParam param) {
+                            try {
+                                Activity act = (Activity) param.thisObject;
+                                Intent intent = act.getIntent();
+                                if (intent != null && "1".equals(intent.getStringExtra(AUTO_LAUNCH_EXTRA))) {
+                                    act.moveTaskToBack(true);   // 连接由后台重连线程完成
+                                    XposedBridge.log(TAG + " 自动拉起模式：app 已切后台");
+                                }
+                            } catch (Throwable t) {
+                                XposedBridge.log(TAG + " auto_launch 处理失败: " + t.getMessage());
+                            }
+                        }
+                    });
+            XposedBridge.log(TAG + " 已钩住 Activity.onCreate（b6x_auto_launch 后台化）");
+        } catch (Throwable t) {
+            XposedBridge.log(TAG + " 钩 auto_launch 失败: " + t.getMessage());
         }
     }
 
@@ -1014,6 +1086,7 @@ public class MainHook implements IXposedHookLoadPackage {
         bleLastOwnerAt = bleConnectedTimestamp;
         if (gatt != null && gatt.getDevice() != null) {
             lastDevice = gatt.getDevice();
+            saveLastDeviceAddress(gatt.getDevice().getAddress());   // v2.8：持久化 MAC 供冷启动自动连接
         }
     }
 
