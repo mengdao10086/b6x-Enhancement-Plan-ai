@@ -746,6 +746,20 @@
     var data = S.samples.slice(-(S.window || 360));   // 只画最近 window 秒
     var leftSeries = S.series.filter(function (s) { return s.on && s.axis === 'left'; });
     var rightSeries = S.series.filter(function (s) { return s.on && s.axis === 'right'; });
+
+    // —— 断联感知布局 ——
+    // C 端断联时不写曲线数据行（重连才续写），曲线数据里断联表现为相邻采样时间戳跳变。
+    // 相邻采样时间差 > 5s 视为一次断联：断开曲线，并在该处插入固定 5s 宽的空白，
+    // 直观标记"这里断开过"（空白宽度 = 正常绘制 5s 的宽度）。
+    var GAP_SEC = 5;
+    var gap = new Array(data.length);
+    var totalGap = 0, di;
+    for (di = 0; di < data.length; di++) {
+      if (di > 0 && data[di].t - data[di - 1].t > GAP_SEC) totalGap += GAP_SEC;
+      gap[di] = totalGap;
+    }
+    var totalUnits = (data.length > 1 ? data.length - 1 : 0) + totalGap;
+
     if (data.length < 2 || (!leftSeries.length && !rightSeries.length)) {
       ctx.fillStyle = '#888'; ctx.font = '12px system-ui';
       ctx.fillText(data.length < 2 ? '采样中…' : '无曲线', padL + W / 2 - 24, padT + H / 2);
@@ -799,9 +813,10 @@
         ctx.beginPath();
         var started = false;
         for (var di = 0; di < data.length; di++) {
+          if (di > 0 && data[di].t - data[di - 1].t > GAP_SEC) started = false;   // 断联处断开，空白不连桥
           var v = getV(s, data[di]);
           if (v == null) continue;
-          var x = padL + W * (data.length === 1 ? 0.5 : (di / (data.length - 1)));
+          var x = padL + W * ((di + gap[di]) / totalUnits);
           var y = yOf(axis, v);
           if (started) ctx.lineTo(x, y); else { ctx.moveTo(x, y); started = true; }
         }

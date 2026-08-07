@@ -3245,18 +3245,25 @@ static int match_nearest_gear_for_reconnect(void) {
 // ======================== 程序入口 ========================
 
 /**
- * 每 1 秒采集一次并写入 WebUI 曲线数据文件（滚动保留 480 行）。
+ * 每 1 秒采集一次并写入 WebUI 曲线数据文件（滚动保留 720 行）。
  * 行格式：epoch,电池(0.1°C),CPU(0.1°C),热端(0.1°C),冷端(0.1°C),实际转速,实际制冷,目标制冷
  * 未就绪的值为 -1，WebUI 端忽略该采样点。
+ * 断联（BLE 未连 或 app 进程失活）时停止写入：曲线数据文件留下真实时间空洞，
+ * WebUI 端按相邻采样时间戳差 > 5s 断开曲线并留出 5s 宽空白。
  */
 static void write_webui_data(void) {
     int batt = read_battery_temp();
     int cpu  = read_cpu_temp_max();
-    read_cooler_params();   // 更新 cooler_* 全局（热/冷端、实际转速、实际制冷）
+    read_cooler_params();   // 更新 cooler_* 全局（热/冷端、实际转速、实际制冷）+ app_ble_connected
     // 1s 采集缓存：5s 控制块直接读缓存，不再重复读 sysfs/状态文件（保留上次成功值抗抖）
     if (batt >= 0) cached_batt_raw = batt;
     if (batt_temp_updated) batt_changed_since_ctrl = 1;  // 1s 层累积：自上次控制以来值变过
     if (cpu  >= 0) cached_cpu_now  = cpu;
+    // 断联即停止写入曲线：重连后 read_cooler_params 检测到 BLE 恢复即自动继续写。
+    // 断联判定与主循环一致（BLE 未连 或 app 进程失活），覆盖"BLE 干净断开"与"app 被强杀"两种场景。
+    // 断联期间不写行 → 数据文件留下真实时间空洞，WebUI 按相邻时间戳差 >5s 断开曲线。
+    // 温度采集/缓存不受影响，5s 控制块仍用新鲜缓存。
+    if (!app_ble_connected || !is_app_alive()) return;
     char buf[WEBUI_DATA_MAX_LINES][96];
     int n = 0;
     FILE *rf = fopen(WEBUI_DATA_PATH, "r");
@@ -3395,7 +3402,7 @@ pid_init_done:
     }
 
     // ---- 主循环：1 秒节拍（采集 + 控制分离） ----
-    // 每 1s：采集电池/CPU/散热器回传 → 写 WebUI 曲线数据文件（滚动 480 行）
+    // 每 1s：采集电池/CPU/散热器回传 → 写 WebUI 曲线数据文件（滚动 720 行，断联不写）
     // 每 5s（时间判定）：执行控制（仲裁/存活/主循环/限速下发）；原"5 秒间隔对齐"已删除
     time_t last_ctrl = 0;
     while (running) {
