@@ -206,6 +206,7 @@ static int RATE_LIMIT_TEMP = 2;
 
 // --- 动态值（根据电池温差自动调整）---
 static int RATE_LIMIT_COLD_MULT = 10;  // 制冷强度倍率：升速/降速 = base ± dev(0.1°C) × mult / 10
+static int COLD_UP_DEADZONE = 5;       // 制冷上升死区：上升变化量 ≤ 该值时不升（制冷强度变化时会在限制以下波动一段时间，上升太少不如不升）
 static int RATE_LIMIT_FAN_UP = 200;   // 风扇升速基础值：RPM_UP = base + d × mult / 10
 static int RATE_LIMIT_FAN_MULT = 50;  // 风扇升速倍率（RATE_LIMIT_FAN_UP 双值第二位）
 static int cycle_batt_temp = -1;       // 本周期电池温度（-1=未就绪）
@@ -437,7 +438,6 @@ static char status_file_path_b7[512] = "/data/local/tmp/tempctrl_b7x.status";
 // WebUI 曲线数据文件（每 1 秒一行，滚动保留最大曲线窗口秒数）
 #define WEBUI_DATA_PATH       "/data/local/tmp/tempctrl_webui.data"
 #define WEBUI_DATA_MAX_LINES  720   // = 曲线最大时间挡位（秒）
-static char gear_file_path[512] = "";
 
 // 三方 app 包名（v2.7：farsef 在最近连 B6X 散热器时也参与仲裁）
 #define APP_PKG_B6X_OLD "com.flydigi.waspwing.experimental"
@@ -512,7 +512,6 @@ static int final_gear = LEVEL_INIT;   // 逻辑计算的目标档位（执行向
 static void write_log(const char *fmt, ...);
 static inline int clamp(int val, int lo, int hi);
 static void alarm_handler(int sig);
-static int match_nearest_gear_for_reconnect(void);
 static void pid_align_from_gear(void);
 static int compute_fan_target(void);
 
@@ -890,6 +889,7 @@ static void load_config(const char *path) {
             }
         }
         else if (strcmp(key, "RATE_LIMIT_TEMP") == 0) RATE_LIMIT_TEMP = clamp(val, 1, 30);
+        else if (strcmp(key, "COLD_UP_DEADZONE") == 0) COLD_UP_DEADZONE = clamp(val, 1, 50);
         else if (strcmp(key, "BATT_SKIP_MAX") == 0) BATT_SKIP_MAX = clamp(val, 1, 60);
         else if (strcmp(key, "RATE_LIMIT_FAN_UP") == 0) {
             int rise = RATE_LIMIT_FAN_UP, mult = RATE_LIMIT_FAN_MULT;
@@ -1009,8 +1009,12 @@ static void load_config(const char *path) {
 
         // 切换活动表指针与计数，同步范围
         select_gear_table();
-        actual_rpm = -1;
-        actual_cold = -1;
+        // 档位表重排后 actual 值复位：以散热器实际回传为准初始化（回传异常用最小合法值保底），
+        // 避免删直通后 -1 初值步进出负值
+        if (cooler_cold_real >= COLD_MIN) actual_cold = cooler_cold_real;
+        else actual_cold = COLD_MIN;
+        if (cooler_rpm_real >= fan_rpm_min) actual_rpm = cooler_rpm_real;
+        else actual_rpm = fan_rpm_min;
         actual_target_temp = -1;
         batt_gear_base = clamp(batt_gear_base, gear_min, gear_max);
     }
@@ -1170,9 +1174,10 @@ static inline int temp_delta_by_boundary(int ad, int z1, int z2, int z3) {
     return 0;
 }
 
-/** 限速步进：actual 向 desired 靠拢，每周期最多变 up_limit（升）或 down_limit（降） */
+/** 限速步进：actual 向 desired 靠拢，每周期最多变 up_limit（升）或 down_limit（降）。
+ * 任何情况都走正常步进（不做首步直通）；调用方须保证 actual 已初始化为合法值，
+ * 重连/启动路径用散热器实际回传值初始化，回传异常时保持原值/最小合法值。 */
 static inline void rate_limit(int *actual, int desired, int up_limit, int down_limit) {
-    if (*actual < 0) { *actual = desired; return; }
     int diff = desired - *actual;
     int step = (diff > 0) ? up_limit : down_limit;
     if (abs(diff) > step)
@@ -1359,46 +1364,6 @@ static void read_cooler_params(void) {
         }
     }
     fclose(f);
-}
-
-// ======================== 存档（持久化上次制冷强度） ========================
-
-/**
- * 设定存档路径（根据 /proc/self/exe 推导）
- */
-static void set_gear_file_path(void) {
-    char basename[64];
-    if (get_exe_basename(basename, sizeof(basename))) {
-        snprintf(gear_file_path, sizeof(gear_file_path),
-                 "/data/local/tmp/%s.gear", basename);
-        return;
-    }
-    strncpy(gear_file_path, "/data/local/tmp/tempctrl.gear",
-            sizeof(gear_file_path) - 1);
-}
-
-/**
- * 保存制冷强度到存档文件
- */
-static void save_cold(int cold) {
-    if (cold < 1) return;
-    FILE *f = fopen(gear_file_path, "w");
-    if (f) {
-        fprintf(f, "%d\n", cold);
-        fclose(f);
-    }
-}
-
-/**
- * 读取存档制冷强度，失败返回 -1
- */
-static int load_cold(void) {
-    FILE *f = fopen(gear_file_path, "r");
-    if (!f) return -1;
-    int val = -1;
-    fscanf(f, "%d", &val);
-    fclose(f);
-    return val;
 }
 
 // ======================== sysfs 读取工具 ========================
@@ -1695,6 +1660,44 @@ static int rate_limit_fan(int desired_rpm) {
 }
 
 /**
+ * 下发去重 + 制冷上升死区判定：返回 1 表示跳过本次下发。
+ *
+ * 去重以散热器实际回传为准：要播发值与散热器实际值一致视为已到位，跳过下发，
+ * 解决"日志报告已变化，但实际因广播丢失/BLE 失败未成功"导致的无法达到最高/最低制冷强度。
+ * 回传异常（status 文件读失败，实际值 < 0）时退化用 last_* 缓存对比。
+ *
+ * 制冷上升死区：制冷强度变化时会在限制以下波动一段时间，所以如果上升值较少不如不升。
+ * 制冷上升且"要下发值 − 散热器实际值 ≤ COLD_UP_DEADZONE"时跳过；
+ * 距最高/最低制冷强度 < 阈值×2 时死区失效（接近极值必须允许精确到位）。
+ * 下降方向不受限（快速响应撤冷）。
+ */
+static int should_skip_dispatch(int mode, int target, int windOC, int cold, int windLevel) {
+    int send_rpm = (mode == 0) ? windLevel : windOC;
+
+    if (cooler_cold_real >= 0 && cooler_rpm_real >= 0) {
+        if (cold == cooler_cold_real && send_rpm == cooler_rpm_real)
+            return 1;   // 散热器实际已到位
+
+        int diff = cold - cooler_cold_real;
+        if (diff > 0) {
+            int cmin = (ctrl_mode == 1) ? pid_cold_min : COLD_MIN;
+            int cmax = (ctrl_mode == 1) ? active_pid_cold_max : active_cold_max;
+            int near_extreme = (cmax - cooler_cold_real) < COLD_UP_DEADZONE * 2
+                            || (cooler_cold_real - cmin) < COLD_UP_DEADZONE * 2;
+            if (!near_extreme && diff <= COLD_UP_DEADZONE)
+                return 1;   // 上升太少，不如不升
+        }
+        return 0;
+    }
+
+    // 回传异常：退化用 last_* 缓存对比
+    return last_bcast_valid &&
+           mode == last_mode && target == last_target_temp &&
+           windOC == last_rpm && cold == last_cold &&
+           windLevel == last_wind_level;
+}
+
+/**
  * 下发控制参数（如有变化）
  * 通过 am broadcast 发送到 LSPosed 模块
  *
@@ -1721,8 +1724,10 @@ static int apply_gear(int level) {
     int desired_rpm = (mode == 0) ? windLevel : windOC;
     int send_rpm = rate_limit_fan(desired_rpm);
 
-    // 目标温度限速（仅智能温控模式；<0 时 rate_limit 直接初始化）
-    if (mode == 0 || actual_target_temp < 0)
+    // 目标温度限速（仅智能温控模式；回传无目标温度字段，<0 时显式初始化为目标档位 target）
+    if (actual_target_temp < 0)
+        actual_target_temp = target;
+    else if (mode == 0)
         rate_limit(&actual_target_temp, target, RATE_LIMIT_TEMP, RATE_LIMIT_TEMP);
 
     // ---- 用限速后的实际值替换查表值 ----
@@ -1735,14 +1740,8 @@ static int apply_gear(int level) {
     else
         windOC = send_rpm;
 
-    // ---- 去重检测 ----
-    if (last_bcast_valid &&
-        mode      == last_mode &&
-        target    == last_target_temp &&
-        windOC    == last_rpm &&
-        coldOC    == last_cold &&
-        windLevel == last_wind_level)
-    {
+    // ---- 去重检测 + 制冷上升死区（以散热器实际回传为准）----
+    if (should_skip_dispatch(mode, target, windOC, coldOC, windLevel)) {
         debug_log(debug_exec, "apply_gear 档位%d 参数无变化，跳过下发", gear_label(level));
         return 0;
     }
@@ -1756,8 +1755,6 @@ static int apply_gear(int level) {
     last_rpm           = windOC;
     last_cold          = coldOC;
     last_wind_level    = windLevel;
-
-    save_cold(coldOC);
 
     return 1;
 }
@@ -2743,10 +2740,8 @@ static void apply_gear_direct(int mode, int target,
                                int send_rpm, int cold, int wl) {
     // 纯下发：制冷限速与风扇目标已由 rate_limited_execute 完成，此处只去重/日志/广播
 
-    // ---- 去重检测 ----
-    if (last_bcast_valid &&
-        mode == last_mode && send_rpm == last_rpm &&
-        cold == last_cold && wl == last_wind_level)
+    // ---- 去重检测 + 制冷上升死区（以散热器实际回传为准）----
+    if (should_skip_dispatch(mode, target, send_rpm, cold, wl))
         return;
 
     // 偏差 = (滤波后电池温度 + 补偿) - 目标温度，取自上一周期 PID 计算的结果
@@ -2765,8 +2760,6 @@ static void apply_gear_direct(int mode, int target,
     last_rpm           = send_rpm;
     last_cold          = cold;
     last_wind_level    = wl;
-
-    save_cold(cold);
 }
 
 /**
@@ -2833,51 +2826,42 @@ static void alarm_handler(int sig) {
 }
 
 /**
- * 重连安全对齐：将三个实际值都调到匹配挡位的值，
- * 后续由 rate_limited_execute 按正常速率向目标挡位变化，
+ * 重连安全对齐：以散热器实际回传值为准初始化实际制冷/转速（PID/gear 共用），
+ * 由 rate_limited_execute 按正常限速逐步调节，抑制重连突变。
  * 不在此处立即下发，防止部分执行后参数组合不协调
  */
 static void reconnect_align(void) {
     // 清空温度窗口累积标志，避免重连后误判"窗口内变过"
     batt_changed_since_ctrl = 0;
     batt_window_changed = 0;
-    // PID 模式：重置 PID 状态，actual 值由 rate_limited_execute 重新初始化
-    // （pid_predict_buf_* 已在 pid_reset_core 中清零）
+
+    // 以散热器实际回传为准：重连后从真实当前状态起步，由正常限速逐步调节，抑制突变。
+    // 回传异常（status 文件读失败）时保持原值不变，避免无效初值。
+    if (cooler_cold_real >= COLD_MIN) actual_cold = cooler_cold_real;
+    if (cooler_rpm_real >= fan_rpm_min) actual_rpm = cooler_rpm_real;
+
     if (ctrl_mode == 1) {
+        // PID 模式：重置 PID 状态（积分/误差/滤波），制冷/转速初值取回传实际值，
+        // 由 rate_limited_execute 从回传值向 PID 目标正常步进
         pid_reset_core();
         pid_filter_interval_smooth = -1;
         pid_filter_auto_off = 0;
         temp_idle_cycles = 0;
-        actual_rpm = -1;
-        actual_cold = -1;
+        // 回传异常时保持原值（函数开头已处理有效回传覆盖），避免强制拉到最小值
         actual_target_temp = -1;
-        write_log("重连 PID 状态已重置");
+        write_log("重连 PID 状态已重置，制冷从回传实际值起步 cold=%d", actual_cold);
         last_batt_reading = -1;
         first_run = 1;
         return;
     }
 
-    // --- gear 模式：保留现有逻辑 ---
+    // --- gear 模式：删除档位表匹配，直接以散热器实际回传值起步 ---
     debug_log(debug_conn, "reconnect_align actual_rpm=%d actual_cold=%d", actual_rpm, actual_cold);
-    if (actual_rpm >= 0 && actual_cold >= 0) {
-        int idx = match_nearest_gear_for_reconnect();
-        debug_log(debug_conn, "reconnect_align match idx=%d final_gear=%d", idx, final_gear);
-        if (idx >= 0) {
-            actual_rpm = gear_table[idx].fan_rpm;
-            actual_cold = gear_table[idx].cold;
-            actual_target_temp = gear_table[idx].target;
-            write_log("重连 匹配档位%d 风扇%dRPM 制冷%d",
-                      gear_label(idx + 1), actual_rpm, actual_cold);
-        }
-    } else {
-        actual_rpm = -1;
-        actual_cold = -1;
-        actual_target_temp = -1;
-    }
-
+    int safe_level = clamp(final_gear, gear_min, gear_max);
+    actual_target_temp = gear_table[safe_level - 1].target;
     last_batt_reading = -1;
     first_run = 1;
-    // 不下发，等下轮 rate_limited_execute 从匹配挡位自然过渡
+    // 不下发，等下轮 rate_limited_execute 从实际值自然过渡
 }
 
 /** 记录上一轮紧急等级，退出紧急时用作档位上限 */
@@ -3206,42 +3190,6 @@ static void main_loop(void) {
     }
 }
 
-// ======================== 重连安全对齐 ========================
-
-/**
- * 断联重连时：用实际值（制冷强度/目标温度）匹配最接近的档位，
- * 将风扇转速对齐到该档位，防止断联前部分执行导致参数组合不协调。
- *
- * 例如：风扇转速很低但制冷强度很高（危险），或风扇很高但制冷很弱（噪音）。
- * 匹配后风扇从安全值开始，再经 rate_limited_execute 向目标档位变化。
- *
- * 返回档位索引（0-based），失败返回 -1。
- */
-static int match_nearest_gear_for_reconnect(void) {
-    if (gear_count == 0) return -1;
-
-    // 防御：final_gear 越界时回退到 gear_min
-    int safe_level = final_gear;
-    if (safe_level < gear_min || safe_level > gear_max)
-        safe_level = gear_min;
-
-    // 用目标档位的模式决定匹配依据
-    int mode = gear_table[safe_level - 1].mode;
-    int ref_val = (mode == 0) ? actual_target_temp : actual_cold;
-
-    int best_idx = 0;
-    int best_dist = INT_MAX;
-    for (int i = 0; i < gear_count; i++) {
-        int tbl = (gear_table[i].mode == 0) ? gear_table[i].target : gear_table[i].cold;
-        int dist = abs(tbl - ref_val);
-        if (dist < best_dist) {
-            best_dist = dist;
-            best_idx = i;
-        }
-    }
-    return best_idx;
-}
-
 // ======================== 程序入口 ========================
 
 /**
@@ -3307,14 +3255,30 @@ int main(int argc, char *argv[]) {
         if (stat(config_path, &st) == 0) config_mtime = st.st_mtime;
     }
 
-    // --- 双状态文件 + 档位存档初始化 ---
+    // --- 双状态文件初始化 ---
     // 状态文件路径已由全局初始化设好（status_file_path_b6/_b7 硬编码）
     create_status_files();
-    set_gear_file_path();
 
     // --- Gear 模式初始化（与 cooler 状态无关，在 BLE 就绪前完成） ---
+    // 原档位存档已删除：改为读 status 文件历史回传制冷强度（回传文件重启不删，保留上次实际状态），
+    // 匹配最近档位作为初始档位，读到无效值用 LEVEL_INIT 保底
     if (ctrl_mode != 1) {
-        int stored_cold = load_cold();
+        int stored_cold = -1;
+        const char *paths[] = {status_file_path_b6, status_file_path_b7};
+        for (int i = 0; i < 2 && stored_cold < 1; i++) {
+            FILE *f = fopen(paths[i], "r");
+            if (f) {
+                char line[64];
+                while (fgets(line, sizeof(line), f)) {
+                    if (strncmp(line, "COLD_REAL=", 10) == 0) {
+                        int v = atoi(line + 10);
+                        if (v >= 1) stored_cold = v;
+                        break;
+                    }
+                }
+                fclose(f);
+            }
+        }
         if (stored_cold >= 1) {
             int nearest = LEVEL_INIT;
             int min_diff = 9999;
@@ -3326,7 +3290,7 @@ int main(int argc, char *argv[]) {
                 }
             }
             batt_gear_base = nearest;
-            write_log("存档 制冷强度%d→挡位%d", stored_cold, nearest);
+            write_log("status 回传 制冷强度%d→挡位%d", stored_cold, nearest);
         } else {
             batt_gear_base = LEVEL_INIT;
         }
@@ -3356,16 +3320,11 @@ int main(int argc, char *argv[]) {
     if (!running) goto exit;
 
     // --- PID 模式初始化（需要 cooler 状态回传，放在 BLE 就绪后） ---
-    // 优先读取历史存档，其次读取 LSP 模块回传的实际制冷强度，最后回退到 gear 对齐
+    // 读取 LSP 模块回传的实际制冷强度，不可用则回退到 gear 对齐
     if (ctrl_mode == 1) {
         float pid_ratio = 0.0f;
 
-        int stored_cold = load_cold();
-        if (stored_cold >= 1) {
-            pid_ratio = pid_ratio_from_cold(stored_cold, pid_cold_max);
-            write_log("存档 恢复制冷=%d ratio=%.2f rpm=%d",
-                      stored_cold, pid_ratio, pid_align_rpm);
-        } else if (cooler_cold_real >= pid_cold_min) {
+        if (cooler_cold_real >= pid_cold_min) {
             pid_ratio = pid_ratio_from_cold(cooler_cold_real, active_pid_cold_max);
             write_log("LSP 回传承载 制冷=%d ratio=%.2f rpm=%d",
                       cooler_cold_real, pid_ratio, pid_align_rpm);
@@ -3390,6 +3349,13 @@ pid_init_done:
     emerg_forced_gear = 0;
     first_run = 1;
     last_batt_reading = -1;     // 重置电池温度跟踪，使首次 battery_control 视作新读数
+
+    // 以散热器实际回传值为准初始化实际制冷/转速（进入工作模式前 read_cooler_params 已读回传）。
+    // 回传异常（文件读失败）时用最小合法值保底，避免删直通后无效初值步进出负值。
+    if (cooler_cold_real >= COLD_MIN) actual_cold = cooler_cold_real;
+    else if (actual_cold < COLD_MIN) actual_cold = COLD_MIN;
+    if (cooler_rpm_real >= fan_rpm_min) actual_rpm = cooler_rpm_real;
+    else if (actual_rpm < fan_rpm_min) actual_rpm = fan_rpm_min;
 
     // 强制首次下发（PID 模式使用 apply_gear_direct 避免走 Gear 表）
     last_bcast_valid = 0;
@@ -3434,7 +3400,6 @@ pid_init_done:
                               device_tag_of(new_device));
                     active_device = new_device;
                     update_active_limits();
-                    last_bcast_valid = 0;
                     read_cooler_params();
                     reconnect_align();
                 }
@@ -3458,7 +3423,6 @@ pid_init_done:
 
             if (!app_was_alive) {
                 app_was_alive = 1;
-                last_bcast_valid = 0;
                 reconnect_align();
             }
 
