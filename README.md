@@ -76,7 +76,7 @@
 ├── <a href="参考资料/">参考资料/</a>
 │   ├── <a href="参考资料/完整修复历程.md">完整修复历程.md</a>             ← BLE 4 层 Bug 修复全记录 + B8X 分析
 │   ├── <a href="参考资料/decompile/">decompile/</a>                  ← APK 反编译产物（不进 git）
-│   └── <a href="参考资料/smali修改重编译apk尝试/">smali修改重编译apk尝试/</a>     ← smali 工具链 + DEX 修改产物
+│   └── <a href="参考资料/smali_patching_attempts/">smali_patching_attempts/</a>     ← smali 工具链 + DEX 修改产物（失败尝试，工具 jar 已并入集中 工具/）
 ├── <a href="反编译分析/">反编译分析/</a>                   ← 各 app 反编译分析文档（总览见 <a href="反编译分析/总览.md">总览.md</a>）
 ├── <a href=".github/workflows/">.github/workflows/</a>              ← CI 自动构建
 └── <a href="README.md">README.md</a>                       ← 本文件

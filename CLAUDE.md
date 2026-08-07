@@ -63,7 +63,7 @@ MUST 先在 `参考资料/` 搜索关键词，再考虑加诊断钩子。这里�
 | `参考资料/decompile/b6_overclock_v2/` | B6X 超频工具 V2 反编译 |
 | `参考资料/decompile/b7_overclock_v3/` | B7X 超频工具 V3 反编译（含混淆分析），分析见 `反编译分析/B7X超频V3反编译报告.md` |
 | `参考资料/decompile/b8x/` | B8X 超频工具 V2 反编译（加固，静态不可分析），见 `反编译分析/B8X加固壳层分析.md` |
-| `参考资料/smali修改重编译apk尝试/` | smali 工具链产物 |
+| `参考资料/smali_patching_attempts/` | smali 工具链产物（失败尝试，工具 jar 已并入集中 `工具/`） |
 
 ### 工具路径
 
@@ -94,7 +94,7 @@ MUST 先在 `参考资料/` 搜索关键词，再考虑加诊断钩子。这里�
 <!-- gitnexus:start -->
 # GitNexus — Code Intelligence
 
-This project is indexed by GitNexus as **b6x-Enhancement-Plan-ai** (896 symbols, 1582 relationships, 78 execution flows). Use the GitNexus MCP tools to understand code, assess impact, and navigate safely.
+This project is indexed by GitNexus as **b6x-Enhancement-Plan-ai** (898 symbols, 1609 relationships, 78 execution flows). Use the GitNexus MCP tools to understand code, assess impact, and navigate safely.
 
 > Index stale? Run `node .gitnexus/run.cjs analyze` from the project root — it auto-selects an available runner. No `.gitnexus/run.cjs` yet? `npx gitnexus analyze` (npm 11 crash → `npm i -g gitnexus`; #1939).
 
