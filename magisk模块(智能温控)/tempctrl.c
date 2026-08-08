@@ -188,7 +188,7 @@ static int ctrl_mode = 1;           // CTRL_MODE: 0=gear, 1=PID
 // --- 冷端→风扇映射 ---
 static int cold_map_start = 40;     // 映射起始强度，低于此值时线性外推下限
 static int cold_map_exp = 150;      // n^exp（÷100，150=1.50），>1 低冷慢转
-static int rpm_smooth_alpha = 33;   // RPM_SMOOTH_ALPHA：冷/热端→风扇转速映射的 EMA 平滑系数（百分比，1~99）
+static int rpm_smooth_alpha = 50;   // RPM_SMOOTH_ALPHA：冷/热端→风扇转速映射的 EMA 平滑系数（百分比，1~99）
 
 // --- 热端映射范围 ---
 static int hot_map_min = 350;       // HOT_MAP_MIN（0.1°C）
@@ -2651,13 +2651,15 @@ static float pid_compute(int batt_10, float dt) {
     // 死区回退：方差门控未激活时，仅在 |error|<deadband 内累积
     // 两者均不满足时冻结 I（防 windup）
     int ki_active = 0;
+    int ki_gate = 0;      // 门控来源：0=冻结 1=方差门控 2=死区门控（仅日志用）
+    int v = -1;           // 当前方差（仅日志用，-1=采样不足未计算）
     if (pid_ki_var_threshold > 0 && pid_var_count >= 2) {
-        int v = pid_var_compute();
-        if (v < pid_ki_var_threshold) ki_active = 1;
+        v = pid_var_compute();
+        if (v < pid_ki_var_threshold) { ki_active = 1; ki_gate = 1; }
     }
     if (!ki_active && pid_ki_deadband > 0) {
         float db = pid_ki_deadband / 10.0f;
-        if (error > -db && error < db) ki_active = 1;
+        if (error > -db && error < db) { ki_active = 1; ki_gate = 2; }
     }
     if (ki_active) {
         pid_integral_accum += (pid_ki / 1000.0f) * error * dt;
@@ -2675,8 +2677,12 @@ static float pid_compute(int batt_10, float dt) {
 
     // 钳位 0~1
     float raw = p + pid_integral_accum + d;
+    float raw_pre = raw;   // 钳位前值（仅日志用）
     if (raw < 0.0f) raw = 0.0f;
     if (raw > 1.0f) raw = 1.0f;
+    // 分项诊断（仅 debug_pid 开启时输出）：P/I/D 贡献 + 钳位前后 + 门控来源 + 方差
+    const char *gate = ki_active ? (ki_gate == 1 ? "var" : "dead") : "frozen";
+    pid_log("p=%.2f i=%.2f d=%.2f raw=%.2f out=%.2f ki=%s var=%d", p, pid_integral_accum, d, raw_pre, raw, gate, v);
     return raw;
 }
 
