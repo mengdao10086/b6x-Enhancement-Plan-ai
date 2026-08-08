@@ -85,6 +85,8 @@ public class MainHook implements IXposedHookLoadPackage {
     private static final int DIAG_LOG_MAX_PER_CONN = 3;   // 每次连接最多记录的对数
     private static volatile int diagLogCount = 0;          // 当前连接已记录的对数（markConnected 清零）
     private static volatile int setRunModeLogCount = 0;    // "setRunMode 已下发"当前连接已记录条数（markConnected 清零，上限同 DIAG_LOG_MAX_PER_CONN）
+    private static final int DIAG_CONN_LOG_MAX = 1;        // 连接诊断日志每连最多条数（connect 进/出、断联等风暴源）
+    private static volatile int diagConnLogCount = 0;      // 连接诊断日志计数（markConnected 清零）
     private static volatile boolean loggedReconnectAttempt = false; // "后台重连尝试"每断联只记一次（markConnected 清零）
     private static volatile boolean paramMissingLogged = false;     // 参数回传缺失：状态翻转才打（进入一条/恢复一条）
     private static volatile boolean statusWriteFailLogged = false;  // 状态文件写入失败：状态翻转才打（进入一条/恢复一条）
@@ -138,6 +140,14 @@ public class MainHook implements IXposedHookLoadPackage {
         } catch (Throwable t) {
             XposedBridge.log(TAG + " 注册广播接收器失败: " + t.getMessage());
         }
+    }
+
+    /** 连接诊断日志门控：每连接最多记录 DIAG_CONN_LOG_MAX 条（markConnected 清零）。
+     *  重连风暴（长时间无 markConnected）时首条后即静默，防刷屏。 */
+    private static boolean diagConnLogAllowed() {
+        if (diagConnLogCount >= DIAG_CONN_LOG_MAX) return false;
+        diagConnLogCount++;
+        return true;
     }
 
     /**
@@ -478,6 +488,7 @@ public class MainHook implements IXposedHookLoadPackage {
                     new XC_MethodHook() {
                         @Override
                         protected void beforeHookedMethod(MethodHookParam param) {
+                            if (!diagConnLogAllowed()) return;
                             BluetoothGatt gatt = (BluetoothGatt) param.thisObject;
                             String devName = gatt.getDevice() != null
                                     ? gatt.getDevice().getName() : "null";
@@ -486,6 +497,7 @@ public class MainHook implements IXposedHookLoadPackage {
                         }
                         @Override
                         protected void afterHookedMethod(MethodHookParam param) {
+                            if (!diagConnLogAllowed()) return;
                             Object result = param.getResult();
                             XposedBridge.log(TAG + " [诊断] discoverServices 返回 "
                                     + (result != null ? result : "null"));  // L9：防御 getResult() 为 null
@@ -498,6 +510,7 @@ public class MainHook implements IXposedHookLoadPackage {
                     new XC_MethodHook() {
                         @Override
                         protected void beforeHookedMethod(MethodHookParam param) {
+                            if (!diagConnLogAllowed()) return;
                             Object ctrl = param.thisObject;
                             Object dev = XposedHelpers.callMethod(ctrl, "getMBluetoothDevice");
                             int state = XposedHelpers.getIntField(ctrl, "mDataConnectState");
@@ -507,6 +520,7 @@ public class MainHook implements IXposedHookLoadPackage {
                         }
                         @Override
                         protected void afterHookedMethod(MethodHookParam param) {
+                            if (!diagConnLogAllowed()) return;
                             Object ctrl = param.thisObject;
                             Object gatt = XposedHelpers.getObjectField(ctrl, "mBluetoothGatt");
                             XposedBridge.log(TAG + " [诊断] connect() 退出"
@@ -536,8 +550,9 @@ public class MainHook implements IXposedHookLoadPackage {
                             int newState = (int) param.args[2];
                             if (newState == 0) {  // BluetoothProfile.STATE_DISCONNECTED
                                 markDisconnected((BluetoothGatt) param.args[0]);
-                                XposedBridge.log(TAG + " BLE 断联（onConnectionStateChange）"
-                                        + " device=" + (lastDevice != null ? lastDevice.getAddress() : "null"));
+                                if (diagConnLogAllowed())
+                                    XposedBridge.log(TAG + " BLE 断联（onConnectionStateChange）"
+                                            + " device=" + (lastDevice != null ? lastDevice.getAddress() : "null"));
                                 writeStatusFile();  // v2.5：远程断连立刻写 status 文件
                             }
                         }
@@ -634,8 +649,9 @@ public class MainHook implements IXposedHookLoadPackage {
                             // v2.7：断连保留 CONNECTED_AT / BLE_OWNER_LAST（作为"上次连接时间/连接者"供仲裁）
                             markDisconnected((BluetoothGatt) param.thisObject);
                             // [底层]：本地 disconnect() 调用点；权威断联日志在 GattCallback.onConnectionStateChange（远程）
-                            XposedBridge.log(TAG + " [底层] BLE 断联 device="
-                                    + (lastDevice != null ? lastDevice.getAddress() : "null"));
+                            if (diagConnLogAllowed())
+                                XposedBridge.log(TAG + " [底层] BLE 断联 device="
+                                        + (lastDevice != null ? lastDevice.getAddress() : "null"));
                             writeStatusFile();  // v2.5：断连事件立刻写 status 文件
                         }
                     });
@@ -960,8 +976,9 @@ public class MainHook implements IXposedHookLoadPackage {
                     protected void afterHookedMethod(MethodHookParam param) {
                         try {
                             markDisconnected((BluetoothGatt) param.args[0]);
-                            XposedBridge.log(TAG + " b7x BLE 断联（a.T1） device="
-                                    + (lastDevice != null ? lastDevice.getAddress() : "null"));
+                            if (diagConnLogAllowed())
+                                XposedBridge.log(TAG + " b7x BLE 断联（a.T1） device="
+                                        + (lastDevice != null ? lastDevice.getAddress() : "null"));
                             writeStatusFile();
                         } catch (Throwable t) {
                             XposedBridge.log(TAG + " b7x T1 钩子异常: " + t.getMessage());
@@ -1343,6 +1360,7 @@ public class MainHook implements IXposedHookLoadPackage {
         bleConnected = true;
         diagLogCount = 0;            // 新连接：重置广播接收诊断计数（每连最多记录 DIAG_LOG_MAX_PER_CONN 对）
         setRunModeLogCount = 0;      // 新连接：重置"setRunMode 已下发"计数（每连最多 3 条）
+        diagConnLogCount = 0;        // 新连接：重置连接诊断日志计数（每连最多 DIAG_CONN_LOG_MAX 条）
         loggedReconnectAttempt = false;  // 新连接：重置"后台重连尝试"一次性标记
         bleConnectedTimestamp = System.currentTimeMillis() / 1000L;
         if (connectedModel != 6 && connectedModel != 7)
