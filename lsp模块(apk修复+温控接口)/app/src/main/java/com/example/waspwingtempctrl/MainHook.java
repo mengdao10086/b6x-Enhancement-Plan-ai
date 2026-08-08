@@ -90,6 +90,12 @@ public class MainHook implements IXposedHookLoadPackage {
     private static volatile boolean statusWriteFailLogged = false;  // 状态文件写入失败：状态翻转才打（进入一条/恢复一条）
     private static volatile boolean loggedResolveFallback = false;  // resolveWaspWingManager 兜底失败仅记一次（进程内）
 
+    // ========== 故障注入验证（临时诊断，验证后需恢复 false） ==========
+    // 反向验证"实例不一致/连接状态≠2 → processData 丢弃命令"是否就是 setRunMode 下发无反应的真实成因：
+    // 构建验证版 APK 时置 true（invokeSetRunMode 强制 dataInteractionController.state=1），
+    // 验证完毕后必须改回 false 再构建正式版。
+    private static final boolean VERIFY_FAULT_INJECTION = true;  // ⚠️ 验证版；验证完必须改回 false 再构建正式版
+
     // ========== 智能温控广播接收器（v2.0） ==========
     // 接收 tempctrl 发送的 am broadcast，调用 setRunMode 控制散热器
 
@@ -347,6 +353,7 @@ public class MainHook implements IXposedHookLoadPackage {
         if (deviceType == 7) hookB7Obfuscated(lpparam);     // c0.s1 + 混淆适配（仅 B7X）
         hookApplicationCreate(lpparam);               // 广播接收器 + 定时状态写入（双设备）
         hookAutoLaunch(lpparam);                      // v2.8：自动拉起标志 → Activity 后台化（双设备）
+        if (VERIFY_FAULT_INJECTION) hookProcessDataConfirm(lpparam);  // 故障注入验证：确认 processData 丢弃判定
     }
 
     // ========== 各 Hook 分区实现 ==========
@@ -706,6 +713,37 @@ public class MainHook implements IXposedHookLoadPackage {
                     + "（修复 runFetchLoop CPU 满载）");
         } catch (Throwable t) {
             XposedBridge.log(TAG + " 钩 AbstractDataInteractionController 失败: " + t.getMessage());
+        }
+    }
+
+    /**
+     * 故障注入验证：确认 processData 丢弃判定。
+     * 钩住 private processData(RequestPack)，在命令发送前打印当前 mDataConnectState：
+     *  state==2 → 将发送；state≠2 → 将被丢弃（"Gatt hasn't connected"）。
+     * 配合 invokeSetRunMode 的 state=1 强制注入，可判定"非 2 状态丢弃"是否就是真实症状成因。
+     */
+    private static void hookProcessDataConfirm(XC_LoadPackage.LoadPackageParam lpparam) {
+        try {
+            Class<?> absCtrl = lpparam.classLoader.loadClass(
+                    "com.flydigi.sdk.bluetooth.AbstractDataInteractionController");
+            Class<?> packCls = lpparam.classLoader.loadClass(
+                    "com.flydigi.sdk.bluetooth.data.RequestPack");
+            XposedHelpers.findAndHookMethod(absCtrl, "processData", packCls,
+                    new XC_MethodHook() {
+                        @Override
+                        protected void beforeHookedMethod(MethodHookParam param) {
+                            try {
+                                int st = XposedHelpers.getIntField(param.thisObject, "mDataConnectState");
+                                XposedBridge.log(TAG + " [确认] processData state=" + st
+                                        + " → " + (st == 2 ? "将发送" : "将被丢弃(非2)"));
+                            } catch (Throwable t) {
+                                XposedBridge.log(TAG + " [确认] processData 读状态失败: " + t.getMessage());
+                            }
+                        }
+                    });
+            XposedBridge.log(TAG + " 已钩住 processData（故障注入确认钩子）");
+        } catch (Throwable t) {
+            XposedBridge.log(TAG + " 钩 processData 失败: " + t.getMessage());
         }
     }
 
@@ -1100,6 +1138,18 @@ public class MainHook implements IXposedHookLoadPackage {
      */
     private static void invokeSetRunMode(Object inst, int mode, int temperature, int windOC,
                                         int coldOC, int windLevel, int modeCustom, int extra) {
+        // 故障注入验证：强制 dataInteractionController 连接状态=1（"连接中"僵尸态），
+        // 观察 processData 是否因此丢弃命令（与真实 bug 症状对比）。仅验证版开启。
+        if (VERIFY_FAULT_INJECTION) {
+            try {
+                Object dic = XposedHelpers.getStaticObjectField(
+                        inst.getClass(), "dataInteractionController");
+                XposedHelpers.setIntField(dic, "mDataConnectState", 1);
+                XposedBridge.log(TAG + " [注入] dataInteractionController 状态强制=1（连接中）");
+            } catch (Throwable t) {
+                XposedBridge.log(TAG + " [注入] 失败: " + t.getMessage());
+            }
+        }
         String[] names = (deviceType == 7)
                 ? new String[]{"setRunMode", "W"}
                 : new String[]{"setRunMode"};

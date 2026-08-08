@@ -338,9 +338,9 @@ static time_t config_mtime = 0;
 // ======================== PID 模式控制（CTRL_MODE=1）================
 // --- 核心参数 ---
 static int pid_kp = 300;                  // PID_KP（÷1000，1°C→P=40%）
-static int pid_ki = 75;                   // PID_KI（÷1000）
+static int pid_ki = 45;                   // PID_KI（÷1000；dt 为周期数后标定单位=每 5s 周期，原秒标定 ×5 得等效值）
 static int pid_kd = 300;                  // PID_KD
-static int pid_integral_limit = 800;      // PID_INTEGRAL_LIMIT（÷1000）
+static int pid_integral_limit = 667;      // PID_INTEGRAL_LIMIT（÷1000，I 项最大输出贡献）
 
 // --- KI 方差门控 ---
 static int pid_ki_var_threshold = 50;     // PID_KI_VAR_THRESHOLD（0.1°C²，0=关闭）
@@ -358,7 +358,7 @@ static int pid_filter_interval_smooth = -1;     // 平滑后的更新周期数�
 #define PID_FILTER_GAP_MULT 2   // 滤波间隔 EMA 输入钳位倍数
 
 // --- PID 运行状态 ---
-static int pid_integral_accum = 0;        // 积分累积值
+static float pid_integral_accum = 0.0f;   // 积分累积值（必须 float：int 在限幅 0.8f 赋值时截断为 0，I 项恒失效）
 static int pid_prev_error = 0;            // 上周期误差
 static int pid_batt_filtered = -1;        // EMA 滤波后电池温度
 static int pid_last_batt = -1;            // 上次参与 PID 计算的原始温度
@@ -2646,7 +2646,7 @@ static int predict_compute(int batt_raw) {
 /**
  * PID 计算（温度变化时调用一次）
  * @param batt_10  电池温度（0.1°C），已 EMA 滤波
- * @param dt       自上次变化以来的实际秒数（钳位 3~30）
+ * @param dt       距上次重算以来的 5 秒周期数（钳位 0.6~6，1 = 5s）
  * @return 归一化输出 0.0~1.0
  */
 static float pid_compute(int batt_10, float dt) {
@@ -3175,9 +3175,11 @@ static void main_loop(void) {
                                (batt_raw != pid_last_batt || total_comp_10 != pid_last_comp_10);
 
         if (should_recompute) {
-            float dt = (float)(now - pid_last_change_time);
-            if (dt > 30.0f) dt = 30.0f;
-            if (dt < 3.0f)  dt = 3.0f;
+            // dt：距上次 PID 重算以来的 5 秒周期数（1 = 5s），钳位 0.6~6（3s~30s）。
+            // 改为周期数后 PID_KI/PID_KD 标定单位随之为"每 5s 周期"：原秒标定值 KI×5 / KD÷5 保持原行为
+            float dt = (float)(now - pid_last_change_time) / 5.0f;
+            if (dt > 6.0f) dt = 6.0f;
+            if (dt < 0.6f) dt = 0.6f;
 
             int compensated_10 = pid_input + total_comp_10;
             float pid_out = pid_compute(compensated_10, dt);
@@ -3185,7 +3187,7 @@ static void main_loop(void) {
             // 直接映射到物理值（无输出平滑）
             pid_map_output(pid_out, &pid_align_cold);
 
-            pid_log("epoch=%ld Tbatt=%d+comp%+.1f(cpu)=Tinp%d Ttgt=%d Thot=%d dt=%.0fs e=%.2f out=%.2f var=%d",
+            pid_log("epoch=%ld Tbatt=%d+comp%+.1f(cpu)=Tinp%d Ttgt=%d Thot=%d dt=%.1f周期 e=%.2f out=%.2f var=%d",
                      now, pid_input, cpu_comp,
                      compensated_10, BATT_BASELINE, cooler_hot_temp,
                      dt, (compensated_10 - BATT_BASELINE) / 10.0f,
