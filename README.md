@@ -2,7 +2,7 @@
 
 [![自动构建](https://github.com/mengdao10086/b6x-Enhancement-Plan-ai/actions/workflows/build.yml/badge.svg)](https://github.com/mengdao10086/b6x-Enhancement-Plan-ai/actions/workflows/build.yml)
 
-飞智 B6X/B7X 散热器的增强方案。修复了 Android 16 上的 BLE 兼容性问题，扩展了智能温控功能，支持双设备共存仲裁。
+飞智 B6X/B7X 散热器的增强方案。修复了 Android 16 上的 BLE 兼容性问题，扩展了智能温控功能。
 
 ---
 
@@ -42,23 +42,18 @@
 
 ### LSPosed 模块
 
-- 修复 Android 16 BLE 无法连接的 4 层连环 Bug → [完整修复历程](参考资料/完整修复历程.md)
-- 广播控制接口（B6X：`com.flydigi.SET_TEMPERATURE` / B7X：`com.flydigi.SET_TEMPERATURE_B7`），7 参数完整控制
-- 双状态文件心跳（`tempctrl_b6x.status` / `tempctrl_b7x.status`），写入连接状态、连接时间、上次连接者，供 C 端仲裁
-- 双设备全功能支持（B6X 原生 + B7X 混淆适配）
+- 修复蓝牙连接bug，死循环吃满一个核心bug → [完整修复历程](参考资料/完整修复历程.md)
+- 广播控制接口（B6X：`com.flydigi.SET_TEMPERATURE` / B7X：`com.flydigi.SET_TEMPERATURE_B7`），完整 7 参数散热器控制
+- 状态文件（`tempctrl_b6x.status` / `tempctrl_b7x.status`）向c温控程序回传散热器参数
 
 ### C 智能温控守护程序
 
-- **双设备 + 三方 app 存活仲裁**：按状态文件选择当前设备；在 B6X 两个 app 与 farsef 之间做存活仲裁，保留上次连接者；无 app 存活时自动拉起上次使用的 app（`APP_LAUNCH_ENABLED` 可关闭）
-- **PID 连续无级调节**：P+I+D 控制 + 温度趋势预测 + 输入滤波
-- **制冷→风扇自动映射**：冷端指数 + 热端线性映射，双端 EMA 平滑系数可配置（`RPM_SMOOTH_ALPHA`），速率限制统一内建
-- **降速防抖**：风扇下降方向阈值防抖（可配置 `FAN_RPM_CHANGE_THRESHOLD`），上升自由爬升
-- **风扇转速独立计算**：每周期下发前用限速后的实际制冷强度 + 热面温度独立计算风扇目标，不跟随 PID/Gear 输出，避免滞后
-- **温度变化检测（值比较）**：每秒读取温度值、有变化才进入计算；5 秒控制周期检查最近 1 秒采集数据，温度在窗口内变过不漏判；值连续未变达 `BATT_SKIP_MAX`（默认 6）时强制处理防卡死
-- **自动拉起散热器 app**：无散热器 app 存活时自动拉起上次使用的 app（`APP_LAUNCH_ENABLED` 开关，刷入时音量±选择、默认关闭）；拉起后自动后台化并恢复上次设备连接，几乎无感；老 B6X app 未安装自动改用新 app
-- **CPU 紧急干预**：3 级紧急 + 退出恢复期
-- **内置 WebUI 配置界面**：KSU 管理器模块页直接可视化调参（KSU-Next / APatch 支持，Magisk 需宿主应用）、实时曲线与日志，详见 [逻辑说明.md](magisk模块(智能温控)/逻辑说明.md)
-- **配置热重载**：profile.conf 修改后无需重启即生效
+- **PID控制**：PID连续无级调节 + 温度趋势预测 + 输入输出滤波，尽可能稳定手机温度
+- **制冷→风扇自动映射**：冷端指数 + 热端线性双重映射平均，双端 EMA 平滑系数可配置（`RPM_SMOOTH_ALPHA`），保证散热相对够用的同时尽可能压低风扇转速降低噪音
+- **可自动拉起散热器 app**：无散热器 app 存活时自动拉起上次使用的 app（`APP_LAUNCH_ENABLED` 开关，刷入时音量±选择、默认关闭）
+- **高可玩性**：大量可自定义参数
+- **内置 WebUI 配置界面**：root 管理器模块页直接查看实时曲线与日志，直接可视化调参
+- **配置热重载**：profile.conf 或 webui 修改参数后无需重启即生效
 
 > 详细策略设计 → [逻辑说明.md](magisk模块(智能温控)/逻辑说明.md) · 版本变更 → [CHANGELOG.md](CHANGELOG.md)
 
