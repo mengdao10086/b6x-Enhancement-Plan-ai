@@ -683,6 +683,10 @@
     var text = rebuildConfig();
     var r = await Bridge.exec('echo ' + b64(text) + ' | base64 -d > ' + CFG);
     if (r.errno !== 0) { toast('保存失败: ' + (r.stderr || 'errno ' + r.errno), 'err'); return; }
+    // 修复：把刚写入的内容同步回 S.items 快照，否则下次保存会用页面加载时的旧值覆盖其他项
+    // （例：先存 DEBUG_PID=1，再改 DEBUG_ENABLED 保存时会把 DEBUG_PID 冲回页面加载时的 0）
+    S.items = parseConfig(text);
+    S.values = buildValues(S.items);
     S.dirty = {}; S.dirtySpecial = false;
     // 保存只重置 dirty，不清空 S.manualExpand/S.manualCollapse：
     // 折叠状态是会话级 UI 状态，保存配置不应重置它，否则切模式触发保存会把手动展开的分组折叠回去

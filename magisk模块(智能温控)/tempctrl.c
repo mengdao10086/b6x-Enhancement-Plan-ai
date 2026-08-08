@@ -2495,6 +2495,10 @@ static int pid_var_compute(void) {
         int dev = pid_var_buffer[idx] - mean;
         var_sum += dev * dev;
     }
+    // 临时诊断（验证方差窗口是否陈旧）：打印本次窗口的实际样本值
+    char sbuf[72] = ""; char tmp[10];
+    for (int i = 0; i < n; i++) { int s = pid_var_buffer[(pid_var_head - n + i + PID_VAR_BUF_MAX) % PID_VAR_BUF_MAX]; snprintf(tmp, sizeof(tmp), "%d,", s); strncat(sbuf, tmp, sizeof(sbuf) - strlen(sbuf) - 1); }
+    debug_log(debug_pid, "var=%d n=%d mean=%d buf=[%s]", var_sum / n, n, mean, sbuf);
     return var_sum / n;
 }
 

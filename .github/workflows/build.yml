@@ -45,7 +45,11 @@ jobs:
           else
             # core.quotePath=false 防止中文路径被转义为八进制导致 grep 匹配失败
             CHANGES=$(git -c core.quotePath=false diff --name-only "$BEFORE" "${{ github.sha }}")
-            echo "$CHANGES" | grep -q '^lsp模块(apk修复+温控接口)/' && echo "lsposed=true" >> "$GITHUB_OUTPUT" || echo "lsposed=false" >> "$GITHUB_OUTPUT"
+            # 排除文档类文件（*.md），改文档不触发任何构建
+            CHANGES=$(echo "$CHANGES" | grep -v '\.md$' || true)
+            # LSP：仅 app/ 代码或 gradle 配置文件变更才构建（目录内文档/资料不触发）
+            echo "$CHANGES" | grep -qE '^lsp模块\(apk修复\+温控接口\)/(app/|build\.gradle\.kts|settings\.gradle\.kts|gradle\.properties|gradlew|gradle/)' && echo "lsposed=true" >> "$GITHUB_OUTPUT" || echo "lsposed=false" >> "$GITHUB_OUTPUT"
+            # Magisk：目录内构建相关变更才构建（md 已排除）
             echo "$CHANGES" | grep -q '^magisk模块(智能温控)/' && echo "magisk=true" >> "$GITHUB_OUTPUT" || echo "magisk=false" >> "$GITHUB_OUTPUT"
           fi
 
@@ -130,7 +134,19 @@ jobs:
           test -d /opt/ndk && echo "NDK ready at /opt/ndk"
           ls /opt/ndk/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android* | head -3
 
-      - name: 编译 tempctrl（静态链接）
+      - name: 计算 tempctrl 源码哈希（内容级变更检测）
+        id: hash-tempctrl
+        run: echo "HASH=$(sha256sum 'magisk模块(智能温控)/tempctrl.c' 'magisk模块(智能温控)/patch_tls.py' | sha256sum | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
+
+      - name: 缓存 tempctrl 二进制（源码未变时直接复用，跳过编译）
+        id: cache-tempctrl
+        uses: actions/cache@v4
+        with:
+          path: tempctrl
+          key: tempctrl-${{ steps.hash-tempctrl.outputs.HASH }}
+
+      - name: 编译 tempctrl（静态链接，源码未变化时跳过）
+        if: steps.cache-tempctrl.outputs.cache-hit != 'true'
         run: |
           set +e
           CC=/opt/ndk/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android21-clang
