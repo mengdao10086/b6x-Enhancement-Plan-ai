@@ -43,14 +43,14 @@
 ### LSPosed 模块
 
 - 修复蓝牙连接bug，死循环吃满一个核心bug → [完整修复历程](参考资料/完整修复历程.md)
-- 广播控制接口（B6X：com.flydigi.SET_TEMPERATURE/ B7X：com.flydigi.SET_TEMPERATURE_B7），完整 7 参数散热器控制
-- 状态文件（tempctrl_b6x.status/tempctrl_b7x.status）向c温控程序回传散热器参数
+- 广播控制接口（B6X：com.flydigi.SET_TEMPERATURE / B7X：com.flydigi.SET_TEMPERATURE_B7），完整 7 参数散热器控制
+- 状态文件（tempctrl_b6x.status / tempctrl_b7x.status）向c温控程序回传散热器参数
 
 ### C 智能温控守护程序
 
 - **PID控制**：PID连续无级调节 + 温度趋势预测 + 输入输出滤波，尽可能稳定手机温度
-- **制冷→风扇自动映射**：冷端指数 + 热端线性双重映射平均，双端 EMA 平滑系数可配置（`RPM_SMOOTH_ALPHA`），保证散热相对够用的同时尽可能压低风扇转速降低噪音
-- **可自动拉起散热器 app**：无散热器 app 存活时自动拉起上次使用的 app（`APP_LAUNCH_ENABLED` 开关，刷入时音量±选择、默认关闭）
+- **制冷→风扇自动映射**：冷端指数 + 热端线性双重映射平均，双端 EMA 平滑系数可配置，保证散热相对够用的同时尽可能压低风扇转速降低噪音
+- **可自动拉起散热器 app**：无散热器 app 存活时自动拉起上次使用的 app（刷入时音量±选择、默认关闭）
 - **高可玩性**：大量可自定义参数
 - **内置 WebUI 配置界面**：root 管理器模块页直接查看实时曲线与日志，直接可视化调参
 - **配置热重载**：profile.conf 或 webui 修改参数后无需重启即生效
