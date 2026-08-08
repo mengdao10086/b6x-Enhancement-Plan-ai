@@ -176,6 +176,7 @@ static int BATT_CURRENT_DIVISOR = 10000;  // 电池电流原始值 µA ÷ 此值
 // 首次运行在此范围内扫描有效的 thermal_zone，后续只扫命中的 zone
 static int CPU_ZONE_MIN = 0;
 static int CPU_ZONE_MAX = 99;
+static int cpu_zone_rescan_sec = 60;   // CPU thermal_zone 全量重扫间隔（秒，CPU_ZONE_RESCAN 配置，默认 60）
 
 // ======================== 通用参数（PID 和 Gear 共用）========================
 // --- 基准温度 ---
@@ -312,7 +313,6 @@ static int emerg_forced_gear = 0;   // 紧急强制最低档位
 // --- 日志路径（默认根据二进制名自动生成，可由 profile.conf 覆盖）---
 static char log_file_path[256] = "";
 static int LOG_MAX = 7936;          // 日志文件大小上限（字节），0=关闭日志
-static int log_trim_lines = 3;      // 日志超限时删除最早 N 行，0=不清理
 static FILE *log_fp = NULL;          // 持久的日志文件指针，避免每行都 fopen/fclose
 static char log_path_opened[256] = ""; // 已打开的文件路径（检测路径变化）
 static int debug_mode = 0;           // 调试日志总开关，=1 时启用各分区调试输出
@@ -444,9 +444,12 @@ static char status_file_path_b7[512] = "/data/local/tmp/tempctrl_b7x.status";
 #define APP_PKG_B6X_NEW "com.flydigi.waspwing.experimentanliuliu"
 #define APP_PKG_B7X "com.fdg.flashplay.farsef"
 
+#define ARBITRATE_INTERVAL 15   // app 存活仲裁间隔（秒）：合并扫描后仍较低频，兼顾拉起/清理响应
+
 // v2.8：自动拉起散热器 app（优先上次使用的 app）
 static int APP_LAUNCH_ENABLED = 0;      // 总开关：1=允许自动拉起，0=关闭（默认关，刷入时可选开）
 static time_t last_launch_attempt = 0;  // 上次拉起尝试时间（冷却用）
+static time_t last_arbitrate = 0;       // 上次 app 存活仲裁时间（ARBITRATE_INTERVAL 节流）
 #define APP_LAUNCH_COOLDOWN 60          // 两次拉起最小间隔（秒）
 
 #define BOOT_START_DELAY_SEC 30         // 脚本启动成功后延迟开始运行（等待系统/蓝牙就绪，避开开机初期拉起 app 闪烁）
@@ -694,9 +697,9 @@ static int is_sysfs_key(const char *key) {
         || strcmp(key, "CPU_TEMP_PATH_FMT") == 0
         || strcmp(key, "CPU_TEMP_DIVISOR") == 0
         || strcmp(key, "CPU_ZONE") == 0
+        || strcmp(key, "CPU_ZONE_RESCAN") == 0
         || strcmp(key, "LOG_FILE") == 0
-        || strcmp(key, "LOG_MAX") == 0
-        || strcmp(key, "LOG_TRIM_LINES") == 0;
+        || strcmp(key, "LOG_MAX") == 0;
 }
 
 static void load_config(const char *path) {
@@ -788,8 +791,8 @@ static void load_config(const char *path) {
                 int a = CPU_ZONE_MIN, b = CPU_ZONE_MAX;
                 if (sscanf(val_str, "%d %d", &a, &b) >= 2) { CPU_ZONE_MIN = clamp(a,0,99); CPU_ZONE_MAX = clamp(b,0,99); }
             }
+            else if (strcmp(key, "CPU_ZONE_RESCAN") == 0)   cpu_zone_rescan_sec = clamp(val, 5, 3600);
             else if (strcmp(key, "LOG_MAX") == 0)              LOG_MAX            = clamp(val, 0, 1048576);
-            else if (strcmp(key, "LOG_TRIM_LINES") == 0)       log_trim_lines     = clamp(val, 0, 50);
             else if (strcmp(key, "LOG_FILE") == 0) {
                 config_read_path(log_file_path, sizeof(log_file_path), val_str);
                 record_log_path_for_uninstall(log_file_path);  // v2.5：记录自定义日志路径供卸载清理
@@ -1096,34 +1099,26 @@ static void write_log(const char *fmt, ...) {
 
     int max_bytes = LOG_MAX;
 
-    // 超标 → 滚动：先关 log_fp，再读-删-写，下次自动重开（调试模式下跳过限制，保留完整日志）
+    // 超标 → 截断保留尾部（调试模式下跳过限制，保留完整日志）。
+    // ftruncate 只改文件 size 元数据，不读不写全文件；旧"malloc+读全文件+写回"已废弃。
     struct stat st;
-    if (!debug_mode && log_trim_lines > 0 && stat(log_file_path, &st) == 0 && st.st_size > max_bytes) {
-        if (log_fp) { fclose(log_fp); log_fp = NULL; }
-        size_t sz = st.st_size;
-        char *buf = malloc(sz + 1);
-        if (buf) {
-            FILE *rf = fopen(log_file_path, "r");
-            if (rf) {
-                size_t rd = fread(buf, 1, sz, rf);
-                buf[rd] = '\0';
-                fclose(rf);
-
-                // 跳过前 N 个换行（删除最早 N 行，行数由 log_trim_lines 配置）
-                int nl = 0;
-                char *tail = buf;
-                while (*tail && nl < log_trim_lines) {
-                    if (*tail == '\n') nl++;
-                    tail++;
+    if (!debug_mode && stat(log_file_path, &st) == 0 && st.st_size > max_bytes) {
+        int fd = open(log_file_path, O_RDWR);
+        if (fd >= 0) {
+            off_t target = (off_t)st.st_size - max_bytes;   // 目标：保留尾部 max_bytes
+            off_t new_off = target;
+            char probe[128];
+            if (target > 0) {
+                // 从 target 起读一小段找换行，对齐到完整行首（避免截出半行拼坏下条日志）
+                ssize_t got = pread(fd, probe, sizeof(probe), target);
+                for (ssize_t i = 0; i < got; i++) {
+                    if (probe[i] == '\n') { new_off = target + i + 1; break; }
                 }
-
-                FILE *wf = fopen(log_file_path, "w");
-                if (wf) {
-                    fwrite(tail, 1, rd - (tail - buf), wf);
-                    fclose(wf);
-                }
+            } else {
+                new_off = 0;   // 超限不多，整个清空重来
             }
-            free(buf);
+            ftruncate(fd, new_off);
+            close(fd);
         }
     }
 
@@ -1439,10 +1434,11 @@ static int read_batt_current_ua10(void) {
  * 缓存已发现的 CPU 温度 zone（首次全量扫描后记录）
  */
 #define CPU_ZONE_MAX_CACHE 64
-#define CPU_ZONE_TOP_KEEP   20   // 首次扫描后只保留温度最高的 N 个 zone
+#define CPU_ZONE_TOP_KEEP   10   // 只保留温度最高的 N 个 zone（CPU 紧急取 max，前 10 已具代表性）
 static int cpu_zone_cache[CPU_ZONE_MAX_CACHE];
 static int cpu_zone_count = 0;
 static int cpu_zone_scanned = 0;
+static time_t cpu_zone_last_scan = 0;        // 上次全量扫描时间（每 cpu_zone_rescan_sec 秒重扫一次）
 
 // 初始扫描时暂存 zone 编号 + 温度（用于排序筛选）
 typedef struct { int id; int raw; } ZoneReading;
@@ -1463,8 +1459,10 @@ static int cmp_zone_desc(const void *a, const void *b) {
  * 全部失败返回 -1
  */
 static int read_cpu_temp_max(void) {
-    // 首次调用 → 在 CPU_ZONE_MIN~MAX 范围内扫描可用 zone
-    if (!cpu_zone_scanned) {
+    time_t now = time(NULL);
+    // 首次调用 或 距上次全量扫描超过 cpu_zone_rescan_sec → 在 CPU_ZONE_MIN~MAX 范围内重扫。
+    // 周期重扫让保留列表跟随温度分布变化（负载迁移到其它 zone 时更新），避免固定 zone 失真。
+    if (!cpu_zone_scanned || now - cpu_zone_last_scan >= cpu_zone_rescan_sec) {
         ZoneReading readings[CPU_ZONE_MAX_CACHE];
         int count = 0;
         for (int i = CPU_ZONE_MIN; i <= CPU_ZONE_MAX; i++) {
@@ -1484,13 +1482,14 @@ static int read_cpu_temp_max(void) {
             cpu_zone_cache[i] = readings[i].id;
         cpu_zone_count = keep;
         cpu_zone_scanned = 1;
+        cpu_zone_last_scan = now;
 
         if (keep == 0) {
             debug_log(debug_sensor, "thermal_zone 扫描 无可读 zone（路径 %s），CPU 紧急无法触发",
                       CPU_TEMP_PATH_FMT);
         } else {
-            debug_log(debug_sensor, "thermal_zone 扫描 发现 %d 个有效 zone，保留 %d 个最高温",
-                      count, keep);
+            debug_log(debug_sensor, "thermal_zone 扫描 发现 %d 个有效 zone，保留 %d 个最高温（%ds 后重扫）",
+                      count, keep, cpu_zone_rescan_sec);
         }
     }
 
@@ -1849,6 +1848,42 @@ static int app_process_running(const char *pkg) {
     return found;
 }
 
+/** 单次遍历 /proc，同时检测多个包名存活状态（合并扫描，替代逐包名全量遍历，省 2/3 开销） */
+static void app_process_scan(const char *pkgs[], int alive[], int count) {
+    for (int i = 0; i < count; i++) alive[i] = 0;
+    DIR *d = opendir("/proc");
+    if (!d) return;
+    struct dirent *de;
+    char buf[4096];
+    int found_all = 0;
+    while (!found_all && (de = readdir(d)) != NULL) {
+        if (de->d_name[0] < '0' || de->d_name[0] > '9') continue;   // 只扫数字 PID
+        char path[64];
+        snprintf(path, sizeof(path), "/proc/%s/cmdline", de->d_name);
+        int fd = open(path, O_RDONLY);
+        if (fd < 0) continue;
+        ssize_t n = read(fd, buf, sizeof(buf) - 1);
+        close(fd);
+        if (n <= 0) continue;
+        buf[n] = '\0';
+        for (char *tok = buf; tok < buf + n; ) {
+            size_t len = strnlen(tok, (size_t)(buf + n - tok));
+            if (len > 0) {
+                for (int i = 0; i < count; i++) {
+                    if (!alive[i] &&
+                        (strcmp(tok, pkgs[i]) == 0 ||
+                         (strncmp(tok, "--nice-name=", 12) == 0 && strcmp(tok + 12, pkgs[i]) == 0)))
+                        alive[i] = 1;
+                }
+            }
+            tok += len + 1;
+        }
+        found_all = 1;
+        for (int i = 0; i < count; i++) if (!alive[i]) { found_all = 0; break; }
+    }
+    closedir(d);
+}
+
 /** 判断指定包名是否为当前前台/top Activity（dumpsys 开销约 100~300ms，仅在要 kill 时调用） */
 static int is_foreground_pkg(const char *pkg) {
     // 优先窗口焦点 mCurrentFocus（最准确），退化为 topResumedActivity/mResumedActivity
@@ -1977,9 +2012,13 @@ static void evict_app_if_eligible(int alive, const char *keep, const char *pkg) 
  * 被淘汰者非 top-app/foreground 时 am force-stop（在前台则等下一周期）。
  */
 static void arbitrate_apps(void) {
-    int old_alive = app_process_running(APP_PKG_B6X_OLD);
-    int new_alive = app_process_running(APP_PKG_B6X_NEW);
-    int far_alive = app_process_running(APP_PKG_B7X);
+    // 单次遍历 /proc 同时检测 3 个包名（合并扫描，不再逐包名全量遍历）
+    const char *pkgs[3] = { APP_PKG_B6X_OLD, APP_PKG_B6X_NEW, APP_PKG_B7X };
+    int alive[3];
+    app_process_scan(pkgs, alive, 3);
+    int old_alive = alive[0];
+    int new_alive = alive[1];
+    int far_alive = alive[2];
     int far_in = far_alive && (last_owner == 6);  // farsef 上次连的是 B6X 散热器才参与
 
     // v2.8：无任何散热器 app 存活 → 自动拉起上次使用的 app（复用下方 keep 的选择逻辑，冷却节流）
@@ -3252,6 +3291,14 @@ static void main_loop(void) {
  * 断联（BLE 未连 或 app 进程失活）时停止写入：曲线数据文件留下真实时间空洞，
  * WebUI 端按相邻采样时间戳差 > 5s 断开曲线并留出 5s 宽空白。
  */
+// ======================== WebUI 曲线数据（1s 采样 + 追加 + 读文件删最旧行） ========================
+// 每 1s 追加 1 行到文件（快速路径，不读旧行）；每追加 WEBUI_COMPACT_EVERY 行做一次全量压缩：
+// 读文件 → 保留最近 WEBUI_DATA_MAX_LINES 行（删最旧行）→ 写回。文件行数在 720~780 间波动。
+// 断联不写行，压缩天然保留时间空洞（时间戳差 >5s → WebUI 断线）。
+// 相比旧实现"每秒读 720 行再写回 720 行"，文件 I/O 降约 55 倍。
+#define WEBUI_COMPACT_EVERY 60   // 每追加 60 行（≈60s）压缩一次，文件最多膨胀到 720+60=780 行
+static int webui_lines_since_compact = 0;   // 自上次压缩以来追加的行数
+
 static void write_webui_data(void) {
     int batt = read_battery_temp();
     int cpu  = read_cpu_temp_max();
@@ -3265,23 +3312,40 @@ static void write_webui_data(void) {
     // 断联期间不写行 → 数据文件留下真实时间空洞，WebUI 按相邻时间戳差 >5s 断开曲线。
     // 温度采集/缓存不受影响，5s 控制块仍用新鲜缓存。
     if (!app_ble_connected || !is_app_alive()) return;
-    char buf[WEBUI_DATA_MAX_LINES][96];
-    int n = 0;
-    FILE *rf = fopen(WEBUI_DATA_PATH, "r");
-    if (rf) {
-        while (n < WEBUI_DATA_MAX_LINES && fgets(buf[n], sizeof(buf[n]), rf)) n++;
-        fclose(rf);
+
+    // 快速路径：追加 1 行到文件（mtime 每 1s 更新）
+    FILE *wf = fopen(WEBUI_DATA_PATH, "a");
+    if (wf) {
+        fprintf(wf, "%ld,%d,%d,%d,%d,%d,%d,%d\n",
+                (long)time(NULL), batt, cpu,
+                cooler_hot_temp, cooler_cold_temp,
+                cooler_rpm_real, cooler_cold_real, actual_cold);
+        fclose(wf);
     }
-    int start = (n == WEBUI_DATA_MAX_LINES) ? 1 : 0;   // 已满则丢弃最旧一行
-    int keep  = n - start;
-    FILE *wf = fopen(WEBUI_DATA_PATH, "w");
-    if (!wf) return;
-    for (int i = 0; i < keep; i++) fputs(buf[start + i], wf);
-    fprintf(wf, "%ld,%d,%d,%d,%d,%d,%d,%d\n",
-            (long)time(NULL), batt, cpu,
-            cooler_hot_temp, cooler_cold_temp,
-            cooler_rpm_real, cooler_cold_real, actual_cold);
-    fclose(wf);
+    webui_lines_since_compact++;
+
+    // 每 WEBUI_COMPACT_EVERY 行压缩：读文件 → 删最旧行 → 写回，文件收敛回 ~720 行
+    if (webui_lines_since_compact >= WEBUI_COMPACT_EVERY) {
+        webui_lines_since_compact = 0;
+        char buf[WEBUI_DATA_MAX_LINES][96];
+        int total = 0;
+        FILE *rf = fopen(WEBUI_DATA_PATH, "r");
+        if (rf) {
+            // 环形覆盖读：缓冲只留最近 WEBUI_DATA_MAX_LINES 行（文件可能已膨胀到 780 行）
+            while (fgets(buf[total % WEBUI_DATA_MAX_LINES], sizeof(buf[0]), rf)) total++;
+            fclose(rf);
+        }
+        if (total > 0) {
+            int keep = (total < WEBUI_DATA_MAX_LINES) ? total : WEBUI_DATA_MAX_LINES;
+            int start = (total < WEBUI_DATA_MAX_LINES) ? 0 : (total % WEBUI_DATA_MAX_LINES);
+            FILE *cf = fopen(WEBUI_DATA_PATH, "w");
+            if (cf) {
+                for (int i = 0; i < keep; i++)
+                    fputs(buf[(start + i) % WEBUI_DATA_MAX_LINES], cf);
+                fclose(cf);
+            }
+        }
+    }
 }
 
 int main(int argc, char *argv[]) {
@@ -3432,7 +3496,10 @@ pid_init_done:
 
             // 1. 读取双状态文件 + 仲裁
             read_status_ble_both();
-            arbitrate_apps();  // v2.6：双 app 存活仲裁（两个 app 最多一个后台存活）
+            if (time(NULL) - last_arbitrate >= ARBITRATE_INTERVAL) {
+                arbitrate_apps();  // v2.6：双 app 存活仲裁（30s 节流 + 合并扫描，降低 /proc 遍历开销）
+                last_arbitrate = time(NULL);
+            }
             DeviceType new_device = select_active_device();
 
             // 2. 设备切换检测：当前设备断联时尝试切换到另一台

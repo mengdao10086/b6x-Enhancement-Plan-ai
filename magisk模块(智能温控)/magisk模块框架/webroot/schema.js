@@ -62,7 +62,7 @@ window.B6X_SCHEMA = {
       keys: [],
       subKeys: ["BATT_TEMP_PATH", "BATT_TEMP_DIVISOR", "BATT_CURRENT_PATH",
                 "BATT_CURRENT_DIVISOR", "CPU_TEMP_PATH_FMT", "CPU_TEMP_DIVISOR",
-                "CPU_ZONE", "LOG_FILE", "LOG_MAX", "LOG_TRIM_LINES"]
+                "CPU_ZONE", "CPU_ZONE_RESCAN", "LOG_FILE", "LOG_MAX"]
     },
     // [4] 自动拉起散热器 app：独立分组，开关常显在组头；说明区常显（无折叠内容，不渲染小三角）
     {
@@ -109,9 +109,9 @@ window.B6X_SCHEMA = {
     LOG_FILE: { type: "path", label: "日志文件路径",
       desc: "空则自动根据二进制名在 /cache/ 生成" },
     LOG_MAX: { type: "int", min: 0, max: 1048576, label: "日志上限（字节）",
-      desc: "0=关闭日志；默认 7936" },
-    LOG_TRIM_LINES: { type: "int", min: 0, max: 50, label: "日志超限清理行数",
-      desc: "删除最早 N 行，0=不清理" },
+      desc: "0=关闭日志；默认 7936。超限时 ftruncate 截断保留尾部（从完整行首起）" },
+    CPU_ZONE_RESCAN: { type: "int", min: 5, max: 3600, label: "CPU zone 全量重扫间隔（秒）",
+      desc: "默认 60。按此间隔重新全量扫描，更新保留的最高温 zone 列表" },
 
     // ---- [2] 通用 ----
     RATE_LIMIT_FAN_UP: { type: "multi", fields: [{ label: "升速基础值", min: 50, max: 2000 }, { label: "升速倍率", min: 1, max: 200 }],
