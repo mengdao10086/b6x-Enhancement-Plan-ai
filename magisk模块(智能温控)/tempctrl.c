@@ -263,6 +263,7 @@ static int trend_exempt_count = 0;
 static int batt_gear_base = 0;                // 电池控制决定的基础档位
 static int last_batt_reading = -1;            // 上次读取的电池温度
 static int temp_idle_cycles = 0;              // 温度值连续未变的控制周期数
+static int pid_ctrl_cycles = 0;               // PID 控制周期单调计数器（main_loop 每次 PID 模式 +1，方差插值用）
 static int BATT_SKIP_MAX = 6;                 // 值连续未变达到此上限时强制处理一次（防卡死，可配置）
 static int batt_gear_cooldown = 0;            // 电池调档冷却剩余周期
 
@@ -338,13 +339,13 @@ static time_t config_mtime = 0;
 // ======================== PID 模式控制（CTRL_MODE=1）================
 // --- 核心参数 ---
 static int pid_kp = 300;                  // PID_KP（÷1000，1°C→P=40%）
-static int pid_ki = 45;                   // PID_KI（÷1000；dt 为周期数后标定单位=每 5s 周期，原秒标定 ×5 得等效值）
+static int pid_ki = 45;                   // PID_KI 第一值=积分增益（÷1000；dt 为周期数后标定单位=每 5s 周期，原秒标定 ×5 得等效值）
 static int pid_kd = 300;                  // PID_KD
-static int pid_integral_limit = 667;      // PID_INTEGRAL_LIMIT（÷1000，I 项最大输出贡献）
+static int pid_integral_limit = 667;      // PID_KI 第二值=积分上限（÷1000，I 项最大输出贡献）
 
 // --- KI 方差门控 ---
-static int pid_ki_var_threshold = 50;     // PID_KI_VAR_THRESHOLD（0.1°C²，0=关闭）
-static int pid_ki_var_samples = 6;        // PID_KI_VAR_SAMPLES（采样数，2~20）
+static int pid_ki_var_threshold = 50;     // PID_KI_VAR 第一值=方差门控阈值（0.1°C²，0=关闭）
+static int pid_ki_var_samples = 6;        // PID_KI_VAR 第二值=采样数（2~20）
 static int pid_ki_deadband = 20;          // PID_KI_DEADBAND（0.1°C，0=禁止I项）
 
 // --- 输入滤波 ---
@@ -364,10 +365,12 @@ static int pid_batt_filtered = -1;        // EMA 滤波后电池温度
 static int pid_last_batt = -1;            // 上次参与 PID 计算的原始温度
 static time_t pid_last_change_time = 0;   // 上次温度变化时间戳
 // 方差门控环形缓冲区
-#define PID_VAR_BUF_MAX 20    // 最大支持采样数（≥ PID_KI_VAR_SAMPLES 上限）
+#define PID_VAR_BUF_MAX 20    // 最大支持采样数（≥ PID_KI_VAR 第二值上限）
 static int pid_var_buffer[PID_VAR_BUF_MAX];
 static int pid_var_head = 0;
 static int pid_var_count = 0;
+static int pid_var_last_value = -1;  // 上次推入的值（插值用）
+static int pid_var_last_cycle = -1;  // 上次推入时的周期计数（插值用）
 
 // ======================== PID 温度预测 ========================
 // 通过历史温度变化趋势预测电池温度的平衡点，提前给 PID 提供前馈信号
@@ -384,7 +387,7 @@ static int pid_predict_win_n = 5;          // PID_PREDICT_WIN_N: 计算窗口（
 static int pid_predict_min_points = 2;     // PID_PREDICT_MIN_POINTS: 最小可用数据点数（2~5）
 static int pid_predict_max_rise = 30;      // PID_PREDICT_MAX_RISE: 最大预测变化量（0.1°C，10~100）
 static int pid_predict_ramp_cycles = 3;    // PID_PREDICT_RAMP_CYCLES: Ramp-up 周期数（1~10，0=不渐进）
-static int pid_predict_min_delta = 2;      // PID_PREDICT_MIN_DELTA: 最小起始 delta（0.1°C/周期，1~10）
+static int pid_predict_min_delta = 2;      // PID_PREDICT_RISE 第三值=最小起始 delta（0.1°C/周期，1~10）
 static int pid_predict_heat_weight = 10;  // PID_PREDICT_WEIGHT 第一值：升温预测权重（0~10，默认10=全效）
 static int pid_predict_cool_weight = 5;   // PID_PREDICT_WEIGHT 第二值：降温预测权重（0~10，默认5=半效）
 static int pid_predict_alpha = 33;         // 预测平滑系数（%，PID_ALPHA 第三值）
@@ -904,11 +907,23 @@ static void load_config(const char *path) {
 
         // --- PID 核心 + 补偿 ---
         else if (strcmp(key, "PID_KP") == 0)              pid_kp              = clamp(val, 1, 1000);
-        else if (strcmp(key, "PID_KI") == 0)              pid_ki              = clamp(val, 0, 1000);
+        else if (strcmp(key, "PID_KI") == 0) {
+            // 多值：积分增益 积分上限（默认保留当前值，缺省值不覆盖）
+            int k = pid_ki, l = pid_integral_limit;
+            if (sscanf(val_str, "%d %d", &k, &l) >= 1) {
+                pid_ki              = clamp(k, 0, 1000);
+                pid_integral_limit  = clamp(l, 0, 1000);
+            }
+        }
         else if (strcmp(key, "PID_KD") == 0)              pid_kd              = clamp(val, 0, 1000);
-        else if (strcmp(key, "PID_INTEGRAL_LIMIT") == 0)  pid_integral_limit  = clamp(val, 0, 1000);
-        else if (strcmp(key, "PID_KI_VAR_THRESHOLD") == 0) pid_ki_var_threshold = clamp(val, 0, 200);
-        else if (strcmp(key, "PID_KI_VAR_SAMPLES") == 0)   pid_ki_var_samples   = clamp(val, 2, 20);
+        else if (strcmp(key, "PID_KI_VAR") == 0) {
+            // 多值：方差门控阈值 采样数（默认保留当前值，缺省值不覆盖）
+            int t = pid_ki_var_threshold, n = pid_ki_var_samples;
+            if (sscanf(val_str, "%d %d", &t, &n) >= 1) {
+                pid_ki_var_threshold = clamp(t, 0, 200);
+                pid_ki_var_samples   = clamp(n, 2, 20);
+            }
+        }
         else if (strcmp(key, "PID_KI_DEADBAND") == 0)       pid_ki_deadband      = clamp(val, 0, 100);
         else if (strcmp(key, "PID_INPUT_FILTER_ENABLED") == 0) pid_input_filter_enabled = (val != 0);
         else if (strcmp(key, "PID_CPU_COMP_ENABLED") == 0)   pid_cpu_comp_enabled   = (val != 0);
@@ -924,13 +939,14 @@ static void load_config(const char *path) {
             }
         }
         else if (strcmp(key, "PID_PREDICT_RISE") == 0) {
-            int a = pid_predict_max_rise, b = pid_predict_ramp_cycles;
-            if (sscanf(val_str, "%d %d", &a, &b) >= 2) {
+            // 多值：最大温升(0.1°C) ramp周期数 最小起始delta（默认保留当前值，缺省值不覆盖）
+            int a = pid_predict_max_rise, b = pid_predict_ramp_cycles, d = pid_predict_min_delta;
+            if (sscanf(val_str, "%d %d %d", &a, &b, &d) >= 1) {
                 pid_predict_max_rise    = clamp(a, 10, 100);
                 pid_predict_ramp_cycles = clamp(b, 0, 10);
+                pid_predict_min_delta   = clamp(d, 1, 10);
             }
         }
-        else if (strcmp(key, "PID_PREDICT_MIN_DELTA") == 0)      pid_predict_min_delta      = clamp(val, 1, 10);
         else if (strcmp(key, "PID_PREDICT_WEIGHT") == 0) {
             int h = pid_predict_heat_weight, c = pid_predict_cool_weight, s = pid_predict_suppress;
             if (sscanf(val_str, "%d %d %d", &h, &c, &s) >= 1) {
@@ -2472,13 +2488,31 @@ static int gear_from_current(void) {
 // ======================== PID 方差门控 ========================
 
 /**
- * 推入温度采样（仅 batt_temp_updated 时调用，使用原始值）
+ * 推入方差采样（对齐 PID 计算时机）。
+ * @param value 原始电池温度（0.1°C）——固定推原始值，不做滤波/预测
+ * @param cycle 当前控制周期计数（pid_ctrl_cycles）
+ * 两次推入间若有周期被跳过（无滤波跳过周期不推入），在缺档处线性插值补样本，
+ * 保证方差窗口覆盖连续控制周期，反映真实温度变化率。
  */
-static void pid_var_push(int value) {
+static void pid_var_push(int value, int cycle) {
+    if (pid_var_last_cycle >= 0 && cycle > pid_var_last_cycle + 1) {
+        // 距上次推入 gap = cycle - pid_var_last_cycle 个周期，缺中间 gap-1 个样本
+        int gap = cycle - pid_var_last_cycle;
+        for (int k = 1; k < gap; k++) {
+            int v = pid_var_last_value
+                    + (value - pid_var_last_value) * k / gap;
+            pid_var_buffer[pid_var_head] = v;
+            pid_var_head = (pid_var_head + 1) % PID_VAR_BUF_MAX;
+            if (pid_var_count < PID_VAR_BUF_MAX)
+                pid_var_count++;
+        }
+    }
     pid_var_buffer[pid_var_head] = value;
     pid_var_head = (pid_var_head + 1) % PID_VAR_BUF_MAX;
     if (pid_var_count < PID_VAR_BUF_MAX)
         pid_var_count++;
+    pid_var_last_value = value;
+    pid_var_last_cycle = cycle;
 }
 
 /**
@@ -2515,6 +2549,8 @@ static int pid_var_compute(void) {
 static void pid_var_reset(void) {
     pid_var_count = 0;
     pid_var_head = 0;
+    pid_var_last_value = -1;
+    pid_var_last_cycle = -1;
 }
 
 // ======================== PID 温度预测 ========================
@@ -2677,7 +2713,9 @@ static float pid_compute(int batt_10, float dt) {
     }
     float i_limit = pid_integral_limit / 1000.0f;
     if (pid_integral_accum >  i_limit) pid_integral_accum =  i_limit;
-    if (pid_integral_accum < -i_limit) pid_integral_accum = -i_limit;
+    // 积分单向限制 0~+LIMIT：低温（error<0）时不累积负积分，
+    // 避免之后升温时需先抵消负积分才能响应（升温延迟）
+    if (pid_integral_accum < 0.0f)    pid_integral_accum = 0.0f;
 
     // 临时诊断：打印门控判定输入/输出，定位 var<阈值 却 I 未累积的问题
     debug_log(debug_pid, "KI判定 thr=%d cnt=%d var=%d err=%.1f ki=%d acc=%.2f", pid_ki_var_threshold, pid_var_count, v, error, ki_active, pid_integral_accum);
@@ -3021,15 +3059,13 @@ static void main_loop(void) {
     // --- PID 模式：跳过档位/紧急逻辑，直接 PID 计算 ---
     if (ctrl_mode == 1) {
         time_t now = time(NULL);
+        pid_ctrl_cycles++;               // 单调周期计数（方差插值用；跳过周期也计数，保证插值对齐真实时间）
         int batt_raw = cached_batt_raw;   // 1s 采集缓存
         if (batt_raw < 0) return;
 
         // --- 温度更新周期跟踪（基于周期数，非时间） ---
         // idle 递增已由 main_loop 入口按窗口变化统一维护，此处只做采样 push
-        // 方差采样：每控制周期强制推入一个样本，保证窗口代表当前温度稳定性。
-        // 修复：旧实现依赖 1s 瞬时标志 batt_temp_updated，温度变化稀疏时 5s 层读不到标志
-        //       → 样本稀疏 → 方差窗口陈旧虚高（曾现 6 样本卡在爬升期、温度已稳定方差仍大的问题）
-        pid_var_push(batt_raw);
+        // 方差采样 push 已下移到 pid_input 计算之后：与 PID 计算输入标准保持一致
         if (batt_temp_updated) {
             int gap = temp_idle_cycles + 1;  // 距离上次更新经过的周期数
             if (pid_predict_heat_weight > 0 || pid_predict_cool_weight > 0)
@@ -3168,6 +3204,11 @@ static void main_loop(void) {
             pid_predict_was_active = 0;
             pid_predict_consecutive = 0;
         }
+
+        // --- 方差采样 push（对齐 PID 计算时机） ---
+        // 固定推入原始温度 batt_raw（不做滤波/预测）；跳过周期（无滤波模式温度未更新）不推入，
+        // pid_var_push 内部对缺档做线性插值，保证窗口覆盖连续控制周期。
+        pid_var_push(batt_raw, pid_ctrl_cycles);
 
         // --- PID 重算判定 ---
         // 滤波模式：每周期都重算 | 无滤波模式：温度或补偿变化时才重算

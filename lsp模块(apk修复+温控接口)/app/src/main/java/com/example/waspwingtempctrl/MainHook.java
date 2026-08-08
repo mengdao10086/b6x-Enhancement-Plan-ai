@@ -90,12 +90,6 @@ public class MainHook implements IXposedHookLoadPackage {
     private static volatile boolean statusWriteFailLogged = false;  // 状态文件写入失败：状态翻转才打（进入一条/恢复一条）
     private static volatile boolean loggedResolveFallback = false;  // resolveWaspWingManager 兜底失败仅记一次（进程内）
 
-    // ========== 故障注入验证（临时诊断，验证后需恢复 false） ==========
-    // 反向验证"实例不一致/连接状态≠2 → processData 丢弃命令"是否就是 setRunMode 下发无反应的真实成因：
-    // 构建验证版 APK 时置 true（invokeSetRunMode 强制 dataInteractionController.state=1），
-    // 验证完毕后必须改回 false 再构建正式版。
-    private static final boolean VERIFY_FAULT_INJECTION = true;  // ⚠️ 验证版；验证完必须改回 false 再构建正式版
-
     // ========== 智能温控广播接收器（v2.0） ==========
     // 接收 tempctrl 发送的 am broadcast，调用 setRunMode 控制散热器
 
@@ -350,10 +344,10 @@ public class MainHook implements IXposedHookLoadPackage {
         hookRunFetchLoopCpuFix(lpparam);              // runFetchLoop CPU 满载修复（双设备）
         if (deviceType == 6) hookB6Activity(lpparam);       // 唤醒 + 自动进入设置界面（仅 B6X）
         hookWaspWingManagerCapture(lpparam);          // 捕获 WaspWingManager 实例（双设备）
+        hookSyncConnectedController(lpparam);         // 修复 setRunMode 无反应：static controller 同步到已连接实例（仅 B6X）
         if (deviceType == 7) hookB7Obfuscated(lpparam);     // c0.s1 + 混淆适配（仅 B7X）
         hookApplicationCreate(lpparam);               // 广播接收器 + 定时状态写入（双设备）
         hookAutoLaunch(lpparam);                      // v2.8：自动拉起标志 → Activity 后台化（双设备）
-        if (VERIFY_FAULT_INJECTION) hookProcessDataConfirm(lpparam);  // 故障注入验证：确认 processData 丢弃判定
     }
 
     // ========== 各 Hook 分区实现 ==========
@@ -716,37 +710,6 @@ public class MainHook implements IXposedHookLoadPackage {
         }
     }
 
-    /**
-     * 故障注入验证：确认 processData 丢弃判定。
-     * 钩住 private processData(RequestPack)，在命令发送前打印当前 mDataConnectState：
-     *  state==2 → 将发送；state≠2 → 将被丢弃（"Gatt hasn't connected"）。
-     * 配合 invokeSetRunMode 的 state=1 强制注入，可判定"非 2 状态丢弃"是否就是真实症状成因。
-     */
-    private static void hookProcessDataConfirm(XC_LoadPackage.LoadPackageParam lpparam) {
-        try {
-            Class<?> absCtrl = lpparam.classLoader.loadClass(
-                    "com.flydigi.sdk.bluetooth.AbstractDataInteractionController");
-            Class<?> packCls = lpparam.classLoader.loadClass(
-                    "com.flydigi.sdk.bluetooth.data.RequestPack");
-            XposedHelpers.findAndHookMethod(absCtrl, "processData", packCls,
-                    new XC_MethodHook() {
-                        @Override
-                        protected void beforeHookedMethod(MethodHookParam param) {
-                            try {
-                                int st = XposedHelpers.getIntField(param.thisObject, "mDataConnectState");
-                                XposedBridge.log(TAG + " [确认] processData state=" + st
-                                        + " → " + (st == 2 ? "将发送" : "将被丢弃(非2)"));
-                            } catch (Throwable t) {
-                                XposedBridge.log(TAG + " [确认] processData 读状态失败: " + t.getMessage());
-                            }
-                        }
-                    });
-            XposedBridge.log(TAG + " 已钩住 processData（故障注入确认钩子）");
-        } catch (Throwable t) {
-            XposedBridge.log(TAG + " 钩 processData 失败: " + t.getMessage());
-        }
-    }
-
     /** B6X 专属：智能温控唤醒 + 启动自动进入设置界面 */
     private static void hookB6Activity(XC_LoadPackage.LoadPackageParam lpparam) {
         // ========== 智能温控唤醒：B6ExperimentalActivity.onResume ==========
@@ -873,6 +836,42 @@ public class MainHook implements IXposedHookLoadPackage {
         }
     }
 
+    /**
+     * 修复"setRunMode 下发但散热器无反应"（仅 B6X）：
+     * 根因——WaspWingManager.dataInteractionController 是 static 字段，只在 init() 时赋值一次，
+     * app 重连/重建 controller 后 static 不指向新实例；MainHook 调 setRunMode 走 static 旧实例，
+     * 其 mDataConnectState≠2 → 命令在 processData 被丢弃。
+     * 修复——钩 LeDataInteractionController.onGattConnected（GATT 连接成功回调，state 已置 2），
+     * 把 static dataInteractionController 同步指向"当前已连接的实例"，彻底消除实例不一致。
+     */
+    private static void hookSyncConnectedController(XC_LoadPackage.LoadPackageParam lpparam) {
+        if (deviceType != 6) return;  // 仅 B6X（B7X 走 hookB7Obfuscated 的 H1 连接状态修正）
+        try {
+            Class<?> ctrlCls = lpparam.classLoader.loadClass(
+                    "com.flydigi.sdk.bluetooth.LeDataInteractionController");
+            Class<?> mgrCls = lpparam.classLoader.loadClass(
+                    "com.flydigi.sdk.waspwing.WaspWingManager");
+            XposedHelpers.findAndHookMethod(ctrlCls, "onGattConnected",
+                    BluetoothGatt.class, new XC_MethodHook() {
+                        @Override
+                        protected void afterHookedMethod(MethodHookParam param) {
+                            try {
+                                // param.thisObject = 刚完成 GATT 连接的 controller（state 已是 2）
+                                XposedHelpers.setStaticObjectField(mgrCls,
+                                        "dataInteractionController", param.thisObject);
+                                int st = XposedHelpers.getIntField(param.thisObject, "mDataConnectState");
+                                XposedBridge.log(TAG + " dataInteractionController 已同步到已连接实例 state=" + st);
+                            } catch (Throwable t) {
+                                XposedBridge.log(TAG + " 同步 dataInteractionController 失败: " + t.getMessage());
+                            }
+                        }
+                    });
+            XposedBridge.log(TAG + " 已钩住 LeDataInteractionController.onGattConnected（static 同步修复）");
+        } catch (Throwable t) {
+            XposedBridge.log(TAG + " 钩 onGattConnected 失败: " + t.getMessage());
+        }
+    }
+
     /** B7X 专属：c0.s1() 权限修复 + 完整混淆适配（v2.7） */
     private static void hookB7Obfuscated(XC_LoadPackage.LoadPackageParam lpparam) {
         // ========== c0.s1() 权限检查强制 true（修复 Android 16 连接失败） ==========
@@ -922,6 +921,17 @@ public class MainHook implements IXposedHookLoadPackage {
                             // 型号未知先按包名兜底，随后 X.getDeviceCode() 修正（见 captureInfoFromController）
                             markConnected((BluetoothGatt) param.args[0]);
                             captureInfoFromController(param.thisObject);
+                            // 修复"概率无法修改数据"：static dataInteractionController(t9.j.f50991b) 只在 init 时赋值，
+                            // 重连后不指向新实例 → setRunMode 走旧实例其 E 状态≠2 → 命令在 b1() 被丢弃。
+                            // 连接成功时同步 static 指向当前已连接实例（E 已=2），与 B6X hookSyncConnectedController 同理。
+                            try {
+                                Class<?> mgrCls7 = lpparam.classLoader.loadClass("t9.j");
+                                XposedHelpers.setStaticObjectField(mgrCls7, "f50991b", param.thisObject);
+                                int st = XposedHelpers.getIntField(param.thisObject, "E");
+                                XposedBridge.log(TAG + " b7x dataInteractionController 已同步到已连接实例 state=" + st);
+                            } catch (Throwable t) {
+                                XposedBridge.log(TAG + " b7x 同步 dataInteractionController 失败: " + t.getMessage());
+                            }
                             XposedBridge.log(TAG + " b7x BLE 已连接（a.S1） device="
                                     + (lastDevice != null ? lastDevice.getAddress() : "null")
                                     + " model=" + connectedModel);
@@ -1138,17 +1148,31 @@ public class MainHook implements IXposedHookLoadPackage {
      */
     private static void invokeSetRunMode(Object inst, int mode, int temperature, int windOC,
                                         int coldOC, int windLevel, int modeCustom, int extra) {
-        // 故障注入验证：强制 dataInteractionController 连接状态=1（"连接中"僵尸态），
-        // 观察 processData 是否因此丢弃命令（与真实 bug 症状对比）。仅验证版开启。
-        if (VERIFY_FAULT_INJECTION) {
-            try {
-                Object dic = XposedHelpers.getStaticObjectField(
-                        inst.getClass(), "dataInteractionController");
-                XposedHelpers.setIntField(dic, "mDataConnectState", 1);
-                XposedBridge.log(TAG + " [注入] dataInteractionController 状态强制=1（连接中）");
-            } catch (Throwable t) {
-                XposedBridge.log(TAG + " [注入] 失败: " + t.getMessage());
+        // 状态自愈兜底：static dataInteractionController 若 GATT 已就绪但 state≠2（连接中/旧实例），
+        // 命令会被 processData/b1 丢弃（故障注入已验证）。强制同步 state=2 兜底；
+        // 主修复在 hookSyncConnectedController（B6X）/ hookB7Obfuscated S1（B7X）连接成功时同步 static。
+        // 字段名按设备分流：B6X dataInteractionController/mDataConnectState/mBluetoothGatt；
+        // B7X（混淆）f50991b/E/I。
+        try {
+            String dicField, stateField, gattField;
+            if (deviceType == 7) {
+                dicField = "f50991b"; stateField = "E"; gattField = "I";
+            } else {
+                dicField = "dataInteractionController"; stateField = "mDataConnectState"; gattField = "mBluetoothGatt";
             }
+            Object dic = XposedHelpers.getStaticObjectField(inst.getClass(), dicField);
+            if (dic != null) {
+                int st = XposedHelpers.getIntField(dic, stateField);
+                Object gatt = XposedHelpers.getObjectField(dic, gattField);
+                if (st != 2 && gatt != null) {
+                    XposedHelpers.setIntField(dic, stateField, 2);
+                    XposedBridge.log(TAG + " 状态自愈: static controller state " + st + "→2（gatt 已就绪）");
+                } else if (st == 0 && gatt == null) {
+                    XposedBridge.log(TAG + " setRunMode 警告: static controller 未连接(state=0,gatt=null)");
+                }
+            }
+        } catch (Throwable t) {
+            // 字段缺失/不可访问时忽略（不影响 setRunMode 主流程）
         }
         String[] names = (deviceType == 7)
                 ? new String[]{"setRunMode", "W"}
