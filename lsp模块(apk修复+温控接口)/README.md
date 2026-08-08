@@ -7,7 +7,7 @@
 ## 功能
 
 - **BLE 修复**：修复 Android 16 上飞智散热器工具（B6X + B7X）无法连接的 4 层连环 Bug（[完整修复历程](../参考资料/完整修复历程.md)）
-- **双设备支持**：自动检测包名选择 B6X（`com.flydigi.waspwing.experimental`）或 B7X（`com.fdg.flashplay.farsef`）钩子集，B7X WaspWingManager 混淆名 `t9.j` 自动 fallback
+- **双设备支持**：自动检测包名选择 B6X 老 app（`com.flydigi.waspwing.experimental`）、B6X 新 app（`com.flydigi.waspwing.experimentanliuliu`）或 B7X（`com.fdg.flashplay.farsef`）钩子集，B7X WaspWingManager 混淆名 `t9.j` 自动 fallback
 - **双广播接口**：接收 `com.flydigi.SET_TEMPERATURE`（B6X）或 `com.flydigi.SET_TEMPERATURE_B7`（B7X）广播，将参数转发到对应 SDK 的 `setRunMode()`
 - **双 status 文件心跳**：每 1 秒写入 BLE 状态及散热器运行参数到 `/data/local/tmp/tempctrl_b6x.status` / `tempctrl_b7x.status`，含 `CONNECTED_AT` 时间戳供仲裁
 - **CPU 占用修复**：修复 DefaultDispatcher 线程空队列忙等导致的 100% CPU 占用
@@ -19,7 +19,7 @@
 
 1. 编译或下载 APK
 2. 安装到手机（允许未知来源应用）
-3. 在 LSPosed 中**启用模块**，作用域勾选 `com.flydigi.waspwing.experimental`（B6X）和 `com.fdg.flashplay.farsef`（B7X）
+3. 在 LSPosed 中**启用模块**，作用域勾选 `com.flydigi.waspwing.experimental` 和 `com.flydigi.waspwing.experimentanliuliu`（B6X 两个 app）以及 `com.fdg.flashplay.farsef`（B7X）
 4. **强制停止**目标 App 或重启手机
 
 > 需要 LSPosed ≥ 1.8。

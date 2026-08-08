@@ -45,11 +45,11 @@ body {
 
 /* ---------- 布局：固定 vs 滚动隐藏 ---------- */
 body.pin-fixed .app { height: 100dvh; display: flex; flex-direction: column; overflow: hidden; }
-body.pin-fixed .top { flex: 0 0 30dvh; min-height: 0; }
+body.pin-fixed .top { flex: 0 0 var(--top-h, 30dvh); min-height: 0; }
 body.pin-fixed .config { flex: 1; overflow-y: auto; min-height: 0; }
 
 body.pin-scroll .app { display: block; }
-body.pin-scroll .top { height: 30dvh; }
+body.pin-scroll .top { height: var(--top-h, 30dvh); }
 body.pin-scroll .config { overflow: visible; }
 
 /* ---------- 顶部横滑容器 ---------- */
@@ -83,6 +83,18 @@ body.pin-scroll .config { overflow: visible; }
 }
 .top-slider::-webkit-scrollbar { display: none; }
 .panel { flex: 0 0 100%; scroll-snap-align: start; min-width: 100%; overflow: hidden; display: flex; flex-direction: column; }
+
+/* ---------- 顶部拖动手柄（长按 0.3s 激活拖动改高度） ---------- */
+.top-handle {
+  flex: 0 0 auto; height: 10px; cursor: ns-resize; touch-action: none;
+  position: relative; z-index: 5;
+  display: flex; align-items: center; justify-content: center;
+}
+.top-handle::before {
+  content: ''; width: 44px; height: 4px; border-radius: 2px;
+  background: var(--border);
+}
+.top-handle.dragging::before { background: var(--accent); }
 
 /* ---------- 曲线面板 ---------- */
 .chart-tools {

@@ -159,7 +159,7 @@
       { key: 'batt', label: '电池℃', color: '#f44336', on: true, unit: '°C', axis: 'left' },
       { key: 'coldReal', label: '制冷', color: '#4caf50', on: true, unit: '', axis: 'right' },
       { key: 'rpm', label: '风扇rpm', color: '#9c27b0', on: true, unit: 'rpm', axis: 'left' },
-      { key: 'cold', label: '冷端℃', color: '#2196f3', on: true, unit: '°C', axis: 'left' },
+      { key: 'cold', label: '冷端℃', color: '#2196f3', on: false, unit: '°C', axis: 'left' },
       { key: 'hot', label: '热端℃', color: '#e91e63', on: true, unit: '°C', axis: 'left' },
       { key: 'cpu', label: 'CPU℃', color: '#ff9800', on: false, unit: '°C', axis: 'left' }
     ],
@@ -785,11 +785,19 @@
     var L = range(leftSeries, leftV), R = range(rightSeries, rightV);
     function yOf(axis, v) { return padT + H * (1 - (v - axis.min) / (axis.max - axis.min)); }
     ctx.font = '10px system-ui'; ctx.fillStyle = '#888';
+    // 刻度数量随高度自适应：越高刻度越多（信息密度提升），越矮越少（避免拥挤）
+    function tickCount(h) {
+      var n = Math.round((h - 30) / 70);   // 每 70px 一条刻度
+      if (n < 3) n = 3;                     // 至少 3 条（2 段）
+      if (n > 10) n = 10;                   // 至多 10 条
+      return n;
+    }
+    var nTick = tickCount(H);
     // 左轴刻度 + 网格
     if (L) {
       ctx.textAlign = 'right';
-      for (var i = 0; i <= 4; i++) {
-        var val = L.min + (L.max - L.min) * i / 4;
+      for (var i = 0; i <= nTick; i++) {
+        var val = L.min + (L.max - L.min) * i / nTick;
         var y = yOf(L, val);
         ctx.fillText(val.toFixed(1), padL - 4, y + 3);
         ctx.strokeStyle = 'rgba(128,128,128,0.15)';
@@ -802,8 +810,8 @@
     // 右轴刻度
     if (R) {
       ctx.textAlign = 'left';
-      for (var j = 0; j <= 4; j++) {
-        var rval = R.min + (R.max - R.min) * j / 4;
+      for (var j = 0; j <= nTick; j++) {
+        var rval = R.min + (R.max - R.min) * j / nTick;
         var ry = yOf(R, rval);
         ctx.fillText(rval.toFixed(0), padL + W + 4, ry + 3);
       }
@@ -987,6 +995,57 @@
     syncModeHeight();
   }
 
+  // ---------- 顶部高度：长按手柄拖动改高度（localStorage 持久化，pin-fixed/pin-scroll 均生效） ----------
+  var TOP_H_MIN = 15, TOP_H_MAX = 80;      // dvh 范围
+  var TOP_LONGPRESS_MS = 300;              // 长按激活门槛（ms）
+
+  function applyTopHeight(v) {
+    document.documentElement.style.setProperty('--top-h', v + 'dvh');
+  }
+
+  function initTopHeight() {
+    var v = 30;
+    try { v = parseInt(localStorage.getItem('b6xTopH') || '30', 10); } catch (e) {}
+    if (!(v >= TOP_H_MIN && v <= TOP_H_MAX)) v = 30;
+    applyTopHeight(v);
+
+    var hd = $('topHandle');
+    if (!hd) return;
+    var active = false, holdTimer = null, startY = 0, startH = 0;
+    function onDown(e) {
+      var t = e.touches ? e.touches[0] : e;
+      startY = t.clientY;
+      startH = parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--top-h')) || 30;
+      clearTimeout(holdTimer);
+      holdTimer = setTimeout(function () { active = true; hd.classList.add('dragging'); }, TOP_LONGPRESS_MS);
+    }
+    function onMove(e) {
+      if (!active) return;
+      e.preventDefault();
+      var t = e.touches ? e.touches[0] : e;
+      var dvh = (t.clientY - startY) / (window.innerHeight || 100) * 100;
+      var v = startH + dvh;
+      if (v < TOP_H_MIN) v = TOP_H_MIN;
+      if (v > TOP_H_MAX) v = TOP_H_MAX;
+      applyTopHeight(v);
+    }
+    function onUp() {
+      clearTimeout(holdTimer);
+      if (!active) return;
+      active = false;
+      hd.classList.remove('dragging');
+      var v = parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--top-h')) || 30;
+      try { localStorage.setItem('b6xTopH', String(Math.round(v))); } catch (e) {}
+      if (typeof drawChart === 'function') drawChart();   // 高度定下后立即重绘（纵轴刻度数随之变化）
+    }
+    hd.addEventListener('touchstart', onDown, { passive: false });
+    hd.addEventListener('touchmove', onMove, { passive: false });
+    hd.addEventListener('touchend', onUp);
+    hd.addEventListener('mousedown', onDown);
+    window.addEventListener('mousemove', onMove);
+    window.addEventListener('mouseup', onUp);
+  }
+
   // 图钉状态同步：仅固定时蓝色（蓝底 = body 有 pin-fixed）
   function syncPinState() {
     $('pinBtn').classList.toggle('active', document.body.classList.contains('pin-fixed'));
@@ -1033,6 +1092,7 @@
     initLogUI();
     initModeSlider();
     initModeHeight();
+    initTopHeight();
     updateCollapse();
     if (errText) reportError(errText);
     else if (!Bridge.available) reportError('未检测到 WebUI 桥接 — 请在 KernelSU / KSU-Next / APatch 管理器内打开本模块 WebUI');

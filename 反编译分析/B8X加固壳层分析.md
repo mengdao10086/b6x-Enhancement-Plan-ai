@@ -79,11 +79,11 @@ ENABLE_PT             // PT（protection/反调试）开关
 | **脱壳机** | BlackDex / Youpk / 常见脱壳工具 | 自动化脱壳，直接输出真实 dex，再 jadx 反编译 |
 | **native 逆向** | IDA Pro / Ghidra | 静态分析 libjgdtc.so 还原解密算法（工作量大，非首选） |
 
-脱壳得到真实 `classes.dex` 后，用 `工具/jadx.jar`（或 baksmali）反编译，即可按 b6_overclock_v2 的分析流程补齐本 App 的运行逻辑文档。
+脱壳得到真实 `classes.dex` 后，用 `../../工具/jadx.jar`（或 baksmali）反编译，即可按 b6_overclock_v2 的分析流程补齐本 App 的运行逻辑文档。
 
 ---
 
 ## 附：相关文档
 
 - [B6X超频V2运行逻辑.md](B6X超频V2运行逻辑.md) — B6X 超频工具 V2（未加固，已完整分析）
-- 见 `参考资料/decompile/b8x/反编译报告.md`（早期尝试的原始记录）
+- 见 `../参考资料/decompile/b8x/反编译报告.md`（早期尝试的原始记录）
