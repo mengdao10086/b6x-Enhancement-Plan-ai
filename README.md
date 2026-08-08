@@ -43,8 +43,8 @@
 ### LSPosed 模块
 
 - 修复蓝牙连接bug，死循环吃满一个核心bug → [完整修复历程](参考资料/完整修复历程.md)
-- 广播控制接口（B6X：`com.flydigi.SET_TEMPERATURE` / B7X：`com.flydigi.SET_TEMPERATURE_B7`），完整 7 参数散热器控制
-- 状态文件（`tempctrl_b6x.status` / `tempctrl_b7x.status`）向c温控程序回传散热器参数
+- 广播控制接口（B6X：com.flydigi.SET_TEMPERATURE/ B7X：com.flydigi.SET_TEMPERATURE_B7），完整 7 参数散热器控制
+- 状态文件（tempctrl_b6x.status/tempctrl_b7x.status）向c温控程序回传散热器参数
 
 ### C 智能温控守护程序
 
