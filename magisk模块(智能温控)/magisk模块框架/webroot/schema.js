@@ -29,7 +29,7 @@ window.B6X_SCHEMA = {
       subKeys: ["RATE_LIMIT_FAN_UP", "RATE_LIMIT_FAN_DOWN", "FAN_RPM_CHANGE_THRESHOLD",
                 "RATE_LIMIT_COLD", "RATE_LIMIT_TEMP", "BATT_BASELINE",
                 "COLD_MAP_START", "COLD_MAP_EXP", "HOT_MAP", "RPM_SMOOTH_ALPHA", "FAN_RPM",
-                "BATT_SKIP_MAX"]
+                "BATT_SKIP_MAX", "HOT_DERATE"]
     },
     // [2] 控制模式：PID 与 Gear 同一窗口。组头开关 CTRL_MODE 仅切换模式（1=PID / 0=Gear），
     // 不控制折叠；展开/折叠由 PERF_ENABLED 总开关驱动（master）。组内按模式切换显示参数面板
@@ -142,6 +142,9 @@ window.B6X_SCHEMA = {
       desc: "冷端与热端共用，值越大越跟随原始值，越小越平滑" },
     FAN_RPM: { type: "multi", fields: [{ label: "最低转速", min: 1000, max: 6000 }, { label: "最高转速(B6X)", min: 1000, max: 6000 }, { label: "最高转速(B7X)", min: 2000, max: 6000 }],
       label: "风扇转速范围", desc: "最低转速 B6X最高转速 B7X最高转速" },
+    HOT_DERATE: { type: "multi", fields: [{ label: "阈值(0.1°C)", min: 350, max: 700 }, { label: "倍率=恢复值", min: 1, max: 20 }, { label: "冷却周期数", min: 0, max: 20 }],
+      label: "热端过温制冷上限削减",
+      desc: "热端>阈值→每次削减上限(热端-阈值)×倍率；≤阈值→恢复倍率值；削减/恢复冷却独立，Gear 与 PID 共用" },
 
     // ---- [3] PID ----
     PID_KP: { type: "int", min: 1, max: 1000, label: "KP 比例", desc: "偏差敏感度，300=偏差3°时满幅" },

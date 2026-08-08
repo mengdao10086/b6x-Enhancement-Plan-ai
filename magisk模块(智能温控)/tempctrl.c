@@ -489,6 +489,18 @@ static int active_cold_max = COLD_MAX;      // 当前设备制冷上限（gear �
 static int active_fan_max  = 6000;          // 当前设备风扇上限
 static int active_pid_cold_max = 190;       // 当前设备 PID 制冷上限
 
+// ======================== 热端过温制冷上限削减 ========================
+// 热端温度 > 阈值 → 每次削减制冷上限 (热端-阈值)×倍率，削减后 3 周期内不再削减；
+// 热端温度 ≤ 阈值 → 每次恢复 5（复用倍率值），恢复后 3 周期内不再恢复；
+// 削减与恢复的冷却独立（不共用）。削减基准上限：gear = 档位表最高档制冷，
+// PID = active_pid_cold_max（PID_COLD 上限）。CPU 紧急干预期间仍生效（保护散热器硬件）。
+static int HOT_DERATE_THRESHOLD = 450;   // 热端阈值（0.1°C，450=45.0°C）
+static int HOT_DERATE_MULT = 5;          // 削减倍率 = 单次恢复值（削减量=(热端-阈值)×mult/10）
+static int HOT_DERATE_COOLDOWN = 3;      // 削减/恢复后冷却周期数（3 个 5s 周期）
+static int hot_derate = 0;               // 当前制冷上限削减量
+static int hot_derate_cooldown = 0;      // 削减冷却剩余周期（独立）
+static int hot_recover_cooldown = 0;     // 恢复冷却剩余周期（独立）
+
 /** 根据 active_device 切换活动档位表指针与计数（B6X/B7X 独立表） */
 static void select_gear_table(void) {
     if (active_device == DEVICE_B7X) {
@@ -832,6 +844,14 @@ static void load_config(const char *path) {
             int n = sscanf(val_str, "%d %d %d", &a, &b, &c);
             if (n >= 2) { pid_cold_min=clamp(a,0,194); pid_cold_max=clamp(b,0,194); }
             if (n >= 3) { b7_pid_cold_max = clamp(c, 1, B7X_COLD_MAX); }
+        }
+        else if (strcmp(key, "HOT_DERATE") == 0) {
+            // 热端过温制冷上限削减：阈值(0.1°C) 倍率=单次恢复值 冷却周期数
+            int t = HOT_DERATE_THRESHOLD, m = HOT_DERATE_MULT, c = HOT_DERATE_COOLDOWN;
+            int n = sscanf(val_str, "%d %d %d", &t, &m, &c);
+            if (n >= 1) HOT_DERATE_THRESHOLD = clamp(t, 350, 700);   // 35.0~70.0°C
+            if (n >= 2) HOT_DERATE_MULT = clamp(m, 1, 20);
+            if (n >= 3) HOT_DERATE_COOLDOWN = clamp(c, 0, 20);
         }
         else if (strcmp(key, "BATT_BOUNDARY") == 0) {
             int v[3] = {BATT_BOUNDARY_1,BATT_BOUNDARY_2,BATT_BOUNDARY_3};
@@ -1533,6 +1553,54 @@ static int read_cpu_temp_max(void) {
 }
 
 
+// ======================== 热端过温制冷上限削减 ========================
+
+/** 当前档位表最高档的制冷强度（gear 模式削减基准上限，档位表已按制冷升序） */
+static inline int gear_top_cold(void) {
+    if (gear_max >= 1 && gear_max <= gear_count) return gear_table[gear_max - 1].cold;
+    return COLD_MIN;
+}
+
+/** 当前生效的制冷强度上限 = 基准上限 - 热端过温削减，下限不低于冷端最小强度 */
+static inline int eff_cold_max(int base_max, int cold_min) {
+    int m = base_max - hot_derate;
+    if (m < cold_min) m = cold_min;
+    return m;
+}
+
+/**
+ * 每 5s 周期调用：根据散热器热端温度更新制冷上限削减量。
+ * 热端 > 阈值 → 削减 (热端-阈值)×倍率，削减后 HOT_DERATE_COOLDOWN 周期内不再削减；
+ * 热端 ≤ 阈值 → 恢复 5（=倍率值），恢复后 HOT_DERATE_COOLDOWN 周期内不再恢复；
+ * 削减/恢复冷却独立。热端数据无效（<0）时保持当前削减量。原始直算不加滤波。
+ */
+static void update_hot_derate(void) {
+    if (hot_derate_cooldown > 0) hot_derate_cooldown--;
+    if (hot_recover_cooldown > 0) hot_recover_cooldown--;
+    if (cooler_hot_temp < 0) return;   // 热端无效：保持当前削减
+
+    if (cooler_hot_temp > HOT_DERATE_THRESHOLD) {
+        if (hot_derate_cooldown == 0) {
+            int reduction = (cooler_hot_temp - HOT_DERATE_THRESHOLD) * HOT_DERATE_MULT / 10;
+            if (reduction > 0) {   // 刚过阈值整数截断为 0 时跳过，不触发冷却
+                hot_derate += reduction;
+                hot_derate_cooldown = HOT_DERATE_COOLDOWN;
+                write_log("热端过温 %d.%d°C 削减制冷上限 %d（总削减 %d）",
+                          cooler_hot_temp / 10, cooler_hot_temp % 10, reduction, hot_derate);
+            }
+        }
+    } else {
+        if (hot_derate > 0 && hot_recover_cooldown == 0) {
+            hot_derate -= HOT_DERATE_MULT;
+            if (hot_derate < 0) hot_derate = 0;
+            hot_recover_cooldown = HOT_DERATE_COOLDOWN;
+            write_log("热端回落 %d.%d°C 恢复制冷上限 %d（剩余削减 %d）",
+                      cooler_hot_temp / 10, cooler_hot_temp % 10, HOT_DERATE_MULT, hot_derate);
+        }
+    }
+}
+
+
 // ======================== 控制参数计算与下发 ========================
 
 /**
@@ -1566,7 +1634,7 @@ static void build_params(int level,
     } else {
         // --- 固定功率 ---
         *out_windOC    = fan;
-        *out_coldOC    = clamp(cold, COLD_MIN, active_cold_max);
+        *out_coldOC    = clamp(cold, COLD_MIN, eff_cold_max(gear_top_cold(), COLD_MIN));
         *out_windLevel = 0;
     }
 
@@ -1724,7 +1792,9 @@ static int should_skip_dispatch(int mode, int target, int windOC, int cold, int 
         int diff = cold - cooler_cold_real;
         if (diff > 0) {
             int cmin = (ctrl_mode == 1) ? pid_cold_min : COLD_MIN;
-            int cmax = (ctrl_mode == 1) ? active_pid_cold_max : active_cold_max;
+            int cmax = (ctrl_mode == 1)
+                     ? eff_cold_max(active_pid_cold_max, pid_cold_min)
+                     : eff_cold_max(gear_top_cold(), COLD_MIN);
             int near_extreme = (cmax - cooler_cold_real) < COLD_UP_DEADZONE * 2
                             || (cooler_cold_real - cmin) < COLD_UP_DEADZONE * 2;
             if (!near_extreme && diff <= COLD_UP_DEADZONE) {
@@ -2855,9 +2925,10 @@ static int compute_fan_target(void) {
  * PID 输出 → 制冷强度（风扇目标已由 compute_fan_target 独立计算，不再在此输出）
  */
 static void pid_map_output(float output, int *out_cold) {
-    int range = active_pid_cold_max - pid_cold_min;
+    int cmax = eff_cold_max(active_pid_cold_max, pid_cold_min);
+    int range = cmax - pid_cold_min;
     if (range <= 0) range = 1;
-    *out_cold = clamp(pid_cold_min + (int)(output * range), pid_cold_min, active_pid_cold_max);
+    *out_cold = clamp(pid_cold_min + (int)(output * range), pid_cold_min, cmax);
 }
 
 /**
@@ -2922,7 +2993,7 @@ static void pid_align_from_gear(void) {
     float ratio = (float)(batt_gear_base - gear_min) /
                   (gear_max - gear_min);
     pid_align_rpm  = fan_rpm_min + (int)(ratio * (active_fan_max - fan_rpm_min));
-    pid_align_cold = pid_cold_min + (int)(ratio * (active_pid_cold_max - pid_cold_min));
+    pid_align_cold = pid_cold_min + (int)(ratio * (eff_cold_max(active_pid_cold_max, pid_cold_min) - pid_cold_min));
     pid_reset_core();
     last_bcast_valid     = 0;
     write_log("PID 从 gear 对齐 ratio=%.2f cold=%d", ratio, pid_align_cold);
@@ -3055,6 +3126,9 @@ static void main_loop(void) {
             }
         }
     }
+
+    // 0.5. 热端过温 → 制冷上限削减（两模式共用，先于 PID/档位决策，本周期即生效）
+    update_hot_derate();
 
     // --- PID 模式：跳过档位/紧急逻辑，直接 PID 计算 ---
     if (ctrl_mode == 1) {

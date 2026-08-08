@@ -31,6 +31,7 @@ MUST 先在 `参考资料/` 搜索关键词，再考虑加诊断钩子。这里�
 - 改完后 MUST 运行 `detect_changes()` 检查影响范围
 - 风险 HIGH/CRITICAL → MUST 先告知用户再继续
 - 普通日志降级为 debug 时，必须用**对应功能分区的子开关**（如配置加载→`debug_config`、传感器→`debug_sensor`、PID→`debug_pid`），不得用通用 `write_log` 或乱选分区。注意 C 宏按文本顺序生效，调用点位于宏定义之前时需把 `debug_log`/`pid_log` 宏上移
+- **所有加到 `profile.conf` 的参数 → MUST 同步更新 `magisk模块框架/webroot/schema.js`**（键定义 + 分组 `subKeys` 归属 + 字段范围与 tempctrl.c clamp 一致），并同步 `逻辑说明.md` 参数表；改完 WebUI 需能正常编辑该参数
 
 ## 5. 编译须知
 
