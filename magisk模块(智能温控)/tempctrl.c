@@ -490,13 +490,12 @@ static int active_fan_max  = 6000;          // 当前设备风扇上限
 static int active_pid_cold_max = 190;       // 当前设备 PID 制冷上限
 
 // ======================== 热端过温制冷上限削减 ========================
-// 热端温度 > 阈值 → 每次削减制冷上限 (热端-阈值)×倍率，削减后 3 周期内不再削减；
-// 热端温度 ≤ 阈值 → 每次恢复 5（复用倍率值），恢复后 3 周期内不再恢复；
-// 削减与恢复的冷却独立（不共用）。削减基准上限：gear = 档位表最高档制冷，
-// PID = active_pid_cold_max（PID_COLD 上限）。CPU 紧急干预期间仍生效（保护散热器硬件）。
+// 热端温度 > 阈值 → 每次削减制冷上限 (热端-阈值)×倍率，削减后 5 周期内不再削减；
+// 热端温度 ≤ 阈值 → 每次恢复 5（复用倍率值），恢复后 5 周期内不再恢复；
+// 削减与恢复的冷却独立（不共用）。削减基准上限：gear = 档位表最高档制冷
 static int HOT_DERATE_THRESHOLD = 450;   // 热端阈值（0.1°C，450=45.0°C）
 static int HOT_DERATE_MULT = 5;          // 削减倍率 = 单次恢复值（削减量=(热端-阈值)×mult/10）
-static int HOT_DERATE_COOLDOWN = 3;      // 削减/恢复后冷却周期数（3 个 5s 周期）
+static int HOT_DERATE_COOLDOWN = 5;      // 削减/恢复后冷却周期数（5 个 5s 周期）
 static int hot_derate = 0;               // 当前制冷上限削减量
 static int hot_derate_cooldown = 0;      // 削减冷却剩余周期（独立）
 static int hot_recover_cooldown = 0;     // 恢复冷却剩余周期（独立）
@@ -1854,6 +1853,13 @@ static int apply_gear(int level) {
     coldOC = actual_cold;
     target = actual_target_temp;
 
+    // ---- 热端过温边界钳制（去重前生效；不同步 actual_cold，风扇由 actual_cold 推算保持高转速散热）----
+    int cold_pre_clamp = coldOC;
+    if (hot_derate > 0) {
+        int cold_cap = eff_cold_max(gear_top_cold(), COLD_MIN);
+        if (coldOC > cold_cap) coldOC = cold_cap;
+    }
+
     // ---- 风扇转速向上取整到 50 的倍数（rate_limit_fan 已钳制到设备范围）----
     if (mode == 0)
         windLevel = send_rpm;
@@ -1864,6 +1870,10 @@ static int apply_gear(int level) {
     if (should_skip_dispatch(mode, target, windOC, coldOC, windLevel)) {
         return 0;   // 跳过原因日志已由 should_skip_dispatch 内部输出
     }
+
+    // 过热钳制冷动作日志（仅在实际下发时输出，与去重判定一致）
+    if (coldOC < cold_pre_clamp)
+        write_log("过热钳制冷 %d→%d（上限削减 %d）", cold_pre_clamp, coldOC, hot_derate);
 
     send_am_broadcast(mode, target, windOC, coldOC, windLevel);
     // Gear 模式下发成功常驻快照（与 PID 模式 apply_gear_direct 对齐，消除下发可见性不对称）
@@ -2939,12 +2949,23 @@ static void apply_gear_direct(int mode, int target,
                                int send_rpm, int cold, int wl) {
     // 纯下发：制冷限速与风扇目标已由 rate_limited_execute 完成，此处只去重/日志/广播
 
+    // ---- 热端过温边界钳制（去重前生效；不同步 actual_cold，风扇由 actual_cold 推算保持高转速散热）----
+    int cold_pre_clamp = cold;
+    if (hot_derate > 0) {
+        int cold_cap = eff_cold_max(active_pid_cold_max, pid_cold_min);
+        if (cold > cold_cap) cold = cold_cap;
+    }
+
     // ---- 去重检测 + 制冷上升死区（以散热器实际回传为准）----
     if (should_skip_dispatch(mode, target, send_rpm, cold, wl)) {
         debug_log(debug_exec, "apply_gear_direct 跳过下发（目标冷%d RPM%d == 回传冷%d RPM%d）",
                   cold, send_rpm, cooler_cold_real, cooler_rpm_real);
         return;
     }
+
+    // 过热钳制冷动作日志（仅在实际下发时输出，与去重判定一致）
+    if (cold < cold_pre_clamp)
+        write_log("过热钳制冷 %d→%d（上限削减 %d）", cold_pre_clamp, cold, hot_derate);
 
     // 偏差 = (滤波后电池温度 + 补偿) - 目标温度，取自上一周期 PID 计算的结果
     int batt_10 = (pid_batt_filtered >= 0) ? pid_batt_filtered : BATT_BASELINE;
