@@ -987,7 +987,10 @@ static void load_config(const char *path) {
             collect_gear_config(key, val_str, config_gears_b6, &config_gear_count_b6);
         }
 
-        else { continue; }
+        else {
+            debug_log(debug_config, "配置 未识别键 %s（已忽略）", key);
+            continue;
+        }
     }
     fclose(f);
 
@@ -1576,16 +1579,19 @@ static void send_am_broadcast(int mode, int target, int windOC, int coldOC, int 
         const char *action = (active_device == DEVICE_B7X)
             ? "com.flydigi.SET_TEMPERATURE_B7"
             : "com.flydigi.SET_TEMPERATURE";
-        execlp("am", "am", "broadcast", "--user", "0",
-               "-a", action,
-               "--ei", "mode", m_s,
-               "--ei", "temperature", t_s,
-               "--ei", "windOC", woc_s,
-               "--ei", "coldOC", coc_s,
-               "--ei", "windLevel", wl_s,
-               "--ei", "modeCustom", "0",
-               "--ei", "extra", "0",
-               (char *)NULL);
+        // 用绝对路径执行 am：daemon 环境 PATH 若缺 /system/bin，execlp 会静默失败
+        // （子进程 _exit(127)，父进程 waitpid 正常返回，故障不可见）。
+        // execl 不依赖 PATH，标准 Android/MIUI 的 am 均在 /system/bin/am。
+        execl("/system/bin/am", "am", "broadcast", "--user", "0",
+              "-a", action,
+              "--ei", "mode", m_s,
+              "--ei", "temperature", t_s,
+              "--ei", "windOC", woc_s,
+              "--ei", "coldOC", coc_s,
+              "--ei", "windLevel", wl_s,
+              "--ei", "modeCustom", "0",
+              "--ei", "extra", "0",
+              (char *)NULL);
         _exit(127);
     }
     // 父进程：限时等待子进程（3 秒超时，防止 am 卡死阻塞 daemon）
@@ -1596,6 +1602,15 @@ static void send_am_broadcast(int mode, int target, int windOC, int coldOC, int 
         write_log("am broadcast 超时");
         kill(pid, SIGKILL);
         waitpid(pid, NULL, 0);
+    } else if (WIFEXITED(status) && WEXITSTATUS(status) != 0) {
+        // am 退出码非零（127=命令未找到等）→ 广播未送达，必须让故障可见，否则
+        // daemon 会持续重发而散热器永远不动（正是之前"日志正常但实际不变"的静默根因）。
+        write_log("am broadcast 失败：退出码 %d（广播未送达）", WEXITSTATUS(status));
+    } else if (WIFSIGNALED(status)) {
+        write_log("am broadcast 异常终止：信号 %d", WTERMSIG(status));
+    } else {
+        debug_log(debug_exec, "am broadcast 已发送 mode=%d target=%d windOC=%d coldOC=%d windLevel=%d",
+                  mode, target, windOC, coldOC, windLevel);
     }
     alarm(0);
     signal(SIGALRM, SIG_DFL);
@@ -1630,7 +1645,10 @@ static void calc_dynamic_rates(int *out_fan_up, int *out_cold_up, int *out_cold_
 static void rate_limit_cold(int desired_cold) {
     int fan_up, cold_up, cold_down;
     calc_dynamic_rates(&fan_up, &cold_up, &cold_down);
+    int old_cold = actual_cold;
     rate_limit(&actual_cold, desired_cold, cold_up, cold_down);
+    debug_log(debug_fan, "cold 限速 %d→%d desired=%d（升%d 降%d）",
+              old_cold, actual_cold, desired_cold, cold_up, cold_down);
 }
 
 /**
@@ -1675,8 +1693,11 @@ static int should_skip_dispatch(int mode, int target, int windOC, int cold, int 
     int send_rpm = (mode == 0) ? windLevel : windOC;
 
     if (cooler_cold_real >= 0 && cooler_rpm_real >= 0) {
-        if (cold == cooler_cold_real && send_rpm == cooler_rpm_real)
+        if (cold == cooler_cold_real && send_rpm == cooler_rpm_real) {
+            debug_log(debug_exec, "skip 已到位：目标冷%d RPM%d == 回传冷%d RPM%d，跳过下发",
+                      cold, send_rpm, cooler_cold_real, cooler_rpm_real);
             return 1;   // 散热器实际已到位
+        }
 
         int diff = cold - cooler_cold_real;
         if (diff > 0) {
@@ -1684,17 +1705,24 @@ static int should_skip_dispatch(int mode, int target, int windOC, int cold, int 
             int cmax = (ctrl_mode == 1) ? active_pid_cold_max : active_cold_max;
             int near_extreme = (cmax - cooler_cold_real) < COLD_UP_DEADZONE * 2
                             || (cooler_cold_real - cmin) < COLD_UP_DEADZONE * 2;
-            if (!near_extreme && diff <= COLD_UP_DEADZONE)
+            if (!near_extreme && diff <= COLD_UP_DEADZONE) {
+                debug_log(debug_exec, "skip 制冷上升死区：目标冷%d 回传冷%d diff=%d ≤死区%d，跳过下发",
+                          cold, cooler_cold_real, diff, COLD_UP_DEADZONE);
                 return 1;   // 上升太少，不如不升
+            }
         }
         return 0;
     }
 
-    // 回传异常：退化用 last_* 缓存对比
-    return last_bcast_valid &&
-           mode == last_mode && target == last_target_temp &&
-           windOC == last_rpm && cold == last_cold &&
-           windLevel == last_wind_level;
+    // 回传异常：退化用 last_* 缓存对比（异常路径必须常驻可见，不走 debug 分区）
+    int skip = last_bcast_valid &&
+               mode == last_mode && target == last_target_temp &&
+               windOC == last_rpm && cold == last_cold &&
+               windLevel == last_wind_level;
+    if (skip)
+        write_log("下发去重 回传异常（冷%d RPM%d 不可用），按上次参数缓存判定跳过 mode=%d 冷%d RPM%d",
+                  cooler_cold_real, cooler_rpm_real, last_mode, last_cold, last_rpm);
+    return skip;
 }
 
 /**
@@ -1742,11 +1770,15 @@ static int apply_gear(int level) {
 
     // ---- 去重检测 + 制冷上升死区（以散热器实际回传为准）----
     if (should_skip_dispatch(mode, target, windOC, coldOC, windLevel)) {
-        debug_log(debug_exec, "apply_gear 档位%d 参数无变化，跳过下发", gear_label(level));
-        return 0;
+        return 0;   // 跳过原因日志已由 should_skip_dispatch 内部输出
     }
 
     send_am_broadcast(mode, target, windOC, coldOC, windLevel);
+    // Gear 模式下发成功常驻快照（与 PID 模式 apply_gear_direct 对齐，消除下发可见性不对称）
+    write_log("%s 档位%d mode=%d 冷%d 热%d° RPM%d 目标%d°C",
+              device_tag_of(active_device), gear_label(level), mode,
+              coldOC, (cooler_hot_temp > 0) ? cooler_hot_temp / 10 : 0,
+              send_rpm, target);
 
     // ---- 更新缓存 ----
     last_bcast_valid   = 1;
@@ -1771,9 +1803,6 @@ static int is_app_alive(void) {
     if (stat(path, &st) != 0) return 0;
     time_t now = time(NULL);
     int alive = (now - st.st_mtime <= STATUS_TIMEOUT);
-    debug_log(debug_conn, "app_alive device=%s %d mtime_gap=%lds timeout=%ds",
-              device_tag_of(active_device),
-              alive, (long)(now - st.st_mtime), STATUS_TIMEOUT);
     return alive;
 }
 
@@ -1933,8 +1962,10 @@ static void launch_last_app(void) {
 
 /** 淘汰存活参与者：非保留者且非前台时 force-stop（在前台则等下周期再试） */
 static void evict_app_if_eligible(int alive, const char *keep, const char *pkg) {
-    if (alive && keep != pkg && !is_foreground_pkg(pkg))
+    if (alive && keep != pkg && !is_foreground_pkg(pkg)) {
+        write_log("app 仲裁 强制停止 %s（保留 %s）", pkg, keep);
         force_stop_app(pkg);
+    }
 }
 
 /**
@@ -2741,8 +2772,11 @@ static void apply_gear_direct(int mode, int target,
     // 纯下发：制冷限速与风扇目标已由 rate_limited_execute 完成，此处只去重/日志/广播
 
     // ---- 去重检测 + 制冷上升死区（以散热器实际回传为准）----
-    if (should_skip_dispatch(mode, target, send_rpm, cold, wl))
+    if (should_skip_dispatch(mode, target, send_rpm, cold, wl)) {
+        debug_log(debug_exec, "apply_gear_direct 跳过下发（目标冷%d RPM%d == 回传冷%d RPM%d）",
+                  cold, send_rpm, cooler_cold_real, cooler_rpm_real);
         return;
+    }
 
     // 偏差 = (滤波后电池温度 + 补偿) - 目标温度，取自上一周期 PID 计算的结果
     int batt_10 = (pid_batt_filtered >= 0) ? pid_batt_filtered : BATT_BASELINE;
@@ -2825,6 +2859,9 @@ static void alarm_handler(int sig) {
     (void)sig;  // 仅用于中断 waitpid，不做事
 }
 
+/** 记录最近一次断联时间戳（重连汇总行用；0=未处于断联） */
+static time_t last_disconnect_time = 0;
+
 /**
  * 重连安全对齐：以散热器实际回传值为准初始化实际制冷/转速（PID/gear 共用），
  * 由 rate_limited_execute 按正常限速逐步调节，抑制重连突变。
@@ -2834,6 +2871,14 @@ static void reconnect_align(void) {
     // 清空温度窗口累积标志，避免重连后误判"窗口内变过"
     batt_changed_since_ctrl = 0;
     batt_window_changed = 0;
+
+    // 断联→重连汇总行（常驻）：断联时长 + 重连后散热器回传实际值
+    if (last_disconnect_time > 0) {
+        write_log("重连 断联%d秒 回传冷%d RPM%d",
+                  (int)(time(NULL) - last_disconnect_time),
+                  cooler_cold_real, cooler_rpm_real);
+        last_disconnect_time = 0;
+    }
 
     // 以散热器实际回传为准：重连后从真实当前状态起步，由正常限速逐步调节，抑制突变。
     // 回传异常（status 文件读失败）时保持原值不变，避免无效初值。
@@ -2907,7 +2952,7 @@ static void main_loop(void) {
             if (st.st_mtime != config_mtime) {
                 load_config(config_path);
                 config_mtime = st.st_mtime;
-                write_log("配置 热重载\n");
+                write_log("配置 热重载");
                 // 配置重载可能重置了 fan_rpm_max/pid_cold_max，立即用设备限制覆盖
                 update_active_limits();
             }
@@ -3113,6 +3158,8 @@ static void main_loop(void) {
         emerg_recovery_mult = EMERG_RECOVERY_MULT_1;
         emerg_recovery_cycles = EMERG_RECOVERY_PHASE_CYCLES;
         reset_exempt_state();
+        write_log("紧急退出 进入恢复期 P1 倍率%d 周期%d",
+                  EMERG_RECOVERY_MULT_1, EMERG_RECOVERY_PHASE_CYCLES);
     }
 
     // 2. 电池温度控制 / 电流-挡位映射模式
@@ -3184,8 +3231,14 @@ static void main_loop(void) {
             // 同步 final_gear，避免逐步执行向已被压低的档位上方移动
             if (final_gear > batt_gear_base)
                 final_gear = batt_gear_base;
+            debug_log(debug_emerg, "emerg 退出 cap/drop 档位=%d final=%d exit=%s 模式%d",
+                      batt_gear_base, final_gear,
+                      exit_mode == EXIT_FULL ? "全效" : "半效", EMERG_MODE_EXIT);
+        } else {
+            debug_log(debug_emerg, "emerg 退出被电池温度阻挡（电池%d.%d 过高），保持档位",
+                      batt_temp / 10, batt_temp % 10);
         }
-        // exit_mode == 0 → 电池温度过高，不退出紧急，保持当前档位
+        // exit_mode == EXIT_NONE → 电池温度过高，不退出紧急，保持当前档位
         // 恢复期已在步骤 1 提前启动，此处不再重复
     }
 }
@@ -3389,6 +3442,8 @@ pid_init_done:
                     if (active_device != DEVICE_NONE) {
                         write_log("%s 已断开，无其他设备可切换\n",
                                   device_tag_of(active_device));
+                        if (last_disconnect_time == 0)
+                            last_disconnect_time = time(NULL);   // 断联起点（重连汇总行用）
                     }
                     active_device = DEVICE_NONE;
                     app_was_alive = 0;
@@ -3411,11 +3466,21 @@ pid_init_done:
             debug_log(debug_conn, "main 当前设备=%s ble=%d",
                       device_tag_of(active_device), app_ble_connected);
 
-            // 4. 存活检测
+            // 4. 存活检测（debug_conn 日志只在 5s 控制层输出，is_app_alive 另被 1s 采集层调用）
             int app_proc_ok = is_app_alive();
+            struct stat st_conn;
+            long mtime_gap = -1;
+            if (stat((active_device == DEVICE_B7X) ? status_file_path_b7 : status_file_path_b6,
+                     &st_conn) == 0)
+                mtime_gap = (long)(time(NULL) - st_conn.st_mtime);
+            debug_log(debug_conn, "app_alive device=%s %d mtime_gap=%lds timeout=%ds",
+                      device_tag_of(active_device), app_proc_ok, mtime_gap, STATUS_TIMEOUT);
             if (!app_proc_ok || !app_ble_connected) {
-                write_log("%s 连接丢失，检查另一设备...\n",
-                          device_tag_of(active_device));
+                // 每断联只打一次：last_disconnect_time==0 表示本次断联尚未记录，恢复由 reconnect_align 清零
+                if (last_disconnect_time == 0) {
+                    last_disconnect_time = time(NULL);   // 断联起点（重连汇总行用）
+                    write_log("%s 连接丢失", device_tag_of(active_device));
+                }
                 launch_last_app();   // v2.9：断联时也尝试拉起散热器 app（无 app 存活时真正拉起；存活时 debug 提示）
                 app_was_alive = 0;  // 复活后走 reconnect_align 重新对齐实际值
                 continue;

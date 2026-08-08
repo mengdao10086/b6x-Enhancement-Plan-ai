@@ -79,6 +79,16 @@ public class MainHook implements IXposedHookLoadPackage {
     private static volatile BluetoothDevice lastDevice = null;      // 上次连接的 BLE 设备
     private static volatile Object capturedB7Controller = null;     // B7X 混淆控制器（com.flydigi.sdk.waspwing.a）实例，重连用 T0()
     private static ClassLoader appClassLoader = null;      // App 类加载器（后台线程反射用）
+    private static volatile boolean loggedReconnectSkip = false;    // 后台重连被跳过（控制器/类加载器未就绪）仅记一次，防每 5s 刷屏
+
+    // ========== 广播接收诊断（每次重连最多 3 对日志，证明接收+下发链路正常） ==========
+    private static final int DIAG_LOG_MAX_PER_CONN = 3;   // 每次连接最多记录的对数
+    private static volatile int diagLogCount = 0;          // 当前连接已记录的对数（markConnected 清零）
+    private static volatile int setRunModeLogCount = 0;    // "setRunMode 已下发"当前连接已记录条数（markConnected 清零，上限同 DIAG_LOG_MAX_PER_CONN）
+    private static volatile boolean loggedReconnectAttempt = false; // "后台重连尝试"每断联只记一次（markConnected 清零）
+    private static volatile boolean paramMissingLogged = false;     // 参数回传缺失：状态翻转才打（进入一条/恢复一条）
+    private static volatile boolean statusWriteFailLogged = false;  // 状态文件写入失败：状态翻转才打（进入一条/恢复一条）
+    private static volatile boolean loggedResolveFallback = false;  // resolveWaspWingManager 兜底失败仅记一次（进程内）
 
     // ========== 智能温控广播接收器（v2.0） ==========
     // 接收 tempctrl 发送的 am broadcast，调用 setRunMode 控制散热器
@@ -101,6 +111,9 @@ public class MainHook implements IXposedHookLoadPackage {
                         int windLevel   = intent.getIntExtra("windLevel", 0);
                         int modeCustom  = intent.getIntExtra("modeCustom", 0);
                         int extra       = intent.getIntExtra("extra", 0);
+
+                        // 诊断：每次连接最多 3 对——"收到广播参数" + "1s 后散热器实际回传"，证明接收与下发链路正常
+                        logDiagOnBroadcast(mode, temperature, windOC, coldOC, windLevel);
 
                         // 调用 setRunMode——优先用构造函数捕获的实例，其次试单例
                         try {
@@ -125,6 +138,43 @@ public class MainHook implements IXposedHookLoadPackage {
         } catch (Throwable t) {
             XposedBridge.log(TAG + " 注册广播接收器失败: " + t.getMessage());
         }
+    }
+
+    /**
+     * 诊断：每次连接最多记录 DIAG_LOG_MAX_PER_CONN 对日志——
+     * ① 立即记"收到广播参数"（证明接收链路通）
+     * ② 延迟 1s 记散热器实际回传（证明 setRunMode 已下发且设备响应，read after command take effect）
+     * 上限防刷屏；重连时 markConnected 清零，可反复用于每次连接的连通性验证。
+     */
+    private static void logDiagOnBroadcast(final int mode, final int temperature,
+                                           final int windOC, final int coldOC, final int windLevel) {
+        if (diagLogCount >= DIAG_LOG_MAX_PER_CONN) return;
+        diagLogCount++;
+        XposedBridge.log(TAG + " 收到广播 mode=" + mode + " temp=" + temperature
+                + " windOC=" + windOC + " coldOC=" + coldOC + " windLv=" + windLevel);
+        mainHandler().postDelayed(new Runnable() {
+            @Override
+            public void run() {
+                StringBuilder sb = new StringBuilder();
+                Object info = lastWaspWingInfo;
+                if (info != null) {
+                    try {
+                        Object rpm = XposedHelpers.callMethod(info, "getRealWindLevel");
+                        Object cold = XposedHelpers.callMethod(info, "getRealColdLevel");
+                        sb.append(" RPM=").append(rpm).append(" 制冷=").append(cold);
+                        Object hot = XposedHelpers.callMethod(info, "getHotSurfaceTemperature");
+                        if (hot != null) sb.append(" 热端=").append(((Number) hot).intValue() * 10);
+                        Object tgt = XposedHelpers.callMethod(info, "getTargetTemperature");
+                        if (tgt != null) sb.append(" 目标=").append(((Number) tgt).intValue() * 10);
+                    } catch (Throwable t) {
+                        sb.append(" 读回传异常=").append(t.getMessage());
+                    }
+                } else {
+                    sb.append(" 无回传（lastWaspWingInfo 未就绪）");
+                }
+                XposedBridge.log(TAG + " [诊断] 1s后散热器实际" + sb);
+            }
+        }, 1000);
     }
 
     // ========== 双文件状态写入（v2.5） ==========
@@ -167,6 +217,17 @@ public class MainHook implements IXposedHookLoadPackage {
 
                     // 目标温度：getTargetTemperature() → int(°C) → 0.1°C
                     appendTenthValue(sb, lastWaspWingInfo, "getTargetTemperature", "TARGET_TEMP");
+                    // 回传恢复：此前缺失则补一条（状态翻转才打，防 1s 刷屏）
+                    if (paramMissingLogged) {
+                        paramMissingLogged = false;
+                        XposedBridge.log(TAG + " 参数回传已恢复");
+                    }
+                } else if (bleConnected) {
+                    // 参数回传缺失：BLE 已连接但 lastWaspWingInfo 未就绪（如首包未到/回传断）
+                    if (!paramMissingLogged) {
+                        paramMissingLogged = true;
+                        XposedBridge.log(TAG + " 参数回传缺失: lastWaspWingInfo 未就绪（BLE 已连接但无回传）");
+                    }
                 }
             } catch (Throwable t) {
                 XposedBridge.log(TAG + " 参数回传异常: " + t.getMessage());
@@ -174,8 +235,18 @@ public class MainHook implements IXposedHookLoadPackage {
 
             fos.write(sb.toString().getBytes());
             fos.close();
+            // 写入成功：此前失败则补一条恢复（状态翻转才打）
+            if (statusWriteFailLogged) {
+                statusWriteFailLogged = false;
+                XposedBridge.log(TAG + " 写入状态文件已恢复");
+            }
         } catch (Throwable e) {
-            XposedBridge.log(TAG + " 写入状态文件失败: " + e.getMessage());
+            if (!statusWriteFailLogged) {
+                statusWriteFailLogged = true;
+                XposedBridge.log(TAG + " 写入状态文件失败: " + currentStatusFile
+                        + " 异常类型=" + e.getClass().getSimpleName()
+                        + " msg=" + e.getMessage());
+            }
         }
     }
 
@@ -196,18 +267,35 @@ public class MainHook implements IXposedHookLoadPackage {
                                 // 改用 B7X 控制器(a) 的实际连接入口 T0()——重连其存储的 M() 设备
                                 if (capturedB7Controller != null) {
                                     XposedHelpers.callMethod(capturedB7Controller, "T0");
-                                    XposedBridge.log(TAG + " 后台重连尝试(b7x T0) -> "
-                                            + lastDevice.getAddress());
+                                    // 尝试仅记一次（每断联，markConnected 清零），防 5s 刷屏
+                                    if (!loggedReconnectAttempt) {
+                                        loggedReconnectAttempt = true;
+                                        XposedBridge.log(TAG + " 后台重连尝试(b7x T0) -> "
+                                                + lastDevice.getAddress());
+                                    }
+                                } else if (!loggedReconnectSkip) {
+                                    loggedReconnectSkip = true;
+                                    XposedBridge.log(TAG + " 后台重连跳过: capturedB7Controller 未捕获（b7x 重连不可用）");
                                 }
                             } else {
-                                Class<?> mgrCls = XposedHelpers.findClass(
-                                        "com.flydigi.sdk.waspwing.WaspWingManager", appClassLoader);
-                                XposedHelpers.callStaticMethod(mgrCls, "connectGattWith", lastDevice);
-                                XposedBridge.log(TAG + " 后台重连尝试 -> " + lastDevice.getAddress());
+                                if (appClassLoader == null) {
+                                    if (!loggedReconnectSkip) {
+                                        loggedReconnectSkip = true;
+                                        XposedBridge.log(TAG + " 后台重连跳过: appClassLoader 为 null（B6X findClass 无法进行）");
+                                    }
+                                } else {
+                                    Class<?> mgrCls = XposedHelpers.findClass(
+                                            "com.flydigi.sdk.waspwing.WaspWingManager", appClassLoader);
+                                    XposedHelpers.callStaticMethod(mgrCls, "connectGattWith", lastDevice);
+                                    // 尝试仅记一次（每断联，markConnected 清零），防 5s 刷屏
+                                    if (!loggedReconnectAttempt) {
+                                        loggedReconnectAttempt = true;
+                                        XposedBridge.log(TAG + " 后台重连尝试 -> " + lastDevice.getAddress());
+                                    }
+                                }
                             }
                         } catch (Throwable t2) {
-                            XposedBridge.log(TAG + " 后台重连失败: " + t2.getMessage());
-                            // connectGattWith/T0 可能会因内部状态抛异常，静默跳过等下一周期
+                            // 重连失败静默跳过（失败日志已删除，仅"尝试"首次输出），等下一周期
                         }
                     }
 
@@ -215,7 +303,10 @@ public class MainHook implements IXposedHookLoadPackage {
                 } catch (InterruptedException e) {
                     break;
                 } catch (Exception e) {
-                    XposedBridge.log(TAG + " 状态写入异常: " + e.getMessage());
+                    if (!statusWriteFailLogged) {
+                        statusWriteFailLogged = true;
+                        XposedBridge.log(TAG + " 状态写入异常: " + e.getMessage());
+                    }
                 }
             }
         });
@@ -462,10 +553,11 @@ public class MainHook implements IXposedHookLoadPackage {
                             // M2：重连路径也刷新 CONNECTED_AT，与 onDeviceConnected 对齐；并保存设备引用
                             markConnected(gatt);
                             autoEnterSetup();  // v2.6：引导页可见时自动进入设置界面
-                            XposedBridge.log(TAG + " BLE 已连接（onGattConnected）"
+                            // [底层]：GATT 层连接确认；同一次连接的权威日志在控制器层 onDeviceConnected
+                            XposedBridge.log(TAG + " [底层] BLE 已连接（onGattConnected）"
                                     + " device=" + (lastDevice != null ? lastDevice.getAddress() : "null"));
                             writeStatusFile();  // v2.5：连接事件立刻写 status 文件
-                            // 检查 discoverServices 结果
+                            // 检查 discoverServices 结果（诊断：常态输出）
                             if (gatt != null) {
                                 XposedBridge.log(TAG + " [诊断]   services="
                                         + (gatt.getServices() != null ? gatt.getServices().size() : 0));
@@ -503,12 +595,6 @@ public class MainHook implements IXposedHookLoadPackage {
                             // original method 内部检查条件并发命令。beforeHookedMethod
                             // 确保值已修正，self-repair 检查通过后跳过无命令发出。
                             blockSelfRepair(info);
-
-                            Boolean connected = (Boolean) XposedHelpers.callMethod(info, "isConnected");
-                            Integer wind = (Integer) XposedHelpers.callMethod(info, "getRealWindLevel");
-                            XposedBridge.log(TAG + " [诊断] SDK.onDeviceInfoUpdate"
-                                    + " connected=" + connected
-                                    + " windLevel(real)=" + wind);
                         }
                     });
             XposedBridge.log(TAG + " 已钩住 SDK WaspwingViewModel.onDeviceInfoUpdate（beforeHook）");
@@ -546,7 +632,8 @@ public class MainHook implements IXposedHookLoadPackage {
                         protected void beforeHookedMethod(MethodHookParam param) {
                             // v2.7：断连保留 CONNECTED_AT / BLE_OWNER_LAST（作为"上次连接时间/连接者"供仲裁）
                             markDisconnected((BluetoothGatt) param.thisObject);
-                            XposedBridge.log(TAG + " BLE 断联 device="
+                            // [底层]：本地 disconnect() 调用点；权威断联日志在 GattCallback.onConnectionStateChange（远程）
+                            XposedBridge.log(TAG + " [底层] BLE 断联 device="
                                     + (lastDevice != null ? lastDevice.getAddress() : "null"));
                             writeStatusFile();  // v2.5：断连事件立刻写 status 文件
                         }
@@ -872,6 +959,10 @@ public class MainHook implements IXposedHookLoadPackage {
             br.close();
             return (line != null && !line.trim().isEmpty()) ? line.trim() : null;
         } catch (Throwable t) {
+            // 冷启动读取失败（每进程一次，低频）：区分"无记录"与"读文件异常"
+            XposedBridge.log(TAG + " 读取上次设备 MAC 失败: " + LAST_DEV_FILE
+                    + " 异常类型=" + t.getClass().getSimpleName()
+                    + " msg=" + t.getMessage());
             return null;
         }
     }
@@ -1017,6 +1108,15 @@ public class MainHook implements IXposedHookLoadPackage {
             try {
                 XposedHelpers.callMethod(inst, n, mode, temperature, windOC, coldOC,
                         windLevel, modeCustom, extra);
+                // 下发成功日志：与"收到广播/1s后实际"一致，每连最多 DIAG_LOG_MAX_PER_CONN 条（markConnected 清零）
+                if (setRunModeLogCount < DIAG_LOG_MAX_PER_CONN) {
+                    setRunModeLogCount++;
+                    XposedBridge.log(TAG + " setRunMode 已下发 method=" + n
+                            + " mode=" + mode + " temp=" + temperature
+                            + " windOC=" + windOC + " coldOC=" + coldOC
+                            + " windLv=" + windLevel + " modeCustom=" + modeCustom
+                            + " extra=" + extra);
+                }
                 return;
             } catch (Throwable t) {
                 last = t;
@@ -1112,27 +1212,51 @@ public class MainHook implements IXposedHookLoadPackage {
         Object inst = capturedWaspWingMgr;
         if (inst != null) return inst;
 
-        // 构造函数还没触发过，试单例方式兜底
+        // 构造函数还没触发过，试单例方式兜底（日志仅在首次兜底时输出一次，防每次广播重复刷屏）
+        boolean firstFallback = !loggedResolveFallback;
+        if (firstFallback) loggedResolveFallback = true;
         Class<?> mgrCls = ctx.getClassLoader().loadClass("com.flydigi.sdk.waspwing.WaspWingManager");
         String[] methods = {"getInstance", "get", "getDefault"};
+        StringBuilder failed = new StringBuilder();
         for (String m : methods) {
             try {
                 inst = XposedHelpers.callStaticMethod(mgrCls, m);
-                if (inst != null) break;
-            } catch (Throwable t) { /* next */ }
+                if (inst != null) {
+                    if (firstFallback) XposedBridge.log(TAG + " resolveWaspWingManager: 静态方法 " + m + " 成功");
+                    break;
+                }
+            } catch (Throwable t) {
+                if (firstFallback) XposedBridge.log(TAG + " resolveWaspWingManager: 静态方法 " + m + " 失败: " + t.getMessage());
+                failed.append(m).append(' ');
+            }
         }
         if (inst == null) {
             try {
                 // Kotlin object singleton: ClassName.INSTANCE
                 inst = XposedHelpers.getStaticObjectField(mgrCls, "INSTANCE");
-            } catch (Throwable t) { /* ok */ }
+                if (inst != null) {
+                    if (firstFallback) XposedBridge.log(TAG + " resolveWaspWingManager: INSTANCE 字段成功");
+                }
+            } catch (Throwable t) {
+                if (firstFallback) XposedBridge.log(TAG + " resolveWaspWingManager: INSTANCE 字段失败: " + t.getMessage());
+                failed.append("INSTANCE ");
+            }
         }
         if (inst == null && deviceType == 7) {
             // v2.7(H3)：B7X 混淆管理器 t9.j 的 Kotlin 单例字段 f50990a（反编译确认）
             try {
                 Class<?> mgrCls7 = ctx.getClassLoader().loadClass("t9.j");
                 inst = XposedHelpers.getStaticObjectField(mgrCls7, "f50990a");
-            } catch (Throwable t) { /* ok */ }
+                if (inst != null) {
+                    if (firstFallback) XposedBridge.log(TAG + " resolveWaspWingManager: t9.j.f50990a 成功");
+                }
+            } catch (Throwable t) {
+                if (firstFallback) XposedBridge.log(TAG + " resolveWaspWingManager: t9.j.f50990a 失败: " + t.getMessage());
+                failed.append("f50990a ");
+            }
+        }
+        if (inst == null && firstFallback) {
+            XposedBridge.log(TAG + " resolveWaspWingManager: 全部兜底失败 [" + failed.toString().trim() + "]");
         }
         return inst;
     }
@@ -1143,6 +1267,9 @@ public class MainHook implements IXposedHookLoadPackage {
      */
     private static void markConnected(BluetoothGatt gatt) {
         bleConnected = true;
+        diagLogCount = 0;            // 新连接：重置广播接收诊断计数（每连最多记录 DIAG_LOG_MAX_PER_CONN 对）
+        setRunModeLogCount = 0;      // 新连接：重置"setRunMode 已下发"计数（每连最多 3 条）
+        loggedReconnectAttempt = false;  // 新连接：重置"后台重连尝试"一次性标记
         bleConnectedTimestamp = System.currentTimeMillis() / 1000L;
         if (connectedModel != 6 && connectedModel != 7)
             connectedModel = (deviceType == 7) ? 7 : 6;  // 型号未知按包名兜底
