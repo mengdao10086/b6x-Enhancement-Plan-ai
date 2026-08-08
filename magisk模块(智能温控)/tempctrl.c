@@ -1100,24 +1100,31 @@ static void write_log(const char *fmt, ...) {
     int max_bytes = LOG_MAX;
 
     // 超标 → 截断保留尾部（调试模式下跳过限制，保留完整日志）。
-    // ftruncate 只改文件 size 元数据，不读不写全文件；旧"malloc+读全文件+写回"已废弃。
+    // ftruncate 只能从尾部截断，删头部必须先把尾部内容前移到文件头再截断。
+    // 旧实现直接 ftruncate(st_size - max_bytes) 是反向的：保留头部、删掉最新日志，且超限越多删得越过头，已废弃。
     struct stat st;
     if (!debug_mode && stat(log_file_path, &st) == 0 && st.st_size > max_bytes) {
         int fd = open(log_file_path, O_RDWR);
         if (fd >= 0) {
-            off_t target = (off_t)st.st_size - max_bytes;   // 目标：保留尾部 max_bytes
-            off_t new_off = target;
-            char probe[128];
-            if (target > 0) {
-                // 从 target 起读一小段找换行，对齐到完整行首（避免截出半行拼坏下条日志）
-                ssize_t got = pread(fd, probe, sizeof(probe), target);
-                for (ssize_t i = 0; i < got; i++) {
-                    if (probe[i] == '\n') { new_off = target + i + 1; break; }
+            off_t keep = (off_t)max_bytes;            // 保留的尾部字节数（最新日志）
+            off_t del  = (off_t)st.st_size - keep;    // 头部要删除的字节数
+            char *buf = malloc((size_t)keep);
+            if (buf) {
+                ssize_t got = pread(fd, buf, (size_t)keep, del);
+                // 对齐完整行首：del 落在行中间时，丢弃 buf 开头的半行
+                size_t start = 0;
+                char prev = '\0';
+                if (del > 0 && pread(fd, &prev, 1, del - 1) == 1 && prev != '\n') {
+                    for (size_t i = 0; i < (size_t)got; i++) {
+                        if (buf[i] == '\n') { start = i + 1; break; }
+                    }
                 }
-            } else {
-                new_off = 0;   // 超限不多，整个清空重来
+                if (got - (off_t)start > 0) {
+                    pwrite(fd, buf + start, (size_t)(got - (off_t)start), 0);
+                    ftruncate(fd, (off_t)(got - (off_t)start));
+                }
+                free(buf);
             }
-            ftruncate(fd, new_off);
             close(fd);
         }
     }
@@ -2672,6 +2679,9 @@ static float pid_compute(int batt_10, float dt) {
     if (pid_integral_accum >  i_limit) pid_integral_accum =  i_limit;
     if (pid_integral_accum < -i_limit) pid_integral_accum = -i_limit;
 
+    // 临时诊断：打印门控判定输入/输出，定位 var<阈值 却 I 未累积的问题
+    debug_log(debug_pid, "KI判定 thr=%d cnt=%d var=%d err=%.1f ki=%d acc=%.2f", pid_ki_var_threshold, pid_var_count, v, error, ki_active, pid_integral_accum);
+
     // D 项（首次跳过）
     float d = 0.0f;
     if (pid_prev_error != 0 || pid_last_batt >= 0) {
@@ -3016,9 +3026,11 @@ static void main_loop(void) {
 
         // --- 温度更新周期跟踪（基于周期数，非时间） ---
         // idle 递增已由 main_loop 入口按窗口变化统一维护，此处只做采样 push
+        // 方差采样：每控制周期强制推入一个样本，保证窗口代表当前温度稳定性。
+        // 修复：旧实现依赖 1s 瞬时标志 batt_temp_updated，温度变化稀疏时 5s 层读不到标志
+        //       → 样本稀疏 → 方差窗口陈旧虚高（曾现 6 样本卡在爬升期、温度已稳定方差仍大的问题）
+        pid_var_push(batt_raw);
         if (batt_temp_updated) {
-            // 推入方差采样（使用原始电池温度，非滤波值）
-            pid_var_push(batt_raw);
             int gap = temp_idle_cycles + 1;  // 距离上次更新经过的周期数
             if (pid_predict_heat_weight > 0 || pid_predict_cool_weight > 0)
                 predict_push(batt_raw, gap);
