@@ -335,15 +335,22 @@ static time_t config_mtime = 0;
 
 // ======================== PID 模式控制（CTRL_MODE=1）========================
 // --- 核心参数 ---
-static int pid_kp = 300;                  // PID_KP（÷1000，1°C→P=40%）
+static int pid_kp = 300;                  // PID_KP 第三值=远区斜率（÷1000，默认 0.3）
+static int pid_kp_near = 150;             // PID_KP 第二值=近基准区低增益（÷1000，默认 0.15）
+static int pid_kp_near_bound = 100;       // PID_KP 第一值=近/远区分界（0.1°C，默认 1.0°C）
 static int pid_ki = 45;                   // PID_KI 第一值=积分增益（÷1000；dt 为周期数后标定单位=每 5s 周期，原秒标定 ×5 得等效值）
-static int pid_kd = 300;                  // PID_KD
-static int pid_integral_limit = 667;      // PID_KI 第二值=积分上限（÷1000，I 项最大输出贡献）
+static int pid_kd = 300;                  // PID_KD 第三值=远区斜率（÷1000，默认 0.3）
+static int pid_kd_near = 100;             // PID_KD 第二值=小变化低增益（÷1000，默认 0.1）
+static int pid_kd_near_bound = 30;        // PID_KD 第一值=小/大变化分界（0.1°C，默认 0.3°C）
+static int pid_kd_leak = 50;              // PID_KD_MEM 第一值=记忆每周期固定衰减量（×1000，默认 0.05）
+static int pid_kd_max = 150;              // PID_KD_MEM 第二值=记忆幅值基础（×1000，默认 0.1）
+static int pid_kd_slope = 150;            // PID_KD_MEM 第三值=幅值随距基准斜率（×1000，默认 0.2/°C）；实际上限=基础+距基准°C×斜率
+static int pid_integral_limit = 667;      // PID_KI 第二值=积分上限（÷1000，I 项最大输出贡献；预算链 min(1-p-d, 此值) 取小）
 
 // --- KI 方差门控 ---
 static int pid_ki_var_threshold = 50;     // PID_KI_VAR 第一值=方差门控阈值（0.1°C²，0=关闭）
 static int pid_ki_var_samples = 6;        // PID_KI_VAR 第二值=采样数（2~20）
-static int pid_ki_deadband = 20;          // PID_KI_DEADBAND（0.1°C，0=禁止I项）
+static int pid_ki_deadband = 20;          // PID_KI_VAR 第三值=积分死区（0.1°C，0=禁止I项）
 
 // --- 输入滤波 ---
 static int pid_input_filter_enabled = 1;  // PID_INPUT_FILTER 第一值：默认开（EMA 滤波；自适应逻辑可按间隔自动关闭/恢复）
@@ -361,6 +368,7 @@ static int pid_prev_error = 0;            // 上周期误差
 static int pid_batt_filtered = -1;        // EMA 滤波后电池温度
 static int pid_last_batt = -1;            // 上次参与 PID 计算的原始温度
 static time_t pid_last_change_time = 0;   // 上次温度变化时间戳
+static float pid_d_state = 0.0f;          // D 项记忆累积值（泄漏积分器，每周期固定衰减；重置/切模式归零）
 // 方差门控环形缓冲区
 #define PID_VAR_BUF_MAX 20    // 最大支持采样数（≥ PID_KI_VAR 第二值上限）
 static int pid_var_buffer[PID_VAR_BUF_MAX];
@@ -426,9 +434,10 @@ static int cooler_cold_real = -1;         // 实际制冷强度
 // --- 信号 ---
 static volatile int running = 1;
 
-// --- 电池温度数值追踪（Scene 式：定时轮询 + 值比较，不依赖 sysfs mtime）---
+// --- 电池温度数值追踪（Scene 式：定时轮询 + 值比较，mtime 变化作为补充刷新信号）---
 static int batt_cached_temp = -1;        // 最后一次读取的温度缓存
-static int batt_temp_updated = 0;        // 最近一次 1s 采集值是否变化（供采样 push 判定）
+static int batt_temp_updated = 0;        // 最近一次 1s 采集：值或 mtime 任一变化即置位（供采样 push 判定）
+static time_t batt_temp_mtime = 0;       // 温度文件上次 mtime（mtime 更新视为温度数据刷新；不可靠内核恒不变则退化为纯值比较）
 static int batt_changed_since_ctrl = 0;  // 自上次 5s 控制以来，1s 层是否检测到过温度变化（累积）
 static int batt_window_changed = 0;      // 当前控制周期快照（main_loop 入口设置，供跳过判定）
 
@@ -724,9 +733,7 @@ static const struct IntCfgKey INT_CFG_KEYS[] = {
     { "RATE_LIMIT_TEMP",           &RATE_LIMIT_TEMP,             1, 30 },
     { "COLD_UP_DEADZONE",          &COLD_UP_DEADZONE,            1, 50 },
     { "BATT_SKIP_MAX",             &BATT_SKIP_MAX,               1, 60 },
-    { "PID_KP",                    &pid_kp,                      1, 1000 },
-    { "PID_KD",                    &pid_kd,                      0, 1000 },
-    { "PID_KI_DEADBAND",           &pid_ki_deadband,             0, 100 },
+    // PID 多值键（PID_KP / PID_KD / PID_KD_MEM / PID_KI_VAR / PID_KI）在 parse_pid_cfg 分段解析
     { "GEAR_PREDICT_ALPHA",        &gear_predict_alpha,          1, 100 },
     { "COLD_MAP_START",            &cold_map_start,              0, 194 },
     { "COLD_MAP_EXP",              &cold_map_exp,                50, 500 },
@@ -788,6 +795,41 @@ static void parse_sysfs_cfg(const char *key, int val, const char *val_str) {
 
 /** PID 专属多值配置（PERF 层） */
 static int parse_pid_cfg(const char *key, int val, const char *val_str) {
+    // PID_KP = 分界 近区 远区（旧单值格式 → 仅远区，兼容）
+    if (strcmp(key, "PID_KP") == 0) {
+        int b = pid_kp_near_bound, n = pid_kp_near, f = pid_kp;
+        int cnt = sscanf(val_str, "%d %d %d", &b, &n, &f);
+        if (cnt == 1) {
+            pid_kp = clamp(b, 1, 1000);   // 旧单值：视为远区斜率
+        } else {
+            if (cnt >= 1) pid_kp_near_bound = clamp(b, 10, 300);
+            if (cnt >= 2) pid_kp_near       = clamp(n, 1, 1000);
+            if (cnt >= 3) pid_kp            = clamp(f, 1, 1000);
+        }
+        return 1;
+    }
+    // PID_KD = 分界 近区 远区（旧单值格式 → 仅远区，兼容）
+    if (strcmp(key, "PID_KD") == 0) {
+        int b = pid_kd_near_bound, n = pid_kd_near, f = pid_kd;
+        int cnt = sscanf(val_str, "%d %d %d", &b, &n, &f);
+        if (cnt == 1) {
+            pid_kd = clamp(b, 0, 1000);   // 旧单值：视为远区斜率
+        } else {
+            if (cnt >= 1) pid_kd_near_bound = clamp(b, 10, 300);
+            if (cnt >= 2) pid_kd_near       = clamp(n, 1, 1000);
+            if (cnt >= 3) pid_kd            = clamp(f, 0, 1000);
+        }
+        return 1;
+    }
+    // PID_KD_MEM = 记忆衰减 记忆幅值基础 幅值斜率（均 ×1000）
+    if (strcmp(key, "PID_KD_MEM") == 0) {
+        int l = pid_kd_leak, m = pid_kd_max, s = pid_kd_slope;
+        int cnt = sscanf(val_str, "%d %d %d", &l, &m, &s);
+        if (cnt >= 1) pid_kd_leak  = clamp(l, 1, 1000);
+        if (cnt >= 2) pid_kd_max   = clamp(m, 1, 1000);
+        if (cnt >= 3) pid_kd_slope = clamp(s, 1, 1000);
+        return 1;
+    }
     if (strcmp(key, "PID_INPUT_FILTER") == 0) {
         int on = pid_input_filter_enabled, a = pid_filter_auto_threshold_on, b = pid_filter_auto_threshold_off;
         int n = sscanf(val_str, "%d %d %d", &on, &a, &b);
@@ -817,11 +859,11 @@ static int parse_pid_cfg(const char *key, int val, const char *val_str) {
         return 1;
     }
     if (strcmp(key, "PID_KI_VAR") == 0) {
-        int t = pid_ki_var_threshold, n = pid_ki_var_samples;
-        if (sscanf(val_str, "%d %d", &t, &n) >= 1) {
-            pid_ki_var_threshold = clamp(t, 0, 200);
-            pid_ki_var_samples   = clamp(n, 2, 20);
-        }
+        int t = pid_ki_var_threshold, n = pid_ki_var_samples, db = pid_ki_deadband;
+        int cnt = sscanf(val_str, "%d %d %d", &t, &n, &db);
+        if (cnt >= 1) pid_ki_var_threshold = clamp(t, 0, 200);
+        if (cnt >= 2) pid_ki_var_samples   = clamp(n, 2, 20);
+        if (cnt >= 3) pid_ki_deadband      = clamp(db, 0, 100);
         return 1;
     }
     if (strcmp(key, "PID_CPU_COMP") == 0) {
@@ -1497,9 +1539,9 @@ static int read_thermal_zone_raw(int zone_id) {
  * 失败返回 -1
  */
 static int read_battery_temp(void) {
-    // Scene 式：定时轮询 + 纯数值比较，不依赖 sysfs mtime。
-    // 部分内核的 sysfs 温度文件 mtime 更新不可靠（不随值变化更新），原 mtime 判断
-    // 会导致温度实际在变却被判"未更新"而大量跳过。改为值比较：值变化才标记更新。
+    // Scene 式：定时轮询 + 值比较为主，mtime 变化作为补充刷新信号。
+    // 部分内核的 sysfs 温度文件 mtime 更新不可靠（不随值变化更新），故值比较为
+    // 兜底主判据；mtime 更新时（即使值相同）也视为温度数据刷新（防漏判）。
     int raw = read_sysfs_int(BATT_TEMP_PATH);
     if (raw < 0) {
         batt_temp_updated = 0;
@@ -1508,7 +1550,13 @@ static int read_battery_temp(void) {
     int val = raw / BATT_TEMP_DIVISOR;
     debug_log(debug_sensor, "batt_temp 原始 %d 除数 %d = %d (%.1f°C)",
               raw, BATT_TEMP_DIVISOR, val, val / 10.0);
-    batt_temp_updated = (val != batt_cached_temp);   // 值变化才标记更新
+    struct stat st;
+    int mtime_changed = 0;
+    if (stat(BATT_TEMP_PATH, &st) == 0 && st.st_mtime != batt_temp_mtime) {
+        mtime_changed = 1;
+        batt_temp_mtime = st.st_mtime;
+    }
+    batt_temp_updated = (val != batt_cached_temp) || mtime_changed;   // 值或 mtime 任一变化
     batt_cached_temp = val;
     return val;
 }
@@ -2868,8 +2916,56 @@ static float pid_compute(int batt_10, float dt) {
     int error_10 = batt_10 - target_10;
     float error = error_10 / 10.0f;
 
-    // P 项
-    float p = (pid_kp / 1000.0f) * error;
+    // P 项（非线性：|error|≤近区分界用低斜率 pid_kp_near，远区用 pid_kp，衔接连续）
+    float p;
+    {
+        float e_abs = (error >= 0.0f) ? error : -error;
+        float near_deg = pid_kp_near_bound / 10.0f;
+        if (e_abs <= near_deg) {
+            p = (pid_kp_near / 1000.0f) * error;
+        } else {
+            float sign = (error >= 0.0f) ? 1.0f : -1.0f;
+            p = sign * ((pid_kp_near / 1000.0f) * near_deg
+                      + (pid_kp / 1000.0f) * (e_abs - near_deg));
+        }
+    }
+
+    // D 项（非线性 + 泄漏记忆 + 预算/幅值限幅；先于 I 计算，供 I 预算使用）
+    // 非线性：|Δerror|≤分界低增益、大变化高增益，抑制小波动引起的 D 抖动
+    // 泄漏记忆：d_state 每周期向 0 收敛固定量（消除非线性方向不对称），再加新贡献
+    // 预算链：d_state 正方向不超过 1−p（防 P+D 超 1 被末端 clamp 硬截断）
+    float de = error - pid_prev_error;
+    float d_new = 0.0f;
+    if (pid_prev_error != 0 || pid_last_batt >= 0) {   // 首次跳过
+        float de_abs = (de >= 0.0f) ? de : -de;
+        float sign = (de >= 0.0f) ? 1.0f : -1.0f;
+        float near_deg = pid_kd_near_bound / 10.0f;
+        if (de_abs <= near_deg)
+            d_new = (pid_kd_near / 1000.0f) * de / dt;
+        else
+            d_new = sign * ((pid_kd_near / 1000.0f) * near_deg
+                          + (pid_kd / 1000.0f) * (de_abs - near_deg)) / dt;
+    }
+    pid_prev_error = error;
+    // 泄漏衰减（固定值向 0 收敛，正负对称）
+    if (pid_d_state > 0.0f) {
+        pid_d_state -= pid_kd_leak / 1000.0f;
+        if (pid_d_state < 0.0f) pid_d_state = 0.0f;
+    } else if (pid_d_state < 0.0f) {
+        pid_d_state += pid_kd_leak / 1000.0f;
+        if (pid_d_state > 0.0f) pid_d_state = 0.0f;
+    }
+    pid_d_state += d_new;
+    // 幅值上限（对称，防持续单向变化无限累积导致超长回零迟滞）
+    // 动态：基础值 pid_kd_max + 距基准温度每 °C × 斜率 pid_kd_slope（误差大放宽、接近基准收紧）
+    float d_max = pid_kd_max / 1000.0f;
+    d_max += (pid_kd_slope / 1000.0f) * ((error >= 0.0f) ? error : -error);
+    if (pid_d_state >  d_max) pid_d_state =  d_max;
+    if (pid_d_state < -d_max) pid_d_state = -d_max;
+    // 预算链限幅（正方向不超过 1−p；负方向不占预算，raw 底部 clamp 0 截断）
+    if (pid_d_state > 0.0f && pid_d_state > 1.0f - p)
+        pid_d_state = (1.0f - p > 0.0f) ? (1.0f - p) : 0.0f;
+    float d = pid_d_state;
 
     // I 项（方差门控 + 死区回退）
     // 方差门控：温度稳定（方差<阈值）时全温度段启用 I 累积
@@ -2889,18 +2985,15 @@ static float pid_compute(int batt_10, float dt) {
     if (ki_active) {
         pid_integral_accum += (pid_ki / 1000.0f) * error * dt;
     }
+    // I 预算上限：min(剩余预算 1−p−d, 固定值 667)，再单向下限 0
     float i_limit = pid_integral_limit / 1000.0f;
+    float i_budget = 1.0f - p - d;
+    if (i_budget < 0.0f) i_budget = 0.0f;
+    if (i_budget < i_limit) i_limit = i_budget;
     if (pid_integral_accum >  i_limit) pid_integral_accum =  i_limit;
     // 积分单向限制 0~+LIMIT：低温（error<0）时不累积负积分，
     // 避免之后升温时需先抵消负积分才能响应（升温延迟）
     if (pid_integral_accum < 0.0f)    pid_integral_accum = 0.0f;
-
-    // D 项（首次跳过）
-    float d = 0.0f;
-    if (pid_prev_error != 0 || pid_last_batt >= 0) {
-        d = (pid_kd / 1000.0f) * (error - pid_prev_error) / dt;
-    }
-    pid_prev_error = error;
 
     // 钳位 0~1
     float raw = p + pid_integral_accum + d;
@@ -3067,6 +3160,7 @@ static void apply_gear_direct(int mode, int target,
  */
 static void pid_reset_core(void) {
     pid_integral_accum = 0;
+    pid_d_state = 0.0f;   // D 项泄漏记忆清零（防切模式/重置后残留旧前馈）
     pid_prev_error = 0;
     pid_batt_filtered = -1;
     pid_last_batt = -1;
@@ -3281,9 +3375,11 @@ static void pid_cycle(void) {
     pid_var_push(batt_raw, pid_ctrl_cycles);
 
     // --- PID 重算判定 ---
-    // 滤波模式：每周期都重算 | 无滤波模式：温度或补偿变化时才重算
+    // 滤波模式：每周期都重算 | 无滤波模式：温度值/时间戳(mtime)或补偿变化时重算
+    // batt_window_changed 已由 1s 层融合"值变化"与"mtime 变化"（read_battery_temp 置位）
     int should_recompute = filter_eff ||
-                           (batt_raw != pid_last_batt || total_comp_10 != pid_last_comp_10);
+                           batt_window_changed ||
+                           total_comp_10 != pid_last_comp_10;
 
     if (should_recompute) {
         // dt：距上次 PID 重算以来的 5 秒周期数（1 = 5s），钳位 0.6~6（3s~30s）。
