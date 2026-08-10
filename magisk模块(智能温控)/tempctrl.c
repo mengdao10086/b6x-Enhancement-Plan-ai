@@ -334,37 +334,58 @@ static char uninstall_script_path[256] = "";
 static time_t config_mtime = 0;
 
 // ======================== PID 模式控制（CTRL_MODE=1）========================
-// --- 核心参数 ---
+// --- 配置变量（按 profile.conf [3] PID 区键顺序排列）---
+
+// PID_KP：比例增益
 static int pid_kp = 300;                  // PID_KP=比例增益（÷1000，默认 0.3，线性无分段）
+
+// PID_KI：V 形增益（高基准累积 / 低基准回落）
 static int pid_ki_up_base = 20;           // PID_KI 第一值=高基准基础增益（÷1000，error>0 时 gain=base+slope×error）
 static int pid_ki_up_slope = 20;          // PID_KI 第二值=高基准每°C增益（÷1000，每高于基准1°增益+20）
 static int pid_ki_down_base = 50;         // PID_KI 第三值=低基准基础增益（÷1000，error<0 时回落 gain=base+slope×|error|）
 static int pid_ki_down_slope = 50;        // PID_KI 第四值=低基准每°C增益（÷1000，每低于基准1°回落+50）
+
+// PID_KI_MEM：I 项回落与限幅
 static int pid_ki_drop = 100;             // PID_KI_MEM 第一值=下降惩罚（÷1000，降温时每周期每度降低直接扣累计值）
 static int pid_ki_leak = 30;              // PID_KI_MEM 第二值=每次计算固定衰减（÷1000，0.03/周期，始终生效不受门控）
-static int pid_kd_up = 240;               // PID_KD 第一值=上升倍率（÷1000，默认 0.24）
-static int pid_kd_down = 360;             // PID_KD 第二值=下降倍率（÷1000，默认 0.36）
-static int pid_kd_leak = 50;              // PID_KD_MEM 第一值=记忆每周期固定衰减量（×1000，默认 0.05）
-static int pid_kd_max = 150;              // PID_KD_MEM 第二值=记忆幅值基础（×1000，默认 0.15）
-static int pid_kd_slope = 150;            // PID_KD_MEM 第三值=幅值随距基准斜率（×1000，默认 0.15/°C）；实际上限=基础+距基准°C×斜率
 static int pid_integral_limit = 667;      // PID_KI_MEM 第三值=积分上限（÷1000，I 项最大输出贡献；预算链 min(1-p-d, 此值) 取小）
 
-// --- KI 方差门控 ---
+// PID_KI_VAR：方差门控
 static int pid_ki_var_threshold = 50;     // PID_KI_VAR 第一值=方差门控阈值（0.1°C²，0=关闭）
 static int pid_ki_var_samples = 6;        // PID_KI_VAR 第二值=采样数（2~20）
 static int pid_ki_deadband = 20;          // PID_KI_VAR 第三值=积分死区（0.1°C，0=禁止I项）
 
-// --- 输入滤波 ---
+// PID_KD：微分（上升/下降独立倍率）
+static int pid_kd_up = 240;               // PID_KD 第一值=上升倍率（÷1000，默认 0.24）
+static int pid_kd_down = 360;             // PID_KD 第二值=下降倍率（÷1000，默认 0.36）
+
+// PID_KD_MEM：D 项记忆
+static int pid_kd_leak = 50;              // PID_KD_MEM 第一值=记忆每周期固定衰减量（×1000，默认 0.05）
+static int pid_kd_max = 150;              // PID_KD_MEM 第二值=记忆幅值基础（×1000，默认 0.15）
+static int pid_kd_slope = 150;            // PID_KD_MEM 第三值=幅值随距基准斜率（×1000，默认 0.15/°C）；实际上限=基础+距基准°C×斜率
+
+// PID_INPUT_FILTER：输入滤波（EMA 自适应开关）
 static int pid_input_filter_enabled = 1;  // PID_INPUT_FILTER 第一值：默认开（EMA 滤波；自适应逻辑可按间隔自动关闭/恢复）
-static int pid_batt_alpha = 33;           // PID_BATT_ALPHA（%，新值权重）
-static int pid_filter_auto_threshold_on = 30;   // 自动关闭阈值（×0.1周期）
-static int pid_filter_auto_threshold_off = 20;  // 自动恢复阈值（×0.1周期）
-static int pid_filter_auto_alpha = 20;          // 间隔EMA平滑系数（%）
+static int pid_filter_auto_threshold_on = 30;   // PID_INPUT_FILTER 第二值：自动关闭阈值（×0.1周期）
+static int pid_filter_auto_threshold_off = 20;  // PID_INPUT_FILTER 第三值：自动恢复阈值（×0.1周期）
+
+// PID_ALPHA：滤波强度
+static int pid_filter_auto_alpha = 20;          // PID_ALPHA 第一值：间隔EMA平滑系数（%）
+static int pid_batt_alpha = 33;                 // PID_ALPHA 第二值：电池温度滤波强度（%，新值权重）
+
+// PID_CPU_COMP：CPU 补偿（PID 与 Gear 共用，始终生效，无开关）
+static int pid_cpu_comp_filter_alpha = 25;      // PID_CPU_COMP 第一值：补偿 EMA 平滑系数（%，独立于 CPU_FILTER_ALPHA）
+static int pid_cpu_comp_divisor = 30;           // PID_CPU_COMP 第二值：除数
+static int pid_cpu_comp_offset = 100;           // PID_CPU_COMP 第三值：偏移量（0.1°C，100=10.0°C）
+
+// PID_COLD：输出范围
+static int pid_cold_min = 1;              // PID_COLD 第一值：制冷强度下限
+static int pid_cold_max = 190;            // PID_COLD 第二值：制冷强度上限（B6X）
+
+// --- PID 运行时状态 ---
 static int pid_filter_auto_off = 0;             // 运行时标志：1=自适应关闭了滤波
 static int pid_filter_interval_smooth = -1;     // 平滑后的更新周期数（0.1周期）
 #define PID_FILTER_GAP_MULT 2   // 滤波间隔 EMA 输入钳位倍数
-
-// --- PID 运行状态 ---
 static float pid_integral_accum = 0.0f;   // 积分累积值（必须 float：int 在限幅赋小数时会截断为 0，I 项恒失效）
 static int pid_prev_error = 0;            // 上周期误差
 static int pid_batt_filtered = -1;        // EMA 滤波后电池温度
@@ -378,6 +399,12 @@ static int pid_var_head = 0;
 static int pid_var_count = 0;
 static int pid_var_last_value = -1;  // 上次推入的值（插值用）
 static int pid_var_last_cycle = -1;  // 上次推入时的周期计数（插值用）
+
+// --- CPU 补偿运行状态（PID 与 Gear 共用）---
+static int pid_cpu_comp_ready = 0;          // 补偿平滑是否已初始化（首次上次值用 0，从 0 爬升）
+static float pid_cpu_comp_smooth = 0.0f;    // CPU 补偿 EMA 平滑值（°C）
+static int pid_last_comp_10 = 0;            // 上次 PID 重算时的补偿值（0.1°C）
+static int pid_cpu_comp_active = 0;         // 补偿门控：1=激活（进入后即使条件消失也保持到滤波归零才退出）
 
 // ======================== Gear 温度预测 ========================
 // 通过历史温度变化趋势预测电池温度的平衡点，提前给 Gear 调档提供前馈信号（PID 不使用预测）
@@ -408,20 +435,10 @@ static int gear_predict_smoothed = -1;      // 平滑后的预测温度（0.1°C
 static int gear_predict_was_active = 0;     // 上周期是否使用了预测模式
 static int gear_predict_consecutive = 0;    // 连续预测周期数（用于 ramp-up）
 
-// --- 输入补偿（加到电池温度，反映 CPU 额外发热；PID 与 Gear 共用，始终生效，无开关）---
-static int pid_cpu_comp_filter_alpha = 25;  // PID_CPU_COMP 第一值：补偿 EMA 平滑系数（%，独立于 CPU_FILTER_ALPHA）
-static int pid_cpu_comp_divisor = 30;       // PID_CPU_COMP 第二值：除数
-static int pid_cpu_comp_offset = 0;       // PID_CPU_COMP 第三值：偏移量（0.1°C，100=10.0°C）
-static int pid_cpu_comp_ready = 0;          // 补偿平滑是否已初始化（首值直取）
-static float pid_cpu_comp_smooth = 0.0f;    // CPU 补偿 EMA 平滑值（°C）
-static int pid_last_comp_10 = 0;            // 上次 PID 重算时的补偿值（0.1°C）
-
 // --- Gear 调档输入温度（每 5s 周期由 gear_compute_input 计算，battery_control / gear_from_current 读取）---
 static int gear_input_batt = -1;
 
 // --- 输出映射与对齐 ---
-static int pid_cold_min = 1;              // PID_COLD_MIN
-static int pid_cold_max = 190;            // PID_COLD_MAX
 static int pid_align_rpm = 2000;          // PID 目标 RPM（仅初始化对齐与日志使用；风扇下发已由 compute_fan_target 独立计算）
 static int pid_align_cold = 1;            // PID 目标制冷强度
 static float pid_ratio_saved = -1.0f;     // PID 无级对齐量（0~1，-1=未初始化；切回 Gear 时映射回档位）
@@ -2831,19 +2848,29 @@ static int gear_predict_compute(int batt_raw) {
 
 /**
  * CPU 补偿值（0.1°C）：comp=(cpu滤波温度 − 电池 − 偏移)/divisor，clamp≥0，
- * 再按补偿专属滤波系数 EMA 平滑（首值直取）。始终生效，无开关。
+ * 再按补偿专属滤波系数 EMA 平滑（首次上次值用 0，从 0 平滑爬升而非直取）。
+ * 门控滞回：条件满足（raw>0）进入补偿；条件消失（raw=0）后不立即退出，
+ * 而是让滤波后的平滑值继续向 0 收敛，归零后才真正关闭补偿（避免输出瞬间跳变归零）。
+ * 始终生效，无开关（门控由条件自触发）。
  * @param batt 当前电池温度（0.1°C，两模式均用原始电池温度口径）
  */
 static int cpu_comp_now(int batt) {
     if (cpu_filtered_temp < 0) return 0;
     float raw = (float)(cpu_filtered_temp - batt - pid_cpu_comp_offset) / (pid_cpu_comp_divisor * 10);
     if (raw < 0.0f) raw = 0.0f;
-    if (!pid_cpu_comp_ready) {
-        pid_cpu_comp_smooth = raw;
-        pid_cpu_comp_ready = 1;
-    } else {
-        pid_cpu_comp_smooth = (pid_cpu_comp_filter_alpha * raw +
-                              (100 - pid_cpu_comp_filter_alpha) * pid_cpu_comp_smooth) / 100.0f;
+    // 进入门控：条件满足（CPU 高于电池+偏移，raw>0）→ 激活补偿
+    if (raw > 0.0f) pid_cpu_comp_active = 1;
+    // 未激活（从未满足条件，或已归零退出）→ 无补偿输出
+    if (!pid_cpu_comp_active) return 0;
+    // 首次滤波：上次值使用 0（从 0 开始 EMA 爬升，而非直接取 raw 首值跳变）
+    float prev = pid_cpu_comp_ready ? pid_cpu_comp_smooth : 0.0f;
+    pid_cpu_comp_smooth = (pid_cpu_comp_filter_alpha * raw +
+                          (100 - pid_cpu_comp_filter_alpha) * prev) / 100.0f;
+    pid_cpu_comp_ready = 1;
+    // 退出门控：滤波值归零才退出（raw=0 时 EMA 使平滑值渐进收敛，不瞬间切断）
+    if (pid_cpu_comp_smooth <= 0.0001f) {
+        pid_cpu_comp_active = 0;
+        pid_cpu_comp_smooth = 0.0f;
     }
     return (int)(pid_cpu_comp_smooth * 10 + 0.5f);
 }
@@ -3173,6 +3200,7 @@ static void pid_reset_core(void) {
     pid_var_last_value = -1;
     pid_var_last_cycle = -1;
     pid_cpu_comp_ready = 0;
+    pid_cpu_comp_active = 0;
 }
 
 /**

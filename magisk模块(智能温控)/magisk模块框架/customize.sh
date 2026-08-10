@@ -15,7 +15,7 @@ set_perm "$MODPATH/profile.conf" 0 0 0644
 # 自动拉起散热器 app 开关（v2.8）
 #   - 音量+ = 开启（拉起后自动后台化，几乎无感）
 #   - 音量- = 关闭（保持静默，需手动打开 app）
-#   - 无操作 10 秒 或 读不到按键（如 KSU 环境）→ 默认关闭
+#   - 无操作 30 秒 或 读不到按键（如 KSU 环境）→ 默认关闭
 # 之后可在 WebUI 的 APP_LAUNCH_ENABLED 随时修改
 # ============================================================
 ui_print ""
@@ -26,11 +26,11 @@ ui_print "  拉起时会闪烁一下散热器的ui界面"
 ui_print "  请自行根据自己的使用习惯选择是否开启"
 ui_print "=============================="
 ui_print "  音量+ = 开启   音量- = 关闭"
-ui_print "  不操作 10 秒 → 默认关闭"
+ui_print "  不操作 30 秒 → 默认关闭"
 
 LAUNCH_ENABLED=0
 KEY_PRESSED=0
-for i in 1 2 3 4 5 6 7 8 9 10; do
+for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30; do
     KEY=$(timeout 1 getevent -c 1 -lq 2>/dev/null | grep -o 'KEY_VOLUME[A-Z]*' | head -1)
     case "$KEY" in
         KEY_VOLUMEUP)   LAUNCH_ENABLED=1 ;;
