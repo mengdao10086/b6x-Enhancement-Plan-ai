@@ -14,6 +14,7 @@ import android.os.Looper;
 
 import java.io.BufferedReader;
 import java.io.FileOutputStream;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.UUID;
 
@@ -45,24 +46,39 @@ public class MainHook implements IXposedHookLoadPackage {
     // 双文件路径
     private static final String STATUS_FILE_B6 = "/data/local/tmp/tempctrl_b6x.status";
     private static final String STATUS_FILE_B7 = "/data/local/tmp/tempctrl_b7x.status";
-    private static final String LAST_DEV_FILE = "/data/local/tmp/tempctrl_last_dev";  // v2.8：上次连接的散热器 MAC（持久化，冷启动自动连接用）
-    private static final String AUTO_LAUNCH_EXTRA = "b6x_auto_launch";               // v2.8：tempctrl 拉起 app 时携带的标志（LSP 读到后自动后台化）
+    private static final String LAST_DEV_FILE = "/data/local/tmp/tempctrl_last_dev";  // 上次连接的散热器 MAC（持久化，冷启动自动连接用）
+    private static final String AUTO_LAUNCH_EXTRA = "b6x_auto_launch";               // tempctrl 拉起 app 时携带的标志（LSP 读到后自动后台化）
 
     private static Object capturedWaspWingMgr = null;  // 构造函数钩子捕获的实例
     private static int deviceType = 0;      // 0=无连接, 6=B6X, 7=B7X
     private static boolean isNewB6App = false;  // v2.5：当前进程是否为新版 B6X app（决定 BLE=1/2）
-    // v2.7：以下共享状态被 BLE 回调线程写、周期线程读，需 volatile 保证跨线程可见性（M4）
+    // 以下共享状态被 BLE 回调线程写、周期线程读，需 volatile 保证跨线程可见性（M4）
     private static volatile boolean bleConnected = false;  // BLE 连接状态（供写 status 文件）
     private static volatile long bleConnectedTimestamp = 0; // 连接 Unix 时间戳（CONNECTED_AT）
     private static String currentStatusFile = STATUS_FILE_B6; // 当前选中的 status 文件
     private static volatile Object lastWaspWingInfo = null;  // 散热器全参数回传（v2.3）
 
-    // ========== 设备型号识别 + B6X 自动进入设置界面（v2.6） ==========
+    // ========== gatt 有效性跟踪 + 锁死自愈 ==========
+    // 背景：B6X 重连时 SDK 可能创建多个 controller 实例，static dataInteractionController 若指向
+    // gatt 已失效/断开的旧实例，setRunMode 命令会写入失效 gatt 被静默丢弃（writeCharacteristic 返回 false），
+    // 设备停在固件默认档（制冷125/风扇4500），tempctrl 持续下发无效——表现为"锁死"。
+    // 修复：跟踪"当前有效 gatt"与"已连接 controller 实例"，下发前校验 static 指向，失效则重新同步/强制重连。
+    private static volatile BluetoothGatt currentValidGatt = null;   // 最近一次 GATT 连接成功的 gatt（断连清空）
+    private static volatile Object lastSyncedController = null;       // 最近一次连接成功并同步到 static 的 controller 实例
+    private static final ConcurrentHashMap<Object, BluetoothGatt> connectedControllers = new ConcurrentHashMap<>();
+    private static volatile int lastBcastCold = -1, lastBcastRpm = -1; // 最近广播下发的目标制冷/风扇（锁死检测基准）
+    private static volatile int stallLastCold = -1, stallLastRpm = -1; // 回传停滞快照（锁死检测）
+    private static volatile int dispatchStallCount = 0;                // 回传停滞期间累计的下发次数（达到 3 次 → 锁死）
+    private static final int DISPATCH_STALL_LIMIT = 3;                 // 连续 3 次参数下发后回传仍停滞 → 判定锁死
+    private static volatile long lastForceReconnectAt = 0;              // forceReconnect 防抖（10s 内最多一次）
+    private static final long FORCE_RECONNECT_MIN_INTERVAL_MS = 10000;
+
+    // ========== 设备型号识别 + B6X 自动进入设置界面 ==========
     private static volatile int connectedModel = 0;           // 0=未知, 6=B6X型号, 7=B7X型号（BLE 字段 0/6/7）
     private static volatile int bleLastOwner = 0;             // 上次连接者（BLE_OWNER_LAST 值：1/2=B6X app, 6/7=farsef 连的型号）；断连保留
     private static volatile long bleLastOwnerAt = 0;          // 上次连接时间戳（Unix 秒，与 bleLastOwner 配套，断连保留）
     private static volatile Activity currentGuideActivity = null;  // 当前可见的 MainActivity（引导页）
-    private static volatile boolean autoLaunchPending = false;     // 自动拉起标志已读取，待进入设置界面后后台化（v2.8）
+    private static volatile boolean autoLaunchPending = false;     // 自动拉起标志已读取，待进入设置界面后后台化
     // 注意：不能在静态初始化里直接 new Handler(Looper.getMainLooper())——模块类在 Zygote fork 阶段即被加载，
     // 此时主线程 Looper 尚未创建，getMainLooper() 返回 null 会抛 NPE，导致整个模块加载失败（所有钩子失效）。
     // 懒加载：首次用到（Activity.onCreate 主线程）时才创建。
@@ -121,7 +137,7 @@ public class MainHook implements IXposedHookLoadPackage {
                         try {
                             Object inst = resolveWaspWingManager(context);
                             if (inst != null) {
-                                // v2.7：B7X 的 WaspWingManager(t9.j) 混淆后 setRunMode 更名为 W(int×7)，
+                                // B7X 的 WaspWingManager(t9.j) 混淆后 setRunMode 更名为 W(int×7)，
                                 // 用 invokeSetRunMode 做原名→混淆名回退，确保 SET_TEMPERATURE_B7 广播可控温
                                 invokeSetRunMode(inst, mode, temperature, windOC, coldOC,
                                         windLevel, modeCustom, extra);
@@ -250,6 +266,7 @@ public class MainHook implements IXposedHookLoadPackage {
                 statusWriteFailLogged = false;
                 XposedBridge.log(TAG + " 写入状态文件已恢复");
             }
+            checkCommandStall();   // 锁死检测（每秒，回传停滞且≠目标时触发重连自愈）
         } catch (Throwable e) {
             if (!statusWriteFailLogged) {
                 statusWriteFailLogged = true;
@@ -357,7 +374,7 @@ public class MainHook implements IXposedHookLoadPackage {
         hookSyncConnectedController(lpparam);         // 修复 setRunMode 无反应：static controller 同步到已连接实例（仅 B6X）
         if (deviceType == 7) hookB7Obfuscated(lpparam);     // c0.s1 + 混淆适配（仅 B7X）
         hookApplicationCreate(lpparam);               // 广播接收器 + 定时状态写入（双设备）
-        hookAutoLaunch(lpparam);                      // v2.8：自动拉起标志 → Activity 后台化（双设备）
+        hookAutoLaunch(lpparam);                      // 自动拉起标志 → Activity 后台化（双设备）
     }
 
     // ========== 各 Hook 分区实现 ==========
@@ -438,7 +455,7 @@ public class MainHook implements IXposedHookLoadPackage {
                                         vm, "_connectLiveData");
                                 XposedHelpers.callMethod(connMd, "postValue", true);
 
-                                // v2.7：原 _waspWingInfo 修正块已删除——
+                                // 原 _waspWingInfo 修正块已删除——
                                 // 反编译确认 BluetoothViewModel 直接 extends ViewModel，无 _waspWingInfo 字段
                                 // （该字段在 com.example.extool.WaspWingViewModel 上），此块必然 NoSuchFieldError。
                                 // 状态回传由 SDK/App 层 onDeviceInfoUpdate 钩子接管（lastWaspWingInfo）。
@@ -479,7 +496,7 @@ public class MainHook implements IXposedHookLoadPackage {
             XposedBridge.log(TAG + " 已钩住 checkBluetoothPermission（强制返回 true）");
 
             // ===== 诊断钩子（调试用，保留） =====
-            // v2.7：B6X 专属的 BluetoothGatt.disconnect 钩子已删除（M1）——
+            // B6X 专属的 BluetoothGatt.disconnect 钩子已删除（M1）——
             // 公共断连钩子（下方 BluetoothGatt.disconnect，双设备通用）行为一致且已覆盖，删除避免重复写状态文件。
 
             // 诊断 0：BluetoothGatt.discoverServices() — 验证是否被调用
@@ -568,7 +585,7 @@ public class MainHook implements IXposedHookLoadPackage {
                             BluetoothGatt gatt = (BluetoothGatt) param.args[0];
                             // M2：重连路径也刷新 CONNECTED_AT，与 onDeviceConnected 对齐；并保存设备引用
                             markConnected(gatt);
-                            autoEnterSetup();  // v2.6：引导页可见时自动进入设置界面
+                            autoEnterSetup();  // 引导页可见时自动进入设置界面
                             // [底层]：GATT 层连接确认；同一次连接的权威日志在控制器层 onDeviceConnected
                             XposedBridge.log(TAG + " [底层] BLE 已连接（onGattConnected）"
                                     + " device=" + (lastDevice != null ? lastDevice.getAddress() : "null"));
@@ -605,7 +622,7 @@ public class MainHook implements IXposedHookLoadPackage {
                         protected void beforeHookedMethod(MethodHookParam param) {
                             Object info = param.args[0];
                             lastWaspWingInfo = info;    // v2.3：捕获散热器全参数回传
-                            updateModelFromInfo(info);  // v2.6 型号识别 + M3 同步 BLE_OWNER_LAST
+                            updateModelFromInfo(info);  // 型号识别 + M3 同步 BLE_OWNER_LAST
                             // 修正 experimentalRunModeValue，阻止 App 自修复触发 BLE 命令竞争
                             // 必须在 original method 执行前修正，因为 self-repair 在
                             // original method 内部检查条件并发命令。beforeHookedMethod
@@ -625,7 +642,7 @@ public class MainHook implements IXposedHookLoadPackage {
                         protected void beforeHookedMethod(MethodHookParam param) {
                             Object info = param.args[0];
                             lastWaspWingInfo = info;
-                            updateModelFromInfo(info);  // v2.6 型号识别 + M3 同步 BLE_OWNER_LAST
+                            updateModelFromInfo(info);  // 型号识别 + M3 同步 BLE_OWNER_LAST
                             // 设 experimentalRunModeValue = realColdLevel + 1
                             // 满足 self-repair 的跳过条件，阻止 BLE 命令发出。
                             blockSelfRepair(info);
@@ -646,7 +663,7 @@ public class MainHook implements IXposedHookLoadPackage {
                     new XC_MethodHook() {
                         @Override
                         protected void beforeHookedMethod(MethodHookParam param) {
-                            // v2.7：断连保留 CONNECTED_AT / BLE_OWNER_LAST（作为"上次连接时间/连接者"供仲裁）
+                            // 断连保留 CONNECTED_AT / BLE_OWNER_LAST（作为"上次连接时间/连接者"供仲裁）
                             markDisconnected((BluetoothGatt) param.thisObject);
                             // [底层]：本地 disconnect() 调用点；权威断联日志在 GattCallback.onConnectionStateChange（远程）
                             if (diagConnLogAllowed())
@@ -762,7 +779,7 @@ public class MainHook implements IXposedHookLoadPackage {
                     if (isMainActivity(param.thisObject)) {
                         currentGuideActivity = (Activity) param.thisObject;
                         autoEnterSetup();  // 已连接则立即跳；未连接则等 onGattConnected 触发
-                        autoStartSetup();  // v2.9：冷启动自动进入设置界面（等效点"开始设置"），其 onResume 会 tryConnect()
+                        autoStartSetup();  // 冷启动自动进入设置界面（等效点"开始设置"），其 onResume 会 tryConnect()
                     }
                 }
             });
@@ -875,6 +892,11 @@ public class MainHook implements IXposedHookLoadPackage {
                                 // param.thisObject = 刚完成 GATT 连接的 controller（state 已是 2）
                                 XposedHelpers.setStaticObjectField(mgrCls,
                                         "dataInteractionController", param.thisObject);
+                                // 记录连接实例 + 有效 gatt，供下发前校验 static 指向（防锁死）
+                                BluetoothGatt gatt = (BluetoothGatt) param.args[0];
+                                currentValidGatt = gatt;
+                                lastSyncedController = param.thisObject;
+                                connectedControllers.put(param.thisObject, gatt);
                                 int st = XposedHelpers.getIntField(param.thisObject, "mDataConnectState");
                                 XposedBridge.log(TAG + " dataInteractionController 已同步到已连接实例 state=" + st);
                             } catch (Throwable t) {
@@ -888,7 +910,7 @@ public class MainHook implements IXposedHookLoadPackage {
         }
     }
 
-    /** B7X 专属：c0.s1() 权限修复 + 完整混淆适配（v2.7） */
+    /** B7X 专属：c0.s1() 权限修复 + 完整混淆适配 */
     private static void hookB7Obfuscated(XC_LoadPackage.LoadPackageParam lpparam) {
         // ========== c0.s1() 权限检查强制 true（修复 Android 16 连接失败） ==========
         // 根因：B7X 旧版 SDK 用 c0.s1() 检查 BLUETOOTH_CONNECT 权限，Android 16 上返回 false，
@@ -902,7 +924,7 @@ public class MainHook implements IXposedHookLoadPackage {
                     }
                 });
 
-        // ========== B7X 完整混淆适配（v2.7） ==========
+        // ========== B7X 完整混淆适配 ==========
         // 依据 b7_overclock_v3 反编译（com.fdg.flashplay.farsef）：
         //   - com.flydigi.sdk.waspwing.a = WaspWingDataInteractionController（混淆类）
         //     - a.S1(BluetoothGatt)：GATT 连接成功点（super.S1 后 this.X = WaspWingInfo.Companion.a(device)，
@@ -943,6 +965,10 @@ public class MainHook implements IXposedHookLoadPackage {
                             try {
                                 Class<?> mgrCls7 = lpparam.classLoader.loadClass("t9.j");
                                 XposedHelpers.setStaticObjectField(mgrCls7, "f50991b", param.thisObject);
+                                // 记录连接实例 + 有效 gatt（B7X 字段 I），供下发前校验防锁死
+                                currentValidGatt = (BluetoothGatt) param.args[0];
+                                lastSyncedController = param.thisObject;
+                                connectedControllers.put(param.thisObject, (BluetoothGatt) param.args[0]);
                                 int st = XposedHelpers.getIntField(param.thisObject, "E");
                                 XposedBridge.log(TAG + " b7x dataInteractionController 已同步到已连接实例 state=" + st);
                             } catch (Throwable t) {
@@ -997,13 +1023,13 @@ public class MainHook implements IXposedHookLoadPackage {
                     protected void afterHookedMethod(MethodHookParam param) {
                         Context ctx = (Context) param.thisObject;
                         registerTemperatureReceiver(ctx);
-                        restoreLastDevice();   // v2.8：冷启动恢复上次设备引用，后台重连自动接管
+                        restoreLastDevice();   // 冷启动恢复上次设备引用，后台重连自动接管
                         startPeriodicStatusWrite();
                     }
                 });
     }
 
-    // ========== v2.8：上次设备持久化 + 自动拉起后台化 ==========
+    // ========== 上次设备持久化 + 自动拉起后台化 ==========
 
     /** 持久化上次连接的散热器 MAC（供冷启动自动连接 / 自动拉起使用） */
     private static void saveLastDeviceAddress(String addr) {
@@ -1032,7 +1058,7 @@ public class MainHook implements IXposedHookLoadPackage {
         }
     }
 
-    /** 冷启动恢复上次设备引用，使后台自动重连在启动后即可工作（v2.8） */
+    /** 冷启动恢复上次设备引用，使后台自动重连在启动后即可工作 */
     private static void restoreLastDevice() {
         if (lastDevice != null || bleConnected) return;
         String addr = loadLastDeviceAddress();
@@ -1047,7 +1073,7 @@ public class MainHook implements IXposedHookLoadPackage {
         }
     }
 
-    /** 自动拉起模式：读到 b6x_auto_launch 标志的 Activity 在进入设置界面（第一个非引导页 onResume）后后台化（v2.8） */
+    /** 自动拉起模式：读到 b6x_auto_launch 标志的 Activity 在进入设置界面（第一个非引导页 onResume）后后台化 */
     private static void hookAutoLaunch(XC_LoadPackage.LoadPackageParam lpparam) {
         try {
             XposedHelpers.findAndHookMethod(Activity.class, "onCreate", Bundle.class,
@@ -1147,7 +1173,7 @@ public class MainHook implements IXposedHookLoadPackage {
     }
 
     /**
-     * v2.7（M3）：connectedModel 被修正（如 B7X app 连 B6X 设备从 7→6）时同步重算 BLE_OWNER_LAST 的值。
+     * M3：connectedModel 被修正（如 B7X app 连 B6X 设备从 7→6）时同步重算 BLE_OWNER_LAST 的值。
      * 仅当已连接且 owner 值发生变化时更新；时间保持连接时间（BLE_OWNER_LAST 语义为"上次连接者+连接时间"，
      * 不能在每次数据包时刷新时间）。
      */
@@ -1159,12 +1185,23 @@ public class MainHook implements IXposedHookLoadPackage {
     }
 
     /**
-     * v2.7（H3）：调用 WaspWingManager.setRunMode。
+     * （H3）：调用 WaspWingManager.setRunMode。
      * B7X 的 WaspWingManager 混淆为 t9.j，setRunMode 更名为 W(int×7)（反编译确认：W→a.E2），
      * 故先试原名再试混淆名；B6X 只有原名。
      */
     private static void invokeSetRunMode(Object inst, int mode, int temperature, int windOC,
                                         int coldOC, int windLevel, int modeCustom, int extra) {
+        // 记录最近下发目标（锁死检测基准：目标≠回传且回传停滞时判定锁死）
+        lastBcastCold = coldOC;
+        lastBcastRpm = (mode == 0) ? windLevel : windOC;
+
+        // 下发前确保 static dataInteractionController 指向 gatt 有效的实例——
+        // 若指向 gatt 失效/断开的旧实例，命令写入失效 gatt 被静默丢弃，设备停在固件默认档（锁死）。
+        if (!ensureUsableController(inst)) {
+            XposedBridge.log(TAG + " setRunMode 跳过: static controller 不可用（已触发重连，下周期重试）");
+            return;
+        }
+
         // 状态自愈兜底：static dataInteractionController 若 GATT 已就绪但 state≠2（连接中/旧实例），
         // 命令会被 processData/b1 丢弃（故障注入已验证）。强制同步 state=2 兜底；
         // 主修复在 hookSyncConnectedController（B6X）/ hookB7Obfuscated S1（B7X）连接成功时同步 static。
@@ -1199,6 +1236,7 @@ public class MainHook implements IXposedHookLoadPackage {
             try {
                 XposedHelpers.callMethod(inst, n, mode, temperature, windOC, coldOC,
                         windLevel, modeCustom, extra);
+                dispatchStallCount++;   // 锁死检测：累计下发次数（回传到位/变化时由 checkCommandStall 清零）
                 // 下发成功日志：与"收到广播/1s后实际"一致，每连最多 DIAG_LOG_MAX_PER_CONN 条（markConnected 清零）
                 if (setRunModeLogCount < DIAG_LOG_MAX_PER_CONN) {
                     setRunModeLogCount++;
@@ -1217,6 +1255,92 @@ public class MainHook implements IXposedHookLoadPackage {
     }
 
     /**
+     * 下发前校验 static dataInteractionController 指向的实例 gatt 是否有效。
+     * 有效 = 该实例的 gatt 与当前有效 gatt（currentValidGatt）是同一个对象。
+     * 失效（static 指向旧实例/断开实例）时从 connectedControllers 找回有效实例重新同步；
+     * 找不到则触发强制重连并返回 false（调用方跳过本次下发，下周期重试）。
+     * B6X/B7X 字段名按 deviceType 分流。
+     */
+    private static boolean ensureUsableController(Object inst) {
+        try {
+            String dicField, gattField;
+            if (deviceType == 7) { dicField = "f50991b"; gattField = "I"; }
+            else { dicField = "dataInteractionController"; gattField = "mBluetoothGatt"; }
+            Object dic = XposedHelpers.getStaticObjectField(inst.getClass(), dicField);
+            if (dic == null) {
+                forceReconnect();
+                return false;
+            }
+            Object gatt = XposedHelpers.getObjectField(dic, gattField);
+            if (gatt != null && gatt == currentValidGatt) return true;  // static 指向有效实例
+
+            // static 指向的 gatt 失效：在已连接实例中找回 currentValidGatt 对应的实例并重新同步
+            for (ConcurrentHashMap.Entry<Object, BluetoothGatt> e : connectedControllers.entrySet()) {
+                if (e.getValue() == currentValidGatt) {
+                    XposedHelpers.setStaticObjectField(inst.getClass(), dicField, e.getKey());
+                    lastSyncedController = e.getKey();
+                    XposedBridge.log(TAG + " ensureUsableController: static 已重新同步到有效实例（gatt 失效恢复）");
+                    return true;
+                }
+            }
+            // 当前 gatt 也失效（已断连）：触发重连
+            forceReconnect();
+            return false;
+        } catch (Throwable t) {
+            // 字段缺失/不可访问时保守放行（保持原行为，不影响 setRunMode 主流程）
+            return true;
+        }
+    }
+
+    /** 强制重新连接（10s 防抖）。断开当前 gatt → 置断连状态 → 后台重连线程自动接管。 */
+    private static void forceReconnect() {
+        long now = System.currentTimeMillis();
+        if (now - lastForceReconnectAt < FORCE_RECONNECT_MIN_INTERVAL_MS) return;
+        lastForceReconnectAt = now;
+        try {
+            BluetoothGatt g = currentValidGatt;
+            if (g != null) g.disconnect();
+        } catch (Throwable t) { /* 断开失败忽略 */ }
+        markDisconnected(currentValidGatt);  // 置 bleConnected=false，后台重连线程检测后自动接管
+        XposedBridge.log(TAG + " forceReconnect: 已触发重新连接（gatt 失效/锁死自愈）");
+    }
+
+    /**
+     * 锁死检测——累计 3 次参数下发后，散热器回传（制冷/风扇）仍停滞不变、
+     * 且与最近下发目标不一致，判定设备已锁死（命令被静默丢弃），触发强制重连。
+     * 每秒调用一次（writeStatusFile 内）。回传到位（=目标）或回传在变（设备在响应）均清零。
+     */
+    private static void checkCommandStall() {
+        if (!bleConnected || lastWaspWingInfo == null) { dispatchStallCount = 0; return; }
+        try {
+            int cold = ((Number) XposedHelpers.callMethod(lastWaspWingInfo, "getRealColdLevel")).intValue();
+            int rpm = ((Number) XposedHelpers.callMethod(lastWaspWingInfo, "getRealWindLevel")).intValue();
+            // 回传已到位（与最近下发目标一致）→ 正常，清零
+            if (cold == lastBcastCold && rpm == lastBcastRpm) {
+                dispatchStallCount = 0;
+                stallLastCold = cold;
+                stallLastRpm = rpm;
+                return;
+            }
+            // 回传停滞（连续不变）：累计下发 ≥ 3 次仍未生效 → 锁死
+            if (cold == stallLastCold && rpm == stallLastRpm) {
+                if (dispatchStallCount >= DISPATCH_STALL_LIMIT && lastBcastCold >= 0) {
+                    XposedBridge.log(TAG + " 锁死检测: " + DISPATCH_STALL_LIMIT + " 次下发后回传停滞 冷" + cold
+                            + " RPM" + rpm + " ≠ 目标 冷" + lastBcastCold + " RPM" + lastBcastRpm
+                            + "，触发重连自愈");
+                    dispatchStallCount = 0;
+                    forceReconnect();
+                }
+            } else {
+                // 回传在变：设备在响应（可能限速追赶中），清零
+                stallLastCold = cold;
+                stallLastRpm = rpm;
+                dispatchStallCount = 0;
+            }
+        } catch (Throwable t) { /* 回传读取失败忽略 */ }
+    }
+
+    /**
      * v2.5：判断对象是否为 B6X app 的 MainActivity。
      * 模块编译期类路径不含 app 类（build.gradle 仅 xposed api 依赖），不能直接写 instanceof，
      * 改用 app 类加载器 loadClass + isInstance（语义等同 instanceof；MainActivity 为 final 类无子类）。
@@ -1232,7 +1356,7 @@ public class MainHook implements IXposedHookLoadPackage {
     }
 
     /**
-     * v2.6：引导页可见且 BLE 已连、本进程未进过设置界面时，自动进入设置界面。
+     * 引导页可见且 BLE 已连、本进程未进过设置界面时，自动进入设置界面。
      * onResume（主线程）与 onGattConnected（BLE 回调线程）共用，内部 runOnUiThread 保证主线程跳转。
      */
     private static void autoEnterSetup() {
@@ -1260,7 +1384,7 @@ public class MainHook implements IXposedHookLoadPackage {
     }
 
     /**
-     * v2.9：冷启动自动进入设置界面（等效自动点"开始设置"）。
+     * 冷启动自动进入设置界面（等效自动点"开始设置"）。
      * B6ExperimentalActivity.onResume 会在未连接时调用 tryConnect() 发起连接；
      * 连接成功后既有 autoEnterSetup（onGattConnected）路径可继续接管。
      * enteredSetup 防重入：已进入过设置界面 / 从设置返回引导页时不再触发。
@@ -1334,7 +1458,7 @@ public class MainHook implements IXposedHookLoadPackage {
             }
         }
         if (inst == null && deviceType == 7) {
-            // v2.7(H3)：B7X 混淆管理器 t9.j 的 Kotlin 单例字段 f50990a（反编译确认）
+            // (H3)：B7X 混淆管理器 t9.j 的 Kotlin 单例字段 f50990a（反编译确认）
             try {
                 Class<?> mgrCls7 = ctx.getClassLoader().loadClass("t9.j");
                 inst = XposedHelpers.getStaticObjectField(mgrCls7, "f50990a");
@@ -1369,25 +1493,27 @@ public class MainHook implements IXposedHookLoadPackage {
         bleLastOwnerAt = bleConnectedTimestamp;
         if (gatt != null && gatt.getDevice() != null) {
             lastDevice = gatt.getDevice();
-            saveLastDeviceAddress(gatt.getDevice().getAddress());   // v2.8：持久化 MAC 供冷启动自动连接
+            currentValidGatt = gatt;   // 记录当前有效 gatt（供下发前校验 static 指向）
+            saveLastDeviceAddress(gatt.getDevice().getAddress());   // 持久化 MAC 供冷启动自动连接
         }
     }
 
-    /** 记录断连状态：清空 BLE 连接标志 + 型号，并保存设备引用供后台重连使用 */
+    /** 记录断连状态：清空 BLE 连接标志 + 型号 + 有效 gatt，并保存设备引用供后台重连使用 */
     private static void markDisconnected(BluetoothGatt gatt) {
         bleConnected = false;
         connectedModel = 0;
+        currentValidGatt = null;   // gatt 失效，下发前校验会重新同步/触发重连
         if (gatt != null && gatt.getDevice() != null) {
             lastDevice = gatt.getDevice();
         }
     }
 
-    /** v2.6：从 WaspWingInfo.getDeviceCode() 识别型号并同步 BLE_OWNER_LAST；型号未知保持包名兜底 */
+    /** 从 WaspWingInfo.getDeviceCode() 识别型号并同步 BLE_OWNER_LAST；型号未知保持包名兜底 */
     private static void updateModelFromInfo(Object info) {
         try {
             connectedModel = modelFromDeviceCode(
                     XposedHelpers.callMethod(info, "getDeviceCode"));
-            refreshLastOwnerIfNeeded();  // v2.7(M3)：型号修正后同步 BLE_OWNER_LAST
+            refreshLastOwnerIfNeeded();  // (M3)：型号修正后同步 BLE_OWNER_LAST
         } catch (Throwable t) { /* 型号未知保持包名兜底 */ }
     }
 
