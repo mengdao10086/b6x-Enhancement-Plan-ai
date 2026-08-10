@@ -341,7 +341,7 @@ static int pid_kp_near_bound = 100;       // PID_KP 第一值=近/远区分界�
 static int pid_ki = 45;                   // PID_KI 第一值=积分增益（÷1000；dt 为周期数后标定单位=每 5s 周期，原秒标定 ×5 得等效值）
 static int pid_kd = 300;                  // PID_KD 第三值=远区斜率（÷1000，默认 0.3）
 static int pid_kd_near = 100;             // PID_KD 第二值=小变化低增益（÷1000，默认 0.1）
-static int pid_kd_near_bound = 30;        // PID_KD 第一值=小/大变化分界（0.1°C，默认 0.3°C）
+static int pid_kd_near_bound = 20;        // PID_KD 第一值=小/大变化分界（0.1°C，默认 0.3°C）
 static int pid_kd_leak = 50;              // PID_KD_MEM 第一值=记忆每周期固定衰减量（×1000，默认 0.05）
 static int pid_kd_max = 150;              // PID_KD_MEM 第二值=记忆幅值基础（×1000，默认 0.1）
 static int pid_kd_slope = 150;            // PID_KD_MEM 第三值=幅值随距基准斜率（×1000，默认 0.2/°C）；实际上限=基础+距基准°C×斜率
