@@ -184,8 +184,8 @@ static int BATT_BASELINE = 350;     // 基准温度 35.0°C
 static int ctrl_mode = 1;           // CTRL_MODE: 0=gear, 1=PID
 
 // --- 冷端→风扇映射 ---
-static int cold_map_start = 40;     // 映射起始强度，低于此值时线性外推下限
-static int cold_map_exp = 150;      // n^exp（÷100，150=1.50），>1 低冷慢转
+static int cold_map_start = 40;     // COLD_MAP 第一值=映射起始强度，低于此值时线性外推下限
+static int cold_map_exp = 150;      // COLD_MAP 第二值=n^exp（÷100，150=1.50），>1 低冷慢转
 static int rpm_smooth_alpha = 50;   // RPM_SMOOTH_ALPHA：冷/热端→风扇转速映射的 EMA 平滑系数（百分比，1~99）
 
 // --- 热端映射范围 ---
@@ -205,7 +205,7 @@ static int RATE_LIMIT_TEMP = 2;   // 目标温度每周期最大变化量（0.1�
 
 // --- 动态值（根据电池温差自动调整）---
 static int RATE_LIMIT_COLD_MULT = 10;  // 制冷强度倍率：升速/降速 = base ± dev(0.1°C) × mult / 10
-static int COLD_UP_DEADZONE = 5;       // 制冷上升死区：上升变化量 ≤ 该值时不升（制冷强度变化时会在限制以下波动一段时间，上升太少不如不升）
+static int COLD_UP_DEADZONE = 3;       // 制冷上升死区（RATE_LIMIT_COLD 第三值）：上升变化量 ≤ 该值时不升（制冷强度变化时会在限制以下波动一段时间，上升太少不如不升）
 static int RATE_LIMIT_FAN_UP = 200;   // 风扇升速基础值：RPM_UP = base + d × mult / 10
 static int RATE_LIMIT_FAN_MULT = 50;  // 风扇升速倍率（RATE_LIMIT_FAN_UP 双值第二位）
 static int cycle_batt_temp = -1;       // 本周期电池温度（-1=未就绪）
@@ -353,16 +353,20 @@ static int pid_integral_limit = 667;      // PID_KI_MEM 第三值=积分上限�
 // PID_KI_VAR：方差门控
 static int pid_ki_var_threshold = 50;     // PID_KI_VAR 第一值=方差门控阈值（0.1°C²，0=关闭）
 static int pid_ki_var_samples = 6;        // PID_KI_VAR 第二值=采样数（2~20）
-static int pid_ki_deadband = 20;          // PID_KI_VAR 第三值=积分死区（0.1°C，0=禁止I项）
+static int pid_ki_deadband = 15;          // PID_KI_VAR 第三值=积分死区（0.1°C，0=禁止I项）
 
 // PID_KD：微分（上升/下降独立倍率）
 static int pid_kd_up = 240;               // PID_KD 第一值=上升倍率（÷1000，默认 0.24）
 static int pid_kd_down = 360;             // PID_KD 第二值=下降倍率（÷1000，默认 0.36）
 
 // PID_KD_MEM：D 项记忆
-static int pid_kd_leak = 50;              // PID_KD_MEM 第一值=记忆每周期固定衰减量（×1000，默认 0.05）
+static int pid_kd_leak = 30;              // PID_KD_MEM 第一值=记忆每周期固定衰减量（×1000，默认 0.03）
 static int pid_kd_max = 150;              // PID_KD_MEM 第二值=记忆幅值基础（×1000，默认 0.15）
 static int pid_kd_slope = 150;            // PID_KD_MEM 第三值=幅值随距基准斜率（×1000，默认 0.15/°C）；实际上限=基础+距基准°C×斜率
+
+// PID_KD_NEAR：近区降敏（阈值 + 近区倍率）
+static int pid_kd_near_bound = 2;         // PID_KD_NEAR 第一值=近区阈值（0.1°C，默认 2=0.2°C；|de|<此值视为近区微抖）
+static int pid_kd_near_mult = 333;        // PID_KD_NEAR 第二值=近区倍率（÷1000，默认 333≈1/3；近区变化量×此倍率降敏）
 
 // PID_INPUT_FILTER：输入滤波（EMA 自适应开关）
 static int pid_input_filter_enabled = 1;  // PID_INPUT_FILTER 第一值：默认开（EMA 滤波；自适应逻辑可按间隔自动关闭/恢复）
@@ -750,12 +754,9 @@ static const struct IntCfgKey INT_CFG_KEYS[] = {
     { "TREND_RESET_THRESHOLD",     &TREND_RESET_THRESHOLD,       0, 20 },
     { "REV_COMP_COOLDOWN",         &REV_COMP_COOLDOWN,           0, 10 },
     { "RATE_LIMIT_TEMP",           &RATE_LIMIT_TEMP,             1, 30 },
-    { "COLD_UP_DEADZONE",          &COLD_UP_DEADZONE,            1, 50 },
     { "BATT_SKIP_MAX",             &BATT_SKIP_MAX,               1, 60 },
-    // PID 多值键（PID_KP / PID_KD / PID_KD_MEM / PID_KI_VAR / PID_KI / PID_KI_MEM）在 parse_pid_cfg 分段解析
+    // PID 多值键（PID_KP / PID_KD / PID_KD_MEM / PID_KI_VAR / PID_KI / PID_KI_MEM / PID_KD_NEAR）在 parse_pid_cfg 分段解析
     { "GEAR_PREDICT_ALPHA",        &gear_predict_alpha,          1, 100 },
-    { "COLD_MAP_START",            &cold_map_start,              0, 194 },
-    { "COLD_MAP_EXP",              &cold_map_exp,                50, 500 },
     { "RPM_SMOOTH_ALPHA",          &rpm_smooth_alpha,            1, 99 },
     { "CURRENT_GEAR_SMOOTH_ALPHA", &CURRENT_GEAR_SMOOTH_ALPHA,   1, 100 },
     { "CURRENT_GEAR_MIN",          &CURRENT_GEAR_MIN,            1, 12 },
@@ -837,6 +838,14 @@ static int parse_pid_cfg(const char *key, int val, const char *val_str) {
         if (cnt >= 1) pid_kd_leak  = clamp(l, 1, 1000);
         if (cnt >= 2) pid_kd_max   = clamp(m, 1, 1000);
         if (cnt >= 3) pid_kd_slope = clamp(s, 1, 1000);
+        return 1;
+    }
+    // PID_KD_NEAR = 近区阈值 近区倍率（双值：阈值(0.1°C) 倍率(÷1000)）
+    if (strcmp(key, "PID_KD_NEAR") == 0) {
+        int b = pid_kd_near_bound, m = pid_kd_near_mult;
+        int cnt = sscanf(val_str, "%d %d", &b, &m);
+        if (cnt >= 1) pid_kd_near_bound = clamp(b, 0, 100);
+        if (cnt >= 2) pid_kd_near_mult  = clamp(m, 1, 1000);
         return 1;
     }
     if (strcmp(key, "PID_INPUT_FILTER") == 0) {
@@ -1039,11 +1048,20 @@ static int parse_common_cfg(const char *key, int val, const char *val_str) {
         return 1;
     }
     if (strcmp(key, "RATE_LIMIT_COLD") == 0) {
-        int base = RATE_LIMIT_COLD, mult = RATE_LIMIT_COLD_MULT;
-        if (sscanf(val_str, "%d %d", &base, &mult) >= 1) {
-            RATE_LIMIT_COLD      = clamp(base, 1, 194);
-            RATE_LIMIT_COLD_MULT = clamp(mult, 1, 100);
-        }
+        // RATE_LIMIT_COLD = 基础值 倍率 上升死区（三值；上升死区原 COLD_UP_DEADZONE 并入）
+        int base = RATE_LIMIT_COLD, mult = RATE_LIMIT_COLD_MULT, dz = COLD_UP_DEADZONE;
+        int n = sscanf(val_str, "%d %d %d", &base, &mult, &dz);
+        if (n >= 1) RATE_LIMIT_COLD      = clamp(base, 1, 194);
+        if (n >= 2) RATE_LIMIT_COLD_MULT = clamp(mult, 1, 100);
+        if (n >= 3) COLD_UP_DEADZONE     = clamp(dz, 1, 50);
+        return 1;
+    }
+    // COLD_MAP = 映射起始强度 指数（双值；原 COLD_MAP_START / COLD_MAP_EXP 合并）
+    if (strcmp(key, "COLD_MAP") == 0) {
+        int s = cold_map_start, e = cold_map_exp;
+        int n = sscanf(val_str, "%d %d", &s, &e);
+        if (n >= 1) cold_map_start = clamp(s, 0, 194);
+        if (n >= 2) cold_map_exp   = clamp(e, 50, 500);
         return 1;
     }
     if (strcmp(key, "RATE_LIMIT_FAN_UP") == 0) {
@@ -2958,6 +2976,11 @@ static float pid_compute(int batt_10, float dt) {
     if (pid_prev_error != 0 || pid_last_batt >= 0) {   // 首次跳过
         float kd = (de >= 0.0f) ? (pid_kd_up / 1000.0f) : (pid_kd_down / 1000.0f);
         d_new = kd * de / dt;
+        // 近区降敏（PID_KD_NEAR 双值：阈值(0.1°C) 倍率(÷1000)）：|de| < 阈值视为近区（微抖），变化量 × 倍率
+        // 默认 2 333 = 0.2°C 内 × 1/3，抑制传感器微抖被微分放大导致制冷强度掉档；|de| ≥ 阈值全量响应
+        float de_abs = (de >= 0.0f) ? de : -de;
+        if (de_abs < pid_kd_near_bound / 10.0f)
+            d_new *= pid_kd_near_mult / 1000.0f;
     }
     pid_prev_error = error;
     // 泄漏衰减（固定值向 0 收敛，正负对称）
