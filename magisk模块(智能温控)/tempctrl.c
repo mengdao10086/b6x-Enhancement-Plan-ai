@@ -335,17 +335,19 @@ static time_t config_mtime = 0;
 
 // ======================== PID 模式控制（CTRL_MODE=1）========================
 // --- 核心参数 ---
-static int pid_kp = 300;                  // PID_KP 第三值=远区斜率（÷1000，默认 0.3）
-static int pid_kp_near = 150;             // PID_KP 第二值=近基准区低增益（÷1000，默认 0.15）
-static int pid_kp_near_bound = 100;       // PID_KP 第一值=近/远区分界（0.1°C，默认 1.0°C）
-static int pid_ki = 45;                   // PID_KI 第一值=积分增益（÷1000；dt 为周期数后标定单位=每 5s 周期，原秒标定 ×5 得等效值）
-static int pid_kd = 300;                  // PID_KD 第三值=远区斜率（÷1000，默认 0.3）
-static int pid_kd_near = 100;             // PID_KD 第二值=小变化低增益（÷1000，默认 0.1）
-static int pid_kd_near_bound = 20;        // PID_KD 第一值=小/大变化分界（0.1°C，默认 0.3°C）
+static int pid_kp = 300;                  // PID_KP=比例增益（÷1000，默认 0.3，线性无分段）
+static int pid_ki_up_base = 20;           // PID_KI 第一值=高基准基础增益（÷1000，error>0 时 gain=base+slope×error）
+static int pid_ki_up_slope = 20;          // PID_KI 第二值=高基准每°C增益（÷1000，每高于基准1°增益+20）
+static int pid_ki_down_base = 50;         // PID_KI 第三值=低基准基础增益（÷1000，error<0 时回落 gain=base+slope×|error|）
+static int pid_ki_down_slope = 50;        // PID_KI 第四值=低基准每°C增益（÷1000，每低于基准1°回落+50）
+static int pid_ki_drop = 100;             // PID_KI_MEM 第一值=下降惩罚（÷1000，降温时每周期每度降低直接扣累计值）
+static int pid_ki_leak = 30;              // PID_KI_MEM 第二值=每次计算固定衰减（÷1000，0.03/周期，始终生效不受门控）
+static int pid_kd_up = 240;               // PID_KD 第一值=上升倍率（÷1000，默认 0.24）
+static int pid_kd_down = 360;             // PID_KD 第二值=下降倍率（÷1000，默认 0.36）
 static int pid_kd_leak = 50;              // PID_KD_MEM 第一值=记忆每周期固定衰减量（×1000，默认 0.05）
-static int pid_kd_max = 150;              // PID_KD_MEM 第二值=记忆幅值基础（×1000，默认 0.1）
-static int pid_kd_slope = 150;            // PID_KD_MEM 第三值=幅值随距基准斜率（×1000，默认 0.2/°C）；实际上限=基础+距基准°C×斜率
-static int pid_integral_limit = 667;      // PID_KI 第二值=积分上限（÷1000，I 项最大输出贡献；预算链 min(1-p-d, 此值) 取小）
+static int pid_kd_max = 150;              // PID_KD_MEM 第二值=记忆幅值基础（×1000，默认 0.15）
+static int pid_kd_slope = 150;            // PID_KD_MEM 第三值=幅值随距基准斜率（×1000，默认 0.15/°C）；实际上限=基础+距基准°C×斜率
+static int pid_integral_limit = 667;      // PID_KI_MEM 第三值=积分上限（÷1000，I 项最大输出贡献；预算链 min(1-p-d, 此值) 取小）
 
 // --- KI 方差门控 ---
 static int pid_ki_var_threshold = 50;     // PID_KI_VAR 第一值=方差门控阈值（0.1°C²，0=关闭）
@@ -409,7 +411,7 @@ static int gear_predict_consecutive = 0;    // 连续预测周期数（用于 ra
 // --- 输入补偿（加到电池温度，反映 CPU 额外发热；PID 与 Gear 共用，始终生效，无开关）---
 static int pid_cpu_comp_filter_alpha = 25;  // PID_CPU_COMP 第一值：补偿 EMA 平滑系数（%，独立于 CPU_FILTER_ALPHA）
 static int pid_cpu_comp_divisor = 30;       // PID_CPU_COMP 第二值：除数
-static int pid_cpu_comp_offset = 100;       // PID_CPU_COMP 第三值：偏移量（0.1°C，100=10.0°C）
+static int pid_cpu_comp_offset = 0;       // PID_CPU_COMP 第三值：偏移量（0.1°C，100=10.0°C）
 static int pid_cpu_comp_ready = 0;          // 补偿平滑是否已初始化（首值直取）
 static float pid_cpu_comp_smooth = 0.0f;    // CPU 补偿 EMA 平滑值（°C）
 static int pid_last_comp_10 = 0;            // 上次 PID 重算时的补偿值（0.1°C）
@@ -733,7 +735,7 @@ static const struct IntCfgKey INT_CFG_KEYS[] = {
     { "RATE_LIMIT_TEMP",           &RATE_LIMIT_TEMP,             1, 30 },
     { "COLD_UP_DEADZONE",          &COLD_UP_DEADZONE,            1, 50 },
     { "BATT_SKIP_MAX",             &BATT_SKIP_MAX,               1, 60 },
-    // PID 多值键（PID_KP / PID_KD / PID_KD_MEM / PID_KI_VAR / PID_KI）在 parse_pid_cfg 分段解析
+    // PID 多值键（PID_KP / PID_KD / PID_KD_MEM / PID_KI_VAR / PID_KI / PID_KI_MEM）在 parse_pid_cfg 分段解析
     { "GEAR_PREDICT_ALPHA",        &gear_predict_alpha,          1, 100 },
     { "COLD_MAP_START",            &cold_map_start,              0, 194 },
     { "COLD_MAP_EXP",              &cold_map_exp,                50, 500 },
@@ -795,30 +797,20 @@ static void parse_sysfs_cfg(const char *key, int val, const char *val_str) {
 
 /** PID 专属多值配置（PERF 层） */
 static int parse_pid_cfg(const char *key, int val, const char *val_str) {
-    // PID_KP = 分界 近区 远区（旧单值格式 → 仅远区，兼容）
+    // PID_KP = 比例增益（单值，÷1000；兼容旧三值"分界 近区 远区"取远区斜率）
     if (strcmp(key, "PID_KP") == 0) {
-        int b = pid_kp_near_bound, n = pid_kp_near, f = pid_kp;
-        int cnt = sscanf(val_str, "%d %d %d", &b, &n, &f);
-        if (cnt == 1) {
-            pid_kp = clamp(b, 1, 1000);   // 旧单值：视为远区斜率
-        } else {
-            if (cnt >= 1) pid_kp_near_bound = clamp(b, 10, 300);
-            if (cnt >= 2) pid_kp_near       = clamp(n, 1, 1000);
-            if (cnt >= 3) pid_kp            = clamp(f, 1, 1000);
-        }
+        int v[3] = {0, 0, 0};
+        int cnt = sscanf(val_str, "%d %d %d", &v[0], &v[1], &v[2]);
+        int g = (cnt >= 3) ? v[2] : v[0];   // 旧三值取远区斜率，单值取本身
+        pid_kp = clamp(g, 1, 1000);
         return 1;
     }
-    // PID_KD = 分界 近区 远区（旧单值格式 → 仅远区，兼容）
+    // PID_KD = 上升倍率 下降倍率（双值，÷1000；删除分段后上升/下降独立）
     if (strcmp(key, "PID_KD") == 0) {
-        int b = pid_kd_near_bound, n = pid_kd_near, f = pid_kd;
-        int cnt = sscanf(val_str, "%d %d %d", &b, &n, &f);
-        if (cnt == 1) {
-            pid_kd = clamp(b, 0, 1000);   // 旧单值：视为远区斜率
-        } else {
-            if (cnt >= 1) pid_kd_near_bound = clamp(b, 10, 300);
-            if (cnt >= 2) pid_kd_near       = clamp(n, 1, 1000);
-            if (cnt >= 3) pid_kd            = clamp(f, 0, 1000);
-        }
+        int u = pid_kd_up, d = pid_kd_down;
+        int cnt = sscanf(val_str, "%d %d", &u, &d);
+        if (cnt >= 1) pid_kd_up   = clamp(u, 0, 1000);
+        if (cnt >= 2) pid_kd_down = clamp(d, 0, 1000);
         return 1;
     }
     // PID_KD_MEM = 记忆衰减 记忆幅值基础 幅值斜率（均 ×1000）
@@ -850,12 +842,23 @@ static int parse_pid_cfg(const char *key, int val, const char *val_str) {
         if (n >= 3) { b7_pid_cold_max = clamp(c, 1, B7X_COLD_MAX); }
         return 1;
     }
+    // PID_KI = 高基准基础 高基准斜率 低基准基础 低基准斜率（四值，÷1000）
     if (strcmp(key, "PID_KI") == 0) {
-        int k = pid_ki, l = pid_integral_limit;
-        if (sscanf(val_str, "%d %d", &k, &l) >= 1) {
-            pid_ki              = clamp(k, 0, 1000);
-            pid_integral_limit  = clamp(l, 0, 1000);
-        }
+        int a = pid_ki_up_base, b = pid_ki_up_slope, c = pid_ki_down_base, d = pid_ki_down_slope;
+        int cnt = sscanf(val_str, "%d %d %d %d", &a, &b, &c, &d);
+        if (cnt >= 1) pid_ki_up_base   = clamp(a, 0, 1000);
+        if (cnt >= 2) pid_ki_up_slope  = clamp(b, 0, 1000);
+        if (cnt >= 3) pid_ki_down_base = clamp(c, 0, 1000);
+        if (cnt >= 4) pid_ki_down_slope= clamp(d, 0, 1000);
+        return 1;
+    }
+    // PID_KI_MEM = 下降惩罚 固定衰减 积分上限（三值，÷1000）
+    if (strcmp(key, "PID_KI_MEM") == 0) {
+        int a = pid_ki_drop, b = pid_ki_leak, c = pid_integral_limit;
+        int cnt = sscanf(val_str, "%d %d %d", &a, &b, &c);
+        if (cnt >= 1) pid_ki_drop        = clamp(a, 0, 1000);
+        if (cnt >= 2) pid_ki_leak        = clamp(b, 0, 1000);
+        if (cnt >= 3) pid_integral_limit = clamp(c, 0, 1000);
         return 1;
     }
     if (strcmp(key, "PID_KI_VAR") == 0) {
@@ -2916,35 +2919,18 @@ static float pid_compute(int batt_10, float dt) {
     int error_10 = batt_10 - target_10;
     float error = error_10 / 10.0f;
 
-    // P 项（非线性：|error|≤近区分界用低斜率 pid_kp_near，远区用 pid_kp，衔接连续）
-    float p;
-    {
-        float e_abs = (error >= 0.0f) ? error : -error;
-        float near_deg = pid_kp_near_bound / 10.0f;
-        if (e_abs <= near_deg) {
-            p = (pid_kp_near / 1000.0f) * error;
-        } else {
-            float sign = (error >= 0.0f) ? 1.0f : -1.0f;
-            p = sign * ((pid_kp_near / 1000.0f) * near_deg
-                      + (pid_kp / 1000.0f) * (e_abs - near_deg));
-        }
-    }
+    // P 项（线性，无分段）：比例增益 pid_kp，偏差 3°C 达满幅（0.3×3=0.9）
+    float p = (pid_kp / 1000.0f) * error;
 
-    // D 项（非线性 + 泄漏记忆 + 预算/幅值限幅；先于 I 计算，供 I 预算使用）
-    // 非线性：|Δerror|≤分界低增益、大变化高增益，抑制小波动引起的 D 抖动
-    // 泄漏记忆：d_state 每周期向 0 收敛固定量（消除非线性方向不对称），再加新贡献
+    // D 项（线性 + 泄漏记忆 + 预算/幅值限幅；先于 I 计算，供 I 预算使用）
+    // 上升/下降独立倍率：de>0（升温）用 pid_kd_up、de<0（降温）用 pid_kd_down
+    // 泄漏记忆：d_state 每周期向 0 收敛固定量（消除方向不对称），再加新贡献
     // 预算链：d_state 正方向不超过 1−p（防 P+D 超 1 被末端 clamp 硬截断）
     float de = error - pid_prev_error;
     float d_new = 0.0f;
     if (pid_prev_error != 0 || pid_last_batt >= 0) {   // 首次跳过
-        float de_abs = (de >= 0.0f) ? de : -de;
-        float sign = (de >= 0.0f) ? 1.0f : -1.0f;
-        float near_deg = pid_kd_near_bound / 10.0f;
-        if (de_abs <= near_deg)
-            d_new = (pid_kd_near / 1000.0f) * de / dt;
-        else
-            d_new = sign * ((pid_kd_near / 1000.0f) * near_deg
-                          + (pid_kd / 1000.0f) * (de_abs - near_deg)) / dt;
+        float kd = (de >= 0.0f) ? (pid_kd_up / 1000.0f) : (pid_kd_down / 1000.0f);
+        d_new = kd * de / dt;
     }
     pid_prev_error = error;
     // 泄漏衰减（固定值向 0 收敛，正负对称）
@@ -2982,17 +2968,31 @@ static float pid_compute(int batt_10, float dt) {
         float db = pid_ki_deadband / 10.0f;
         if (error > -db && error < db) { ki_active = 1; ki_gate = 2; }
     }
-    if (ki_active) {
-        pid_integral_accum += (pid_ki / 1000.0f) * error * dt;
+    // V 形增益累积（建立慢、释放快）：高基准受门控、低基准无条件
+    // 高基准（error>0，门控激活时）：gain = up_base + up_slope×error，每高于基准1°增益+20
+    if (ki_active && error >= 0.0f) {
+        float gain = (pid_ki_up_base + pid_ki_up_slope * error) / 1000.0f;
+        pid_integral_accum += gain * error * dt;
     }
+    // 低基准（error<0，无条件）：gain = down_base + down_slope×|error|，每低于基准1°回落+50
+    if (error < 0.0f) {
+        float e_abs = -error;
+        float gain = (pid_ki_down_base + pid_ki_down_slope * e_abs) / 1000.0f;
+        pid_integral_accum -= gain * e_abs * dt;
+    }
+    // 下降惩罚（本次比上次降温 de<0，无条件）：每降低1°扣 drop/1000 的累计值，直接作用于累积量
+    if (de < 0.0f) {
+        pid_integral_accum -= (pid_ki_drop / 1000.0f) * (-de);
+    }
+    // 固定衰减：每周期向 0 收敛 leak/1000（0.03），始终生效不受门控
+    pid_integral_accum -= pid_ki_leak / 1000.0f;
     // I 预算上限：min(剩余预算 1−p−d, 固定值 667)，再单向下限 0
     float i_limit = pid_integral_limit / 1000.0f;
     float i_budget = 1.0f - p - d;
     if (i_budget < 0.0f) i_budget = 0.0f;
     if (i_budget < i_limit) i_limit = i_budget;
     if (pid_integral_accum >  i_limit) pid_integral_accum =  i_limit;
-    // 积分单向限制 0~+LIMIT：低温（error<0）时不累积负积分，
-    // 避免之后升温时需先抵消负积分才能响应（升温延迟）
+    // 积分单向限制 0~+LIMIT（低温回落已在此处归零，不产生负积分）
     if (pid_integral_accum < 0.0f)    pid_integral_accum = 0.0f;
 
     // 钳位 0~1
