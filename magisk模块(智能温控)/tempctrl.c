@@ -410,6 +410,17 @@ static float pid_cpu_comp_smooth = 0.0f;    // CPU 补偿 EMA 平滑值（°C）
 static int pid_last_comp_10 = 0;            // 上次 PID 重算时的补偿值（0.1°C）
 static int pid_cpu_comp_active = 0;         // 补偿门控：1=激活（进入后即使条件消失也保持到滤波归零才退出）
 
+// --- PID 输出端自适应 EMA 滤波（PID_OUT_FILTER）---
+// α = 基础 + 每周期平均温差×温差增益 + 距目标偏差×偏差增益，clamp [基础, 1.0]
+static int pid_out_filter_enabled = 1;    // 开关：0=直通（回退现状）
+static int pid_out_base_alpha = 100;      // 基础 α（‰，100=0.1）
+static int pid_out_temp_gain = 100;       // 温差增益（‰/0.1°，每 0.1° 温差 α+0.1）
+static int pid_out_dev_gain = 10;         // 偏差增益（‰/0.1°，每 0.1° 偏差 α+0.01）
+static int pid_out_prev = -1;             // 上次滤波输出（-1=未初始化）
+static int pid_out_last_batt = -1;        // 上次判据温度（0.1°，原始值）
+static int pid_out_last_cycle = -1;       // 上次判据周期计数（gap 计算用）
+static int pid_out_prev2_batt = -1;       // 上上次判据温度（0.1° 抖动识别用）
+
 // ======================== Gear 温度预测 ========================
 // 通过历史温度变化趋势预测电池温度的平衡点，提前给 Gear 调档提供前馈信号（PID 不使用预测）
 #define PREDICT_BUF_MAX 32  // 缓冲区容量上限（≥ 可配置的 GEAR_PREDICT_WIN 第一值）
@@ -901,6 +912,17 @@ static int parse_pid_cfg(const char *key, int val, const char *val_str) {
         if (n >= 1) pid_cpu_comp_filter_alpha = clamp(a, 1, 100);
         if (n >= 2) pid_cpu_comp_divisor = clamp(b, 5, 200);
         if (n >= 3) pid_cpu_comp_offset = clamp(c, 0, 500);
+        return 1;
+    }
+    // PID_OUT_FILTER = 开关 基础α(‰) 温差增益(‰/0.1°) 偏差增益(‰/0.1°)
+    // 默认 "1 100 100 10" = 基础0.1、温差每0.1°+0.1、偏差每0.1°+0.01
+    if (strcmp(key, "PID_OUT_FILTER") == 0) {
+        int on = pid_out_filter_enabled, b = pid_out_base_alpha, tg = pid_out_temp_gain, dg = pid_out_dev_gain;
+        int n = sscanf(val_str, "%d %d %d %d", &on, &b, &tg, &dg);
+        if (n >= 1) pid_out_filter_enabled = (on != 0);
+        if (n >= 2) pid_out_base_alpha = clamp(b, 1, 1000);
+        if (n >= 3) pid_out_temp_gain  = clamp(tg, 0, 1000);
+        if (n >= 4) pid_out_dev_gain   = clamp(dg, 0, 500);
         return 1;
     }
     return 0;
@@ -1926,7 +1948,7 @@ static int rate_limit_fan(int desired_rpm) {
  * 回传异常（status 文件读失败，实际值 < 0）时退化用 last_* 缓存对比。
  *
  * 制冷上升死区：制冷强度变化时会在限制以下波动一段时间，所以如果上升值较少不如不升。
- * 制冷上升且"要下发值 − 散热器实际值 ≤ COLD_UP_DEADZONE"时跳过；
+ * 制冷上升且"要下发值 − 散热器实际值 < COLD_UP_DEADZONE"时跳过（达到死区值及以上放行）；
  * 距最高/最低制冷强度 < 阈值×2 时死区失效（接近极值必须允许精确到位）。
  * 下降方向不受限（快速响应撤冷）。
  */
@@ -1946,8 +1968,8 @@ static int should_skip_dispatch(int mode, int target, int windOC, int cold, int 
             int cmax = active_cold_eff_max;
             int near_extreme = (cmax - cooler_cold_real) < COLD_UP_DEADZONE * 2
                             || (cooler_cold_real - cmin) < COLD_UP_DEADZONE * 2;
-            if (!near_extreme && diff <= COLD_UP_DEADZONE) {
-                debug_log(debug_exec, "skip 制冷上升死区：目标冷%d 回传冷%d diff=%d ≤死区%d，跳过下发",
+            if (diff < COLD_UP_DEADZONE && !near_extreme) {
+                debug_log(debug_exec, "skip 制冷上升死区：目标冷%d 回传冷%d diff=%d <%d死区，跳过下发",
                           cold, cooler_cold_real, diff, COLD_UP_DEADZONE);
                 return 1;   // 上升太少，不如不升
             }
@@ -3224,6 +3246,11 @@ static void pid_reset_core(void) {
     pid_var_last_cycle = -1;
     pid_cpu_comp_ready = 0;
     pid_cpu_comp_active = 0;
+    // PID 输出端自适应滤波状态重置（切模式/重连/重置后直取新目标，避免旧滤波残留）
+    pid_out_prev = -1;
+    pid_out_last_batt = -1;
+    pid_out_last_cycle = -1;
+    pid_out_prev2_batt = -1;
 }
 
 /**
@@ -3252,6 +3279,11 @@ static float pid_ratio_from_cold(int cold_ref, int cold_max) {
     if (ratio < 0.0f) ratio = 0.0f;
     if (ratio > 1.0f) ratio = 1.0f;
     pid_align_cold = cold_ref;
+    // 输出滤波状态重置（外部对齐目标变更，避免旧滤波从上次值向新目标爬升）
+    pid_out_prev = -1;
+    pid_out_last_batt = -1;
+    pid_out_last_cycle = -1;
+    pid_out_prev2_batt = -1;
     pid_align_rpm  = fan_rpm_min + (int)(ratio * (active_fan_max - fan_rpm_min));
     pid_ratio_saved = ratio;
     return ratio;
@@ -3324,13 +3356,77 @@ static void reconnect_align(void) {
 static int prev_emerg_level = 0;
 
 /**
+ * PID 输出端自适应 EMA 滤波（PID_OUT_FILTER）。
+ * 每控制周期推进，不跟随 PID 是否重算：PID 未重算时目标 pid_align_cold 保持，
+ * 滤波继续向该目标收敛，输出仍逐步变化。
+ *
+ * α（0~1）动态 = 基础 + 每周期平均温差×温差增益 + 距目标偏差×偏差增益：
+ *   温差大（真趋势）→ α 高 → 快速跟随；温差小（稳态）→ α 低 → 强滤波压抖。
+ * 0.1° 抖动识别：单步温差恰为 0.1° 且上上次温度与本次相同（来回抖回原位）→ 视为无变化。
+ *
+ * 判据温度用原始值 cached_batt_raw（滤波后值会把温差摊平、判据失真）；
+ * 偏差用 PID 滤波后输入 pid_batt_filtered（与 pid_compute 内部口径一致）。
+ * 输出方向取整（增大向上、减小向下），并钳制到当前模式有效范围。
+ */
+static int pid_out_filter(int target) {
+    if (!pid_out_filter_enabled) return target;
+
+    int batt = cached_batt_raw;   // 1s 采集缓存
+    if (batt < 0) batt = (pid_out_last_batt >= 0) ? pid_out_last_batt : BATT_BASELINE;
+                                // 采集异常时用上次判据值，温差按 0（避免 -1 被误判为大跳变）
+
+    // --- 每周期平均温差（0.1°），含 0.1° 抖动识别 ---
+    int d_eff_10 = 0;
+    if (pid_out_last_cycle >= 0 && pid_out_last_batt >= 0) {
+        int delta = (batt >= pid_out_last_batt) ? (batt - pid_out_last_batt)
+                                                : (pid_out_last_batt - batt);
+        if (delta == 1 && pid_out_prev2_batt >= 0 && pid_out_prev2_batt == batt)
+            d_eff_10 = 0;   // 0.1° 来回抖且回到原位 → 无变化
+        else {
+            int gap = pid_ctrl_cycles - pid_out_last_cycle;
+            if (gap <= 0) gap = 1;
+            d_eff_10 = delta / gap;
+        }
+    }
+    pid_out_prev2_batt = pid_out_last_batt;
+    pid_out_last_batt  = batt;
+    pid_out_last_cycle = pid_ctrl_cycles;
+
+    // --- α 计算（千分制）：α = 基础 + d_eff×温差增益 + 偏差×偏差增益，clamp [基础, 1000] ---
+    int pid_input_10 = (pid_batt_filtered >= 0) ? pid_batt_filtered : batt;
+    int dev_10 = pid_input_10 - BATT_BASELINE;
+    if (dev_10 < 0) dev_10 = -dev_10;
+    int alpha_mil = pid_out_base_alpha
+                  + d_eff_10 * pid_out_temp_gain
+                  + dev_10  * pid_out_dev_gain;
+    if (alpha_mil > 1000) alpha_mil = 1000;
+    if (alpha_mil < pid_out_base_alpha) alpha_mil = pid_out_base_alpha;
+    float alpha = alpha_mil / 1000.0f;
+
+    // --- EMA 滤波（方向取整）---
+    if (pid_out_prev < 0) {                          // 首次直取
+        pid_out_prev = target;
+        return target;
+    }
+    float f = (float)pid_out_prev + alpha * ((float)target - pid_out_prev);
+    int out;
+    if (target >= pid_out_prev) out = (int)(f + 0.999f);   // 增大向上取整
+    else                        out = (int)f;              // 减小向下取整
+    if (out < pid_cold_min)        out = pid_cold_min;
+    if (out > active_cold_eff_max) out = active_cold_eff_max;
+    pid_out_prev = out;
+    return out;
+}
+
+/**
  * 按当前模式分发执行（限速统一下沉到 apply_gear / apply_gear_direct 内部）
  * PID 模式：传 pid_align_* → apply_gear_direct 内部限速
  * Gear 模式：apply_gear 内部限速
  */
 static void rate_limited_execute(void) {
-    // --- PID 模式：制冷限速 → 独立风扇计算（不跟 PID 输出）→ 风扇限速 → 纯下发 ---
+    // --- PID 模式：输出端滤波 → 制冷限速 → 独立风扇计算（不跟 PID 输出）→ 风扇限速 → 纯下发 ---
     if (ctrl_mode == 1) {
+        pid_align_cold = pid_out_filter(pid_align_cold);
         rate_limit_cold(pid_align_cold);
         int send_rpm = rate_limit_fan(compute_fan_target());
         apply_gear_direct(1, 5, send_rpm, actual_cold, 0);
