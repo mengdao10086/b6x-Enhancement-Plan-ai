@@ -12,7 +12,7 @@
 - **双 status 文件心跳**：每 1 秒写入 BLE 状态及散热器运行参数到 `/data/local/tmp/tempctrl_b6x.status` / `tempctrl_b7x.status`，含 `CONNECTED_AT` 时间戳供仲裁
 - **CPU 占用修复**：修复 DefaultDispatcher 线程空队列忙等导致的 100% CPU 占用
 - **上次设备持久化 + 启动自动连接**：连接时保存散热器 MAC，app 冷启动后自动恢复并重连，无需手动点"开始设置"；配合守护进程自动拉起（`b6x_auto_launch` 标志）实现拉起即连、自动后台化
-- **锁死自愈**：修复 B6X 重连后散热器停在固件默认档（制冷 125 / 风扇 4500）不再响应控制命令——下发前校验 static controller 的 gatt 有效性并自动重新同步到有效实例；连续 3 次参数下发后回传仍停滞且 ≠ 目标时自动强制重连。详见 [CHANGELOG.md](../CHANGELOG.md)
+- **锁死自愈**：修复 B6X 重连后散热器不再响应控制命令——下发前校验 static controller 的 gatt 有效性并自动重新同步到有效实例；连续 3 次参数下发后回传仍停滞且 ≠ 目标时自动强制重连。另覆盖"命令消费协程崩溃"场景：命令队列堆积时启动守护线程接管消费，重连无法恢复也能自愈。详见 [CHANGELOG.md](../CHANGELOG.md)
 
 ---
 
