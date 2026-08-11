@@ -120,3 +120,21 @@ Caused by: java.lang.NullPointerException: Attempt to read from field 'android.o
 - B6X 新 app（`com.flydigi.waspwing.experimental` 与 `com.flydigi.waspwing.experimentanliuliu`，SDK 同源类名/字段一致）与 B7X（混淆 `t9.j`/`a`）均已覆盖同一套逻辑
 
 **教训**：LSP 侧"命令下发无反应"的排查不能止步于连接状态（state==2）——Android BLE 对**已断开但非空**的 `BluetoothGatt` 调用 `writeCharacteristic` 是静默失败的，必须校验 gatt 与当前有效连接的一致性，并给设备停摆兜底一个主动重连的保险丝。
+
+### 6. 散热器停摆制冷82/风扇2000，命令消费协程崩溃（2026-08-11 发现，已解决待真机验证）
+
+**现象**：散热器偶发停在制冷 82、风扇 2000（**最后一次成功命令的残留状态**，非固件默认档），tempctrl 持续下发新参数但散热器不响应；条目5 的锁死自愈（重连）触发后**仍无效**，必须强制停止 app 冷启动才恢复。LSP 日志显示回传热端温度持续变化（310→390，0x13 通知链路活着），制冷/风扇字段恒 82/2000。
+
+**机制（已确认，日志+反编译证据）**：
+1. SDK 的 `AbstractDataInteractionController.runFetchLoop`（命令消费协程）**只在构造函数里 `GlobalScope.launch` 启动一次**，是死循环且无重启机制；
+2. 断联后某次 `writeToBluetoothDevice` 对已 close 的 gatt 调用 `writeCharacteristic` 抛异常，runFetchLoop 无 try-catch **直接崩溃退出**；
+3. 之后 `setRunMode` 照常入队（`addCommandToQueue` 只检查 state≠0），但**队列无人消费** → 散热器停在最后成功状态；
+4. 0x13 回传是**独立链路**（`BluetoothGattCallback.onCharacteristicChanged`，不走 runFetchLoop），故热端温度仍更新——"回传活着但命令不生效"的表象；
+5. 重连**无法恢复进程级协程**（不随连接重建）；杀 app 冷启动 = 重建 controller + 重建 runFetchLoop。
+
+**修正（2026-08-11，待真机验证）**：
+- **先 queue 后 dispatch**：锁死检测先判命令队列堆积（>12 条）→ 堆积即启动守护消费线程接管 `processData`（跳过 forceReconnect，因重连救不了崩溃协程）；否则才走原有"3 次下发 → forceReconnect"
+- **守护消费线程**：轮询命令队列，state==2 时反射调用 `processData` 消费；单条异常 try-catch 不冒泡（天然防崩溃）
+- **重连前清空队列**：forceReconnect 前 `clear()` 堆积命令，避免断连期无效命令残留
+
+**教训**：LSP 侧"命令下发无反应"的排查，除连接状态（state==2）与 gatt 有效性（条目4/5）外，还要检查**命令消费协程是否存活**——SDK 在构造时启动的进程级死循环协程一旦崩溃，重连无法恢复，必须以"队列堆积"为判据做独立兜底（守护消费线程），而不能只依赖连接级自愈。

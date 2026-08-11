@@ -16,6 +16,7 @@ import java.io.BufferedReader;
 import java.io.FileOutputStream;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentLinkedQueue;
+import java.lang.reflect.Method;
 import java.util.UUID;
 
 import de.robv.android.xposed.IXposedHookLoadPackage;
@@ -72,6 +73,17 @@ public class MainHook implements IXposedHookLoadPackage {
     private static final int DISPATCH_STALL_LIMIT = 3;                 // 连续 3 次参数下发后回传仍停滞 → 判定锁死
     private static volatile long lastForceReconnectAt = 0;              // forceReconnect 防抖（10s 内最多一次）
     private static final long FORCE_RECONNECT_MIN_INTERVAL_MS = 10000;
+
+    // ========== runFetchLoop 崩溃兜底（v2.5+） ==========
+    // 背景：SDK 的 AbstractDataInteractionController.runFetchLoop（命令消费协程）只在构造函数里
+    // GlobalScope.launch 启动一次，是死循环且无重启机制。断联后某次 writeToBluetoothDevice 对已 close
+    // 的 gatt 调用 writeCharacteristic 会抛异常，runFetchLoop 未捕获直接崩溃退出 → 命令队列从此无人
+    // 消费 → 散热器停在最后一次成功命令状态（如制冷82/风扇2000，热端仍变，因为 0x13 通知是独立链路）。
+    // 重连无法恢复（进程级协程不随连接重建），必须检测队列堆积并用守护线程接管消费。
+    private static final int QUEUE_STALL_THRESHOLD = 12;          // queue 堆积 > 12 条 = runFetchLoop 疑似崩溃
+    private static volatile boolean consumerThreadStarted = false; // 守护消费线程已启动（幂等，进程内一次）
+    private static volatile long consumerThreadStartedAt = 0;      // 守护线程启动防抖（10s 内不重复触发）
+    private static final long CONSUMER_START_MIN_INTERVAL_MS = 10000;
 
     // ========== 设备型号识别 + B6X 自动进入设置界面 ==========
     private static volatile int connectedModel = 0;           // 0=未知, 6=B6X型号, 7=B7X型号（BLE 字段 0/6/7）
@@ -1292,11 +1304,13 @@ public class MainHook implements IXposedHookLoadPackage {
         }
     }
 
-    /** 强制重新连接（10s 防抖）。断开当前 gatt → 置断连状态 → 后台重连线程自动接管。 */
+    /** 强制重新连接（10s 防抖）。断开当前 gatt → 清空命令队列 → 置断连状态 → 后台重连线程自动接管。 */
     private static void forceReconnect() {
         long now = System.currentTimeMillis();
         if (now - lastForceReconnectAt < FORCE_RECONNECT_MIN_INTERVAL_MS) return;
         lastForceReconnectAt = now;
+        clearCommandQueue();  // 重连前清空堆积的无效命令：断连期入队的命令写在旧 gatt 上必然失败，
+                              // 且若 runFetchLoop 已崩溃，队列残留只会让守护线程反复消费无效命令
         try {
             BluetoothGatt g = currentValidGatt;
             if (g != null) g.disconnect();
@@ -1306,8 +1320,10 @@ public class MainHook implements IXposedHookLoadPackage {
     }
 
     /**
-     * 锁死检测——累计 3 次参数下发后，散热器回传（制冷/风扇）仍停滞不变、
-     * 且与最近下发目标不一致，判定设备已锁死（命令被静默丢弃），触发强制重连。
+     * 锁死检测——先判命令队列堆积，再判回传停滞（先 queue 后 dispatch）：
+     * ① 命令队列堆积 > QUEUE_STALL_THRESHOLD 条 → runFetchLoop（命令消费协程）疑似崩溃退出，
+     *    重连救不了进程级协程，直接启动守护消费线程接管（跳过 forceReconnect）；
+     * ② 否则累计 3 次参数下发后回传仍停滞不变、且与最近下发目标不一致 → 判定锁死，强制重连。
      * 每秒调用一次（writeStatusFile 内）。回传到位（=目标）或回传在变（设备在响应）均清零。
      */
     private static void checkCommandStall() {
@@ -1322,7 +1338,14 @@ public class MainHook implements IXposedHookLoadPackage {
                 stallLastRpm = rpm;
                 return;
             }
-            // 回传停滞（连续不变）：累计下发 ≥ 3 次仍未生效 → 锁死
+            // ═══ 先 queue 后 dispatch ═══
+            // ① 队列持续堆积 → runFetchLoop 疑似崩溃，守护线程接管消费（重连救不了崩溃的协程）
+            if (getCommandQueueSize() > QUEUE_STALL_THRESHOLD) {
+                startConsumerThreadIfNeeded();
+                dispatchStallCount = 0;  // 本周期已走队列兜底，重置下发计数避免与 ② 叠加
+                return;
+            }
+            // ② 回传停滞（连续不变）：累计下发 ≥ 3 次仍未生效 → 锁死
             if (cold == stallLastCold && rpm == stallLastRpm) {
                 if (dispatchStallCount >= DISPATCH_STALL_LIMIT && lastBcastCold >= 0) {
                     XposedBridge.log(TAG + " 锁死检测: " + DISPATCH_STALL_LIMIT + " 次下发后回传停滞 冷" + cold
@@ -1338,6 +1361,101 @@ public class MainHook implements IXposedHookLoadPackage {
                 dispatchStallCount = 0;
             }
         } catch (Throwable t) { /* 回传读取失败忽略 */ }
+    }
+
+    /** 读取 static dataInteractionController 当前实例（B6X/B7X 按字段分流）；捕获失败返回 null */
+    private static Object getStaticController() {
+        if (capturedWaspWingMgr == null) return null;
+        String dicField = (deviceType == 7) ? "f50991b" : "dataInteractionController";
+        try {
+            return XposedHelpers.getStaticObjectField(capturedWaspWingMgr.getClass(), dicField);
+        } catch (Throwable t) { return null; }
+    }
+
+    /** 当前命令队列大小（runFetchLoop 是否在消费的判据：堆积 = 消费停摆） */
+    private static int getCommandQueueSize() {
+        try {
+            Object ctrl = getStaticController();
+            if (ctrl == null) return 0;
+            ConcurrentLinkedQueue<?> q = (ConcurrentLinkedQueue<?>) XposedHelpers.getObjectField(
+                    ctrl, "mConcurrentLinkedQueue");
+            return q != null ? q.size() : 0;
+        } catch (Throwable t) { return 0; }
+    }
+
+    /** 清空命令队列（forceReconnect 前调用，避免断连期无效命令残留） */
+    private static void clearCommandQueue() {
+        try {
+            Object ctrl = getStaticController();
+            if (ctrl == null) return;
+            ConcurrentLinkedQueue<?> q = (ConcurrentLinkedQueue<?>) XposedHelpers.getObjectField(
+                    ctrl, "mConcurrentLinkedQueue");
+            if (q != null) q.clear();
+        } catch (Throwable t) { /* 队列不可用忽略 */ }
+    }
+
+    /**
+     * 启动守护消费线程（幂等，10s 防抖，仅 B6X）：runFetchLoop 崩溃后接管命令消费。
+     * 线程轮询 static controller 的命令队列，state==2 且有命令时反射调用 processData
+     * （processData 内部 poll + writeToBluetoothDevice）；单条消费异常 try-catch 不冒泡，
+     * 保证守护线程自身不崩溃。B7X 的 processData 已混淆，接管兜底暂不覆盖（TODO）。
+     */
+    private static void startConsumerThreadIfNeeded() {
+        if (deviceType != 6) return;  // B7X processData 混淆，兜底暂不覆盖
+        long now = System.currentTimeMillis();
+        if (consumerThreadStarted
+                || now - consumerThreadStartedAt < CONSUMER_START_MIN_INTERVAL_MS) return;
+        consumerThreadStartedAt = now;
+        try {
+            final Class<?> rpCls = appClassLoader.loadClass(
+                    "com.flydigi.sdk.bluetooth.data.RequestPack");
+            final Method processData = findProcessDataMethod(rpCls);  // 沿继承链查找（声明在父类）
+            if (processData == null) {
+                XposedBridge.log(TAG + " 守护消费线程启动失败: 未找到 processData");
+                return;
+            }
+            Thread t = new Thread(() -> {
+                while (true) {
+                    try {
+                        Object ctrl = getStaticController();
+                        if (ctrl != null) {
+                            int state = XposedHelpers.getIntField(ctrl, "mDataConnectState");
+                            if (state == 2) {
+                                ConcurrentLinkedQueue<?> q = (ConcurrentLinkedQueue<?>) XposedHelpers
+                                        .getObjectField(ctrl, "mConcurrentLinkedQueue");
+                                if (q != null && q.peek() != null) {
+                                    processData.invoke(ctrl, q.peek());
+                                }
+                            }
+                        }
+                        Thread.sleep(50);
+                    } catch (InterruptedException e) {
+                        break;
+                    } catch (Throwable t2) {
+                        // 单条命令消费失败（gatt 失效等）忽略，继续下一轮——不冒泡保证线程不崩溃
+                    }
+                }
+            });
+            t.setDaemon(true);
+            t.start();
+            consumerThreadStarted = true;
+            XposedBridge.log(TAG + " 守护消费线程已启动（runFetchLoop 崩溃接管，queue>"
+                    + QUEUE_STALL_THRESHOLD + "）");
+        } catch (Throwable t) {
+            XposedBridge.log(TAG + " 守护消费线程启动失败: " + t.getMessage());
+        }
+    }
+
+    /** 在 AbstractDataInteractionController 上查找 processData(RequestPack) 私有方法（B6X，类加载定位不依赖实例） */
+    private static Method findProcessDataMethod(Class<?> rpCls) {
+        try {
+            Class<?> absCtrl = appClassLoader.loadClass(
+                    "com.flydigi.sdk.bluetooth.AbstractDataInteractionController");
+            Method m = absCtrl.getDeclaredMethod("processData", rpCls);
+            m.setAccessible(true);
+            return m;
+        } catch (Throwable t) { /* 反射失败忽略 */ }
+        return null;
     }
 
     /**
