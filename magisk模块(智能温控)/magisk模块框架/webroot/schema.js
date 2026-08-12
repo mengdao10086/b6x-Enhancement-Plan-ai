@@ -175,9 +175,9 @@ window.B6X_SCHEMA = {
     PID_CPU_COMP: { type: "multi", fields: [{ label: "滤波系数(%)", min: 1, max: 100 }, { label: "除数", min: 5, max: 200 }, { label: "偏移量(0.1°C)", min: 0, max: 500 }],
       label: "CPU 补偿（滤波系数 + 除数 + 偏移量）",
       desc: "comp = clamp(cpu滤波−batt−偏移, 0)÷除数，按滤波系数 EMA 平滑；PID 与 Gear 共用、始终生效；偏移默认100=10°C" },
-    PID_OUT_FILTER: { type: "multi", fields: [{ label: "开启", min: 0, max: 1 }, { label: "基础α(‰)", min: 1, max: 1000 }, { label: "温差增益(‰/0.1°)", min: 0, max: 1000 }, { label: "偏差增益(‰/0.1°)", min: 0, max: 500 }],
-      label: "PID 输出端自适应滤波（开启 + 基础α + 温差增益 + 偏差增益）",
-      desc: "α=基础+温差×增益+偏差×增益，clamp[基础,1.0]；温差大快速跟随、稳态强滤波压抖；每周期推进，输出受制冷上升死区控制；默认 100 100 10=0.1/0.1/0.01" },
+    PID_OUT_FILTER: { type: "multi", fields: [{ label: "开启", min: 0, max: 1 }, { label: "下限α(‰)", min: 1, max: 1000 }, { label: "温差增益(‰/0.1°)", min: 0, max: 1000 }, { label: "偏差增益(‰/0.1°)", min: 0, max: 500 }, { label: "下降倍率(×0.1)", min: 10, max: 100 }],
+      label: "PID 输出端自适应滤波（开启 + 下限α + 温差增益 + 偏差增益 + 下降倍率）",
+      desc: "α=基础+温差×增益+偏差×增益，clamp[基础,1.0]；下降方向（目标<上次输出）α×下降倍率（×0.1，默认20=×2）回落更快；温差大快速跟随、稳态强滤波压抖；每周期推进，输出受制冷上升死区控制；默认 100 100 10 20" },
     PID_COLD: { type: "multi", fields: [{ label: "下限", min: 0, max: 194 }, { label: "上限(B6X)", min: 0, max: 194 }, { label: "上限(B7X)", min: 1, max: 190 }],
       label: "制冷强度范围", desc: "下限 B6X上限 B7X上限" },
 

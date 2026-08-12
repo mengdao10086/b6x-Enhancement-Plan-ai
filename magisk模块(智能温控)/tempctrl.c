@@ -411,11 +411,12 @@ static int pid_last_comp_10 = 0;            // 上次 PID 重算时的补偿值�
 static int pid_cpu_comp_active = 0;         // 补偿门控：1=激活（进入后即使条件消失也保持到滤波归零才退出）
 
 // --- PID 输出端自适应 EMA 滤波（PID_OUT_FILTER）---
-// α = 基础 + 每周期平均温差×温差增益 + 距目标偏差×偏差增益，clamp [基础, 1.0]
+// α = 每周期平均温差×温差增益 + 距目标偏差×偏差增益；下限钳制到 base（最低 0.1）后，下降方向 α×下降倍率（回落更快）
 static int pid_out_filter_enabled = 1;    // 开关：0=直通（回退现状）
-static int pid_out_base_alpha = 100;      // 基础 α（‰，100=0.1）
+static int pid_out_base_alpha = 100;      // 下限钳制 α（‰，100=0.1；α 低于此值钳到此值，且最低 0.1）
 static int pid_out_temp_gain = 100;       // 温差增益（‰/0.1°，每 0.1° 温差 α+0.1）
 static int pid_out_dev_gain = 10;         // 偏差增益（‰/0.1°，每 0.1° 偏差 α+0.01）
+static int pid_out_down_mult = 20;        // 下降方向倍率（×0.1，20=×2.0；目标<上次输出时 α×该倍率，制冷回落更快）
 static int pid_out_prev = -1;             // 上次滤波输出（-1=未初始化）
 static int pid_out_last_batt = -1;        // 上次判据温度（0.1°，原始值）
 static int pid_out_last_cycle = -1;       // 上次判据周期计数（gap 计算用）
@@ -914,15 +915,16 @@ static int parse_pid_cfg(const char *key, int val, const char *val_str) {
         if (n >= 3) pid_cpu_comp_offset = clamp(c, 0, 500);
         return 1;
     }
-    // PID_OUT_FILTER = 开关 基础α(‰) 温差增益(‰/0.1°) 偏差增益(‰/0.1°)
-    // 默认 "1 100 100 10" = 基础0.1、温差每0.1°+0.1、偏差每0.1°+0.01
+    // PID_OUT_FILTER = 开关 下限α(‰) 温差增益(‰/0.1°) 偏差增益(‰/0.1°) 下降倍率(×0.1)
+    // 默认 "1 100 100 10 20" = 下限0.1（α 低于0.1按0.1）、温差每0.1°+0.1、偏差每0.1°+0.01、下降方向 α×2
     if (strcmp(key, "PID_OUT_FILTER") == 0) {
-        int on = pid_out_filter_enabled, b = pid_out_base_alpha, tg = pid_out_temp_gain, dg = pid_out_dev_gain;
-        int n = sscanf(val_str, "%d %d %d %d", &on, &b, &tg, &dg);
+        int on = pid_out_filter_enabled, b = pid_out_base_alpha, tg = pid_out_temp_gain, dg = pid_out_dev_gain, dm = pid_out_down_mult;
+        int n = sscanf(val_str, "%d %d %d %d %d", &on, &b, &tg, &dg, &dm);
         if (n >= 1) pid_out_filter_enabled = (on != 0);
         if (n >= 2) pid_out_base_alpha = clamp(b, 1, 1000);
         if (n >= 3) pid_out_temp_gain  = clamp(tg, 0, 1000);
         if (n >= 4) pid_out_dev_gain   = clamp(dg, 0, 500);
+        if (n >= 5) pid_out_down_mult  = clamp(dm, 10, 100);
         return 1;
     }
     return 0;
@@ -3360,12 +3362,14 @@ static int prev_emerg_level = 0;
  * 每控制周期推进，不跟随 PID 是否重算：PID 未重算时目标 pid_align_cold 保持，
  * 滤波继续向该目标收敛，输出仍逐步变化。
  *
- * α（0~1）动态 = 基础 + 每周期平均温差×温差增益 + 距目标偏差×偏差增益：
+ * α（0~1）动态 = 每周期平均温差×温差增益 + 距目标偏差×偏差增益，
+ *   下限钳制到 base（最低 0.1，先于下降倍率处理）：
  *   温差大（真趋势）→ α 高 → 快速跟随；温差小（稳态）→ α 低 → 强滤波压抖。
  * 0.1° 抖动识别：单步温差恰为 0.1° 且上上次温度与本次相同（来回抖回原位）→ 视为无变化。
  *
  * 判据温度用原始值 cached_batt_raw（滤波后值会把温差摊平、判据失真）；
  * 偏差用 PID 滤波后输入 pid_batt_filtered（与 pid_compute 内部口径一致）。
+ * 下降方向（目标<上次输出）α×下降倍率，制冷回落更快更干脆。
  * 输出方向取整（增大向上、减小向下），并钳制到当前模式有效范围。
  */
 static int pid_out_filter(int target) {
@@ -3392,15 +3396,17 @@ static int pid_out_filter(int target) {
     pid_out_last_batt  = batt;
     pid_out_last_cycle = pid_ctrl_cycles;
 
-    // --- α 计算（千分制）：α = 基础 + d_eff×温差增益 + 偏差×偏差增益，clamp [基础, 1000] ---
+    // --- α 计算（千分制）：α = d_eff×温差增益 + 偏差×偏差增益；先做下限钳制（base 为钳制值，最低 0.1），再处理下降方向 ×下降倍率；clamp [0.1, 1000] ---
     int pid_input_10 = (pid_batt_filtered >= 0) ? pid_batt_filtered : batt;
     int dev_10 = pid_input_10 - BATT_BASELINE;
     if (dev_10 < 0) dev_10 = -dev_10;
-    int alpha_mil = pid_out_base_alpha
-                  + d_eff_10 * pid_out_temp_gain
+    int alpha_mil = d_eff_10 * pid_out_temp_gain
                   + dev_10  * pid_out_dev_gain;
+    if (alpha_mil < pid_out_base_alpha) alpha_mil = pid_out_base_alpha;   // 下限钳制：钳到 base（钳制值）
+    if (alpha_mil < 100) alpha_mil = 100;                                 // 低于 0.1 时按 0.1（此判断在下降倍率之前）
+    if (target < pid_out_prev)                          // 下降方向（目标<上次输出）：α×下降倍率，回落更快
+        alpha_mil = alpha_mil * pid_out_down_mult / 10;
     if (alpha_mil > 1000) alpha_mil = 1000;
-    if (alpha_mil < pid_out_base_alpha) alpha_mil = pid_out_base_alpha;
     float alpha = alpha_mil / 1000.0f;
 
     // --- EMA 滤波（方向取整）---
