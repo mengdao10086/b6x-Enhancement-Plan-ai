@@ -33,7 +33,7 @@ for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27
     KEY_PRESSED=1
     break
 done
-
+sleep 1
 if [ "$KEY_PRESSED" = 1 ]; then
     if [ "$LAUNCH_ENABLED" = 1 ]; then
         ui_print "已选择：开启自动拉起"
@@ -45,6 +45,8 @@ else
 fi
 ui_print ""
 
+sleep 1
+
 # 锁死自动重启（watchdog）选择：仅自动拉起开启时询问（关闭自动拉起则本功能默认关闭）
 WATCHDOG_VALUE=0
 if [ "$LAUNCH_ENABLED" = "1" ]; then
@@ -53,6 +55,7 @@ if [ "$LAUNCH_ENABLED" = "1" ]; then
     ui_print "  散热器锁死自动重启功能"
     ui_print "  检测到散热器锁死（实际制冷持续多周期无响应）时"
     ui_print "  自动强制重启散热器 app 以恢复控制"
+    ui_print "  默认 6 周期"
     ui_print "=============================="
     ui_print "  音量+ = 开启   音量- = 关闭"
     ui_print "  不操作 30 秒 → 默认关闭"
@@ -70,6 +73,7 @@ if [ "$LAUNCH_ENABLED" = "1" ]; then
         KEY_PRESSED=1
         break
     done
+    sleep 1
     if [ "$KEY_PRESSED" = 1 ]; then
         if [ "$WATCHDOG_ENABLED" = 1 ]; then
             ui_print "已选择：开启锁死自动重启"
@@ -92,12 +96,12 @@ if [ -f "$MODPATH/profile.conf" ]; then
     else
         echo "APP_LAUNCH_ENABLED=$LAUNCH_ENABLED" >> "$MODPATH/profile.conf"
     fi
-    ui_print "APP_LAUNCH_ENABLED=$LAUNCH_ENABLED（可后续在 WebUI 修改）"
+    ui_print "APP_LAUNCH_ENABLED=$LAUNCH_ENABLED（可后续在 WebUI/配置文件 修改）"
     # 锁死自动重启周期数（0=关闭；6=实际制冷停滞 6 周期(30s)且≠目标则 kill app 重新拉起）
     if grep -q '^APP_WATCHDOG=' "$MODPATH/profile.conf"; then
         sed -i "s/^APP_WATCHDOG=.*/APP_WATCHDOG=$WATCHDOG_VALUE/" "$MODPATH/profile.conf"
     else
         echo "APP_WATCHDOG=$WATCHDOG_VALUE" >> "$MODPATH/profile.conf"
     fi
-    ui_print "APP_WATCHDOG=$WATCHDOG_VALUE（可后续在 WebUI 修改）"
+    ui_print "APP_WATCHDOG=$WATCHDOG_VALUE（可后续在 WebUI/配置文件 修改）"
 fi

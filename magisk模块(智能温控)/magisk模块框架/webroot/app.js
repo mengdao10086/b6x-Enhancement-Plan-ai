@@ -213,17 +213,19 @@
   function masterOn(key) { return S.values[key] !== '0'; }
   function ctrlMode() { return S.values['CTRL_MODE'] !== undefined ? S.values['CTRL_MODE'] : '1'; }
 
-  // 分组是否有可折叠内容（子面板/模式面板/档位表/直接参数）；无折叠内容的分组（如 [4] 自动拉起）
+  // 分组是否有可折叠内容（子面板/模式面板/档位表/直接参数）；无折叠内容的分组
   // 不渲染小三角、不响应组头点击，说明区常显
   function hasCollapsible(g) {
     return !!(g.subKeys || g.modePanels || g.gearTables || (g.keys && g.keys.length));
   }
 
   function onHeaderClick(g) {
-    if (!hasCollapsible(g)) return;   // 无折叠内容（如 [4] 自动拉起），组头点击无动作
-    if (g.master) {
-      if (masterOn(g.master)) S.manualCollapse[g.id] = !S.manualCollapse[g.id]; // 会话级折叠
-      else S.manualExpand[g.id] = !S.manualExpand[g.id]; // 手动展开仅查看，不改总开关
+    if (!hasCollapsible(g)) return;   // 无折叠内容，组头点击无动作
+    // master / headerSwitch 统一处理：开关开 → 会话级折叠（manualCollapse），开关关 → 手动展开仅查看
+    var swKey = g.master || g.headerSwitch;
+    if (swKey) {
+      if (masterOn(swKey)) S.manualCollapse[g.id] = !S.manualCollapse[g.id];
+      else S.manualExpand[g.id] = !S.manualExpand[g.id];
     } else {
       S.manualExpand[g.id] = !S.manualExpand[g.id];
     }

@@ -496,10 +496,11 @@ static char status_file_path_b7[512] = "/data/local/tmp/tempctrl_b7x.status";
 
 // 自动拉起散热器 app（优先上次使用的 app）
 static int APP_LAUNCH_ENABLED = 0;      // 总开关：1=允许自动拉起，0=关闭（默认关，刷入时可选开）
-// 锁死自动重启（watchdog）：散热器实际制冷停滞且≠下发目标持续 N 周期 → kill app 并重新拉起
-static int app_watchdog_cycles = 6;     // APP_WATCHDOG：停滞周期数（0=关闭，默认 6）
-static int watchdog_stall_count = 0;    // 当前连续停滞周期数（按 5s 控制周期计数）
-static int watchdog_last_cold = -1;     // 上次检测的实际制冷值（停滞判定基准）
+// 锁死自动重启（watchdog）：每次实际下发制冷变化时判定——实际停滞（=上周期实际）且≠上周期下发持续 N 次 → kill app 并重新拉起
+static int app_watchdog_cycles = 6;     // APP_WATCHDOG：连续停滞次数（0=关闭，默认 6）
+static int watchdog_stall_count = 0;    // 当前连续停滞次数（按实际下发周期计数）
+static int watchdog_last_cold = -1;     // 上周期实际制冷值（停滞判定基准）
+static int watchdog_last_cmd  = -1;     // 上周期下发制冷值（未达目标判定基准）
 static long watchdog_last_kill_at = 0;  // 上次 kill 时间戳（冷却防风暴）
 static time_t last_launch_attempt = 0;  // 上次拉起尝试时间（冷却用）
 static time_t last_arbitrate = 0;       // 上次 app 存活仲裁时间（ARBITRATE_INTERVAL 节流）
@@ -2262,11 +2263,13 @@ static void force_kill_and_relaunch(void) {
 }
 
 /**
- * 锁死自动重启检测（watchdog）：散热器实际制冷停滞且≠最近下发目标，持续 APP_WATCHDOG 周期
- * → 判定设备锁死/无响应（App 进程内坏状态，重启散热器无效）→ 强制重启散热器 app（重建连接栈）。
- * 实际值用 COLD_REAL（status 文件 cooler_cold_real），停滞=连续 N 个 5s 控制周期值不变；
- * ≠目标用 last_cold（最近下发制冷）。仅 BLE 已连接、实际回传可用、watchdog 开启时启用；
- * kill 后冷却 300s 防风暴。每 5s 控制周期调用一次（rate_limited_execute 后）。
+ * 锁死自动重启检测（watchdog）：每次实际下发制冷变化时判定一次（调用点在 rate_limited_execute 之后、且仅在其返回已下发时）。
+ * 双条件都满足才计数：①本周期实际 = 上周期实际（停滞）②本周期实际 ≠ 上周期下发（未达目标），
+ * 连续计数 ≥ APP_WATCHDOG 次 → 判定设备锁死/无响应（App 进程内坏状态，重启散热器无效）
+ * → 强制重启散热器 app（重建连接栈）。
+ * 实际值用 COLD_REAL（status 文件 cooler_cold_real）；上周期下发 = watchdog_last_cmd
+ * （上次实际下发后保存的 last_cold，供本周期"未达目标"判定）。
+ * 仅 BLE 已连接、实际回传可用、watchdog 开启时启用；kill 后冷却 300s 防风暴。
  */
 static void watchdog_check(void) {
     if (app_watchdog_cycles <= 0)      { watchdog_stall_count = 0; return; }  // 关闭
@@ -2276,22 +2279,27 @@ static void watchdog_check(void) {
     time_t now = time(NULL);
     if (now - watchdog_last_kill_at < 300) return;   // kill 冷却：5 分钟内不重复 kill
 
-    // 停滞判定：实际制冷值连续不变（首次仅锚定基准，不计数）
-    if (watchdog_last_cold < 0) {
+    // 首次锚定：记录上周期实际 + 上周期下发基准，不计数
+    if (watchdog_last_cold < 0 || watchdog_last_cmd < 0) {
         watchdog_last_cold = cooler_cold_real;
+        watchdog_last_cmd  = last_cold;
         return;
     }
-    if (cooler_cold_real == watchdog_last_cold) {
+    // 双条件都满足才计数：实际 = 上周期实际（停滞）且 实际 ≠ 上周期下发（未达目标）；
+    // 任一不满足 → 清零（实际在变=设备在响应；已达目标=设备正常）
+    if (cooler_cold_real == watchdog_last_cold && cooler_cold_real != watchdog_last_cmd) {
         watchdog_stall_count++;
     } else {
-        watchdog_stall_count = 0;   // 实际在变 → 设备在响应，清零
+        watchdog_stall_count = 0;
     }
+    // 更新基准：本次实际/本次下发成为下次判定的"上周期"
     watchdog_last_cold = cooler_cold_real;
+    watchdog_last_cmd  = last_cold;
 
-    // 触发：停滞 ≥ N 周期 且 实际 ≠ 最近下发目标
-    if (watchdog_stall_count >= app_watchdog_cycles && cooler_cold_real != last_cold) {
-        write_log("锁死自动重启 实际制冷 %d 停滞 %d 周期且≠目标 %d，kill app 并重新拉起",
-                  cooler_cold_real, app_watchdog_cycles, last_cold);
+    // 触发：计数 ≥ N 次
+    if (watchdog_stall_count >= app_watchdog_cycles) {
+        write_log("锁死自动重启 实际制冷 %d 停滞且≠上周期下发 %d 连续 %d 次，kill app 并重新拉起",
+                  cooler_cold_real, watchdog_last_cmd, app_watchdog_cycles);
         watchdog_stall_count = 0;
         watchdog_last_kill_at = now;
         force_kill_and_relaunch();
@@ -3261,8 +3269,9 @@ static int compute_fan_target(void) {
 /**
  * 直接下发 AT 广播（PID / 直接冷端模式使用）
  * 与 apply_gear 共享 last_* 去重缓存
+ * 返回 1=已发送，0=跳过（无变化）
  */
-static void apply_gear_direct(int mode, int target,
+static int apply_gear_direct(int mode, int target,
                                int send_rpm, int cold, int wl) {
     // 纯下发：制冷限速与风扇目标已由 rate_limited_execute 完成，此处只去重/日志/广播
 
@@ -3277,7 +3286,7 @@ static void apply_gear_direct(int mode, int target,
     if (should_skip_dispatch(mode, target, send_rpm, cold, wl)) {
         debug_log(debug_exec, "apply_gear_direct 跳过下发（目标冷%d RPM%d == 回传冷%d RPM%d）",
                   cold, send_rpm, cooler_cold_real, cooler_rpm_real);
-        return;
+        return 0;
     }
 
     // 过热钳制冷动作日志（仅在实际下发时输出，与去重判定一致）
@@ -3300,6 +3309,7 @@ static void apply_gear_direct(int mode, int target,
     last_rpm           = send_rpm;
     last_cold          = cold;
     last_wind_level    = wl;
+    return 1;
 }
 
 /**
@@ -3503,18 +3513,18 @@ static int pid_out_filter(int target) {
  * PID 模式：传 pid_align_* → apply_gear_direct 内部限速
  * Gear 模式：apply_gear 内部限速
  */
-static void rate_limited_execute(void) {
+/** 速率限制执行：返回 1=实际下发了制冷变化，0=跳过（无变化/去重）。 */
+static int rate_limited_execute(void) {
     // --- PID 模式：输出端滤波 → 制冷限速 → 独立风扇计算（不跟 PID 输出）→ 风扇限速 → 纯下发 ---
     if (ctrl_mode == 1) {
         pid_align_cold = pid_out_filter(pid_align_cold);
         rate_limit_cold(pid_align_cold);
         int send_rpm = rate_limit_fan(compute_fan_target());
-        apply_gear_direct(1, 5, send_rpm, actual_cold, 0);
-        return;
+        return apply_gear_direct(1, 5, send_rpm, actual_cold, 0);
     }
 
     // --- Gear 模式：限速已内建到 apply_gear（GEAR_AUTO_FAN 分支同样独立计算风扇） ---
-    apply_gear(final_gear);
+    return apply_gear(final_gear);
 }
 
 /**
@@ -4070,10 +4080,11 @@ pid_init_done:
 
             // ★ 速率限制执行（替代逐档变动 + RPM 平滑跟踪）
             cycle_batt_temp = cached_batt_raw;   // 1s 采集缓存
-            rate_limited_execute();
+            int dispatched = rate_limited_execute();   // 1=实际下发了制冷变化，0=跳过
 
-            // ★ 锁死自动重启检测（watchdog）：实际制冷停滞且≠目标持续 N 周期 → kill app 重新拉起
-            watchdog_check();
+            // ★ 锁死自动重启检测（watchdog）：仅在本次实际下发制冷变化后判定——
+            // 实际停滞（=上周期实际）且未达目标（≠上周期下发）连续 N 次 → kill app 重新拉起
+            if (dispatched) watchdog_check();
         }
 
         sleep(1);

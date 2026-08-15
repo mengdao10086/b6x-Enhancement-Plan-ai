@@ -65,8 +65,7 @@ window.B6X_SCHEMA = {
                 "BATT_CURRENT_DIVISOR", "CPU_TEMP_PATH_FMT", "CPU_TEMP_DIVISOR",
                 "CPU_ZONE", "CPU_ZONE_RESCAN", "LOG_FILE", "LOG_MAX"]
     },
-    // [4] 自动拉起散热器 app：独立分组，开关常显在组头；说明区常显（无折叠内容，不渲染小三角）
-    // 锁死自动重启周期数（APP_WATCHDOG）作为该组唯一可编辑项
+    // [4] 自动拉起散热器 app：独立分组，开关常显在组头；组内含可编辑参数 APP_WATCHDOG（可折叠/展开）
     {
       id: "g3", title: "[4] 自动拉起散热器 app", headerSwitch: "APP_LAUNCH_ENABLED",
       keys: ["APP_WATCHDOG"]
@@ -128,8 +127,8 @@ window.B6X_SCHEMA = {
       desc: "目标温度每周期最大变化量（智能温控模式）" },
     APP_LAUNCH_ENABLED: { type: "switch", label: "自动拉起散热器 app",
       desc: "无散热器 app 存活时自动拉起上次使用的 app" },
-    APP_WATCHDOG: { type: "int", min: 0, max: 120, label: "锁死自动重启（周期数）",
-      desc: "散热器实际制冷持续 N 个控制周期(5s)停滞且≠下发目标时，kill 散热器 app 并重新拉起（散热器重启无效，需重建 App 进程）；0=关闭" },
+    APP_WATCHDOG: { type: "int", min: 0, max: 120, label: "锁死自动重启（次数）",
+      desc: "实际制冷停滞（=上周期实际）且未达目标（≠上周期下发）连续 N 次下发时，kill 散热器 app 并重新拉起（散热器重启无效，需重建 App 进程）；0=关闭" },
     BATT_SKIP_MAX: { type: "int", min: 1, max: 60, label: "温度未变强制处理周期",
       desc: "温度值连续未变达 N 周期时强制进入一次计算，防止温度文件卡死控制停摆" },
     CTRL_MODE: { type: "switch", label: "控制模式", desc: "" },
