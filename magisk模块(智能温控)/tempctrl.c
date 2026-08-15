@@ -347,7 +347,7 @@ static int pid_ki_down_slope = 50;        // PID_KI 第四值=低基准每°C增
 
 // PID_KI_MEM：I 项回落与限幅
 static int pid_ki_drop = 100;             // PID_KI_MEM 第一值=下降惩罚（÷1000，降温时每周期每度降低直接扣累计值）
-static int pid_ki_leak = 30;              // PID_KI_MEM 第二值=每次计算固定衰减（÷1000，0.03/周期，始终生效不受门控）
+static int pid_ki_leak = 25;              // PID_KI_MEM 第二值=每次计算固定衰减（÷1000，0.025/周期，始终生效不受门控）
 static int pid_integral_limit = 667;      // PID_KI_MEM 第三值=积分上限（÷1000，I 项最大输出贡献；预算链 min(1-p-d, 此值) 取小）
 
 // PID_KI_VAR：方差门控
@@ -360,7 +360,7 @@ static int pid_kd_up = 240;               // PID_KD 第一值=上升倍率（÷1
 static int pid_kd_down = 360;             // PID_KD 第二值=下降倍率（÷1000，默认 0.36）
 
 // PID_KD_MEM：D 项记忆
-static int pid_kd_leak = 30;              // PID_KD_MEM 第一值=记忆每周期固定衰减量（×1000，默认 0.03）
+static int pid_kd_leak = 25;              // PID_KD_MEM 第一值=记忆每周期固定衰减量（×1000，默认 0.025）
 static int pid_kd_max = 150;              // PID_KD_MEM 第二值=记忆幅值基础（×1000，默认 0.15）
 static int pid_kd_slope = 150;            // PID_KD_MEM 第三值=幅值随距基准斜率（×1000，默认 0.15/°C）；实际上限=基础+距基准°C×斜率
 
@@ -391,7 +391,7 @@ static int pid_filter_auto_off = 0;             // 运行时标志：1=自适应
 static int pid_filter_interval_smooth = -1;     // 平滑后的更新周期数（0.1周期）
 #define PID_FILTER_GAP_MULT 2   // 滤波间隔 EMA 输入钳位倍数
 static float pid_integral_accum = 0.0f;   // 积分累积值（必须 float：int 在限幅赋小数时会截断为 0，I 项恒失效）
-static int pid_prev_error = 0;            // 上周期误差
+static float pid_prev_error = 0.0f;       // 上周期误差（必须 float：int 会截断 <1°C 的误差为 0，de 恒等于 error 使 D 项微分/泄漏失效）
 static int pid_batt_filtered = -1;        // EMA 滤波后电池温度
 static int pid_last_batt = -1;            // 上次参与 PID 计算的原始温度
 static time_t pid_last_change_time = 0;   // 上次温度变化时间戳
@@ -496,6 +496,11 @@ static char status_file_path_b7[512] = "/data/local/tmp/tempctrl_b7x.status";
 
 // 自动拉起散热器 app（优先上次使用的 app）
 static int APP_LAUNCH_ENABLED = 0;      // 总开关：1=允许自动拉起，0=关闭（默认关，刷入时可选开）
+// 锁死自动重启（watchdog）：散热器实际制冷停滞且≠下发目标持续 N 周期 → kill app 并重新拉起
+static int app_watchdog_cycles = 6;     // APP_WATCHDOG：停滞周期数（0=关闭，默认 6）
+static int watchdog_stall_count = 0;    // 当前连续停滞周期数（按 5s 控制周期计数）
+static int watchdog_last_cold = -1;     // 上次检测的实际制冷值（停滞判定基准）
+static long watchdog_last_kill_at = 0;  // 上次 kill 时间戳（冷却防风暴）
 static time_t last_launch_attempt = 0;  // 上次拉起尝试时间（冷却用）
 static time_t last_arbitrate = 0;       // 上次 app 存活仲裁时间（ARBITRATE_INTERVAL 节流）
 #define APP_LAUNCH_COOLDOWN 60          // 两次拉起最小间隔（秒）
@@ -1124,6 +1129,8 @@ static void load_config(const char *path) {
             found_sysfs = atoi(val_str) != 0;   // sysfs 路径与缩放独立大类
         } else if (strcmp(key, "APP_LAUNCH_ENABLED") == 0) {
             APP_LAUNCH_ENABLED = (atoi(val_str) != 0);   // 任何模式下都生效（含 PERF=0/DEBUG=0）
+        } else if (strcmp(key, "APP_WATCHDOG") == 0) {
+            app_watchdog_cycles = clamp(atoi(val_str), 0, 120);   // 锁死自动重启停滞周期数（0=关闭）
         }
     }
 
@@ -2222,6 +2229,73 @@ static void launch_last_app(void) {
                  "-p %s --es b6x_auto_launch 1 > /dev/null 2>&1", pkg);
     int rc = system(cmd);
     write_log("自动拉起散热器 app %s（后台化）rc=%d", pkg, rc);
+}
+
+/** kill 目标散热器 app 并重新拉起（绕过 APP_LAUNCH_ENABLED 开关：本处主动 kill 必须拉起） */
+static void force_kill_and_relaunch(void) {
+    const char *pkg = resolve_launch_pkg();
+    write_log("锁死自动重启 强制停止 %s 并重新拉起", pkg);
+    run_cmd_silent("am force-stop %s > /dev/null 2>&1", pkg);
+    // 等进程退出（最多 2s），避免拉起时进程未死
+    for (int i = 0; i < 20; i++) {
+        int alive = 0;
+        app_process_scan(&pkg, &alive, 1);
+        if (!alive) break;
+        usleep(100000);
+    }
+    // 复用自动拉起的显式组件逻辑（b6x_auto_launch 后台化）
+    const char *act = NULL;
+    if (strcmp(pkg, APP_PKG_B6X_OLD) == 0 || strcmp(pkg, APP_PKG_B6X_NEW) == 0)
+        act = "com.example.extool.MainActivity";
+    else if (strcmp(pkg, APP_PKG_B7X) == 0)
+        act = "com.game.motionelf.activity.ActivityStart";
+    char cmd[320];
+    if (act)
+        snprintf(cmd, sizeof(cmd),
+                 "am start -n %s/%s --es b6x_auto_launch 1 > /dev/null 2>&1", pkg, act);
+    else
+        snprintf(cmd, sizeof(cmd),
+                 "am start -a android.intent.action.MAIN -c android.intent.category.LAUNCHER "
+                 "-p %s --es b6x_auto_launch 1 > /dev/null 2>&1", pkg);
+    int rc = system(cmd);
+    write_log("锁死自动重启 重新拉起 %s rc=%d", pkg, rc);
+}
+
+/**
+ * 锁死自动重启检测（watchdog）：散热器实际制冷停滞且≠最近下发目标，持续 APP_WATCHDOG 周期
+ * → 判定设备锁死/无响应（App 进程内坏状态，重启散热器无效）→ 强制重启散热器 app（重建连接栈）。
+ * 实际值用 COLD_REAL（status 文件 cooler_cold_real），停滞=连续 N 个 5s 控制周期值不变；
+ * ≠目标用 last_cold（最近下发制冷）。仅 BLE 已连接、实际回传可用、watchdog 开启时启用；
+ * kill 后冷却 300s 防风暴。每 5s 控制周期调用一次（rate_limited_execute 后）。
+ */
+static void watchdog_check(void) {
+    if (app_watchdog_cycles <= 0)      { watchdog_stall_count = 0; return; }  // 关闭
+    if (cooler_cold_real < 0)          { watchdog_stall_count = 0; return; }  // 无实际回传不判
+    if (last_cold < 0)                 { watchdog_stall_count = 0; return; }  // 从未下发不判
+    if (active_device == DEVICE_NONE)  { watchdog_stall_count = 0; return; }  // 无连接设备不判
+    time_t now = time(NULL);
+    if (now - watchdog_last_kill_at < 300) return;   // kill 冷却：5 分钟内不重复 kill
+
+    // 停滞判定：实际制冷值连续不变（首次仅锚定基准，不计数）
+    if (watchdog_last_cold < 0) {
+        watchdog_last_cold = cooler_cold_real;
+        return;
+    }
+    if (cooler_cold_real == watchdog_last_cold) {
+        watchdog_stall_count++;
+    } else {
+        watchdog_stall_count = 0;   // 实际在变 → 设备在响应，清零
+    }
+    watchdog_last_cold = cooler_cold_real;
+
+    // 触发：停滞 ≥ N 周期 且 实际 ≠ 最近下发目标
+    if (watchdog_stall_count >= app_watchdog_cycles && cooler_cold_real != last_cold) {
+        write_log("锁死自动重启 实际制冷 %d 停滞 %d 周期且≠目标 %d，kill app 并重新拉起",
+                  cooler_cold_real, app_watchdog_cycles, last_cold);
+        watchdog_stall_count = 0;
+        watchdog_last_kill_at = now;
+        force_kill_and_relaunch();
+    }
 }
 
 /** 淘汰存活参与者：非保留者且非前台时 force-stop（在前台则等下周期再试） */
@@ -3997,6 +4071,9 @@ pid_init_done:
             // ★ 速率限制执行（替代逐档变动 + RPM 平滑跟踪）
             cycle_batt_temp = cached_batt_raw;   // 1s 采集缓存
             rate_limited_execute();
+
+            // ★ 锁死自动重启检测（watchdog）：实际制冷停滞且≠目标持续 N 周期 → kill app 重新拉起
+            watchdog_check();
         }
 
         sleep(1);

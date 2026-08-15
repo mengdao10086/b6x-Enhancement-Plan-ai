@@ -74,6 +74,21 @@ public class MainHook implements IXposedHookLoadPackage {
     private static volatile long lastForceReconnectAt = 0;              // forceReconnect 防抖（10s 内最多一次）
     private static final long FORCE_RECONNECT_MIN_INTERVAL_MS = 10000;
 
+    // ========== 回传新鲜度验证 + 设备唤醒 + 重连上限（v2.6） ==========
+    // 背景：重连成功后若设备固件锁死（不再回传），lastWaspWingInfo 永远是旧连接的回传缓存（如 125/4500），
+    // 锁死检测读旧值会无限触发重连。需区分"设备无新回传"与"回传停滞"：无回传时尝试唤醒设备，
+    // 连续无效则停止自动重连并提示强制重启 App（BLE 重连/重启散热器均无法恢复进程内坏状态，需重建 App 进程）。
+    private static volatile boolean reconnectPending = false;      // markConnected 置 true：重连后等待新回传
+    private static volatile long connectStartedAt = 0;             // 最近一次连接成功时间戳（ms，等待新回传计时）
+    private static final long INFO_STALE_AFTER_MS = 6000;          // 重连成功后无新回传超时（6s）→ 判定设备无响应
+    private static volatile int wakeupAttempts = 0;                // 本次连接已尝试的设备唤醒次数
+    private static final int WAKEUP_MAX = 1;                       // 每连接最多唤醒尝试 1 次（避免反复 mode0 扰动）
+    private static volatile long lastWakeupAttemptAt = 0;          // 唤醒尝试防抖（ms）
+    private static final long WAKEUP_RETRY_MIN_INTERVAL_MS = 15000;
+    private static volatile int stallReconnectCount = 0;           // 连续"无回传"重连次数（锁死会话内累计）
+    private static final int STALL_RECONNECT_MAX = 3;              // 连续 3 次重连仍无回传 → 设备固件锁死，停止循环
+    private static volatile boolean deviceLockedAlerted = false;   // 设备锁死提示已发出（markConnected 重置）
+
     // ========== runFetchLoop 崩溃兜底（v2.5+） ==========
     // 背景：SDK 的 AbstractDataInteractionController.runFetchLoop（命令消费协程）只在构造函数里
     // GlobalScope.launch 启动一次，是死循环且无重启机制。断联后某次 writeToBluetoothDevice 对已 close
@@ -299,7 +314,8 @@ public class MainHook implements IXposedHookLoadPackage {
 
                     // ═══ 后台自动重连（v2.4） ═══
                     // 保持 5 秒节奏（tick%5==0），避免每秒重连轰炸 BLE
-                    if (tick % 5 == 0 && !bleConnected && lastDevice != null) {
+                    // v2.6：设备锁死（多次重连无回传）时停止自动重连，等用户强制重启 App（重建模块连接栈）
+                    if (tick % 5 == 0 && !bleConnected && lastDevice != null && !deviceLockedAlerted) {
                         try {
                             if (deviceType == 7) {
                                 // B7X：connectGattWith 只存在于 B6X（反编译确认 t9.j 无此方法）；
@@ -634,6 +650,8 @@ public class MainHook implements IXposedHookLoadPackage {
                         protected void beforeHookedMethod(MethodHookParam param) {
                             Object info = param.args[0];
                             lastWaspWingInfo = info;    // v2.3：捕获散热器全参数回传
+                            reconnectPending = false;   // v2.6：收到新回传，重连新鲜度验证通过
+                            stallReconnectCount = 0;    // 设备恢复响应，清零连续无回传重连计数
                             updateModelFromInfo(info);  // 型号识别 + M3 同步 BLE_OWNER_LAST
                             // 修正 experimentalRunModeValue，阻止 App 自修复触发 BLE 命令竞争
                             // 必须在 original method 执行前修正，因为 self-repair 在
@@ -654,6 +672,8 @@ public class MainHook implements IXposedHookLoadPackage {
                         protected void beforeHookedMethod(MethodHookParam param) {
                             Object info = param.args[0];
                             lastWaspWingInfo = info;
+                            reconnectPending = false;   // v2.6：收到新回传，重连新鲜度验证通过
+                            stallReconnectCount = 0;    // 设备恢复响应，清零连续无回传重连计数
                             updateModelFromInfo(info);  // 型号识别 + M3 同步 BLE_OWNER_LAST
                             // 设 experimentalRunModeValue = realColdLevel + 1
                             // 满足 self-repair 的跳过条件，阻止 BLE 命令发出。
@@ -1320,6 +1340,67 @@ public class MainHook implements IXposedHookLoadPackage {
     }
 
     /**
+     * v2.6：重连成功后无新回传 → 分层处置：唤醒 → 重连上限 → 强制重启 App 提示。
+     * 由 checkCommandStall 的"回传新鲜度验证"分支调用（每秒最多一次）。
+     * 唤醒/重连后 reconnectPending 重新置 true 并重置计时，等待新回传再次验证。
+     */
+    private static void handleDeviceNoResponse() {
+        long now = System.currentTimeMillis();
+        // ① 先尝试设备唤醒序列（mode0 关制冷 → 触发固件重新处理命令）；固件若活着可被唤醒
+        if (wakeupAttempts < WAKEUP_MAX && now - lastWakeupAttemptAt >= WAKEUP_RETRY_MIN_INTERVAL_MS) {
+            wakeupAttempts++;
+            lastWakeupAttemptAt = now;
+            reconnectPending = true;      // 重置等待，唤醒后重新计时
+            connectStartedAt = now;
+            dispatchStallCount = 0;
+            XposedBridge.log(TAG + " 设备无回传（重连后 " + INFO_STALE_AFTER_MS / 1000
+                    + "s 无新数据），尝试唤醒序列 mode0→1");
+            invokeDeviceWakeup();
+            return;
+        }
+        // ② 唤醒无效 → 计为重连无效，达上限 → 设备固件锁死
+        if (stallReconnectCount < STALL_RECONNECT_MAX) {
+            stallReconnectCount++;
+            reconnectPending = true;
+            connectStartedAt = now;
+            dispatchStallCount = 0;
+            XposedBridge.log(TAG + " 设备无回传重连 #" + stallReconnectCount + "/" + STALL_RECONNECT_MAX
+                    + "（唤醒无效），触发重连");
+            forceReconnect();
+            return;
+        }
+        // ③ 达上限：设备锁死，停止自动重连 + 写状态文件提示强制重启 App
+        reconnectPending = false;
+        if (!deviceLockedAlerted) {
+            deviceLockedAlerted = true;
+            XposedBridge.log(TAG + " 设备锁死: 连续 " + STALL_RECONNECT_MAX
+                    + " 次重连仍无回传，停止自动重连，请强制重启 App（散热器重启无效）");
+            try {
+                FileOutputStream fos = new FileOutputStream(currentStatusFile, true);
+                fos.write("DEVICE_LOCKED=1\n".getBytes());
+                fos.close();
+            } catch (Throwable t) { /* 状态文件写入失败忽略 */ }
+        }
+    }
+
+    /** v2.6：异步下发 mode0（关制冷）尝试唤醒设备固件；tempctrl 下周期广播会自动恢复 mode1 目标 */
+    private static void invokeDeviceWakeup() {
+        Thread t = new Thread(() -> {
+            try {
+                Thread.sleep(300);   // 等当前命令处理完，避免与正常下发竞争
+                Object inst = capturedWaspWingMgr;
+                if (inst != null) {
+                    invokeSetRunMode(inst, 0, 0, 0, 0, 0, 0, 0);   // mode=0 固定功率/关制冷
+                } else {
+                    XposedBridge.log(TAG + " 唤醒序列失败: WaspWingManager 实例未就绪");
+                }
+            } catch (Throwable t2) { /* 唤醒失败忽略 */ }
+        });
+        t.setDaemon(true);
+        t.start();
+    }
+
+    /**
      * 锁死检测——双信号并行判断、独立处置：
      * ① 命令队列堆积 > QUEUE_STALL_THRESHOLD 条 → 消费协程（runFetchLoop）疑似崩溃，
      *    启动守护消费线程接管（重连救不了进程级协程）；
@@ -1328,8 +1409,17 @@ public class MainHook implements IXposedHookLoadPackage {
      * 每秒调用一次（writeStatusFile 内）。回传到位（=目标）或回传在变（设备在响应）均清零。
      */
     private static void checkCommandStall() {
+        // v2.6：设备固件锁死已判定 → 完全退出锁死检测，避免旧值停滞判定继续触发 forceReconnect 绕过停止保护
+        if (deviceLockedAlerted) { dispatchStallCount = 0; return; }
         if (!bleConnected || lastWaspWingInfo == null) { dispatchStallCount = 0; return; }
         try {
+            // ═══ v2.6：回传新鲜度验证（先于值停滞判定）═══
+            // 重连成功后若长时间无新 onDeviceInfoUpdate → 设备固件无回传，
+            // lastWaspWingInfo 仍是旧连接缓存（如 125/4500）——此时值停滞判定会误判并无限重连。
+            if (reconnectPending && System.currentTimeMillis() - connectStartedAt > INFO_STALE_AFTER_MS) {
+                handleDeviceNoResponse();
+                return;   // 设备无响应期间不做旧值停滞判定
+            }
             int cold = ((Number) XposedHelpers.callMethod(lastWaspWingInfo, "getRealColdLevel")).intValue();
             int rpm = ((Number) XposedHelpers.callMethod(lastWaspWingInfo, "getRealWindLevel")).intValue();
             // 回传已到位（与最近下发目标一致）→ 完全正常，清零
@@ -1616,6 +1706,11 @@ public class MainHook implements IXposedHookLoadPackage {
             currentValidGatt = gatt;   // 记录当前有效 gatt（供下发前校验 static 指向）
             saveLastDeviceAddress(gatt.getDevice().getAddress());   // 持久化 MAC 供冷启动自动连接
         }
+        // v2.6：重连后进入"等待新回传"验证（区分设备无响应 vs 旧缓存）；设备锁死提示随新连接重置
+        reconnectPending = true;
+        connectStartedAt = System.currentTimeMillis();
+        wakeupAttempts = 0;
+        deviceLockedAlerted = false;
     }
 
     /** 记录断连状态：清空 BLE 连接标志 + 型号 + 有效 gatt，并保存设备引用供后台重连使用 */
