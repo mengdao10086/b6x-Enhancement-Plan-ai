@@ -1577,14 +1577,14 @@ public class MainHook implements IXposedHookLoadPackage {
                                     // 降低与存活 runFetchLoop 的双写概率。守护线程在队列已堆积（>阈值）后才启动，
                                     // 观察时间即可近似入队时间。
                                     Object head = q.peek();
-                                    long now = System.currentTimeMillis();
+                                    long nowMs = System.currentTimeMillis();
                                     if (head != null && head == headSeen) {
-                                        if (now - headSeenAt > QUEUE_TAKEOVER_MS) {
+                                        if (nowMs - headSeenAt > QUEUE_TAKEOVER_MS) {
                                             processData.invoke(ctrl, head);
                                         }
                                     } else {
                                         headSeen = head;   // 队首变化（含变空/换新）：刷新观察基准
-                                        headSeenAt = now;
+                                        headSeenAt = nowMs;
                                     }
                                 }
                             }
