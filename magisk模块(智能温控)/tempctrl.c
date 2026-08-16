@@ -501,7 +501,7 @@ static char status_file_path_b7[512] = "/data/local/tmp/tempctrl_b7x.status";
 // 自动拉起散热器 app（优先上次使用的 app）
 static int APP_LAUNCH_ENABLED = 0;      // 总开关：1=允许自动拉起，0=关闭（默认关，刷入时可选开）
 // 锁死自动重启（watchdog）：每次实际下发制冷变化时判定——实际停滞（=上周期实际）且≠上周期下发持续 N 次 → kill app 并重新拉起
-static int app_watchdog_cycles = 6;     // APP_WATCHDOG：连续停滞次数（0=关闭，默认 6）
+static int app_watchdog_cycles = 0;     // APP_WATCHDOG：连续停滞次数（0=关闭，默认 6）
 static int watchdog_stall_count = 0;    // 当前连续停滞次数（按实际下发周期计数）
 static int watchdog_last_cold = -1;     // 上周期实际制冷值（停滞判定基准）
 static int watchdog_last_cmd  = -1;     // 上周期下发制冷值（未达目标判定基准）
