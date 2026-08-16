@@ -20,6 +20,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <errno.h>
 #include <unistd.h>
 #include <signal.h>
 #include <time.h>
@@ -292,6 +293,9 @@ static int EMERG_FORCED_1 = 6;   // 等级 1 强制最低档位
 static int EMERG_FORCED_2 = 8;   // 等级 2
 static int EMERG_FORCED_3 = 10;  // 等级 3
 static int EMERG_FORCED_4 = 12;  // 等级 4
+// 等级 → 强制最低档位查表（下标 0 为占位）。初始值与上方 EMERG_FORCED_1~4 默认值一致；
+// EMERG_FORCED 配置热重载时在 parse_common_cfg 同步刷新。避免 emergency_intervention 每周期重建局部数组。
+static int emerg_forced_table[5] = {0, 6, 8, 10, 12};
 static int EMERG_EXIT_CAP_OFFSET = 1;  // 退出钳制偏移
 
 // --- 紧急退出恢复期 ---
@@ -603,7 +607,10 @@ static int parse_gear_config_line(const char *val_str, GearConfigTemp *out) {
     c = (int)strtol(next + 1, NULL, 10);
     out->mode    = (m == 0) ? 0 : 1;
     out->target  = clamp(t, 5, 35);
-    out->fan_rpm = clamp(f, 2000, 6000);
+    // 修复原因：去掉设备无关的 6000 上限——B7X 支持 8000RPM，硬 clamp 会屏蔽高配风扇档位。
+    // 上限改由最终 active_fan_max 统一钳制（rate_limit_fan 下发前 clamp 到 active_fan_max），
+    // 此处仅保留下限 2000。
+    out->fan_rpm = (f < 2000) ? 2000 : f;
     out->cold    = clamp(c, 1, 194);
     return 1;
 }
@@ -823,7 +830,13 @@ static void parse_sysfs_cfg(const char *key, int val, const char *val_str) {
         config_read_path(BATT_CURRENT_PATH, sizeof(BATT_CURRENT_PATH), val_str);
     else if (strcmp(key, "CPU_ZONE") == 0) {
         int a = CPU_ZONE_MIN, b = CPU_ZONE_MAX;
-        if (sscanf(val_str, "%d %d", &a, &b) >= 2) { CPU_ZONE_MIN = clamp(a,0,99); CPU_ZONE_MAX = clamp(b,0,99); }
+        if (sscanf(val_str, "%d %d", &a, &b) >= 2) {
+            CPU_ZONE_MIN = clamp(a,0,99); CPU_ZONE_MAX = clamp(b,0,99);
+            // 防御：min > max 时交换，避免扫描区间为空（配置倒序时按反转区间扫描）
+            if (CPU_ZONE_MIN > CPU_ZONE_MAX) {
+                int t = CPU_ZONE_MIN; CPU_ZONE_MIN = CPU_ZONE_MAX; CPU_ZONE_MAX = t;
+            }
+        }
     }
     else if (strcmp(key, "LOG_FILE") == 0) {
         config_read_path(log_file_path, sizeof(log_file_path), val_str);
@@ -960,8 +973,14 @@ static int parse_gear_cfg(const char *key, int val, const char *val_str,
     }
     if (strcmp(key, "EMERG_FORCED") == 0) {
         int v[4] = {EMERG_FORCED_1,EMERG_FORCED_2,EMERG_FORCED_3,EMERG_FORCED_4};
-        if (sscanf(val_str, "%d %d %d %d", &v[0],&v[1],&v[2],&v[3]) >= 4)
-            { EMERG_FORCED_1=clamp(v[0],0,12); EMERG_FORCED_2=clamp(v[1],0,12); EMERG_FORCED_3=clamp(v[2],0,12); EMERG_FORCED_4=clamp(v[3],0,12); }
+        if (sscanf(val_str, "%d %d %d %d", &v[0],&v[1],&v[2],&v[3]) >= 4) {
+            EMERG_FORCED_1=clamp(v[0],0,12); EMERG_FORCED_2=clamp(v[1],0,12); EMERG_FORCED_3=clamp(v[2],0,12); EMERG_FORCED_4=clamp(v[3],0,12);
+            // 同步文件级查表（emergency_intervention 使用），保持与 EMERG_FORCED_1~4 一致
+            emerg_forced_table[1] = EMERG_FORCED_1;
+            emerg_forced_table[2] = EMERG_FORCED_2;
+            emerg_forced_table[3] = EMERG_FORCED_3;
+            emerg_forced_table[4] = EMERG_FORCED_4;
+        }
         return 1;
     }
     if (strcmp(key, "EMERG_RECOVERY_MULT") == 0) {
@@ -1018,9 +1037,13 @@ static int parse_gear_cfg(const char *key, int val, const char *val_str,
     if (strcmp(key, "GEAR_PREDICT_WIN") == 0) {
         int a = gear_predict_buf_n, b = gear_predict_win_n, c = gear_predict_min_points;
         if (sscanf(val_str, "%d %d %d", &a, &b, &c) >= 3) {
+            int old_n = gear_predict_buf_n;
             gear_predict_buf_n      = clamp(a, 3, 32);
             gear_predict_win_n      = clamp(b, 3, 10);
             gear_predict_min_points = clamp(c, 2, 5);
+            // 修复原因：缓冲区缩容后 cnt 可能 > 新 n，环形索引 % n 语义错乱；
+            // 缩容即清空已累积样本重新累积（扩容无需处理，cnt 受旧 n 上限约束）。
+            if (gear_predict_buf_n < old_n) gear_predict_buf_cnt = 0;
         }
         return 1;
     }
@@ -1374,9 +1397,12 @@ static inline int sign_of(int x) {
     return 0;
 }
 
-/** 设备代号（日志显示用）：B7X→"b7x"，其余→"b6x" */
+/** 设备代号（日志显示用）：B7X→"b7x"，B6X/B8X→"b6x"，无设备→"none" */
 static const char *device_tag_of(DeviceType dev) {
-    return (dev == DEVICE_B7X) ? "b7x" : "b6x";
+    // 修复原因：DEVICE_NONE 原返回 "b6x" 有误导性（断联/无设备日志会显示为 b6x），改返回 "none"。
+    if (dev == DEVICE_B7X) return "b7x";
+    if (dev == DEVICE_NONE) return "none";
+    return "b6x";
 }
 
 /** 温差绝对值 → 档位偏移量（三区间阈值：1/2/3 档） */
@@ -1663,48 +1689,65 @@ static int cmp_zone_desc(const void *a, const void *b) {
 }
 
 /**
+ * 全量扫描 thermal_zone（CPU_ZONE_MIN~MAX），按温度降序保留最高 CPU_ZONE_TOP_KEEP 个。
+ * 首次由 read_cpu_temp_max 同步触发（保证首个读数可用）；周期重扫由 5s 控制块
+ * maybe_rescan_cpu_zones 触发——全量扫描 ~100 个 zone 阻塞近 1s，不能放在 1s 采集热路径内。
+ */
+static void rescan_cpu_zones(void) {
+    time_t now = time(NULL);
+    ZoneReading readings[CPU_ZONE_MAX_CACHE];
+    int count = 0;
+    for (int i = CPU_ZONE_MIN; i <= CPU_ZONE_MAX; i++) {
+        int raw = read_thermal_zone_raw(i);
+        if (raw < 0) continue;
+        if (count < CPU_ZONE_MAX_CACHE) {
+            readings[count].id  = i;
+            readings[count].raw = raw;
+            count++;
+        }
+    }
+
+    // 按温度降序排列，保留温度最高的 CPU_ZONE_TOP_KEEP 个
+    qsort(readings, count, sizeof(ZoneReading), cmp_zone_desc);
+    int keep = count < CPU_ZONE_TOP_KEEP ? count : CPU_ZONE_TOP_KEEP;
+    for (int i = 0; i < keep; i++)
+        cpu_zone_cache[i] = readings[i].id;
+    cpu_zone_count = keep;
+    cpu_zone_scanned = 1;
+    cpu_zone_last_scan = now;
+
+    if (keep == 0) {
+        debug_log(debug_sensor, "thermal_zone 扫描 无可读 zone（路径 %s），CPU 紧急无法触发",
+                  CPU_TEMP_PATH_FMT);
+    } else {
+        debug_log(debug_sensor, "thermal_zone 扫描 发现 %d 个有效 zone，保留 %d 个最高温（%ds 后重扫）",
+                  count, keep, cpu_zone_rescan_sec);
+    }
+}
+
+/** 周期重扫（5s 控制块调用）：距上次全量扫描达到 cpu_zone_rescan_sec 时重建保留列表 */
+static void maybe_rescan_cpu_zones(void) {
+    if (!cpu_zone_scanned) return;   // 首次扫描由 read_cpu_temp_max 同步完成
+    time_t now = time(NULL);
+    if (now - cpu_zone_last_scan < cpu_zone_rescan_sec) return;
+    rescan_cpu_zones();
+}
+
+/**
  * 读取 CPU 最高温度，返回 0.1°C（如 753 = 75.3°C）
  *
- * 首次调用：扫描 thermal_zone0~99，记录所有能读到有效值的 zone
- * 后续调用：只扫描已记录的 zone 列表，取最高值
+ * 首次调用：同步全量扫描 thermal_zone0~99 一次，记录所有能读到有效值的 zone
+ * 后续调用：只扫描已记录的 zone 列表，取最高值（周期重扫在 5s 控制块 maybe_rescan_cpu_zones）
  *
  * 原始值 m°C，除以 100 转 0.1°C
  * 全部失败返回 -1
  */
 static int read_cpu_temp_max(void) {
-    time_t now = time(NULL);
-    // 首次调用 或 距上次全量扫描超过 cpu_zone_rescan_sec → 在 CPU_ZONE_MIN~MAX 范围内重扫。
-    // 周期重扫让保留列表跟随温度分布变化（负载迁移到其它 zone 时更新），避免固定 zone 失真。
-    if (!cpu_zone_scanned || now - cpu_zone_last_scan >= cpu_zone_rescan_sec) {
-        ZoneReading readings[CPU_ZONE_MAX_CACHE];
-        int count = 0;
-        for (int i = CPU_ZONE_MIN; i <= CPU_ZONE_MAX; i++) {
-            int raw = read_thermal_zone_raw(i);
-            if (raw < 0) continue;
-            if (count < CPU_ZONE_MAX_CACHE) {
-                readings[count].id  = i;
-                readings[count].raw = raw;
-                count++;
-            }
-        }
-
-        // 按温度降序排列，保留温度最高的 CPU_ZONE_TOP_KEEP 个
-        qsort(readings, count, sizeof(ZoneReading), cmp_zone_desc);
-        int keep = count < CPU_ZONE_TOP_KEEP ? count : CPU_ZONE_TOP_KEEP;
-        for (int i = 0; i < keep; i++)
-            cpu_zone_cache[i] = readings[i].id;
-        cpu_zone_count = keep;
-        cpu_zone_scanned = 1;
-        cpu_zone_last_scan = now;
-
-        if (keep == 0) {
-            debug_log(debug_sensor, "thermal_zone 扫描 无可读 zone（路径 %s），CPU 紧急无法触发",
-                      CPU_TEMP_PATH_FMT);
-        } else {
-            debug_log(debug_sensor, "thermal_zone 扫描 发现 %d 个有效 zone，保留 %d 个最高温（%ds 后重扫）",
-                      count, keep, cpu_zone_rescan_sec);
-        }
-    }
+    // 首次调用：同步全量扫描一次（保证首个读数可用）。
+    // 周期重扫（让保留列表跟随温度分布变化）已迁至 5s 控制块 maybe_rescan_cpu_zones——
+    // 全量扫描 ~100 个 thermal_zone 阻塞近 1s，不能再 1s 采集热路径（write_webui_data）内
+    // 触发，避免打乱 1s 采集节拍。此处的周期判断已移除。
+    if (!cpu_zone_scanned) rescan_cpu_zones();
 
     // 后续调用 → 只扫描已保留的 zone
     int max_temp = -1;
@@ -1872,7 +1915,12 @@ static void send_am_broadcast(int mode, int target, int windOC, int coldOC, int 
     alarm(3);
     int status;
     if (waitpid(pid, &status, 0) == -1) {
-        write_log("am broadcast 超时");
+        // 修复原因：区分 EINTR（alarm 3s 超时打断 waitpid）与其他错误，
+        // 避免把 ECHILD 等系统错误也误报为"超时"。
+        if (errno == EINTR)
+            write_log("am broadcast 超时");
+        else
+            write_log("am broadcast waitpid 失败：%s", strerror(errno));
         kill(pid, SIGKILL);
         waitpid(pid, NULL, 0);
     } else if (WIFEXITED(status) && WEXITSTATUS(status) != 0) {
@@ -1966,6 +2014,18 @@ static int should_skip_dispatch(int mode, int target, int windOC, int cold, int 
     int send_rpm = (mode == 0) ? windLevel : windOC;
 
     if (cooler_cold_real >= 0 && cooler_rpm_real >= 0) {
+        if (mode == 0) {
+            // 修复原因：mode=0 智能温控下散热器自行管理制冷（build_params 置 coldOC=0），
+            // 原去重等式 "冷==回传冷" 对制冷项恒不成立，会导致每个周期都误判"未到位"而重复下发。
+            // mode=0 只需比较风扇上限（windLevel/RPM）是否到位即可，制冷不参与去重。
+            if (send_rpm == cooler_rpm_real) {
+                debug_log(debug_exec, "skip 已到位（mode=0 仅比较风扇）：目标RPM%d == 回传RPM%d，跳过下发",
+                          send_rpm, cooler_rpm_real);
+                return 1;   // 风扇已到位（制冷由散热器自管理，不判）
+            }
+            return 0;
+        }
+
         if (cold == cooler_cold_real && send_rpm == cooler_rpm_real) {
             debug_log(debug_exec, "skip 已到位：目标冷%d RPM%d == 回传冷%d RPM%d，跳过下发",
                       cold, send_rpm, cooler_cold_real, cooler_rpm_real);
@@ -2276,11 +2336,26 @@ static void watchdog_check(void) {
     if (cooler_cold_real < 0)          { watchdog_stall_count = 0; return; }  // 无实际回传不判
     if (last_cold < 0)                 { watchdog_stall_count = 0; return; }  // 从未下发不判
     if (active_device == DEVICE_NONE)  { watchdog_stall_count = 0; return; }  // 无连接设备不判
+    // 修复原因：mode=0 智能温控下散热器自行管理制冷，实际制冷不跟随下发是正常现象，
+    // watchdog 的"停滞且未达目标"判定对制冷项恒成立会误杀；故 mode=0 不计数。
+    // 同时刷新锚点，切回 mode=1（固定功率）时以最新实际/下发为基准，避免旧锚点误判停滞。
+    if (last_mode == 0) {
+        watchdog_stall_count = 0;
+        watchdog_last_cold = cooler_cold_real;
+        watchdog_last_cmd  = last_cold;
+        return;
+    }
     time_t now = time(NULL);
-    if (now - watchdog_last_kill_at < 300) return;   // kill 冷却：5 分钟内不重复 kill
 
     // 首次锚定：记录上周期实际 + 上周期下发基准，不计数
     if (watchdog_last_cold < 0 || watchdog_last_cmd < 0) {
+        watchdog_last_cold = cooler_cold_real;
+        watchdog_last_cmd  = last_cold;
+        return;
+    }
+    // 修复原因：kill 冷却期内也每周期刷新锚点，避免冷却结束后用 300s 前的陈旧锚点
+    // 立即误判"停滞且未达目标"（原实现冷却期锚点不更新）。
+    if (now - watchdog_last_kill_at < 300) {   // kill 冷却：5 分钟内不重复 kill
         watchdog_last_cold = cooler_cold_real;
         watchdog_last_cmd  = last_cold;
         return;
@@ -2670,10 +2745,9 @@ static void emergency_intervention(void) {
 
     // --- 5. 根据模式设定强制最低档位 ---
     if (EMERG_MODE_ENTRY == 0) {
-        // 模式 0：查表强制最低档
-        const int EMERG_FORCED_TABLE[] = {0, EMERG_FORCED_1, EMERG_FORCED_2, EMERG_FORCED_3, EMERG_FORCED_4};
+        // 模式 0：查表强制最低档（表为文件级 emerg_forced_table，配置重载时同步刷新）
         if (emergency_level >= 1 && emergency_level <= 4)
-            emerg_forced_gear = EMERG_FORCED_TABLE[emergency_level];
+            emerg_forced_gear = emerg_forced_table[emergency_level];
         else
             emerg_forced_gear = 0;
     } else {
@@ -2703,6 +2777,11 @@ static int gear_from_current(void) {
     // 1. 读取电池电流（0.01A 单位，正=放电，负=充电）
     int ua10 = read_batt_current_ua10();
     if (ua10 == 0) {
+        // 修复原因：退出时清掉陈旧推荐挡位/偏移，避免下次重进沿用数周期前的旧偏移导致挡位跳变
+        //（与下方阈值退出路径 final_level < CURRENT_GEAR_MIN 的清理保持一致）。
+        curr_gear_recommended = 0;
+        curr_gear_temp_offset = 0;
+        curr_gear_temp_cooldown = 0;
         return 0;
     }
 
@@ -2712,7 +2791,13 @@ static int gear_from_current(void) {
 
     // 2. 检查方向开关
     int mode_enabled = is_charging ? CURRENT_GEAR_MODE_CHARGE : CURRENT_GEAR_MODE_DISCHARGE;
-    if (!mode_enabled) return 0;
+    if (!mode_enabled) {
+        // 修复原因：方向开关关闭时同样清掉陈旧推荐挡位/偏移（与 ua10==0 早退一致）
+        curr_gear_recommended = 0;
+        curr_gear_temp_offset = 0;
+        curr_gear_temp_cooldown = 0;
+        return 0;
+    }
 
     // 3. EMA 平滑
     if (!curr_gear_smooth_valid) {
@@ -3344,8 +3429,10 @@ static void pid_reset_core(void) {
  * 从当前 gear 状态映射到 PID 输出空间
  */
 static void pid_align_from_gear(void) {
-    float ratio = (float)(batt_gear_base - gear_min) /
-                  (gear_max - gear_min);
+    // 修复原因：除数保护——gear_max == gear_min 时除零会得到 NaN/Inf 比例，污染对齐量。
+    int gear_span = gear_max - gear_min;
+    if (gear_span < 1) gear_span = 1;
+    float ratio = (float)(batt_gear_base - gear_min) / gear_span;
     pid_ratio_saved = ratio;   // 记录无级对齐量（切回 Gear 时映射回档位）
     pid_align_rpm  = fan_rpm_min + (int)(ratio * (active_fan_max - fan_rpm_min));
     pid_align_cold = pid_cold_min + (int)(ratio * (eff_cold_max(active_pid_cold_max, pid_cold_min) - pid_cold_min));
@@ -3361,7 +3448,10 @@ static void pid_align_from_gear(void) {
  * @return 对齐比例（0~1），用于映射基础档位
  */
 static float pid_ratio_from_cold(int cold_ref, int cold_max) {
-    float ratio = (float)(cold_ref - pid_cold_min) / (cold_max - pid_cold_min);
+    // 修复原因：除数保护——cold_max == pid_cold_min 时除零会得到 Inf 比例，对齐值失真。
+    int span = cold_max - pid_cold_min;
+    if (span < 1) span = 1;
+    float ratio = (float)(cold_ref - pid_cold_min) / span;
     if (ratio < 0.0f) ratio = 0.0f;
     if (ratio > 1.0f) ratio = 1.0f;
     pid_align_cold = cold_ref;
@@ -3722,9 +3812,10 @@ static void gear_cycle(void) {
         if (exit_mode >= EXIT_HALF) {
             if (EMERG_MODE_EXIT == 0) {
                 // 模式 0：钳制最高档
+                // 修复原因：紧急等级最大 3（emergency_intervention 中 cpu_lvl 计算 0~3），
+                // prev_emerg_level >= 4 为死分支，删除。
                 int cap;
-                if      (prev_emerg_level >= 4) cap = EMERG_FORCED_4;
-                else if (prev_emerg_level >= 3) cap = EMERG_FORCED_3;
+                if      (prev_emerg_level >= 3) cap = EMERG_FORCED_3;
                 else if (prev_emerg_level >= 2) cap = EMERG_FORCED_2;
                 else                             cap = EMERG_FORCED_1;
                 cap += EMERG_EXIT_CAP_OFFSET;
@@ -3848,7 +3939,13 @@ static void write_webui_data(void) {
     // 每 WEBUI_COMPACT_EVERY 行压缩：读文件 → 删最旧行 → 写回，文件收敛回 ~720 行
     if (webui_lines_since_compact >= WEBUI_COMPACT_EVERY) {
         webui_lines_since_compact = 0;
-        char buf[WEBUI_DATA_MAX_LINES][96];
+        // 修复原因：69KB 栈缓冲（720×96）改堆分配，避免挤占守护进程小栈；行为等价。
+        char (*buf)[96] = malloc(WEBUI_DATA_MAX_LINES * 96);
+        if (!buf) {
+            write_log("WebUI 曲线压缩 分配 %d 字节失败，跳过本轮压缩",
+                      WEBUI_DATA_MAX_LINES * 96);
+            return;
+        }
         int total = 0;
         FILE *rf = fopen(WEBUI_DATA_PATH, "r");
         if (rf) {
@@ -3866,6 +3963,7 @@ static void write_webui_data(void) {
                 fclose(cf);
             }
         }
+        free(buf);
     }
 }
 
@@ -3951,7 +4049,12 @@ int main(int argc, char *argv[]) {
             read_cooler_params();
             break;
         }
-        arbitrate_apps();   // 等待设备期间无 app 存活则自动拉起上次使用的 app（冷却节流）
+        // 等待设备期间无 app 存活则自动拉起上次使用的 app。
+        // 与主循环一致加 ARBITRATE_INTERVAL 节流，避免每 5s 全量扫描一次 /proc。
+        if (time(NULL) - last_arbitrate >= ARBITRATE_INTERVAL) {
+            arbitrate_apps();
+            last_arbitrate = time(NULL);
+        }
         sleep(5);
     }
     if (!running) goto exit;
@@ -4011,6 +4114,10 @@ pid_init_done:
 
         if (last_ctrl == 0 || time(NULL) - last_ctrl >= 5) {
             last_ctrl = time(NULL);
+
+            // 0. CPU thermal_zone 周期重扫（移入 5s 控制块：全量扫描 ~100 个 zone 阻塞近 1s，
+            //    不能在 1s 采集热路径 write_webui_data 内触发，避免打乱采集节拍）
+            maybe_rescan_cpu_zones();
 
             // 1. 读取双状态文件 + 仲裁
             read_status_ble_both();

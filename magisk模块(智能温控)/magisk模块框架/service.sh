@@ -19,8 +19,14 @@ for i in $(seq 1 12); do
 done
 
 # 2. 复制二进制到可执行分区（仅首次执行）
-cp "$MODDIR/tempctrl" /data/local/tmp/tempctrl
-chmod 755 /data/local/tmp/tempctrl
+# 修复：二进制缺失时（模块被手动拆解/替换中）直接跳过启动，避免 cp 失败后重启循环空跑
+if [ -f "$MODDIR/tempctrl" ]; then
+    cp "$MODDIR/tempctrl" /data/local/tmp/tempctrl
+    chmod 755 /data/local/tmp/tempctrl
+else
+    echo "$(date '+%Y-%m-%d %H:%M:%S')：tempctrl 二进制缺失，跳过启动" >> /cache/tempctrl.log
+    exit 0
+fi
 
 # 3. 清空上次日志并首次启动
 > /cache/tempctrl.log

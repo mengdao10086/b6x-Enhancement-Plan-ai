@@ -96,6 +96,10 @@
           catch (e2) {
             if (!fired) { fired = true; delete window[name]; cb({ errno: -1, stdout: '', stderr: 'ksu.exec: ' + e2.message }); }
           }
+          // 兜底：回调长期不触发时清理挂载的全局回调并报超时，避免 window[name] 泄漏
+          setTimeout(function () {
+            if (!fired) { fired = true; delete window[name]; cb({ errno: -2, stdout: '', stderr: 'ksu 回调超时(8s): ' + String(cmd).slice(0, 60) }); }
+          }, 8000);
         };
       })();
       kind = 'ksu';
@@ -365,6 +369,25 @@
     return n;
   }
 
+  // 取某输入框对应字段的当前已保存值：multi 子输入（data-key 形如 "KEY::i"）按字段序号从
+  // S.values 的空格分隔值中拆取，单值输入直接取 S.values[key]；取不到回退 fallback。
+  // 用于清空输入时回退旧值，避免 UI 空显示而 S.values 残留旧值的不一致。
+  function fieldCurrentValue(inp, fallback) {
+    var dk = inp.dataset.key || '';
+    var sep = dk.lastIndexOf('::');
+    var cur = S.values[sep >= 0 ? dk.slice(0, sep) : dk];
+    if (cur !== undefined) {
+      if (sep >= 0) {
+        var parts = String(cur).split(/\s+/);
+        var pi = parseInt(dk.slice(sep + 2), 10);
+        if (parts[pi] !== undefined && parts[pi] !== '') return parts[pi];
+      } else {
+        return cur;
+      }
+    }
+    return fallback;
+  }
+
   function buildNumInput(key, val, min, max, step, placeholder) {
     var inp = document.createElement('input');
     inp.type = 'number'; inp.min = min; inp.max = max; inp.step = step;
@@ -375,6 +398,12 @@
     fitInput(inp);
     inp.addEventListener('input', function () {
       var n = clampNumInput(inp, min, max);
+      if (n == null) {
+        // 空串/非数字：不允许清空 → 回退该字段当前有效值并还原输入框
+        inp.value = String(fieldCurrentValue(inp, min));
+        n = parseInt(inp.value, 10);
+        if (isNaN(n)) n = min;
+      }
       if (n != null && isRow) setValue(key, String(n)); // multi 子输入不直接写 dirty
       fitInput(inp);
     });
@@ -600,27 +629,29 @@
   }
 
   // 按 DOM 顺序重排该族档位行，重编号 N=1..count，并自动保存
+  // 修复：onGearFieldInput 只更新 S.values/S.dirty 不更新 it.value，旧实现重编号后
+  // S.values/S.dirty 仍按旧键指向新项，导致保存写错值/丢编辑。
+  // 改为：按 DOM 顺序收集每行当前值（优先 S.values[oldKey]，缺省 it.value），
+  // 重编号后同步重建 S.values/S.dirty（清该族全部旧键、写新键），再统一 render+save。
   function commitGearOrder(container, family) {
-    var keys = [];
+    var order = [];
     container.querySelectorAll('.gear-row[data-gear-key]').forEach(function (r) {
-      keys.push(r.dataset.gearKey);
+      order.push(r.dataset.gearKey);
     });
+    // 收集每行当前值：优先编辑中的 S.values[oldKey]，缺省回退 items 快照值
     var byKey = {};
     S.items.forEach(function (it) {
       if (it.type === 'kv' && it.key.indexOf(family) === 0) byKey[it.key] = it;
     });
-    var oldKeys = Object.keys(byKey);
-    var newItems = keys.map(function (k, i) {
-      var it = byKey[k];
+    var newItems = order.map(function (oldKey, i) {
       var nk = family + (i + 1);
-      if (S.values[nk] === undefined && S.values[k] !== undefined) S.values[nk] = S.values[k];
-      it.key = nk;
-      it.raw = nk + '=' + it.value;
-      return it;
+      var v = S.values[oldKey] !== undefined ? S.values[oldKey] : (byKey[oldKey] ? byKey[oldKey].value : SCHEMA.gearRow.defaultValue);
+      // 值同步写进 item（value+raw 与新键一致，即使 dirty 未命中快照也正确）
+      return { type: 'kv', key: nk, value: v, raw: nk + '=' + v };
     });
-    oldKeys.forEach(function (k) {
-      if (S.values[k] !== undefined && S.items.indexOf(byKey[k]) === -1) delete S.values[k];
-    });
+    // 清该族全部旧键的 values/dirty，写入新键（重排必然改变配置，全部标脏触发保存）
+    Object.keys(byKey).forEach(function (k) { delete S.values[k]; delete S.dirty[k]; });
+    newItems.forEach(function (it) { S.values[it.key] = it.value; S.dirty[it.key] = true; });
     S.items = S.items.filter(function (it) { return !(it.type === 'kv' && it.key.indexOf(family) === 0); }).concat(newItems);
     renderGearTable(container, family);
     scheduleSave();
@@ -628,10 +659,22 @@
 
   function onGearFieldInput(ref, idx, inp) {
     var f = SCHEMA.gearRow.fields[idx];
-    clampNumInput(inp, f.min, f.max);
-    ref.parts[idx] = inp.value;
-    S.values[ref.key] = ref.parts.join(',');
+    var n = clampNumInput(inp, f.min, f.max);
+    // 空串/非数字：不允许清空 → 回退该字段当前值并还原输入框（避免 join 出 "1,,2000,5"）
+    if (n == null) {
+      var cur = String(S.values[ref.key] !== undefined ? S.values[ref.key] : ref.parts.join(',')).split(',');
+      inp.value = (cur[idx] !== undefined && cur[idx] !== '') ? cur[idx] : String(f.min);
+      n = parseInt(inp.value, 10);
+      if (isNaN(n)) n = f.min;
+    }
+    ref.parts[idx] = String(n);
+    var joined = ref.parts.join(',');
+    S.values[ref.key] = joined;
     S.dirty[ref.key] = true;
+    // 同步 items 快照（it.value/raw），否则后续 renderGearTable 重渲染（增删行等）会显示回退旧值（丢编辑）
+    S.items.forEach(function (it) {
+      if (it.type === 'kv' && it.key === ref.key) { it.value = joined; it.raw = ref.key + '=' + joined; }
+    });
     scheduleSave();
   }
 
@@ -678,13 +721,23 @@
     // 兼容中文注释（实际配置为 ASCII，安全起见走 UTF-8）
     return btoa(unescape(encodeURIComponent(str)));
   }
+  // shell 单引号转义：把用户路径安全嵌入命令，防止空格/引号/元字符注入或破坏命令
+  function shq(s) {
+    return "'" + String(s).replace(/'/g, "'\\''") + "'";
+  }
 
   async function save() {
     if (!Bridge.available) { toast('无桥接，无法保存', 'err'); return; }
     if (!Object.keys(S.dirty).length && !S.dirtySpecial) return;
     var text = rebuildConfig();
-    var r = await Bridge.exec('echo ' + b64(text) + ' | base64 -d > ' + CFG);
-    if (r.errno !== 0) { toast('保存失败: ' + (r.stderr || 'errno ' + r.errno), 'err'); return; }
+    // 原子写：先写 $CFG.tmp 再 mv（同文件系统原子改名），避免保存中断（断电/被杀）
+    // 留下写一半的损坏配置导致 C 端解析异常。失败时单独清理 .tmp，保持 errno 反映真实失败
+    var r = await Bridge.exec('echo ' + b64(text) + ' | base64 -d > ' + CFG + '.tmp && mv ' + CFG + '.tmp ' + CFG);
+    if (r.errno !== 0) {
+      Bridge.exec('rm -f ' + CFG + '.tmp');
+      toast('保存失败: ' + (r.stderr || 'errno ' + r.errno), 'err');
+      return;
+    }
     // 修复：把刚写入的内容同步回 S.items 快照，否则下次保存会用页面加载时的旧值覆盖其他项
     // （例：先存 DEBUG_PID=1，再改 DEBUG_ENABLED 保存时会把 DEBUG_PID 冲回页面加载时的 0）
     S.items = parseConfig(text);
@@ -785,6 +838,10 @@
       return { min: mn - sp * 0.1, max: mx + sp * 0.1 };
     }
     var L = range(leftSeries, leftV), R = range(rightSeries, rightV);
+    // 修复：单轴全无效值时该轴 range() 返回 null（此前守卫只挡双轴都空），
+    // 直接 return 会让 L/R 为 null 的轴在 plot 的 yOf 里解引用崩溃。
+    // 双轴都不可画（全 null）则无曲线可画；仅一轴有效时仍画该轴。
+    if (!L && !R) return;
     function yOf(axis, v) { return padT + H * (1 - (v - axis.min) / (axis.max - axis.min)); }
     ctx.font = '10px system-ui'; ctx.fillStyle = '#888';
     // 刻度数量随高度自适应：越高刻度越多（信息密度提升），越矮越少（避免拥挤）
@@ -822,6 +879,7 @@
     }
     // 画线
     function plot(series, getV, axis) {
+      if (!axis) return;   // 该轴范围无效（全 null），跳过该轴绘制
       series.forEach(function (s) {
         ctx.strokeStyle = s.color; ctx.lineWidth = 1.6;
         ctx.beginPath();
@@ -852,7 +910,8 @@
 
   async function refreshLog() {
     var logFile = S.values.LOG_FILE || '/cache/tempctrl.log';
-    var r = await Bridge.exec('tail -c 400000 ' + logFile + ' 2>/dev/null');
+    // LOG_FILE 为可编辑路径，用 shq 单引号包裹，避免含空格/引号的路径破坏命令
+    var r = await Bridge.exec('tail -c 400000 ' + shq(logFile) + ' 2>/dev/null');
     if (r.errno !== 0) { S.logText = ''; } else { S.logText = r.stdout || ''; }
     renderLog();
     if (!S.manualScroll) scrollLogBottom();

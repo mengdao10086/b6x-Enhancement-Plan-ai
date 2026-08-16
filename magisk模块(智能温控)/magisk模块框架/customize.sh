@@ -24,6 +24,7 @@ ui_print ""
 LAUNCH_ENABLED=0
 KEY_PRESSED=0
 for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30; do
+    command -v getevent >/dev/null 2>&1 || break   # 无 getevent 的环境（部分 ksu 恢复模式）直接跳过，避免空等 30s×2
     KEY=$(timeout 1 getevent -c 1 -lq 2>/dev/null | grep -o 'KEY_VOLUME[A-Z]*' | head -1)
     case "$KEY" in
         KEY_VOLUMEUP)   LAUNCH_ENABLED=1 ;;
@@ -47,27 +48,30 @@ ui_print ""
 
 sleep 1
 
-# 锁死自动重启（watchdog）选择：仅自动拉起开启时询问（关闭自动拉起则本功能默认关闭）
-WATCHDOG_VALUE=0
+# 锁死自动重启（watchdog）选择：仅自动拉起开启时询问（关闭自动拉起则保持默认 6，无实际作用）
+# 修复：旧版无按键时 WATCHDOG_VALUE=0 会把 profile.conf 出厂值 APP_WATCHDOG=6 覆盖为 0，
+# 导致保护静默失效。统一为无按键时保留 6（与 profile.conf 出厂值及 C 代码默认一致）。
+WATCHDOG_VALUE=6
 if [ "$LAUNCH_ENABLED" = "1" ]; then
     ui_print ""
     ui_print "=============================="
     ui_print "  散热器锁死自动重启功能"
     ui_print "  检测到散热器锁死（实际制冷持续多周期无响应）时"
     ui_print "  自动强制重启散热器 app 以恢复控制"
-    ui_print "  默认 6 周期"
+    ui_print "  默认 6 周期（不操作保留 6）"
     ui_print "=============================="
     ui_print "  音量+ = 开启   音量- = 关闭"
-    ui_print "  不操作 30 秒 → 默认关闭"
+    ui_print "  不操作 30 秒 → 保留默认 6"
     ui_print "=============================="
     ui_print ""
     KEY_PRESSED=0
     WATCHDOG_ENABLED=0
     for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30; do
+        command -v getevent >/dev/null 2>&1 || break   # 无 getevent 直接跳过按键等待
         KEY=$(timeout 1 getevent -c 1 -lq 2>/dev/null | grep -o 'KEY_VOLUME[A-Z]*' | head -1)
         case "$KEY" in
-            KEY_VOLUMEUP)   WATCHDOG_ENABLED=1 ;;
-            KEY_VOLUMEDOWN) WATCHDOG_ENABLED=0 ;;
+            KEY_VOLUMEUP)   WATCHDOG_ENABLED=1; WATCHDOG_VALUE=6 ;;
+            KEY_VOLUMEDOWN) WATCHDOG_ENABLED=0; WATCHDOG_VALUE=0 ;;
             *) continue ;;
         esac
         KEY_PRESSED=1
@@ -77,16 +81,15 @@ if [ "$LAUNCH_ENABLED" = "1" ]; then
     if [ "$KEY_PRESSED" = 1 ]; then
         if [ "$WATCHDOG_ENABLED" = 1 ]; then
             ui_print "已选择：开启锁死自动重启"
-            WATCHDOG_VALUE=6
         else
             ui_print "已选择：关闭锁死自动重启"
         fi
     else
-        ui_print "未检测到按键，默认关闭锁死自动重启"
+        ui_print "未检测到按键，保留默认 6 周期锁死自动重启"
     fi
     ui_print ""
 else
-    ui_print "自动拉起未开启，锁死自动重启默认关闭"
+    ui_print "自动拉起未开启，锁死自动重启保留默认 6（自动拉起关闭时无实际作用）"
 fi
 
 # 写入 profile.conf（已有行替换，无则追加）

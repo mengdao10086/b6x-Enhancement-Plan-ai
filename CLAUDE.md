@@ -59,7 +59,7 @@ MUST 先在 `参考资料/` 搜索关键词，再考虑加诊断钩子。这里�
 | `lsp模块(apk修复+温控接口)/app/src/main/java/.../MainHook.java` | LSPosed 模块核心 |
 | `TECH_DEBT.md` | 技术债与未解决问题记录 |
 | `待办.md` | 项目待办清单 |
-| `参考资料/完整修复历程.md` | BLE 4 层 Bug 修复全记录 + B7X/B8X 分析 |
+| `参考资料/完整修复历程.md` | BLE 4 层 Bug 修复全记录 + B8X 分析 |
 | `反编译分析/总览.md` | 反编译技术文档总览（所有 app 分析索引） |
 | `反编译分析/飞智散热器开发者工具运行逻辑.md` | App 内部运行逻辑分析 |
 | `参考资料/decompile/b6_devtool/` | B6X 老版开发者工具反编译（含 SDK+App 全量 smali），分析见 `反编译分析/飞智散热器开发者工具运行逻辑.md` |
@@ -73,10 +73,10 @@ MUST 先在 `参考资料/` 搜索关键词，再考虑加诊断钩子。这里�
 
 | 工具 | 位置 |
 |------|------|
-| `baksmali.jar` | `../../工具/baksmali.jar`（集中目录） |
-| `smali.jar` | `../../工具/smali.jar` |
-| `debug.keystore` | `../../工具/debug.keystore` |
-| `jadx.jar` | `../../工具/jadx.jar` |
+| `baksmali.jar` | `../工具/baksmali.jar`（集中目录） |
+| `smali.jar` | `../工具/smali.jar` |
+| `debug.keystore` | `../工具/debug.keystore` |
+| `jadx.jar` | `../工具/jadx.jar` |
 
 ---
 
@@ -99,7 +99,7 @@ MUST 先在 `参考资料/` 搜索关键词，再考虑加诊断钩子。这里�
 <!-- gitnexus:start -->
 # GitNexus — Code Intelligence
 
-This project is indexed by GitNexus as **b6x-Enhancement-Plan-ai** (1042 symbols, 1900 relationships, 91 execution flows). Use the GitNexus MCP tools to understand code, assess impact, and navigate safely.
+This project is indexed by GitNexus as **b6x-Enhancement-Plan-ai** (1623 symbols, 2931 relationships, 144 execution flows). Use the GitNexus MCP tools to understand code, assess impact, and navigate safely.
 
 > Index stale? Run `node .gitnexus/run.cjs analyze` from the project root — it auto-selects an available runner. No `.gitnexus/run.cjs` yet? `npx gitnexus analyze` (npm 11 crash → `npm i -g gitnexus`; #1939).
 

@@ -47,4 +47,4 @@ log.md
 参考资料/decompile/
 参考资料/smali_patching_attempts/
 参考资料/apk_original/
-参考资料/c_historical_sources/
+# 注意：参考资料/c_historical_sources/（tempctrl 历史版本源码）单独追踪，不忽略

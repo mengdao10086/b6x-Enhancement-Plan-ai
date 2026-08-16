@@ -10,31 +10,16 @@
 
 | 组件 | 路径 | 说明 | 状态 |
 |------|------|------|------|
-| **LSPosed 模块** | [lsp模块(apk修复+温控接口)/](lsp模块(apk修复+温控接口)/) | 修复蓝牙连接 + 提供散热器控制接口 | ✅ v2.5 |
-| **C 守护程序** | [magisk模块(智能温控)/](magisk模块(智能温控)/) | 智能温控，通过 LSPosed 接口控制散热器 | ✅ v2.5 |
+| **LSPosed 模块** | [lsp模块(apk修复+温控接口)/](lsp模块(apk修复+温控接口)/) | 修复蓝牙连接 + 提供散热器控制接口 | ✅ v2.5+（含未发布改进） |
+| **C 守护程序** | [magisk模块(智能温控)/](magisk模块(智能温控)/) | 智能温控，通过 LSPosed 接口控制散热器 | ✅ v2.5+（含未发布改进） |
 
 ---
 
 ## 架构概览
 
-```
- ┌─ 手机 ─────────────────────────────────────────────────┐
- │                                                        │
- │  B6X App 进程         B7X App 进程     Root 进程        │
- │ ┌──────────────────┐ ┌──────────────┐ ┌───────────────┐│
- │ │ LSPosed 模块     │ │  LSPosed 模块 │ │ tempctrl      ││
- │ │ B6X 钩子集       │ │  B7X 钩子集   │ │ 单实例仲裁     ││
- │ │                  │ │              │ │               ││
- │ │ ←─ am broadcast  │ │← am broadcast│ │ 双 status     ││
- │ │   SET_TEMPERATURE│ │ SET_TEMP_B7  │ │ 文件心跳       ││
- │ │       ↓          │ │    ↓         │ │ →选active     ││
- │ │ WaspWingManager  │ │ t9.j(混淆)   │ │ →am broadcast ││
- │ │ .setRunMode()    │ │ .setRunMode()│ │ 5s 周期       ││
- │ │     ↓            │ │    ↓         │ └───────────────┘│
- │ │  BLE → B6X 散热器 │ │ BLE → B7X    │                  │
- │ └──────────────────┘ └──────────────┘                  │
- └────────────────────────────────────────────────────────┘
-```
+手机内三进程协作：**B6X App / B7X App** 内由 LSPosed 模块钩住散热器 SDK（`setRunMode()` → BLE 下发指令）；Root 进程 **tempctrl** 通过双 status 文件心跳仲裁 active 设备，每 5s 周期决策并经 `am broadcast` 下发控制指令。
+
+> 详细架构图与进程协作见 [逻辑说明.md](magisk模块(智能温控)/逻辑说明.md)。
 
 ---
 
@@ -43,13 +28,13 @@
 ### LSPosed 模块
 
 - 修复蓝牙连接bug，死循环吃满一个核心bug → [完整修复历程](参考资料/完整修复历程.md)
-- 广播控制接口（B6X：com.flydigi.SET_TEMPERATURE / B7X：com.flydigi.SET_TEMPERATURE_B7），完整 7 参数散热器控制
-- 状态文件（tempctrl_b6x.status / tempctrl_b7x.status）向c温控程序回传散热器参数
+- 广播控制接口（完整 7 参数散热器控制），协议详见 [lsp模块 README](lsp模块(apk修复+温控接口)/README.md)
+- 状态文件（tempctrl_b6x.status / tempctrl_b7x.status）向 C 守护程序回传散热器参数
 
 ### C 智能温控守护程序
 
 - **PID控制**：PID连续无级调节 + 温度趋势预测 + 输入输出滤波，尽可能稳定手机温度
-- **制冷→风扇自动映射**：冷端指数 + 热端线性双重映射平均，双端 EMA 平滑系数可配置，保证散热相对够用的同时尽可能压低风扇转速降低噪音
+- **制冷→风扇自动映射**：冷端指数 + 热端线性自加权合并，双端 EMA 平滑系数可配置，保证散热相对够用的同时尽可能压低风扇转速降低噪音
 - **可自动拉起散热器 app**：无散热器 app 存活时自动拉起上次使用的 app（刷入时音量±选择、默认关闭）
 - **高可玩性**：大量可自定义参数
 - **内置 WebUI 配置界面**：root 管理器模块页直接查看实时曲线与日志，直接可视化调参
@@ -66,12 +51,13 @@
 ├── <a href="magisk模块(智能温控)/">magisk模块(智能温控)/</a>          ← C 守护程序源码 + Magisk 模块框架
 │   ├── <a href="magisk模块(智能温控)/tempctrl.c">tempctrl.c</a>                 ← 核心 C 代码
 │   ├── <a href="magisk模块(智能温控)/逻辑说明.md">逻辑说明.md</a>                ← 技术设计文档
+│   ├── <a href="magisk模块(智能温控)/patch_tls.py">patch_tls.py</a>               ← CI 构建工具（修复 PT_TLS 对齐）
 │   └── <a href="magisk模块(智能温控)/magisk模块框架/">magisk模块框架/</a>            ← module.prop / service.sh / customize.sh / profile.conf / webroot/
 ├── <a href="CHANGELOG.md">CHANGELOG.md</a>                   ← 版本更新日志
 ├── <a href="参考资料/">参考资料/</a>
 │   ├── <a href="参考资料/完整修复历程.md">完整修复历程.md</a>             ← BLE 4 层 Bug 修复全记录 + B8X 分析
 │   ├── <a href="参考资料/decompile/">decompile/</a>                  ← APK 反编译产物（不进 git）
-│   └── <a href="参考资料/smali_patching_attempts/">smali_patching_attempts/</a>     ← smali 工具链 + DEX 修改产物（失败尝试，工具 jar 已并入集中 [../../工具/](../../工具/)）
+│   └── <a href="参考资料/smali_patching_attempts/">smali_patching_attempts/</a>     ← smali 工具链 + DEX 修改产物（失败尝试，工具 jar 已并入集中 [../工具/](../工具/)）
 ├── <a href="反编译分析/">反编译分析/</a>                   ← 各 app 反编译分析文档（总览见 <a href="反编译分析/总览.md">总览.md</a>）
 ├── <a href=".github/workflows/">.github/workflows/</a>              ← CI 自动构建
 └── <a href="README.md">README.md</a>                       ← 本文件
