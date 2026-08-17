@@ -265,7 +265,10 @@ public class MainHook implements IXposedHookLoadPackage {
                         int c = ((Number) cold).intValue();
                         int d = ((Number) coldDec).intValue();
                         if (d >= 10) d = (d + 5) / 10;  // 多位小数 → 四舍五入到 0.1°C
-                        sb.append("COLD_TEMP=").append(c * 10 + d).append("\n");
+                        // bug fix(P2.7): 负温度换算——按 getTemperature 符号约定（c 为带符号整数°C），
+                        // d 恒为正小数位，故负温度结果为 c*10 - d（如 -1.5°C → c=-1,d=5 → -10-5=-15）。
+                        // 原 c*10+d 在负温下会错误地往正方向偏移（-1.5°C 被写成 -5）。
+                        sb.append("COLD_TEMP=").append((c < 0) ? c * 10 - d : c * 10 + d).append("\n");
                     }
 
                     // 实际风扇转速（经超频逻辑折算）：getRealWindLevel()
@@ -1746,6 +1749,8 @@ public class MainHook implements IXposedHookLoadPackage {
      * 由 BLE 回调线程调用，字段均 volatile（M4）。
      */
     private static void markConnected(BluetoothGatt gatt) {
+        // P2.13: 记录上一连接状态，用于判断是否"断连→连接"翻转（决定唤醒次数是否重置）
+        boolean wasConnected = bleConnected;
         bleConnected = true;
         diagLogCount = 0;            // 新连接：重置广播接收诊断计数（每连最多记录 DIAG_LOG_MAX_PER_CONN 对）
         setRunModeLogCount = 0;      // 新连接：重置"setRunMode 已下发"计数（每连最多 3 条）
@@ -1764,7 +1769,12 @@ public class MainHook implements IXposedHookLoadPackage {
         // v2.6：重连后进入"等待新回传"验证（区分设备无响应 vs 旧缓存）；设备锁死提示随新连接重置
         reconnectPending = true;
         connectStartedAt = System.currentTimeMillis();
-        wakeupAttempts = 0;
+        // bug fix(P2.13): 仅断连→连接状态翻转时重置唤醒次数——同一次连接会话内 onDeviceConnected /
+        // onGattConnected / a.S1 会多次触发 markConnected，若每次都清零，单会话唤醒上限（WAKEUP_MAX=1）
+        // 形同虚设，设备无回传时会被反复唤醒扰动。仅真实重连（wasConnected=false）才重置。
+        if (!wasConnected) {
+            wakeupAttempts = 0;
+        }
         deviceLockedAlerted = false;
     }
 
