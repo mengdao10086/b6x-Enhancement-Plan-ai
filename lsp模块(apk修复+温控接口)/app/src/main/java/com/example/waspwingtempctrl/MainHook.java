@@ -301,18 +301,30 @@ public class MainHook implements IXposedHookLoadPackage {
             // bug fix(P1.5): 跨进程写竞争——先写临时文件再原子 rename。进程内 synchronized 无法跨进程
             // 互斥；此前直接覆盖写时，未连接 app 的周期写可能把 BLE=0 覆写到已连接方刚写好的文件上，
             // 导致 daemon/WebUI 误判为断开。写入完成后 rename 原子替换目标，读者只看到完整内容。
+            // bug fix(2026-08-17): 原子写需在 /data/local/tmp 目录内创建 .tmp 新文件，app uid 无目录写权限
+            // 时 new FileOutputStream(tmp) EACCES 抛异常直接跳外层 catch → 状态文件永久不更新（散热器失控）。
+            // 改原子写失败回退直接覆盖写目标（目标已由 create_status_files 预建 0666，覆盖写无需目录写权限）；
+            // 有目录写权限环境仍走原子写，无权限环境恢复旧行为。
             byte[] data = sb.toString().getBytes();
-            File tmp = new File(currentStatusFile + ".tmp");
-            FileOutputStream fos = new FileOutputStream(tmp);
-            fos.write(data);
-            fos.close();
-            File dst = new File(currentStatusFile);
-            if (!tmp.renameTo(dst)) {
-                // 兜底：rename 失败（罕见，同目录原子 rename 应成功）时直接覆盖写目标文件，保持原行为
-                FileOutputStream direct = new FileOutputStream(dst);
+            boolean atomicOk = false;
+            try {
+                File tmp = new File(currentStatusFile + ".tmp");
+                FileOutputStream fos = new FileOutputStream(tmp);
+                fos.write(data);
+                fos.close();
+                File dst = new File(currentStatusFile);
+                if (tmp.renameTo(dst)) {
+                    atomicOk = true;
+                } else {
+                    tmp.delete();
+                }
+            } catch (Throwable t) {
+                // 原子写不可行（目录无写权限等）→ 走直接覆盖写兜底
+            }
+            if (!atomicOk) {
+                FileOutputStream direct = new FileOutputStream(currentStatusFile);
                 direct.write(data);
                 direct.close();
-                tmp.delete();
             }
             // 写入成功：此前失败则补一条恢复（状态翻转才打）
             if (statusWriteFailLogged) {

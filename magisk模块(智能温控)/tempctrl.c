@@ -1465,6 +1465,14 @@ static void create_status_files(void) {
             write_log("状态文件 创建失败 %s", paths[i]);
         }
     }
+    // 预创建 MAC 记录文件（LSP markConnected 时覆盖写；0666 让 app uid 无需目录写权限即可写，
+    // 否则 MainHook P2.9 FileOutputStream 直写创建新文件会 EACCES → tempctrl_last_dev 缺失，
+    // 冷启动自动连接/后台重连缺目标 MAC。路径须与 MainHook LAST_DEV_FILE 一致）
+    FILE *mf = fopen("/data/local/tmp/tempctrl_last_dev", "a");
+    if (mf) {
+        fclose(mf);
+        chmod("/data/local/tmp/tempctrl_last_dev", 0666);
+    }
 }
 
 // ======================== 双文件状态读取 ========================
