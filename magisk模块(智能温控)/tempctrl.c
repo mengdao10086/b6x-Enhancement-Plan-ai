@@ -20,7 +20,6 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <errno.h>
 #include <unistd.h>
 #include <signal.h>
 #include <time.h>
@@ -293,9 +292,6 @@ static int EMERG_FORCED_1 = 6;   // 等级 1 强制最低档位
 static int EMERG_FORCED_2 = 8;   // 等级 2
 static int EMERG_FORCED_3 = 10;  // 等级 3
 static int EMERG_FORCED_4 = 12;  // 等级 4
-// 等级 → 强制最低档位查表（下标 0 为占位）。初始值与上方 EMERG_FORCED_1~4 默认值一致；
-// EMERG_FORCED 配置热重载时在 parse_common_cfg 同步刷新。避免 emergency_intervention 每周期重建局部数组。
-static int emerg_forced_table[5] = {0, 6, 8, 10, 12};
 static int EMERG_EXIT_CAP_OFFSET = 1;  // 退出钳制偏移
 
 // --- 紧急退出恢复期 ---
@@ -830,13 +826,7 @@ static void parse_sysfs_cfg(const char *key, int val, const char *val_str) {
         config_read_path(BATT_CURRENT_PATH, sizeof(BATT_CURRENT_PATH), val_str);
     else if (strcmp(key, "CPU_ZONE") == 0) {
         int a = CPU_ZONE_MIN, b = CPU_ZONE_MAX;
-        if (sscanf(val_str, "%d %d", &a, &b) >= 2) {
-            CPU_ZONE_MIN = clamp(a,0,99); CPU_ZONE_MAX = clamp(b,0,99);
-            // 防御：min > max 时交换，避免扫描区间为空（配置倒序时按反转区间扫描）
-            if (CPU_ZONE_MIN > CPU_ZONE_MAX) {
-                int t = CPU_ZONE_MIN; CPU_ZONE_MIN = CPU_ZONE_MAX; CPU_ZONE_MAX = t;
-            }
-        }
+        if (sscanf(val_str, "%d %d", &a, &b) >= 2) { CPU_ZONE_MIN = clamp(a,0,99); CPU_ZONE_MAX = clamp(b,0,99); }
     }
     else if (strcmp(key, "LOG_FILE") == 0) {
         config_read_path(log_file_path, sizeof(log_file_path), val_str);
@@ -973,14 +963,8 @@ static int parse_gear_cfg(const char *key, int val, const char *val_str,
     }
     if (strcmp(key, "EMERG_FORCED") == 0) {
         int v[4] = {EMERG_FORCED_1,EMERG_FORCED_2,EMERG_FORCED_3,EMERG_FORCED_4};
-        if (sscanf(val_str, "%d %d %d %d", &v[0],&v[1],&v[2],&v[3]) >= 4) {
-            EMERG_FORCED_1=clamp(v[0],0,12); EMERG_FORCED_2=clamp(v[1],0,12); EMERG_FORCED_3=clamp(v[2],0,12); EMERG_FORCED_4=clamp(v[3],0,12);
-            // 同步文件级查表（emergency_intervention 使用），保持与 EMERG_FORCED_1~4 一致
-            emerg_forced_table[1] = EMERG_FORCED_1;
-            emerg_forced_table[2] = EMERG_FORCED_2;
-            emerg_forced_table[3] = EMERG_FORCED_3;
-            emerg_forced_table[4] = EMERG_FORCED_4;
-        }
+        if (sscanf(val_str, "%d %d %d %d", &v[0],&v[1],&v[2],&v[3]) >= 4)
+            { EMERG_FORCED_1=clamp(v[0],0,12); EMERG_FORCED_2=clamp(v[1],0,12); EMERG_FORCED_3=clamp(v[2],0,12); EMERG_FORCED_4=clamp(v[3],0,12); }
         return 1;
     }
     if (strcmp(key, "EMERG_RECOVERY_MULT") == 0) {
@@ -1156,6 +1140,14 @@ static void load_config(const char *path) {
         } else if (strcmp(key, "APP_WATCHDOG") == 0) {
             app_watchdog_cycles = clamp(atoi(val_str), 0, 120);   // 锁死自动重启停滞周期数（0=关闭）
         }
+    }
+
+    // 前置条件：自动拉起关闭 → 锁死自动重启（watchdog）强制关闭（不改配置文件，仅运行时生效）。
+    // 原因：watchdog 触发时 force_kill_and_relaunch 会强制拉起 app，与"自动拉起关闭"的意愿冲突；
+    // 且自动拉起关闭时无冷启动/断联拉起机制，watchdog 重建 App 栈后缺乏后续保护，行为不可控。
+    if (!APP_LAUNCH_ENABLED && app_watchdog_cycles > 0) {
+        write_log("配置 自动拉起关闭 → 锁死自动重启 强制关闭（APP_WATCHDOG=%d 运行时置 0）", app_watchdog_cycles);
+        app_watchdog_cycles = 0;
     }
 
     // debug_mode 必须在提前 return 之前更新：PERF=0 且 DEBUG=0 时也要清零，
@@ -1399,10 +1391,7 @@ static inline int sign_of(int x) {
 
 /** 设备代号（日志显示用）：B7X→"b7x"，B6X/B8X→"b6x"，无设备→"none" */
 static const char *device_tag_of(DeviceType dev) {
-    // 修复原因：DEVICE_NONE 原返回 "b6x" 有误导性（断联/无设备日志会显示为 b6x），改返回 "none"。
-    if (dev == DEVICE_B7X) return "b7x";
-    if (dev == DEVICE_NONE) return "none";
-    return "b6x";
+    return (dev == DEVICE_B7X) ? "b7x" : "b6x";
 }
 
 /** 温差绝对值 → 档位偏移量（三区间阈值：1/2/3 档） */
@@ -1923,12 +1912,7 @@ static void send_am_broadcast(int mode, int target, int windOC, int coldOC, int 
     alarm(3);
     int status;
     if (waitpid(pid, &status, 0) == -1) {
-        // 修复原因：区分 EINTR（alarm 3s 超时打断 waitpid）与其他错误，
-        // 避免把 ECHILD 等系统错误也误报为"超时"。
-        if (errno == EINTR)
-            write_log("am broadcast 超时");
-        else
-            write_log("am broadcast waitpid 失败：%s", strerror(errno));
+        write_log("am broadcast 超时");
         kill(pid, SIGKILL);
         waitpid(pid, NULL, 0);
     } else if (WIFEXITED(status) && WEXITSTATUS(status) != 0) {
@@ -2753,9 +2737,10 @@ static void emergency_intervention(void) {
 
     // --- 5. 根据模式设定强制最低档位 ---
     if (EMERG_MODE_ENTRY == 0) {
-        // 模式 0：查表强制最低档（表为文件级 emerg_forced_table，配置重载时同步刷新）
+        // 模式 0：查表强制最低档
+        const int EMERG_FORCED_TABLE[] = {0, EMERG_FORCED_1, EMERG_FORCED_2, EMERG_FORCED_3, EMERG_FORCED_4};
         if (emergency_level >= 1 && emergency_level <= 4)
-            emerg_forced_gear = emerg_forced_table[emergency_level];
+            emerg_forced_gear = EMERG_FORCED_TABLE[emergency_level];
         else
             emerg_forced_gear = 0;
     } else {
@@ -3820,10 +3805,9 @@ static void gear_cycle(void) {
         if (exit_mode >= EXIT_HALF) {
             if (EMERG_MODE_EXIT == 0) {
                 // 模式 0：钳制最高档
-                // 修复原因：紧急等级最大 3（emergency_intervention 中 cpu_lvl 计算 0~3），
-                // prev_emerg_level >= 4 为死分支，删除。
                 int cap;
-                if      (prev_emerg_level >= 3) cap = EMERG_FORCED_3;
+                if      (prev_emerg_level >= 4) cap = EMERG_FORCED_4;
+                else if (prev_emerg_level >= 3) cap = EMERG_FORCED_3;
                 else if (prev_emerg_level >= 2) cap = EMERG_FORCED_2;
                 else                             cap = EMERG_FORCED_1;
                 cap += EMERG_EXIT_CAP_OFFSET;
@@ -3947,13 +3931,7 @@ static void write_webui_data(void) {
     // 每 WEBUI_COMPACT_EVERY 行压缩：读文件 → 删最旧行 → 写回，文件收敛回 ~720 行
     if (webui_lines_since_compact >= WEBUI_COMPACT_EVERY) {
         webui_lines_since_compact = 0;
-        // 修复原因：69KB 栈缓冲（720×96）改堆分配，避免挤占守护进程小栈；行为等价。
-        char (*buf)[96] = malloc(WEBUI_DATA_MAX_LINES * 96);
-        if (!buf) {
-            write_log("WebUI 曲线压缩 分配 %d 字节失败，跳过本轮压缩",
-                      WEBUI_DATA_MAX_LINES * 96);
-            return;
-        }
+        char buf[WEBUI_DATA_MAX_LINES][96];
         int total = 0;
         FILE *rf = fopen(WEBUI_DATA_PATH, "r");
         if (rf) {
@@ -3971,7 +3949,6 @@ static void write_webui_data(void) {
                 fclose(cf);
             }
         }
-        free(buf);
     }
 }
 
@@ -4057,12 +4034,7 @@ int main(int argc, char *argv[]) {
             read_cooler_params();
             break;
         }
-        // 等待设备期间无 app 存活则自动拉起上次使用的 app。
-        // 与主循环一致加 ARBITRATE_INTERVAL 节流，避免每 5s 全量扫描一次 /proc。
-        if (time(NULL) - last_arbitrate >= ARBITRATE_INTERVAL) {
-            arbitrate_apps();
-            last_arbitrate = time(NULL);
-        }
+        arbitrate_apps();   // 等待设备期间无 app 存活则自动拉起上次使用的 app（冷却节流）
         sleep(5);
     }
     if (!running) goto exit;

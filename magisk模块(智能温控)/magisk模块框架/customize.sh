@@ -15,6 +15,7 @@ ui_print "  自动拉起散热器 app 功能"
 ui_print "  无散热器 app 存活时自动拉起上次使用的 app"
 ui_print "  拉起时会闪烁一下散热器的ui界面"
 ui_print "  请自行根据自己的使用习惯选择是否开启"
+ui_print "  本功能也是锁死自动重启功能的前置条件"
 ui_print "=============================="
 ui_print "  音量+ = 开启   音量- = 关闭"
 ui_print "  不操作 30 秒 → 默认关闭"
@@ -48,20 +49,19 @@ ui_print ""
 
 sleep 1
 
-# 锁死自动重启（watchdog）选择：仅自动拉起开启时询问（关闭自动拉起则保持默认 6，无实际作用）
-# 修复：旧版无按键时 WATCHDOG_VALUE=0 会把 profile.conf 出厂值 APP_WATCHDOG=6 覆盖为 0，
-# 导致保护静默失效。统一为无按键时保留 6（与 profile.conf 出厂值及 C 代码默认一致）。
-WATCHDOG_VALUE=6
+# 锁死自动重启（watchdog）选择：仅自动拉起开启时询问，默认关闭
+# （自动拉起为前置条件：C 端检测到自动拉起关闭时，无论配置如何都会强制关闭 watchdog）
+WATCHDOG_VALUE=0
 if [ "$LAUNCH_ENABLED" = "1" ]; then
     ui_print ""
     ui_print "=============================="
     ui_print "  散热器锁死自动重启功能"
     ui_print "  检测到散热器锁死（实际制冷持续多周期无响应）时"
     ui_print "  自动强制重启散热器 app 以恢复控制"
-    ui_print "  默认 6 周期（不操作保留 6）"
+    ui_print "  默认关闭（不操作保持关闭）"
     ui_print "=============================="
-    ui_print "  音量+ = 开启   音量- = 关闭"
-    ui_print "  不操作 30 秒 → 保留默认 6"
+    ui_print "  音量+ = 开启（6 周期）   音量- = 关闭"
+    ui_print "  不操作 30 秒 → 默认关闭"
     ui_print "=============================="
     ui_print ""
     KEY_PRESSED=0
@@ -85,11 +85,11 @@ if [ "$LAUNCH_ENABLED" = "1" ]; then
             ui_print "已选择：关闭锁死自动重启"
         fi
     else
-        ui_print "未检测到按键，保留默认 6 周期锁死自动重启"
+        ui_print "未检测到按键，默认关闭锁死自动重启"
     fi
     ui_print ""
 else
-    ui_print "自动拉起未开启，锁死自动重启保留默认 6（自动拉起关闭时无实际作用）"
+    ui_print "自动拉起未开启，锁死自动重启默认关闭（自动拉起为其前置条件）"
 fi
 
 # 写入 profile.conf（已有行替换，无则追加）
