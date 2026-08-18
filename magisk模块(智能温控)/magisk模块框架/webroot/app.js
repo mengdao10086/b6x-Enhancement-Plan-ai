@@ -150,8 +150,7 @@
     items: [],            // [{type:'kv'|'comment'|'blank', raw, key?, value?}]
     values: {},           // key -> 当前值字符串
     dirty: {},            // key -> true（值被改过）
-    manualExpand: {},     // 本会话手动展开的分组（开关关着也能展开查看，不持久）
-    manualCollapse: {},   // 本会话手动折叠的分组（不持久）
+    manualExpand: {},     // 本会话手动展开的分组（默认全部收起，点击组头展开，不持久化）
     samples: [],
     series: [
       // 图例顺序；默认除 CPU 外全显示；axis 决定走左/右纵轴
@@ -159,8 +158,8 @@
       { key: 'batt', label: '电池℃', color: '#f44336', on: true, unit: '°C', axis: 'left' },
       { key: 'coldReal', label: '制冷', color: '#4caf50', on: true, unit: '', axis: 'right' },
       { key: 'rpm', label: '风扇rpm', color: '#9c27b0', on: true, unit: 'rpm', axis: 'left' },
-      { key: 'cold', label: '冷端℃', color: '#2196f3', on: false, unit: '°C', axis: 'left' },
       { key: 'hot', label: '热端℃', color: '#e91e63', on: true, unit: '°C', axis: 'left' },
+      { key: 'cold', label: '冷端℃', color: '#2196f3', on: false, unit: '°C', axis: 'left' },
       { key: 'cpu', label: 'CPU℃', color: '#ff9800', on: false, unit: '°C', axis: 'left' }
     ],
     logText: '',
@@ -209,7 +208,7 @@
     scheduleSave();
   }
 
-  // ---------- 折叠逻辑：开关驱动 + 手动展开仅查看/编辑（不改总开关） ----------
+  // ---------- 折叠逻辑：固定默认收起 + 组头点击手动展开（不随开关状态） ----------
   function masterOn(key) { return S.values[key] !== '0'; }
   function ctrlMode() { return S.values['CTRL_MODE'] !== undefined ? S.values['CTRL_MODE'] : '1'; }
 
@@ -221,59 +220,38 @@
 
   function onHeaderClick(g) {
     if (!hasCollapsible(g)) return;   // 无折叠内容，组头点击无动作
-    // master / headerSwitch 统一处理：开关开 → 会话级折叠（manualCollapse），开关关 → 手动展开仅查看
-    var swKey = g.master || g.headerSwitch;
-    if (swKey) {
-      if (masterOn(swKey)) S.manualCollapse[g.id] = !S.manualCollapse[g.id];
-      else S.manualExpand[g.id] = !S.manualExpand[g.id];
-    } else {
-      S.manualExpand[g.id] = !S.manualExpand[g.id];
-    }
+    // 所有大类固定默认收起、不随开关状态展开；组头点击仅做会话级手动展开/收起（不持久化）
+    S.manualExpand[g.id] = !S.manualExpand[g.id];
     updateCollapse();
   }
 
   function updateCollapse() {
-    var perfOn = masterOn('PERF_ENABLED');
-    // 总开关状态变化：控制模式（master=PERF_ENABLED 的组）展开跟随总开关（幂等）——
-    // 打开→确保展开（清 manualCollapse），关闭→确保折叠（清 manualExpand）；
-    // 总开关不变时保留手动折叠/展开（manualCollapse/manualExpand 不被清除）
-    if (S._prevPerf !== undefined && S._prevPerf !== perfOn) {
-      SCHEMA.groups.forEach(function (g) {
-        if (g.master === 'PERF_ENABLED') {
-          if (perfOn) delete S.manualCollapse[g.id];
-          else delete S.manualExpand[g.id];
-        }
-      });
-    }
-    S._prevPerf = perfOn;
     SCHEMA.groups.forEach(function (g) {
-      if (!hasCollapsible(g)) return;   // 无折叠内容（如 [4] 自动拉起）：说明区常显，不处理折叠
+      if (!hasCollapsible(g)) return;   // 无折叠内容：说明区常显，不处理折叠
       var head = $('head-' + g.id), chev = $('chev-' + g.id), badge = $('badge-' + g.id);
       var body = $('body-' + g.id);
       if (!head || !body) return;
-      // 模式子面板（[2] 控制模式）：PID / Gear 横滑切换（滑动由 CTRL_MODE 驱动，见 setValue/initModeSlider）
-      // 展开状态统一规则：master 组跟 PERF_ENABLED，headerSwitch 组跟开关；手动展开/折叠为会话级，不改总开关
-      var on;
-      if (g.master === 'PERF_ENABLED') {
-        on = perfOn;
-        if (g.modePanels) {   // [2] 控制模式：seg 按钮 active 跟随 CTRL_MODE
-          var cm = ctrlMode();
-          head.querySelectorAll('.seg-btn').forEach(function (b) {
-            b.classList.toggle('active', b.dataset.mode === cm);
-          });
-        }
-      } else if (g.headerSwitch) {
-        // 开关驱动子面板（[0] 日志&调试、[3] sysfs 等）：
-        // 开关关 → 折叠整个 body（含子面板），消除空 body 的 padding 残留（"下巴长"）
-        on = masterOn(g.headerSwitch);
-      } else {
-        return;   // 无开关驱动（当前 schema 不存在，防御性保留）：不处理折叠
-      }
-      var open = on ? !S.manualCollapse[g.id] : !!S.manualExpand[g.id];
+      // 全部大类固定默认收起、不随开关状态展开；仅组头点击做会话级手动展开/收起
+      var open = !!S.manualExpand[g.id];
       body.classList.toggle('collapsed', !open);
-      head.classList.toggle('off', !on);
-      if (badge) badge.classList.toggle('hidden', on);
       chev.classList.toggle('on', open);
+      // 模式子面板（[2] 控制模式）：seg 按钮 active 跟随 CTRL_MODE；展开时对齐横滑面板
+      // （收起期间 scrollTo 对 display:none 元素无效，位置可能失准，需在展开时重对齐）
+      if (g.modePanels) {
+        var cm = ctrlMode();
+        head.querySelectorAll('.seg-btn').forEach(function (b) {
+          b.classList.toggle('active', b.dataset.mode === cm);
+        });
+        if (open) {
+          var ms = $('mode-slider-' + g.id);
+          if (ms) ms.scrollLeft = cm === '1' ? 0 : ms.clientWidth;
+        }
+      }
+      // 组头暗色/徽标仍反映开关实际状态（仅视觉提示，不影响折叠）
+      var swKey = g.master || g.headerSwitch;
+      var swOn = swKey ? masterOn(swKey) : true;
+      head.classList.toggle('off', !swOn);
+      if (badge) badge.classList.toggle('hidden', swOn);
     });
   }
 
@@ -690,7 +668,7 @@
     S.items = parseConfig(text);
     S.values = buildValues(S.items);
     S.dirty = {}; S.dirtySpecial = false;
-    // 保存只重置 dirty，不清空 S.manualExpand/S.manualCollapse：
+    // 保存只重置 dirty，不清空 S.manualExpand：
     // 折叠状态是会话级 UI 状态，保存配置不应重置它，否则切模式触发保存会把手动展开的分组折叠回去
     updateCollapse();
     toast('已保存');
@@ -727,6 +705,17 @@
     drawChart();
   }
 
+  // 强制单行完整显示：内容超宽则逐级缩小字号（最小 8px），保证不滚动、不裁切
+  function fitOneLine(el, maxFs) {
+    if (!el) return;
+    var fs = maxFs || 11;
+    el.style.fontSize = fs + 'px';
+    while (fs > 8 && el.scrollWidth > el.clientWidth + 1) {
+      fs -= 0.5;
+      el.style.fontSize = fs + 'px';
+    }
+  }
+
   function updateLiveRow(o) {
     var bits = [];
     if (o.batt != null) bits.push('电池 ' + o.batt.toFixed(1) + '°C');
@@ -735,7 +724,9 @@
     if (o.rpm != null) bits.push('风扇 ' + o.rpm + 'rpm');
     if (o.cold != null) bits.push('冷端 ' + o.cold.toFixed(1) + '°C');
     if (o.hot != null) bits.push('热端 ' + o.hot.toFixed(1) + '°C');
-    $('liveRow').textContent = bits.length ? bits.join(' · ') : '等待数据…';
+    var el = $('liveRow');
+    el.textContent = bits.length ? bits.join(' · ') : '等待数据…';
+    fitOneLine(el, 11);
   }
 
   // ---------- 曲线（双纵轴：左 ℃/rpm，右 cold） ----------
@@ -962,6 +953,11 @@
       inp.addEventListener('change', function () { s.on = inp.checked; drawChart(); });
       st.appendChild(lab);
     });
+    fitOneLine(st, 11);   // 图例单行完整显示
+    window.addEventListener('resize', function () {
+      fitOneLine($('seriesToggle'), 11);
+      fitOneLine($('liveRow'), 11);
+    });
   }
 
   // ---------- 日志 UI ----------
@@ -1002,29 +998,26 @@
     syncModeHeight();
   }
 
-  // ---------- 顶部高度：长按手柄拖动改高度（localStorage 持久化，pin-fixed/pin-scroll 均生效） ----------
+  // ---------- 顶部高度：点住即拖动改高度（不记忆，每次加载回默认 = 渲染窗口的 2/5，pin-fixed/pin-scroll 均生效） ----------
   var TOP_H_MIN = 15, TOP_H_MAX = 80;      // dvh 范围
-  var TOP_LONGPRESS_MS = 300;              // 长按激活门槛（ms）
+  var TOP_H_DEFAULT = 40;                  // 默认 = 渲染窗口的 2/5（dvh）
 
   function applyTopHeight(v) {
     document.documentElement.style.setProperty('--top-h', v + 'dvh');
   }
 
   function initTopHeight() {
-    var v = 30;
-    try { v = parseInt(localStorage.getItem('b6xTopH') || '30', 10); } catch (e) {}
-    if (!(v >= TOP_H_MIN && v <= TOP_H_MAX)) v = 30;
-    applyTopHeight(v);
+    applyTopHeight(TOP_H_DEFAULT);   // 不记忆上次调整值，每次打开回到默认
 
     var hd = $('topHandle');
     if (!hd) return;
-    var active = false, holdTimer = null, startY = 0, startH = 0;
+    var active = false, startY = 0, startH = 0;
     function onDown(e) {
       var t = e.touches ? e.touches[0] : e;
       startY = t.clientY;
-      startH = parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--top-h')) || 30;
-      clearTimeout(holdTimer);
-      holdTimer = setTimeout(function () { active = true; hd.classList.add('dragging'); }, TOP_LONGPRESS_MS);
+      startH = parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--top-h')) || TOP_H_DEFAULT;
+      active = true;                          // 点住即进入调整，无需长按
+      hd.classList.add('dragging');
     }
     function onMove(e) {
       if (!active) return;
@@ -1037,12 +1030,9 @@
       applyTopHeight(v);
     }
     function onUp() {
-      clearTimeout(holdTimer);
       if (!active) return;
       active = false;
       hd.classList.remove('dragging');
-      var v = parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--top-h')) || 30;
-      try { localStorage.setItem('b6xTopH', String(Math.round(v))); } catch (e) {}
       if (typeof drawChart === 'function') drawChart();   // 高度定下后立即重绘（纵轴刻度数随之变化）
     }
     hd.addEventListener('touchstart', onDown, { passive: false });

@@ -127,8 +127,7 @@ window.B6X_SCHEMA = {
       desc: "目标温度每周期最大变化量（智能温控模式）" },
 
     // ---- [4] 自动拉起散热器 app ----
-    APP_LAUNCH_ENABLED: { type: "switch", label: "自动拉起散热器 app",
-      desc: "无散热器 app 存活时自动拉起上次使用的 app" },
+    APP_LAUNCH_ENABLED: { type: "switch", label: "自动拉起散热器 app", desc: "" },
     APP_WATCHDOG: { type: "int", min: 0, max: 120, label: "锁死自动重启（次数）",
       desc: "实际制冷停滞（=上周期实际）且未达目标（≠上周期下发）连续 N 次下发时，kill 散热器 app 并重新拉起（散热器重启无效，需重建 App 进程）；0=关闭" },
     BATT_SKIP_MAX: { type: "int", min: 1, max: 60, label: "温度未变强制处理周期",
