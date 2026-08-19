@@ -703,17 +703,101 @@
     var last = S.samples[S.samples.length - 1];
     if (last) updateLiveRow(last);
     drawChart();
+    fitChartTools();   // 时间窗口+图例子窗口每刷重校准
   }
 
-  // 强制单行完整显示：内容超宽则逐级缩小字号（最小 8px），保证不滚动、不裁切
-  function fitOneLine(el, maxFs) {
-    if (!el) return;
-    var fs = maxFs || 11;
-    el.style.fontSize = fs + 'px';
-    while (fs > 8 && el.scrollWidth > el.clientWidth + 1) {
-      fs -= 0.5;
-      el.style.fontSize = fs + 'px';
+  // ---------- 单行自适应字号（图例栏 / 实时数据栏共用） ----------
+  // 测量一律绕过 scrollWidth：部分 WebView 对 overflow:hidden 的容器不报告溢出内容，
+  // 会导致字体不缩、尾部被裁。文本宽度优先用 canvas.measureText（最稳定），canvas
+  // 不可用再用隐藏探针兜底；图例等多子项元素直接累加子项 offsetWidth + gap。
+  var fitCv = null, fitProxy = null;
+  function textWidth(t, fs, refEl) {
+    var cs = refEl ? window.getComputedStyle(refEl) : null;
+    var fam = (cs && cs.fontFamily) || '';
+    // 隐藏探针优先：能如实反映 font-variant-numeric(tabular-nums 数字定宽)、letter-spacing 等实际渲染宽度
+    if (!fitProxy) {
+      fitProxy = document.createElement('div');
+      fitProxy.style.cssText = 'position:fixed;visibility:hidden;pointer-events:none;white-space:nowrap;top:0;left:-9999px;';
+      document.body.appendChild(fitProxy);
     }
+    fitProxy.style.font = fs + 'px ' + fam;
+    if (cs) {
+      fitProxy.style.fontVariantNumeric = cs.fontVariantNumeric || '';
+      fitProxy.style.letterSpacing = cs.letterSpacing || '';
+    }
+    fitProxy.textContent = t;
+    var w = fitProxy.offsetWidth;
+    if (w > 0) return w;
+    // 探针不可用 → canvas 兜底（数字按等比宽测量，比 tabular 窄，加 5% 保险避免低估）
+    if (!fitCv) fitCv = document.createElement('canvas');
+    var c = fitCv.getContext && fitCv.getContext('2d');
+    if (c) {
+      c.font = fs + 'px ' + fam;
+      try { var m = c.measureText(t).width; if (m > 0) return m * 1.05; } catch (e) { }
+    }
+    return 0;
+  }
+  function contentWidth(el) {
+    if (el.childElementCount) {
+      var kids = el.children, t = 0, i;
+      for (i = 0; i < kids.length; i++) t += kids[i].offsetWidth;
+      var g = parseFloat(window.getComputedStyle(el).columnGap);
+      if (isFinite(g)) t += g * Math.max(0, kids.length - 1);
+      return t;
+    }
+    return textWidth(el.textContent, parseFloat(el.style.fontSize) || 11, el);
+  }
+  // 单行完整显示（实时数值栏）：纯文本，字号缩小（0.1px 步进），4% 缓冲余量
+  function fitOneLine(el, maxFs, minFs, bufferPct) {
+    if (!el) return { avail: 0, total: 0, fs: 0, skip: '无元素' };
+    var max = maxFs || 11, min = minFs == null ? 7 : minFs;
+    var avail = el.clientWidth;
+    if (!avail) return { avail: 0, total: 0, fs: 0, skip: 'clientWidth=0' };
+    var fitLimit = avail * (bufferPct == null ? 0.96 : bufferPct);   // 4% 余量
+    el.style.fontSize = max + 'px';
+    var total = contentWidth(el);
+    var fs = max;
+    if (total > fitLimit) {
+      fs = Math.max(min, Math.round(max * fitLimit / total * 10) / 10);   // 0.1px 步进，贴合更准
+      el.style.fontSize = fs + 'px';
+      var guard = 0;
+      while (guard++ < 40 && fs > min && contentWidth(el) > fitLimit) {
+        fs = Math.max(min, Math.round((fs - 0.1) * 10) / 10);
+        el.style.fontSize = fs + 'px';
+      }
+    }
+    return { avail: avail, total: total, fs: fs, skip: '' };
+  }
+  // 整体缩放子窗口（时间窗口 + 图例）：内部保持固定值，超宽时整个 transform: scale。
+  // 裁切在父级 .chart-tools（overflow:hidden），与 transform 不同坐标系 → 缩放后内容必然落在可用区内，
+  // 规避 WebView 对子元素缩放（calc/zoom）兼容性问题
+  function fitChartTools() {
+    var wrap = $('ctInner');
+    if (!wrap) return null;
+    var avail = wrap.parentElement ? wrap.parentElement.clientWidth : 0;
+    if (!avail) return null;
+    var total = wrap.offsetWidth;                  // 自然宽（transform 不影响 offsetWidth）
+    var fitLimit = avail * 0.96;                   // 4% 余量
+    var z = total > fitLimit ? Math.max(0.5, fitLimit / total) : 1;
+    wrap.style.transformOrigin = 'left top';
+    wrap.style.transform = z < 1 ? 'scale(' + z.toFixed(4) + ')' : 'none';
+    return { avail: avail, total: total, fs: Math.round(11 * z * 10) / 10, z: z, skip: '' };
+  }
+  var fitDiag = {};   // 适配诊断：结果变化时输出 可用宽/内容宽/字号/缩放/跳过原因
+  function diagFit(id, r) {
+    if (!r) return;
+    var prev = fitDiag[id];
+    if (!prev || prev.fs !== r.fs || prev.skip !== r.skip ||
+        Math.abs(prev.avail - r.avail) >= 1 || Math.abs(prev.total - r.total) >= 1) {
+      fitDiag[id] = r;
+      uiLog('[fit] ' + id + ': 可用=' + r.avail + ' 内容=' + Math.round(r.total) +
+            ' 字号=' + r.fs + (r.z ? ' 缩放=' + (r.z * 100).toFixed(0) + '%' : '') +
+            (r.skip ? ' 跳过:' + r.skip : ''));
+    }
+  }
+  function refitBars() {
+    diagFit('chartTools', fitChartTools());
+    diagFit('liveRow', fitOneLine($('liveRow'), 11, null, 0.96));
   }
 
   function updateLiveRow(o) {
@@ -726,8 +810,19 @@
     if (o.hot != null) bits.push('热端 ' + o.hot.toFixed(1) + '°C');
     var el = $('liveRow');
     el.textContent = bits.length ? bits.join(' · ') : '等待数据…';
-    fitOneLine(el, 11);
+    diagFit('liveRow', fitOneLine(el, 11, null, 0.96));   // 每帧重算；tabular-nums 定宽同字符数字号稳定
   }
+
+  // 制冷轴辅助：tempctrl.c COLD_MIN=1（轴下限从 1 开始）；COLD_MAP 第一值 = 制冷→风扇映射
+  // 起始强度。总开关（PERF_ENABLED=1）开启时取配置实际值，否则回退默认 40。轴最低显示范围 = [1, 起始强度]
+  function coldMapStart() {
+    if (S.values['PERF_ENABLED'] !== '1') return 40;   // 总开关未开启 → 默认 40
+    var cm = S.values['COLD_MAP'];
+    if (cm == null) return 40;
+    var n = parseInt(String(cm).split(/[\s,]+/)[0], 10);
+    return isFinite(n) && n > 0 ? n : 40;
+  }
+  var drawAxisDiag = false;   // 制冷轴范围一次性诊断
 
   // ---------- 曲线（双纵轴：左 ℃/rpm，右 cold） ----------
   function drawChart() {
@@ -765,7 +860,7 @@
     // 取值：左轴 = 温度(℃) 或 风扇转速÷100；右轴 = 制冷强度
     function leftV(s, d) { return s.key === 'rpm' ? (d.rpm == null ? null : d.rpm / 100) : d[s.key]; }
     function rightV(s, d) { return d[s.key]; }
-    // 计算一轴的范围（上下各留 10% 余量）
+    // 计算一轴的范围（上下各留 5% 余量）
     function range(series, getV) {
       var mn = Infinity, mx = -Infinity;
       series.forEach(function (s) {
@@ -773,9 +868,16 @@
       });
       if (!isFinite(mn) || !isFinite(mx)) return null;
       var sp = (mx - mn) || 1;
-      return { min: mn - sp * 0.1, max: mx + sp * 0.1 };
+      return { min: mn - sp * 0.05, max: mx + sp * 0.05 };
     }
     var L = range(leftSeries, leftV), R = range(rightSeries, rightV);
+    // 制冷强度轴（右轴）：从 COLD_MIN=1 开始，最低显示范围覆盖到制冷→风扇映射起始强度（COLD_MAP 第一值）
+    if (R) {
+      R.min = 1;
+      var coldFanStart = coldMapStart();
+      if (R.max < coldFanStart) R.max = coldFanStart;
+      if (!drawAxisDiag) { drawAxisDiag = true; uiLog('[轴] 制冷轴: ' + R.min + '~' + R.max + '（起始强度=' + coldFanStart + '）'); }
+    }
     // 修复：单轴全无效值时该轴 range() 返回 null（此前守卫只挡双轴都空），
     // 直接 return 会让 L/R 为 null 的轴在 plot 的 yOf 里解引用崩溃。
     // 双轴都不可画（全 null）则无曲线可画；仅一轴有效时仍画该轴。
@@ -802,7 +904,7 @@
       }
       // 轴标题靠左绘制：允许向右突出到曲线区内（避免标题过长挤压曲线横向空间）
       ctx.textAlign = 'left';
-      ctx.fillText('℃/百rpm', 2, padT - 2);
+      ctx.fillText('℃/百rpm', 2, padT - 7);
     }
     // 右轴刻度
     if (R) {
@@ -812,7 +914,7 @@
         var ry = yOf(R, rval);
         ctx.fillText(rval.toFixed(0), padL + W + 4, ry + 3);
       }
-      ctx.fillText('cold', padL + W + 4, padT - 2);
+      ctx.fillText('cold', padL + W + 4, padT - 7);
       ctx.textAlign = 'right';
     }
     // 画线
@@ -953,11 +1055,15 @@
       inp.addEventListener('change', function () { s.on = inp.checked; drawChart(); });
       st.appendChild(lab);
     });
-    fitOneLine(st, 11);   // 图例单行完整显示
-    window.addEventListener('resize', function () {
-      fitOneLine($('seriesToggle'), 11);
-      fitOneLine($('liveRow'), 11);
-    });
+    refitBars();   // 图例 + 实时数据栏首次适配（两侧留白与全局左侧 10px 一致）
+    // 窗口尺寸变化、字体异步加载完成、WebView 布局变化时重新适配，避免裁切
+    window.addEventListener('resize', refitBars);
+    if (document.fonts && document.fonts.ready) document.fonts.ready.then(refitBars);
+    if (window.ResizeObserver) {
+      var ro = new ResizeObserver(refitBars);
+      ro.observe($('ctInner'));
+      ro.observe($('liveRow'));
+    }
   }
 
   // ---------- 日志 UI ----------
@@ -1000,7 +1106,7 @@
 
   // ---------- 顶部高度：点住即拖动改高度（不记忆，每次加载回默认 = 渲染窗口的 2/5，pin-fixed/pin-scroll 均生效） ----------
   var TOP_H_MIN = 15, TOP_H_MAX = 80;      // dvh 范围
-  var TOP_H_DEFAULT = 40;                  // 默认 = 渲染窗口的 2/5（dvh）
+  var TOP_H_DEFAULT = 36;                  // 默认顶部高度（dvh）
 
   function applyTopHeight(v) {
     document.documentElement.style.setProperty('--top-h', v + 'dvh');
@@ -1094,6 +1200,7 @@
     if (errText) reportError(errText);
     else if (!Bridge.available) reportError('未检测到 WebUI 桥接 — 请在 KernelSU / KSU-Next / APatch 管理器内打开本模块 WebUI');
     else uiLog('已加载 · 桥接=' + (Bridge.kind || '?'));   // 合并进 UI 诊断日志（默认收起）
+    uiLog('[fit] 诊断版已加载（下方应有 [fit] chartTools/liveRow 适配行与 [轴] 制冷轴行；若无 = 仍是旧版 app.js 缓存，请强刷 WebUI）');
     refreshCurve();                    // 曲线：读 C 数据文件，每秒一次
     setInterval(refreshCurve, 1000);
     refreshLog();                      // 日志：5 秒刷新一次（增量缓存，减少 exec）
@@ -1113,6 +1220,9 @@
     window.__B6X_TEST__ = {
       parseConfig: parseConfig, buildValues: buildValues, rebuildConfig: rebuildConfig,
       parseDataLines: parseDataLines,
+      fitOneLine: fitOneLine, updateLiveRow: updateLiveRow, refitBars: refitBars,   // 单行适配逻辑测试钩子
+      fitChartTools: fitChartTools,                           // 时间窗口+图例子窗口整体缩放
+      coldMapStart: coldMapStart,                             // 制冷→风扇映射起始强度
       init: init, renderGroups: renderGroups, updateCollapse: updateCollapse,
       onHeaderClick: onHeaderClick, setValue: setValue,
       S: S, SCHEMA: SCHEMA

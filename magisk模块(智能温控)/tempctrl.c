@@ -310,7 +310,7 @@ static int emerg_forced_gear = 0;   // 紧急强制最低档位
 // ======================== 日志与调试 ========================
 // --- 日志路径（默认根据二进制名自动生成，可由 profile.conf 覆盖）---
 static char log_file_path[256] = "";
-static int LOG_MAX = 7936;          // 日志文件大小上限（字节），0=关闭日志
+static int LOG_MAX = 16256;          // 日志文件大小上限（字节），0=关闭日志
 static FILE *log_fp = NULL;          // 持久的日志文件指针，避免每行都 fopen/fclose
 static char log_path_opened[256] = ""; // 已打开的文件路径（检测路径变化）
 static int debug_mode = 0;           // 调试日志总开关，=1 时启用各分区调试输出
@@ -347,8 +347,8 @@ static int pid_ki_down_slope = 50;        // PID_KI 第四值=低基准每°C增
 
 // PID_KI_MEM：I 项回落与限幅
 static int pid_ki_drop = 100;             // PID_KI_MEM 第一值=下降惩罚（÷1000，降温时每周期每度降低直接扣累计值）
-static int pid_ki_leak = 25;              // PID_KI_MEM 第二值=每次计算固定衰减（÷1000，0.025/周期，始终生效不受门控）
-static int pid_integral_limit = 667;      // PID_KI_MEM 第三值=积分上限（÷1000，I 项最大输出贡献；预算链 min(1-p-d, 此值) 取小）
+static int pid_ki_leak = 15;              // PID_KI_MEM 第二值=每次计算固定衰减（÷1000，0.025/周期，始终生效不受门控）
+static int pid_integral_limit = 600;      // PID_KI_MEM 第三值=积分上限（÷1000，I 项最大输出贡献；预算链 min(1-p-d, 此值) 取小）
 
 // PID_KI_VAR：方差门控
 static int pid_ki_var_threshold = 50;     // PID_KI_VAR 第一值=方差门控阈值（0.1°C²，0=关闭）
