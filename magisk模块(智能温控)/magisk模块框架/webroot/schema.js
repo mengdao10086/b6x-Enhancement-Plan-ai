@@ -29,7 +29,7 @@ window.B6X_SCHEMA = {
       subKeys: ["RATE_LIMIT_FAN_UP", "RATE_LIMIT_FAN_DOWN",
                 "RATE_LIMIT_COLD", "RATE_LIMIT_TEMP", "BATT_BASELINE",
                 "COLD_MAP", "HOT_MAP", "RPM_SMOOTH_ALPHA", "FAN_RPM",
-                "BATT_SKIP_MAX", "HOT_DERATE"]
+                "BATT_SKIP_MAX", "HOT_DERATE", "RECONNECT_KEEP_CYCLES"]
     },
     // [2] 控制模式：PID 与 Gear 同一窗口。组头开关 CTRL_MODE 仅切换模式（1=PID / 0=Gear），
     // 不控制折叠；展开/折叠由 PERF_ENABLED 总开关驱动（master）。组内按模式切换显示参数面板
@@ -39,8 +39,8 @@ window.B6X_SCHEMA = {
       keys: [],
       modePanels: [
         { when: "1", title: "PID 模式控制",
-          keys: ["PID_KP", "PID_KI", "PID_KI_MEM", "PID_KI_VAR", "PID_KD", "PID_KD_MEM",
-                 "PID_KD_NEAR",
+          keys: ["PID_KP", "PID_KI", "PID_KI_MEM", "PID_KI_VAR", "PID_KI_SLOW",
+                 "PID_KD", "PID_KD_MEM", "PID_KD_NEAR",
                  "PID_INPUT_FILTER", "PID_ALPHA",
                  "PID_CPU_COMP", "PID_OUT_FILTER", "PID_COLD"] },
         { when: "0", title: "Gear 模式控制",
@@ -69,6 +69,12 @@ window.B6X_SCHEMA = {
     {
       id: "g3", title: "[4] 自动拉起散热器 app", headerSwitch: "APP_LAUNCH_ENABLED",
       keys: ["APP_WATCHDOG"]
+    },
+    // [5] WebUI 界面：仅 WebUI 读取的显示参数，守护进程忽略
+    {
+      id: "g5", title: "[5] WebUI 界面",
+      keys: [],
+      subKeys: ["WEBUI_GAP_DETECT_SEC", "WEBUI_GAP_MAX_SEC"]
     }
   ],
 
@@ -132,6 +138,8 @@ window.B6X_SCHEMA = {
       desc: "实际制冷停滞（=上周期实际）且未达目标（≠上周期下发）连续 N 次下发时，kill 散热器 app 并重新拉起（散热器重启无效，需重建 App 进程）；0=关闭" },
     BATT_SKIP_MAX: { type: "int", min: 1, max: 60, label: "温度未变强制处理周期",
       desc: "温度值连续未变达 N 周期时强制进入一次计算，防止温度文件卡死控制停摆" },
+    RECONNECT_KEEP_CYCLES: { type: "int", min: 0, max: 30, label: "断联保留状态周期数",
+      desc: "断联少于 N 个控制周期(×5秒)不重置 PID 状态（kd/积分/误差等），输出连续不跳变；0=总是重置" },
     CTRL_MODE: { type: "switch", label: "控制模式", desc: "" },
     BATT_BASELINE: { type: "int", min: 300, max: 500, label: "基准温度（0.1°C）",
       desc: "电池温度与此值计算偏差，PID 和 Gear 共用" },
@@ -161,6 +169,9 @@ window.B6X_SCHEMA = {
     PID_KI_VAR: { type: "multi", fields: [{ label: "方差阈值", min: 0, max: 200 }, { label: "采样数", min: 2, max: 20 }, { label: "积分死区(0.1°C)", min: 0, max: 100 }],
       label: "KI 门控（方差阈值 + 采样数 + 死区）",
       desc: "阈值：温度方差低于此值则 I 项全段启用，0=退回仅死区模式；采样数：越多越滤波但响应越慢；死区：|偏差|<此值则启用 I 项" },
+    PID_KI_SLOW: { type: "multi", fields: [{ label: "滤波系数(%)", min: 0, max: 100 }, { label: "上升每0.1°减量(×1000)", min: -1000, max: 1000 }, { label: "高于基准每°减量(×1000)", min: -1000, max: 1000 }, { label: "反向偏移(0.1°C)", min: 0, max: 50 }],
+      label: "KI 积分动态衰减（滤波系数 + 上升减量 + 基准减量 + 反向偏移）",
+      desc: "升温值每周期按滤波系数 EMA（首次直取），每0.1°C使积分衰减-0.003；高于基准每°C再-0.005（衰减变慢、保留制冷记忆）；系数填负数→反向（衰减加快、输出更快下降）；上升项仅温度<基准+反向偏移时生效，0=关闭上升项" },
     PID_KD: { type: "multi", fields: [{ label: "上升倍率", min: 0, max: 1000 }, { label: "下降倍率", min: 0, max: 1000 }],
       label: "KD 微分（上升 + 下降倍率）",
       desc: "温度升高(de>0)用上升倍率、温度降低(de<0)用下降倍率；每周期每度每KD为0.001归一化输出" },
@@ -242,7 +253,13 @@ window.B6X_SCHEMA = {
     GEAR_CONFIG_ENABLED: { type: "switch", label: "自定义档位表开关",
       desc: "=1 使用下方 GEAR_N，=0 使用代码默认表" },
     GEAR_AUTO_FAN: { type: "switch", label: "档位表自动风扇转速",
-      desc: "=1 用冷端强度+热端温度双映射计算风扇转速，挡位表风扇转速变为截断上限；=0 直接使用配置风扇转速" }
+      desc: "=1 用冷端强度+热端温度双映射计算风扇转速，挡位表风扇转速变为截断上限；=0 直接使用配置风扇转速" },
+
+    // ---- [5] WebUI 界面 ----
+    WEBUI_GAP_DETECT_SEC: { type: "int", min: 1, max: 120, label: "断联判定阈值（秒）",
+      desc: "相邻采样时间差超过此秒数视为一次断联，曲线在该处断开" },
+    WEBUI_GAP_MAX_SEC: { type: "int", min: 1, max: 600, label: "断联空白最大宽度（秒）",
+      desc: "断联空白按真实断开时长等比显示，超过此秒数封顶（相当于该秒数的曲线宽度）" }
   },
 
   // 档位表行格式：模式,目标温度(°C),风扇RPM,制冷强度

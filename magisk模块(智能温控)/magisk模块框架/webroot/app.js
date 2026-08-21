@@ -824,6 +824,9 @@
   }
   var drawAxisDiag = false;   // 制冷轴范围一次性诊断
 
+  // 读可配置秒数（profile.conf WebUI 键，缺省/非法回落默认值）
+  function gapSec(key, def) { var n = parseFloat(S.values[key]); return isFinite(n) && n >= 0 ? n : def; }
+
   // ---------- 曲线（双纵轴：左 ℃/rpm，右 cold） ----------
   function drawChart() {
     var cv = $('chart'), dpr = window.devicePixelRatio || 1;
@@ -841,13 +844,18 @@
 
     // —— 断联感知布局 ——
     // C 端断联时不写曲线数据行（重连才续写），曲线数据里断联表现为相邻采样时间戳跳变。
-    // 相邻采样时间差 > 5s 视为一次断联：断开曲线，并在该处插入固定 5s 宽的空白，
-    // 直观标记"这里断开过"（空白宽度 = 正常绘制 5s 的宽度）。
-    var GAP_SEC = 5;
+    // 相邻采样时间差 > 断联判定阈值 视为一次断联：断开曲线，并按真实断开时长插入空白
+    // （空白宽度 = 正常绘制该秒数的宽度，封顶到最大宽度），直观反映断联长短。
+    // 阈值/最大宽度由 profile.conf 配置（WEBUI_GAP_DETECT_SEC / WEBUI_GAP_MAX_SEC）。
+    var gapDetectSec = gapSec('WEBUI_GAP_DETECT_SEC', 5);
+    var gapMaxSec    = gapSec('WEBUI_GAP_MAX_SEC', 15);
     var gap = new Array(data.length);
     var totalGap = 0, di;
     for (di = 0; di < data.length; di++) {
-      if (di > 0 && data[di].t - data[di - 1].t > GAP_SEC) totalGap += GAP_SEC;
+      if (di > 0) {
+        var dt = data[di].t - data[di - 1].t;
+        if (dt > gapDetectSec) totalGap += Math.min(dt, gapMaxSec);
+      }
       gap[di] = totalGap;
     }
     var totalUnits = (data.length > 1 ? data.length - 1 : 0) + totalGap;
@@ -925,7 +933,7 @@
         ctx.beginPath();
         var started = false;
         for (var di = 0; di < data.length; di++) {
-          if (di > 0 && data[di].t - data[di - 1].t > GAP_SEC) started = false;   // 断联处断开，空白不连桥
+          if (di > 0 && data[di].t - data[di - 1].t > gapDetectSec) started = false;   // 断联处断开，空白不连桥
           var v = getV(s, data[di]);
           if (v == null) continue;
           var x = padL + W * ((di + gap[di]) / totalUnits);

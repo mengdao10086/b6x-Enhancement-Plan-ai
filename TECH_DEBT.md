@@ -6,7 +6,22 @@
 
 ## 未解决区
 
-（当前无未解决条目）
+### 1. 散热器偶发锁制冷 125 / 风扇 4500，tempctrl 下发无效（2026-08-11 发现，未解决）
+
+**现象**：散热器偶发停在制冷 125、风扇 4500，tempctrl（magisk 守护进程）持续下发新参数但散热器不响应；常在 BLE 重连后出现（多次快速重连更易触发），偶发无重连也出现。LSP 日志（`D:\下载\LocalSend`）显示下发与回传长期偏离。**当前所有自愈措施触发后仍偶发**（未根治）。
+
+**已确认机制**（三层证据链，非未确认推测；供后续排查不重复推导）：
+1. **4500/125 不是任何一方下发的值**：日志中 tempctrl 下发的 windOC/coldOC 组合（3100/168、4800/144、4900/183、5250/190、5550/190 等）从未包含 4500/125——这是设备固件在"未收到有效控制命令"时的默认固定功率档（0x13 回传 `coldLevelOverclock=byte[0xd]=125`、`windLevelOverclock=byte[0xc]×100+byte[0x13]=45×100`）
+2. **多 controller 实例竞态**：B6X 重连时 SDK 可能创建多个 controller 实例并各自触发 `onGattConnected`，static `dataInteractionController` 指向"最后连接成功"的实例，可能并非正在接收 0x13 状态包的实例
+3. **两处命令静默丢弃点**：`AbstractDataInteractionController.processData` 的 `mDataConnectState != 2` 出队即丢；`LeDataInteractionController.writeToBluetoothDevice` 只检查 `mBluetoothGatt != null` 不检查已连接，失效 gatt 的 `writeCharacteristic` 静默返回 false（state==2 也拦不住）
+
+**已尝试的解决**（均未根治，仅降低频率/待真机验证）：
+- [2026-08-11] **下发前校验** `ensureUsableController()`：每次 `invokeSetRunMode` 前校验 static controller 的 gatt 是否等于当前有效连接（`currentValidGatt`，连接成功记录、断连清空）；失效时从已连接实例注册表（`connectedControllers`）找回 gatt 有效实例重新同步，找不到则强制重连
+- [2026-08-11] **锁死自愈** `checkCommandStall()`：累计 3 次参数下发后回传仍停滞且 ≠ 下发目标判定锁死 → 强制重连（10s 防抖）；回传到位或回传在变均清零，避免误判限速追赶
+- [2026-08-11] 覆盖 B6X 新旧 app（`com.flydigi.waspwing.experimental` 与 `com.flydigi.waspwing.experimentanliuliu`）与 B7X（混淆 `t9.j`/`a`）同一套逻辑
+- [2026-08-11] **守护消费线程**（相关后续，见已解决区条目 5「命令消费协程崩溃」）：重连级自愈对"命令消费协程 `runFetchLoop` 崩溃"场景无效（锁 82/2000，最后成功命令残留态），新增双信号判断（命令队列堆积 >6 条 + 回传停滞 ≥3 次下发）+ 守护消费线程反射接管 `processData`——重连无法恢复进程级协程，须以队列堆积为判据独立兜底
+
+**状态**：**未解决**——锁 125/4500 仍偶发；待真机长期验证上述自愈是否足以覆盖，或进一步定位固件级根因。
 
 ## 已解决区
 
@@ -103,27 +118,9 @@ Caused by: java.lang.NullPointerException: Attempt to read from field 'android.o
 
 **教训**：SDK static 单例字段可能在重连后被 app 替换为新实例而不更新 static 引用，外部 hook 调用方必须保证引用的实例与 app 实际连接实例一致；排查"命令下发无反应"要同时检查入队闸门与发送闸门的连接状态判断。
 
-### 5. 散热器锁死制冷 125 / 风扇 4500，tempctrl 持续下发无效（2026-08-11 发现，已解决待真机验证）
+### 5. 散热器停摆制冷82/风扇2000，命令消费协程崩溃（2026-08-11 发现，已解决待真机验证）
 
-**现象**：散热器偶发停在制冷 125、风扇 4500，tempctrl（magisk 守护进程）持续下发新参数但散热器不响应；常在 BLE 重连后出现（多次快速重连更易触发），偶发无重连也出现。LSP 日志（`D:\下载\LocalSend`）显示下发与回传长期偏离。
-
-**机制（已确认，三层证据链）**：
-1. **4500/125 不是任何一方下发的值**：日志中 tempctrl 下发的 windOC/coldOC 组合（3100/168、4800/144、4900/183、5250/190、5550/190 等）从未包含 4500/125——这是设备固件在"未收到有效控制命令"时的默认固定功率档（0x13 回传 `coldLevelOverclock=byte[0xd]=125`、`windLevelOverclock=byte[0xc]×100+byte[0x13]=45×100`）。
-2. **多 controller 实例竞态**：B6X 重连时 SDK 可能创建多个 controller 实例并各自触发 `onGattConnected`（日志可见单次连接 6 次 static 同步），static `dataInteractionController` 指向"最后连接成功"的实例，可能并非正在接收 0x13 状态包的实例。
-3. **两处命令静默丢弃点**（比条目 4 的 state≠2 闸门更深一层）：
-   - `AbstractDataInteractionController.processData`：`mDataConnectState != 2` 时命令出队即丢（条目 4 已修，state 由 hookSyncConnectedController 同步为 2）；
-   - `LeDataInteractionController.writeToBluetoothDevice`：只检查 `mBluetoothGatt != null`，**不检查是否已连接**——static 指向的实例 gatt 若已失效/是旧实例，`writeCharacteristic` 静默返回 false，命令丢失（state==2 也拦不住）。
-
-**修正（2026-08-11，待真机验证）**：
-- **下发前校验**：新增 `ensureUsableController()`，每次 `invokeSetRunMode` 前校验 static controller 的 gatt 是否等于当前有效连接（`currentValidGatt`，连接成功记录、断连清空）；失效时从已连接实例注册表（`connectedControllers`）找回 gatt 有效实例重新同步，找不到则强制重连
-- **锁死自愈**：新增 `checkCommandStall()`——累计 3 次参数下发后散热器回传仍停滞且 ≠ 下发目标，判定锁死，触发强制重连（10s 防抖）；回传到位或回传在变（设备在响应）均清零，避免误判限速追赶
-- B6X 新 app（`com.flydigi.waspwing.experimental` 与 `com.flydigi.waspwing.experimentanliuliu`，SDK 同源类名/字段一致）与 B7X（混淆 `t9.j`/`a`）均已覆盖同一套逻辑
-
-**教训**：LSP 侧"命令下发无反应"的排查不能止步于连接状态（state==2）——Android BLE 对**已断开但非空**的 `BluetoothGatt` 调用 `writeCharacteristic` 是静默失败的，必须校验 gatt 与当前有效连接的一致性，并给设备停摆兜底一个主动重连的保险丝。
-
-### 6. 散热器停摆制冷82/风扇2000，命令消费协程崩溃（2026-08-11 发现，已解决待真机验证）
-
-**现象**：散热器偶发停在制冷 82、风扇 2000（**最后一次成功命令的残留状态**，非固件默认档），tempctrl 持续下发新参数但散热器不响应；条目5 的锁死自愈（重连）触发后**仍无效**，必须强制停止 app 冷启动才恢复。LSP 日志显示回传热端温度持续变化（310→390，0x13 通知链路活着），制冷/风扇字段恒 82/2000。
+**现象**：散热器偶发停在制冷 82、风扇 2000（**最后一次成功命令的残留状态**，非固件默认档），tempctrl 持续下发新参数但散热器不响应；未解决区条目 1 的锁死自愈（重连）触发后**仍无效**，必须强制停止 app 冷启动才恢复。LSP 日志显示回传热端温度持续变化（310→390，0x13 通知链路活着），制冷/风扇字段恒 82/2000。
 
 **机制（已确认，日志+反编译证据）**：
 1. SDK 的 `AbstractDataInteractionController.runFetchLoop`（命令消费协程）**只在构造函数里 `GlobalScope.launch` 启动一次**，是死循环且无重启机制；
@@ -137,4 +134,4 @@ Caused by: java.lang.NullPointerException: Attempt to read from field 'android.o
 - **守护消费线程**：轮询命令队列，state==2 时反射调用 `processData` 消费；单条异常 try-catch 不冒泡（天然防崩溃）
 - **重连前清空队列**：forceReconnect 前 `clear()` 堆积命令，避免断连期无效命令残留
 
-**教训**：LSP 侧"命令下发无反应"的排查，除连接状态（state==2）与 gatt 有效性（条目4/5）外，还要检查**命令消费协程是否存活**——SDK 在构造时启动的进程级死循环协程一旦崩溃，重连无法恢复，必须以"队列堆积"为判据做独立兜底（守护消费线程），而不能只依赖连接级自愈。
+**教训**：LSP 侧"命令下发无反应"的排查，除连接状态（state==2，条目 4）与 gatt 有效性（未解决区条目 1）外，还要检查**命令消费协程是否存活**——SDK 在构造时启动的进程级死循环协程一旦崩溃，重连无法恢复，必须以"队列堆积"为判据做独立兜底（守护消费线程），而不能只依赖连接级自愈。

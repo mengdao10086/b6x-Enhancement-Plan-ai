@@ -263,6 +263,7 @@ static int last_batt_reading = -1;            // 上次读取的电池温度
 static int temp_idle_cycles = 0;              // 温度值连续未变的控制周期数
 static int pid_ctrl_cycles = 0;               // PID 控制周期单调计数器（pid_cycle 每次 +1，方差插值用）
 static int BATT_SKIP_MAX = 6;                 // 值连续未变达到此上限时强制处理一次（防卡死，可配置）
+static int reconnect_keep_cycles = 3;         // RECONNECT_KEEP_CYCLES：断联< N 控制周期(×5s) 不重置 PID 状态
 static int batt_gear_cooldown = 0;            // 电池调档冷却剩余周期
 
 // ======================== Gear 模式 — 紧急干预（CTRL_MODE=0）========================
@@ -355,6 +356,12 @@ static int pid_ki_var_threshold = 50;     // PID_KI_VAR 第一值=方差门控�
 static int pid_ki_var_samples = 6;        // PID_KI_VAR 第二值=采样数（2~20）
 static int pid_ki_deadband = 15;          // PID_KI_VAR 第三值=积分死区（0.1°C，0=禁止I项）
 
+// PID_KI_SLOW：积分动态衰减（升温/高于基准时放缓衰减，保留制冷记忆；第二/三值可负）
+static int pid_ki_slow_alpha = 33;        // PID_KI_SLOW 第一值=滤波系数（%，0=关闭上升项）
+static int pid_ki_slow_rise  = 3;         // PID_KI_SLOW 第二值=上升每0.1°C减量（×1000，默认0.003，可负）
+static int pid_ki_slow_above = 5;         // PID_KI_SLOW 第三值=高于基准每°C减量（×1000，默认0.005，可负）
+static int pid_ki_slow_off   = 5;         // PID_KI_SLOW 第四值=上升项反向偏移（0.1°C，默认0.5°C）：仅温度<基准+此偏移时上升项生效/可反向
+
 // PID_KD：微分（上升/下降独立倍率）
 static int pid_kd_up = 240;               // PID_KD 第一值=上升倍率（÷1000，默认 0.24）
 static int pid_kd_down = 360;             // PID_KD 第二值=下降倍率（÷1000，默认 0.36）
@@ -396,6 +403,8 @@ static int pid_batt_filtered = -1;        // EMA 滤波后电池温度
 static int pid_last_batt = -1;            // 上次参与 PID 计算的原始温度
 static time_t pid_last_change_time = 0;   // 上次温度变化时间戳
 static float pid_d_state = 0.0f;          // D 项记忆累积值（泄漏积分器，每周期固定衰减；重置/切模式归零）
+static float pid_ki_rise_filt = 0.0f;     // PID_KI_SLOW 升温值 EMA 滤波（0.1°C；停止上升按0衰减至归零；≥基准+偏移清零）
+static int   pid_ki_prev_batt = -1;       // 上周期电池温度（0.1°C，升温值计算用）
 // 方差门控环形缓冲区
 #define PID_VAR_BUF_MAX 20    // 最大支持采样数（≥ PID_KI_VAR 第二值上限）
 static int pid_var_buffer[PID_VAR_BUF_MAX];
@@ -776,7 +785,8 @@ static const struct IntCfgKey INT_CFG_KEYS[] = {
     { "REV_COMP_COOLDOWN",         &REV_COMP_COOLDOWN,           0, 10 },
     { "RATE_LIMIT_TEMP",           &RATE_LIMIT_TEMP,             1, 30 },
     { "BATT_SKIP_MAX",             &BATT_SKIP_MAX,               1, 60 },
-    // PID 多值键（PID_KP / PID_KD / PID_KD_MEM / PID_KI_VAR / PID_KI / PID_KI_MEM / PID_KD_NEAR）在 parse_pid_cfg 分段解析
+    { "RECONNECT_KEEP_CYCLES",     &reconnect_keep_cycles,       0, 30 },
+    // PID 多值键（PID_KP / PID_KD / PID_KD_MEM / PID_KI_VAR / PID_KI / PID_KI_MEM / PID_KD_NEAR / PID_KI_SLOW）在 parse_pid_cfg 分段解析
     { "GEAR_PREDICT_ALPHA",        &gear_predict_alpha,          1, 100 },
     { "RPM_SMOOTH_ALPHA",          &rpm_smooth_alpha,            1, 99 },
     { "CURRENT_GEAR_SMOOTH_ALPHA", &CURRENT_GEAR_SMOOTH_ALPHA,   1, 100 },
@@ -914,6 +924,16 @@ static int parse_pid_cfg(const char *key, int val, const char *val_str) {
         if (cnt >= 1) pid_ki_var_threshold = clamp(t, 0, 200);
         if (cnt >= 2) pid_ki_var_samples   = clamp(n, 2, 20);
         if (cnt >= 3) pid_ki_deadband      = clamp(db, 0, 100);
+        return 1;
+    }
+    // PID_KI_SLOW = 滤波系数 上升每0.1°C减量 高于基准每°C减量 反向偏移（第二/三值×1000，可负；偏移 0.1°C）
+    if (strcmp(key, "PID_KI_SLOW") == 0) {
+        int a = pid_ki_slow_alpha, b = pid_ki_slow_rise, c = pid_ki_slow_above, d = pid_ki_slow_off;
+        int cnt = sscanf(val_str, "%d %d %d %d", &a, &b, &c, &d);
+        if (cnt >= 1) pid_ki_slow_alpha = clamp(a, 0, 100);
+        if (cnt >= 2) pid_ki_slow_rise  = clamp(b, -1000, 1000);
+        if (cnt >= 3) pid_ki_slow_above = clamp(c, -1000, 1000);
+        if (cnt >= 4) pid_ki_slow_off   = clamp(d, 0, 50);
         return 1;
     }
     if (strcmp(key, "PID_CPU_COMP") == 0) {
@@ -3218,8 +3238,15 @@ static float pid_compute(int batt_10, float dt) {
     if (de < 0.0f) {
         pid_integral_accum -= (pid_ki_drop / 1000.0f) * (-de);
     }
-    // 固定衰减：每周期向 0 收敛 leak/1000（0.03），始终生效不受门控
-    pid_integral_accum -= pid_ki_leak / 1000.0f;
+    // 积分衰减：固定衰减 + 动态放缓（PID_KI_SLOW）
+    // 升温（滤波上升值）每0.1°C减0.003、高于基准每°C减0.005 → 有效衰减变小（保留制冷记忆、输出不掉）；
+    // 系数可配负值 → 反向：衰减加快、输出更快下降（"允许传入负值使输出降低速度提高"）。
+    // 上升项由 pid_cycle 门控（仅温度 < 基准+偏移 时非 0），≥阈值时清零无残留反向。
+    float ki_decay = pid_ki_leak / 1000.0f;
+    ki_decay -= (pid_ki_slow_rise  / 1000.0f) * pid_ki_rise_filt;   // 上升项（0.1°C 单位）
+    if (error > 0.0f)
+        ki_decay -= (pid_ki_slow_above / 1000.0f) * error;           // 基准项（°C）
+    pid_integral_accum -= ki_decay;
     // I 预算上限：min(剩余预算 1−p−d, 固定值 667)，再单向下限 0
     float i_limit = pid_integral_limit / 1000.0f;
     float i_budget = 1.0f - p - d;
@@ -3415,6 +3442,9 @@ static void pid_reset_core(void) {
     pid_out_last_batt = -1;
     pid_out_last_cycle = -1;
     pid_out_prev2_batt = -1;
+    // PID_KI_SLOW 升温滤波状态重置（作为"重置各项数据"的一部分；短断联保留时恰好不触发）
+    pid_ki_rise_filt = 0.0f;
+    pid_ki_prev_batt = -1;
 }
 
 /**
@@ -3485,10 +3515,11 @@ static void reconnect_align(void) {
     batt_window_changed = 0;
 
     // 断联→重连汇总行（常驻）：断联时长 + 重连后散热器回传实际值
+    int discon_sec = 0;
     if (last_disconnect_time > 0) {
+        discon_sec = (int)(time(NULL) - last_disconnect_time);
         write_log("重连 断联%d秒 回传冷%d RPM%d",
-                  (int)(time(NULL) - last_disconnect_time),
-                  cooler_cold_real, cooler_rpm_real);
+                  discon_sec, cooler_cold_real, cooler_rpm_real);
         last_disconnect_time = 0;
     }
 
@@ -3498,17 +3529,23 @@ static void reconnect_align(void) {
     if (cooler_rpm_real >= fan_rpm_min) actual_rpm = cooler_rpm_real;
 
     if (ctrl_mode == 1) {
-        // PID 模式：重置 PID 状态（积分/误差/滤波），制冷/转速初值取回传实际值，
-        // 由 rate_limited_execute 从回传值向 PID 目标正常步进
-        pid_reset_core();
-        pid_filter_interval_smooth = -1;
-        pid_filter_auto_off = 0;
-        temp_idle_cycles = 0;
-        // 回传异常时保持原值（函数开头已处理有效回传覆盖），避免强制拉到最小值
-        actual_target_temp = -1;
-        write_log("重连 PID 状态已重置，制冷从回传实际值起步 cold=%d", actual_cold);
-        last_batt_reading = -1;
-        first_run = 1;
+        // 断联 < reconnect_keep_cycles 个控制周期(×5s)：短断联保留 PID 状态（kd/积分/误差/滤波），
+        // 仅对齐实际值，输出连续不跳变；长断联/无断联记录则完整重置避免陈旧状态误入。
+        if (reconnect_keep_cycles > 0 && discon_sec < reconnect_keep_cycles * 5) {
+            write_log("重连 断联%d秒<%d周期，保留 PID 状态", discon_sec, reconnect_keep_cycles);
+        } else {
+            // PID 模式：重置 PID 状态（积分/误差/滤波），制冷/转速初值取回传实际值，
+            // 由 rate_limited_execute 从回传值向 PID 目标正常步进
+            pid_reset_core();
+            pid_filter_interval_smooth = -1;
+            pid_filter_auto_off = 0;
+            temp_idle_cycles = 0;
+            // 回传异常时保持原值（函数开头已处理有效回传覆盖），避免强制拉到最小值
+            actual_target_temp = -1;
+            write_log("重连 PID 状态已重置，制冷从回传实际值起步 cold=%d", actual_cold);
+            last_batt_reading = -1;
+            first_run = 1;
+        }
         return;
     }
 
@@ -3619,6 +3656,33 @@ static void pid_cycle(void) {
     pid_ctrl_cycles++;               // 单调周期计数（方差插值用；跳过周期也计数，保证插值对齐真实时间）
     int batt_raw = cached_batt_raw;   // 1s 采集缓存
     if (batt_raw < 0) return;
+
+    // --- PID_KI_SLOW 升温值滤波（每控制周期推进，独立于 pid_compute 重算时机） ---
+    // 反向限制：仅温度 < 基准+反向偏移 时上升项生效；其余时候升温值截断为 0 且滤波值清零，
+    // 负系数也无法让"降温"变为"ki 降低速度提高"。
+    if (pid_ki_slow_alpha > 0) {
+        int rise_0_1 = 0;
+        if (batt_raw < BATT_BASELINE + pid_ki_slow_off) {   // 仅低于 基准+偏移 时上升项生效
+            if (pid_ki_prev_batt >= 0 && batt_raw > pid_ki_prev_batt)
+                rise_0_1 = batt_raw - pid_ki_prev_batt;
+        }
+        if (rise_0_1 > 0) {
+            if (pid_ki_rise_filt <= 0.0f)
+                pid_ki_rise_filt = (float)rise_0_1;   // 首次上升不滤波直取
+            else
+                pid_ki_rise_filt = (rise_0_1 * pid_ki_slow_alpha
+                                  + pid_ki_rise_filt * (100 - pid_ki_slow_alpha)) / 100.0f;
+        } else {
+            // 停止上升/开始降温：输入 0 继续滤波，衰减至归零
+            pid_ki_rise_filt = pid_ki_rise_filt * (100 - pid_ki_slow_alpha) / 100.0f;
+            if (pid_ki_rise_filt < 1.0f) pid_ki_rise_filt = 0.0f;   // <0.1° 视为归零
+        }
+        if (batt_raw >= BATT_BASELINE + pid_ki_slow_off)
+            pid_ki_rise_filt = 0.0f;   // ≥ 阈值：上升项彻底关闭，无残留反向
+    } else {
+        pid_ki_rise_filt = 0.0f;   // 滤波系数=0：关闭上升项，清零陈旧滤波值（否则 pid_compute 仍会用残留值）
+    }
+    pid_ki_prev_batt = batt_raw;   // 始终跟踪，热重载启用时不至于用陈旧前值
 
     // --- 温度更新周期跟踪（基于周期数，非时间） ---
     // idle 递增已由 main_loop 入口按窗口变化统一维护，此处只做采样 push
