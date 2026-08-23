@@ -5,7 +5,7 @@
 (function () {
   'use strict';
 
-  // 全局错误捕获：任何 JS 异常都显示到横幅，便于真机诊断（必须先于可能崩溃的初始化）
+  // 全局错误捕获：任何 JS 异常都显示到横幅（必须先于可能崩溃的初始化）
   function reportError(msg) {
     var b = $('bridgeBanner');
     if (b) {
@@ -38,11 +38,8 @@
   }
   function fitInput(inp) {
     var val = String(inp.value || '');
-    var ph = inp.placeholder || '';
-    var len = Math.max(val.length, ph.length, 1);
-    // 修正：ch 单位只计内容宽，输入框 box-sizing:border-box 另有左右 padding(7px×2)+border(1px×2)=16px，
-    // 长数字（日志上限/缩放系数等）会被截掉末位。补上该偏移。
-    inp.style.width = 'calc(' + (len + 1) + 'ch + 16px)';
+    // 输入框宽度按当前值计算，上限 120px
+    inp.style.width = 'min(calc(' + (Math.max(val.length, 1) + 1) + 'ch + 16px), 120px)';
   }
   function debounce(fn, ms) {
     var t;
@@ -76,7 +73,7 @@
         var useAsync = false, probe = null;
         try { probe = w.ksu.exec("printf '__B6XA__\\n__B6XB__\\n__B6XC__'"); }
         catch (e) {}
-        // 实测同步形态只返回"最后一行"：必须确认第一行 __B6XA__ 是否出现，否则误判为完整多行
+        // 同步形态只返回"最后一行"，确认第一行 __B6XA__ 出现
         useAsync = !(typeof probe === 'string' && probe.indexOf('__B6XA__') !== -1);
         uiLog('ksu 探测: 同步返回=' + JSON.stringify(probe) + ' → useAsync=' + useAsync);
         return function (cmd, cb) {
@@ -173,7 +170,7 @@
     return lines.map(function (raw) {
       var m = raw.match(/^([A-Za-z0-9_]+)=([^\r\n]*)/);   // 兼容 CRLF/LF 行尾
       if (m) {
-        // 剥离行内注释（如 LOG_MAX=7936   # 字节），与 C 解析器行为一致（atoi/sscanf 停在非数字处）
+        // 剥离行内注释（如 LOG_MAX=7936   # 字节）
         var value = m[2].replace(/\s*#.*$/, '');
         return { type: 'kv', raw: raw, key: m[1], value: value };
       }
@@ -267,9 +264,7 @@
     if (!ms) return;
     var initVal = ctrlMode();
     ms.scrollLeft = initVal === '1' ? 0 : ms.clientWidth;   // 初始对齐当前模式（无动画）
-    // 滚动停止后才同步 CTRL_MODE：滚动过程实时 setValue 会经 setValue→scrollModePanel 反向触发 scrollTo，
-    // 造成点击开关时值被滚过中点前的判定改回（抖动回原位）、惯性滑动被 smooth 接管而卡顿。
-    // 同步用 noScroll，只更新值+保存，不触发滚动。
+    // 滚动停止后才同步 CTRL_MODE；同步用 noScroll，只更新值+保存，不触发滚动
     var syncMode = debounce(function () {
       var p = ms.scrollLeft / Math.max(1, ms.clientWidth);
       var newVal = p > 0.5 ? '0' : '1';
@@ -418,7 +413,7 @@
     body.className = 'group-body' + (hasCollapsible(g) ? '' : ' compact');
     sec.appendChild(body);
 
-    // 头部开关的说明：作为分组首行说明（原"独立条目"的说明迁到这里）
+    // 头部开关的说明：作为分组首行说明
     if (g.headerSwitch && SCHEMA.keys[g.headerSwitch] && String(SCHEMA.keys[g.headerSwitch].desc).trim()) {
       appendNote(body, SCHEMA.keys[g.headerSwitch].desc);
     }
@@ -653,7 +648,7 @@
   }
 
   function b64(str) {
-    // 兼容中文注释（实际配置为 ASCII，安全起见走 UTF-8）
+    // 兼容中文注释（实际配置为 ASCII；走 UTF-8）
     return btoa(unescape(encodeURIComponent(str)));
   }
 
@@ -663,18 +658,16 @@
     var text = rebuildConfig();
     var r = await Bridge.exec('echo ' + b64(text) + ' | base64 -d > ' + CFG);
     if (r.errno !== 0) { toast('保存失败: ' + (r.stderr || 'errno ' + r.errno), 'err'); return; }
-    // 修复：把刚写入的内容同步回 S.items 快照，否则下次保存会用页面加载时的旧值覆盖其他项
-    // （例：先存 DEBUG_PID=1，再改 DEBUG_ENABLED 保存时会把 DEBUG_PID 冲回页面加载时的 0）
+    // 把刚写入的内容同步回 S.items 快照
     S.items = parseConfig(text);
     S.values = buildValues(S.items);
     S.dirty = {}; S.dirtySpecial = false;
-    // 保存只重置 dirty，不清空 S.manualExpand：
-    // 折叠状态是会话级 UI 状态，保存配置不应重置它，否则切模式触发保存会把手动展开的分组折叠回去
+    // 保存只重置 dirty，不清空 S.manualExpand
     updateCollapse();
     toast('已保存');
   }
 
-  // ---------- 曲线数据：读 C 每 1s 写的数据文件（无现场采样，减少 exec） ----------
+  // ---------- 曲线数据：读 C 每 1s 写的数据文件（无现场采样） ----------
   function parseDataLines(text) {
     // 行格式：epoch,电池(0.1°C),CPU(0.1°C),热端(0.1°C),冷端(0.1°C),实际转速,实际制冷,目标制冷（未就绪为 -1）
     // 温度列 ×0.1°C → °C（负数/未就绪视为 null）；转速/制冷列保持原值
@@ -707,8 +700,8 @@
   }
 
   // ---------- 单行自适应字号（图例栏 / 实时数据栏共用） ----------
-  // 测量一律绕过 scrollWidth：部分 WebView 对 overflow:hidden 的容器不报告溢出内容，
-  // 会导致字体不缩、尾部被裁。文本宽度优先用 canvas.measureText（最稳定），canvas
+  // 测量一律绕过 scrollWidth：部分 WebView 对 overflow:hidden 的容器不报告溢出内容。
+  // 文本宽度优先用 canvas.measureText（最稳定），canvas
   // 不可用再用隐藏探针兜底；图例等多子项元素直接累加子项 offsetWidth + gap。
   var fitCv = null, fitProxy = null;
   function textWidth(t, fs, refEl) {
@@ -728,7 +721,7 @@
     fitProxy.textContent = t;
     var w = fitProxy.offsetWidth;
     if (w > 0) return w;
-    // 探针不可用 → canvas 兜底（数字按等比宽测量，比 tabular 窄，加 5% 保险避免低估）
+    // 探针不可用 → canvas 兜底（数字按等比宽测量，比 tabular 窄，加 5% 保险）
     if (!fitCv) fitCv = document.createElement('canvas');
     var c = fitCv.getContext && fitCv.getContext('2d');
     if (c) {
@@ -769,8 +762,7 @@
     return { avail: avail, total: total, fs: fs, skip: '' };
   }
   // 整体缩放子窗口（时间窗口 + 图例）：内部保持固定值，超宽时整个 transform: scale。
-  // 裁切在父级 .chart-tools（overflow:hidden），与 transform 不同坐标系 → 缩放后内容必然落在可用区内，
-  // 规避 WebView 对子元素缩放（calc/zoom）兼容性问题
+  // 裁切在父级 .chart-tools（overflow:hidden），与 transform 不同坐标系 → 缩放后内容落在可用区内
   function fitChartTools() {
     var wrap = $('ctInner');
     if (!wrap) return null;
@@ -814,7 +806,7 @@
   }
 
   // 制冷轴辅助：tempctrl.c COLD_MIN=1（轴下限从 1 开始）；COLD_MAP 第一值 = 制冷→风扇映射
-  // 起始强度。总开关（PERF_ENABLED=1）开启时取配置实际值，否则回退默认 40。轴最低显示范围 = [1, 起始强度]
+  // 起始强度。总开关（PERF_ENABLED=1）开启时取配置实际值；未开启回退默认 40。轴最低显示范围 = [1, 起始强度]
   function coldMapStart() {
     if (S.values['PERF_ENABLED'] !== '1') return 40;   // 总开关未开启 → 默认 40
     var cm = S.values['COLD_MAP'];
@@ -886,13 +878,12 @@
       if (R.max < coldFanStart) R.max = coldFanStart;
       if (!drawAxisDiag) { drawAxisDiag = true; uiLog('[轴] 制冷轴: ' + R.min + '~' + R.max + '（起始强度=' + coldFanStart + '）'); }
     }
-    // 修复：单轴全无效值时该轴 range() 返回 null（此前守卫只挡双轴都空），
-    // 直接 return 会让 L/R 为 null 的轴在 plot 的 yOf 里解引用崩溃。
+    // 单轴全无效值时该轴 range() 返回 null。
     // 双轴都不可画（全 null）则无曲线可画；仅一轴有效时仍画该轴。
     if (!L && !R) return;
     function yOf(axis, v) { return padT + H * (1 - (v - axis.min) / (axis.max - axis.min)); }
     ctx.font = '10px system-ui'; ctx.fillStyle = '#888';
-    // 刻度数量随高度自适应：越高刻度越多（信息密度提升），越矮越少（避免拥挤）
+    // 刻度数量随高度自适应：越高刻度越多，越矮越少
     function tickCount(h) {
       var n = Math.round((h - 30) / 70);   // 每 70px 一条刻度
       if (n < 3) n = 3;                     // 至少 3 条（2 段）
@@ -910,7 +901,7 @@
         ctx.strokeStyle = 'rgba(128,128,128,0.15)';
         ctx.beginPath(); ctx.moveTo(padL, y); ctx.lineTo(padL + W, y); ctx.stroke();
       }
-      // 轴标题靠左绘制：允许向右突出到曲线区内（避免标题过长挤压曲线横向空间）
+      // 轴标题靠左绘制：允许向右突出到曲线区内
       ctx.textAlign = 'left';
       ctx.fillText('℃/百rpm', 2, padT - 7);
     }
@@ -1003,19 +994,17 @@
     seg.querySelectorAll('.seg-btn').forEach(function (b) {
       b.addEventListener('click', function () { goTo(b.dataset.panel); });
     });
-    // 滚动停止后才按最终位置同步高亮：滚动过程实时判定会在平滑滚动刚起步时把高亮改回旧面板，
-    // 造成点击切换时先高亮目标→又闪回旧面板→滚过中点再高亮目标（闪烁）
+    // 滚动停止后才按最终位置同步高亮
     var syncSeg = debounce(function () {
       var p = slider.scrollLeft / Math.max(1, slider.clientWidth);
       setSegActive(p > 0.5 ? 'log' : 'chart');
     }, 120);
     slider.addEventListener('scroll', syncSeg, { passive: true });
-    // 图钉：图标蓝底状态完全由 body 的 pin-fixed 类驱动（初始/点击后都走 syncPinState），
-    // 不依赖 classList.toggle 返回值，避免个别 WebView 下图标常蓝。
+    // 图钉：图标蓝底状态完全由 body 的 pin-fixed 类驱动（初始/点击后都走 syncPinState）
     $('pinBtn').addEventListener('click', function () {
       document.body.classList.toggle('pin-fixed');
       var pinned = document.body.classList.contains('pin-fixed');
-      document.body.classList.toggle('pin-scroll', !pinned);   // 互斥：移除另一类，避免 CSS 冲突锁死
+      document.body.classList.toggle('pin-scroll', !pinned);   // 互斥：移除另一类
       syncPinState();
     });
   }
@@ -1037,7 +1026,7 @@
 
   function initChartUI() {
     var w = parseInt(storeGet('b6xChartWindow') || '360', 10);
-    if (SCHEMA.chartWindowOptions.indexOf(w) === -1) w = 360;   // 旧自定义值回落默认挡位
+    if (SCHEMA.chartWindowOptions.indexOf(w) === -1) w = 360;   // 非可选值回落默认挡位
     S.window = w;
     var wbox = $('chartWindow');
     SCHEMA.chartWindowOptions.forEach(function (v) {
@@ -1064,13 +1053,25 @@
       st.appendChild(lab);
     });
     refitBars();   // 图例 + 实时数据栏首次适配（两侧留白与全局左侧 10px 一致）
-    // 窗口尺寸变化、字体异步加载完成、WebView 布局变化时重新适配，避免裁切
+    // 窗口尺寸变化、字体异步加载完成、WebView 布局变化时重新适配
     window.addEventListener('resize', refitBars);
     if (document.fonts && document.fonts.ready) document.fonts.ready.then(refitBars);
     if (window.ResizeObserver) {
       var ro = new ResizeObserver(refitBars);
       ro.observe($('ctInner'));
       ro.observe($('liveRow'));
+    }
+    // 曲线画布尺寸变化即重绘（rAF 节流）
+    if (window.ResizeObserver) {
+      var rafP = null;
+      var chartRo = new ResizeObserver(function () {
+        if (rafP != null) return;
+        rafP = requestAnimationFrame(function () {
+          rafP = null;
+          drawChart();
+        });
+      });
+      chartRo.observe($('chart'));
     }
   }
 
@@ -1211,7 +1212,7 @@
     uiLog('[fit] 诊断版已加载（下方应有 [fit] chartTools/liveRow 适配行与 [轴] 制冷轴行；若无 = 仍是旧版 app.js 缓存，请强刷 WebUI）');
     refreshCurve();                    // 曲线：读 C 数据文件，每秒一次
     setInterval(refreshCurve, 1000);
-    refreshLog();                      // 日志：5 秒刷新一次（增量缓存，减少 exec）
+    refreshLog();                      // 日志：5 秒刷新一次（增量缓存）
     setInterval(refreshLog, 5000);
   }
 

@@ -45,11 +45,11 @@ body {
 
 /* ---------- 布局：固定 vs 滚动隐藏 ---------- */
 body.pin-fixed .app { height: 100dvh; display: flex; flex-direction: column; overflow: hidden; }
-body.pin-fixed .top { flex: 0 0 var(--top-h, 36dvh); min-height: 0; }
+body.pin-fixed .top { flex: 0 0 max(var(--top-h, 36dvh), 220px); min-height: 0; }   /* 顶部高度保底 220px */
 body.pin-fixed .config { flex: 1; overflow-y: auto; min-height: 0; }
 
 body.pin-scroll .app { display: block; }
-body.pin-scroll .top { height: var(--top-h, 36dvh); }
+body.pin-scroll .top { height: max(var(--top-h, 36dvh), 220px); }   /* 顶部高度保底 220px */
 body.pin-scroll .config { overflow: visible; }
 
 /* ---------- 顶部横滑容器 ---------- */
@@ -91,7 +91,7 @@ body.pin-scroll .config { overflow: visible; }
   display: flex; align-items: center; justify-content: center;
 }
 .top-handle::before {
-  content: ''; width: 176px; height: 4px; border-radius: 2px;   /* 4 倍长（原 44px），方便点按 */
+  content: ''; width: 176px; height: 4px; border-radius: 2px;   /* 4 倍长 */
   background: var(--border);
 }
 .top-handle.dragging::before { background: var(--accent); }
@@ -163,7 +163,7 @@ body.pin-scroll .config { overflow: visible; }
   display: flex; align-items: center; gap: 8px; padding: 9px 10px; cursor: pointer;
   user-select: none; -webkit-user-select: none;
 }
-/* 折叠小三角：原生风格（与 UI 诊断日志的折叠标记一致） */
+/* 折叠小三角：原生风格 */
 .group-head .chev {
   display: inline-block; width: 0; height: 0; flex: 0 0 auto;
   border-left: 5px solid var(--muted);
@@ -219,7 +219,7 @@ body.pin-scroll .config { overflow: visible; }
 }
 .multi { display: flex; gap: 6px; flex-wrap: wrap; }
 .multi input[type=number] { text-align: right; min-width: 44px; }
-/* 隐藏 number 微调按钮，让宽度更贴合值 */
+/* 隐藏 number 微调按钮 */
 input[type=number]::-webkit-inner-spin-button,
 input[type=number]::-webkit-outer-spin-button { -webkit-appearance: none; margin: 0; }
 input[type=number] { -moz-appearance: textfield; }
