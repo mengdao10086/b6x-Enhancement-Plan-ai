@@ -307,16 +307,32 @@
       var row = document.createElement('div');
       row.className = 'multi';
       def.fields.forEach(function (f, i) {
-        row.appendChild(buildNumInput(key + '::' + i, parts[i] || '0', f.min, f.max, 1, f.label));
+        if (f.min === 0 && f.max === 1) {
+          // 0/1 布尔字段（开关/模式位）：渲成 checkbox，勾→1 未勾→0，替代数字输入框
+          var box = document.createElement('label');
+          box.className = 'multicheck';
+          var cb = document.createElement('input');
+          cb.type = 'checkbox'; cb.dataset.multiKey = key + '::' + i;
+          cb.checked = (parts[i] || '0') === '1';
+          var tf = document.createElement('span');
+          tf.textContent = f.label;
+          box.appendChild(cb); box.appendChild(tf);
+          row.appendChild(box);
+        } else {
+          row.appendChild(buildNumInput(key + '::' + i, parts[i] || '0', f.min, f.max, 1, f.label));
+        }
       });
-      row.addEventListener('input', function () {
+      function onMultiChange() {
         var out = [];
         def.fields.forEach(function (f, i) {
-          var inp = row.querySelector('[data-multi-key="' + key + '::' + i + '"]');
-          out.push(inp ? inp.value : '0');
+          var el = row.querySelector('[data-multi-key="' + key + '::' + i + '"]');
+          if (el && el.type === 'checkbox') out.push(el.checked ? '1' : '0');
+          else out.push(el ? el.value : '0');
         });
         setValue(key, out.join(' '));
-      });
+      }
+      row.addEventListener('input', onMultiChange);
+      row.addEventListener('change', onMultiChange);   // checkbox 用 change 事件
       wrap.appendChild(row);
     } else if (def.type === 'path') {
       var inp = document.createElement('input');

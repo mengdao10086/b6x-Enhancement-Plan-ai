@@ -219,6 +219,8 @@ body.pin-scroll .config { overflow: visible; }
 }
 .multi { display: flex; gap: 6px; flex-wrap: wrap; }
 .multi input[type=number] { text-align: right; min-width: 44px; }
+.multi .multicheck { display: inline-flex; align-items: center; gap: 5px; font-size: 13px; cursor: pointer; padding: 4px 4px; }
+.multi .multicheck input[type=checkbox] { width: 16px; height: 16px; flex: 0 0 auto; margin: 0; }
 /* 隐藏 number 微调按钮 */
 input[type=number]::-webkit-inner-spin-button,
 input[type=number]::-webkit-outer-spin-button { -webkit-appearance: none; margin: 0; }

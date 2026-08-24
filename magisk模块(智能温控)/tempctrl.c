@@ -350,6 +350,9 @@ static int pid_ki_leak = 20;              // PID_KI_MEM 第二值=固定衰减�
 static int pid_integral_limit = 600;      // PID_KI_MEM 第三值=积分上限（÷1000，I 项最大输出贡献；预算链 min(1-p-d, 此值) 取小）
 static int pid_ki_above_drop = 5;         // PID_KI_MEM 第四值=高于基准每°C衰减减量（÷1000，默认0.005，可负：负→衰减加快、输出更快下降）
 
+// PID_KI_FALL：降温抑制（降温时放缓积分建立，压制无谓制冷尖峰）
+static int pid_ki_fall_c1 = 5;            // PID_KI_FALL 第一值=降温抑制权重（被积项 error−降温值×此权重，默认5，0=关闭，范围0~50）
+
 // PID_KI_VAR：方差门控
 static int pid_ki_var_threshold = 50;     // PID_KI_VAR 第一值=方差门控阈值（0.1°C²，0=关闭）
 static int pid_ki_var_samples = 6;        // PID_KI_VAR 第二值=采样数（2~20）
@@ -396,6 +399,9 @@ static int pid_batt_filtered = -1;        // EMA 滤波后电池温度
 static int pid_last_batt = -1;            // 上次参与 PID 计算的原始温度
 static time_t pid_last_change_time = 0;   // 上次温度变化时间戳
 static float pid_d_state = 0.0f;          // D 项记忆累积值（泄漏积分器，每周期固定衰减；重置/切模式归零）
+static float pid_ki_fall_filt = 0.0f;     // PID_KI_FALL 降温值 EMA 滤波（°C/控制周期，α33）
+static int pid_ki_prev_batt = -1;         // PID_KI_FALL 上周期原始电池温度（0.1°C）
+static int pid_ki_last_cycle = -1;        // PID_KI_FALL 上次记录降温值的控制周期号（缺档 gap 摊平）
 // 方差门控环形缓冲区
 #define PID_VAR_BUF_MAX 20    // 最大支持采样数（≥ PID_KI_VAR 第二值上限）
 static int pid_var_buffer[PID_VAR_BUF_MAX];
@@ -924,6 +930,12 @@ static int parse_pid_cfg(const char *key, int val, const char *val_str) {
         if (cnt >= 2) pid_ki_leak        = clamp(b, 0, 1000);
         if (cnt >= 3) pid_integral_limit = clamp(c, 0, 1000);
         if (cnt >= 4) pid_ki_above_drop  = clamp(d, -1000, 1000);
+        return 1;
+    }
+    // PID_KI_FALL = 降温抑制权重（单值，范围0~50，默认5；0=关闭）
+    if (strcmp(key, "PID_KI_FALL") == 0) {
+        int a = pid_ki_fall_c1;
+        if (sscanf(val_str, "%d", &a) >= 1) pid_ki_fall_c1 = clamp(a, 0, 50);
         return 1;
     }
     if (strcmp(key, "PID_KI_VAR") == 0) {
@@ -3203,9 +3215,17 @@ static float pid_compute(int batt_10, float dt) {
     }
     // V 形增益累积（建立慢、释放快）：高基准受门控、低基准无条件
     // 高基准（error>0，门控激活时）：gain = up_base + up_slope×error，每高于基准1°增益+20
+    // 降温抑制（PID_KI_FALL）：降温时被积项改 error−降温值×权重（钳≥0，仅放缓建、不主动释放），下降惩罚等比例缩小
+    float sup = 1.0f;   // 降温抑制比例（1=不抑制；<1=放缓建立；0=完全抑制）
     if (ki_active && error >= 0.0f) {
         float gain = (pid_ki_up_base + pid_ki_up_slope * error) / 1000.0f;
-        pid_integral_accum += gain * error * dt;
+        float efac = error;
+        if (pid_ki_fall_c1 > 0 && pid_ki_fall_filt > 0.0f) {
+            efac = error - pid_ki_fall_filt * pid_ki_fall_c1;
+            if (efac < 0.0f) efac = 0.0f;
+            if (error > 0.0f) sup = efac / error;
+        }
+        pid_integral_accum += gain * efac * dt;
     }
     // 低基准（error<0，无条件）：gain = down_base + down_slope×|error|，每低于基准1°回落+50
     if (error < 0.0f) {
@@ -3215,7 +3235,9 @@ static float pid_compute(int batt_10, float dt) {
     }
     // 下降惩罚（本次比上次降温 de<0，无条件）：每降低1°扣 drop/1000 的累计值，直接作用于累积量
     if (de < 0.0f) {
-        pid_integral_accum -= (pid_ki_drop / 1000.0f) * (-de);
+        float dp = (pid_ki_drop / 1000.0f) * (-de);
+        if (error >= 0.0f) dp *= sup;   // 降温抑制时下降惩罚等比例缩小
+        pid_integral_accum -= dp;
     }
     // 积分衰减：固定衰减 + 高于基准动态放缓（PID_KI_MEM 第四值）
     // 温度高于基准（error>0）每 °C 使有效衰减 −0.005（衰减变慢、保留制冷记忆、输出不掉）；
@@ -3419,6 +3441,10 @@ static void pid_reset_core(void) {
     pid_out_last_batt = -1;
     pid_out_last_cycle = -1;
     pid_out_prev2_batt = -1;
+    // PID_KI_FALL 降温抑制状态重置（短断联保留场景恰好不触发 pid_reset_core）
+    pid_ki_fall_filt = 0.0f;
+    pid_ki_prev_batt = -1;
+    pid_ki_last_cycle = -1;
 }
 
 /**
@@ -3630,6 +3656,23 @@ static void pid_cycle(void) {
     pid_ctrl_cycles++;               // 单调周期计数（方差插值用；跳过周期也计数，保证插值对齐真实时间）
     int batt_raw = cached_batt_raw;   // 1s 采集缓存
     if (batt_raw < 0) return;
+
+    // --- 降温值跟踪（PID_KI_FALL 降温抑制用；每控制周期推进，独立于 pid_compute 重算时机） ---
+    // 降温值 = 每控制周期降温速率（°C/周期）：本周期原始温度比上周期低时，跨缺档 gap 摊平；再 EMA 滤波（α33）
+    // 首次降温（滤波值为0）不滤波直取；停止降温按输入 0 继续滤波直至归零
+    int fgap = (pid_ki_last_cycle >= 0) ? (pid_ctrl_cycles - pid_ki_last_cycle) : 1;
+    float fdrop = 0.0f;
+    if (pid_ki_prev_batt >= 0 && fgap >= 1 && batt_raw < pid_ki_prev_batt)
+        fdrop = (float)(pid_ki_prev_batt - batt_raw) / 10.0f / (float)fgap;
+    pid_ki_prev_batt = batt_raw;
+    pid_ki_last_cycle = pid_ctrl_cycles;
+    if (fdrop > 0.0f) {
+        if (pid_ki_fall_filt <= 0.0f) pid_ki_fall_filt = fdrop;
+        else pid_ki_fall_filt = (fdrop * 33 + pid_ki_fall_filt * 67) / 100.0f;
+    } else {
+        pid_ki_fall_filt = pid_ki_fall_filt * 67 / 100.0f;
+        if (pid_ki_fall_filt < 0.05f) pid_ki_fall_filt = 0.0f;
+    }
 
     // --- 温度更新周期跟踪（基于周期数，非时间） ---
     // idle 递增已由 main_loop 入口按窗口变化统一维护，此处只做采样 push

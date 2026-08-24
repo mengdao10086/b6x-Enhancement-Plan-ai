@@ -48,7 +48,7 @@ window.B6X_SCHEMA = {
       keys: [],
       modePanels: [
         { when: "1", title: "PID 模式控制",
-          keys: ["PID_KP", "PID_KI", "PID_KI_MEM", "PID_KI_VAR",
+          keys: ["PID_KP", "PID_KI", "PID_KI_MEM", "PID_KI_FALL", "PID_KI_VAR",
                  "PID_KD", "PID_KD_MEM", "PID_KD_NEAR",
                  "PID_INPUT_FILTER", "PID_ALPHA",
                  "PID_CPU_COMP", "PID_OUT_FILTER", "PID_COLD"] },
@@ -171,6 +171,8 @@ window.B6X_SCHEMA = {
     PID_KI_MEM: { type: "multi", fields: [{ label: "下降惩罚", min: 0, max: 1000 }, { label: "固定衰减", min: 0, max: 1000 }, { label: "积分上限", min: 0, max: 1000 }, { label: "高于基准每°减量", min: -1000, max: 1000 }],
       label: "KI 记忆",
       desc: "降温累计积分扣除量 / 每周期巡检降低值 / KI积分上限" },
+    PID_KI_FALL: { type: "int", min: 0, max: 50, label: "KI 降温抑制",
+      desc: "温度下降时放缓积分建立的权重（0=关闭）。被积项=偏差−降温速率×此值；降温速率每周期滤波(α33)" },
     PID_KI_VAR: { type: "multi", fields: [{ label: "方差阈值", min: 0, max: 200 }, { label: "采样数", min: 2, max: 20 }, { label: "积分死区(0.1°C)", min: 0, max: 100 }],
       label: "KI 门控",
       desc: "方差阈值 / 方差采样数 / 死区" },
