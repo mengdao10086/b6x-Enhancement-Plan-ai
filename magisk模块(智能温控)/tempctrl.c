@@ -262,7 +262,7 @@ static int batt_gear_base = 0;                // 电池控制决定的基础档�
 static int last_batt_reading = -1;            // 上次读取的电池温度
 static int temp_idle_cycles = 0;              // 温度值连续未变的控制周期数
 static int pid_ctrl_cycles = 0;               // PID 控制周期单调计数器（pid_cycle 每次 +1，方差插值用）
-static int BATT_SKIP_MAX = 6;                 // 值连续未变达到此上限时强制处理一次（防卡死，可配置）
+static int BATT_SKIP_MAX = 12;                // 值连续未变达到此上限时强制处理一次（防卡死，可配置）
 static int reconnect_keep_cycles = 3;         // RECONNECT_KEEP_CYCLES：断联< N 控制周期(×5s) 不重置 PID 状态
 static int batt_gear_cooldown = 0;            // 电池调档冷却剩余周期
 
@@ -348,10 +348,15 @@ static int pid_ki_down_slope = 50;        // PID_KI 第四值=低基准每°C增
 static int pid_ki_drop = 100;             // PID_KI_MEM 第一值=下降惩罚（÷1000，降温时每周期每度降低直接扣累计值）
 static int pid_ki_leak = 20;              // PID_KI_MEM 第二值=固定衰减（÷1000）
 static int pid_integral_limit = 600;      // PID_KI_MEM 第三值=积分上限（÷1000，I 项最大输出贡献；预算链 min(1-p-d, 此值) 取小）
-static int pid_ki_above_drop = 5;         // PID_KI_MEM 第四值=高于基准每°C衰减减量（÷1000，默认0.005，可负：负→衰减加快、输出更快下降）
 
 // PID_KI_FALL：降温抑制（降温时放缓积分建立，压制无谓制冷尖峰）
 static int pid_ki_fall_c1 = 5;            // PID_KI_FALL 第一值=降温抑制权重（被积项 error−降温值×此权重，默认5，0=关闭，范围0~50）
+
+// PID_KI_NEAR：近基准速度衰减（近基准时按温度变化速度调积分衰减；升温快→慢释放保留、降温快→快释放防过冲）
+static int pid_ki_near_base = 2;          // PID_KI_NEAR 第一值=基准速率（×0.1°C/周期，默认2=0.2；速度=此值时无附加衰减）
+static int pid_ki_near_scale = 100;       // PID_KI_NEAR 第二值=缩放（×1，默认100；(速度−基准)×此值 为附加量，÷1000）
+static int pid_ki_near_recount = 3;       // PID_KI_NEAR 第三值=窗口重算数（上限，默认3；段内重算≤此值就整段用）
+static int pid_ki_near_cycn = 6;          // PID_KI_NEAR 第四值=窗口周期数（上限，默认6；段长≤此值就整段用）
 
 // PID_KI_VAR：方差门控
 static int pid_ki_var_threshold = 50;     // PID_KI_VAR 第一值=方差门控阈值（0.1°C²，0=关闭）
@@ -375,6 +380,7 @@ static int pid_kd_near_mult = 33;         // PID_KD_NEAR 第二值=近区倍率�
 static int pid_input_filter_enabled = 1;  // PID_INPUT_FILTER 第一值：默认开（EMA 滤波；自适应逻辑可按间隔自动关闭/恢复）
 static int pid_filter_auto_threshold_on = 30;   // PID_INPUT_FILTER 第二值：自动关闭阈值（×0.1周期）
 static int pid_filter_auto_threshold_off = 20;  // PID_INPUT_FILTER 第三值：自动恢复阈值（×0.1周期）
+static int pid_filter_count_mult = 15;          // PID_INPUT_FILTER 第四值：变化后计数强制关倍数（×0.1，默认15=1.5；N=ceil(自动关闭阈值×此值/100)周期）
 
 // PID_ALPHA：滤波强度
 static int pid_filter_auto_alpha = 20;          // PID_ALPHA 第一值：间隔EMA平滑系数（%）
@@ -402,6 +408,22 @@ static float pid_d_state = 0.0f;          // D 项记忆累积值（泄漏积分
 static float pid_ki_fall_filt = 0.0f;     // PID_KI_FALL 降温值 EMA 滤波（°C/控制周期，α33）
 static int pid_ki_prev_batt = -1;         // PID_KI_FALL 上周期原始电池温度（0.1°C）
 static int pid_ki_last_cycle = -1;        // PID_KI_FALL 上次记录降温值的控制周期号（缺档 gap 摊平）
+// 想法1：输入滤波 变化后计数强制关 + 切下线性过渡
+static int pid_filter_count = 0;        // 自最近一次温度窗口变化以来，滤波模式下经过的控制周期数
+static int pid_filter_was_eff = 1;      // 上周期滤波有效性（检测刚切换下时启动线性过渡）
+static int pid_filter_trans = 0;        // 线性过渡剩余周期数（断开滤波时 滤波值向原值逐步逼近）
+// 想法5：近基准速度衰减 窗口跟踪（连续同向段 + 两上限取长）
+static int near_seg_dir = 0;            // 当前段方向 +1升温/-1降温/0未定
+static int near_seg_start_cycle = 0;    // 段起点周期
+static int near_seg_start_temp = 0;     // 段起点温度
+static int near_prev_temp = -1;         // 上一有效原始温度（判方向/开段）
+static int near_seg_reccnt = 0;         // 段内重算累计次数
+static int near_re_cycle[4] = {0,0,0,0};// 段内最近4次重算周期（环形）
+static int near_re_temp[4]  = {0,0,0,0};
+static int near_ring_cycle[9] = {0,0,0,0,0,0,0,0,0};  // 最近9周期（环形，供窗口B取"近周期前"；长度>最大窗口周期8防覆盖）
+static int near_ring_temp[9]  = {0,0,0,0,0,0,0,0,0};
+static float pid_near_s = 0.0f;         // 窗口均速（绝对值 °C/周期）
+static int pid_near_dir = 0;            // 方向 +1升温/-1降温/0未定
 // 方差门控环形缓冲区
 #define PID_VAR_BUF_MAX 20    // 最大支持采样数（≥ PID_KI_VAR 第二值上限）
 static int pid_var_buffer[PID_VAR_BUF_MAX];
@@ -893,11 +915,12 @@ static int parse_pid_cfg(const char *key, int val, const char *val_str) {
         return 1;
     }
     if (strcmp(key, "PID_INPUT_FILTER") == 0) {
-        int on = pid_input_filter_enabled, a = pid_filter_auto_threshold_on, b = pid_filter_auto_threshold_off;
-        int n = sscanf(val_str, "%d %d %d", &on, &a, &b);
+        int on = pid_input_filter_enabled, a = pid_filter_auto_threshold_on, b = pid_filter_auto_threshold_off, m = pid_filter_count_mult;
+        int n = sscanf(val_str, "%d %d %d %d", &on, &a, &b, &m);
         if (n >= 1) pid_input_filter_enabled = (on != 0);
         if (n >= 2) pid_filter_auto_threshold_on = clamp(a, 5, 100);
         if (n >= 3) pid_filter_auto_threshold_off = clamp(b, 5, 100);
+        if (n >= 4) pid_filter_count_mult = clamp(m, 1, 50);
         return 1;
     }
     if (strcmp(key, "PID_ALPHA") == 0) {
@@ -922,20 +945,29 @@ static int parse_pid_cfg(const char *key, int val, const char *val_str) {
         if (cnt >= 4) pid_ki_down_slope= clamp(d, 0, 1000);
         return 1;
     }
-    // PID_KI_MEM = 下降惩罚 固定衰减 积分上限 高于基准每°C衰减减量（四值；第4值÷1000，可负=-1000..1000）
+    // PID_KI_MEM = 下降惩罚 固定衰减 积分上限（三值，÷1000）
     if (strcmp(key, "PID_KI_MEM") == 0) {
-        int a = pid_ki_drop, b = pid_ki_leak, c = pid_integral_limit, d = pid_ki_above_drop;
-        int cnt = sscanf(val_str, "%d %d %d %d", &a, &b, &c, &d);
+        int a = pid_ki_drop, b = pid_ki_leak, c = pid_integral_limit;
+        int cnt = sscanf(val_str, "%d %d %d", &a, &b, &c);
         if (cnt >= 1) pid_ki_drop        = clamp(a, 0, 1000);
         if (cnt >= 2) pid_ki_leak        = clamp(b, 0, 1000);
         if (cnt >= 3) pid_integral_limit = clamp(c, 0, 1000);
-        if (cnt >= 4) pid_ki_above_drop  = clamp(d, -1000, 1000);
         return 1;
     }
     // PID_KI_FALL = 降温抑制权重（单值，范围0~50，默认5；0=关闭）
     if (strcmp(key, "PID_KI_FALL") == 0) {
         int a = pid_ki_fall_c1;
         if (sscanf(val_str, "%d", &a) >= 1) pid_ki_fall_c1 = clamp(a, 0, 50);
+        return 1;
+    }
+    // PID_KI_NEAR = 基准速率 缩放 窗口重算数 窗口周期数（四值；基准速率×0.1°C/周期）
+    if (strcmp(key, "PID_KI_NEAR") == 0) {
+        int a = pid_ki_near_base, b = pid_ki_near_scale, c = pid_ki_near_recount, d = pid_ki_near_cycn;
+        int cnt = sscanf(val_str, "%d %d %d %d", &a, &b, &c, &d);
+        if (cnt >= 1) pid_ki_near_base    = clamp(a, 0, 50);
+        if (cnt >= 2) pid_ki_near_scale   = clamp(b, 10, 1000);
+        if (cnt >= 3) pid_ki_near_recount = clamp(c, 2, 4);
+        if (cnt >= 4) pid_ki_near_cycn    = clamp(d, 2, 8);
         return 1;
     }
     if (strcmp(key, "PID_KI_VAR") == 0) {
@@ -3239,12 +3271,17 @@ static float pid_compute(int batt_10, float dt) {
         if (error >= 0.0f) dp *= sup;   // 降温抑制时下降惩罚等比例缩小
         pid_integral_accum -= dp;
     }
-    // 积分衰减：固定衰减 + 高于基准动态放缓（PID_KI_MEM 第四值）
-    // 温度高于基准（error>0）每 °C 使有效衰减 −0.005（衰减变慢、保留制冷记忆、输出不掉）；
-    // 系数可配负值 → 反向：衰减加快、输出更快下降。
+    // 积分衰减：固定衰减 + 近基准速度衰减（PID_KI_NEAR，想法5）
     float ki_decay = pid_ki_leak / 1000.0f;
-    if (error > 0.0f)
-        ki_decay -= (pid_ki_above_drop / 1000.0f) * error;           // 高于基准项（°C）
+    // 想法5：近基准速度衰减（降温快→加快衰减防过冲；升温快→减慢释放/保留；仅近基准|error|≤死区且窗口方向有效）
+    //   w = (窗口均速 − 基准速率) × 缩放；受既有积分预算上限与 ≥0 下限钳制
+    if (pid_near_dir != 0) {
+        float e_abs = (error >= 0.0f) ? error : -error;
+        if (e_abs <= (float)pid_ki_deadband / 10.0f) {
+            float w = (pid_near_s - (float)pid_ki_near_base / 10.0f) * (float)pid_ki_near_scale;
+            ki_decay += (float)pid_near_dir * w / 1000.0f;
+        }
+    }
     pid_integral_accum -= ki_decay;
     // I 预算上限：min(剩余预算 1−p−d, 固定值 667)，再单向下限 0
     float i_limit = pid_integral_limit / 1000.0f;
@@ -3445,6 +3482,18 @@ static void pid_reset_core(void) {
     pid_ki_fall_filt = 0.0f;
     pid_ki_prev_batt = -1;
     pid_ki_last_cycle = -1;
+    // 想法1 滤波计数/过渡重置
+    pid_filter_count = 0;
+    pid_filter_was_eff = 1;
+    pid_filter_trans = 0;
+    // 想法5 近基准速度窗口重置
+    near_seg_dir = 0;
+    near_seg_start_cycle = pid_ctrl_cycles;
+    near_seg_start_temp = 0;
+    near_prev_temp = -1;
+    near_seg_reccnt = 0;
+    pid_near_s = 0.0f;
+    pid_near_dir = 0;
 }
 
 /**
@@ -3530,21 +3579,26 @@ static void reconnect_align(void) {
 
     if (ctrl_mode == 1) {
         // 断联 < reconnect_keep_cycles 个控制周期(×5s)：短断联保留 PID 状态（kd/积分/误差/滤波），
-        // 仅对齐实际值；长断联/无断联记录则完整重置
-        if (reconnect_keep_cycles > 0 && discon_sec < reconnect_keep_cycles * 5) {
-            write_log("重连 断联%d秒<%d周期，保留 PID 状态", discon_sec, reconnect_keep_cycles);
-        } else {
-            // PID 模式：重置 PID 状态（积分/误差/滤波），制冷/转速初值取回传实际值，
-            // 由 rate_limited_execute 从回传值向 PID 目标正常步进
-            pid_reset_core();
-            pid_filter_interval_smooth = -1;
-            pid_filter_auto_off = 0;
-            temp_idle_cycles = 0;
-            // 回传异常时保持原值（函数开头已处理有效回传覆盖）
-            actual_target_temp = -1;
-            write_log("重连 PID 状态已重置，制冷从回传实际值起步 cold=%d", actual_cold);
-            last_batt_reading = -1;
-            first_run = 1;
+        // 仅对齐实际值；长断联则完整重置。
+        // 仅在真有断联记录（discon_sec>0）时决策+打印：同一重连会被 reconnect_align 重复进入
+        // （设备切换 + app 复活各一次），第二次 last_disconnect_time 已清零 → discon_sec=0，
+        // 若此时仍走该分支会恒命中"<N周期"打印"断联0秒"伪日志；无断联记录仅对齐实际值、保留状态、不打日志
+        if (discon_sec > 0) {
+            if (reconnect_keep_cycles > 0 && discon_sec < reconnect_keep_cycles * 5) {
+                write_log("重连 断联%d秒<%d周期，保留 PID 状态", discon_sec, reconnect_keep_cycles);
+            } else {
+                // PID 模式：重置 PID 状态（积分/误差/滤波），制冷/转速初值取回传实际值，
+                // 由 rate_limited_execute 从回传值向 PID 目标正常步进
+                pid_reset_core();
+                pid_filter_interval_smooth = -1;
+                pid_filter_auto_off = 0;
+                temp_idle_cycles = 0;
+                // 回传异常时保持原值（函数开头已处理有效回传覆盖）
+                actual_target_temp = -1;
+                write_log("重连 PID 状态已重置，制冷从回传实际值起步 cold=%d", actual_cold);
+                last_batt_reading = -1;
+                first_run = 1;
+            }
         }
         return;
     }
@@ -3657,6 +3711,52 @@ static void pid_cycle(void) {
     int batt_raw = cached_batt_raw;   // 1s 采集缓存
     if (batt_raw < 0) return;
 
+    // --- 想法5：近基准速度窗口 推进（连续同向段 + 两上限取长；每控制周期推进，独立于重算） ---
+    if (near_prev_temp >= 0) {
+        int d = batt_raw - near_prev_temp;
+        int sd = (d > 0) ? 1 : (d < 0) ? -1 : 0;
+        if (sd != 0) {
+            if (near_seg_dir != 0 && sd != near_seg_dir) {
+                near_seg_start_cycle = pid_ctrl_cycles - 1;   // 方向反转 → 开新段，起点=上一有效点
+                near_seg_start_temp  = near_prev_temp;
+                near_seg_reccnt = 0;
+            }
+            near_seg_dir = sd;
+        }
+    } else {
+        near_seg_start_cycle = pid_ctrl_cycles;
+        near_seg_start_temp  = batt_raw;
+        near_seg_reccnt = 0;
+    }
+    near_prev_temp = batt_raw;
+    int ring_idx = pid_ctrl_cycles % 9;
+    near_ring_cycle[ring_idx] = pid_ctrl_cycles;
+    near_ring_temp[ring_idx]  = batt_raw;
+    // 窗口A=段内第 N 次重算前（段内重算≤上限则用段起点）；窗口B=近 N 周期前（段长≤上限则用段起点）；取时长较长者
+    int cyc_now = pid_ctrl_cycles;
+    int wsA_cyc = near_seg_start_cycle, wsA_t = near_seg_start_temp;
+    if (near_seg_reccnt > pid_ki_near_recount) {
+        int k = (near_seg_reccnt - pid_ki_near_recount) % 4;
+        wsA_cyc = near_re_cycle[k];
+        wsA_t   = near_re_temp[k];
+    }
+    int durA = cyc_now - wsA_cyc;
+    int wsB_cyc, wsB_t;
+    if (near_seg_start_cycle <= cyc_now - pid_ki_near_cycn) {
+        wsB_cyc = cyc_now - pid_ki_near_cycn;
+        wsB_t   = near_ring_temp[wsB_cyc % 9];
+    } else {
+        wsB_cyc = near_seg_start_cycle;
+        wsB_t   = near_seg_start_temp;
+    }
+    int durB = cyc_now - wsB_cyc;
+    float sA = 0.0f, sB = 0.0f;
+    if (durA >= 1) sA = (float)(batt_raw - wsA_t) / (float)durA;
+    if (durB >= 1) sB = (float)(batt_raw - wsB_t) / (float)durB;
+    float s = (durA >= durB) ? sA : sB;
+    pid_near_s = (s < 0) ? -s : s;   // 绝对值速率（°C/周期）
+    pid_near_dir = near_seg_dir;
+
     // --- 降温值跟踪（PID_KI_FALL 降温抑制用；每控制周期推进，独立于 pid_compute 重算时机） ---
     // 降温值 = 每控制周期降温速率（°C/周期）：本周期原始温度比上周期低时，跨缺档 gap 摊平；再 EMA 滤波（α33）
     // 首次降温（滤波值为0）不滤波直取；停止降温按输入 0 继续滤波直至归零
@@ -3714,6 +3814,19 @@ static void pid_cycle(void) {
         }
     }
     int filter_eff = (filter_cfg_on && !pid_filter_auto_off);
+    // --- 想法1：变化后计数强制关（叠加于自适应；温度窗口变化重置计数）---
+    if (filter_cfg_on) {
+        if (batt_window_changed) { pid_filter_count = 0; }
+        else if (filter_eff) { pid_filter_count++; }
+        int n_limit = (pid_filter_auto_threshold_on * pid_filter_count_mult + 50) / 100;  // ceil(自动关闭阈值×倍数/100)周期
+        if (pid_filter_count > n_limit) filter_eff = 0;
+    }
+    // 检测滤波从有效切到断开 → 启动线性过渡（从当前滤波值向原值逐步逼近）
+    if (pid_filter_was_eff && !filter_eff && pid_batt_filtered >= 0) {
+        int n_limit = (pid_filter_auto_threshold_on * pid_filter_count_mult + 50) / 100;
+        pid_filter_trans = (n_limit > 1) ? n_limit : 1;
+    }
+    pid_filter_was_eff = filter_eff;
 
     // --- 根据有效滤波状态分支 ---
     if (filter_eff) {
@@ -3724,8 +3837,14 @@ static void pid_cycle(void) {
             pid_batt_filtered = EMA_DIR(batt_raw, pid_batt_filtered, pid_batt_alpha);
         }
     } else {
-        // 无滤波模式：原始值直通；1s 层未变过且 idle 未达上限则跳过本周期
-        pid_batt_filtered = batt_raw;
+        // 无滤波模式：原始值直通（断开时经线性过渡向原值逼近，避免跳变）；1s 层未变过且 idle 未达上限则跳过本周期
+        if (pid_filter_trans > 0) {
+            pid_batt_filtered += (batt_raw - pid_batt_filtered) / pid_filter_trans;
+            pid_filter_trans--;
+            if (pid_filter_trans <= 0) pid_batt_filtered = batt_raw;
+        } else {
+            pid_batt_filtered = batt_raw;
+        }
         if (!batt_window_changed && temp_idle_cycles < BATT_SKIP_MAX && pid_last_batt >= 0) {
             debug_log(debug_pid, "PID 跳过（温度未更新 idle=%d）", temp_idle_cycles);
             return;
@@ -3762,6 +3881,13 @@ static void pid_cycle(void) {
         if (dt > 6.0f) dt = 6.0f;
         if (dt < 0.6f) dt = 0.6f;
 
+        // 想法5：记录段内重算点（供窗口A 取"第 N 次重算前"）
+        {
+            int ri = near_seg_reccnt % 4;
+            near_re_cycle[ri] = pid_ctrl_cycles;
+            near_re_temp[ri]  = batt_raw;
+            near_seg_reccnt++;
+        }
         int compensated_10 = pid_input + total_comp_10;
         float pid_out = pid_compute(compensated_10, dt);
 
