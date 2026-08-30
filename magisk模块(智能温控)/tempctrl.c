@@ -58,94 +58,7 @@
 // 参数映射：mode=0(智能温控)：targetTemperature, windLevel(风扇转速上限)
 //          mode=1（固定功率）：windLevelOverclock(风扇固定转速), coldLevelOverclock(制冷片强度)
 
-// --- 档位范围 ---
-#define LEVEL_INIT          5     // 无存档时的默认初始档位
-#define GEAR_TABLE_MAX      32    // 最大支持档位数（支持自动扩展）
-
-// --- 档位表（动态，可通过 profile.conf 的 GEAR_B6X_N / GEAR_B7X_N 配置覆盖）---
-// 每条包含：模式(0=智能温控, 1=固定功率), 目标温度(°C), 风扇转速(RPM), 制冷片强度(0-194)
-typedef struct {
-    int mode;       // 0=智能温控, 1=固定功率
-    int target;     // 智能温控目标温度 (°C)，固定功率时为 0
-    int fan_rpm;    // 风扇转速 (RPM)
-    int cold;       // 制冷片强度 (0-194)
-    int config_n;   // 配置中的原始档位编号（日志显示用，无空洞时同 runtime level）
-} GearEntry;
-
-// 双设备独立档位表（B6X / B7X），活动表指针随 active_device 切换
-static GearEntry gear_table_b6[GEAR_TABLE_MAX];
-static GearEntry gear_table_b7[GEAR_TABLE_MAX];
-static GearEntry *gear_table = gear_table_b6;  // 活动表指针
-static int gear_count_b6 = 0;    // B6X 实际档位数
-static int gear_count_b7 = 0;    // B7X 实际档位数
-static int gear_min = 1;
-static int gear_max_b6 = 12;     // B6X 默认 12 档
-static int gear_max_b7 = 12;     // B7X 默认 12 档
-static int gear_count = 12;      // 活动表档位数（select_gear_table 同步）
-static int gear_max = 12;        // 活动表最大档（select_gear_table 同步）
-
-// 默认档位表（依实测散热曲线标定，全部固定功率模式）
-// 格式：GEAR_B6X_<档位N>=<模式>,<目标温度°C>,<风扇RPM>,<制冷强度>（B7X 用 GEAR_B7X_ 前缀）
-// 范围：N=1~32, 模式=0(智能)或1(固定), 目标=5~35°C, 风扇=2000~6000, 制冷=1~194
-// 模式 0 时制冷强度失效，模式 1 时目标温度无效
-// 例：GEAR_B6X_12=1,0,6000,190 表示 12 档固定功率，6000RPM，制冷 190
-//     GEAR_B6X_5=0,16,2650,0   表示  5 档智能温控，16°C，风扇上限 2650RPM
-static const GearEntry DEFAULT_GEAR_TABLE[12] = {
-    {1, 0, 2000,  5,  1},    // Level 1   α待机
-    {1, 0, 2000, 10,  2},    // Level 2
-    {1, 0, 2000, 20,  3},    // Level 3
-    {1, 0, 2300, 35,  4},    // Level 4
-    {1, 0, 2650, 55,  5},    // Level 5   LEVEL_INIT
-    {1, 0, 3050, 75,  6},    // Level 6
-    {1, 0, 3500, 100, 7},    // Level 7
-    {1, 0, 4000, 125, 8},    // Level 8
-    {1, 0, 4500, 145, 9},    // Level 9
-    {1, 0, 5000, 165, 10},   // Level 10
-    {1, 0, 5500, 180, 11},   // Level 11
-    {1, 0, 6000, 190, 12},   // Level 12 制冷峰值
-};
-
-/**
- * 初始化默认档位表（B6X / B7X 各一套，内容相同）
- * 程序启动时调用。若 profile.conf 包含 GEAR_B6X_N / GEAR_B7X_N 配置，load_config 将覆盖之。
- */
-static void init_gear_table(void) {
-    gear_count_b6 = 12; gear_max_b6 = 12;
-    gear_count_b7 = 12; gear_max_b7 = 12;
-    gear_min = 1;
-    for (int i = 0; i < 12; i++) {
-        gear_table_b6[i] = DEFAULT_GEAR_TABLE[i];
-        gear_table_b7[i] = DEFAULT_GEAR_TABLE[i];
-    }
-    gear_table = gear_table_b6;   // 默认活动表：B6X
-    gear_count = gear_count_b6;
-    gear_max   = gear_max_b6;
-}
-
-/** GEAR_B6X_N / GEAR_B7X_N 配置解析临时结构体（用于排序后填入连续档位表） */
-typedef struct {
-    int config_n;   // 配置中的原始档位编号
-    int mode;
-    int target;
-    int fan_rpm;
-    int cold;
-} GearConfigTemp;
-
-/** 值升序排序，src 为并行的来源下标（同步交换） */
-static void sort_vals(int *vals, int *src, int n) {
-    for (int i = 1; i < n; i++) {
-        int v = vals[i], s = src[i], k = i - 1;
-        while (k >= 0 && vals[k] > v) { vals[k + 1] = vals[k]; src[k + 1] = src[k]; k--; }
-        vals[k + 1] = v; src[k + 1] = s;
-    }
-}
-
-/** 获取运行时档位的配置编号（日志显示用，空洞时显示原始编号） */
-static inline int gear_label(int level) {
-    if (level < 1 || level > gear_count) return level;
-    int label = gear_table[level - 1].config_n;
-    return (label > 0) ? label : level;
-}
+// ----（Gear 档位表 / init_gear_table / sort_vals / gear_label 已随 Gear 删除）----
 
 // ======================== 常量与边界 ========================
 #define COLD_MIN             1
@@ -180,8 +93,7 @@ static int cpu_zone_rescan_sec = 60;   // CPU thermal_zone 全量重扫间隔（
 // --- 基准温度 ---
 static int BATT_BASELINE = 350;     // 基准温度 35.0°C
 
-// --- 控制模式 ---
-static int ctrl_mode = 1;           // CTRL_MODE: 0=gear, 1=PID
+// --- 控制模式：本实现仅保留 PID（Gear 已删除）---
 
 // --- 冷端→风扇映射 ---
 static int cold_map_start = 40;     // COLD_MAP 第一值=映射起始强度，低于此值时线性外推下限
@@ -201,7 +113,6 @@ static int fan_rpm_change_threshold = 200; // 变化阈值（0=不限制；仅�
 // --- 固定值 ---
 static int RATE_LIMIT_FAN_DOWN = 400;   // 风扇降速每周期最大变化量（RPM）
 static int RATE_LIMIT_COLD = 25;   // 制冷强度升降速基础值：升速=base+dev×mult/10，降速=base-dev×mult/10，负值→0=禁止该方向
-static int RATE_LIMIT_TEMP = 2;   // 目标温度每周期最大变化量（0.1°C）
 
 // --- 动态值（根据电池温差自动调整）---
 static int RATE_LIMIT_COLD_MULT = 10;  // 制冷强度倍率：升速/降速 = base ± dev(0.1°C) × mult / 10
@@ -217,96 +128,15 @@ static int cached_cpu_now  = -1;   // CPU 最高温度（0.1°C），保留上�
 // 始终向目标档位的表格值靠拢，每周期最多变动速率限制的量
 static int actual_rpm = -1;            // 当前实际风扇转速（RPM）
 static int actual_cold = -1;           // 当前实际制冷片强度
-static int actual_target_temp = -1;    // 当前实际目标温度（°C）
 
-// ======================== Gear 模式 — 电池控制（CTRL_MODE=0）========================
-// --- 三区间阈值 ---
-static int BATT_BOUNDARY_1 = 5;      // ±0.5°C → 不变（死区）
-static int BATT_BOUNDARY_2 = 13;     // ±1.3°C → ±1 档
-static int BATT_BOUNDARY_3 = 25;     // ±2.5°C → ±2 档（超过→±3档）
-static int BATT_COOLDOWN_CYCLES = 3; // 档位变动后冷却周期数
-
-// --- 电流-挡位映射 ---
-static int CURRENT_GEAR_MODE_CHARGE    = 1;    // 充电开关
-static int CURRENT_GEAR_MODE_DISCHARGE = 1;    // 放电开关
-static int CURRENT_GEAR_MULT_CHARGE    = 2;    // 充电倍率
-static int CURRENT_GEAR_MULT_DISCHARGE = 6;    // 放电倍率
-static int CURRENT_GEAR_SMOOTH_ALPHA   = 25;   // 电流平滑系数（%）
-static int CURRENT_GEAR_MIN            = 6;    // 低于此值回退基准模式
-// 电流-挡位运行状态
-static int curr_gear_smooth_val   = 0;         // 电流平滑值（µA）
-static int curr_gear_smooth_valid = 0;         // 平滑值是否已初始化
-static int curr_gear_recommended  = 0;         // 上一次的电流推荐挡位
-static int curr_gear_temp_offset   = 0;        // 温度累积偏移量
-static int curr_gear_temp_cooldown = 0;        // 温度偏移冷却剩余周期
-
-// --- 反补查表 ---
-static int REV_COMP_THRESH_1 = 2;
-static int REV_COMP_THRESH_2 = 3;
-static int REV_COMP_THRESH_3 = 4;
-static int REV_COMP_COOLDOWN = 1;
-static int REV_COMP_ENABLED  = 1;              // 反补独立开关
-// 反补运行状态
-static int rev_comp_pending_delta = 0;
-static int rev_comp_pending_idle  = 0;
-static int rev_comp_cooldown = 0;
-
-// --- 趋势豁免 ---
-static int TREND_EXEMPT_ENABLED = 1;          // 趋势豁免独立开关
-static int TREND_RESET_THRESHOLD = 6;
-static int trend_anchor_temp = -1;            // 趋势豁免锚点温度
-static int trend_exempt_count = 0;
-
-// --- 电池控制运行状态 ---
-static int batt_gear_base = 0;                // 电池控制决定的基础档位
-static int last_batt_reading = -1;            // 上次读取的电池温度
-static int temp_idle_cycles = 0;              // 温度值连续未变的控制周期数
-static int pid_ctrl_cycles = 0;               // PID 控制周期单调计数器（pid_cycle 每次 +1，方差插值用）
-static int BATT_SKIP_MAX = 12;                // 值连续未变达到此上限时强制处理一次（防卡死，可配置）
+// ======================== 控制周期计数器 ========================
+static int pid_ctrl_cycles = 0;               // PID 控制周期单调计数器（pid_cycle 每次 +1）
 static int reconnect_keep_cycles = 3;         // RECONNECT_KEEP_CYCLES：断联< N 控制周期(×5s) 不重置 PID 状态
-static int batt_gear_cooldown = 0;            // 电池调档冷却剩余周期
 
-// ======================== Gear 模式 — 紧急干预（CTRL_MODE=0）========================
-// --- 独立开关 ---
-static int EMERG_CPU_ENABLED     = 1;         // CPU 温度紧急开关
-
-// --- CPU 温度紧急 ---
-static int CPU_EMERG_3   = 850;     // >85.0°C → 等级 3
-static int CPU_EMERG_2   = 750;     // >75.0°C → 等级 2
-static int CPU_EMERG_1   = 650;     // >65.0°C → 等级 1
-static int CPU_RECOVER_0 = 550;     // <55.0°C → 清除紧急
-static int CPU_RECOVER_1 = 650;     // <65.0°C 且 ≥2 级时降为 1
-static int CPU_RECOVER_2 = 750;     // <75.0°C 且 ≥3 级时降为 2
+// ======================== CPU 温度滤波（PID / Gear 共用）========================
 static int CPU_FILTER_ALPHA = 25;   // CPU 滤波系数（%）
-// CPU 紧急运行状态
 static int cpu_filtered_temp = 250; // 加权 CPU 温度，初始 25.0°C
 static int first_run = 1;           // 首次运行，滤波直接赋初值
-
-// --- 紧急干预模式 ---
-static int EMERG_MODE_ENTRY = 0;   // 0=查表强制最低档, 1=升档
-static int EMERG_MODE_EXIT  = 1;   // 0=钳制最高档, 1=降档
-static int EMERG_STEP = 2;
-static int EMERG_EXIT_BATT_THRESHOLD = 20;  // 电池温度阈值（0.1°C）
-
-// --- 紧急强制最低档位 ---
-static int EMERG_FORCED_1 = 6;   // 等级 1 强制最低档位
-static int EMERG_FORCED_2 = 8;   // 等级 2
-static int EMERG_FORCED_3 = 10;  // 等级 3
-static int EMERG_FORCED_4 = 12;  // 等级 4
-static int EMERG_EXIT_CAP_OFFSET = 1;  // 退出钳制偏移
-
-// --- 紧急退出恢复期 ---
-static int EMERG_RECOVERY_MULT_1 = 6;             // P1 阈值倍率
-static int EMERG_RECOVERY_MULT_2 = 4;             // P2 阈值倍率
-static int EMERG_RECOVERY_MULT_3 = 2;             // P3 阈值倍率
-static int EMERG_RECOVERY_PHASE_CYCLES = 6;       // 每阶段周期数
-static int emerg_recovery_mult = 1;               // 当前恢复倍率
-static int emerg_recovery_cycles = 0;             // 当前阶段剩余周期
-static int emerg_recovery_phase = 0;              // 当前阶段（0=关闭）
-
-// --- 紧急干预运行状态 ---
-static int emergency_level = 0;     // 紧急等级 0~3
-static int emerg_forced_gear = 0;   // 紧急强制最低档位
 
 // ======================== 日志与调试 ========================
 // --- 日志路径（默认根据二进制名自动生成，可由 profile.conf 覆盖）---
@@ -316,7 +146,6 @@ static FILE *log_fp = NULL;          // 持久的日志文件指针
 static char log_path_opened[256] = ""; // 已打开的文件路径（检测路径变化）
 static int debug_mode = 0;           // 调试日志总开关，=1 时启用各分区调试输出
 static int debug_sensor = 0;    // [传感器] 电池/CPU 读数
-static int debug_gear   = 0;    // [档位] 电池温度调档/恢复期/反补 + 紧急等级
 static int debug_exec   = 0;    // [执行下发] 速率限制/am broadcast + 风扇转速
 static int debug_conn   = 0;    // [连接状态] App 存活/BLE/重连对齐
 static int debug_config = 0;    // [配置加载] 配置文件解析过程
@@ -332,62 +161,24 @@ static char uninstall_script_path[256] = "";
 // 配置文件的最后修改时间（用于热重载检测）
 static time_t config_mtime = 0;
 
-// ======================== PID 模式控制（CTRL_MODE=1）========================
-// --- 配置变量（按 profile.conf [3] PID 区键顺序排列）---
+// ======================== PID 控制（单累积器） ========================
+// --- 配置变量（按 profile.conf 键顺序排列）---
 
-// PID_KP：比例增益
-static int pid_kp = 300;                  // PID_KP=比例增益（÷1000，默认 0.3，线性无分段）
+// PID_GAIN 第一值：KDP 融合 P+D 项系数（÷1000，kdp = kdp_coef×ch_kdp）
+static int pid_kdp_coef = 300;
+// PID_GAIN 第二值：积分增益（÷1000，acc += ki_coef×(ch−target_f)，不乘 dt）
+static int pid_ki_coef = 20;
+// PID_GAIN 第三值：速度项倍率系数（÷1000，ch = error + v×speed_coef + cpu_comp）
+static int pid_speed_coef = 240;
+// PID_TARGET 第一值：动态目标系数（÷1000，raw_target = clamp(error×target_coef, ±0.5)）
+static int pid_target_coef = 20;
+// PID_TARGET 第二值：目标 EMA 平滑系数（%）
+static int pid_target_alpha = 20;
+// PID_CH_THRESHOLD：跳过重算的 ch 阈值（0.1°C，|last_ch|≤此值 → 整轮冻结）
+static int pid_ch_threshold = 1;
 
-// PID_KI：V 形增益（高基准累积 / 低基准回落）
-static int pid_ki_up_base = 20;           // PID_KI 第一值=高基准基础增益（÷1000，error>0 时 gain=base+slope×error）
-static int pid_ki_up_slope = 20;          // PID_KI 第二值=高基准每°C增益（÷1000，每高于基准1°增益+20）
-static int pid_ki_down_base = 50;         // PID_KI 第三值=低基准基础增益（÷1000，error<0 时回落 gain=base+slope×|error|）
-static int pid_ki_down_slope = 50;        // PID_KI 第四值=低基准每°C增益（÷1000，每低于基准1°回落+50）
-
-// PID_KI_MEM：I 项回落与限幅
-static int pid_ki_drop = 100;             // PID_KI_MEM 第一值=下降惩罚（÷1000，降温时每周期每度降低直接扣累计值）
-static int pid_ki_leak = 20;              // PID_KI_MEM 第二值=固定衰减（÷1000）
-static int pid_integral_limit = 600;      // PID_KI_MEM 第三值=积分上限（÷1000，I 项最大输出贡献；预算链 min(1-p-d, 此值) 取小）
-
-// PID_KI_FALL：降温抑制（降温时放缓积分建立，压制无谓制冷尖峰）
-static int pid_ki_fall_c1 = 5;            // PID_KI_FALL 第一值=降温抑制权重（被积项 error−降温值×此权重，默认5，0=关闭，范围0~50）
-
-// PID_KI_NEAR：近基准速度衰减（近基准时按温度变化速度调积分衰减；升温快→慢释放保留、降温快→快释放防过冲）
-static int pid_ki_near_base = 2;          // PID_KI_NEAR 第一值=基准速率（×0.1°C/周期，默认2=0.2；速度=此值时无附加衰减）
-static int pid_ki_near_scale = 100;       // PID_KI_NEAR 第二值=缩放（×1，默认100；(速度−基准)×此值 为附加量，÷1000）
-static int pid_ki_near_recount = 3;       // PID_KI_NEAR 第三值=窗口重算数（上限，默认3；段内重算≤此值就整段用）
-static int pid_ki_near_cycn = 6;          // PID_KI_NEAR 第四值=窗口周期数（上限，默认6；段长≤此值就整段用）
-
-// PID_KI_VAR：方差门控
-static int pid_ki_var_threshold = 50;     // PID_KI_VAR 第一值=方差门控阈值（0.1°C²，0=关闭）
-static int pid_ki_var_samples = 6;        // PID_KI_VAR 第二值=采样数（2~20）
-static int pid_ki_deadband = 15;          // PID_KI_VAR 第三值=积分死区（0.1°C，0=禁止I项）
-
-// PID_KD：微分（上升/下降独立倍率）
-static int pid_kd_up = 240;               // PID_KD 第一值=上升倍率（÷1000，默认 0.24）
-static int pid_kd_down = 360;             // PID_KD 第二值=下降倍率（÷1000，默认 0.36）
-
-// PID_KD_MEM：D 项记忆
-static int pid_kd_leak = 25;              // PID_KD_MEM 第一值=记忆每周期固定衰减量（×1000，默认 0.025）
-static int pid_kd_max = 150;              // PID_KD_MEM 第二值=记忆幅值基础（×1000，默认 0.15）
-static int pid_kd_slope = 150;            // PID_KD_MEM 第三值=幅值随距基准斜率（×1000，默认 0.15/°C）；实际上限=基础+距基准°C×斜率
-
-// PID_KD_NEAR：近区降敏（阈值 + 近区倍率）
-static int pid_kd_near_bound = 2;         // PID_KD_NEAR 第一值=近区阈值（0.1°C，默认 2=0.2°C；|de|<此值视为近区微抖）
-static int pid_kd_near_mult = 33;         // PID_KD_NEAR 第二值=近区倍率（%，默认 33≈1/3；近区变化量×此倍率降敏）
-
-// PID_INPUT_FILTER：输入滤波（EMA 自适应开关）
-static int pid_input_filter_enabled = 1;  // PID_INPUT_FILTER 第一值：默认开（EMA 滤波；自适应逻辑可按间隔自动关闭/恢复）
-static int pid_filter_auto_threshold_on = 30;   // PID_INPUT_FILTER 第二值：自动关闭阈值（×0.1周期）
-static int pid_filter_auto_threshold_off = 20;  // PID_INPUT_FILTER 第三值：自动恢复阈值（×0.1周期）
-static int pid_filter_count_mult = 15;          // PID_INPUT_FILTER 第四值：变化后计数强制关倍数（×0.1，默认15=1.5；N=ceil(自动关闭阈值×此值/100)周期）
-
-// PID_ALPHA：滤波强度
-static int pid_filter_auto_alpha = 20;          // PID_ALPHA 第一值：间隔EMA平滑系数（%）
-static int pid_batt_alpha = 33;                 // PID_ALPHA 第二值：电池温度滤波强度（%，新值权重）
-
-// PID_CPU_COMP：CPU 补偿（PID 与 Gear 共用，始终生效，无开关）
-static int pid_cpu_comp_filter_alpha = 25;      // PID_CPU_COMP 第一值：补偿 EMA 平滑系数（%，独立于 CPU_FILTER_ALPHA）
+// PID_CPU_COMP：CPU 补偿（始终生效，无开关）
+static int pid_cpu_comp_filter_alpha = 25;      // PID_CPU_COMP 第一值：补偿 EMA 平滑系数（%）
 static int pid_cpu_comp_divisor = 30;           // PID_CPU_COMP 第二值：除数
 static int pid_cpu_comp_offset = 100;           // PID_CPU_COMP 第三值：偏移量（0.1°C，100=10.0°C）
 
@@ -395,44 +186,15 @@ static int pid_cpu_comp_offset = 100;           // PID_CPU_COMP 第三值：偏�
 static int pid_cold_min = 1;              // PID_COLD 第一值：制冷强度下限
 static int pid_cold_max = 190;            // PID_COLD 第二值：制冷强度上限（B6X）
 
-// --- PID 运行时状态 ---
-static int pid_filter_auto_off = 0;             // 运行时标志：1=自适应关闭了滤波
-static int pid_filter_interval_smooth = -1;     // 平滑后的更新周期数（0.1周期）
-#define PID_FILTER_GAP_MULT 2   // 滤波间隔 EMA 输入钳位倍数
-static float pid_integral_accum = 0.0f;   // 积分累积值（必须 float：int 在限幅赋小数时会截断为 0，I 项恒失效）
-static float pid_prev_error = 0.0f;       // 上周期误差（float：int 截断小数会使 D 项失效）
-static int pid_batt_filtered = -1;        // EMA 滤波后电池温度
-static int pid_last_batt = -1;            // 上次参与 PID 计算的原始温度
-static time_t pid_last_change_time = 0;   // 上次温度变化时间戳
-static float pid_d_state = 0.0f;          // D 项记忆累积值（泄漏积分器，每周期固定衰减；重置/切模式归零）
-static float pid_ki_fall_filt = 0.0f;     // PID_KI_FALL 降温值 EMA 滤波（°C/控制周期，α33）
-static int pid_ki_prev_batt = -1;         // PID_KI_FALL 上周期原始电池温度（0.1°C）
-static int pid_ki_last_cycle = -1;        // PID_KI_FALL 上次记录降温值的控制周期号（缺档 gap 摊平）
-// 想法1：输入滤波 变化后计数强制关 + 切下线性过渡
-static int pid_filter_count = 0;        // 自最近一次温度窗口变化以来，滤波模式下经过的控制周期数
-static int pid_filter_was_eff = 1;      // 上周期滤波有效性（检测刚切换下时启动线性过渡）
-static int pid_filter_trans = 0;        // 线性过渡剩余周期数（断开滤波时 滤波值向原值逐步逼近）
-// 想法5：近基准速度衰减 窗口跟踪（连续同向段 + 两上限取长）
-static int near_seg_dir = 0;            // 当前段方向 +1升温/-1降温/0未定
-static int near_seg_start_cycle = 0;    // 段起点周期
-static int near_seg_start_temp = 0;     // 段起点温度
-static int near_prev_temp = -1;         // 上一有效原始温度（判方向/开段）
-static int near_seg_reccnt = 0;         // 段内重算累计次数
-static int near_re_cycle[4] = {0,0,0,0};// 段内最近4次重算周期（环形）
-static int near_re_temp[4]  = {0,0,0,0};
-static int near_ring_cycle[9] = {0,0,0,0,0,0,0,0,0};  // 最近9周期（环形，供窗口B取"近周期前"；长度>最大窗口周期8防覆盖）
-static int near_ring_temp[9]  = {0,0,0,0,0,0,0,0,0};
-static float pid_near_s = 0.0f;         // 窗口均速（绝对值 °C/周期）
-static int pid_near_dir = 0;            // 方向 +1升温/-1降温/0未定
-// 方差门控环形缓冲区
-#define PID_VAR_BUF_MAX 20    // 最大支持采样数（≥ PID_KI_VAR 第二值上限）
-static int pid_var_buffer[PID_VAR_BUF_MAX];
-static int pid_var_head = 0;
-static int pid_var_count = 0;
-static int pid_var_last_value = -1;  // 上次推入的值（插值用）
-static int pid_var_last_cycle = -1;  // 上次推入时的周期计数（插值用）
+// --- PID 运行时状态（单累积器）---
+static float pid_ki = 0.0f;               // 积分累积值（acc；float：限幅赋小数需保留）
+static float pid_kdp = 0.0f;              // 融合 P+D 项（kdp = kdp_coef×ch_kdp；无记忆，跳过①用 last 值）
+static float pid_target_f = 0.0f;         // EMA 动态目标
+static float pid_last_error = 0.0f;       // 上周期纯电池误差（°C，v 计算用）
+static float pid_last_ch = 0.0f;          // 上周期 ch（|ch|≤阈值 → 整轮冻结判据）
+static time_t pid_last_change_time = 0;   // 上次重算时间戳（dt 锚点）
 
-// --- CPU 补偿运行状态（PID 与 Gear 共用）---
+// --- CPU 补偿运行状态 ---
 static int pid_cpu_comp_ready = 0;          // 补偿平滑是否已初始化（首次上次值用 0，从 0 爬升）
 static float pid_cpu_comp_smooth = 0.0f;    // CPU 补偿 EMA 平滑值（°C）
 static int pid_last_comp_10 = 0;            // 上次 PID 重算时的补偿值（0.1°C）
@@ -450,42 +212,11 @@ static int pid_out_last_batt = -1;        // 上次判据温度（0.1°，原始
 static int pid_out_last_cycle = -1;       // 上次判据周期计数（gap 计算用）
 static int pid_out_prev2_batt = -1;       // 上上次判据温度（0.1° 抖动识别用）
 
-// ======================== Gear 温度预测 ========================
-// 通过历史温度变化趋势预测电池温度的平衡点，提前给 Gear 调档提供前馈信号（PID 不使用预测）
-#define PREDICT_BUF_MAX 32  // 缓冲区容量上限（≥ 可配置的 GEAR_PREDICT_WIN 第一值）
-
-typedef struct {
-    int temp;     // 真实电池温度（0.1°C）
-    int gap;      // 距离上个真实读数的周期数（≥1）
-} PredictPoint;
-
-// --- 预测配置参数 ---
-static int gear_predict_buf_n = 10;         // GEAR_PREDICT_WIN 第一值：温度记录缓冲区大小（3~32）
-static int gear_predict_win_n = 5;          // GEAR_PREDICT_WIN 第二值：计算窗口（有效数据点数，3~10）
-static int gear_predict_min_points = 2;     // GEAR_PREDICT_WIN 第三值：最小可用数据点数（2~5）
-static int gear_predict_max_rise = 30;      // GEAR_PREDICT_RISE 第一值：最大预测变化量（0.1°C，10~100）
-static int gear_predict_ramp_cycles = 3;    // GEAR_PREDICT_RISE 第二值：Ramp-up 周期数（1~10，0=不渐进）
-static int gear_predict_min_delta = 2;      // GEAR_PREDICT_RISE 第三值=最小起始 delta（0.1°C/周期，1~10）
-static int gear_predict_heat_weight = 10;   // GEAR_PREDICT_WEIGHT 第一值：升温预测权重（0~10，默认10=全效）
-static int gear_predict_cool_weight = 5;    // GEAR_PREDICT_WEIGHT 第二值：降温预测权重（0~10，默认5=半效）
-static int gear_predict_suppress = 50;      // GEAR_PREDICT_WEIGHT 第三值：低于稳定性闸门的预测增量抑制系数（%，50=×0.5，0=完全抑制=停止）
-static int gear_predict_alpha = 33;         // GEAR_PREDICT_ALPHA：预测平滑系数（%，独立键）
-
-// --- 预测运行状态 ---
-static PredictPoint gear_predict_buf[PREDICT_BUF_MAX];
-static int gear_predict_buf_cnt = 0;        // 缓冲区有效条目数
-static int gear_predict_buf_head = 0;       // 环形缓冲区写指针
-static int gear_predict_smoothed = -1;      // 平滑后的预测温度（0.1°C），-1=未初始化
-static int gear_predict_was_active = 0;     // 上周期是否使用了预测模式
-static int gear_predict_consecutive = 0;    // 连续预测周期数（用于 ramp-up）
-
-// --- Gear 调档输入温度（每 5s 周期由 gear_compute_input 计算，battery_control / gear_from_current 读取）---
-static int gear_input_batt = -1;
-
+// ----（Gear 温度预测 / gear_predict_* / gear_input_batt 已随 Gear 删除）----
 // --- 输出映射与对齐 ---
 static int pid_align_rpm = 2000;          // PID 目标 RPM（仅初始化对齐与日志使用；风扇下发已由 compute_fan_target 独立计算）
 static int pid_align_cold = 1;            // PID 目标制冷强度
-static float pid_ratio_saved = -1.0f;     // PID 无级对齐量（0~1，-1=未初始化；切回 Gear 时映射回档位）
+static float pid_ratio_saved = -1.0f;     // PID 无级对齐量（0~1，-1=未初始化）
 
 // ======================== 散热器回传参数 ========================
 static int cooler_hot_temp = -1;          // 热端温度（0.1°C）
@@ -556,9 +287,7 @@ static time_t b7_last_at = 0;
 static int last_owner = 0;       // 全局最近连接者（合并后：1/2/6/7，0=无）
 static time_t last_owner_at = 0; // 对应连接时间
 
-// --- 档位模式自动风扇 ---
-static int gear_auto_fan = 1;   // GEAR_AUTO_FAN: 0=直通, 1=自动映射+截断
-static int gear_config_enabled = 0;   // GEAR_CONFIG_ENABLED: 0=代码默认表, 1=使用配置档位表
+// ----（档位模式自动风扇 gear_auto_fan / gear_config_enabled 已随 Gear 删除）----
 
 // ======================== 双设备仲裁 ========================
 typedef enum { DEVICE_NONE = 0, DEVICE_B6X, DEVICE_B7X } DeviceType;
@@ -579,18 +308,7 @@ static int hot_derate = 0;               // 当前制冷上限削减量
 static int hot_derate_cooldown = 0;      // 削减冷却剩余周期（独立）
 static int hot_recover_cooldown = 0;     // 恢复冷却剩余周期（独立）
 
-/** 根据 active_device 切换活动档位表指针与计数（B6X/B7X 独立表） */
-static void select_gear_table(void) {
-    if (active_device == DEVICE_B7X) {
-        gear_table = gear_table_b7;
-        gear_count = gear_count_b7;
-        gear_max   = gear_max_b7;
-    } else {
-        gear_table = gear_table_b6;
-        gear_count = gear_count_b6;
-        gear_max   = gear_max_b6;
-    }
-}
+// 活动档位表切换（select_gear_table）已随 Gear 删除
 
 // --- 发送去重缓存 ---
 static int last_bcast_valid = 0;
@@ -600,14 +318,10 @@ static int last_rpm = -1;
 static int last_cold = -1;
 static int last_wind_level = -1;
 
-// --- 执行状态 ---
-static int final_gear = LEVEL_INIT;   // 逻辑计算的目标档位（执行向此靠拢）
-
 // 前向声明（配置函数位于 write_log/clamp 之前）
 static void write_log(const char *fmt, ...);
 static inline int clamp(int val, int lo, int hi);
 static void alarm_handler(int sig);
-static void pid_align_from_gear(void);
 static int compute_fan_target(void);
 
 /* 调试日志宏：总开关 debug_mode=1 且对应分区开关=1 时才输出。
@@ -618,86 +332,7 @@ static int compute_fan_target(void);
         write_log("[PID] " fmt, ##__VA_ARGS__); \
     } while(0)
 
-/** 解析 GEAR_B6X_N / GEAR_B7X_N 配置值 "模式,目标温度°C,风扇RPM,制冷强度" */
-static int parse_gear_config_line(const char *val_str, GearConfigTemp *out) {
-    int m, t, f, c;
-    char *next;
-    m = (int)strtol(val_str, &next, 10);
-    if (*next != ',') return 0;
-    t = (int)strtol(next + 1, &next, 10);
-    if (*next != ',') return 0;
-    f = (int)strtol(next + 1, &next, 10);
-    if (*next != ',') return 0;
-    c = (int)strtol(next + 1, NULL, 10);
-    out->mode    = (m == 0) ? 0 : 1;
-    out->target  = clamp(t, 5, 35);
-    // 0=缺省哨兵（缺风扇/缺制冷，供 rebuild 重配对）；>0 才钳制下限/上限
-    out->fan_rpm = (f <= 0) ? 0 : ((f < 2000) ? 2000 : f);
-    out->cold    = (c <= 0) ? 0 : clamp(c, 1, 194);
-    return 1;
-}
-
-/** 收集 GEAR_B6X_N / GEAR_B7X_N 配置到临时表（编号越界或表满时跳过） */
-static void collect_gear_config(const char *key, const char *val_str,
-                                GearConfigTemp *configs, int *count) {
-    int n = atoi(key + 9);
-    if (n < 1 || n > GEAR_TABLE_MAX) return;
-    if (*count < GEAR_TABLE_MAX &&
-        parse_gear_config_line(val_str, &configs[*count])) {
-        configs[*count].config_n = n;
-        (*count)++;
-    }
-}
-
-/**
- * 用配置档位表重建 B6X/B7X 独立档位表。风扇与制冷为两个独立升序清单（0=缺省哨兵），
- * 按数量差全局重配对（扇>冷 高配高、冷>扇 低配低、相等一一对应），多余一侧不生成档位（即屏蔽）。
- * 无有效配置时回退到默认档位表。
- */
-static void rebuild_gear_table(GearEntry *table, GearConfigTemp *configs, int count,
-                               int *out_count, int *out_max, const char *tag) {
-    if (count > 0) {
-        // 风扇与制冷视作两个独立升序清单（0=缺省哨兵），按数量差全局重配对：
-        //   风扇数>制冷数：高配高，低端多余风扇档屏蔽（缺制冷）；
-        //   制冷数>风扇数：低配低，高端多余制冷档屏蔽（缺风扇）；
-        //   相等：升序一一对应。多余一侧不生成档位（即屏蔽）。
-        int nf = 0, nc = 0;
-        int fans[GEAR_TABLE_MAX], colds[GEAR_TABLE_MAX];
-        int ofan[GEAR_TABLE_MAX], ocold[GEAR_TABLE_MAX];
-        for (int i = 0; i < count; i++) {
-            if (configs[i].fan_rpm > 0) { fans[nf] = configs[i].fan_rpm; ofan[nf] = i; nf++; }
-            if (configs[i].cold    > 0) { colds[nc] = configs[i].cold;  ocold[nc] = i; nc++; }
-        }
-        sort_vals(fans, ofan, nf);
-        sort_vals(colds, ocold, nc);
-
-        int m = (nf < nc) ? nf : nc;      // 配对数 = 档位数
-        *out_count = 0;
-        *out_max = 0;
-        memset(table, 0, sizeof(*table) * GEAR_TABLE_MAX);
-        for (int j = 0; j < m; j++) {
-            int fi = (nf > nc) ? (nf - nc + j) : j;   // 高配高：取高端 nc 个风扇；否则升序同秩
-            table[j].config_n = j + 1;
-            table[j].mode     = configs[ofan[fi]].mode;
-            table[j].target   = configs[ofan[fi]].target;
-            table[j].fan_rpm  = fans[fi];
-            table[j].cold     = colds[j];
-            (*out_count)++;
-        }
-        *out_max = *out_count;
-        if (nf > nc)
-            write_log("配置 %s 档位表 风扇%d 制冷%d：缺制冷，低端 %d 个风扇档屏蔽", tag, nf, nc, nf - nc);
-        else if (nc > nf)
-            write_log("配置 %s 档位表 风扇%d 制冷%d：缺风扇，高端 %d 个制冷档屏蔽", tag, nf, nc, nc - nf);
-        else
-            write_log("配置 %s 档位表 %d 级 (1~%d)", tag, *out_count, *out_max);
-    } else {
-        for (int i = 0; i < 12; i++) table[i] = DEFAULT_GEAR_TABLE[i];
-        *out_count = 12;
-        *out_max = 12;
-        write_log("配置 %s 档位表无效，使用默认档位表 (%d 级)", tag, *out_count);
-    }
-}
+// Gear 档位表配置解析（parse_gear_config_line / collect_gear_config / rebuild_gear_table）已随 Gear 删除
 
 /** 去除首尾空白，返回修剪后的起始指针 */
 static inline char *trim_line(char *line) {
@@ -812,22 +447,11 @@ struct IntCfgKey { const char *key; int *var; int min; int max; int layer; };
 static const struct IntCfgKey INT_CFG_KEYS[] = {
     // 性能层（PERF_ENABLED=1）
     { "BATT_BASELINE",             &BATT_BASELINE,               300, 500 },
-    { "BATT_COOLDOWN_CYCLES",      &BATT_COOLDOWN_CYCLES,        0, 20 },
-    { "EMERG_RECOVERY_PHASE_CYCLES", &EMERG_RECOVERY_PHASE_CYCLES, 1, 50 },
     { "CPU_FILTER_ALPHA",          &CPU_FILTER_ALPHA,            1, 100 },
-    { "EMERG_EXIT_CAP_OFFSET",     &EMERG_EXIT_CAP_OFFSET,       0, 5 },
-    { "EMERG_STEP",                &EMERG_STEP,                  1, 12 },
-    { "EMERG_EXIT_BATT_THRESHOLD", &EMERG_EXIT_BATT_THRESHOLD,   5, 50 },
-    { "TREND_RESET_THRESHOLD",     &TREND_RESET_THRESHOLD,       0, 20 },
-    { "REV_COMP_COOLDOWN",         &REV_COMP_COOLDOWN,           0, 10 },
-    { "RATE_LIMIT_TEMP",           &RATE_LIMIT_TEMP,             1, 30 },
-    { "BATT_SKIP_MAX",             &BATT_SKIP_MAX,               1, 60 },
     { "RECONNECT_KEEP_CYCLES",     &reconnect_keep_cycles,       0, 30 },
-    // PID 多值键（PID_KP / PID_KD / PID_KD_MEM / PID_KI_VAR / PID_KI / PID_KI_MEM / PID_KD_NEAR）在 parse_pid_cfg 分段解析
-    { "GEAR_PREDICT_ALPHA",        &gear_predict_alpha,          1, 100 },
+    // PID 单值键走表驱动；多值键（PID_GAIN / PID_TARGET / PID_COLD / PID_CPU_COMP / PID_OUT_FILTER）在 parse_pid_cfg 分段解析
+    { "PID_CH_THRESHOLD",          &pid_ch_threshold,            1, 100 },
     { "RPM_SMOOTH_ALPHA",          &rpm_smooth_alpha,            1, 99 },
-    { "CURRENT_GEAR_SMOOTH_ALPHA", &CURRENT_GEAR_SMOOTH_ALPHA,   1, 100 },
-    { "CURRENT_GEAR_MIN",          &CURRENT_GEAR_MIN,            1, 12 },
     // sysfs 层（SYSFS_ENABLED=1）
     { "BATT_TEMP_DIVISOR",         &BATT_TEMP_DIVISOR,           1, 10000 },
     { "CPU_TEMP_DIVISOR",          &CPU_TEMP_DIVISOR,            1, 10000 },
@@ -851,7 +475,6 @@ static int parse_int_cfg(const char *key, int val, int layer) {
 /** DEBUG 子开关（DEBUG_ENABLED=1 时） */
 static void parse_debug_cfg(const char *key, int val) {
     if      (strcmp(key, "DEBUG_SENSOR") == 0)  debug_sensor = (val != 0);
-    else if (strcmp(key, "DEBUG_GEAR") == 0)    debug_gear   = (val != 0);
     else if (strcmp(key, "DEBUG_EXEC") == 0)    debug_exec   = (val != 0);
     else if (strcmp(key, "DEBUG_CONN") == 0)    debug_conn   = (val != 0);
     else if (strcmp(key, "DEBUG_CONFIG") == 0)  debug_config = (val != 0);
@@ -879,53 +502,23 @@ static void parse_sysfs_cfg(const char *key, int val, const char *val_str) {
     }
 }
 
-/** PID 专属多值配置（PERF 层） */
+/** PID 专属多值配置（PERF 层；单值键已并入 INT_CFG_KEYS 表驱动） */
 static int parse_pid_cfg(const char *key, int val, const char *val_str) {
-    // PID_KP = 比例增益（单值，÷1000；兼容旧三值"分界 近区 远区"取远区斜率）
-    if (strcmp(key, "PID_KP") == 0) {
-        int v[3] = {0, 0, 0};
-        int cnt = sscanf(val_str, "%d %d %d", &v[0], &v[1], &v[2]);
-        int g = (cnt >= 3) ? v[2] : v[0];   // 旧三值取远区斜率，单值取本身
-        pid_kp = clamp(g, 1, 1000);
+    // PID_GAIN = KDP融合系数(÷1000) KI积分增益(÷1000) 速度倍率(÷1000)
+    if (strcmp(key, "PID_GAIN") == 0) {
+        int a = pid_kdp_coef, b = pid_ki_coef, c = pid_speed_coef;
+        int n = sscanf(val_str, "%d %d %d", &a, &b, &c);
+        if (n >= 1) pid_kdp_coef   = clamp(a, 1, 1000);
+        if (n >= 2) pid_ki_coef    = clamp(b, 1, 1000);
+        if (n >= 3) pid_speed_coef = clamp(c, 0, 1000);
         return 1;
     }
-    // PID_KD = 上升倍率 下降倍率（双值，÷1000）
-    if (strcmp(key, "PID_KD") == 0) {
-        int u = pid_kd_up, d = pid_kd_down;
-        int cnt = sscanf(val_str, "%d %d", &u, &d);
-        if (cnt >= 1) pid_kd_up   = clamp(u, 0, 1000);
-        if (cnt >= 2) pid_kd_down = clamp(d, 0, 1000);
-        return 1;
-    }
-    // PID_KD_MEM = 记忆衰减 记忆幅值基础 幅值斜率（均 ×1000）
-    if (strcmp(key, "PID_KD_MEM") == 0) {
-        int l = pid_kd_leak, m = pid_kd_max, s = pid_kd_slope;
-        int cnt = sscanf(val_str, "%d %d %d", &l, &m, &s);
-        if (cnt >= 1) pid_kd_leak  = clamp(l, 1, 1000);
-        if (cnt >= 2) pid_kd_max   = clamp(m, 1, 1000);
-        if (cnt >= 3) pid_kd_slope = clamp(s, 1, 1000);
-        return 1;
-    }
-    // PID_KD_NEAR = 近区阈值 近区倍率（双值：阈值(0.1°C) 倍率(%)）
-    if (strcmp(key, "PID_KD_NEAR") == 0) {
-        int b = pid_kd_near_bound, m = pid_kd_near_mult;
-        int cnt = sscanf(val_str, "%d %d", &b, &m);
-        if (cnt >= 1) pid_kd_near_bound = clamp(b, 0, 100);
-        if (cnt >= 2) pid_kd_near_mult  = clamp(m, 1, 100);
-        return 1;
-    }
-    if (strcmp(key, "PID_INPUT_FILTER") == 0) {
-        int on = pid_input_filter_enabled, a = pid_filter_auto_threshold_on, b = pid_filter_auto_threshold_off, m = pid_filter_count_mult;
-        int n = sscanf(val_str, "%d %d %d %d", &on, &a, &b, &m);
-        if (n >= 1) pid_input_filter_enabled = (on != 0);
-        if (n >= 2) pid_filter_auto_threshold_on = clamp(a, 5, 100);
-        if (n >= 3) pid_filter_auto_threshold_off = clamp(b, 5, 100);
-        if (n >= 4) pid_filter_count_mult = clamp(m, 1, 50);
-        return 1;
-    }
-    if (strcmp(key, "PID_ALPHA") == 0) {
-        int a = pid_filter_auto_alpha, b = pid_batt_alpha;
-        if (sscanf(val_str, "%d %d", &a, &b) >= 2) { pid_filter_auto_alpha=clamp(a,1,100); pid_batt_alpha=clamp(b,1,100); }
+    // PID_TARGET = 目标系数(÷1000) 目标EMA平滑(%)
+    if (strcmp(key, "PID_TARGET") == 0) {
+        int a = pid_target_coef, b = pid_target_alpha;
+        int n = sscanf(val_str, "%d %d", &a, &b);
+        if (n >= 1) pid_target_coef  = clamp(a, 1, 1000);
+        if (n >= 2) pid_target_alpha = clamp(b, 1, 100);
         return 1;
     }
     if (strcmp(key, "PID_COLD") == 0) {
@@ -933,49 +526,6 @@ static int parse_pid_cfg(const char *key, int val, const char *val_str) {
         int n = sscanf(val_str, "%d %d %d", &a, &b, &c);
         if (n >= 2) { pid_cold_min=clamp(a,0,194); pid_cold_max=clamp(b,0,194); }
         if (n >= 3) { b7_pid_cold_max = clamp(c, 1, B7X_COLD_MAX); }
-        return 1;
-    }
-    // PID_KI = 高基准基础 高基准斜率 低基准基础 低基准斜率（四值，÷1000）
-    if (strcmp(key, "PID_KI") == 0) {
-        int a = pid_ki_up_base, b = pid_ki_up_slope, c = pid_ki_down_base, d = pid_ki_down_slope;
-        int cnt = sscanf(val_str, "%d %d %d %d", &a, &b, &c, &d);
-        if (cnt >= 1) pid_ki_up_base   = clamp(a, 0, 1000);
-        if (cnt >= 2) pid_ki_up_slope  = clamp(b, 0, 1000);
-        if (cnt >= 3) pid_ki_down_base = clamp(c, 0, 1000);
-        if (cnt >= 4) pid_ki_down_slope= clamp(d, 0, 1000);
-        return 1;
-    }
-    // PID_KI_MEM = 下降惩罚 固定衰减 积分上限（三值，÷1000）
-    if (strcmp(key, "PID_KI_MEM") == 0) {
-        int a = pid_ki_drop, b = pid_ki_leak, c = pid_integral_limit;
-        int cnt = sscanf(val_str, "%d %d %d", &a, &b, &c);
-        if (cnt >= 1) pid_ki_drop        = clamp(a, 0, 1000);
-        if (cnt >= 2) pid_ki_leak        = clamp(b, 0, 1000);
-        if (cnt >= 3) pid_integral_limit = clamp(c, 0, 1000);
-        return 1;
-    }
-    // PID_KI_FALL = 降温抑制权重（单值，范围0~50，默认5；0=关闭）
-    if (strcmp(key, "PID_KI_FALL") == 0) {
-        int a = pid_ki_fall_c1;
-        if (sscanf(val_str, "%d", &a) >= 1) pid_ki_fall_c1 = clamp(a, 0, 50);
-        return 1;
-    }
-    // PID_KI_NEAR = 基准速率 缩放 窗口重算数 窗口周期数（四值；基准速率×0.1°C/周期）
-    if (strcmp(key, "PID_KI_NEAR") == 0) {
-        int a = pid_ki_near_base, b = pid_ki_near_scale, c = pid_ki_near_recount, d = pid_ki_near_cycn;
-        int cnt = sscanf(val_str, "%d %d %d %d", &a, &b, &c, &d);
-        if (cnt >= 1) pid_ki_near_base    = clamp(a, 0, 50);
-        if (cnt >= 2) pid_ki_near_scale   = clamp(b, 10, 1000);
-        if (cnt >= 3) pid_ki_near_recount = clamp(c, 2, 4);
-        if (cnt >= 4) pid_ki_near_cycn    = clamp(d, 2, 8);
-        return 1;
-    }
-    if (strcmp(key, "PID_KI_VAR") == 0) {
-        int t = pid_ki_var_threshold, n = pid_ki_var_samples, db = pid_ki_deadband;
-        int cnt = sscanf(val_str, "%d %d %d", &t, &n, &db);
-        if (cnt >= 1) pid_ki_var_threshold = clamp(t, 0, 200);
-        if (cnt >= 2) pid_ki_var_samples   = clamp(n, 2, 20);
-        if (cnt >= 3) pid_ki_deadband      = clamp(db, 0, 100);
         return 1;
     }
     if (strcmp(key, "PID_CPU_COMP") == 0) {
@@ -1001,120 +551,7 @@ static int parse_pid_cfg(const char *key, int val, const char *val_str) {
     return 0;
 }
 
-/** Gear 专属多值/开关/档位表配置（PERF 层） */
-static int parse_gear_cfg(const char *key, int val, const char *val_str,
-                          GearConfigTemp *gears_b6, int *cnt_b6,
-                          GearConfigTemp *gears_b7, int *cnt_b7) {
-    if (strcmp(key, "BATT_BOUNDARY") == 0) {
-        int v[3] = {BATT_BOUNDARY_1,BATT_BOUNDARY_2,BATT_BOUNDARY_3};
-        if (sscanf(val_str, "%d %d %d", &v[0],&v[1],&v[2]) >= 3)
-            { BATT_BOUNDARY_1=clamp(v[0],1,100); BATT_BOUNDARY_2=clamp(v[1],1,100); BATT_BOUNDARY_3=clamp(v[2],1,100); }
-        return 1;
-    }
-    if (strcmp(key, "CURRENT_GEAR_MULT") == 0) {
-        int a = CURRENT_GEAR_MULT_CHARGE, b = CURRENT_GEAR_MULT_DISCHARGE;
-        if (sscanf(val_str, "%d %d", &a, &b) >= 2)
-            { CURRENT_GEAR_MULT_CHARGE=clamp(a,1,50); CURRENT_GEAR_MULT_DISCHARGE=clamp(b,1,50); }
-        return 1;
-    }
-    if (strcmp(key, "REV_COMP_T") == 0) {
-        int v[3] = {REV_COMP_THRESH_1,REV_COMP_THRESH_2,REV_COMP_THRESH_3};
-        if (sscanf(val_str, "%d %d %d", &v[0],&v[1],&v[2]) >= 3)
-            { REV_COMP_THRESH_1=clamp(v[0],1,50); REV_COMP_THRESH_2=clamp(v[1],1,50); REV_COMP_THRESH_3=clamp(v[2],1,50); }
-        return 1;
-    }
-    if (strcmp(key, "EMERG_FORCED") == 0) {
-        int v[4] = {EMERG_FORCED_1,EMERG_FORCED_2,EMERG_FORCED_3,EMERG_FORCED_4};
-        if (sscanf(val_str, "%d %d %d %d", &v[0],&v[1],&v[2],&v[3]) >= 4)
-            { EMERG_FORCED_1=clamp(v[0],0,12); EMERG_FORCED_2=clamp(v[1],0,12); EMERG_FORCED_3=clamp(v[2],0,12); EMERG_FORCED_4=clamp(v[3],0,12); }
-        return 1;
-    }
-    if (strcmp(key, "EMERG_RECOVERY_MULT") == 0) {
-        int v[3] = {EMERG_RECOVERY_MULT_1,EMERG_RECOVERY_MULT_2,EMERG_RECOVERY_MULT_3};
-        if (sscanf(val_str, "%d %d %d", &v[0],&v[1],&v[2]) >= 3)
-            { EMERG_RECOVERY_MULT_1=clamp(v[0],1,20); EMERG_RECOVERY_MULT_2=clamp(v[1],1,20); EMERG_RECOVERY_MULT_3=clamp(v[2],1,20); }
-        return 1;
-    }
-    if (strcmp(key, "CPU_EMERG") == 0) {
-        int v[4] = {CPU_RECOVER_0,CPU_EMERG_1,CPU_EMERG_2,CPU_EMERG_3};
-        if (sscanf(val_str, "%d %d %d %d", &v[0],&v[1],&v[2],&v[3]) >= 4) {
-            CPU_RECOVER_0=clamp(v[0],300,700); CPU_EMERG_1=clamp(v[1],400,800);
-            CPU_EMERG_2=clamp(v[2],500,900);   CPU_EMERG_3=clamp(v[3],600,1000);
-            CPU_RECOVER_1=CPU_EMERG_1; CPU_RECOVER_2=CPU_EMERG_2; // 自动同步恢复阈值
-        }
-        return 1;
-    }
-    if (strcmp(key, "CTRL_MODE") == 0)            { ctrl_mode = (val != 0); return 1; }
-    if (strcmp(key, "GEAR_AUTO_FAN") == 0)        { gear_auto_fan = (val != 0); return 1; }
-    if (strcmp(key, "EMERG_CPU_ENABLED") == 0)    { EMERG_CPU_ENABLED = (val != 0); return 1; }
-    if (strcmp(key, "GEAR_CONFIG_ENABLED") == 0)  { gear_config_enabled = (val != 0); return 1; }
-    if (strcmp(key, "REV_COMP") == 0) {
-        int a = REV_COMP_ENABLED, b = TREND_EXEMPT_ENABLED;
-        if (sscanf(val_str, "%d %d", &a, &b) >= 1) {
-            REV_COMP_ENABLED     = (a != 0);
-            TREND_EXEMPT_ENABLED = (b != 0);
-        }
-        return 1;
-    }
-    if (strcmp(key, "CURRENT_GEAR_MODE") == 0) {
-        int charge = CURRENT_GEAR_MODE_CHARGE, discharge = CURRENT_GEAR_MODE_DISCHARGE;
-        if (sscanf(val_str, "%d %d", &charge, &discharge) >= 1) {
-            CURRENT_GEAR_MODE_CHARGE    = clamp(charge, 0, 1);
-            CURRENT_GEAR_MODE_DISCHARGE = clamp(discharge, 0, 1);
-        }
-        return 1;
-    }
-    if (strcmp(key, "EMERG_MODE") == 0) {
-        int entry = EMERG_MODE_ENTRY, exit = EMERG_MODE_EXIT;
-        if (sscanf(val_str, "%d %d", &entry, &exit) >= 1) {
-            EMERG_MODE_ENTRY = clamp(entry, 0, 1);
-            EMERG_MODE_EXIT  = clamp(exit, 0, 1);
-        }
-        return 1;
-    }
-    // --- 电流-挡位子项（无 CURRENT_GEAR_MODE 子守卫）---
-    if (strncmp(key, "CURRENT_GEAR_", 13) == 0) {
-        if      (strcmp(key, "CURRENT_GEAR_SMOOTH_ALPHA") == 0)
-            CURRENT_GEAR_SMOOTH_ALPHA = clamp(val, 1, 100);
-        else if (strcmp(key, "CURRENT_GEAR_MIN") == 0)
-            CURRENT_GEAR_MIN = clamp(val, 1, 12);
-        return 1;
-    }
-    if (strcmp(key, "GEAR_PREDICT_WIN") == 0) {
-        int a = gear_predict_buf_n, b = gear_predict_win_n, c = gear_predict_min_points;
-        if (sscanf(val_str, "%d %d %d", &a, &b, &c) >= 3) {
-            int old_n = gear_predict_buf_n;
-            gear_predict_buf_n      = clamp(a, 3, 32);
-            gear_predict_win_n      = clamp(b, 3, 10);
-            gear_predict_min_points = clamp(c, 2, 5);
-            // 缩容即清空已累积样本重新累积（扩容无需处理）
-            if (gear_predict_buf_n < old_n) gear_predict_buf_cnt = 0;
-        }
-        return 1;
-    }
-    if (strcmp(key, "GEAR_PREDICT_RISE") == 0) {
-        int a = gear_predict_max_rise, b = gear_predict_ramp_cycles, d = gear_predict_min_delta;
-        if (sscanf(val_str, "%d %d %d", &a, &b, &d) >= 1) {
-            gear_predict_max_rise    = clamp(a, 10, 100);
-            gear_predict_ramp_cycles = clamp(b, 0, 10);
-            gear_predict_min_delta   = clamp(d, 1, 10);
-        }
-        return 1;
-    }
-    if (strcmp(key, "GEAR_PREDICT_WEIGHT") == 0) {
-        int h = gear_predict_heat_weight, c = gear_predict_cool_weight, s = gear_predict_suppress;
-        if (sscanf(val_str, "%d %d %d", &h, &c, &s) >= 1) {
-            gear_predict_heat_weight = clamp(h, 0, 10);
-            gear_predict_cool_weight = clamp(c, 0, 10);
-            gear_predict_suppress     = clamp(s, 0, 100);
-        }
-        return 1;
-    }
-    // --- 档位表（无 gear_config_enabled 子守卫，收集后由后处理判断）---
-    if (strncmp(key, "GEAR_B7X_", 9) == 0) { collect_gear_config(key, val_str, gears_b7, cnt_b7); return 1; }
-    if (strncmp(key, "GEAR_B6X_", 9) == 0) { collect_gear_config(key, val_str, gears_b6, cnt_b6); return 1; }
-    return 0;
-}
+// Gear 专属配置解析（parse_gear_cfg）已随 Gear 删除
 
 /** 通用多值配置（PERF 层，PID/Gear 共用） */
 static int parse_common_cfg(const char *key, int val, const char *val_str) {
@@ -1179,8 +616,6 @@ static void load_config(const char *path) {
         write_log("配置 无法打开 %s", path);
         return;
     }
-    int old_ctrl_mode = ctrl_mode;  // 保存旧值，用于模式切换过渡检测
-
     // --- 第一遍：预读 PERF_ENABLED 和 DEBUG_ENABLED（全扫描，不受配置顺序影响）---
     char line[256];
     int perf_enabled = 1;
@@ -1228,11 +663,6 @@ static void load_config(const char *path) {
 
     // --- 第二遍：全量单次扫描，仅按层分发（DEBUG/sysfs/PERF），无子守卫 ---
     rewind(f);
-    gear_config_enabled = 0;   // 每轮重置（未配置时回默认）
-    GearConfigTemp config_gears_b6[GEAR_TABLE_MAX];
-    GearConfigTemp config_gears_b7[GEAR_TABLE_MAX];
-    int config_gear_count_b6 = 0;
-    int config_gear_count_b7 = 0;
     while (fgets(line, sizeof(line), f)) {
         char *key;
         char *val_str = config_parse_line(line, &key);
@@ -1257,54 +687,12 @@ static void load_config(const char *path) {
         // 表驱动单值 → 分段函数（PID/Gear/通用），键互不重叠、唯一命中
         if (parse_int_cfg(key, val, 0)) continue;
         if (parse_pid_cfg(key, val, val_str)) continue;
-        if (parse_gear_cfg(key, val, val_str, config_gears_b6, &config_gear_count_b6,
-                           config_gears_b7, &config_gear_count_b7)) continue;
         if (parse_common_cfg(key, val, val_str)) continue;
         debug_log(debug_config, "配置 未识别键 %s（已忽略）", key);
     }
     fclose(f);
 
-    // CTRL_MODE 变化过渡处理（模式切换：PID/Gear 相互对齐，状态各自清理）
-    if (ctrl_mode != old_ctrl_mode) {
-        last_bcast_valid = 0;
-        if (ctrl_mode == 1) {
-            // 0→1 切 PID：清 Gear 预测状态，从当前档位对齐 PID 初始输出
-            gear_predict_smoothed = -1;
-            gear_predict_was_active = 0;
-            gear_predict_consecutive = 0;
-            gear_predict_buf_cnt = 0;
-            gear_predict_buf_head = 0;
-            if (config_mtime != 0)
-                pid_align_from_gear();
-        } else {
-            // 1→0 切 Gear：用 PID 无级对齐量映射回档位（无缝接管，无跳变）
-            if (pid_ratio_saved >= 0.0f) {
-                batt_gear_base = clamp((int)(pid_ratio_saved * (gear_max - gear_min) + gear_min + 0.5f),
-                                       gear_min, gear_max);
-                final_gear = batt_gear_base;
-            }
-        }
-        write_log("配置 CTRL_MODE=%d", ctrl_mode);
-    }
-
-    // --- GEAR_B6X_N / GEAR_B7X_N 后处理：B6X/B7X 各排序重排为连续档位表 ---
-    if (gear_config_enabled) {
-        rebuild_gear_table(gear_table_b6, config_gears_b6, config_gear_count_b6,
-                           &gear_count_b6, &gear_max_b6, "b6x");
-        rebuild_gear_table(gear_table_b7, config_gears_b7, config_gear_count_b7,
-                           &gear_count_b7, &gear_max_b7, "b7x");
-
-        // 切换活动表指针与计数，同步范围
-        select_gear_table();
-        // 档位表重排后 actual 值复位：以散热器实际回传为准初始化（回传异常用最小合法值保底）
-        if (cooler_cold_real >= COLD_MIN) actual_cold = cooler_cold_real;
-        else actual_cold = COLD_MIN;
-        if (cooler_rpm_real >= fan_rpm_min) actual_rpm = cooler_rpm_real;
-        else actual_rpm = fan_rpm_min;
-        actual_target_temp = -1;
-        batt_gear_base = clamp(batt_gear_base, gear_min, gear_max);
-    }
-
+    // （CTRL_MODE 模式切换过渡 / GEAR 档位表后处理 已随 Gear 删除）
 }
 
 // ======================== 可执行文件名提取 ========================
@@ -1439,24 +827,9 @@ static inline int clamp(int val, int lo, int hi) {
     return val;
 }
 
-/** 返回 x 的符号：正→1，负→-1，零→0 */
-static inline int sign_of(int x) {
-    if (x > 0) return 1;
-    if (x < 0) return -1;
-    return 0;
-}
-
 /** 设备代号（日志显示用）：B7X→"b7x"，B6X/B8X→"b6x"，无设备→"none" */
 static const char *device_tag_of(DeviceType dev) {
     return (dev == DEVICE_B7X) ? "b7x" : "b6x";
-}
-
-/** 温差绝对值 → 档位偏移量（三区间阈值：1/2/3 档） */
-static inline int temp_delta_by_boundary(int ad, int z1, int z2, int z3) {
-    if (ad > z3) return 3;
-    if (ad > z2) return 2;
-    if (ad > z1) return 1;
-    return 0;
 }
 
 /** 限速步进：actual 向 desired 靠拢，每周期最多变 up_limit（升）或 down_limit（降）。
@@ -1469,14 +842,6 @@ static inline void rate_limit(int *actual, int desired, int up_limit, int down_l
         *actual += (diff > 0) ? step : -step;
     else
         *actual = desired;
-}
-
-/** 清除趋势豁免 / 反补累积状态 */
-static inline void reset_exempt_state(void) {
-    trend_exempt_count = 0;
-    trend_anchor_temp = -1;
-    rev_comp_pending_delta = 0;
-    rev_comp_pending_idle = 0;
 }
 
 /** CPU 温度 EMA 滤波：首次直取，此后按 CPU_FILTER_ALPHA 平滑 */
@@ -1614,9 +979,6 @@ static void update_active_limits(void) {
         active_fan_max  = fan_rpm_max;        // 使用 profile.conf 中的配置值
         active_pid_cold_max = pid_cold_max;   // 使用 profile.conf 中的配置值
     }
-
-    // 切换活动档位表（B6X/B7X 独立表）
-    select_gear_table();
 }
 
 /**
@@ -1705,18 +1067,6 @@ static int read_battery_temp(void) {
     batt_temp_updated = (val != batt_cached_temp) || mtime_changed;   // 值或 mtime 任一变化
     batt_cached_temp = val;
     return val;
-}
-
-/**
- * 读取电池电流，返回 0.01A 单位（正=放电，负=充电），失败返回 0。
- */
-static int read_batt_current_ua10(void) {
-    int val = read_sysfs_int(BATT_CURRENT_PATH);
-    if (val == 0) return 0;
-    int ua10 = val / BATT_CURRENT_DIVISOR;
-    debug_log(debug_sensor, "batt_curr 原始 %d 除数 %d = %d (%.2fA)",
-              val, BATT_CURRENT_DIVISOR, ua10, ua10 / 100.0);
-    return ua10;
 }
 
 /**
@@ -1823,7 +1173,7 @@ static inline int eff_cold_max(int base_max, int cold_min) {
 }
 
 // 当前模式有效制冷范围（每 5s 周期由 update_active_cold_range 统一计算，下发/去重/映射共用）
-static int active_cold_eff_min = 1;    // 有效制冷下限（Gear=COLD_MIN，PID=pid_cold_min）
+static int active_cold_eff_min = 1;    // 有效制冷下限（PID=pid_cold_min）
 static int active_cold_eff_max = 190;  // 有效制冷上限（含热端过温削减）
 
 /**
@@ -1859,62 +1209,17 @@ static void update_hot_derate(void) {
 }
 
 /**
- * 计算当前模式有效制冷范围（Gear=档位表最高档，PID=PID_COLD 上限；均含热端过温削减）。
- * 每 5s 周期在 update_hot_derate 之后调用，供下发/去重/映射统一使用，消除模式分支散落。
+ * 计算 PID 模式有效制冷范围（上限 = PID_COLD 上限，含热端过温削减）。
+ * 每 5s 周期在 update_hot_derate 之后调用，供下发/去重/映射统一使用。
  */
 static void update_active_cold_range(void) {
-    if (ctrl_mode == 1) {
-        active_cold_eff_min = pid_cold_min;
-        active_cold_eff_max = eff_cold_max(active_pid_cold_max, pid_cold_min);
-    } else {
-        active_cold_eff_min = COLD_MIN;
-        // 基准上限 = 档位表最高档制冷（档位表已按制冷升序）
-        int base = (gear_max >= 1 && gear_max <= gear_count)
-                 ? gear_table[gear_max - 1].cold : COLD_MIN;
-        active_cold_eff_max = eff_cold_max(base, COLD_MIN);
-    }
+    active_cold_eff_min = pid_cold_min;
+    active_cold_eff_max = eff_cold_max(active_pid_cold_max, pid_cold_min);
 }
 
 // ======================== 控制参数计算与下发 ========================
 
-/**
- * 根据档位查表计算 setRunMode 参数（档位与风扇/制冷非线性）。
- *
- * mode=0 智能温控：targetTemperature + windLevel（风扇上限）。
- * mode=1 固定功率：windLevelOverclock（风扇）+ coldLevelOverclock（制冷）。
- */
-static void build_params(int level,
-                         int *out_mode,
-                         int *out_target,
-                         int *out_windOC,
-                         int *out_coldOC,
-                         int *out_windLevel)
-{
-    // 防御性钳制：确保档位索引不越界（调用栈已保证，但作为内部接口增加保护）
-    if (level < gear_min || level > gear_max) level = gear_min;
-    int idx = level - 1;
-    int mode   = gear_table[idx].mode;
-    int target = gear_table[idx].target;
-    int fan    = gear_table[idx].fan_rpm;
-    int cold   = gear_table[idx].cold;
-
-    target = clamp(target, 5, 35);
-
-    if (mode == 0) {
-        // --- 智能温控 ---
-        *out_windLevel = fan;
-        *out_windOC    = 0;
-        *out_coldOC    = 0;   // 智能模式让散热器自行管理制冷
-    } else {
-        // --- 固定功率 ---
-        *out_windOC    = fan;
-        *out_coldOC    = clamp(cold, COLD_MIN, active_cold_eff_max);
-        *out_windLevel = 0;
-    }
-
-    *out_mode   = mode;
-    *out_target = target;
-}
+// 档位查表参数构造（build_params）已随 Gear 删除
 
 /**
  * 通过 am broadcast 下发控制参数到 LSPosed 模块（fork+exec，3s 超时）
@@ -2096,82 +1401,7 @@ static int should_skip_dispatch(int mode, int target, int windOC, int cold, int 
     return skip;
 }
 
-/**
- * 下发控制参数（如有变化）
- * 通过 am broadcast 发送到 LSPosed 模块
- *
- * 参数无变化时跳过下发
- * 返回 1=已发送，0=跳过（无变化）
- */
-static int apply_gear(int level) {
-    int mode, target, windOC, coldOC, windLevel;
-
-    level = clamp(level, gear_min, gear_max);
-    build_params(level, &mode, &target, &windOC, &coldOC, &windLevel);
-
-    // 制冷强度限速（升降独立，负值方向已 clamp 到 0）
-    rate_limit_cold(coldOC);
-
-    // GEAR_AUTO_FAN：独立风扇目标（基于限速后实际制冷 + 热端），挡位表风扇转速变为截断上限
-    if (gear_auto_fan && mode == 1) {
-        int cap_rpm = windOC;
-        int calc_rpm = compute_fan_target();
-        windOC = (calc_rpm < cap_rpm) ? calc_rpm : cap_rpm;
-    }
-
-    // 风扇转速限速（升降独立，含降速防抖）
-    int desired_rpm = (mode == 0) ? windLevel : windOC;
-    int send_rpm = rate_limit_fan(desired_rpm);
-
-    // 目标温度限速（仅智能温控模式；回传无目标温度字段，<0 时显式初始化为目标档位 target）
-    if (actual_target_temp < 0)
-        actual_target_temp = target;
-    else if (mode == 0)
-        rate_limit(&actual_target_temp, target, RATE_LIMIT_TEMP, RATE_LIMIT_TEMP);
-
-    // ---- 用限速后的实际值替换查表值 ----
-    coldOC = actual_cold;
-    target = actual_target_temp;
-
-    // ---- 热端过温边界钳制（去重前生效；不同步 actual_cold，风扇由 actual_cold 推算保持高转速散热）----
-    int cold_pre_clamp = coldOC;
-    if (hot_derate > 0) {
-        int cold_cap = active_cold_eff_max;
-        if (coldOC > cold_cap) coldOC = cold_cap;
-    }
-
-    // ---- 风扇转速向上取整到 50 的倍数（rate_limit_fan 已钳制到设备范围）----
-    if (mode == 0)
-        windLevel = send_rpm;
-    else
-        windOC = send_rpm;
-
-    // ---- 去重检测 + 制冷上升死区（以散热器实际回传为准）----
-    if (should_skip_dispatch(mode, target, windOC, coldOC, windLevel)) {
-        return 0;   // 跳过原因日志已由 should_skip_dispatch 内部输出
-    }
-
-    // 过热钳制冷动作日志（仅在实际下发时输出，与去重判定一致）
-    if (coldOC < cold_pre_clamp)
-        write_log("过热钳制冷 %d→%d（上限削减 %d）", cold_pre_clamp, coldOC, hot_derate);
-
-    send_am_broadcast(mode, target, windOC, coldOC, windLevel);
-    // Gear 模式下发成功常驻快照（与 PID 模式 apply_gear_direct 对齐，消除下发可见性不对称）
-    write_log("%s 档位%d mode=%d 冷%d 热%d° RPM%d 目标%d°C",
-              device_tag_of(active_device), gear_label(level), mode,
-              coldOC, (cooler_hot_temp > 0) ? cooler_hot_temp / 10 : 0,
-              send_rpm, target);
-
-    // ---- 更新缓存 ----
-    last_bcast_valid   = 1;
-    last_mode          = mode;
-    last_target_temp   = target;
-    last_rpm           = windOC;
-    last_cold          = coldOC;
-    last_wind_level    = windLevel;
-
-    return 1;
-}
+// Gear 档位下发（apply_gear）已随 Gear 删除
 
 // ======================== App 进程 + 心跳检测 ========================
 
@@ -2479,438 +1709,19 @@ static void arbitrate_apps(void) {
  * 紧急退出恢复期阶段推进：冷却周期递减，到期推进 P1→P2→P3→正常。
  * 不受电池温度读取失败影响（battery_control 入口先调用，冷却期也能走完各阶段）。
  */
-static void emerg_recovery_advance(void) {
-    if (emerg_recovery_cycles > 0) {
-        emerg_recovery_cycles--;
-        if (emerg_recovery_cycles == 0) {
-            if (emerg_recovery_phase == 1) {
-                // P1 → P2
-                emerg_recovery_mult = EMERG_RECOVERY_MULT_2;
-                emerg_recovery_phase = 2;
-                emerg_recovery_cycles = EMERG_RECOVERY_PHASE_CYCLES;
-                debug_log(debug_gear, "recovery P1→P2 倍率%d→%d", EMERG_RECOVERY_MULT_1, EMERG_RECOVERY_MULT_2);
-            } else if (emerg_recovery_phase == 2) {
-                // P2 → P3
-                emerg_recovery_mult = EMERG_RECOVERY_MULT_3;
-                emerg_recovery_phase = 3;
-                emerg_recovery_cycles = EMERG_RECOVERY_PHASE_CYCLES;
-                debug_log(debug_gear, "recovery P2→P3 倍率%d→%d", EMERG_RECOVERY_MULT_2, EMERG_RECOVERY_MULT_3);
-            } else if (emerg_recovery_phase >= 3) {
-                // P3 结束 → 恢复正常
-                emerg_recovery_mult = 1;
-                emerg_recovery_phase = 0;
-                debug_log(debug_gear, "recovery P3 结束，恢复正常");
-            }
-        }
-    }
-}
+// Gear 模式（紧急恢复期推进）已随 Gear 删除
 
-/**
- * 过冲反补 + 趋势豁免（三区×双向×三级阈值）。
- * 输入为 battery_control 本轮的调档上下文；通过 *skip_delta 传递"本次跳过常规升降档"。
- */
-static void rev_comp_and_trend(int batt, int delta, int batt_change, int abs_change,
-                               int eff_z2, int cur_idle, int in_cooldown,
-                               int *skip_delta) {
-    if (abs_change > 0) {
-        int trend_rev = (delta > 0 && batt < last_batt_reading) ||
-                        (delta < 0 && batt > last_batt_reading);
-        int dir = (batt_change > 0) ? 1 : -1;  // +1=升温, -1=降温
+// 过冲反补 + 趋势豁免（rev_comp_and_trend）已随 Gear 删除
 
-        // 三区判断：冷外区 / 内区 / 热外区
-        int is_cold_outer = (batt <= BATT_BASELINE - eff_z2);
-        int is_hot_outer  = (batt >= BATT_BASELINE + eff_z2);
-        int in_inner_zone = !is_cold_outer && !is_hot_outer;
-
-        // 根据方向+区域查三级阈值（0.1°C 单位，999=无穷大）
-        // REV_COMP_THRESH_1/2/3 默认 2/3/4 = 0.2°C / 0.3°C / 0.4°C 每周期，可通过 profile.conf 配置
-        int t1 = 999, t2 = 999, t3 = 999;
-        if (dir > 0) {
-            if      (is_cold_outer) { t1 = REV_COMP_THRESH_3; }
-            else if (in_inner_zone) { t1 = REV_COMP_THRESH_2; t2 = REV_COMP_THRESH_3; }
-            else                   { t1 = REV_COMP_THRESH_1; t2 = REV_COMP_THRESH_2; t3 = REV_COMP_THRESH_3; }
-        } else {
-            if      (is_cold_outer) { t1 = REV_COMP_THRESH_1; t2 = REV_COMP_THRESH_2; t3 = REV_COMP_THRESH_3; }
-            else if (in_inner_zone) { t1 = REV_COMP_THRESH_2; t2 = REV_COMP_THRESH_3; }
-            else                   { t1 = REV_COMP_THRESH_3; }
-        }
-
-        // 统一计算每周期速率（用于下方趋势豁免和反补）
-        int total_abs = abs_change + rev_comp_pending_delta;
-        int total_interval = (cur_idle + 1) + rev_comp_pending_idle;
-        int rate = total_abs / total_interval;
-        if (rate < 1) rate = 1;
-
-        // 计算跨过几个阈值（用于反补档位数和豁免范围判断）
-        int steps = (rate > t1) + (rate > t2) + (rate > t3);
-
-        // --- 趋势豁免（抬高生效阈值） ---
-        // 豁免阈值随速率提高而抬高：
-        //   steps=0(T1未触发) → 豁免区间 [0, T1)（原行为）
-        //   steps=1(T1已触发, T2未触发) → 豁免区间 [T1, T2)（抬至T1以上）
-        //   steps=2(T2已触发, T3未触发) → 豁免区间 [T2, T3)（抬至T2以上）
-        //   steps=3(T3已触发) → 始终不豁免
-        //
-        // 温度锚点复位：首次豁免记录当前温度为锚点。区间中间值（steps=0→T1/2,
-        // steps=1→(T1+T2)/2, steps=2→(T2+T3)/2）作为偏移量：降温豁免用减号
-        // （锚点-偏移量=复位阈值），升温豁免用加号（锚点+偏移量=复位阈值）。
-        // 电池温度越过复位阈值后豁免计数器复位，下轮以新锚点重新开始
-        if (TREND_EXEMPT_ENABLED && !in_cooldown && rev_comp_pending_delta == 0 && steps < 3) {
-            if (trend_rev && batt_gear_base > gear_min &&
-                batt_gear_base < gear_max)
-            {
-                if (trend_exempt_count == 0) {
-                    // 首次豁免：记录锚点温度
-                    trend_anchor_temp = batt;
-                    write_log("趋势豁免 %d", gear_label(batt_gear_base));
-                    trend_exempt_count++;
-                    *skip_delta = 1;
-                } else {
-                    // 持续豁免中：计算当前区间中间值（0.1°C）
-                    int band_mid;
-                    if      (steps == 0) band_mid = REV_COMP_THRESH_1 / 2;
-                    else if (steps == 1) band_mid = (REV_COMP_THRESH_1 + REV_COMP_THRESH_2) / 2;
-                    else                 band_mid = (REV_COMP_THRESH_2 + REV_COMP_THRESH_3) / 2;
-                    if (band_mid < 1) band_mid = 1;
-
-                    // 降温（delta<0，温度向基准降温）→ 锚点 - 中值 = 复位下限
-                    // 升温（delta>0，温度向基准升温）→ 锚点 + 中值 = 复位上限
-                    int reset_threshold;
-                    int reset_triggered = 0;
-                    if (delta < 0) {
-                        reset_threshold = trend_anchor_temp - band_mid;
-                        if (batt <= reset_threshold) reset_triggered = 1;
-                    } else {
-                        reset_threshold = trend_anchor_temp + band_mid;
-                        if (batt >= reset_threshold) reset_triggered = 1;
-                    }
-
-                    if (reset_triggered) {
-                        // 温度越过复位阈值 → 复位豁免
-                        trend_exempt_count = 0;
-                    } else {
-                        trend_exempt_count++;
-                        *skip_delta = 1;
-                    }
-                }
-            } else {
-                trend_exempt_count = 0;
-            }
-        }
-
-        // --- 反补（不为全效豁免时执行） ---
-        if (REV_COMP_ENABLED && !*skip_delta && (steps > 0 || rev_comp_pending_delta > 0)) {
-            trend_exempt_count = 0;
-
-            if (rev_comp_cooldown == 0) {
-                // 冷却已到 → 用速率查表执行反补
-                int adjust = dir * steps;
-
-                rev_comp_pending_delta = 0;
-                rev_comp_pending_idle = 0;
-
-                if (adjust != 0) {
-                    int old = batt_gear_base;
-                    batt_gear_base += adjust;
-                    batt_gear_base = clamp(batt_gear_base, gear_min, gear_max);
-                    *skip_delta = 1;
-                    if (old != batt_gear_base) {
-                        batt_gear_cooldown = BATT_COOLDOWN_CYCLES;
-                        rev_comp_cooldown = REV_COMP_COOLDOWN;
-                        write_log("过冲%d/%d 挡位%d（%+d）",
-                                  rate / 10, rate % 10,
-                                  gear_label(batt_gear_base), adjust);
-                    }
-                }
-            } else {
-                // 冷却期内累积温差和周期数，不做调整
-                rev_comp_pending_delta = total_abs;
-                rev_comp_pending_idle = total_interval;
-                debug_log(debug_gear, "batt_ctrl 反补冷却中 累积 abs=%d 周期=%d", total_abs, total_interval);
-            }
-        }
-    }
-}
-
-/**
- * 根据电池温度调整基础档位，每 5 秒一次。
- *
- * 死区 ±ZONE_1 / ±1 档至 ZONE_2 / ±2 档至 ZONE_3 / ±3 档以上。
- * 温度不变时跳过升降档；档位变动后冷却 BATT_COOLDOWN_CYCLES 周期。
- * 紧急退出恢复期：将 BOUNDARY 阈值乘以恢复倍率，降低灵敏度。
- *
- * 反补查表：三区（冷外/内/热外）× 方向（升/降温）× 三级阈值（REV_COMP_THRESH_1/2/3）。
- * 趋势豁免：反补被抑制时抬高生效阈值，锚点温度复位。
- */
-static void battery_control(void) {
-    int batt = gear_input_batt;   // Gear 调档输入温度（预测温度+CPU 补偿，gear 分支开头已计算）
-    if (batt < 0) {
-        return;   // 无有效温度，跳过本周期（idle 已由 main_loop 入口统一维护）
-    }
-
-    // --- 紧急退出恢复期：阶段推进（放在首次读取判断之前）---
-    emerg_recovery_advance();
-
-    // 首次读取（启动后/重连后第一次）：不参与任何判断，数据正常更新，直接进入冷却
-    if (last_batt_reading < 0) {
-        last_batt_reading = batt;
-        batt_gear_cooldown = BATT_COOLDOWN_CYCLES;
-        return;
-    }
-
-    // 计算本周期温度变化量和常规升降档量（先算，给跳过逻辑参考）
-    // last_batt_reading 必定 >= 0（上方已早退处理 <0 的情况）
-    int batt_change = batt - last_batt_reading;
-    int abs_change = abs(batt_change);
-    int diff = batt - BATT_BASELINE;
-    int ad = abs(diff);
-    int sign = sign_of(diff);
-    // 紧急退出恢复期：将 BATT_BOUNDARY 阈值乘以恢复倍率，降低调档灵敏度
-    int eff_z1 = BATT_BOUNDARY_1 * emerg_recovery_mult;
-    int eff_z2 = BATT_BOUNDARY_2 * emerg_recovery_mult;
-    int eff_z3 = BATT_BOUNDARY_3 * emerg_recovery_mult;
-    int delta = temp_delta_by_boundary(ad, eff_z1, eff_z2, eff_z3) * sign;
-
-    debug_log(debug_gear, "batt_ctrl temp=%d (%.1f°C) diff=%d ad=%d sign=%d eff_z=[%d/%d/%d] delta=%d rec_mul=%d",
-              batt, batt / 10.0, diff, ad, sign, eff_z1, eff_z2, eff_z3, delta, emerg_recovery_mult);
-
-    int cur_idle = temp_idle_cycles;  // 快照：自上次有效变化以来已过的空闲周期数
-
-    // 温度跳过判定：1s 层检测到值变化（batt_window_changed）→ 进计算；
-    // 未变但 idle 未达 BATT_SKIP_MAX → 跳过；达上限 → 强制处理一次（防卡死）。
-    // idle 递增已由 main_loop 入口统一维护，此处不再自增。
-    if (!batt_window_changed && temp_idle_cycles < BATT_SKIP_MAX) {
-        debug_log(debug_gear, "batt_ctrl 温度未更新，跳过本周期 (idle=%d)", temp_idle_cycles);
-        return;
-    }
-
-    int skip_delta = 0;  // =1 时本次不执行常规升降档
-
-    // 冷却递减（放在 abs_change 判断之前）
-    int in_cooldown = (batt_gear_cooldown > 0);
-    if (in_cooldown) {
-        batt_gear_cooldown--;
-        skip_delta = 1;
-        debug_log(debug_gear, "batt_ctrl 冷却中，剩余%d周期", batt_gear_cooldown);
-    }
-    if (rev_comp_cooldown > 0) rev_comp_cooldown--;
-
-    // --------------- 反补查表 + 趋势豁免（已抽为 rev_comp_and_trend） ---------------
-    rev_comp_and_trend(batt, delta, batt_change, abs_change, eff_z2, cur_idle, in_cooldown, &skip_delta);
-    // ---- 应用常规升降档（仅当未被豁免/反补跳过时） ----
-    if (delta != 0 && !skip_delta) {
-        int old = batt_gear_base;
-        batt_gear_base += delta;
-        batt_gear_base = clamp(batt_gear_base, gear_min, gear_max);
-        if (old != batt_gear_base) {
-            batt_gear_cooldown = BATT_COOLDOWN_CYCLES;
-            write_log("挡位%d（%+d）", gear_label(batt_gear_base), delta);
-        }
-    }
-
-    debug_log(debug_gear, "batt_ctrl 最终 batt_gear_base=%d skip_delta=%d cooldown=%d",
-              batt_gear_base, skip_delta, batt_gear_cooldown);
-
-    // 更新温度记录
-    last_batt_reading = batt;
-}
+// 电池温度调档（battery_control）已随 Gear 删除
 
 // ======================== 紧急干预（CPU 温度） ========================
 
-/**
- * 紧急干预 — CPU 温度，每 5 秒一次。
- *
- * CPU 温度经 EMA 滤波（α=CPU_FILTER_ALPHA）。
- * 等级 = cpu_level(0~3)。
- * 升档即时响应（进入阈值）；降档逐级滞回（低于恢复阈值才允许）。
- * 等级 → 强制最低档位：EMERG_FORCED_1~4。
- */
-static void emergency_intervention(void) {
-    // --- 1. CPU 温度读入与滤波（1s 采集缓存） ---
-    int cpu_now = cached_cpu_now;
-    update_cpu_filtered(cpu_now);
-    int t = cpu_filtered_temp;
-    int cpu_valid = (cpu_now >= 0);
-    debug_log(debug_gear, "emerg CPU 原始%d 滤波%d 有效%d", cpu_now, t, cpu_valid);
-
-    int prev_level = emergency_level;
-    int new_level = emergency_level;
-
-    // --- 2. 计算 CPU 紧急级别（0~3） ---
-    int cpu_lvl = 0;
-    if (cpu_valid && EMERG_CPU_ENABLED) {
-        if      (t > CPU_EMERG_3) cpu_lvl = 3;
-        else if (t > CPU_EMERG_2) cpu_lvl = 2;
-        else if (t > CPU_EMERG_1) cpu_lvl = 1;
-    }
-    debug_log(debug_gear, "emerg cpu_lvl=%d prev_level=%d", cpu_lvl, prev_level);
-
-    // --- 3. 升降滞回 ---
-    // 升档：立即响应；降档：低于恢复阈值才逐级下降
-    if (cpu_lvl > emergency_level) {
-        new_level = cpu_lvl;
-    } else if (cpu_lvl < emergency_level) {
-        int cpu_ok = 0;
-        if (cpu_valid) {
-            if      (emergency_level >= 3) cpu_ok = (t < CPU_RECOVER_2);
-            else if (emergency_level >= 2) cpu_ok = (t < CPU_RECOVER_1);
-            else                           cpu_ok = (t < CPU_RECOVER_0);
-        }
-        if (cpu_ok) {
-            new_level = emergency_level - 1;
-            debug_log(debug_gear, "emerg 降级 %d→%d（cpu_ok=1）",
-                      emergency_level, new_level);
-        } else {
-            debug_log(debug_gear, "emerg 保持 %d（cpu_ok=0）",
-                      emergency_level);
-        }
-    }
-
-    // --- 4. 等级变化处理与日志 ---
-    if (new_level != emergency_level) {
-        int delta_e = new_level - emergency_level;
-        int cpu_disp = cpu_valid ? cpu_now : t;
-        write_log("紧急%d（%s%d）cpu%d.%d",
-                  new_level,
-                  (delta_e >= 0 ? "+" : ""), delta_e,
-                  cpu_disp / 10, cpu_disp % 10);
-
-        emergency_level = new_level;
-        batt_gear_cooldown = BATT_COOLDOWN_CYCLES;
-    }
-
-    // --- 5. 根据模式设定强制最低档位 ---
-    if (EMERG_MODE_ENTRY == 0) {
-        // 模式 0：查表强制最低档
-        const int EMERG_FORCED_TABLE[] = {0, EMERG_FORCED_1, EMERG_FORCED_2, EMERG_FORCED_3, EMERG_FORCED_4};
-        if (emergency_level >= 1 && emergency_level <= 4)
-            emerg_forced_gear = EMERG_FORCED_TABLE[emergency_level];
-        else
-            emerg_forced_gear = 0;
-    } else {
-        // 模式 1：升档模式 — 按等级计算最低档 = gear_min + EMERG_STEP * level
-        if (emergency_level > 0) {
-            emerg_forced_gear = gear_min + EMERG_STEP * emergency_level;
-            if (emerg_forced_gear > gear_max) emerg_forced_gear = gear_max;
-        } else {
-            emerg_forced_gear = 0;
-        }
-    }
-    debug_log(debug_gear, "emerg 最终等级=%d forced_min=%d", emergency_level, emerg_forced_gear);
-}
+// CPU 温度紧急干预（emergency_intervention）已随 Gear 删除
 
 // ======================== 电流-挡位映射 + 温度调整融合 ========================
 
-/**
- * 电流-挡位映射 + 温度融合模式。
- *
- * 电流经 EMA 平滑 + 倍率 → 推荐挡位（基础）。
- * 温度在推荐挡位上累积偏移（带冷却期），推荐挡位变化时偏移继承。
- * 最终挡位 = clamp(推荐 + 偏移, gear_min, gear_max)。
- *
- * 返回 1=已覆盖，0=回退常规模式。
- */
-static int gear_from_current(void) {
-    // 1. 读取电池电流（0.01A 单位，正=放电，负=充电）
-    int ua10 = read_batt_current_ua10();
-    if (ua10 == 0) {
-        // 退出时清空推荐挡位/偏移
-        //（与下方阈值退出路径 final_level < CURRENT_GEAR_MIN 的清理保持一致）。
-        curr_gear_recommended = 0;
-        curr_gear_temp_offset = 0;
-        curr_gear_temp_cooldown = 0;
-        return 0;
-    }
-
-    // 用户约定：负值 = 充电（充电电流），正值 = 放电（放电电流）
-    int is_charging = (ua10 < 0);
-    int abs_ua10 = (ua10 < 0) ? -ua10 : ua10;
-
-    // 2. 检查方向开关
-    int mode_enabled = is_charging ? CURRENT_GEAR_MODE_CHARGE : CURRENT_GEAR_MODE_DISCHARGE;
-    if (!mode_enabled) {
-        // 方向开关关闭时清空推荐挡位/偏移
-        curr_gear_recommended = 0;
-        curr_gear_temp_offset = 0;
-        curr_gear_temp_cooldown = 0;
-        return 0;
-    }
-
-    // 3. EMA 平滑
-    if (!curr_gear_smooth_valid) {
-        curr_gear_smooth_val = abs_ua10;
-        curr_gear_smooth_valid = 1;
-    } else {
-        curr_gear_smooth_val = EMA_DIR(abs_ua10, curr_gear_smooth_val, CURRENT_GEAR_SMOOTH_ALPHA);
-    }
-
-    // 4. 推荐挡位 = 平滑值(0.01A) × 倍率 ÷ 100
-    int multiplier = is_charging ? CURRENT_GEAR_MULT_CHARGE : CURRENT_GEAR_MULT_DISCHARGE;
-    int recommended = (curr_gear_smooth_val * multiplier) / 100;
-    recommended = clamp(recommended, gear_min, gear_max);
-
-    debug_log(debug_gear, "curr_gear sign=%s raw=%d smooth=%d rec=%d/%d",
-              is_charging ? "充电" : "放电", abs_ua10, curr_gear_smooth_val,
-              recommended, gear_label(recommended));
-
-    // 5. 温度偏移管理（温度用 Gear 调档输入 = 预测温度 + CPU 补偿）
-    int batt = gear_input_batt;
-    if (curr_gear_recommended > 0) {
-        // 已激活：每周期根据当前温度差计算偏移（不受冷却期阻挡）
-        // 冷却期仅阻止同方向继续累积，但反方向（温度回归方向）始终允许
-        if (batt >= 0) {
-            int diff = batt - BATT_BASELINE;
-            int ad = abs(diff);
-            int sign = sign_of(diff);
-            int delta = temp_delta_by_boundary(ad, BATT_BOUNDARY_1, BATT_BOUNDARY_2, BATT_BOUNDARY_3) * sign;
-            if (delta != 0) {
-                if (curr_gear_temp_cooldown > 0) {
-                    // 冷却期：仅允许向零靠近，阻止同方向继续累积
-                    if ((delta > 0 && curr_gear_temp_offset < 0) ||
-                        (delta < 0 && curr_gear_temp_offset > 0)) {
-                        curr_gear_temp_offset += delta;
-                    }
-                } else {
-                    curr_gear_temp_offset += delta;
-                    curr_gear_temp_cooldown = BATT_COOLDOWN_CYCLES;
-                }
-            }
-        }
-    } else {
-        // 初次进入/重新进入：以当前实际挡位为基准计算初始偏移
-        curr_gear_temp_offset = batt_gear_base - recommended;
-    }
-
-    // 6. 计算实际挡位 = 推荐 + 偏移
-    int final_level = recommended + curr_gear_temp_offset;
-    final_level = clamp(final_level, gear_min, gear_max);
-
-    // 7. 统一以实际挡位走阈值检查：低于阈值则退出/不进入电流映射
-    if (final_level < CURRENT_GEAR_MIN) {
-        curr_gear_recommended = 0;
-        curr_gear_temp_offset = 0;
-        curr_gear_temp_cooldown = 0;
-        return 0;
-    }
-
-    // 偏移继承日志（推荐挡位变化时温度偏移自然保留）
-    if (curr_gear_recommended > 0 && recommended != curr_gear_recommended) {
-        debug_log(debug_gear, "curr_gear rec变化 %d→%d, temp_offset=%+d 继承",
-                  curr_gear_recommended, recommended, curr_gear_temp_offset);
-    }
-    curr_gear_recommended = recommended;
-    batt_gear_base = final_level;
-
-    // 清除反补/豁免状态（切换模式时不应保留旧状态）
-    reset_exempt_state();
-    rev_comp_cooldown = 0;
-    last_batt_reading = -1;
-    temp_idle_cycles = 0;
-
-    debug_log(debug_gear, "curr_gear 融合 rec=%d temp_offset=%+d gear=%d",
-              recommended, curr_gear_temp_offset, gear_label(final_level));
-    return 1;
-}
+// 电流-挡位映射 + 温度融合（gear_from_current）已随 Gear 删除
 
 // ======================== PID 方差门控 ========================
 
@@ -2921,173 +1732,9 @@ static int gear_from_current(void) {
  * 两次推入间若有周期被跳过（无滤波跳过周期不推入），在缺档处线性插值补样本，
  * 保证方差窗口覆盖连续控制周期，反映真实温度变化率。
  */
-static void pid_var_push(int value, int cycle) {
-    if (pid_var_last_cycle >= 0 && cycle > pid_var_last_cycle + 1) {
-        // 距上次推入 gap = cycle - pid_var_last_cycle 个周期，缺中间 gap-1 个样本
-        int gap = cycle - pid_var_last_cycle;
-        for (int k = 1; k < gap; k++) {
-            int v = pid_var_last_value
-                    + (value - pid_var_last_value) * k / gap;
-            pid_var_buffer[pid_var_head] = v;
-            pid_var_head = (pid_var_head + 1) % PID_VAR_BUF_MAX;
-            if (pid_var_count < PID_VAR_BUF_MAX)
-                pid_var_count++;
-        }
-    }
-    pid_var_buffer[pid_var_head] = value;
-    pid_var_head = (pid_var_head + 1) % PID_VAR_BUF_MAX;
-    if (pid_var_count < PID_VAR_BUF_MAX)
-        pid_var_count++;
-    pid_var_last_value = value;
-    pid_var_last_cycle = cycle;
-}
+// PID 方差门控（pid_var_push / pid_var_compute）已随补丁删除
 
-/**
- * 计算当前缓冲区方差 Σ(xi-mean)²/n（0.1°C² 单位）
- * 采样不足时返回大值使方差门控不触发
- */
-static int pid_var_compute(void) {
-    int n = pid_ki_var_samples;
-    if (n > pid_var_count) n = pid_var_count;
-    if (n < 2) return 999999;  // 采样不足
-
-    int sum = 0;
-    for (int i = 0; i < n; i++) {
-        int idx = (pid_var_head - n + i + PID_VAR_BUF_MAX) % PID_VAR_BUF_MAX;
-        sum += pid_var_buffer[idx];
-    }
-    int mean = sum / n;
-    int var_sum = 0;
-    for (int i = 0; i < n; i++) {
-        int idx = (pid_var_head - n + i + PID_VAR_BUF_MAX) % PID_VAR_BUF_MAX;
-        int dev = pid_var_buffer[idx] - mean;
-        var_sum += dev * dev;
-    }
-    return var_sum / n;
-}
-
-// ======================== Gear 温度预测 ========================
-
-/**
- * 推入真实温度读数到预测缓冲区（仅 batt_temp_updated 时调用，Gear 模式）
- * @param batt_raw  原始电池温度（0.1°C）
- * @param gap       距上次真实读数的周期数（temp_idle_cycles + 1）
- */
-static void gear_predict_push(int batt_raw, int gap) {
-    PredictPoint *e = &gear_predict_buf[gear_predict_buf_head];
-    e->temp = batt_raw;
-    e->gap = gap;
-    gear_predict_buf_head = (gear_predict_buf_head + 1) % gear_predict_buf_n;
-    if (gear_predict_buf_cnt < gear_predict_buf_n) gear_predict_buf_cnt++;
-}
-
-/**
- * 温度平衡点预测。
- *
- * 算法：
- *   1. 在缓冲区中扫描最近峰/谷作为趋势起点
- *   2. 从峰/谷开始计算 per_cycle_delta（归一化温差，0.01°C/周期）
- *   3. 在绝对值空间计算加速度（delta 变化量）均值
- *   4. 迭代外推 delta 归零的点作为预测平衡温度
- *
- * @param batt_raw  本周期原始电池温度（0.1°C）
- * @return 预测平衡温度（0.1°C），0 表示数据不足/无法预测
- */
-static int gear_predict_compute(int batt_raw) {
-    // ---- 1. 最小数据检查 ----
-    if (gear_predict_buf_cnt < 2) return 0;
-
-    // ---- 2. 取窗口 ----
-    int win_n = gear_predict_win_n;
-    if (gear_predict_buf_cnt < win_n) win_n = gear_predict_buf_cnt;
-    int win_start = (gear_predict_buf_head - win_n + gear_predict_buf_n) % gear_predict_buf_n;
-
-    // 窗口内访问宏
-#define BUF_AT(off) gear_predict_buf[(win_start + (off)) % gear_predict_buf_n]
-
-    // ---- 3. 峰/谷检测（窗口内扫描温度拐点） ----
-    int pivot = 0;
-    for (int i = win_n - 2; i >= 1; i--) {
-        int t_prev = BUF_AT(i - 1).temp;
-        int t_cur  = BUF_AT(i).temp;
-        int t_next = BUF_AT(i + 1).temp;
-        // 峰: 前升后降；谷: 前降后升（等号归入不严格单调侧）
-        if ((t_prev <= t_cur && t_cur > t_next) ||
-            (t_prev >= t_cur && t_cur < t_next)) {
-            pivot = i;
-            break;
-        }
-    }
-
-    // ---- 4. 可用数据点数检查 ----
-    int usable_points = win_n - pivot;
-    if (usable_points < gear_predict_min_points) return 0;
-
-    // ---- 5. 计算 per_cycle_delta（带符号 + 绝对值，0.01°C/周期）----
-    int pcd_signed[9], pcd_abs[9];
-    int pcd_cnt = 0;
-    for (int i = pivot; i < win_n - 1; i++) {
-        int diff = BUF_AT(i + 1).temp - BUF_AT(i).temp;
-        int g = BUF_AT(i + 1).gap;
-        pcd_signed[pcd_cnt] = (diff * 10) / g;
-        pcd_abs[pcd_cnt] = abs(pcd_signed[pcd_cnt]);
-        pcd_cnt++;
-    }
-    // ---- 6. 稳定性闸门（×1）：最大 |delta| < min_delta → 压缩预测增量（× 抑制系数，0=完全抑制）----
-    int max_pcd_abs = 0;
-    for (int i = 0; i < pcd_cnt; i++)
-        if (pcd_abs[i] > max_pcd_abs) max_pcd_abs = pcd_abs[i];
-    int below_gate = (max_pcd_abs < gear_predict_min_delta);
-    if (below_gate && gear_predict_suppress <= 0) return 0;
-
-    // ---- 7. 2 点线性模式：仅 1 个 delta（2 有效点）→ 无法算加速度，线性外推 ----
-    //    预测 = 当前温度 + 两窗口间变化速度（1 周期外推），低于闸门时增量压缩
-    if (pcd_cnt < 2) {
-        int sign = (pcd_signed[0] >= 0) ? 1 : -1;
-        int weight = (sign >= 0) ? gear_predict_heat_weight : gear_predict_cool_weight;
-        if (weight <= 0) return 0;
-        int inc_10 = pcd_signed[0] / 10;   // 单周期变化速度（0.1°C，有符号）
-        if (below_gate) inc_10 = inc_10 * gear_predict_suppress / 100;
-        int predicted_10 = batt_raw + inc_10;
-        predicted_10 = (predicted_10 * weight + batt_raw * (10 - weight)) / 10;
-        return predicted_10;
-    }
-
-    // ---- 8. 加速度均值（绝对值空间，统一处理升/降温） ----
-    int accel_sum = 0, accel_cnt = 0;
-    for (int i = 0; i < pcd_cnt - 1; i++) {
-        accel_sum += pcd_abs[i + 1] - pcd_abs[i];
-        accel_cnt++;
-    }
-    int avg_accel = accel_sum / accel_cnt;
-    if (avg_accel >= 0) return 0;  // 仍在加速，无法预测平衡点
-
-    // ---- 9. 方向权重（0=禁用，10=全效预测） ----
-    int sign = (pcd_signed[pcd_cnt - 1] >= 0) ? 1 : -1;
-    int weight = (sign >= 0) ? gear_predict_heat_weight : gear_predict_cool_weight;
-    if (weight <= 0) return 0;
-
-    // ---- 10. 迭代预测 ----
-    int cur_delta = pcd_abs[pcd_cnt - 1];
-    if (cur_delta < gear_predict_min_delta)
-        cur_delta = gear_predict_min_delta;
-
-    int sum_01c = 0;       // 累积预测变化量（0.01°C）
-    int last_valid = 0;    // 最后一个 cur_delta > 0 时的 sum
-    while (cur_delta > 0) {
-        sum_01c += cur_delta;
-        cur_delta += avg_accel;      // avg_accel < 0，delta 递减
-        if (cur_delta > 0) last_valid = sum_01c;
-    }
-    if (below_gate) last_valid = last_valid * gear_predict_suppress / 100;  // 低于闸门：压缩增量
-    int predicted_10 = batt_raw + sign * (last_valid / 10);
-
-    // 按权重混合预测值与实际温度：weight=10 全效预测，weight=0 等同于实际温度
-    predicted_10 = (predicted_10 * weight + batt_raw * (10 - weight)) / 10;
-
-#undef BUF_AT
-    return predicted_10;
-}
+// Gear 温度预测（gear_predict_push / gear_predict_compute）已随 Gear 删除
 
 // ======================== 输入补偿（PID / Gear 共用） ========================
 
@@ -3120,192 +1767,70 @@ static int cpu_comp_now(int batt) {
     return (int)(pid_cpu_comp_smooth * 10 + 0.5f);
 }
 
-// ======================== Gear 调档输入温度 ========================
-
-/**
- * 计算 Gear 调档输入温度：原始电池温度 → 预测温度替代 → + CPU 补偿。
- * 每 5s 周期在 gear 分支开头计算一次，结果存 gear_input_batt，
- * battery_control / gear_from_current 直接读取，保证调档判断口径统一。
- * @return 调档输入温度（0.1°C），-1 表示无有效电池温度
- */
-static int gear_compute_input(void) {
-    int batt = cached_batt_raw;
-    if (batt < 0) return -1;
-
-    // 预测温度替代实际温度（参与偏差/边界/反补/趋势豁免全部调档判断）
-    if (gear_predict_heat_weight > 0 || gear_predict_cool_weight > 0) {
-        int pred = gear_predict_compute(batt);
-        if (pred != 0) {
-            // 预测成功：ramp-up 渐进钳位（在平滑之前）
-            int max_rise = gear_predict_max_rise;
-            if (gear_predict_ramp_cycles > 0
-                && gear_predict_consecutive < gear_predict_ramp_cycles) {
-                max_rise = gear_predict_max_rise
-                           * (gear_predict_consecutive + 1)
-                           / gear_predict_ramp_cycles;
-            }
-            int clamped = clamp(pred, batt - max_rise, batt + max_rise);
-
-            if (!gear_predict_was_active) {
-                // 转换 IN：防跳变平滑（以上周期平滑值或实际温度为基准）
-                int base = (gear_predict_smoothed >= 0) ? gear_predict_smoothed : batt;
-                gear_predict_smoothed = EMA_DIR(clamped, base, gear_predict_alpha);
-            } else {
-                // 连续预测：轻量自平滑
-                gear_predict_smoothed = EMA_DIR(clamped, gear_predict_smoothed, gear_predict_alpha);
-            }
-            batt = gear_predict_smoothed;
-            gear_predict_was_active = 1;
-            gear_predict_consecutive++;
-            debug_log(debug_gear, "predict raw=%d(%.1f°C) clamp=%d smoothed=%d ramp=%d/%d",
-                      pred, pred / 10.0, clamped, gear_predict_smoothed,
-                      gear_predict_consecutive, gear_predict_ramp_cycles);
-        } else if (gear_predict_was_active) {
-            // 转换 OUT：防跳变平滑（向实际温度靠拢）
-            gear_predict_smoothed = EMA_DIR(batt, gear_predict_smoothed, gear_predict_alpha);
-            batt = gear_predict_smoothed;
-            gear_predict_was_active = 0;
-            gear_predict_consecutive = 0;
-            debug_log(debug_gear, "predict out batt=%d smoothed=%d", batt, gear_predict_smoothed);
-        } else {
-            // 连续不预测：使用实际温度
-            gear_predict_smoothed = batt;
-        }
-    }
-
-    // CPU 补偿（基于原始电池温度计算，加到预测/实际温度上）
-    batt += cpu_comp_now(cached_batt_raw);
-    return batt;
-}
-
 // ======================== PID 控制函数 ========================
 
 /**
- * PID 计算（滤波模式下每周期调用；无滤波模式仅温度/补偿变化时调用）
- * @param batt_10  电池温度（0.1°C），已 EMA 滤波
+ * PID 计算（单累积器）：OUTPUT = clamp(acc + kdp, 0, 1)。
+ * - error 为纯电池误差（不含 CPU 补偿）；cpu_comp 与速度同地位，算 ch 时加入。
+ * - 速度 v = (error − 上次error)/dt（倍率系数缩放，不乘 dt）。
+ * - ch 用于积分（acc += ki×(ch − target_f)），ch_kdp 用于 KDP（速度按 0.33 衰减，无记忆）。
+ * - 动态目标 target_f（EMA 平滑），使积分逼近"误差×目标系数"包络，防静态过冲。
+ * - 温度未变（batt_window_changed=0）时 kdp 沿用上次值（跳过①），避免补偿突变带动 KDP 跳变。
+ * @param batt_10  原始电池温度（0.1°C，纯电池，不含补偿）
  * @param dt       距上次重算以来的 5 秒周期数（钳位 0.6~6，1 = 5s）
+ * @param cpu_comp CPU 补偿（°C，已 EMA 平滑）
+ * @param batt_window_changed 本周期温度窗口是否变化（0=温度未变，kdp 沿用）
  * @return 归一化输出 0.0~1.0
  */
-static float pid_compute(int batt_10, float dt) {
-    int target_10 = BATT_BASELINE;
-    int error_10 = batt_10 - target_10;
-    float error = error_10 / 10.0f;
+static float pid_compute(int batt_10, float dt, float cpu_comp, int batt_window_changed) {
+    // 输入误差（纯电池）
+    float error = (batt_10 - BATT_BASELINE) / 10.0f;
 
-    // P 项（线性，无分段）：比例增益 pid_kp，偏差 3°C 达满幅（0.3×3=0.9）
-    float p = (pid_kp / 1000.0f) * error;
+    // 速度项（°C/周期）：首次重算（无常值历史）时 v=0
+    float v = 0.0f;
+    if (pid_last_change_time != 0)
+        v = (error - pid_last_error) / dt;
+    pid_last_error = error;
 
-    // D 项（线性 + 泄漏记忆 + 预算/幅值限幅；先于 I 计算，供 I 预算使用）
-    // 上升/下降独立倍率：de>0（升温）用 pid_kd_up、de<0（降温）用 pid_kd_down
-    // 泄漏记忆：d_state 每周期向 0 收敛固定量（消除方向不对称），再加新贡献
-    // 预算链：d_state 正方向不超过 1−p（防 P+D 超 1 被末端 clamp 硬截断）
-    float de = error - pid_prev_error;
-    float d_new = 0.0f;
-    if (pid_prev_error != 0 || pid_last_batt >= 0) {   // 首次跳过
-        float kd = (de >= 0.0f) ? (pid_kd_up / 1000.0f) : (pid_kd_down / 1000.0f);
-        d_new = kd * de / dt;
-        // 近区降敏（PID_KD_NEAR 双值：阈值(0.1°C) 倍率(%)）：|de| < 阈值视为近区（微抖），变化量 × 倍率
-        // 默认 2 33 = 0.2°C 内 × 33%；|de| ≥ 阈值全量响应
-        float de_abs = (de >= 0.0f) ? de : -de;
-        if (de_abs < pid_kd_near_bound / 10.0f)
-            d_new *= pid_kd_near_mult / 100.0f;
-    }
-    pid_prev_error = error;
-    // 泄漏衰减（固定值向 0 收敛，正负对称）
-    if (pid_d_state > 0.0f) {
-        pid_d_state -= pid_kd_leak / 1000.0f;
-        if (pid_d_state < 0.0f) pid_d_state = 0.0f;
-    } else if (pid_d_state < 0.0f) {
-        pid_d_state += pid_kd_leak / 1000.0f;
-        if (pid_d_state > 0.0f) pid_d_state = 0.0f;
-    }
-    pid_d_state += d_new;
-    // 幅值上限（对称）
-    // 动态：基础值 pid_kd_max + 距基准温度每 °C × 斜率 pid_kd_slope（误差大放宽、接近基准收紧）
-    float d_max = pid_kd_max / 1000.0f;
-    d_max += (pid_kd_slope / 1000.0f) * ((error >= 0.0f) ? error : -error);
-    if (pid_d_state >  d_max) pid_d_state =  d_max;
-    if (pid_d_state < -d_max) pid_d_state = -d_max;
-    // 预算链限幅（正方向不超过 1−p；负方向不占预算，raw 底部 clamp 0 截断）
-    if (pid_d_state > 0.0f && pid_d_state > 1.0f - p)
-        pid_d_state = (1.0f - p > 0.0f) ? (1.0f - p) : 0.0f;
-    float d = pid_d_state;
+    // ch（受控量，用于积分）与 ch_kdp（用于 KDP，速度按 0.33 衰减）
+    float sc = pid_speed_coef / 1000.0f;
+    float ch    = error + v * sc + cpu_comp;
+    float chkdp = error + v * sc * 0.33f + cpu_comp;
 
-    // I 项（方差门控 + 死区回退）
-    // 方差门控：温度稳定（方差<阈值）时全温度段启用 I 累积
-    // 死区回退：方差门控未激活时，仅在 |error|<deadband 内累积
-    // 两者均不满足时冻结 I（防 windup）
-    int ki_active = 0;
-    int ki_gate = 0;      // 门控来源：0=冻结 1=方差门控 2=死区门控（仅日志用）
-    int v = -1;           // 当前方差（仅日志用，-1=采样不足未计算）
-    if (pid_ki_var_threshold > 0 && pid_var_count >= 2) {
-        v = pid_var_compute();
-        if (v < pid_ki_var_threshold) { ki_active = 1; ki_gate = 1; }
-    }
-    if (!ki_active && pid_ki_deadband > 0) {
-        float db = pid_ki_deadband / 10.0f;
-        if (error > -db && error < db) { ki_active = 1; ki_gate = 2; }
-    }
-    // V 形增益累积（建立慢、释放快）：高基准受门控、低基准无条件
-    // 高基准（error>0，门控激活时）：gain = up_base + up_slope×error，每高于基准1°增益+20
-    // 降温抑制（PID_KI_FALL）：降温时被积项改 error−降温值×权重（钳≥0，仅放缓建、不主动释放），下降惩罚等比例缩小
-    float sup = 1.0f;   // 降温抑制比例（1=不抑制；<1=放缓建立；0=完全抑制）
-    if (ki_active && error >= 0.0f) {
-        float gain = (pid_ki_up_base + pid_ki_up_slope * error) / 1000.0f;
-        float efac = error;
-        if (pid_ki_fall_c1 > 0 && pid_ki_fall_filt > 0.0f) {
-            efac = error - pid_ki_fall_filt * pid_ki_fall_c1;
-            if (efac < 0.0f) efac = 0.0f;
-            if (error > 0.0f) sup = efac / error;
-        }
-        pid_integral_accum += gain * efac * dt;
-    }
-    // 低基准（error<0，无条件）：gain = down_base + down_slope×|error|，每低于基准1°回落+50
-    if (error < 0.0f) {
-        float e_abs = -error;
-        float gain = (pid_ki_down_base + pid_ki_down_slope * e_abs) / 1000.0f;
-        pid_integral_accum -= gain * e_abs * dt;
-    }
-    // 下降惩罚（本次比上次降温 de<0，无条件）：每降低1°扣 drop/1000 的累计值，直接作用于累积量
-    if (de < 0.0f) {
-        float dp = (pid_ki_drop / 1000.0f) * (-de);
-        if (error >= 0.0f) dp *= sup;   // 降温抑制时下降惩罚等比例缩小
-        pid_integral_accum -= dp;
-    }
-    // 积分衰减：固定衰减 + 近基准速度衰减（PID_KI_NEAR，想法5）
-    float ki_decay = pid_ki_leak / 1000.0f;
-    // 想法5：近基准速度衰减（降温快→加快衰减防过冲；升温快→减慢释放/保留；仅近基准|error|≤死区且窗口方向有效）
-    //   w = (窗口均速 − 基准速率) × 缩放；受既有积分预算上限与 ≥0 下限钳制
-    if (pid_near_dir != 0) {
-        float e_abs = (error >= 0.0f) ? error : -error;
-        if (e_abs <= (float)pid_ki_deadband / 10.0f) {
-            float w = (pid_near_s - (float)pid_ki_near_base / 10.0f) * (float)pid_ki_near_scale;
-            ki_decay += (float)pid_near_dir * w / 1000.0f;
-        }
-    }
-    pid_integral_accum -= ki_decay;
-    // I 预算上限：min(剩余预算 1−p−d, 固定值 667)，再单向下限 0
-    float i_limit = pid_integral_limit / 1000.0f;
-    float i_budget = 1.0f - p - d;
-    if (i_budget < 0.0f) i_budget = 0.0f;
-    if (i_budget < i_limit) i_limit = i_budget;
-    if (pid_integral_accum >  i_limit) pid_integral_accum =  i_limit;
-    // 积分单向限制 0~+LIMIT（低温回落已在此处归零，不产生负积分）
-    if (pid_integral_accum < 0.0f)    pid_integral_accum = 0.0f;
+    // 动态目标（EMA）：raw_target = clamp(error×目标系数, ±0.5°C)
+    float raw_target = error * (pid_target_coef / 1000.0f);
+    if (raw_target >  0.5f) raw_target =  0.5f;
+    if (raw_target < -0.5f) raw_target = -0.5f;
+    pid_target_f += (pid_target_alpha / 100.0f) * (raw_target - pid_target_f);
+
+    // 积分累积（acc；不乘 dt）
+    pid_ki += (pid_ki_coef / 1000.0f) * (ch - pid_target_f);
+
+    // KDP（融合 P+D）：温度变了才更新；温度未变沿用上次值（跳过①）
+    if (batt_window_changed)
+        pid_kdp = (pid_kdp_coef / 1000.0f) * chkdp;
+
+    // 预算钳制：acc ≥0 且 ≤ max(0, 1−kdp)（防 acc+kdp 超 1 被末端硬截断，即抗 windup）
+    float budget = 1.0f - pid_kdp;
+    if (budget < 0.0f) budget = 0.0f;
+    if (pid_ki > budget) pid_ki = budget;
+    if (pid_ki < 0.0f)   pid_ki = 0.0f;
+
+    pid_last_ch = ch;
 
     // 钳位 0~1
-    float raw = p + pid_integral_accum + d;
-    float raw_pre = raw;   // 钳位前值（仅日志用）
-    if (raw < 0.0f) raw = 0.0f;
-    if (raw > 1.0f) raw = 1.0f;
-    // 分项诊断（仅 debug_pid 开启时输出）：P/I/D 贡献 + 钳位前后 + 门控来源 + 方差
-    const char *gate = ki_active ? (ki_gate == 1 ? "var" : "dead") : "frozen";
-    pid_log("p=%.2f i=%.2f d=%.2f raw=%.2f out=%.2f ki=%s var=%d", p, pid_integral_accum, d, raw_pre, raw, gate, v);
-    return raw;
+    float out = pid_ki + pid_kdp;
+    if (out < 0.0f) out = 0.0f;
+    if (out > 1.0f) out = 1.0f;
+
+    pid_log("e=%.2f v=%.2f ch=%.2f tgt=%.2f ki=%.2f kdp=%.2f out=%.2f win=%d",
+            error, v, ch, pid_target_f, pid_ki, pid_kdp, out, batt_window_changed);
+    return out;
 }
 
 /**
  * 热端温度线性映射 + EMA 平滑 + 双向滞回：无上下限，低于 HOT_MAP_MIN 或高于 HOT_MAP_MAX 时线性外推
- * 最终钳制在下发阶段（apply_gear / apply_gear_direct 内部）
+ * 最终钳制在下发阶段（apply_gear_direct 内部）
  *
  * 平滑：输入先经 RPM_SMOOTH_ALPHA EMA 平滑（与冷端共用系数）
  * 滞回（基于平滑后的值）：
@@ -3363,7 +1888,7 @@ static int rpm_from_hot_end(int hot_10) {
 /**
  * 冷强度指数映射：n^exp，无上下限
  * cold < cold_map_start 时线性外推下限（powf 负数底数→NaN）
- * 最终钳制在下发阶段（apply_gear / apply_gear_direct 内部）
+ * 最终钳制在下发阶段（apply_gear_direct 内部）
  */
 static int rpm_from_cold_exp(int cold) {
     static int cold_rpm_smoothed = -1;  // RPM_SMOOTH_ALPHA EMA 平滑
@@ -3434,8 +1959,8 @@ static int apply_gear_direct(int mode, int target,
     if (cold < cold_pre_clamp)
         write_log("过热钳制冷 %d→%d（上限削减 %d）", cold_pre_clamp, cold, hot_derate);
 
-    // 偏差 = (滤波后电池温度 + 补偿) - 目标温度，取自上一周期 PID 计算的结果
-    int batt_10 = (pid_batt_filtered >= 0) ? pid_batt_filtered : BATT_BASELINE;
+    // 偏差 = (原始电池温度 + 补偿) - 目标温度
+    int batt_10 = (cached_batt_raw >= 0) ? cached_batt_raw : BATT_BASELINE;
     int dev_10 = batt_10 + pid_last_comp_10 - BATT_BASELINE;
     int hot_deg = (cooler_hot_temp > 0) ? cooler_hot_temp / 10 : 0;
     write_log("%d%+.1f° %s 冷%d 热%d° RPM%d",
@@ -3453,71 +1978,39 @@ static int apply_gear_direct(int mode, int target,
     return 1;
 }
 
+/** 重置 PID 输出端自适应 EMA 滤波状态（切模式/重连/对齐后直取新目标） */
+static void pid_out_state_reset(void) {
+    pid_out_prev = -1;
+    pid_out_last_batt = -1;
+    pid_out_last_cycle = -1;
+    pid_out_prev2_batt = -1;
+}
+
 /**
  * 重置 PID 核心状态（积分、误差、滤波、补偿、方差缓冲区）
  * 不同场景的调用者在此基础上附加各自的额外重置逻辑
  */
 static void pid_reset_core(void) {
-    pid_integral_accum = 0;
-    pid_d_state = 0.0f;   // D 项泄漏记忆清零（防切模式/重置后残留旧前馈）
-    pid_prev_error = 0;
-    pid_batt_filtered = -1;
-    pid_last_batt = -1;
+    pid_ki = 0.0f;
+    pid_kdp = 0.0f;
+    pid_target_f = 0.0f;
+    pid_last_error = 0.0f;
+    pid_last_ch = 0.0f;
     pid_last_change_time = 0;
     pid_cpu_comp_smooth = 0.0f;
     pid_last_comp_10 = 0;
-    // 方差门控状态重置（环形缓冲区 + 插值锚点）
-    pid_var_count = 0;
-    pid_var_head = 0;
-    pid_var_last_value = -1;
-    pid_var_last_cycle = -1;
     pid_cpu_comp_ready = 0;
     pid_cpu_comp_active = 0;
-    // PID 输出端滤波状态重置（切模式/重连/重置后直取新目标）
-    pid_out_prev = -1;
-    pid_out_last_batt = -1;
-    pid_out_last_cycle = -1;
-    pid_out_prev2_batt = -1;
-    // PID_KI_FALL 降温抑制状态重置（短断联保留场景恰好不触发 pid_reset_core）
-    pid_ki_fall_filt = 0.0f;
-    pid_ki_prev_batt = -1;
-    pid_ki_last_cycle = -1;
-    // 想法1 滤波计数/过渡重置
-    pid_filter_count = 0;
-    pid_filter_was_eff = 1;
-    pid_filter_trans = 0;
-    // 想法5 近基准速度窗口重置
-    near_seg_dir = 0;
-    near_seg_start_cycle = pid_ctrl_cycles;
-    near_seg_start_temp = 0;
-    near_prev_temp = -1;
-    near_seg_reccnt = 0;
-    pid_near_s = 0.0f;
-    pid_near_dir = 0;
+    pid_out_state_reset();
 }
 
-/**
- * CTRL_MODE 0→1 热切换时对齐 PID 初始值
- * 从当前 gear 状态映射到 PID 输出空间
- */
-static void pid_align_from_gear(void) {
-    // 除数保护：gear_max == gear_min 时按 1 处理
-    int gear_span = gear_max - gear_min;
-    if (gear_span < 1) gear_span = 1;
-    float ratio = (float)(batt_gear_base - gear_min) / gear_span;
-    pid_ratio_saved = ratio;   // 记录无级对齐量（切回 Gear 时映射回档位）
-    pid_align_rpm  = fan_rpm_min + (int)(ratio * (active_fan_max - fan_rpm_min));
-    pid_align_cold = pid_cold_min + (int)(ratio * (eff_cold_max(active_pid_cold_max, pid_cold_min) - pid_cold_min));
-    pid_reset_core();
-    last_bcast_valid     = 0;
-    write_log("PID 从 gear 对齐 ratio=%.2f cold=%d", ratio, pid_align_cold);
-}
+// Gear 模式切换对齐（pid_align_from_gear）已随 Gear 删除
 
 /**
  * 按制冷强度参考值对齐 PID 初始输出。
  * @param cold_ref 制冷强度参考值（存档值或 LSP 回传实际值）
- * @param cold_max 参考值所在档位的制冷上限（存档用 pid_cold_max，LSP 用 active_pid_cold_max）
- * @return 对齐比例（0~1），用于映射基础档位
+ * @param cold_max 参考值对应的制冷上限（存档用 pid_cold_max，LSP 用 active_pid_cold_max）
+ * @return 对齐比例（0~1），用于映射制冷强度
  */
 static float pid_ratio_from_cold(int cold_ref, int cold_max) {
     // 除数保护：cold_max == pid_cold_min 时按 1 处理
@@ -3527,11 +2020,7 @@ static float pid_ratio_from_cold(int cold_ref, int cold_max) {
     if (ratio < 0.0f) ratio = 0.0f;
     if (ratio > 1.0f) ratio = 1.0f;
     pid_align_cold = cold_ref;
-    // 输出滤波状态重置（外部对齐目标变更）
-    pid_out_prev = -1;
-    pid_out_last_batt = -1;
-    pid_out_last_cycle = -1;
-    pid_out_prev2_batt = -1;
+    pid_out_state_reset();
     pid_align_rpm  = fan_rpm_min + (int)(ratio * (active_fan_max - fan_rpm_min));
     pid_ratio_saved = ratio;
     return ratio;
@@ -3577,43 +2066,18 @@ static void reconnect_align(void) {
     if (cooler_cold_real >= COLD_MIN) actual_cold = cooler_cold_real;
     if (cooler_rpm_real >= fan_rpm_min) actual_rpm = cooler_rpm_real;
 
-    if (ctrl_mode == 1) {
-        // 断联 < reconnect_keep_cycles 个控制周期(×5s)：短断联保留 PID 状态（kd/积分/误差/滤波），
-        // 仅对齐实际值；长断联则完整重置。
-        // 仅在真有断联记录（discon_sec>0）时决策+打印：同一重连会被 reconnect_align 重复进入
-        // （设备切换 + app 复活各一次），第二次 last_disconnect_time 已清零 → discon_sec=0，
-        // 若此时仍走该分支会恒命中"<N周期"打印"断联0秒"伪日志；无断联记录仅对齐实际值、保留状态、不打日志
-        if (discon_sec > 0) {
-            if (reconnect_keep_cycles > 0 && discon_sec < reconnect_keep_cycles * 5) {
-                write_log("重连 断联%d秒<%d周期，保留 PID 状态", discon_sec, reconnect_keep_cycles);
-            } else {
-                // PID 模式：重置 PID 状态（积分/误差/滤波），制冷/转速初值取回传实际值，
-                // 由 rate_limited_execute 从回传值向 PID 目标正常步进
-                pid_reset_core();
-                pid_filter_interval_smooth = -1;
-                pid_filter_auto_off = 0;
-                temp_idle_cycles = 0;
-                // 回传异常时保持原值（函数开头已处理有效回传覆盖）
-                actual_target_temp = -1;
-                write_log("重连 PID 状态已重置，制冷从回传实际值起步 cold=%d", actual_cold);
-                last_batt_reading = -1;
-                first_run = 1;
-            }
+    // 断联 < reconnect_keep_cycles 个控制周期(×5s)：短断联保留 PID 状态（积分/误差），仅对齐实际值；长断联则完整重置。
+    if (discon_sec > 0) {
+        if (reconnect_keep_cycles > 0 && discon_sec < reconnect_keep_cycles * 5) {
+            write_log("重连 断联%d秒<%d周期，保留 PID 状态", discon_sec, reconnect_keep_cycles);
+        } else {
+            // 重置 PID 状态，制冷/转速初值取回传实际值，由 rate_limited_execute 从回传值向 PID 目标正常步进
+            pid_reset_core();
+            write_log("重连 PID 状态已重置，制冷从回传实际值起步 cold=%d", actual_cold);
+            first_run = 1;
         }
-        return;
     }
-
-    // --- gear 模式：直接以散热器实际回传值起步 ---
-    debug_log(debug_conn, "reconnect_align actual_rpm=%d actual_cold=%d", actual_rpm, actual_cold);
-    int safe_level = clamp(final_gear, gear_min, gear_max);
-    actual_target_temp = gear_table[safe_level - 1].target;
-    last_batt_reading = -1;
-    first_run = 1;
-    // 不下发，等下轮 rate_limited_execute 从实际值自然过渡
 }
-
-/** 记录上一轮紧急等级，退出紧急时用作档位上限 */
-static int prev_emerg_level = 0;
 
 /**
  * PID 输出端自适应 EMA 滤波（PID_OUT_FILTER）。
@@ -3625,8 +2089,7 @@ static int prev_emerg_level = 0;
  *   温差大（真趋势）→ α 高 → 快速跟随；温差小（稳态）→ α 低 → 强滤波压抖。
  * 0.1° 抖动识别：单步温差恰为 0.1° 且上上次温度与本次相同（来回抖回原位）→ 视为无变化。
  *
- * 判据温度用原始值 cached_batt_raw（滤波后值会把温差摊平、判据失真）；
- * 偏差用 PID 滤波后输入 pid_batt_filtered（与 pid_compute 内部口径一致）。
+ * 判据温度用原始值 cached_batt_raw；偏差同样用原始温度（与 pid_compute 口径一致）。
  * 下降方向（目标<上次输出）α×下降倍率，制冷回落更快更干脆。
  * 输出方向取整（增大向上、减小向下），并钳制到当前模式有效范围。
  */
@@ -3655,7 +2118,7 @@ static int pid_out_filter(int target) {
     pid_out_last_cycle = pid_ctrl_cycles;
 
     // --- α 计算（千分制）：α = d_eff×温差增益 + 偏差×偏差增益；先做下限钳制（base 为钳制值，最低 0.1），再处理下降方向 ×下降倍率；clamp [0.1, 1000] ---
-    int pid_input_10 = (pid_batt_filtered >= 0) ? pid_batt_filtered : batt;
+    int pid_input_10 = batt;
     int dev_10 = pid_input_10 - BATT_BASELINE;
     if (dev_10 < 0) dev_10 = -dev_10;
     int alpha_mil = d_eff_10 * pid_out_temp_gain
@@ -3683,175 +2146,27 @@ static int pid_out_filter(int target) {
 }
 
 /**
- * 按当前模式分发执行（限速统一下沉到 apply_gear / apply_gear_direct 内部）
- * PID 模式：传 pid_align_* → apply_gear_direct 内部限速
- * Gear 模式：apply_gear 内部限速
+ * 速率限制执行：返回 1=实际下发了制冷变化，0=跳过（无变化/去重）。
+ * 输出端滤波 → 制冷限速 → 独立风扇计算（不跟 PID 输出）→ 风扇限速 → 纯下发
  */
-/** 速率限制执行：返回 1=实际下发了制冷变化，0=跳过（无变化/去重）。 */
 static int rate_limited_execute(void) {
-    // --- PID 模式：输出端滤波 → 制冷限速 → 独立风扇计算（不跟 PID 输出）→ 风扇限速 → 纯下发 ---
-    if (ctrl_mode == 1) {
-        pid_align_cold = pid_out_filter(pid_align_cold);
-        rate_limit_cold(pid_align_cold);
-        int send_rpm = rate_limit_fan(compute_fan_target());
-        return apply_gear_direct(1, 5, send_rpm, actual_cold, 0);
-    }
-
-    // --- Gear 模式：限速已内建到 apply_gear（GEAR_AUTO_FAN 分支同样独立计算风扇） ---
-    return apply_gear(final_gear);
+    pid_align_cold = pid_out_filter(pid_align_cold);
+    rate_limit_cold(pid_align_cold);
+    int send_rpm = rate_limit_fan(compute_fan_target());
+    return apply_gear_direct(1, 5, send_rpm, actual_cold, 0);
 }
 
 /**
- * PID 模式控制周期（每 5s）：输入滤波 → CPU 补偿 → PID 计算 → 映射制冷。
- * 预测已迁到 Gear，PID 直接使用滤波值，无档位/紧急逻辑。
+ * PID 模式控制周期（每 5s）：CPU 补偿 → 两条跳过判定 → PID 计算 → 映射制冷。
+ * 输入用原始电池温度（无滤波），重算由温度窗口变化或补偿变化门控。
  */
 static void pid_cycle(void) {
     time_t now = time(NULL);
-    pid_ctrl_cycles++;               // 单调周期计数（方差插值用；跳过周期也计数，保证插值对齐真实时间）
+    pid_ctrl_cycles++;               // 单调周期计数
     int batt_raw = cached_batt_raw;   // 1s 采集缓存
     if (batt_raw < 0) return;
 
-    // --- 想法5：近基准速度窗口 推进（连续同向段 + 两上限取长；每控制周期推进，独立于重算） ---
-    if (near_prev_temp >= 0) {
-        int d = batt_raw - near_prev_temp;
-        int sd = (d > 0) ? 1 : (d < 0) ? -1 : 0;
-        if (sd != 0) {
-            if (near_seg_dir != 0 && sd != near_seg_dir) {
-                near_seg_start_cycle = pid_ctrl_cycles - 1;   // 方向反转 → 开新段，起点=上一有效点
-                near_seg_start_temp  = near_prev_temp;
-                near_seg_reccnt = 0;
-            }
-            near_seg_dir = sd;
-        }
-    } else {
-        near_seg_start_cycle = pid_ctrl_cycles;
-        near_seg_start_temp  = batt_raw;
-        near_seg_reccnt = 0;
-    }
-    near_prev_temp = batt_raw;
-    int ring_idx = pid_ctrl_cycles % 9;
-    near_ring_cycle[ring_idx] = pid_ctrl_cycles;
-    near_ring_temp[ring_idx]  = batt_raw;
-    // 窗口A=段内第 N 次重算前（段内重算≤上限则用段起点）；窗口B=近 N 周期前（段长≤上限则用段起点）；取时长较长者
-    int cyc_now = pid_ctrl_cycles;
-    int wsA_cyc = near_seg_start_cycle, wsA_t = near_seg_start_temp;
-    if (near_seg_reccnt > pid_ki_near_recount) {
-        int k = (near_seg_reccnt - pid_ki_near_recount) % 4;
-        wsA_cyc = near_re_cycle[k];
-        wsA_t   = near_re_temp[k];
-    }
-    int durA = cyc_now - wsA_cyc;
-    int wsB_cyc, wsB_t;
-    if (near_seg_start_cycle <= cyc_now - pid_ki_near_cycn) {
-        wsB_cyc = cyc_now - pid_ki_near_cycn;
-        wsB_t   = near_ring_temp[wsB_cyc % 9];
-    } else {
-        wsB_cyc = near_seg_start_cycle;
-        wsB_t   = near_seg_start_temp;
-    }
-    int durB = cyc_now - wsB_cyc;
-    float sA = 0.0f, sB = 0.0f;
-    if (durA >= 1) sA = (float)(batt_raw - wsA_t) / (float)durA;
-    if (durB >= 1) sB = (float)(batt_raw - wsB_t) / (float)durB;
-    float s = (durA >= durB) ? sA : sB;
-    pid_near_s = (s < 0) ? -s : s;   // 绝对值速率（°C/周期）
-    pid_near_dir = near_seg_dir;
-
-    // --- 降温值跟踪（PID_KI_FALL 降温抑制用；每控制周期推进，独立于 pid_compute 重算时机） ---
-    // 降温值 = 每控制周期降温速率（°C/周期）：本周期原始温度比上周期低时，跨缺档 gap 摊平；再 EMA 滤波（α33）
-    // 首次降温（滤波值为0）不滤波直取；停止降温按输入 0 继续滤波直至归零
-    int fgap = (pid_ki_last_cycle >= 0) ? (pid_ctrl_cycles - pid_ki_last_cycle) : 1;
-    float fdrop = 0.0f;
-    if (pid_ki_prev_batt >= 0 && fgap >= 1 && batt_raw < pid_ki_prev_batt)
-        fdrop = (float)(pid_ki_prev_batt - batt_raw) / 10.0f / (float)fgap;
-    pid_ki_prev_batt = batt_raw;
-    pid_ki_last_cycle = pid_ctrl_cycles;
-    if (fdrop > 0.0f) {
-        if (pid_ki_fall_filt <= 0.0f) pid_ki_fall_filt = fdrop;
-        else pid_ki_fall_filt = (fdrop * 33 + pid_ki_fall_filt * 67) / 100.0f;
-    } else {
-        pid_ki_fall_filt = pid_ki_fall_filt * 67 / 100.0f;
-        if (pid_ki_fall_filt < 0.05f) pid_ki_fall_filt = 0.0f;
-    }
-
-    // --- 温度更新周期跟踪（基于周期数，非时间） ---
-    // idle 递增已由 main_loop 入口按窗口变化统一维护，此处只做采样 push
-    // 方差采样 push 已下移到 pid_input 计算之后：与 PID 计算输入标准保持一致
-    if (batt_temp_updated) {
-        int gap = temp_idle_cycles + 1;  // 距离上次更新经过的周期数
-        if (pid_filter_interval_smooth < 0) {
-            pid_filter_interval_smooth = gap * 10;  // ×10 转 0.1周期
-        } else {
-            int old_s = pid_filter_interval_smooth;
-            // 钳位输入值：钳位值 = 自动关闭阈值 × 倍数，防偶发长间隙平滑值异常跳变
-            int raw_gap = gap * 10;
-            int gap_max = pid_filter_auto_threshold_on * PID_FILTER_GAP_MULT;
-            if (raw_gap > gap_max) raw_gap = gap_max;
-            pid_filter_interval_smooth = EMA(raw_gap, old_s, pid_filter_auto_alpha);
-            // 方向取整：平滑值增大→向上取整，减小→向下取整
-            if (pid_filter_interval_smooth > old_s) pid_filter_interval_smooth++;
-        }
-    }
-    // else：值未变，不推入新样本（idle 已由入口维护）
-
-    // --- 自适应滤波开关（仅在配置开启时生效，不修改配置文件值） ---
-    int filter_cfg_on = pid_input_filter_enabled;
-    if (filter_cfg_on && pid_filter_interval_smooth >= 0) {
-        if (pid_filter_auto_off) {
-            if (pid_filter_interval_smooth < pid_filter_auto_threshold_off) {
-                pid_filter_auto_off = 0;
-                pid_log("滤波 自适应恢复（间隔%.1f <%d.%d周期）",
-                         pid_filter_interval_smooth / 10.0,
-                         pid_filter_auto_threshold_off / 10, pid_filter_auto_threshold_off % 10);
-            }
-        } else {
-            if (pid_filter_interval_smooth > pid_filter_auto_threshold_on) {
-                pid_filter_auto_off = 1;
-                pid_log("滤波 自适应关闭（间隔%.1f >%d.%d周期）",
-                         pid_filter_interval_smooth / 10.0,
-                         pid_filter_auto_threshold_on / 10, pid_filter_auto_threshold_on % 10);
-            }
-        }
-    }
-    int filter_eff = (filter_cfg_on && !pid_filter_auto_off);
-    // --- 想法1：变化后计数强制关（叠加于自适应；温度窗口变化重置计数）---
-    if (filter_cfg_on) {
-        if (batt_window_changed) { pid_filter_count = 0; }
-        else if (filter_eff) { pid_filter_count++; }
-        int n_limit = (pid_filter_auto_threshold_on * pid_filter_count_mult + 50) / 100;  // ceil(自动关闭阈值×倍数/100)周期
-        if (pid_filter_count > n_limit) filter_eff = 0;
-    }
-    // 检测滤波从有效切到断开 → 启动线性过渡（从当前滤波值向原值逐步逼近）
-    if (pid_filter_was_eff && !filter_eff && pid_batt_filtered >= 0) {
-        int n_limit = (pid_filter_auto_threshold_on * pid_filter_count_mult + 50) / 100;
-        pid_filter_trans = (n_limit > 1) ? n_limit : 1;
-    }
-    pid_filter_was_eff = filter_eff;
-
-    // --- 根据有效滤波状态分支 ---
-    if (filter_eff) {
-        // 滤波模式：EMA 滤波 + 方向取整（增大→向上取整，减小→向下取整）
-        if (pid_batt_filtered < 0) {
-            pid_batt_filtered = batt_raw;
-        } else {
-            pid_batt_filtered = EMA_DIR(batt_raw, pid_batt_filtered, pid_batt_alpha);
-        }
-    } else {
-        // 无滤波模式：原始值直通（断开时经线性过渡向原值逼近，避免跳变）；1s 层未变过且 idle 未达上限则跳过本周期
-        if (pid_filter_trans > 0) {
-            pid_batt_filtered += (batt_raw - pid_batt_filtered) / pid_filter_trans;
-            pid_filter_trans--;
-            if (pid_filter_trans <= 0) pid_batt_filtered = batt_raw;
-        } else {
-            pid_batt_filtered = batt_raw;
-        }
-        if (!batt_window_changed && temp_idle_cycles < BATT_SKIP_MAX && pid_last_batt >= 0) {
-            debug_log(debug_pid, "PID 跳过（温度未更新 idle=%d）", temp_idle_cycles);
-            return;
-        }
-    }
-
-    // --- CPU 温度读入与滤波（用于补偿，两模式共享） ---
+    // --- CPU 温度读入与滤波（用于补偿） ---
     int cpu_now = cached_cpu_now;   // 1s 采集缓存
     update_cpu_filtered(cpu_now);
 
@@ -3859,191 +2174,61 @@ static void pid_cycle(void) {
     int total_comp_10 = cpu_comp_now(batt_raw);
     float cpu_comp = total_comp_10 / 10.0f;   // 日志用（0.1°C → °C）
 
-    // --- PID 输入（使用滤波值；温度预测仅 Gear 使用） ---
-    int pid_input = (filter_eff ? pid_batt_filtered : batt_raw);
-
-    // --- 方差采样 push（对齐 PID 计算时机） ---
-    // 固定推入原始温度 batt_raw（不做滤波/预测）；跳过周期（无滤波模式温度未更新）不推入，
-    // pid_var_push 内部对缺档做线性插值，保证窗口覆盖连续控制周期。
-    pid_var_push(batt_raw, pid_ctrl_cycles);
-
-    // --- PID 重算判定 ---
-    // 滤波模式：每周期都重算 | 无滤波模式：温度值/时间戳(mtime)或补偿变化时重算
-    // batt_window_changed 已由 1s 层融合"值变化"与"mtime 变化"（read_battery_temp 置位）
-    int should_recompute = filter_eff ||
-                           batt_window_changed ||
+    // --- PID 重算判定：仅温度窗口变化 或 补偿变化 ---
+    int should_recompute = batt_window_changed ||
                            total_comp_10 != pid_last_comp_10;
 
-    if (should_recompute) {
-        // dt：距上次 PID 重算以来的 5 秒周期数（1 = 5s），钳位 0.6~6（3s~30s）。
-        // PID_KI/PID_KD 标定单位为每 5s 周期
-        float dt = (float)(now - pid_last_change_time) / 5.0f;
-        if (dt > 6.0f) dt = 6.0f;
-        if (dt < 0.6f) dt = 0.6f;
+    if (!should_recompute) {
+        debug_log(debug_pid, "PID 跳过重算（温度/补偿未变）");
+        return;
+    }
 
-        // 想法5：记录段内重算点（供窗口A 取"第 N 次重算前"）
-        {
-            int ri = near_seg_reccnt % 4;
-            near_re_cycle[ri] = pid_ctrl_cycles;
-            near_re_temp[ri]  = batt_raw;
-            near_seg_reccnt++;
+    // --- 跳过②：温度未变（仅补偿变化触发）且上次 |ch| ≤ ch阈值 → 整轮冻结 ---
+    // 冻结时控制状态（acc/kdp/target/last_ch）一律不动；仅推进补偿书签，防补偿反复变化反复触发。
+    if (!batt_window_changed) {
+        float last_ch_abs = (pid_last_ch >= 0.0f) ? pid_last_ch : -pid_last_ch;
+        if (last_ch_abs <= (pid_ch_threshold / 10.0f)) {
+            debug_log(debug_pid, "PID 整轮冻结（|last_ch|=%.2f ≤阈值%.1f）",
+                      pid_last_ch, pid_ch_threshold / 10.0f);
+            pid_last_comp_10 = total_comp_10;   // 补偿书签推进，防死锁
+            return;
         }
-        int compensated_10 = pid_input + total_comp_10;
-        float pid_out = pid_compute(compensated_10, dt);
-
-        // 直接映射到物理值（无输出平滑）：PID 输出 → 制冷强度（风扇目标由 compute_fan_target 独立计算）
-        int cmax = active_cold_eff_max;
-        int range = cmax - pid_cold_min;
-        if (range <= 0) range = 1;
-        pid_align_cold = clamp(pid_cold_min + (int)(pid_out * range), pid_cold_min, cmax);
-
-        pid_log("epoch=%ld Tbatt=%d+comp%+.1f(cpu)=Tinp%d Ttgt=%d Thot=%d dt=%.1f周期 e=%.2f out=%.2f var=%d",
-                 now, pid_input, cpu_comp,
-                 compensated_10, BATT_BASELINE, cooler_hot_temp,
-                 dt, (compensated_10 - BATT_BASELINE) / 10.0f,
-                 pid_out, pid_var_count >= 2 ? pid_var_compute() : -1);
-
-        pid_last_batt = batt_raw;
-        pid_last_comp_10 = total_comp_10;
-        pid_last_change_time = now;
-    }
-}
-
-/**
- * Gear 模式控制周期（每 5s）：预测输入 → 紧急干预 → 电池/电流调档 → 最终档位。
- */
-static void gear_cycle(void) {
-    // 0. 预测采样推入（温度更新时）+ 计算调档输入温度（预测温度 + CPU 补偿）
-    if (batt_temp_updated) {
-        int gap = temp_idle_cycles + 1;
-        if (gear_predict_heat_weight > 0 || gear_predict_cool_weight > 0)
-            gear_predict_push(cached_batt_raw, gap);
-    }
-    gear_input_batt = gear_compute_input();
-
-    // 1. 紧急干预（CPU 温度，更新 emergency_level）
-    prev_emerg_level = emergency_level;
-    emergency_intervention();
-
-    // 重新进入紧急 → 取消恢复期（立即恢复全灵敏度以快速响应）
-    if (emergency_level > prev_emerg_level) {
-        emerg_recovery_mult = 1;
-        emerg_recovery_cycles = 0;
-        emerg_recovery_phase = 0;
-        // 清除趋势豁免/反补累积
-        reset_exempt_state();
     }
 
-    // 退出紧急 → 启动恢复期，清除趋势豁免/反补累积
-    if (emergency_level < prev_emerg_level) {
-        emerg_recovery_phase = 1;
-        emerg_recovery_mult = EMERG_RECOVERY_MULT_1;
-        emerg_recovery_cycles = EMERG_RECOVERY_PHASE_CYCLES;
-        reset_exempt_state();
-        write_log("紧急退出 进入恢复期 P1 倍率%d 周期%d",
-                  EMERG_RECOVERY_MULT_1, EMERG_RECOVERY_PHASE_CYCLES);
-    }
+    // dt：距上次重算以来的 5 秒周期数（1 = 5s），钳位 0.6~6（3s~30s）。标定单位为每 5s 周期
+    float dt = (float)(now - pid_last_change_time) / 5.0f;
+    if (dt > 6.0f) dt = 6.0f;
+    if (dt < 0.6f) dt = 0.6f;
 
-    // 2. 电池温度控制 / 电流-挡位映射模式
-    // 先尝试电流-挡位模式（返回 1 表示已覆盖挡位），未覆盖则回退到常规温度控制
-    if (!gear_from_current()) {
-        battery_control();
-    }
+    // --- PID 计算（纯电池 error + cpu_comp；温度未变时 kdp 沿用）---
+    float pid_out = pid_compute(batt_raw, dt, cpu_comp, batt_window_changed);
 
-    // 3. 计算最终档位 = max(电池基础档位, 紧急强制最低档位)
-    int final_level = batt_gear_base;
-    if (emerg_forced_gear > final_level) final_level = emerg_forced_gear;
-    final_level = clamp(final_level, gear_min, gear_max);
+    // 直接映射到物理值（无输出平滑）：PID 输出 → 制冷强度（风扇目标由 compute_fan_target 独立计算）
+    int cmax = active_cold_eff_max;
+    int range = cmax - pid_cold_min;
+    if (range <= 0) range = 1;
+    pid_align_cold = clamp(pid_cold_min + (int)(pid_out * range), pid_cold_min, cmax);
 
-    // 4. 同步逻辑跟踪值（供下轮控制计算基础），不下发
-    batt_gear_base = final_level;
+    pid_log("epoch=%ld Tbatt=%d+comp%+.1f(cpu)=Tinp%d Ttgt=%d Thot=%d dt=%.1f周期",
+            now, batt_raw, cpu_comp, batt_raw + total_comp_10, BATT_BASELINE, cooler_hot_temp, dt);
 
-    // 5. 保存为目标档位（供下轮逐步执行使用）
-    final_gear = final_level;
-
-    // 6. 退出紧急时限制档位（过渡期保护，仅生效一周期，受电池温度约束）
-    //    电池温度低于基准+EMERG_EXIT_BATT_THRESHOLD → 全效退出
-    //    低于基准+EMERG_EXIT_BATT_THRESHOLD×2 → 半效退出
-    //    不退出（保持当前档位）
-    //    恢复期启动已在步骤 1 中完成，此处只做 cap/drop
-    if (emergency_level < prev_emerg_level) {
-        int batt_temp = cached_batt_raw;   // 1s 采集缓存
-        enum { EXIT_NONE = 0, EXIT_HALF = 1, EXIT_FULL = 2 };
-        int exit_mode = EXIT_FULL;
-        if (batt_temp >= 0) {
-            int t1 = BATT_BASELINE + EMERG_EXIT_BATT_THRESHOLD;
-            int t2 = BATT_BASELINE + EMERG_EXIT_BATT_THRESHOLD * 2;
-            if (batt_temp < t1) {
-                exit_mode = EXIT_FULL;
-            } else if (batt_temp < t2) {
-                exit_mode = EXIT_HALF;
-            } else {
-                exit_mode = EXIT_NONE;
-            }
-        } // batt_temp<0 → 传感器异常，默认全效退出(安全)
-
-        if (exit_mode >= EXIT_HALF) {
-            if (EMERG_MODE_EXIT == 0) {
-                // 模式 0：钳制最高档
-                int cap;
-                if      (prev_emerg_level >= 4) cap = EMERG_FORCED_4;
-                else if (prev_emerg_level >= 3) cap = EMERG_FORCED_3;
-                else if (prev_emerg_level >= 2) cap = EMERG_FORCED_2;
-                else                             cap = EMERG_FORCED_1;
-                cap += EMERG_EXIT_CAP_OFFSET;
-                if (cap > gear_max) cap = gear_max;
-                if (batt_gear_base > cap) {
-                    if (exit_mode >= EXIT_FULL) {
-                        batt_gear_base = cap;
-                    } else {
-                        // 半效：只降低实际档位与 cap 差值的一半
-                        int reduction = batt_gear_base - cap;
-                        batt_gear_base -= reduction / 2;
-                    }
-                }
-            } else {
-                // 模式 1：降档模式 — 直接减去 EMERG_STEP（全效）或一半（半效）
-                int step = (exit_mode >= EXIT_FULL) ? EMERG_STEP : (EMERG_STEP / 2);
-                if (step < 1) step = 1;
-                if (batt_gear_base > step)
-                    batt_gear_base -= step;
-                else
-                    batt_gear_base = gear_min;
-            }
-            // 同步 final_gear
-            if (final_gear > batt_gear_base)
-                final_gear = batt_gear_base;
-            debug_log(debug_gear, "emerg 退出 cap/drop 档位=%d final=%d exit=%s 模式%d",
-                      batt_gear_base, final_gear,
-                      exit_mode == EXIT_FULL ? "全效" : "半效", EMERG_MODE_EXIT);
-        } else {
-            debug_log(debug_gear, "emerg 退出被电池温度阻挡（电池%d.%d 过高），保持档位",
-                      batt_temp / 10, batt_temp % 10);
-        }
-        // exit_mode == EXIT_NONE → 电池温度过高，不退出紧急，保持当前档位
-        // 恢复期已在步骤 1 提前启动，此处不再重复
-    }
+    pid_last_comp_10 = total_comp_10;
+    pid_last_change_time = now;
 }
 
 /**
  * 单次控制循环（纯计算，不下发）
- * 配置重载 → 热端过温/有效范围 → 按模式分发（PID / Gear）
+ * 配置重载 → 热端过温/有效范围 → PID 周期
  * 调用者在外部立即执行速率限制下发，本函数只做决策
  */
 static void main_loop(void) {
     // 温度窗口变化：自上次 5s 控制以来，1s 采集层是否检测到值变化（防漏判：变过又回原位仍算变化）。
     batt_window_changed = batt_changed_since_ctrl;
     batt_changed_since_ctrl = 0;                 // 开启新窗口
-    if (batt_window_changed) temp_idle_cycles = 0;
-    else temp_idle_cycles++;
 
     // 0. 检查配置文件是否更新（热重载）
-    if (ctrl_mode == 1)
-        debug_log(debug_main, "main_loop 开始(PID) 温度窗口=%s idle=%d",
-                  batt_window_changed ? "变化" : "未变", temp_idle_cycles);
-    else
-        debug_log(debug_main, "main_loop 开始(Gear) emergency=%d forced_min=%d 档位=%d target=%d",
-                  emergency_level, emerg_forced_gear, batt_gear_base, final_gear);
+    debug_log(debug_main, "main_loop 开始 温度窗口=%s",
+              batt_window_changed ? "变化" : "未变");
     if (config_path[0] != '\0') {
         struct stat st;
         if (stat(config_path, &st) == 0) {
@@ -4062,11 +2247,8 @@ static void main_loop(void) {
     // 0.6. 当前模式有效制冷范围（统一计算，供下发/去重/映射使用，消除模式分支散落）
     update_active_cold_range();
 
-    // --- 按模式分发 ---
-    if (ctrl_mode == 1)
-        pid_cycle();
-    else
-        gear_cycle();
+    // --- 控制周期分发（本实现仅 PID） ---
+    pid_cycle();
 }
 
 // ======================== 程序入口 ========================
@@ -4133,9 +2315,6 @@ int main(int argc, char *argv[]) {
     signal(SIGTERM, handle_signal);
     signal(SIGINT,  handle_signal);
 
-    // --- 初始化默认档位表（load_config 中 GEAR_B6X_N / GEAR_B7X_N 可覆盖） ---
-    init_gear_table();
-
     // --- 日志路径、配置加载 ---
     set_default_log_path();
     if (argc >= 3 && strcmp(argv[1], "--config") == 0) {
@@ -4157,44 +2336,6 @@ int main(int argc, char *argv[]) {
     // 状态文件路径已由全局初始化设好（status_file_path_b6/_b7 硬编码）
     create_status_files();
 
-    // --- Gear 模式初始化（与 cooler 状态无关，在 BLE 就绪前完成） ---
-    // 读 status 文件历史回传制冷强度匹配最近档位（回传文件重启不删，保留上次状态），无效用 LEVEL_INIT 保底
-    if (ctrl_mode != 1) {
-        int stored_cold = -1;
-        const char *paths[] = {status_file_path_b6, status_file_path_b7};
-        for (int i = 0; i < 2 && stored_cold < 1; i++) {
-            FILE *f = fopen(paths[i], "r");
-            if (f) {
-                char line[64];
-                while (fgets(line, sizeof(line), f)) {
-                    if (strncmp(line, "COLD_REAL=", 10) == 0) {
-                        int v = atoi(line + 10);
-                        if (v >= 1) stored_cold = v;
-                        break;
-                    }
-                }
-                fclose(f);
-            }
-        }
-        if (stored_cold >= 1) {
-            int nearest = LEVEL_INIT;
-            int min_diff = 9999;
-            for (int i = 0; i < gear_count; i++) {
-                int diff = abs(gear_table[i].cold - stored_cold);
-                if (diff < min_diff) {
-                    min_diff = diff;
-                    nearest = i + 1;
-                }
-            }
-            batt_gear_base = nearest;
-            write_log("status 回传 制冷强度%d→挡位%d", stored_cold, nearest);
-        } else {
-            batt_gear_base = LEVEL_INIT;
-        }
-        batt_gear_cooldown = 0;
-        final_gear = batt_gear_base;
-    }
-
     write_log("脚本启动成功");
     sleep(BOOT_START_DELAY_SEC);   // 延迟开始运行：等待系统/蓝牙就绪（守护进程保持存活，watchdog 不会误重启）
 
@@ -4215,34 +2356,16 @@ int main(int argc, char *argv[]) {
     }
     if (!running) goto exit;
 
-    // --- PID 模式初始化（放在 BLE 就绪后） ---
-    // 读取 LSP 模块回传的实际制冷强度，不可用则回退到 gear 对齐
-    if (ctrl_mode == 1) {
-        float pid_ratio = 0.0f;
-
-        if (cooler_cold_real >= pid_cold_min) {
-            // 内部记录 pid_ratio_saved（切回 Gear 时映射回档位）
-            pid_ratio = pid_ratio_from_cold(cooler_cold_real, active_pid_cold_max);
-            write_log("LSP 回传承载 制冷=%d ratio=%.2f rpm=%d",
-                      cooler_cold_real, pid_ratio, pid_align_rpm);
-        } else {
-            pid_align_from_gear();   // 回退到 gear 对齐
-            goto pid_init_done;
-        }
-
-        pid_reset_core();
-
-pid_init_done:
-        batt_gear_cooldown = 0;
-    }
+    // --- PID 初始化（放在 BLE 就绪后）：读取 LSP 模块回传的实际制冷强度对齐输出 ---
+    float pid_ratio = 0.0f;
+    int cold_ref = (cooler_cold_real >= pid_cold_min) ? cooler_cold_real : pid_cold_min;
+    pid_ratio = pid_ratio_from_cold(cold_ref, active_pid_cold_max);
+    write_log("LSP 回传承载 制冷=%d ratio=%.2f rpm=%d", cold_ref, pid_ratio, pid_align_rpm);
+    pid_reset_core();
 
     // --- 进入工作模式 ---
     app_was_alive = 1;
-    batt_gear_cooldown = 0;
-    emergency_level = 0;
-    emerg_forced_gear = 0;
     first_run = 1;
-    last_batt_reading = -1;     // 重置电池温度跟踪，使首次 battery_control 视作新读数
 
     // 以散热器实际回传值为准初始化实际制冷/转速（进入工作模式前 read_cooler_params 已读回传）。
     // 回传异常（文件读失败）时用最小合法值保底
@@ -4251,15 +2374,11 @@ pid_init_done:
     if (cooler_rpm_real >= fan_rpm_min) actual_rpm = cooler_rpm_real;
     else if (actual_rpm < fan_rpm_min) actual_rpm = fan_rpm_min;
 
-    // 强制首次下发（PID 模式使用 apply_gear_direct）
+    // 强制首次下发
     last_bcast_valid = 0;
-    if (ctrl_mode == 1) {
-        rate_limit_cold(pid_align_cold);
-        int send_rpm = rate_limit_fan(compute_fan_target());
-        apply_gear_direct(1, 5, send_rpm, actual_cold, 0);
-    } else {
-        apply_gear(batt_gear_base);
-    }
+    rate_limit_cold(pid_align_cold);
+    int send_rpm = rate_limit_fan(compute_fan_target());
+    apply_gear_direct(1, 5, send_rpm, actual_cold, 0);
 
     // ---- 主循环：1 秒节拍（采集 + 控制分离） ----
     // 每 1s：采集电池/CPU/散热器回传 → 写 WebUI 曲线数据文件（滚动 720 行，断联不写）

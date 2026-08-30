@@ -200,19 +200,17 @@
       if (el.type === 'checkbox') el.checked = (val !== '0');
       else if (el.tagName === 'INPUT' && !el.dataset.rowField) el.value = val;
     }
-    if (key === 'PERF_ENABLED' || key === 'DEBUG_ENABLED' || key === 'CTRL_MODE') updateCollapse();
-    if (key === 'CTRL_MODE' && !opts.noScroll) scrollModePanel(val);   // 控制模式：横滑到对应面板（滚动同步时 noScroll 不触发）
+    if (key === 'PERF_ENABLED' || key === 'DEBUG_ENABLED') updateCollapse();
     scheduleSave();
   }
 
   // ---------- 折叠逻辑：固定默认收起 + 组头点击手动展开（不随开关状态） ----------
   function masterOn(key) { return S.values[key] !== '0'; }
-  function ctrlMode() { return S.values['CTRL_MODE'] !== undefined ? S.values['CTRL_MODE'] : '1'; }
 
   // 分组是否有可折叠内容（子面板/模式面板/档位表/直接参数）；无折叠内容的分组
   // 不渲染小三角、不响应组头点击，说明区常显
   function hasCollapsible(g) {
-    return !!(g.subKeys || g.modePanels || g.gearTables || (g.keys && g.keys.length));
+    return !!(g.subKeys || (g.keys && g.keys.length));
   }
 
   function onHeaderClick(g) {
@@ -232,46 +230,12 @@
       var open = !!S.manualExpand[g.id];
       body.classList.toggle('collapsed', !open);
       chev.classList.toggle('on', open);
-      // 模式子面板（[2] 控制模式）：seg 按钮 active 跟随 CTRL_MODE；展开时对齐横滑面板
-      // （收起期间 scrollTo 对 display:none 元素无效，位置可能失准，需在展开时重对齐）
-      if (g.modePanels) {
-        var cm = ctrlMode();
-        head.querySelectorAll('.seg-btn').forEach(function (b) {
-          b.classList.toggle('active', b.dataset.mode === cm);
-        });
-        if (open) {
-          var ms = $('mode-slider-' + g.id);
-          if (ms) ms.scrollLeft = cm === '1' ? 0 : ms.clientWidth;
-        }
-      }
       // 组头暗色/徽标仍反映开关实际状态（仅视觉提示，不影响折叠）
       var swKey = g.master || g.headerSwitch;
       var swOn = swKey ? masterOn(swKey) : true;
       head.classList.toggle('off', !swOn);
       if (badge) badge.classList.toggle('hidden', swOn);
     });
-  }
-
-  // ---------- 控制模式横滑（PID / Gear 两侧，类似顶部曲线/日志） ----------
-  function scrollModePanel(modeVal) {
-    var ms = $('mode-slider-g4');
-    if (!ms) return;
-    ms.scrollTo({ left: modeVal === '1' ? 0 : ms.clientWidth, behavior: 'smooth' });
-  }
-
-  function initModeSlider() {
-    var ms = $('mode-slider-g4');
-    if (!ms) return;
-    var initVal = ctrlMode();
-    ms.scrollLeft = initVal === '1' ? 0 : ms.clientWidth;   // 初始对齐当前模式（无动画）
-    // 滚动停止后才同步 CTRL_MODE；同步用 noScroll，只更新值+保存，不触发滚动
-    var syncMode = debounce(function () {
-      var p = ms.scrollLeft / Math.max(1, ms.clientWidth);
-      var newVal = p > 0.5 ? '0' : '1';
-      var cur = ctrlMode();
-      if (newVal !== cur) setValue('CTRL_MODE', newVal, { noScroll: true });
-    }, 120);
-    ms.addEventListener('scroll', syncMode, { passive: true });
   }
 
   // ---------- 控件构建 ----------
@@ -397,29 +361,10 @@
       '<span class="g-title">' + esc(g.title) + '</span>' +
       '<span class="badge hidden" id="badge-' + g.id + '">未生效</span>';
     if (g.headerSwitch && SCHEMA.keys[g.headerSwitch]) {
-      if (g.modePanels) {
-        // [2] 控制模式：PID / Gear 分段按钮（类似顶部实时曲线/日志），点击切换模式并横滑面板
-        var seg = document.createElement('div');
-        seg.className = 'seg head-switch';
-        g.modePanels.forEach(function (p) {
-          var btn = document.createElement('button');
-          btn.type = 'button';
-          btn.className = 'seg-btn';
-          btn.dataset.mode = p.when;
-          btn.textContent = (p.when === '1') ? 'PID' : 'Gear';
-          btn.addEventListener('click', function (e) {
-            e.stopPropagation();
-            setValue('CTRL_MODE', p.when);
-          });
-          seg.appendChild(btn);
-        });
-        head.appendChild(seg);
-      } else {
-        var swEl = buildSwitchEl(g.headerSwitch);
-        swEl.classList.add('head-switch');
-        swEl.addEventListener('click', function (e) { e.stopPropagation(); });
-        head.appendChild(swEl);
-      }
+      var swEl = buildSwitchEl(g.headerSwitch);
+      swEl.classList.add('head-switch');
+      swEl.addEventListener('click', function (e) { e.stopPropagation(); });
+      head.appendChild(swEl);
     }
     head.addEventListener('click', function () { onHeaderClick(g); });
     sec.appendChild(head);
@@ -452,210 +397,10 @@
       body.appendChild(sub);
     }
 
-    // 档位表
-    if (g.gearTables) appendGearBoxes(body, g.gearTables);
-
-    // 模式子面板（[4] 控制模式）：PID / Gear 两侧横滑切换（类似顶部实时曲线/日志）
-    if (g.modePanels) {
-      var slider = document.createElement('div');
-      slider.className = 'mode-slider';
-      slider.id = 'mode-slider-' + g.id;
-      g.modePanels.forEach(function (p) {
-        var sub = document.createElement('div');
-        sub.id = 'sub-' + g.id + '-' + p.when;
-        sub.className = 'group-body sub-panel mode-panel';
-        if (p.title) {
-          var pt = document.createElement('div');
-          pt.className = 'sub-panel-title';
-          pt.textContent = p.title;
-          sub.appendChild(pt);
-        }
-        p.keys.forEach(function (k) {
-          if (SCHEMA.keys[k]) sub.appendChild(buildControl(k));
-        });
-        if (p.gearTables) appendGearBoxes(sub, p.gearTables);
-        slider.appendChild(sub);
-      });
-      body.appendChild(slider);
-    }
-
     return sec;
   }
 
-  // 档位表容器（普通分组或模式子面板共用）
-  function appendGearBoxes(container, gearTables) {
-    gearTables.forEach(function (family) {
-      var box = document.createElement('div');
-      box.className = 'gear-box';
-      box.innerHTML = '<div class="gear-title">' + (family === 'GEAR_B6X_' ? 'B6X 档位表' : 'B7X 档位表') + '</div>';
-      var table = document.createElement('div');
-      table.id = 'gearTable-' + family.replace(/_/g, '-');
-      table.className = 'gear-table';
-      box.appendChild(table);
-      var addBtn = document.createElement('button');
-      addBtn.className = 'btn-add';
-      addBtn.textContent = '+ 添加档位';
-      addBtn.addEventListener('click', function () { addGearRow(family); });
-      box.appendChild(addBtn);
-      container.appendChild(box);
-      renderGearTable(table, family);
-    });
-  }
-
-  // ---------- 档位表 ----------
-  function renderGearTable(container, family) {
-    var rows = S.items.filter(function (it) {
-      return it.type === 'kv' && it.key.indexOf(family) === 0;
-    }).sort(function (a, b) {
-      return parseInt(a.key.slice(family.length), 10) - parseInt(b.key.slice(family.length), 10);
-    });
-    container.innerHTML = '';
-    var headRow = document.createElement('div');
-    headRow.className = 'gear-row gear-head';
-    headRow.innerHTML = '<span>档</span>' + SCHEMA.gearRow.fields.map(function (f) {
-      return '<span>' + f.label + '</span>';
-    }).join('') + '<span></span>';
-    container.appendChild(headRow);
-
-    rows.forEach(function (it) {
-      var n = it.key.slice(family.length);
-      var parts = String(it.value).split(',');
-      var row = document.createElement('div');
-      row.className = 'gear-row';
-      row.dataset.gearKey = it.key;   // 供长按排序读取顺序
-      var num = document.createElement('span');
-      num.className = 'gear-n';
-      num.textContent = n;
-      row.appendChild(num);
-      var ref = { key: it.key, parts: parts, row: row };
-      SCHEMA.gearRow.fields.forEach(function (f, i) {
-        var inp = document.createElement('input');
-        inp.type = 'number'; inp.min = f.min; inp.max = f.max;
-        inp.value = parts[i] !== undefined ? parts[i] : '';
-        inp.dataset.rowField = '1';
-        inp.addEventListener('input', function () { onGearFieldInput(ref, i, inp); });
-        row.appendChild(inp);
-      });
-      var del = document.createElement('button');
-      del.className = 'btn-del';
-      del.textContent = '×';
-      del.addEventListener('click', function () { removeGearRow(it.key); });
-      row.appendChild(del);
-      container.appendChild(row);
-    });
-    initGearDrag(container, family);
-  }
-
-  // 长按拖动排序：长按一行进入拖动 → 上下移动重排 → 松手重编号并自动保存
-  function initGearDrag(container, family) {
-    container.querySelectorAll('.gear-row:not(.gear-head)').forEach(function (row) {
-      var timer = null, dragging = false, startY = 0;
-      row.addEventListener('touchstart', function (e) {
-        if (e.target.tagName === 'INPUT') return;   // 不拦截输入框编辑
-        startY = e.touches[0].clientY;
-        timer = setTimeout(function () {
-          dragging = true;
-          row.classList.add('dragging');
-          container.classList.add('dragmode');
-        }, 450);
-      }, { passive: true });
-      row.addEventListener('touchmove', function (e) {
-        if (!dragging) {
-          if (Math.abs(e.touches[0].clientY - startY) > 10) clearTimeout(timer);
-          return;
-        }
-        e.preventDefault();
-        var y = e.touches[0].clientY;
-        var rows = container.querySelectorAll('.gear-row:not(.gear-head)');
-        for (var i = 0; i < rows.length; i++) {
-          if (rows[i] === row) continue;
-          var r = rows[i].getBoundingClientRect();
-          if (y < r.top + r.height / 2) { container.insertBefore(row, rows[i]); return; }
-        }
-        container.appendChild(row);
-      }, { passive: false });
-      function endDrag() {
-        clearTimeout(timer);
-        if (dragging) {
-          dragging = false;
-          row.classList.remove('dragging');
-          container.classList.remove('dragmode');
-          commitGearOrder(container, family);
-        }
-      }
-      row.addEventListener('touchend', endDrag);
-      row.addEventListener('touchcancel', endDrag);
-    });
-  }
-
-  // 按 DOM 顺序重排该族档位行，重编号 N=1..count，并自动保存
-  function commitGearOrder(container, family) {
-    var keys = [];
-    container.querySelectorAll('.gear-row[data-gear-key]').forEach(function (r) {
-      keys.push(r.dataset.gearKey);
-    });
-    var byKey = {};
-    S.items.forEach(function (it) {
-      if (it.type === 'kv' && it.key.indexOf(family) === 0) byKey[it.key] = it;
-    });
-    var oldKeys = Object.keys(byKey);
-    var newItems = keys.map(function (k, i) {
-      var it = byKey[k];
-      var nk = family + (i + 1);
-      if (S.values[nk] === undefined && S.values[k] !== undefined) S.values[nk] = S.values[k];
-      it.key = nk;
-      it.raw = nk + '=' + it.value;
-      return it;
-    });
-    oldKeys.forEach(function (k) {
-      if (S.values[k] !== undefined && S.items.indexOf(byKey[k]) === -1) delete S.values[k];
-    });
-    S.items = S.items.filter(function (it) { return !(it.type === 'kv' && it.key.indexOf(family) === 0); }).concat(newItems);
-    renderGearTable(container, family);
-    scheduleSave();
-  }
-
-  function onGearFieldInput(ref, idx, inp) {
-    var f = SCHEMA.gearRow.fields[idx];
-    clampNumInput(inp, f.min, f.max);
-    ref.parts[idx] = inp.value;
-    S.values[ref.key] = ref.parts.join(',');
-    S.dirty[ref.key] = true;
-    scheduleSave();
-  }
-
-  function addGearRow(family) {
-    var existing = S.items.filter(function (it) {
-      return it.type === 'kv' && it.key.indexOf(family) === 0;
-    }).map(function (it) { return parseInt(it.key.slice(family.length), 10); });
-    var n = 1;
-    while (existing.indexOf(n) !== -1 && n <= SCHEMA.gearRow.maxN) n++;
-    if (n > SCHEMA.gearRow.maxN) { toast('已达最大 ' + SCHEMA.gearRow.maxN + ' 档'); return; }
-    var key = family + n;
-    var item = { type: 'kv', key: key, value: SCHEMA.gearRow.defaultValue, raw: key + '=' + SCHEMA.gearRow.defaultValue };
-    // 插入到同族最后一行之后（或文件末尾）
-    var idx = -1;
-    S.items.forEach(function (it, i) {
-      if (it.type === 'kv' && it.key.indexOf(family) === 0) idx = i;
-    });
-    S.items.splice(idx + 1, 0, item);
-    S.values[key] = item.value;
-    S.dirtySpecial = true;
-    renderGearTable($('gearTable-' + family.replace(/_/g, '-')), family);
-    scheduleSave();
-  }
-
-  function removeGearRow(key) {
-    var idx = S.items.findIndex(function (it) { return it.type === 'kv' && it.key === key; });
-    if (idx >= 0) S.items.splice(idx, 1);
-    delete S.values[key];
-    delete S.dirty[key];
-    S.dirtySpecial = true;
-    var family = key.slice(0, key.lastIndexOf('_') + 1);
-    renderGearTable($('gearTable-' + family.replace(/_/g, '-')), family);
-    scheduleSave();
-  }
-
+  // ---------- 档位表（已随 Gear 删除） ----------
   // ---------- 改即存（防抖自动写配置） ----------
   var saveTimer = null;
   function scheduleSave() {
@@ -698,7 +443,7 @@
       out.push({
         t: num(0),
         batt: temp(num(1)), cpu: temp(num(2)), hot: temp(num(3)), cold: temp(num(4)),
-        rpm: raw(num(5)), coldReal: raw(num(6)), gearCold: raw(num(7))
+        rpm: raw(num(5)), coldReal: raw(num(6))
       });
     }
     return out;
@@ -1103,32 +848,6 @@
     $('logFollowBtn').addEventListener('click', function () { S.manualScroll = false; scrollLogBottom(); $('logFollowBtn').classList.remove('off'); });
   }
 
-  // ---------- 模式面板：自适应高度横滑（容器高度跟随激活面板，消除空区） ----------
-  function syncModeHeight() {
-    var ms = $('mode-slider-g4');
-    if (!ms) return;
-    var p = ms.scrollLeft / Math.max(1, ms.clientWidth);
-    var idx = p > 0.5 ? 1 : 0;
-    var panels = ms.querySelectorAll('.mode-panel');
-    if (!panels[idx]) return;
-    // 面板底相对容器顶的距离（含 margin），设为容器高度则面板完整可见
-    var h = panels[idx].getBoundingClientRect().bottom - ms.getBoundingClientRect().top;
-    if (h > 0) ms.style.height = h + 'px';   // >0 防收起时误设 0
-  }
-
-  function initModeHeight() {
-    var ms = $('mode-slider-g4');
-    if (!ms) return;
-    var settle = debounce(syncModeHeight, 80);
-    ms.addEventListener('scroll', settle, { passive: true });
-    if (window.ResizeObserver) {
-      // 面板内容（档位表增删等）变化时联动容器高度
-      var ro = new ResizeObserver(syncModeHeight);
-      ms.querySelectorAll('.mode-panel').forEach(function (p) { ro.observe(p); });
-    }
-    syncModeHeight();
-  }
-
   // ---------- 顶部高度：点住即拖动改高度（不记忆，每次加载回默认 = 渲染窗口的 2/5，pin-fixed/pin-scroll 均生效） ----------
   var TOP_H_MIN = 15, TOP_H_MAX = 80;      // dvh 范围
   var TOP_H_DEFAULT = 36;                  // 默认顶部高度（dvh）
@@ -1197,7 +916,6 @@
         var emptyKeys = [];
         SCHEMA.groups.forEach(function (g) {
           var gk = (g.keys || []).concat(g.subKeys || []).concat(g.headerSwitch ? [g.headerSwitch] : []);
-          (g.modePanels || []).forEach(function (p) { gk = gk.concat(p.keys || []); });
           gk.forEach(function (k) {
             if (SCHEMA.keys[k] && (S.values[k] === undefined || S.values[k] === '')) emptyKeys.push(k);
           });
@@ -1218,8 +936,6 @@
     syncPinState();
     initChartUI();
     initLogUI();
-    initModeSlider();
-    initModeHeight();
     initTopHeight();
     updateCollapse();
     if (errText) reportError(errText);
