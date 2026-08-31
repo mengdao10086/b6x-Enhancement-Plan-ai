@@ -38,8 +38,9 @@
   }
   function fitInput(inp) {
     var val = String(inp.value || '');
-    // 输入框宽度按当前值计算，上限 120px
-    inp.style.width = 'min(calc(' + (Math.max(val.length, 1) + 1) + 'ch + 16px), 120px)';
+    // 输入框宽度按内容自适应（值长 + 2ch 余量），上限交给 CSS max-width:100% 兜底，最小 5ch
+    var ch = Math.max(val.length, 1) + 2;
+    inp.style.width = 'calc(' + Math.max(ch, 5) + 'ch + 12px)';
   }
   function debounce(fn, ms) {
     var t;
@@ -566,14 +567,14 @@
     diagFit('liveRow', fitOneLine(el, 11, null, 0.96));   // 每帧重算；tabular-nums 定宽同字符数字号稳定
   }
 
-  // 制冷轴辅助：tempctrl.c COLD_MIN=1（轴下限从 1 开始）；COLD_MAP 第一值 = 制冷→风扇映射
-  // 起始强度。总开关（PERF_ENABLED=1）开启时取配置实际值；未开启回退默认 40。轴最低显示范围 = [1, 起始强度]
-  function coldMapStart() {
-    if (S.values['PERF_ENABLED'] !== '1') return 40;   // 总开关未开启 → 默认 40
-    var cm = S.values['COLD_MAP'];
-    if (cm == null) return 40;
-    var n = parseInt(String(cm).split(/[\s,]+/)[0], 10);
-    return isFinite(n) && n > 0 ? n : 40;
+  // 制冷轴辅助：右轴上限固定 = PID_COLD 制冷上限（B6X 上限，默认 190）。
+  // 按配置取 B6X 上限；总开关(PERF_ENABLED=1)未开启时回退默认 190。
+  function pidColdMax() {
+    if (S.values['PERF_ENABLED'] !== '1') return 190;   // 总开关未开启 → 默认 190
+    var pc = S.values['PID_COLD'];
+    if (pc == null) return 190;
+    var n = parseInt(String(pc).split(/[\s,]+/)[1], 10);   // 第二值 = B6X 上限
+    return isFinite(n) && n > 0 ? n : 190;
   }
   var drawAxisDiag = false;   // 制冷轴范围一次性诊断
 
@@ -632,12 +633,11 @@
       return { min: mn - sp * 0.05, max: mx + sp * 0.05 };
     }
     var L = range(leftSeries, leftV), R = range(rightSeries, rightV);
-    // 制冷强度轴（右轴）：从 COLD_MIN=1 开始，最低显示范围覆盖到制冷→风扇映射起始强度（COLD_MAP 第一值）
+    // 制冷强度轴（右轴）：从 COLD_MIN=1 开始，上限固定 = PID_COLD 制冷上限（B6X 上限，默认 190）
     if (R) {
       R.min = 1;
-      var coldFanStart = coldMapStart();
-      if (R.max < coldFanStart) R.max = coldFanStart;
-      if (!drawAxisDiag) { drawAxisDiag = true; uiLog('[轴] 制冷轴: ' + R.min + '~' + R.max + '（起始强度=' + coldFanStart + '）'); }
+      R.max = pidColdMax();
+      if (!drawAxisDiag) { drawAxisDiag = true; uiLog('[轴] 制冷轴: ' + R.min + '~' + R.max + '（PID_COLD 上限）'); }
     }
     // 单轴全无效值时该轴 range() 返回 null。
     // 双轴都不可画（全 null）则无曲线可画；仅一轴有效时仍画该轴。

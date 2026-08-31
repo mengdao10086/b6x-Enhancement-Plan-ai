@@ -87,7 +87,8 @@ static int BATT_CURRENT_DIVISOR = 10000;  // 电池电流原始值 µA ÷ 此值
 // 首次运行在此范围内扫描有效的 thermal_zone，后续只扫命中的 zone
 static int CPU_ZONE_MIN = 0;
 static int CPU_ZONE_MAX = 99;
-static int cpu_zone_rescan_sec = 60;   // CPU thermal_zone 全量重扫间隔（秒，CPU_ZONE_RESCAN 配置，默认 60）
+static int cpu_zone_rescan_sec = 60;   // CPU thermal_zone 全量重扫间隔（秒，CPU_ZONE_RESCAN 第一值，默认 60）
+static int cpu_zone_keep = 10;         // 保留温度值个数（CPU_ZONE_RESCAN 第二值，默认 10）
 
 // ======================== 通用参数（PID 和 Gear 共用）========================
 // --- 基准温度 ---
@@ -170,12 +171,14 @@ static int pid_kdp_coef = 300;
 static int pid_ki_coef = 20;
 // PID_GAIN 第三值：速度项倍率系数（÷1000，ch = error + v×speed_coef + cpu_comp）
 static int pid_speed_coef = 240;
-// PID_TARGET 第一值：动态目标系数（÷1000，raw_target = clamp(error×target_coef, ±0.5)）
+// PID_TARGET 第一值：动态目标系数（÷1000，raw_target = clamp(error×target_coef, ±上限)）
 static int pid_target_coef = 20;
-// PID_TARGET 第二值：目标 EMA 平滑系数（%）
-static int pid_target_alpha = 20;
+// PID_TARGET 第二值：目标 EMA 平滑系数（%，滤波系数）
+static int pid_target_alpha = 10;
+// PID_TARGET 第三值：动态目标上限（0.1°C，默认 10=1.0°C）
+static int pid_target_max = 10;
 // PID_CH_THRESHOLD：跳过重算的 ch 阈值（0.1°C，|last_ch|≤此值 → 整轮冻结）
-static int pid_ch_threshold = 1;
+static int pid_ch_threshold = 2;
 
 // PID_CPU_COMP：CPU 补偿（始终生效，无开关）
 static int pid_cpu_comp_filter_alpha = 25;      // PID_CPU_COMP 第一值：补偿 EMA 平滑系数（%）
@@ -263,7 +266,7 @@ static int watchdog_last_cmd  = -1;     // 上周期下发制冷值（未达目�
 static long watchdog_last_kill_at = 0;  // 上次 kill 时间戳（冷却防风暴）
 static time_t last_launch_attempt = 0;  // 上次拉起尝试时间（冷却用）
 static time_t last_arbitrate = 0;       // 上次 app 存活仲裁时间（ARBITRATE_INTERVAL 节流）
-#define APP_LAUNCH_COOLDOWN 60          // 两次拉起最小间隔（秒）
+static int app_launch_cooldown = 60;    // APP_LAUNCH_COOLDOWN：两次拉起最小间隔（秒，默认 60）
 
 #define BOOT_START_DELAY_SEC 30         // 脚本启动成功后延迟开始运行（等待系统/蓝牙就绪，避开开机初期拉起 app 闪烁）
 
@@ -456,7 +459,6 @@ static const struct IntCfgKey INT_CFG_KEYS[] = {
     { "BATT_TEMP_DIVISOR",         &BATT_TEMP_DIVISOR,           1, 10000 },
     { "CPU_TEMP_DIVISOR",          &CPU_TEMP_DIVISOR,            1, 10000 },
     { "BATT_CURRENT_DIVISOR",      &BATT_CURRENT_DIVISOR,        1, 100000 },
-    { "CPU_ZONE_RESCAN",           &cpu_zone_rescan_sec,         5, 3600 },
     { "LOG_MAX",                   &LOG_MAX,                     0, 1048576 },
 };
 
@@ -496,6 +498,13 @@ static void parse_sysfs_cfg(const char *key, int val, const char *val_str) {
         int a = CPU_ZONE_MIN, b = CPU_ZONE_MAX;
         if (sscanf(val_str, "%d %d", &a, &b) >= 2) { CPU_ZONE_MIN = clamp(a,0,99); CPU_ZONE_MAX = clamp(b,0,99); }
     }
+    else if (strcmp(key, "CPU_ZONE_RESCAN") == 0) {
+        // 双值：重扫间隔（秒） 保留温度值个数
+        int a = cpu_zone_rescan_sec, b = cpu_zone_keep;
+        int n = sscanf(val_str, "%d %d", &a, &b);
+        if (n >= 1) cpu_zone_rescan_sec = clamp(a, 5, 3600);
+        if (n >= 2) cpu_zone_keep = clamp(b, 1, 64);
+    }
     else if (strcmp(key, "LOG_FILE") == 0) {
         config_read_path(log_file_path, sizeof(log_file_path), val_str);
         record_log_path_for_uninstall(log_file_path);  // 记录自定义日志路径供卸载清理
@@ -513,12 +522,13 @@ static int parse_pid_cfg(const char *key, int val, const char *val_str) {
         if (n >= 3) pid_speed_coef = clamp(c, 0, 1000);
         return 1;
     }
-    // PID_TARGET = 目标系数(÷1000) 目标EMA平滑(%)
+    // PID_TARGET = 目标系数(÷1000) 目标EMA平滑(%) 动态目标上限(0.1°C)
     if (strcmp(key, "PID_TARGET") == 0) {
-        int a = pid_target_coef, b = pid_target_alpha;
-        int n = sscanf(val_str, "%d %d", &a, &b);
+        int a = pid_target_coef, b = pid_target_alpha, c = pid_target_max;
+        int n = sscanf(val_str, "%d %d %d", &a, &b, &c);
         if (n >= 1) pid_target_coef  = clamp(a, 1, 1000);
         if (n >= 2) pid_target_alpha = clamp(b, 1, 100);
+        if (n >= 3) pid_target_max   = clamp(c, 1, 100);
         return 1;
     }
     if (strcmp(key, "PID_COLD") == 0) {
@@ -635,6 +645,8 @@ static void load_config(const char *path) {
             APP_LAUNCH_ENABLED = (atoi(val_str) != 0);   // 任何模式下都生效（含 PERF=0/DEBUG=0）
         } else if (strcmp(key, "APP_WATCHDOG") == 0) {
             app_watchdog_cycles = clamp(atoi(val_str), 0, 120);   // 锁死自动重启停滞周期数（0=关闭）
+        } else if (strcmp(key, "APP_LAUNCH_COOLDOWN") == 0) {
+            app_launch_cooldown = clamp(atoi(val_str), 0, 3600);  // 两次拉起最小间隔（秒，0=不冷却）
         }
     }
 
@@ -1073,8 +1085,9 @@ static int read_battery_temp(void) {
  * 缓存已发现的 CPU 温度 zone（首次全量扫描后记录）
  */
 #define CPU_ZONE_MAX_CACHE 64
-#define CPU_ZONE_TOP_KEEP   10   // 只保留温度最高的 N 个 zone（CPU 紧急取 max，前 10 已具代表性）
 static int cpu_zone_cache[CPU_ZONE_MAX_CACHE];
+static int cpu_zone_valid[CPU_ZONE_MAX_CACHE];   // 首次全量扫描发现的有效 zone 候选名单（固定，不随重扫增减）
+static int cpu_zone_valid_count = 0;
 static int cpu_zone_count = 0;
 static int cpu_zone_scanned = 0;
 static time_t cpu_zone_last_scan = 0;        // 上次全量扫描时间（每 cpu_zone_rescan_sec 秒重扫一次）
@@ -1089,27 +1102,47 @@ static int cmp_zone_desc(const void *a, const void *b) {
 }
 
 /**
- * 全量扫描 thermal_zone（CPU_ZONE_MIN~MAX），按温度降序保留最高 CPU_ZONE_TOP_KEEP 个。
- * 首次由 read_cpu_temp_max 同步触发（保证首个读数可用）；周期重扫由 5s 控制块
- * maybe_rescan_cpu_zones 触发——全量扫描 ~100 个 zone 阻塞近 1s，不能放在 1s 采集热路径内。
+ * 扫描 thermal_zone 并保留最高温的 cpu_zone_keep 个。
+ * 首次（!cpu_zone_scanned）真全量扫描 CPU_ZONE_MIN~MAX，把有效 zone 记为固定候选名单；
+ * 后续只在候选名单内读值重排。首次由 read_cpu_temp_max 同步触发（保证首个读数可用）；
+ * 周期重扫由 5s 控制块 maybe_rescan_cpu_zones 触发——全量扫描 ~100 个 zone 阻塞近 1s，
+ * 不能放在 1s 采集热路径内。
  */
 static void rescan_cpu_zones(void) {
     time_t now = time(NULL);
     ZoneReading readings[CPU_ZONE_MAX_CACHE];
     int count = 0;
-    for (int i = CPU_ZONE_MIN; i <= CPU_ZONE_MAX; i++) {
-        int raw = read_thermal_zone_raw(i);
-        if (raw < 0) continue;
-        if (count < CPU_ZONE_MAX_CACHE) {
-            readings[count].id  = i;
-            readings[count].raw = raw;
-            count++;
+
+    if (!cpu_zone_scanned) {
+        // 首次：真全量扫描 CPU_ZONE_MIN~MAX，记录所有能读到有效值（正数）的 zone 为固定候选名单
+        for (int i = CPU_ZONE_MIN; i <= CPU_ZONE_MAX; i++) {
+            int raw = read_thermal_zone_raw(i);
+            if (raw < 0) continue;
+            if (count < CPU_ZONE_MAX_CACHE) {
+                readings[count].id  = i;
+                readings[count].raw = raw;
+                count++;
+            }
+        }
+        cpu_zone_valid_count = count;
+        for (int i = 0; i < count; i++) cpu_zone_valid[i] = readings[i].id;
+    } else {
+        // 后续重扫：只在首次有效候选名单内读值重排，不扫描区间外、不发现新 zone；
+        // 名单中本轮无效（≤0/读失败）的 zone 不入列。无回退全量兜底。
+        for (int i = 0; i < cpu_zone_valid_count; i++) {
+            int raw = read_thermal_zone_raw(cpu_zone_valid[i]);
+            if (raw < 0) continue;
+            if (count < CPU_ZONE_MAX_CACHE) {
+                readings[count].id  = cpu_zone_valid[i];
+                readings[count].raw = raw;
+                count++;
+            }
         }
     }
 
-    // 按温度降序排列，保留温度最高的 CPU_ZONE_TOP_KEEP 个
+    // 按温度降序排列，保留温度最高的 cpu_zone_keep 个
     qsort(readings, count, sizeof(ZoneReading), cmp_zone_desc);
-    int keep = count < CPU_ZONE_TOP_KEEP ? count : CPU_ZONE_TOP_KEEP;
+    int keep = count < cpu_zone_keep ? count : cpu_zone_keep;
     for (int i = 0; i < keep; i++)
         cpu_zone_cache[i] = readings[i].id;
     cpu_zone_count = keep;
@@ -1120,7 +1153,7 @@ static void rescan_cpu_zones(void) {
         debug_log(debug_sensor, "thermal_zone 扫描 无可读 zone（路径 %s），CPU 紧急无法触发",
                   CPU_TEMP_PATH_FMT);
     } else {
-        debug_log(debug_sensor, "thermal_zone 扫描 发现 %d 个有效 zone，保留 %d 个最高温（%ds 后重扫）",
+        debug_log(debug_sensor, "thermal_zone 扫描 有效 %d 个，保留 %d 个最高温（%ds 后重扫）",
                   count, keep, cpu_zone_rescan_sec);
     }
 }
@@ -1521,7 +1554,7 @@ static const char *resolve_launch_pkg(void) {
  */
 static void launch_last_app(void) {
     time_t now = time(NULL);
-    if (now - last_launch_attempt < APP_LAUNCH_COOLDOWN) return;   // 冷却节流
+    if (now - last_launch_attempt < app_launch_cooldown) return;   // 冷却节流
     last_launch_attempt = now;
     if (!APP_LAUNCH_ENABLED) {
         debug_log(debug_launch, "自动拉起 开关关闭，跳过");
@@ -1797,10 +1830,11 @@ static float pid_compute(int batt_10, float dt, float cpu_comp, int batt_window_
     float ch    = error + v * sc + cpu_comp;
     float chkdp = error + v * sc * 0.33f + cpu_comp;
 
-    // 动态目标（EMA）：raw_target = clamp(error×目标系数, ±0.5°C)
+    // 动态目标（EMA）：raw_target = clamp(error×目标系数, ±目标上限)
     float raw_target = error * (pid_target_coef / 1000.0f);
-    if (raw_target >  0.5f) raw_target =  0.5f;
-    if (raw_target < -0.5f) raw_target = -0.5f;
+    float tmax = pid_target_max / 10.0f;   // 0.1°C → °C
+    if (raw_target >  tmax) raw_target =  tmax;
+    if (raw_target < -tmax) raw_target = -tmax;
     pid_target_f += (pid_target_alpha / 100.0f) * (raw_target - pid_target_f);
 
     // 积分累积（acc；不乘 dt）

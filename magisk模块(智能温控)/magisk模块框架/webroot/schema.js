@@ -53,7 +53,7 @@ window.B6X_SCHEMA = {
     // [3] 自动拉起散热器 app：独立分组，开关常显在组头；组内含可编辑参数 APP_WATCHDOG（可折叠/展开）
     {
       id: "g3", title: "[3] 自动拉起散热器 app", headerSwitch: "APP_LAUNCH_ENABLED",
-      keys: ["APP_WATCHDOG"]
+      keys: ["APP_WATCHDOG", "APP_LAUNCH_COOLDOWN"]
     },
     // [4] WebUI 界面：仅 WebUI 读取的显示参数，守护进程忽略
     {
@@ -97,8 +97,8 @@ window.B6X_SCHEMA = {
       desc: "" },
     LOG_MAX: { type: "int", min: 0, max: 1048576, label: "日志上限（字节）",
       desc: "超限时删除最早的超出部分，0=关闭日志" },
-    CPU_ZONE_RESCAN: { type: "int", min: 5, max: 3600, label: "CPU zone 全量重扫间隔（秒）",
-      desc: "按此间隔重新全量扫描，更新保留的最高温 zone 列表" },
+    CPU_ZONE_RESCAN: { type: "multi", fields: [{ label: "重扫间隔(秒)", min: 5, max: 3600 }, { label: "保留温度值个数", min: 1, max: 64 }],
+      label: "CPU zone 重扫间隔/保留数", desc: "按此间隔重扫，保留温度最高的 N 个 zone" },
 
     // ---- [1] 总开关 — 通用参数 ----
     RATE_LIMIT_FAN_UP: { type: "multi", fields: [{ label: "升速基础值", min: 50, max: 2000 }, { label: "升速倍率", min: 1, max: 200 }],
@@ -113,6 +113,8 @@ window.B6X_SCHEMA = {
     APP_LAUNCH_ENABLED: { type: "switch", label: "自动拉起散热器 app", desc: "" },
     APP_WATCHDOG: { type: "int", min: 0, max: 120, label: "锁死自动重启周期数",
       desc: "实际制冷停滞且未达目标连续 N 次后 kill 散热器 app 并重新拉起；0=关闭" },
+    APP_LAUNCH_COOLDOWN: { type: "int", min: 0, max: 3600, label: "拉起冷却间隔（秒）",
+      desc: "两次拉起的最小间隔；0=不加冷却" },
     RECONNECT_KEEP_CYCLES: { type: "int", min: 0, max: 30, label: "断联保留状态周期数",
       desc: "断联少于 N 个控制周期不重置 PID 状态；0=关闭" },
     BATT_BASELINE: { type: "int", min: 300, max: 500, label: "基准温度（0.1°C）",
@@ -127,17 +129,17 @@ window.B6X_SCHEMA = {
       desc: "冷端与热端共用，值越大越跟随原始值，越小越平滑" },
     FAN_RPM: { type: "multi", fields: [{ label: "最低转速", min: 1000, max: 6000 }, { label: "最高转速(B6X)", min: 1000, max: 6000 }, { label: "最高转速(B7X)", min: 2000, max: 6000 }],
       label: "风扇转速范围", desc: "最低转速 B6X最高转速 B7X最高转速" },
-    HOT_DERATE: { type: "multi", fields: [{ label: "阈值(0.1°C)", min: 350, max: 700 }, { label: "倍率=恢复值", min: 1, max: 20 }, { label: "冷却周期数", min: 0, max: 20 }],
+    HOT_DERATE: { type: "multi", fields: [{ label: "阈值(0.1°C)", min: 350, max: 700 }, { label: "倍率=恢复值", min: 1, max: 20 }, { label: "冷却周期数(×5s)", min: 0, max: 20 }],
       label: "热端每°过温制冷上限削减值",
-      desc: "" },
+      desc: "热端>阈值每 0.1°C 削减上限(热端−阈值)×倍率/10；回落每次恢复倍率；削减/恢复后冷却 N 周期" },
 
     // ---- [1] PID 控制（单累积器）----
     PID_GAIN: { type: "multi", fields: [{ label: "KDP融合系数", min: 1, max: 1000 }, { label: "KI积分增益", min: 1, max: 1000 }, { label: "速度倍率", min: 0, max: 1000 }],
       label: "PID 增益组合(×1000)",
-      desc: "KDP 融合 P+D：KDP=系数×(误差+速度×0.33+CPU补偿)；KI 消静差：acc+=KI×(ch−目标)；SPEED：ch=误差+速度×此值+CPU补偿" },
-    PID_TARGET: { type: "multi", fields: [{ label: "目标系数", min: 1, max: 1000 }, { label: "目标平滑%", min: 1, max: 100 }],
+      desc: "三值均 ÷1000：KDP 融合比例+微分，KI 消静差，SPEED 速度倍率" },
+    PID_TARGET: { type: "multi", fields: [{ label: "目标系数", min: 1, max: 1000 }, { label: "目标平滑%", min: 1, max: 100 }, { label: "目标上限(0.1°C)", min: 1, max: 100 }],
       label: "PID 目标组合",
-      desc: "动态目标 = clamp(误差×系数, ±0.5°C)，使积分逼近包络防过冲；目标 EMA 平滑，越大越快速跟随" },
+      desc: "动态目标 = clamp(误差×系数, ±目标上限)；目标 EMA 平滑%越大越快速跟随；上限默认 10=1.0°C" },
     PID_CH_THRESHOLD: { type: "int", min: 1, max: 100, label: "稳态冻结阈值(0.1°C)",
       desc: "温度未变且上次 |ch|≤此值时整轮冻结（防抖）；1=默认0.1°C" },
     PID_CPU_COMP: { type: "multi", fields: [{ label: "滤波系数(%)", min: 1, max: 100 }, { label: "除数", min: 5, max: 200 }, { label: "偏移量(0.1°C)", min: 0, max: 500 }],
