@@ -117,7 +117,7 @@ static int RATE_LIMIT_COLD = 25;   // 制冷强度升降速基础值：升速=ba
 
 // --- 动态值（根据电池温差自动调整）---
 static int RATE_LIMIT_COLD_MULT = 10;  // 制冷强度倍率：升速/降速 = base ± dev(0.1°C) × mult / 10
-static int COLD_UP_DEADZONE = 3;       // 制冷上升死区（RATE_LIMIT_COLD 第三值）：上升变化量 ≤ 该值时不升
+static int COLD_DEADZONE = 3;          // 制冷最小变化幅度（RATE_LIMIT_COLD 第三值）：与散热器实际 |差值| ≤ 该值时不升不降
 static int RATE_LIMIT_FAN_UP = 200;   // 风扇升速基础值：RPM_UP = base + d × mult / 10
 static int RATE_LIMIT_FAN_MULT = 50;  // 风扇升速倍率（RATE_LIMIT_FAN_UP 双值第二位）
 static int cycle_batt_temp = -1;       // 本周期电池温度（-1=未就绪）
@@ -202,6 +202,11 @@ static int pid_cpu_comp_ready = 0;          // 补偿平滑是否已初始化（
 static float pid_cpu_comp_smooth = 0.0f;    // CPU 补偿 EMA 平滑值（°C）
 static int pid_last_comp_10 = 0;            // 上次 PID 重算时的补偿值（0.1°C）
 static int pid_cpu_comp_active = 0;         // 补偿门控：1=激活（进入后即使条件消失也保持到滤波归零才退出）
+
+// --- 电池温度输入滤波（改动2：加回；仅温度更新时滤波，动态 α，停机后恢复原始值）---
+static int pid_batt_filtered = -1;        // 滤波后电池温度（0.1°C），-1=未初始化
+static int pid_batt_last_update_cycle = -1; // 上次温度更新的控制周期（动态α间隔计算用）
+static int pid_batt_snap_done = 0;        // 停机后是否已做一次"恢复原始值"snap（1=已做）
 
 // --- PID 输出端自适应 EMA 滤波（PID_OUT_FILTER）---
 // α = 每周期平均温差×温差增益 + 距目标偏差×偏差增益；下限钳制到 base（最低 0.1）后，下降方向 α×下降倍率（回落更快）
@@ -593,12 +598,12 @@ static int parse_common_cfg(const char *key, int val, const char *val_str) {
         return 1;
     }
     if (strcmp(key, "RATE_LIMIT_COLD") == 0) {
-        // RATE_LIMIT_COLD = 基础值 倍率 上升死区（三值）
-        int base = RATE_LIMIT_COLD, mult = RATE_LIMIT_COLD_MULT, dz = COLD_UP_DEADZONE;
+        // RATE_LIMIT_COLD = 基础值 倍率 最小变化幅度（三值）
+        int base = RATE_LIMIT_COLD, mult = RATE_LIMIT_COLD_MULT, dz = COLD_DEADZONE;
         int n = sscanf(val_str, "%d %d %d", &base, &mult, &dz);
         if (n >= 1) RATE_LIMIT_COLD      = clamp(base, 1, 194);
         if (n >= 2) RATE_LIMIT_COLD_MULT = clamp(mult, 1, 100);
-        if (n >= 3) COLD_UP_DEADZONE     = clamp(dz, 1, 50);
+        if (n >= 3) COLD_DEADZONE        = clamp(dz, 1, 50);
         return 1;
     }
     // COLD_MAP = 映射起始强度 指数（双值）
@@ -1379,14 +1384,13 @@ static int rate_limit_fan(int desired_rpm) {
 }
 
 /**
- * 下发去重 + 制冷上升死区判定：返回 1 表示跳过本次下发。
+ * 下发去重 + 制冷变化死区判定：返回 1 表示跳过本次下发。
  *
  * 去重以散热器实际回传为准：要播发值与实际值一致视为已到位，跳过下发；
  * 回传异常（实际值 < 0）时退化用 last_* 缓存对比。
  *
- * 制冷上升死区：上升值少于设定则不下发；
+ * 制冷变化死区：目标与制冷实际 |差值| 少于设定则上升下降都不下发；
  * 距最高/最低制冷强度 < 阈值×2 时死区失效（接近极值必须允许精确到位）。
- * 下降方向不受限（快速响应撤冷）。
  */
 static int should_skip_dispatch(int mode, int target, int windOC, int cold, int windLevel) {
     int send_rpm = (mode == 0) ? windLevel : windOC;
@@ -1409,15 +1413,17 @@ static int should_skip_dispatch(int mode, int target, int windOC, int cold, int 
         }
 
         int diff = cold - cooler_cold_real;
-        if (diff > 0) {
+        if (diff != 0) {
+            // 最小变化幅度：目标与制冷实际 |差值| < 死区 → 上升下降都不变；接近极值处死区失效允许到位。
             int cmin = active_cold_eff_min;   // 当前模式有效范围（main_loop 统一计算）
             int cmax = active_cold_eff_max;
-            int near_extreme = (cmax - cooler_cold_real) < COLD_UP_DEADZONE * 2
-                            || (cooler_cold_real - cmin) < COLD_UP_DEADZONE * 2;
-            if (diff < COLD_UP_DEADZONE && !near_extreme) {
-                debug_log(debug_exec, "skip 制冷上升死区：目标冷%d 回传冷%d diff=%d <%d死区，跳过下发",
-                          cold, cooler_cold_real, diff, COLD_UP_DEADZONE);
-                return 1;   // 上升太少，不如不升
+            int adiff = (diff >= 0) ? diff : -diff;
+            int near_extreme = (cmax - cooler_cold_real) < COLD_DEADZONE * 2
+                            || (cooler_cold_real - cmin) < COLD_DEADZONE * 2;
+            if (adiff < COLD_DEADZONE && !near_extreme) {
+                debug_log(debug_exec, "skip 制冷变化死区：目标冷%d 回传冷%d |diff|=%d <%d死区，升降都不变",
+                          cold, cooler_cold_real, adiff, COLD_DEADZONE);
+                return 1;   // |差值| < 最小变化幅度 → 上升下降都不下发
             }
         }
         return 0;
@@ -1982,7 +1988,7 @@ static int apply_gear_direct(int mode, int target,
         if (cold > cold_cap) cold = cold_cap;
     }
 
-    // ---- 去重检测 + 制冷上升死区（以散热器实际回传为准）----
+    // ---- 去重检测 + 制冷变化死区（以散热器实际回传为准）----
     if (should_skip_dispatch(mode, target, send_rpm, cold, wl)) {
         debug_log(debug_exec, "apply_gear_direct 跳过下发（目标冷%d RPM%d == 回传冷%d RPM%d）",
                   cold, send_rpm, cooler_cold_real, cooler_rpm_real);
@@ -2035,6 +2041,9 @@ static void pid_reset_core(void) {
     pid_last_comp_10 = 0;
     pid_cpu_comp_ready = 0;
     pid_cpu_comp_active = 0;
+    pid_batt_filtered = -1;          // 电池输入滤波重置（改动2；切模式/重连后直取初值）
+    pid_batt_last_update_cycle = -1;
+    pid_batt_snap_done = 0;
     pid_out_state_reset();
 }
 
@@ -2208,18 +2217,44 @@ static void pid_cycle(void) {
     int total_comp_10 = cpu_comp_now(batt_raw);
     float cpu_comp = total_comp_10 / 10.0f;   // 日志用（0.1°C → °C）
 
-    // --- PID 重算判定：仅温度窗口变化 或 补偿变化 ---
+    // --- 电池温度输入滤波（改动2：加回；仅温度更新时滤波并输出，动态 α） ---
+    // 首启直取；此后仅温度窗口变化（值/mtime 变）时滤波；动态 α=0.2+0.05×间隔周期数（5s控制周期）。
+    if (pid_batt_filtered < 0) {
+        pid_batt_filtered = batt_raw;
+        pid_batt_last_update_cycle = pid_ctrl_cycles;
+    } else if (batt_window_changed) {
+        int interval = pid_ctrl_cycles - pid_batt_last_update_cycle;
+        if (interval < 0) interval = 0;
+        if (interval > 16) interval = 16;   // 钳 0~16 → α 0.2~1.0（1.0=不滤波）
+        float alpha = 0.2f + 0.05f * interval;
+        pid_batt_filtered = (int)(alpha * batt_raw + (1.0f - alpha) * pid_batt_filtered + 0.5f);
+        pid_batt_last_update_cycle = pid_ctrl_cycles;
+        pid_batt_snap_done = 0;             // 新样本，恢复 snap 资格
+    }
+
+    // 滤波态判据：原始电池温度 != 滤波值 → 正在滤波（可触发恢复原始值逻辑）
+    int filter_lag = (pid_batt_filtered != batt_raw);
+    // 停机首周期（温度未变）且滤波未收敛且未 snap 过：优先恢复原始值强制重算（改动2优先，绕过冻结）
+    int filter_forced = 0;
+    if (!batt_window_changed && filter_lag && !pid_batt_snap_done) {
+        pid_batt_filtered = batt_raw;   // 恢复原始值 = 未更新的电池温度
+        pid_batt_snap_done = 1;         // 只 snap 一次，次周期回正常冻结
+        filter_forced = 1;
+    }
+
+    // --- PID 重算判定：温度窗口变化 或 补偿变化 或 改动2 snap 强制 ---
     int should_recompute = batt_window_changed ||
-                           total_comp_10 != pid_last_comp_10;
+                           total_comp_10 != pid_last_comp_10 ||
+                           filter_forced;
 
     if (!should_recompute) {
-        debug_log(debug_pid, "PID 跳过重算（温度/补偿未变）");
+        debug_log(debug_pid, "PID 跳过重算（温度/补偿/滤波 未变）");
         return;
     }
 
     // --- 跳过②：温度未变（仅补偿变化触发）且上次 |ch| ≤ ch阈值 → 整轮冻结 ---
-    // 冻结时控制状态（acc/kdp/target/last_ch）一律不动；仅推进补偿书签，防补偿反复变化反复触发。
-    if (!batt_window_changed) {
+    // （改动2优先：本周期已 snap 强制重算则跳过冻结，"改动2跑完再冻结"；snap 后 pid_batt_filtered==batt_raw 回正常冻结）
+    if (!batt_window_changed && !filter_forced) {
         float last_ch_abs = (pid_last_ch >= 0.0f) ? pid_last_ch : -pid_last_ch;
         if (last_ch_abs <= (pid_ch_threshold / 10.0f)) {
             debug_log(debug_pid, "PID 整轮冻结（|last_ch|=%.2f ≤阈值%.1f）",
@@ -2234,8 +2269,8 @@ static void pid_cycle(void) {
     if (dt > 6.0f) dt = 6.0f;
     if (dt < 0.6f) dt = 0.6f;
 
-    // --- PID 计算（纯电池 error + cpu_comp；温度未变时 kdp 沿用）---
-    float pid_out = pid_compute(batt_raw, dt, cpu_comp, batt_window_changed);
+    // --- PID 计算（电池 error 用滤波值 pid_batt_filtered + cpu_comp；snap 后==batt_raw 故恢复原始值；温度未变时 kdp 沿用）---
+    float pid_out = pid_compute(pid_batt_filtered, dt, cpu_comp, batt_window_changed);
 
     // 直接映射到物理值（无输出平滑）：PID 输出 → 制冷强度（风扇目标由 compute_fan_target 独立计算）
     int cmax = active_cold_eff_max;

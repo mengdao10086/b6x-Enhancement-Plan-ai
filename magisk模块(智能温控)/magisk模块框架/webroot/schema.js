@@ -106,9 +106,9 @@ window.B6X_SCHEMA = {
     RATE_LIMIT_FAN_DOWN: { type: "multi", fields: [{ label: "每周期最大降速量", min: 50, max: 2000 }, { label: "降速防抖阈值", min: 0, max: 2000 }],
       label: "风扇降速限制",
       desc: "每周期最大降速量 / 最小降低幅度" },
-    RATE_LIMIT_COLD: { type: "multi", fields: [{ label: "基础值", min: 1, max: 194 }, { label: "倍率", min: 1, max: 100 }, { label: "上升死区", min: 1, max: 50 }],
+    RATE_LIMIT_COLD: { type: "multi", fields: [{ label: "基础值", min: 1, max: 194 }, { label: "倍率", min: 1, max: 100 }, { label: "最小变化幅度", min: 1, max: 50 }],
       label: "制冷强度限速",
-      desc: "基础值 / 每°偏离额外变化可量 / 最小上升幅度" },
+      desc: "基础值 / 每°偏离额外变化量 / 最小变化幅度(升降都不变)" },
     // ---- [3] 自动拉起散热器 app ----
     APP_LAUNCH_ENABLED: { type: "switch", label: "自动拉起散热器 app", desc: "" },
     APP_WATCHDOG: { type: "int", min: 0, max: 120, label: "锁死自动重启周期数",
