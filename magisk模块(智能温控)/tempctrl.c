@@ -232,6 +232,19 @@ static int cooler_cold_temp = -1;         // 冷端温度（0.1°C）
 static int cooler_rpm_real = -1;          // 实际风扇转速
 static int cooler_cold_real = -1;         // 实际制冷强度
 
+// --- 回传可信就绪 + 启动/重连对齐（不拿 -1/占位1 兜底，等真实回传再定基线）---
+// LSP 端 COLD_REAL/RPM_REAL 只在 lastWaspWingInfo 就绪时随 RUN_MODE 一起写入；重启/重连瞬间
+// lastWaspWingInfo 为空 → 这些行缺失（读到 -1）或设备未下发前回占位 1。若此时拿它初始化
+// actual_cold 会被兜底成 1（WebUI 显示 1），且后续快速限速一步拉到 PID 目标（125/4500）。
+// 因此启动/长断连重置后不直接采用瞬时回传，改为等待 REPORT_OK_N 帧连续真实回传（RUN_MODE
+// 存在 + 冷/rpm 值合法）再对齐，超时用保守值起步防停摆。
+#define REPORT_OK_N 2                      // 连续 N 帧读到真实回传才判可信（1 帧=1s）
+#define ALIGN_WAIT_TIMEOUT 15              // 等待真实回传上限（秒），超时用保守值起步防永久停摆
+static int report_ok = 0;                  // 1=已连续 REPORT_OK_N 帧读到真实回传（RUN_MODE 存在 + 冷/rpm 值合法）
+static int report_ok_streak = 0;           // 连续"真实回传"读数
+static int pending_align = 0;              // 1=等待真实回传后对齐 actual_cold/actual_rpm
+static time_t pending_align_since = 0;     // pending_align 起点（超时兜底用）
+
 // ======================== 全局运行状态 ========================
 // --- 信号 ---
 static volatile int running = 1;
@@ -1012,6 +1025,7 @@ static void read_cooler_params(void) {
     FILE *f = fopen(path, "r");
     if (!f) return;
     char line[64];
+    int run_mode_seen = 0;   // 本帧是否读到 RUN_MODE（与 COLD_REAL 同块写入，lastWaspWingInfo 就绪才有）
     while (fgets(line, sizeof(line), f)) {
         if (strncmp(line, "BLE=", 4) == 0) {
             app_ble_connected = (atoi(line + 4) != 0);
@@ -1019,6 +1033,8 @@ static void read_cooler_params(void) {
             cooler_hot_temp = atoi(line + 9);
         } else if (strncmp(line, "COLD_TEMP=", 10) == 0) {
             cooler_cold_temp = atoi(line + 10);
+        } else if (strncmp(line, "RUN_MODE=", 9) == 0) {
+            run_mode_seen = 1;
         } else if (strncmp(line, "RPM_REAL=", 9) == 0) {
             cooler_rpm_real = atoi(line + 9);
         } else if (strncmp(line, "COLD_REAL=", 10) == 0) {
@@ -1026,6 +1042,16 @@ static void read_cooler_params(void) {
         }
     }
     fclose(f);
+
+    // 回传可信判定：本帧 RUN_MODE 存在（真实回传已就绪）+ 冷/rpm 值合法 → 累计连续帧；
+    // 任一帧缺失/异常即清零。连续 REPORT_OK_N 帧（≈N 秒）才置 report_ok=1，用于启动/重连对齐。
+    int frame_ok = (run_mode_seen && cooler_cold_real >= COLD_MIN && cooler_rpm_real >= fan_rpm_min);
+    if (frame_ok) {
+        if (report_ok_streak < REPORT_OK_N) report_ok_streak++;
+        if (report_ok_streak >= REPORT_OK_N) report_ok = 1;
+    } else {
+        report_ok_streak = 0;
+    }
 }
 
 // ======================== sysfs 读取工具 ========================
@@ -2086,9 +2112,40 @@ static void alarm_handler(int sig) {
 static time_t last_disconnect_time = 0;
 
 /**
+ * 对齐实际制冷/转速到散热器真实回传（启动/长断连重置后"待对齐"时调用）。
+ * 仅当 report_ok（连续 REPORT_OK_N 帧真实回传）才对齐；超时（ALIGN_WAIT_TIMEOUT 秒）
+ * 用保守值起步，防止回传长期缺失（旧机型）导致永久停摆。
+ * @return 1=本次对齐完成（可强制下发），0=仍待对齐
+ */
+static int try_align_actual(void) {
+    if (!pending_align) return 0;
+    if (report_ok) {
+        actual_cold = (cooler_cold_real >= COLD_MIN) ? cooler_cold_real : pid_cold_min;
+        actual_rpm = (cooler_rpm_real >= fan_rpm_min) ? cooler_rpm_real : fan_rpm_min;
+        write_log("回传就绪对齐 冷=%d rpm=%d", actual_cold, actual_rpm);
+        pending_align = 0;
+        return 1;
+    }
+    if (pending_align_since > 0 && time(NULL) - pending_align_since >= ALIGN_WAIT_TIMEOUT) {
+        actual_cold = pid_cold_min;
+        actual_rpm = fan_rpm_min;
+        write_log("回传超时（>%ds）未就绪，用保守值起步 冷=%d rpm=%d",
+                  ALIGN_WAIT_TIMEOUT, actual_cold, actual_rpm);
+        pending_align = 0;
+        return 1;
+    }
+    return 0;
+}
+
+/**
  * 重连安全对齐：以散热器实际回传值为准初始化实际制冷/转速（PID/gear 共用），
  * 由 rate_limited_execute 按正常限速逐步调节，抑制重连突变。
- * 此处不立即下发（分段执行）
+ * 此处不立即下发（分段执行）。
+ *
+ * 改动：不直接用瞬时 cooler_cold_real 覆盖 actual_cold——重连瞬间 lastWaspWingInfo
+ * 未就绪，COLD_REAL 可能缺失(-1)或设备未下发前回占位 1，拿它初始化会被兜底成 1，
+ * 且后续快速限速一步拉到 PID 目标（125/4500）。改为：长断连由 try_align_actual 等
+ * 真实回传就绪后对齐；短断连保留 PID 状态、沿用内存实际值（断联期间未被改仍准确）。
  */
 static void reconnect_align(void) {
     // 清空温度窗口累积标志
@@ -2104,19 +2161,19 @@ static void reconnect_align(void) {
         last_disconnect_time = 0;
     }
 
-    // 以散热器实际回传为准：重连后从真实当前状态起步，由正常限速逐步调节，抑制突变。
-    // 回传异常（status 文件读失败）时保持原值不变
-    if (cooler_cold_real >= COLD_MIN) actual_cold = cooler_cold_real;
-    if (cooler_rpm_real >= fan_rpm_min) actual_rpm = cooler_rpm_real;
-
-    // 断联 < reconnect_keep_cycles 个控制周期(×5s)：短断联保留 PID 状态（积分/误差），仅对齐实际值；长断联则完整重置。
+    // 断联 < reconnect_keep_cycles 个控制周期(×5s)：短断联保留 PID 状态（积分/误差），
+    // 沿用内存实际值（断联期间 actual_cold 未被改，仍是最下发值）；长断联则完整重置并进入待对齐。
     if (discon_sec > 0) {
         if (reconnect_keep_cycles > 0 && discon_sec < reconnect_keep_cycles * 5) {
             write_log("重连 断联%d秒<%d周期，保留 PID 状态", discon_sec, reconnect_keep_cycles);
         } else {
-            // 重置 PID 状态，制冷/转速初值取回传实际值，由 rate_limited_execute 从回传值向 PID 目标正常步进
+            // 重置 PID 状态；不立即用回传覆盖 actual_cold，等真实回传就绪后由 try_align_actual 对齐。
             pid_reset_core();
-            write_log("重连 PID 状态已重置，制冷从回传实际值起步 cold=%d", actual_cold);
+            actual_cold = -1;      // 未就绪：不设兜底基线，避免被 COLD_MIN=1 吞掉真实起步值
+            actual_rpm = -1;
+            pending_align = 1;
+            pending_align_since = time(NULL);
+            write_log("重连 PID 状态已重置，进入待对齐（等待真实回传）");
             first_run = 1;
         }
     }
@@ -2193,6 +2250,11 @@ static int pid_out_filter(int target) {
  * 输出端滤波 → 制冷限速 → 独立风扇计算（不跟 PID 输出）→ 风扇限速 → 纯下发
  */
 static int rate_limited_execute(void) {
+    // 实际值未就绪（启动/长断连后待对齐期间 actual_cold=-1）：不强制下发，避免用无效/兜底值起步。
+    if (actual_cold < COLD_MIN || actual_rpm < fan_rpm_min) {
+        debug_log(debug_exec, "实际值未就绪（冷%d rpm%d），跳过下发", actual_cold, actual_rpm);
+        return 0;
+    }
     pid_align_cold = pid_out_filter(pid_align_cold);
     rate_limit_cold(pid_align_cold);
     int send_rpm = rate_limit_fan(compute_fan_target());
@@ -2425,29 +2487,39 @@ int main(int argc, char *argv[]) {
     }
     if (!running) goto exit;
 
-    // --- PID 初始化（放在 BLE 就绪后）：读取 LSP 模块回传的实际制冷强度对齐输出 ---
-    float pid_ratio = 0.0f;
-    int cold_ref = (cooler_cold_real >= pid_cold_min) ? cooler_cold_real : pid_cold_min;
-    pid_ratio = pid_ratio_from_cold(cold_ref, active_pid_cold_max);
-    write_log("LSP 回传承载 制冷=%d ratio=%.2f rpm=%d", cold_ref, pid_ratio, pid_align_rpm);
+    // --- PID 初始化（放在 BLE 就绪后）---
     pid_reset_core();
 
     // --- 进入工作模式 ---
     app_was_alive = 1;
     first_run = 1;
 
-    // 以散热器实际回传值为准初始化实际制冷/转速（进入工作模式前 read_cooler_params 已读回传）。
-    // 回传异常（文件读失败）时用最小合法值保底
-    if (cooler_cold_real >= COLD_MIN) actual_cold = cooler_cold_real;
-    else if (actual_cold < COLD_MIN) actual_cold = COLD_MIN;
-    if (cooler_rpm_real >= fan_rpm_min) actual_rpm = cooler_rpm_real;
-    else if (actual_rpm < fan_rpm_min) actual_rpm = fan_rpm_min;
+    // 以散热器实际回传值为准初始化实际制冷/转速。仅当真实回传已就绪才对齐并强制首次下发；
+    // 未就绪（app 刚重启、lastWaspWingInfo 为空 → COLD_REAL 缺失/占位 1）则进入"待对齐"，
+    // 由主循环等真实回传到达后起步，避免被 COLD_MIN 兜底成 1 或用低基线强制下发导致跳变。
+    if (report_ok) {
+        float pid_ratio = 0.0f;
+        int cold_ref = (cooler_cold_real >= pid_cold_min) ? cooler_cold_real : pid_cold_min;
+        pid_ratio = pid_ratio_from_cold(cold_ref, active_pid_cold_max);
+        if (cooler_cold_real >= COLD_MIN) actual_cold = cooler_cold_real;
+        else actual_cold = pid_cold_min;
+        if (cooler_rpm_real >= fan_rpm_min) actual_rpm = cooler_rpm_real;
+        else actual_rpm = fan_rpm_min;
+        write_log("LSP 回传承载就绪 制冷=%d ratio=%.2f rpm=%d", actual_cold, pid_ratio, pid_align_rpm);
 
-    // 强制首次下发
-    last_bcast_valid = 0;
-    rate_limit_cold(pid_align_cold);
-    int send_rpm = rate_limit_fan(compute_fan_target());
-    apply_gear_direct(1, 5, send_rpm, actual_cold, 0);
+        // 强制首次下发
+        last_bcast_valid = 0;
+        rate_limit_cold(pid_align_cold);
+        int send_rpm = rate_limit_fan(compute_fan_target());
+        apply_gear_direct(1, 5, send_rpm, actual_cold, 0);
+    } else {
+        actual_cold = -1;      // 未就绪：不设兜底基线，待 try_align_actual 对齐后起步
+        actual_rpm = -1;
+        pid_align_cold = 1;    // 待对齐期间保持最小，等 PID 重算/对齐后推进
+        pending_align = 1;
+        pending_align_since = time(NULL);
+        write_log("LSP 回传未就绪，进入待对齐（等待真实回传）");
+    }
 
     // ---- 主循环：1 秒节拍（采集 + 控制分离） ----
     // 每 1s：采集电池/CPU/散热器回传 → 写 WebUI 曲线数据文件（滚动 720 行，断联不写）
@@ -2528,6 +2600,10 @@ int main(int argc, char *argv[]) {
             }
 
             main_loop();
+
+            // ★ 待对齐：启动/长断连重置后先等真实回传就绪再对齐实际值（对齐后允许强制首下）
+            if (pending_align && try_align_actual())
+                last_bcast_valid = 0;
 
             // ★ 速率限制执行
             cycle_batt_temp = cached_batt_raw;   // 1s 采集缓存

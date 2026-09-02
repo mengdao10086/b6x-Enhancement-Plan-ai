@@ -921,6 +921,31 @@ public class MainHook implements IXposedHookLoadPackage {
                         }
                     });
             XposedBridge.log(TAG + " 已钩住 LeDataInteractionController.onGattConnected（static 同步修复）");
+
+            // 【方案A 前置：收包者定基准】B6X 数据到达（0x13 状态包）把 currentValidGatt 重绑到
+            // 真正在收包的 gatt。重连时 static/currentValidGatt 常指向"最后连接成功"实例，未必在
+            // 收包；命令写进失效 gatt 会被 SDK 静默丢弃 → 设备停在固件默认 125/4500。以真实收包
+            // 的 gatt 为下发基准（ensureUsableController 再按它重同步 static），可消除该窗口。
+            try {
+                XposedHelpers.findAndHookMethod(
+                        lpparam.classLoader.loadClass(
+                                "com.flydigi.sdk.bluetooth.LeDataInteractionController$mGattCallback$1"),
+                        "onCharacteristicChanged",
+                        BluetoothGatt.class, android.bluetooth.BluetoothGattCharacteristic.class,
+                        new XC_MethodHook() {
+                            @Override
+                            protected void afterHookedMethod(MethodHookParam param) {
+                                if (!bleConnected) return;
+                                BluetoothGatt gatt = (BluetoothGatt) param.args[0];
+                                if (gatt != null) {
+                                    currentValidGatt = gatt;   // 收包实例 = 真在通信的 gatt，作下发基准
+                                }
+                            }
+                        });
+                XposedBridge.log(TAG + " 已钩住 LeDataInteractionController.onCharacteristicChanged（收包锚点）");
+            } catch (Throwable t) {
+                XposedBridge.log(TAG + " 钩 onCharacteristicChanged 失败: " + t.getMessage());
+            }
         } catch (Throwable t) {
             XposedBridge.log(TAG + " 钩 onGattConnected 失败: " + t.getMessage());
         }
@@ -1741,6 +1766,11 @@ public class MainHook implements IXposedHookLoadPackage {
                 reconnectPending = false;
                 stallReconnectCount = 0;    // 设备恢复响应，清零连续无回传重连计数
                 updateModelFromInfo(info);
+                // 【方案A 前置：收包者定基准】B7X 收包时把 currentValidGatt 重绑到该 controller 的
+                // gatt（真在通信）。重连时 static 常指向"最后连接成功"实例而非收包实例，命令写进
+                // 失效 gatt 被 SDK 静默丢弃 → 设备停在固件默认 125/4500。以收包实例为基准可消除。
+                BluetoothGatt g = connectedControllers.get(ctrl);
+                if (g != null) currentValidGatt = g;
             }
         } catch (Throwable t) { /* X 字段不可用则保持包名兜底 */ }
     }
