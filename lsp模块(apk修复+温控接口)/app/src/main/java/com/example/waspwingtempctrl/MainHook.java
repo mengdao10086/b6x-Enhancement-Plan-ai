@@ -326,18 +326,22 @@ public class MainHook implements IXposedHookLoadPackage {
                     if (tick % 5 == 0 && !bleConnected && lastDevice != null && !deviceLockedAlerted) {
                         try {
                             if (appKind == 7) {
-                                // B7X 无 connectGattWith（仅 B6X 有），改用 T0() 重连其 M() 设备
-                                if (capturedB7Controller != null) {
-                                    XposedHelpers.callMethod(capturedB7Controller, "T0");
+                                // B7X 无 connectGattWith（仅 B6X 有）；它的等价入口是 t9.j.E(device)
+                                //（内部 f50991b.o0(device)），与 B6X connectGattWith 走同一 SDK 静态注册表，
+                                // 直接用 lastDevice 发起连接，避免依赖冷启动必丢的 capturedB7Controller 实例。
+                                if (appClassLoader == null) {
+                                    if (!loggedReconnectSkip) {
+                                        loggedReconnectSkip = true;
+                                        XposedBridge.log(TAG + " 后台重连跳过: appClassLoader 为 null（B7X findClass 无法进行）");
+                                    }
+                                } else {
+                                    Class<?> mgrCls7 = XposedHelpers.findClass("t9.j", appClassLoader);
+                                    XposedHelpers.callStaticMethod(mgrCls7, "E", lastDevice);
                                     // 尝试仅记一次（每断联，markConnected 清零）
                                     if (!loggedReconnectAttempt) {
                                         loggedReconnectAttempt = true;
-                                        XposedBridge.log(TAG + " 后台重连尝试(b7x T0) -> "
-                                                + lastDevice.getAddress());
+                                        XposedBridge.log(TAG + " 后台重连尝试(b7x E) -> " + lastDevice.getAddress());
                                     }
-                                } else if (!loggedReconnectSkip) {
-                                    loggedReconnectSkip = true;
-                                    XposedBridge.log(TAG + " 后台重连跳过: capturedB7Controller 未捕获（b7x 重连不可用）");
                                 }
                             } else {
                                 if (appClassLoader == null) {
