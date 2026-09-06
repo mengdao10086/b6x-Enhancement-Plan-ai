@@ -1414,6 +1414,9 @@ static int rate_limit_fan(int desired_rpm) {
         desired_rpm < actual_rpm && (actual_rpm - desired_rpm) <= fan_rpm_change_threshold)
         desired_rpm = actual_rpm;
     rate_limit(&actual_rpm, desired_rpm, fan_up, RATE_LIMIT_FAN_DOWN);
+    // 下限钳制：内部 actual_rpm 与 send_rpm 对齐，恒不低于 fan_rpm_min。
+    // 否则风扇目标偏低时 actual_rpm 跌破 fan_rpm_min，rate_limited_execute 的就绪守卫会误判"未就绪"而永久跳过下发（死锁）。
+    actual_rpm = clamp(actual_rpm, fan_rpm_min, active_fan_max);
 
     // ---- 向上取整到 50 的倍数 ----
     int send_rpm = ((actual_rpm + 49) / 50) * 50;
