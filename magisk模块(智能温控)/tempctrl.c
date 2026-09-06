@@ -177,6 +177,10 @@ static int pid_target_coef = 20;
 static int pid_target_alpha = 10;
 // PID_TARGET 第三值：动态目标上限（0.1°C，默认 10=1.0°C）
 static int pid_target_max = 10;
+// PID_TARGET_DIR：动态目标方向性 EMA（远离基线加快->away alpha，回归基线减慢->toward alpha）
+static int pid_target_dir_on = 1;                 // 第一值：方向性滤波开关（0=退回 PID_TARGET 第2值单 alpha）
+static int pid_target_away_alpha = 20;            // 第二值：远离基线 alpha（%，20=0.2）
+static int pid_target_toward_alpha = 10;          // 第三值：回归基线 alpha（%，10=0.1）
 // PID_CH_THRESHOLD：跳过重算的 ch 阈值（0.1°C，|last_ch|≤此值 → 整轮冻结）
 static int pid_ch_threshold = 2;
 
@@ -196,6 +200,12 @@ static float pid_target_f = 0.0f;         // EMA 动态目标
 static float pid_last_error = 0.0f;       // 上周期纯电池误差（°C，v 计算用）
 static float pid_last_ch = 0.0f;          // 上周期 ch（|ch|≤阈值 → 整轮冻结判据）
 static time_t pid_last_change_time = 0;   // 上次重算时间戳（dt 锚点）
+// --- 无变化回溯（PID_SPD_RECALL）：锚点温度 + 累计周期数 → 重算速度 ---
+static int recall_anchor = 0;             // 最近一次温度变化前的温度（0.1°C）
+static int recall_prev_batt = 0;          // 上个控制周期的电池温度（0.1°C）
+static int recall_cycles = 0;             // 距该次变化的控制周期数（>0 才有效）
+static int pid_spd_recall_on = 1;         // PID_SPD_RECALL 第一值：开关
+static int pid_spd_recall_weight = 1000;  // PID_SPD_RECALL 第二值：回溯速度权重（÷1000，1000=全量）
 
 // --- CPU 补偿运行状态 ---
 static int pid_cpu_comp_ready = 0;          // 补偿平滑是否已初始化（首次上次值用 0，从 0 爬升）
@@ -207,18 +217,6 @@ static int pid_cpu_comp_active = 0;         // 补偿门控：1=激活（进入�
 static int pid_batt_filtered = -1;        // 滤波后电池温度（0.1°C），-1=未初始化
 static int pid_batt_last_update_cycle = -1; // 上次温度更新的控制周期（动态α间隔计算用）
 static int pid_batt_snap_done = 0;        // 停机后是否已做一次"恢复原始值"snap（1=已做）
-
-// --- PID 输出端自适应 EMA 滤波（PID_OUT_FILTER）---
-// α = 每周期平均温差×温差增益 + 距目标偏差×偏差增益；下限钳制到 base（最低 0.1）后，下降方向 α×下降倍率（回落更快）
-static int pid_out_filter_enabled = 1;    // 开关：0=直通（回退现状）
-static int pid_out_base_alpha = 100;      // 下限钳制 α（‰，100=0.1；α 低于此值钳到此值，且最低 0.1）
-static int pid_out_temp_gain = 100;       // 温差增益（‰/0.1°，每 0.1° 温差 α+0.1）
-static int pid_out_dev_gain = 10;         // 偏差增益（‰/0.1°，每 0.1° 偏差 α+0.01）
-static int pid_out_down_mult = 20;        // 下降方向倍率（×0.1，20=×2.0；目标<上次输出时 α×该倍率，制冷回落更快）
-static int pid_out_prev = -1;             // 上次滤波输出（-1=未初始化）
-static int pid_out_last_batt = -1;        // 上次判据温度（0.1°，原始值）
-static int pid_out_last_cycle = -1;       // 上次判据周期计数（gap 计算用）
-static int pid_out_prev2_batt = -1;       // 上上次判据温度（0.1° 抖动识别用）
 
 // ----（Gear 温度预测 / gear_predict_* / gear_input_batt 已随 Gear 删除）----
 // --- 输出映射与对齐 ---
@@ -285,6 +283,9 @@ static long watchdog_last_kill_at = 0;  // 上次 kill 时间戳（冷却防风�
 static time_t last_launch_attempt = 0;  // 上次拉起尝试时间（冷却用）
 static time_t last_arbitrate = 0;       // 上次 app 存活仲裁时间（ARBITRATE_INTERVAL 节流）
 static int app_launch_cooldown = 60;    // APP_LAUNCH_COOLDOWN：两次拉起最小间隔（秒，默认 60）
+static int app_launch_screen_gate_enabled = 1;  // APP_LAUNCH_SCREEN_GATE 第一值：屏幕门禁开关
+static int app_launch_screen_fail_ok    = 1;    // 第二值：读取失败默认值（1=可拉起，0=跳过）
+static int app_launch_screen_dozing_on  = 0;    // 第三值：Dozing 是否算亮屏（默认 0）
 
 #define BOOT_START_DELAY_SEC 30         // 脚本启动成功后延迟开始运行（等待系统/蓝牙就绪，避开开机初期拉起 app 闪烁）
 
@@ -470,7 +471,7 @@ static const struct IntCfgKey INT_CFG_KEYS[] = {
     { "BATT_BASELINE",             &BATT_BASELINE,               300, 500 },
     { "CPU_FILTER_ALPHA",          &CPU_FILTER_ALPHA,            1, 100 },
     { "RECONNECT_KEEP_CYCLES",     &reconnect_keep_cycles,       0, 30 },
-    // PID 单值键走表驱动；多值键（PID_GAIN / PID_TARGET / PID_COLD / PID_CPU_COMP / PID_OUT_FILTER）在 parse_pid_cfg 分段解析
+    // PID 单值键走表驱动；多值键（PID_GAIN / PID_TARGET / PID_TARGET_DIR / PID_COLD / PID_CPU_COMP / PID_SPD_RECALL）在 parse_pid_cfg 分段解析
     { "PID_CH_THRESHOLD",          &pid_ch_threshold,            1, 100 },
     { "RPM_SMOOTH_ALPHA",          &rpm_smooth_alpha,            1, 99 },
     // sysfs 层（SYSFS_ENABLED=1）
@@ -549,6 +550,16 @@ static int parse_pid_cfg(const char *key, int val, const char *val_str) {
         if (n >= 3) pid_target_max   = clamp(c, 1, 100);
         return 1;
     }
+    // PID_TARGET_DIR = 方向性滤波开关 远离基线alpha(%) 回归基线alpha(%)
+    // 默认 "1 20 10" = 远离基线 0.2、回归基线 0.1；开关=0 时退回 PID_TARGET 第2值单一 alpha
+    if (strcmp(key, "PID_TARGET_DIR") == 0) {
+        int on = pid_target_dir_on, a = pid_target_away_alpha, t = pid_target_toward_alpha;
+        int n = sscanf(val_str, "%d %d %d", &on, &a, &t);
+        if (n >= 1) pid_target_dir_on   = (on != 0);
+        if (n >= 2) pid_target_away_alpha   = clamp(a, 1, 100);
+        if (n >= 3) pid_target_toward_alpha = clamp(t, 1, 100);
+        return 1;
+    }
     if (strcmp(key, "PID_COLD") == 0) {
         int a = pid_cold_min, b = pid_cold_max, c = b7_pid_cold_max;
         int n = sscanf(val_str, "%d %d %d", &a, &b, &c);
@@ -564,16 +575,13 @@ static int parse_pid_cfg(const char *key, int val, const char *val_str) {
         if (n >= 3) pid_cpu_comp_offset = clamp(c, 0, 500);
         return 1;
     }
-    // PID_OUT_FILTER = 开关 下限α(‰) 温差增益(‰/0.1°) 偏差增益(‰/0.1°) 下降倍率(×0.1)
-    // 默认 "1 100 100 10 20" = 下限0.1（α 低于0.1按0.1）、温差每0.1°+0.1、偏差每0.1°+0.01、下降方向 α×2
-    if (strcmp(key, "PID_OUT_FILTER") == 0) {
-        int on = pid_out_filter_enabled, b = pid_out_base_alpha, tg = pid_out_temp_gain, dg = pid_out_dev_gain, dm = pid_out_down_mult;
-        int n = sscanf(val_str, "%d %d %d %d %d", &on, &b, &tg, &dg, &dm);
-        if (n >= 1) pid_out_filter_enabled = (on != 0);
-        if (n >= 2) pid_out_base_alpha = clamp(b, 1, 1000);
-        if (n >= 3) pid_out_temp_gain  = clamp(tg, 0, 1000);
-        if (n >= 4) pid_out_dev_gain   = clamp(dg, 0, 500);
-        if (n >= 5) pid_out_down_mult  = clamp(dm, 10, 100);
+    // PID_SPD_RECALL = 开关 回溯速度权重(÷1000)
+    // 默认 "1 1000" = 开启、注入全量速度；无上限（锚点+累计周期数）
+    if (strcmp(key, "PID_SPD_RECALL") == 0) {
+        int on = pid_spd_recall_on, w = pid_spd_recall_weight;
+        int n = sscanf(val_str, "%d %d", &on, &w);
+        if (n >= 1) pid_spd_recall_on = (on != 0);
+        if (n >= 2) pid_spd_recall_weight = clamp(w, 100, 1000);
         return 1;
     }
     return 0;
@@ -665,6 +673,13 @@ static void load_config(const char *path) {
             app_watchdog_cycles = clamp(atoi(val_str), 0, 120);   // 锁死自动重启停滞周期数（0=关闭）
         } else if (strcmp(key, "APP_LAUNCH_COOLDOWN") == 0) {
             app_launch_cooldown = clamp(atoi(val_str), 0, 3600);  // 两次拉起最小间隔（秒，0=不冷却）
+        } else if (strcmp(key, "APP_LAUNCH_SCREEN_GATE") == 0) {
+            // 屏幕门禁（多值：开关 读取失败默认值 Dozing是否算亮屏）；仅 mWakefulness=Awake 才拉起
+            int on = app_launch_screen_gate_enabled, f = app_launch_screen_fail_ok, dz = app_launch_screen_dozing_on;
+            int n = sscanf(val_str, "%d %d %d", &on, &f, &dz);
+            if (n >= 1) app_launch_screen_gate_enabled = (on != 0);
+            if (n >= 2) app_launch_screen_fail_ok    = (f != 0);
+            if (n >= 3) app_launch_screen_dozing_on  = (dz != 0);
         }
     }
 
@@ -1527,6 +1542,29 @@ static void app_process_scan(const char *pkgs[], int alive[], int count) {
     closedir(d);
 }
 
+/**
+ * 屏幕状态（dumpsys power 读 mWakefulness）：仅 Awake 算亮屏。
+ * 返回：1=Awake(亮屏)、2=Dozing(息屏常显)、0=Asleep/其余(灭屏)、-1=读取失败。
+ * 精确匹配 "mWakefulness=" 并排除 "mWakefulnessOverride="（跨版本行序不定，勿用 grep -m1 直接截断）。
+ */
+static int is_screen_awake(void) {
+    char cmd[256];
+    snprintf(cmd, sizeof(cmd),
+             "dumpsys power 2>/dev/null | awk -F'=' '/mWakefulness=/{ if ($0 !~ /Override/) { print $2; exit } }'");
+    FILE *fp = popen(cmd, "r");
+    if (!fp) return -1;
+    char val[32] = {0};
+    if (fgets(val, sizeof(val), fp)) {
+        size_t n = strlen(val);
+        while (n > 0 && (val[n-1] == '\n' || val[n-1] == '\r')) val[--n] = 0;
+    }
+    pclose(fp);
+    if (strcmp(val, "Awake") == 0) return 1;
+    if (strcmp(val, "Dozing") == 0) return 2;
+    if (strlen(val) == 0) return -1;   // 解析到空 → 失败，调用方按兜底处理
+    return 0;                          // Asleep / 其余 → 灭屏
+}
+
 /** 判断指定包名是否为当前前台/top Activity（dumpsys 开销约 100~300ms，仅在要 kill 时调用） */
 static int is_foreground_pkg(const char *pkg) {
     // 优先窗口焦点 mCurrentFocus（最准确），退化为 topResumedActivity/mResumedActivity
@@ -1586,8 +1624,7 @@ static const char *resolve_launch_pkg(void) {
  */
 static void launch_last_app(void) {
     time_t now = time(NULL);
-    if (now - last_launch_attempt < app_launch_cooldown) return;   // 冷却节流
-    last_launch_attempt = now;
+    if (now - last_launch_attempt < app_launch_cooldown) return;   // 冷却节流（仅在真正 am start 前记录尝试）
     if (!APP_LAUNCH_ENABLED) {
         debug_log(debug_launch, "自动拉起 开关关闭，跳过");
         return;
@@ -1606,6 +1643,17 @@ static void launch_last_app(void) {
         return;
     }
 
+    // 屏幕状态门禁（APP_LAUNCH_SCREEN_GATE）：仅 mWakefulness=Awake 才拉起；屏灭/失败跳过本周期（下一 5s 重试）
+    if (app_launch_screen_gate_enabled) {
+        int sc = is_screen_awake();
+        if (sc == 2) sc = app_launch_screen_dozing_on ? 1 : 0;   // Dozing 按配置是否算亮屏（默认 0=算灭）
+        if (sc < 0) sc = app_launch_screen_fail_ok;              // 读取失败兜底（默认 1=可拉起，防永久不拉起）
+        if (sc != 1) {
+            debug_log(debug_launch, "自动拉起 屏幕未亮（mWakefulness 非 Awake），本周期跳过");
+            return;
+        }
+    }
+
     // 优先显式组件：这些 app 的 launcher 未导出/非标准 filter，隐式启动解析不到
     // （报 "unable to resolve Intent"），须用显式组件 -n <包名>/<类名>；未知 launcher 回退 -p
     const char *act = NULL;
@@ -1621,6 +1669,7 @@ static void launch_last_app(void) {
         snprintf(cmd, sizeof(cmd),
                  "am start -a android.intent.action.MAIN -c android.intent.category.LAUNCHER "
                  "-p %s --es b6x_auto_launch 1 > /dev/null 2>&1", pkg);
+    last_launch_attempt = now;   // 真正下发 am start 才记冷却，避免屏灭轮询消耗冷却
     int rc = system(cmd);
     write_log("自动拉起散热器 app %s（后台化）rc=%d", pkg, rc);
 }
@@ -1847,13 +1896,15 @@ static int cpu_comp_now(int batt) {
  * @param batt_window_changed 本周期温度窗口是否变化（0=温度未变，kdp 沿用）
  * @return 归一化输出 0.0~1.0
  */
-static float pid_compute(int batt_10, float dt, float cpu_comp, int batt_window_changed) {
+static float pid_compute(int batt_10, float dt, float cpu_comp, int batt_window_changed, int recall_on, float recall_v) {
     // 输入误差（纯电池）
     float error = (batt_10 - BATT_BASELINE) / 10.0f;
 
-    // 速度项（°C/周期）：首次重算（无常值历史）时 v=0
+    // 速度项（°C/周期）：首次重算（无常值历史）时 v=0；温度未变时用回溯速度（recall_on，item4）
     float v = 0.0f;
-    if (pid_last_change_time != 0)
+    if (recall_on)
+        v = recall_v;
+    else if (pid_last_change_time != 0)
         v = (error - pid_last_error) / dt;
     pid_last_error = error;
 
@@ -1867,7 +1918,16 @@ static float pid_compute(int batt_10, float dt, float cpu_comp, int batt_window_
     float tmax = pid_target_max / 10.0f;   // 0.1°C → °C
     if (raw_target >  tmax) raw_target =  tmax;
     if (raw_target < -tmax) raw_target = -tmax;
-    pid_target_f += (pid_target_alpha / 100.0f) * (raw_target - pid_target_f);
+    // 动态目标 EMA（item2 方向性滤波）：远离基线加快(away)，回归基线减慢(toward)
+    {
+        float ta = pid_target_alpha / 100.0f;
+        if (pid_target_dir_on) {
+            float ra = (raw_target < 0.0f) ? -raw_target : raw_target;
+            float tf = (pid_target_f  < 0.0f) ? -pid_target_f  : pid_target_f;
+            ta = (ra > tf) ? (pid_target_away_alpha / 100.0f) : (pid_target_toward_alpha / 100.0f);
+        }
+        pid_target_f += ta * (raw_target - pid_target_f);
+    }
 
     // 积分累积（acc；不乘 dt）
     pid_ki += (pid_ki_coef / 1000.0f) * (ch - pid_target_f);
@@ -2044,14 +2104,6 @@ static int apply_gear_direct(int mode, int target,
     return 1;
 }
 
-/** 重置 PID 输出端自适应 EMA 滤波状态（切模式/重连/对齐后直取新目标） */
-static void pid_out_state_reset(void) {
-    pid_out_prev = -1;
-    pid_out_last_batt = -1;
-    pid_out_last_cycle = -1;
-    pid_out_prev2_batt = -1;
-}
-
 /**
  * 重置 PID 核心状态（积分、误差、滤波、补偿、方差缓冲区）
  * 不同场景的调用者在此基础上附加各自的额外重置逻辑
@@ -2070,7 +2122,9 @@ static void pid_reset_core(void) {
     pid_batt_filtered = -1;          // 电池输入滤波重置（改动2；切模式/重连后直取初值）
     pid_batt_last_update_cycle = -1;
     pid_batt_snap_done = 0;
-    pid_out_state_reset();
+    recall_anchor = 0;
+    recall_prev_batt = 0;
+    recall_cycles = 0;
 }
 
 // Gear 模式切换对齐（pid_align_from_gear）已随 Gear 删除
@@ -2089,7 +2143,6 @@ static float pid_ratio_from_cold(int cold_ref, int cold_max) {
     if (ratio < 0.0f) ratio = 0.0f;
     if (ratio > 1.0f) ratio = 1.0f;
     pid_align_cold = cold_ref;
-    pid_out_state_reset();
     pid_align_rpm  = fan_rpm_min + (int)(ratio * (active_fan_max - fan_rpm_min));
     pid_ratio_saved = ratio;
     return ratio;
@@ -2180,72 +2233,6 @@ static void reconnect_align(void) {
 }
 
 /**
- * PID 输出端自适应 EMA 滤波（PID_OUT_FILTER）。
- * 每控制周期推进，不跟随 PID 是否重算：PID 未重算时目标 pid_align_cold 保持，
- * 滤波继续向该目标收敛，输出仍逐步变化。
- *
- * α（0~1）动态 = 每周期平均温差×温差增益 + 距目标偏差×偏差增益，
- *   下限钳制到 base（最低 0.1，先于下降倍率处理）：
- *   温差大（真趋势）→ α 高 → 快速跟随；温差小（稳态）→ α 低 → 强滤波压抖。
- * 0.1° 抖动识别：单步温差恰为 0.1° 且上上次温度与本次相同（来回抖回原位）→ 视为无变化。
- *
- * 判据温度用原始值 cached_batt_raw；偏差同样用原始温度（与 pid_compute 口径一致）。
- * 下降方向（目标<上次输出）α×下降倍率，制冷回落更快更干脆。
- * 输出方向取整（增大向上、减小向下），并钳制到当前模式有效范围。
- */
-static int pid_out_filter(int target) {
-    if (!pid_out_filter_enabled) return target;
-
-    int batt = cached_batt_raw;   // 1s 采集缓存
-    if (batt < 0) batt = (pid_out_last_batt >= 0) ? pid_out_last_batt : BATT_BASELINE;
-                                // 采集异常时用上次判据值，温差按 0
-
-    // --- 每周期平均温差（0.1°），含 0.1° 抖动识别 ---
-    int d_eff_10 = 0;
-    if (pid_out_last_cycle >= 0 && pid_out_last_batt >= 0) {
-        int delta = (batt >= pid_out_last_batt) ? (batt - pid_out_last_batt)
-                                                : (pid_out_last_batt - batt);
-        if (delta == 1 && pid_out_prev2_batt >= 0 && pid_out_prev2_batt == batt)
-            d_eff_10 = 0;   // 0.1° 来回抖且回到原位 → 无变化
-        else {
-            int gap = pid_ctrl_cycles - pid_out_last_cycle;
-            if (gap <= 0) gap = 1;
-            d_eff_10 = delta / gap;
-        }
-    }
-    pid_out_prev2_batt = pid_out_last_batt;
-    pid_out_last_batt  = batt;
-    pid_out_last_cycle = pid_ctrl_cycles;
-
-    // --- α 计算（千分制）：α = d_eff×温差增益 + 偏差×偏差增益；先做下限钳制（base 为钳制值，最低 0.1），再处理下降方向 ×下降倍率；clamp [0.1, 1000] ---
-    int pid_input_10 = batt;
-    int dev_10 = pid_input_10 - BATT_BASELINE;
-    if (dev_10 < 0) dev_10 = -dev_10;
-    int alpha_mil = d_eff_10 * pid_out_temp_gain
-                  + dev_10  * pid_out_dev_gain;
-    if (alpha_mil < pid_out_base_alpha) alpha_mil = pid_out_base_alpha;   // 下限钳制：钳到 base（钳制值）
-    if (alpha_mil < 100) alpha_mil = 100;                                 // 低于 0.1 时按 0.1（此判断在下降倍率之前）
-    if (target < pid_out_prev)                          // 下降方向（目标<上次输出）：α×下降倍率，回落更快
-        alpha_mil = alpha_mil * pid_out_down_mult / 10;
-    if (alpha_mil > 1000) alpha_mil = 1000;
-    float alpha = alpha_mil / 1000.0f;
-
-    // --- EMA 滤波（方向取整）---
-    if (pid_out_prev < 0) {                          // 首次直取
-        pid_out_prev = target;
-        return target;
-    }
-    float f = (float)pid_out_prev + alpha * ((float)target - pid_out_prev);
-    int out;
-    if (target >= pid_out_prev) out = (int)(f + 0.999f);   // 增大向上取整
-    else                        out = (int)f;              // 减小向下取整
-    if (out < pid_cold_min)        out = pid_cold_min;
-    if (out > active_cold_eff_max) out = active_cold_eff_max;
-    pid_out_prev = out;
-    return out;
-}
-
-/**
  * 速率限制执行：返回 1=实际下发了制冷变化，0=跳过（无变化/去重）。
  * 输出端滤波 → 制冷限速 → 独立风扇计算（不跟 PID 输出）→ 风扇限速 → 纯下发
  */
@@ -2255,7 +2242,6 @@ static int rate_limited_execute(void) {
         debug_log(debug_exec, "实际值未就绪（冷%d rpm%d），跳过下发", actual_cold, actual_rpm);
         return 0;
     }
-    pid_align_cold = pid_out_filter(pid_align_cold);
     rate_limit_cold(pid_align_cold);
     int send_rpm = rate_limit_fan(compute_fan_target());
     return apply_gear_direct(1, 5, send_rpm, actual_cold, 0);
@@ -2270,6 +2256,15 @@ static void pid_cycle(void) {
     pid_ctrl_cycles++;               // 单调周期计数
     int batt_raw = cached_batt_raw;   // 1s 采集缓存
     if (batt_raw < 0) return;
+
+    // --- 无变化回溯锚点（item4）：温度窗口变化→锚点=变化前值+重置周期；未变→周期计数++ ---
+    if (batt_window_changed) {
+        recall_anchor  = recall_prev_batt;
+        recall_cycles  = 1;
+    } else {
+        recall_cycles++;
+    }
+    recall_prev_batt = batt_raw;
 
     // --- CPU 温度读入与滤波（用于补偿） ---
     int cpu_now = cached_cpu_now;   // 1s 采集缓存
@@ -2331,8 +2326,18 @@ static void pid_cycle(void) {
     if (dt > 6.0f) dt = 6.0f;
     if (dt < 0.6f) dt = 0.6f;
 
+    // 无变化回溯速度（item4）：仅温度未变、开关开启、锚点有效时注入，否则走常规 v
+    int recall_on = 0;
+    float recall_v = 0.0f;
+    if (pid_spd_recall_on && !batt_window_changed &&
+        recall_cycles >= 1 && recall_anchor > 0 && batt_raw > 0 && pid_last_change_time != 0) {
+        recall_on = 1;
+        recall_v = ((float)(batt_raw - recall_anchor) / (float)recall_cycles / 10.0f)
+                   * (pid_spd_recall_weight / 1000.0f);
+    }
+
     // --- PID 计算（电池 error 用滤波值 pid_batt_filtered + cpu_comp；snap 后==batt_raw 故恢复原始值；温度未变时 kdp 沿用）---
-    float pid_out = pid_compute(pid_batt_filtered, dt, cpu_comp, batt_window_changed);
+    float pid_out = pid_compute(pid_batt_filtered, dt, cpu_comp, batt_window_changed, recall_on, recall_v);
 
     // 直接映射到物理值（无输出平滑）：PID 输出 → 制冷强度（风扇目标由 compute_fan_target 独立计算）
     int cmax = active_cold_eff_max;

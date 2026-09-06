@@ -581,6 +581,41 @@
   // 读可配置秒数（profile.conf WebUI 键，缺省/非法回落默认值）
   function gapSec(key, def) { var n = parseFloat(S.values[key]); return isFinite(n) && n >= 0 ? n : def; }
 
+  // ---------- B：整档刻度 / 数值格式化 ----------
+  var B_TICKS = { segs: 4, minSegs: 3, temp: [1, 2, 2.5, 5, 10], cold: [1, 2, 5, 10] };
+  // 数值上滚到 steps 集合中 ≥ raw 的最近整档（×10^n）
+  function niceStep(raw, steps) {
+    if (!(raw > 0)) return 1;
+    var mag = Math.pow(10, Math.floor(Math.log(raw) / Math.LN10));
+    for (var i = 0; i < steps.length; i++) { var v = steps[i] * mag; if (v >= raw - 1e-9) return v; }
+    return steps[steps.length - 1] * mag;
+  }
+  // 由数据最小/最大求整档轴（保证 min≤dmin、max≥dmax，绝不裁点）
+  function niceAxis(dmin, dmax, steps) {
+    if (!(dmax > dmin)) dmax = dmin + 1;
+    var step = niceStep((dmax - dmin) / B_TICKS.segs, steps);
+    for (var g = 0; g < 6; g++) {
+      var mn = Math.floor(dmin / step) * step;
+      var mx = Math.ceil(dmax / step) * step;
+      if (Math.round((mx - mn) / step) >= B_TICKS.minSegs || step < 1e-6) return { min: mn, max: mx, step: step };
+      step = niceStep(step / 2, steps);
+    }
+    return { min: Math.floor(dmin / step) * step, max: Math.ceil(dmax / step) * step, step: step };
+  }
+  // 按 step 决定小数位（整数去掉 .0；2.5 → 1 位）
+  function fmtTick(v, step) {
+    var s = String(step), dot = s.indexOf('.');
+    var dec = dot >= 0 ? Math.min(2, s.length - dot - 1) : 0;
+    var t = v.toFixed(dec);
+    if (dec > 0 && t.slice(-2) === '.0') t = t.slice(0, -2);
+    return t;
+  }
+  // hex(#rrggbb) → rgba(...,a)
+  function hexA(hex, a) {
+    var r = parseInt(hex.slice(1, 3), 16), g = parseInt(hex.slice(3, 5), 16), b = parseInt(hex.slice(5, 7), 16);
+    return 'rgba(' + r + ',' + g + ',' + b + ',' + a + ')';
+  }
+
   // ---------- 曲线（双纵轴：左 ℃/rpm，右 cold） ----------
   function drawChart() {
     var cv = $('chart'), dpr = window.devicePixelRatio || 1;
@@ -622,61 +657,95 @@
     // 取值：左轴 = 温度(℃) 或 风扇转速÷100；右轴 = 制冷强度
     function leftV(s, d) { return s.key === 'rpm' ? (d.rpm == null ? null : d.rpm / 100) : d[s.key]; }
     function rightV(s, d) { return d[s.key]; }
-    // 计算一轴的范围（上下各留 5% 余量）
-    function range(series, getV) {
+    var dark = !!(window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches);
+    // 数据范围（未 padding，供整档轴；保证 min≤数据min、max≥数据max，绝不裁点）
+    function extent(series, getV) {
       var mn = Infinity, mx = -Infinity;
       series.forEach(function (s) {
         data.forEach(function (d) { var v = getV(s, d); if (v == null) return; if (v < mn) mn = v; if (v > mx) mx = v; });
       });
       if (!isFinite(mn) || !isFinite(mx)) return null;
-      var sp = (mx - mn) || 1;
-      return { min: mn - sp * 0.05, max: mx + sp * 0.05 };
+      return { min: mn, max: mx };
     }
-    var L = range(leftSeries, leftV), R = range(rightSeries, rightV);
-    // 制冷强度轴（右轴）：从 COLD_MIN=1 开始，上限固定 = PID_COLD 制冷上限（B6X 上限，默认 190）
-    if (R) {
-      R.min = 1;
-      R.max = pidColdMax();
-      if (!drawAxisDiag) { drawAxisDiag = true; uiLog('[轴] 制冷轴: ' + R.min + '~' + R.max + '（PID_COLD 上限）'); }
+    var Lext = extent(leftSeries, leftV), Rext = extent(rightSeries, rightV);
+    var L = null, R = null;
+    if (Lext) L = niceAxis(Lext.min, Lext.max, B_TICKS.temp);
+    // 制冷强度轴（右轴）：固定 [1, pidColdMax()]，min 恒 1，max 取整档（B_TICKS.cold，去 2.5）
+    if (Rext) {
+      var cmax = pidColdMax();
+      var cstep = niceStep(cmax / B_TICKS.segs, B_TICKS.cold);
+      R = { min: 1, max: Math.ceil(cmax / cstep) * cstep, step: cstep };
+      if (R.max <= R.min) R.max = R.min + cstep;
+      if (!drawAxisDiag) { drawAxisDiag = true; uiLog('[轴] 制冷轴: 1~' + R.max + '（step ' + cstep + '，PID_COLD 上限 ' + cmax + '）'); }
     }
-    // 单轴全无效值时该轴 range() 返回 null。
+    // 单轴全无效值时该轴 null。
     // 双轴都不可画（全 null）则无曲线可画；仅一轴有效时仍画该轴。
     if (!L && !R) return;
     function yOf(axis, v) { return padT + H * (1 - (v - axis.min) / (axis.max - axis.min)); }
-    ctx.font = '10px system-ui'; ctx.fillStyle = '#888';
-    // 刻度数量随高度自适应：越高刻度越多，越矮越少
-    function tickCount(h) {
-      var n = Math.round((h - 30) / 70);   // 每 70px 一条刻度
-      if (n < 3) n = 3;                     // 至少 3 条（2 段）
-      if (n > 10) n = 10;                   // 至多 10 条
-      return n;
+    var baseY = padT + H;   // 面积填充底线（绘图区内、padB 之上）
+    // ===== A 面积填充（每可见序列折线下方同色渐淡；渲染顺序 填充→网格→折线→标注）=====
+    function fillArea(series, getV, axis) {
+      if (!axis) return;
+      series.forEach(function (s) {
+        var isTemp = s.unit === '°C';
+        var alpha = isTemp ? (dark ? 0.22 : 0.16) : (dark ? 0.26 : 0.20);
+        var g = ctx.createLinearGradient(0, padT, 0, padT + H);
+        g.addColorStop(0, hexA(s.color, alpha));
+        g.addColorStop(1, hexA(s.color, alpha * 0.25));
+        ctx.fillStyle = g;
+        function flush(start, endExcl) {
+          if (endExcl - start < 1) return;
+          var x0 = padL + W * ((start + gap[start]) / totalUnits);
+          var x1 = padL + W * ((endExcl - 1 + gap[endExcl - 1]) / totalUnits);
+          ctx.beginPath();
+          ctx.moveTo(x0, baseY);
+          for (var k = start; k < endExcl; k++) {
+            var v = getV(s, data[k]);
+            if (v == null) continue;
+            ctx.lineTo(padL + W * ((k + gap[k]) / totalUnits), yOf(axis, v));
+          }
+          ctx.lineTo(x1, baseY);
+          ctx.closePath();
+          ctx.fill();
+        }
+        var runStart = -1;
+        for (var j = 0; j < data.length; j++) {
+          if (j > 0 && data[j].t - data[j - 1].t > gapDetectSec) { if (runStart >= 0) { flush(runStart, j); runStart = -1; } }
+          if (getV(s, data[j]) == null) { if (runStart >= 0) { flush(runStart, j); runStart = -1; } }
+          else if (runStart < 0) runStart = j;
+        }
+        if (runStart >= 0) flush(runStart, data.length);
+      });
     }
-    var nTick = tickCount(H);
-    // 左轴刻度 + 网格
-    if (L) {
-      ctx.textAlign = 'right';
-      for (var i = 0; i <= nTick; i++) {
-        var val = L.min + (L.max - L.min) * i / nTick;
-        var y = yOf(L, val);
-        ctx.fillText(val.toFixed(1), padL - 4, y + 3);
+    // 刻度网格 + 轴标题（B 整档：只改标签与网格位置，不动数据点 x 映射）
+    function drawGrid(axis, side) {
+      var left = side === 'left';
+      ctx.font = '10px system-ui'; ctx.fillStyle = '#888';
+      ctx.textAlign = left ? 'right' : 'left';
+      var xTxt = left ? padL - 4 : padL + W + 4;
+      var step = axis.step;
+      // 刻度值：轴非整档对齐（如制冷轴 min=1）补一个原点刻度；末档补 max
+      var vals = [];
+      var firstMult = Math.ceil(axis.min / step - 1e-9) * step;
+      if (Math.abs(axis.min - firstMult) > step * 1e-6) vals.push(axis.min);
+      for (var v = firstMult; v <= axis.max + 1e-9; v += step) vals.push(v);
+      var lastMult = Math.floor(axis.max / step + 1e-9) * step;
+      if (axis.max - lastMult > step * 1e-6) vals.push(axis.max);
+      for (var i = 0; i < vals.length; i++) {
+        var val = vals[i];
+        var y = yOf(axis, val);
+        ctx.fillText(fmtTick(val, step), xTxt, y + 3);
         ctx.strokeStyle = 'rgba(128,128,128,0.15)';
         ctx.beginPath(); ctx.moveTo(padL, y); ctx.lineTo(padL + W, y); ctx.stroke();
       }
-      // 轴标题靠左绘制：允许向右突出到曲线区内
       ctx.textAlign = 'left';
-      ctx.fillText('℃/百rpm', 2, padT - 7);
+      ctx.fillText(left ? '℃/百rpm' : 'cold', left ? 2 : padL + W + 4, padT - 7);
     }
-    // 右轴刻度
-    if (R) {
-      ctx.textAlign = 'left';
-      for (var j = 0; j <= nTick; j++) {
-        var rval = R.min + (R.max - R.min) * j / nTick;
-        var ry = yOf(R, rval);
-        ctx.fillText(rval.toFixed(0), padL + W + 4, ry + 3);
-      }
-      ctx.fillText('cold', padL + W + 4, padT - 7);
-      ctx.textAlign = 'right';
-    }
+    // 渲染顺序：面积填充 → 网格 → 折线 → 标注
+    fillArea(leftSeries, leftV, L);
+    fillArea(rightSeries, rightV, R);
+    if (L) drawGrid(L, 'left');
+    if (R) drawGrid(R, 'right');
     // 画线
     function plot(series, getV, axis) {
       if (!axis) return;   // 该轴范围无效（全 null），跳过该轴绘制
@@ -697,6 +766,36 @@
     }
     plot(leftSeries, leftV, L);
     plot(rightSeries, rightV, R);
+
+    // ===== A 当前值标注：每条序列最后一个有效采样点（曲线头部指针）=====
+    function drawHeadMarkers() {
+      function mark(series, getV, axis) {
+        if (!axis) return;
+        series.forEach(function (s) {
+          var last = -1, lv = null;
+          for (var k = data.length - 1; k >= 0; k--) { var hv = getV(s, data[k]); if (hv != null) { last = k; lv = hv; break; } }
+          if (last < 0) return;
+          var x = padL + W * ((last + gap[last]) / totalUnits);
+          var y = yOf(axis, lv);
+          if (y < padT + 4) y = padT + 4;
+          if (y > padT + H) y = padT + H;
+          ctx.fillStyle = s.color;
+          ctx.beginPath(); ctx.arc(x, y, 3.2, 0, Math.PI * 2); ctx.fill();
+          ctx.strokeStyle = dark ? '#101418' : '#ffffff'; ctx.lineWidth = 1; ctx.stroke();
+          var label = s.unit === '°C' ? (lv.toFixed(1) + '°C') : (s.key === 'rpm' ? (lv + 'rpm') : (lv + '%'));
+          ctx.font = '10px system-ui'; ctx.fillStyle = s.color;
+          var tw = ctx.measureText(label).width;
+          var tx = x + 6;
+          if (tx + tw > padL + W) tx = x - 6 - tw;
+          if (tx < 2) tx = 2;
+          ctx.fillText(label, tx, y - 4);
+        });
+      }
+      if (L) mark(leftSeries, leftV, L);
+      if (R) mark(rightSeries, rightV, R);
+    }
+    drawHeadMarkers();
+    ctx.textAlign = 'left';
   }
 
   // ---------- 日志 ----------

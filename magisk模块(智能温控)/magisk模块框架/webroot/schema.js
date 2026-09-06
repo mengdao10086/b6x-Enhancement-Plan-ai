@@ -39,8 +39,8 @@ window.B6X_SCHEMA = {
                 "RATE_LIMIT_COLD", "BATT_BASELINE",
                 "COLD_MAP", "HOT_MAP", "RPM_SMOOTH_ALPHA", "FAN_RPM",
                 "HOT_DERATE", "RECONNECT_KEEP_CYCLES",
-                "PID_GAIN", "PID_TARGET", "PID_CH_THRESHOLD", "PID_CPU_COMP",
-                "PID_OUT_FILTER", "PID_COLD"]
+                "PID_GAIN", "PID_TARGET", "PID_TARGET_DIR", "PID_CH_THRESHOLD", "PID_CPU_COMP",
+                "PID_SPD_RECALL", "PID_COLD"]
     },
     // [2] sysfs 路径与缩放：独立大类（SYSFS_ENABLED 开关控制加载）
     {
@@ -53,7 +53,7 @@ window.B6X_SCHEMA = {
     // [3] 自动拉起散热器 app：独立分组，开关常显在组头；组内含可编辑参数 APP_WATCHDOG（可折叠/展开）
     {
       id: "g3", title: "[3] 自动拉起散热器 app", headerSwitch: "APP_LAUNCH_ENABLED",
-      keys: ["APP_WATCHDOG", "APP_LAUNCH_COOLDOWN"]
+      keys: ["APP_WATCHDOG", "APP_LAUNCH_COOLDOWN", "APP_LAUNCH_SCREEN_GATE"]
     },
     // [4] WebUI 界面：仅 WebUI 读取的显示参数，守护进程忽略
     {
@@ -115,6 +115,9 @@ window.B6X_SCHEMA = {
       desc: "实际制冷停滞且未达目标连续 N 次后 kill 散热器 app 并重新拉起；0=关闭" },
     APP_LAUNCH_COOLDOWN: { type: "int", min: 0, max: 3600, label: "拉起冷却间隔（秒）",
       desc: "两次拉起的最小间隔；0=不加冷却" },
+    APP_LAUNCH_SCREEN_GATE: { type: "multi", fields: [{ label: "开关", min: 0, max: 1 }, { label: "读取失败默认值", min: 0, max: 1 }, { label: "Dozing算亮屏", min: 0, max: 1 }],
+      label: "拉起前屏幕状态门禁",
+      desc: "仅 mWakefulness=Awake 才拉起；Asleep/Dozing 算灭屏跳过，每 5 秒重试；失败兜底1=可拉起" },
     RECONNECT_KEEP_CYCLES: { type: "int", min: 0, max: 30, label: "断联保留状态周期数",
       desc: "断联少于 N 个控制周期不重置 PID 状态；0=关闭" },
     BATT_BASELINE: { type: "int", min: 300, max: 500, label: "基准温度（0.1°C）",
@@ -140,14 +143,17 @@ window.B6X_SCHEMA = {
     PID_TARGET: { type: "multi", fields: [{ label: "目标系数", min: 1, max: 1000 }, { label: "目标平滑%", min: 1, max: 100 }, { label: "目标上限(0.1°C)", min: 1, max: 100 }],
       label: "PID 目标组合",
       desc: "动态目标 = clamp(误差×系数, ±目标上限)；目标 EMA 平滑%越大越快速跟随；上限默认 10=1.0°C" },
+    PID_TARGET_DIR: { type: "multi", fields: [{ label: "开关", min: 0, max: 1 }, { label: "远离基线alpha%", min: 1, max: 100 }, { label: "回归基线alpha%", min: 1, max: 100 }],
+      label: "PID 目标方向性滤波",
+      desc: "目标量级回升(远离基线)用远离alpha求快、回落(回归基线)用回归alpha求稳；开关0=退回 PID_TARGET 第2值单一alpha" },
     PID_CH_THRESHOLD: { type: "int", min: 1, max: 100, label: "稳态冻结阈值(0.1°C)",
       desc: "温度未变且上次 |ch|≤此值时整轮冻结（防抖）；1=默认0.1°C" },
     PID_CPU_COMP: { type: "multi", fields: [{ label: "滤波系数(%)", min: 1, max: 100 }, { label: "除数", min: 5, max: 200 }, { label: "偏移量(0.1°C)", min: 0, max: 500 }],
       label: "CPU 补偿",
       desc: "滤波强度 / 补偿系数 / 偏移量" },
-    PID_OUT_FILTER: { type: "multi", fields: [{ label: "开启", min: 0, max: 1 }, { label: "下限α(‰)", min: 1, max: 1000 }, { label: "温差增益(‰/0.1°)", min: 0, max: 1000 }, { label: "偏差增益(‰/0.1°)", min: 0, max: 500 }, { label: "下降倍率(×0.1)", min: 10, max: 100 }],
-      label: "PID 输出自适应滤波",
-      desc: "开关 / 下限 / 温差增益 / 偏差增益 / 下降倍率" },
+    PID_SPD_RECALL: { type: "multi", fields: [{ label: "开关", min: 0, max: 1 }, { label: "回溯速度权重(×1000)", min: 100, max: 1000 }],
+      label: "PID 无变化回溯",
+      desc: "温度未变时回溯最后一次变化算速度；权重÷1000，1000=注入全量；无上限" },
     PID_COLD: { type: "multi", fields: [{ label: "下限", min: 0, max: 194 }, { label: "上限(B6X)", min: 0, max: 194 }, { label: "上限(B7X)", min: 1, max: 190 }],
       label: "制冷强度范围", desc: "下限 B6X上限 B7X上限" },
 

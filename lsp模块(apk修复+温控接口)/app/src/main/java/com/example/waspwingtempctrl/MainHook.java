@@ -107,7 +107,6 @@ public class MainHook implements IXposedHookLoadPackage {
         return sMainHandler;
     }
     private static final int AUTO_LAUNCH_TIMEOUT_MS = 2000;        // 兜底：自动进入设置失败时仍退后台
-    private static final int AUTO_BACKGROUND_DELAY_MS = 1000;      // 自动拉起后台化延迟：等 1s 再切后台
     private static volatile boolean enteredSetup = false;         // 本进程是否已进入过设置界面
 
     // ========== 后台自动重连 ==========
@@ -1151,20 +1150,14 @@ public class MainHook implements IXposedHookLoadPackage {
         }
     }
 
-    /** 自动拉起：把当前任务切到后台（界面已就绪；连接由后台重连线程完成） */
+    /** 自动拉起：把当前任务切到后台（界面已就绪；连接由后台重连线程完成；事件触发时同步切，无固定延迟） */
     private static void backgroundActivity(final Activity act) {
-        // 延迟 AUTO_BACKGROUND_DELAY_MS 再切后台：留 1s 缓冲
-        mainHandler().postDelayed(new Runnable() {
-            @Override
-            public void run() {
-                try {
-                    act.moveTaskToBack(true);
-                    XposedBridge.log(TAG + " 自动拉起模式：app 已切后台");
-                } catch (Throwable t) {
-                    XposedBridge.log(TAG + " auto_launch 后台化失败: " + t.getMessage());
-                }
-            }
-        }, AUTO_BACKGROUND_DELAY_MS);
+        try {
+            act.moveTaskToBack(true);
+            XposedBridge.log(TAG + " 自动拉起模式：app 已切后台");
+        } catch (Throwable t) {
+            XposedBridge.log(TAG + " auto_launch 后台化失败: " + t.getMessage());
+        }
     }
 
     // 兜底超时：自动进入设置界面未触发（startActivity 失败等）时 2s 后仍退后台
