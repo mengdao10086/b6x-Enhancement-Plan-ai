@@ -276,7 +276,7 @@ static char status_file_path_b7[512] = "/data/local/tmp/tempctrl_b7x.status";
 // 自动拉起散热器 app（优先上次使用的 app）
 static int APP_LAUNCH_ENABLED = 0;      // 总开关：1=允许自动拉起，0=关闭（默认关，刷入时可选开）
 // 锁死自动重启（watchdog）：每次实际下发制冷变化时判定——实际停滞（=上周期实际）且≠上周期下发持续 N 次 → kill app 并重新拉起
-static int app_watchdog_cycles = 0;     // APP_WATCHDOG：连续停滞次数（0=关闭，默认 6）
+static int app_watchdog_cycles = 0;     // APP_WATCHDOG：连续停滞次数（0=关闭，默认 0）
 static int watchdog_stall_count = 0;    // 当前连续停滞次数（按实际下发周期计数）
 static int watchdog_last_cold = -1;     // 上周期实际制冷值（停滞判定基准）
 static int watchdog_last_cmd  = -1;     // 上周期下发制冷值（未达目标判定基准）
@@ -1888,6 +1888,8 @@ static int cpu_comp_now(int batt) {
  * PID 计算（单累积器）：OUTPUT = clamp(acc + kdp, 0, 1)。
  * - error 为纯电池误差（不含 CPU 补偿）；cpu_comp 与速度同地位，算 ch 时加入。
  * - 速度 v = (error − 上次error)/dt（倍率系数缩放，不乘 dt）。
+ * - 速度去噪：|v| ≤ 0.1°C/周期 视为测量噪声归零，超出部分对称向零收缩 0.1（不越过 0）；
+ *   回溯注入的 v（recall_on）与常规 v 同样适用，去噪后的 v 共用给 ch 与 ch_kdp。
  * - ch 用于积分（acc += ki_rate×(ch − target_f)，ki_rate 按被积项符号取升/降速率），ch_kdp 用于 KDP（速度按 0.33 衰减，无记忆）。
  * - 动态目标 target_f（EMA 平滑），使积分逼近"误差×目标系数"包络，防静态过冲。
  * - 温度未变（batt_window_changed=0）时 kdp 沿用上次值（跳过①），避免补偿突变带动 KDP 跳变。
@@ -1908,6 +1910,11 @@ static float pid_compute(int batt_10, float dt, float cpu_comp, int batt_window_
     else if (pid_last_change_time != 0)
         v = (error - pid_last_error) / dt;
     pid_last_error = error;
+
+    // 速度去噪：|v| ≤ 0.1°C/周期 视为测量噪声 → 归零；超出部分对称向零收缩 0.1（不越过 0）
+    if (v > 0.1f)       v -= 0.1f;
+    else if (v < -0.1f) v += 0.1f;
+    else                v  = 0.0f;
 
     // ch（受控量，用于积分）与 ch_kdp（用于 KDP，速度按 0.33 衰减）
     float sc = pid_speed_coef / 10.0f;
