@@ -49,9 +49,9 @@
         _r; \
     })
 
-// ======================== 档位定义 ========================
+// ======================== 运行模式与参数映射 ========================
 //
-// ⚠️ 不推荐智能温控模式（mode=0）：实测其风扇转速配置疑似非强制生效，常突破上限（尤在刚切换的瞬间），噪音突然变大体验差。固定功率档位表已避免此问题。
+// ⚠️ 不推荐智能温控模式（mode=0）：实测其风扇转速配置疑似非强制生效，常突破上限（尤在刚切换的瞬间），噪音突然变大体验差。本实现固定下发 mode=1（固定功率），规避此问题。
 //
 //setRunMode(mode, targetTemperature,windLevelOverclock, coldLevelOverclock,windLevel, modeCustom, extra)
 //
@@ -90,7 +90,7 @@ static int CPU_ZONE_MAX = 99;
 static int cpu_zone_rescan_sec = 60;   // CPU thermal_zone 全量重扫间隔（秒，CPU_ZONE_RESCAN 第一值，默认 60）
 static int cpu_zone_keep = 10;         // 保留温度值个数（CPU_ZONE_RESCAN 第二值，默认 10）
 
-// ======================== 通用参数（PID 和 Gear 共用）========================
+// ======================== 通用参数 ========================
 // --- 基准温度 ---
 static int BATT_BASELINE = 350;     // 基准温度 35.0°C
 
@@ -117,7 +117,7 @@ static int RATE_LIMIT_COLD = 25;   // 制冷强度升降速基础值：升速=ba
 
 // --- 动态值（根据电池温差自动调整）---
 static int RATE_LIMIT_COLD_MULT = 10;  // 制冷强度倍率：升速/降速 = base ± dev(0.1°C) × mult / 10
-static int COLD_DEADZONE = 3;          // 制冷最小变化幅度（RATE_LIMIT_COLD 第三值）：与散热器实际 |差值| ≤ 该值时不升不降
+static int COLD_DEADZONE = 3;          // 制冷最小变化幅度（RATE_LIMIT_COLD 第三值）：与散热器实际 |差值| < 该值时不升不降
 static int RATE_LIMIT_FAN_UP = 200;   // 风扇升速基础值：RPM_UP = base + d × mult / 10
 static int RATE_LIMIT_FAN_MULT = 50;  // 风扇升速倍率（RATE_LIMIT_FAN_UP 双值第二位）
 static int cycle_batt_temp = -1;       // 本周期电池温度（-1=未就绪）
@@ -134,7 +134,7 @@ static int actual_cold = -1;           // 当前实际制冷片强度
 static int pid_ctrl_cycles = 0;               // PID 控制周期单调计数器（pid_cycle 每次 +1）
 static int reconnect_keep_cycles = 3;         // RECONNECT_KEEP_CYCLES：断联< N 控制周期(×5s) 不重置 PID 状态
 
-// ======================== CPU 温度滤波（PID / Gear 共用）========================
+// ======================== CPU 温度滤波 ========================
 static int CPU_FILTER_ALPHA = 25;   // CPU 滤波系数（%）
 static int cpu_filtered_temp = 250; // 加权 CPU 温度，初始 25.0°C
 static int first_run = 1;           // 首次运行，滤波直接赋初值
@@ -165,12 +165,14 @@ static time_t config_mtime = 0;
 // ======================== PID 控制（单累积器） ========================
 // --- 配置变量（按 profile.conf 键顺序排列）---
 
-// PID_GAIN 第一值：KDP 融合 P+D 项系数（÷1000，kdp = kdp_coef×ch_kdp）
+// PID_KDP：KDP 融合 P+D 项系数（÷1000，kdp = kdp_coef×ch_kdp）
 static int pid_kdp_coef = 300;
-// PID_GAIN 第二值：积分增益（÷1000，acc += ki_coef×(ch−target_f)，不乘 dt）
-static int pid_ki_coef = 20;
-// PID_GAIN 第三值：速度项倍率系数（÷1000，ch = error + v×speed_coef + cpu_comp）
-static int pid_speed_coef = 240;
+// PID_KI_RATE 第一值：积分升速率（÷1000，被积项 ch−target_f > 0 时用；acc 不乘 dt）
+static int pid_ki_up_coef = 20;
+// PID_KI_RATE 第二值：积分降速率（÷1000，被积项 < 0 时用；默认与升速率相同，可独立调）
+static int pid_ki_down_coef = 20;
+// PID_SPEED：速度项倍率系数（÷10，100=速度×10，0=关闭；ch = error + v×speed_coef/10 + cpu_comp）
+static int pid_speed_coef = 100;
 // PID_TARGET 第一值：动态目标系数（÷1000，raw_target = clamp(error×target_coef, ±上限)）
 static int pid_target_coef = 20;
 // PID_TARGET 第二值：目标 EMA 平滑系数（%，滤波系数）
@@ -222,7 +224,6 @@ static int pid_batt_snap_done = 0;        // 停机后是否已做一次"恢复�
 // --- 输出映射与对齐 ---
 static int pid_align_rpm = 2000;          // PID 目标 RPM（仅初始化对齐与日志使用；风扇下发已由 compute_fan_target 独立计算）
 static int pid_align_cold = 1;            // PID 目标制冷强度
-static float pid_ratio_saved = -1.0f;     // PID 无级对齐量（0~1，-1=未初始化）
 
 // ======================== 散热器回传参数 ========================
 static int cooler_hot_temp = -1;          // 热端温度（0.1°C）
@@ -322,7 +323,7 @@ static int active_pid_cold_max = 190;       // 当前设备 PID 制冷上限
 // ======================== 热端过温制冷上限削减 ========================
 // 热端温度 > 阈值 → 每次削减制冷上限 (热端-阈值)×倍率，削减后 5 周期内不再削减；
 // 热端温度 ≤ 阈值 → 每次恢复 5（复用倍率值），恢复后 5 周期内不再恢复；
-// 削减与恢复的冷却独立（不共用）。削减基准上限：gear = 档位表最高档制冷
+// 削减与恢复的冷却独立（不共用）。削减基准上限：active_pid_cold_max（PID_COLD 第二/第三值）
 static int HOT_DERATE_THRESHOLD = 450;   // 热端阈值（0.1°C，450=45.0°C）
 static int HOT_DERATE_MULT = 5;          // 削减倍率 = 单次恢复值（削减量=(热端-阈值)×mult/10）
 static int HOT_DERATE_COOLDOWN = 5;      // 削减/恢复后冷却周期数（5 个 5s 周期）
@@ -471,7 +472,9 @@ static const struct IntCfgKey INT_CFG_KEYS[] = {
     { "BATT_BASELINE",             &BATT_BASELINE,               300, 500 },
     { "CPU_FILTER_ALPHA",          &CPU_FILTER_ALPHA,            1, 100 },
     { "RECONNECT_KEEP_CYCLES",     &reconnect_keep_cycles,       0, 30 },
-    // PID 单值键走表驱动；多值键（PID_GAIN / PID_TARGET / PID_TARGET_DIR / PID_COLD / PID_CPU_COMP / PID_SPD_RECALL）在 parse_pid_cfg 分段解析
+    // PID 单值键走表驱动；多值键（PID_KI_RATE / PID_TARGET / PID_TARGET_DIR / PID_COLD / PID_CPU_COMP / PID_SPD_RECALL）在 parse_pid_cfg 分段解析
+    { "PID_KDP",                   &pid_kdp_coef,                1, 1000 },
+    { "PID_SPEED",                 &pid_speed_coef,              0, 1000 },
     { "PID_CH_THRESHOLD",          &pid_ch_threshold,            1, 100 },
     { "RPM_SMOOTH_ALPHA",          &rpm_smooth_alpha,            1, 99 },
     // sysfs 层（SYSFS_ENABLED=1）
@@ -532,13 +535,13 @@ static void parse_sysfs_cfg(const char *key, int val, const char *val_str) {
 
 /** PID 专属多值配置（PERF 层；单值键已并入 INT_CFG_KEYS 表驱动） */
 static int parse_pid_cfg(const char *key, int val, const char *val_str) {
-    // PID_GAIN = KDP融合系数(÷1000) KI积分增益(÷1000) 速度倍率(÷1000)
-    if (strcmp(key, "PID_GAIN") == 0) {
-        int a = pid_kdp_coef, b = pid_ki_coef, c = pid_speed_coef;
-        int n = sscanf(val_str, "%d %d %d", &a, &b, &c);
-        if (n >= 1) pid_kdp_coef   = clamp(a, 1, 1000);
-        if (n >= 2) pid_ki_coef    = clamp(b, 1, 1000);
-        if (n >= 3) pid_speed_coef = clamp(c, 0, 1000);
+    // PID_KI_RATE = KI升速率(÷1000) KI降速率(÷1000)
+    // 被积项 ch−target_f > 0 用升速率、< 0 用降速率；默认两者相同
+    if (strcmp(key, "PID_KI_RATE") == 0) {
+        int a = pid_ki_up_coef, b = pid_ki_down_coef;
+        int n = sscanf(val_str, "%d %d", &a, &b);
+        if (n >= 1) pid_ki_up_coef   = clamp(a, 1, 1000);
+        if (n >= 2) pid_ki_down_coef = clamp(b, 1, 1000);
         return 1;
     }
     // PID_TARGET = 目标系数(÷1000) 目标EMA平滑(%) 动态目标上限(0.1°C)
@@ -589,7 +592,7 @@ static int parse_pid_cfg(const char *key, int val, const char *val_str) {
 
 // Gear 专属配置解析（parse_gear_cfg）已随 Gear 删除
 
-/** 通用多值配置（PERF 层，PID/Gear 共用） */
+/** 通用多值配置（PERF 层） */
 static int parse_common_cfg(const char *key, int val, const char *val_str) {
     if (strcmp(key, "HOT_MAP") == 0) {
         int a = hot_map_min, b = hot_map_max;
@@ -729,7 +732,7 @@ static void load_config(const char *path) {
         // --- 性能参数：仅 PERF_ENABLED=1 时解析（不含 DEBUG_*/sysfs 路径键） ---
         if (!perf_enabled) continue;
 
-        // 表驱动单值 → 分段函数（PID/Gear/通用），键互不重叠、唯一命中
+        // 表驱动单值 → 分段函数（PID/通用），键互不重叠、唯一命中
         if (parse_int_cfg(key, val, 0)) continue;
         if (parse_pid_cfg(key, val, val_str)) continue;
         if (parse_common_cfg(key, val, val_str)) continue;
@@ -742,15 +745,21 @@ static void load_config(const char *path) {
 
 // ======================== 可执行文件名提取 ========================
 
+/** 读取自身可执行文件路径（/proc/self/exe）到 out，返回 1=成功，0=失败 */
+static int read_self_exe(char *out, size_t size) {
+    ssize_t len = readlink("/proc/self/exe", out, size - 1);
+    if (len <= 0) return 0;
+    out[len] = '\0';
+    return 1;
+}
+
 /**
  * 从 /proc/self/exe 获取可执行文件名（不含路径）
  * 返回 1=成功，0=失败
  */
 static int get_exe_basename(char *buf, size_t size) {
     char exe_path[512];
-    ssize_t len = readlink("/proc/self/exe", exe_path, sizeof(exe_path) - 1);
-    if (len <= 0) return 0;
-    exe_path[len] = '\0';
+    if (!read_self_exe(exe_path, sizeof(exe_path))) return 0;
     char *slash = strrchr(exe_path, '/');
     if (!slash) return 0;
     strncpy(buf, slash + 1, size - 1);
@@ -783,9 +792,7 @@ static void set_default_log_path(void) {
  */
 static int detect_config_path(void) {
     char exe_path[512];
-    ssize_t len = readlink("/proc/self/exe", exe_path, sizeof(exe_path) - 1);
-    if (len <= 0) return 0;
-    exe_path[len] = '\0';
+    if (!read_self_exe(exe_path, sizeof(exe_path))) return 0;
 
     // 获取 exe 所在目录
     char *last_slash = strrchr(exe_path, '/');
@@ -814,7 +821,6 @@ static void write_log(const char *fmt, ...) {
 
     // 超标 → 截断保留尾部（调试模式下跳过限制，保留完整日志）。
     // ftruncate 只能从尾部截断，删头部必须先把尾部内容前移到文件头再截断。
-    // 日志超限：保留尾部完整行
     struct stat st;
     if (!debug_mode && stat(log_file_path, &st) == 0 && st.st_size > max_bytes) {
         int fd = open(log_file_path, O_RDWR);
@@ -872,7 +878,7 @@ static inline int clamp(int val, int lo, int hi) {
     return val;
 }
 
-/** 设备代号（日志显示用）：B7X→"b7x"，B6X/B8X→"b6x"，无设备→"none" */
+/** 设备代号（日志显示用）：B7X→"b7x"，其余（B6X / 无设备）→"b6x" */
 static const char *device_tag_of(DeviceType dev) {
     return (dev == DEVICE_B7X) ? "b7x" : "b6x";
 }
@@ -1461,7 +1467,7 @@ static int should_skip_dispatch(int mode, int target, int windOC, int cold, int 
             // 最小变化幅度：目标与制冷实际 |差值| < 死区 → 上升下降都不变；接近极值处死区失效允许到位。
             int cmin = active_cold_eff_min;   // 当前模式有效范围（main_loop 统一计算）
             int cmax = active_cold_eff_max;
-            int adiff = (diff >= 0) ? diff : -diff;
+            int adiff = abs(diff);
             int near_extreme = (cmax - cooler_cold_real) < COLD_DEADZONE * 2
                             || (cooler_cold_real - cmin) < COLD_DEADZONE * 2;
             if (adiff < COLD_DEADZONE && !near_extreme) {
@@ -1618,6 +1624,26 @@ static const char *resolve_launch_pkg(void) {
     return pkg;
 }
 
+/** 构建并执行 am start 拉起指定包名（显式组件优先，未知 launcher 回退 -p），返回 system() 退出码 */
+static int am_start_app(const char *pkg) {
+    // 优先显式组件：这些 app 的 launcher 未导出/非标准 filter，隐式启动解析不到
+    // （报 "unable to resolve Intent"），须用显式组件 -n <包名>/<类名>；未知 launcher 回退 -p
+    const char *act = NULL;
+    if (strcmp(pkg, APP_PKG_B6X_OLD) == 0 || strcmp(pkg, APP_PKG_B6X_NEW) == 0)
+        act = "com.example.extool.MainActivity";
+    else if (strcmp(pkg, APP_PKG_B7X) == 0)
+        act = "com.game.motionelf.activity.ActivityStart";
+    char cmd[320];
+    if (act)
+        snprintf(cmd, sizeof(cmd),
+                 "am start -n %s/%s --es b6x_auto_launch 1 > /dev/null 2>&1", pkg, act);
+    else
+        snprintf(cmd, sizeof(cmd),
+                 "am start -a android.intent.action.MAIN -c android.intent.category.LAUNCHER "
+                 "-p %s --es b6x_auto_launch 1 > /dev/null 2>&1", pkg);
+    return system(cmd);
+}
+
 /**
  * 自动拉起上次使用的散热器 app（带冷却）
  * 包名按 last_owner 选择：2→新 B6X app，6/7→farsef，其余/无记录→老 B6X app；
@@ -1657,23 +1683,8 @@ static void launch_last_app(void) {
         }
     }
 
-    // 优先显式组件：这些 app 的 launcher 未导出/非标准 filter，隐式启动解析不到
-    // （报 "unable to resolve Intent"），须用显式组件 -n <包名>/<类名>；未知 launcher 回退 -p
-    const char *act = NULL;
-    if (strcmp(pkg, APP_PKG_B6X_OLD) == 0 || strcmp(pkg, APP_PKG_B6X_NEW) == 0)
-        act = "com.example.extool.MainActivity";
-    else if (strcmp(pkg, APP_PKG_B7X) == 0)
-        act = "com.game.motionelf.activity.ActivityStart";
-    char cmd[320];
-    if (act)
-        snprintf(cmd, sizeof(cmd),
-                 "am start -n %s/%s --es b6x_auto_launch 1 > /dev/null 2>&1", pkg, act);
-    else
-        snprintf(cmd, sizeof(cmd),
-                 "am start -a android.intent.action.MAIN -c android.intent.category.LAUNCHER "
-                 "-p %s --es b6x_auto_launch 1 > /dev/null 2>&1", pkg);
     last_launch_attempt = now;   // 真正下发 am start 才记冷却，避免屏灭轮询消耗冷却
-    int rc = system(cmd);
+    int rc = am_start_app(pkg);
     write_log("自动拉起散热器 app %s（后台化）rc=%d", pkg, rc);
 }
 
@@ -1690,20 +1701,7 @@ static void force_kill_and_relaunch(void) {
         usleep(100000);
     }
     // 复用自动拉起的显式组件逻辑（b6x_auto_launch 后台化）
-    const char *act = NULL;
-    if (strcmp(pkg, APP_PKG_B6X_OLD) == 0 || strcmp(pkg, APP_PKG_B6X_NEW) == 0)
-        act = "com.example.extool.MainActivity";
-    else if (strcmp(pkg, APP_PKG_B7X) == 0)
-        act = "com.game.motionelf.activity.ActivityStart";
-    char cmd[320];
-    if (act)
-        snprintf(cmd, sizeof(cmd),
-                 "am start -n %s/%s --es b6x_auto_launch 1 > /dev/null 2>&1", pkg, act);
-    else
-        snprintf(cmd, sizeof(cmd),
-                 "am start -a android.intent.action.MAIN -c android.intent.category.LAUNCHER "
-                 "-p %s --es b6x_auto_launch 1 > /dev/null 2>&1", pkg);
-    int rc = system(cmd);
+    int rc = am_start_app(pkg);
     write_log("锁死自动重启 重新拉起 %s rc=%d", pkg, rc);
 }
 
@@ -1853,7 +1851,7 @@ static void arbitrate_apps(void) {
 
 // Gear 温度预测（gear_predict_push / gear_predict_compute）已随 Gear 删除
 
-// ======================== 输入补偿（PID / Gear 共用） ========================
+// ======================== 输入补偿 ========================
 
 /**
  * CPU 补偿值（0.1°C）：comp=(cpu滤波温度 − 电池 − 偏移)/divisor，clamp≥0，
@@ -1861,7 +1859,7 @@ static void arbitrate_apps(void) {
  * 门控滞回：条件满足（raw>0）进入补偿；条件消失（raw=0）后不立即退出，
  * 平滑值归零后才关闭补偿
  * 始终生效，无开关（门控由条件自触发）。
- * @param batt 当前电池温度（0.1°C，两模式均用原始电池温度口径）
+ * @param batt 当前电池温度（0.1°C，用原始电池温度口径）
  */
 static int cpu_comp_now(int batt) {
     if (cpu_filtered_temp < 0) return 0;
@@ -1890,7 +1888,7 @@ static int cpu_comp_now(int batt) {
  * PID 计算（单累积器）：OUTPUT = clamp(acc + kdp, 0, 1)。
  * - error 为纯电池误差（不含 CPU 补偿）；cpu_comp 与速度同地位，算 ch 时加入。
  * - 速度 v = (error − 上次error)/dt（倍率系数缩放，不乘 dt）。
- * - ch 用于积分（acc += ki×(ch − target_f)），ch_kdp 用于 KDP（速度按 0.33 衰减，无记忆）。
+ * - ch 用于积分（acc += ki_rate×(ch − target_f)，ki_rate 按被积项符号取升/降速率），ch_kdp 用于 KDP（速度按 0.33 衰减，无记忆）。
  * - 动态目标 target_f（EMA 平滑），使积分逼近"误差×目标系数"包络，防静态过冲。
  * - 温度未变（batt_window_changed=0）时 kdp 沿用上次值（跳过①），避免补偿突变带动 KDP 跳变。
  * @param batt_10  原始电池温度（0.1°C，纯电池，不含补偿）
@@ -1912,7 +1910,7 @@ static float pid_compute(int batt_10, float dt, float cpu_comp, int batt_window_
     pid_last_error = error;
 
     // ch（受控量，用于积分）与 ch_kdp（用于 KDP，速度按 0.33 衰减）
-    float sc = pid_speed_coef / 1000.0f;
+    float sc = pid_speed_coef / 10.0f;
     float ch    = error + v * sc + cpu_comp;
     float chkdp = error + v * sc * 0.33f + cpu_comp;
 
@@ -1932,8 +1930,12 @@ static float pid_compute(int batt_10, float dt, float cpu_comp, int batt_window_
         pid_target_f += ta * (raw_target - pid_target_f);
     }
 
-    // 积分累积（acc；不乘 dt）
-    pid_ki += (pid_ki_coef / 1000.0f) * (ch - pid_target_f);
+    // 积分累积（acc；不乘 dt）：被积项为正走升速率、为负走降速率
+    {
+        float integrand = ch - pid_target_f;
+        float ki_rate = (integrand >= 0.0f) ? pid_ki_up_coef : pid_ki_down_coef;
+        pid_ki += (ki_rate / 1000.0f) * integrand;
+    }
 
     // KDP（融合 P+D）：温度变了才更新；温度未变沿用上次值（跳过①）
     if (batt_window_changed)
@@ -2043,7 +2045,7 @@ static int rpm_from_cold_exp(int cold) {
 
 /**
  * 独立风扇目标计算：冷端指数映射（基于限速后实际制冷）+ 热端线性映射加权合并。
- * 与 PID/Gear 输出解耦：每周期下发前由 rate_limited_execute / apply_gear 单独调用。
+ * 与 PID 输出解耦：每周期下发前由 rate_limited_execute 单独调用。
  */
 static int compute_fan_target(void) {
     int rpm_cold = rpm_from_cold_exp(actual_cold);
@@ -2062,8 +2064,8 @@ static int compute_fan_target(void) {
 }
 
 /**
- * 直接下发 AT 广播（PID / 直接冷端模式使用）
- * 与 apply_gear 共享 last_* 去重缓存
+ * 直接下发 AT 广播（PID 模式使用）
+ * 通过 should_skip_dispatch 用 last_* 缓存去重
  * 返回 1=已发送，0=跳过（无变化）
  */
 static int apply_gear_direct(int mode, int target,
@@ -2108,7 +2110,7 @@ static int apply_gear_direct(int mode, int target,
 }
 
 /**
- * 重置 PID 核心状态（积分、误差、滤波、补偿、方差缓冲区）
+ * 重置 PID 核心状态（积分、误差、滤波、补偿）
  * 不同场景的调用者在此基础上附加各自的额外重置逻辑
  */
 static void pid_reset_core(void) {
@@ -2122,7 +2124,7 @@ static void pid_reset_core(void) {
     pid_last_comp_10 = 0;
     pid_cpu_comp_ready = 0;
     pid_cpu_comp_active = 0;
-    pid_batt_filtered = -1;          // 电池输入滤波重置（改动2；切模式/重连后直取初值）
+    pid_batt_filtered = -1;          // 电池输入滤波重置（改动2；重连/启动后直取初值）
     pid_batt_last_update_cycle = -1;
     pid_batt_snap_done = 0;
     recall_anchor = 0;
@@ -2134,8 +2136,8 @@ static void pid_reset_core(void) {
 
 /**
  * 按制冷强度参考值对齐 PID 初始输出。
- * @param cold_ref 制冷强度参考值（存档值或 LSP 回传实际值）
- * @param cold_max 参考值对应的制冷上限（存档用 pid_cold_max，LSP 用 active_pid_cold_max）
+ * @param cold_ref 制冷强度参考值（LSP 回传实际值，低于 pid_cold_min 时已由调用方兜底）
+ * @param cold_max 参考值对应的制冷上限（active_pid_cold_max）
  * @return 对齐比例（0~1），用于映射制冷强度
  */
 static float pid_ratio_from_cold(int cold_ref, int cold_max) {
@@ -2147,7 +2149,6 @@ static float pid_ratio_from_cold(int cold_ref, int cold_max) {
     if (ratio > 1.0f) ratio = 1.0f;
     pid_align_cold = cold_ref;
     pid_align_rpm  = fan_rpm_min + (int)(ratio * (active_fan_max - fan_rpm_min));
-    pid_ratio_saved = ratio;
     return ratio;
 }
 
@@ -2194,7 +2195,7 @@ static int try_align_actual(void) {
 }
 
 /**
- * 重连安全对齐：以散热器实际回传值为准初始化实际制冷/转速（PID/gear 共用），
+ * 重连安全对齐：以散热器实际回传值为准初始化实际制冷/转速，
  * 由 rate_limited_execute 按正常限速逐步调节，抑制重连突变。
  * 此处不立即下发（分段执行）。
  *
@@ -2283,9 +2284,7 @@ static void pid_cycle(void) {
         pid_batt_filtered = batt_raw;
         pid_batt_last_update_cycle = pid_ctrl_cycles;
     } else if (batt_window_changed) {
-        int interval = pid_ctrl_cycles - pid_batt_last_update_cycle;
-        if (interval < 0) interval = 0;
-        if (interval > 16) interval = 16;   // 钳 0~16 → α 0.2~1.0（1.0=不滤波）
+        int interval = clamp(pid_ctrl_cycles - pid_batt_last_update_cycle, 0, 16);   // 钳 0~16 → α 0.2~1.0（1.0=不滤波）
         float alpha = 0.2f + 0.05f * interval;
         pid_batt_filtered = (int)(alpha * batt_raw + (1.0f - alpha) * pid_batt_filtered + 0.5f);
         pid_batt_last_update_cycle = pid_ctrl_cycles;
@@ -2368,20 +2367,16 @@ static void main_loop(void) {
     // 0. 检查配置文件是否更新（热重载）
     debug_log(debug_main, "main_loop 开始 温度窗口=%s",
               batt_window_changed ? "变化" : "未变");
-    if (config_path[0] != '\0') {
-        struct stat st;
-        if (stat(config_path, &st) == 0) {
-            if (st.st_mtime != config_mtime) {
-                load_config(config_path);
-                config_mtime = st.st_mtime;
-                write_log("配置 热重载");
-                // 配置重载可能重置了 fan_rpm_max/pid_cold_max，立即用设备限制覆盖
-                update_active_limits();
-            }
-        }
+    struct stat st;
+    if (config_path[0] != '\0' && stat(config_path, &st) == 0 && st.st_mtime != config_mtime) {
+        load_config(config_path);
+        config_mtime = st.st_mtime;
+        write_log("配置 热重载");
+        // 配置重载可能重置了 fan_rpm_max/pid_cold_max，立即用设备限制覆盖
+        update_active_limits();
     }
 
-    // 0.5. 热端过温 → 制冷上限削减（两模式共用，先于 PID/档位决策，本周期即生效）
+    // 0.5. 热端过温 → 制冷上限削减（先于 PID 决策，本周期即生效）
     update_hot_derate();
     // 0.6. 当前模式有效制冷范围（统一计算，供下发/去重/映射使用，消除模式分支散落）
     update_active_cold_range();

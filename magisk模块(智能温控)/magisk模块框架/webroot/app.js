@@ -576,6 +576,14 @@
     var n = parseInt(String(pc).split(/[\s,]+/)[1], 10);   // 第二值 = B6X 上限
     return isFinite(n) && n > 0 ? n : 190;
   }
+  // 制冷轴辅助：低端 = COLD_MAP 第一值（制冷→风扇映射起始强度），轴不高于此起始强度。
+  function coldMapStart() {
+    if (S.values['PERF_ENABLED'] !== '1') return 40;   // 总开关未开启 → 默认 40
+    var cm = S.values['COLD_MAP'];
+    if (cm == null) return 40;
+    var n = parseInt(String(cm).split(/[\s,]+/)[0], 10);
+    return isFinite(n) && n > 0 ? n : 40;
+  }
   var drawAxisDiag = false;   // 制冷轴范围一次性诊断
 
   // 读可配置秒数（profile.conf WebUI 键，缺省/非法回落默认值）
@@ -610,11 +618,6 @@
     if (dec > 0 && t.slice(-2) === '.0') t = t.slice(0, -2);
     return t;
   }
-  // hex(#rrggbb) → rgba(...,a)
-  function hexA(hex, a) {
-    var r = parseInt(hex.slice(1, 3), 16), g = parseInt(hex.slice(3, 5), 16), b = parseInt(hex.slice(5, 7), 16);
-    return 'rgba(' + r + ',' + g + ',' + b + ',' + a + ')';
-  }
 
   // ---------- 曲线（双纵轴：左 ℃/rpm，右 cold） ----------
   function drawChart() {
@@ -627,7 +630,17 @@
     ctx.clearRect(0, 0, cw, ch);
     var padL = 36, padR = 36, padT = 16, padB = 4;
     var W = cw - padL - padR, H = ch - padT - padB;
-    var data = S.samples.slice(-(S.window || 360));   // 只画最近 window 秒
+    var data = S.samples.slice(-(S.window || 360));   // 先按条数收紧
+    // 再按时间戳收紧到"最近 window 秒"：纵轴/曲线只依据显示窗口内的样本。
+    // 否则断联或稀疏采样时条数≠秒数，窗口之外的早期样本会抬高纵轴上下限。
+    var winSec = S.window || 360;
+    var lastT = data[data.length - 1].t;
+    if (data.length > 1 && isFinite(lastT)) {
+      var cutoff = lastT - winSec;
+      var start = 0;
+      while (start < data.length - 1 && data[start].t < cutoff) start++;
+      if (start > 0) data = data.slice(start);
+    }
     var leftSeries = S.series.filter(function (s) { return s.on && s.axis === 'left'; });
     var rightSeries = S.series.filter(function (s) { return s.on && s.axis === 'right'; });
 
@@ -670,13 +683,13 @@
     var Lext = extent(leftSeries, leftV), Rext = extent(rightSeries, rightV);
     var L = null, R = null;
     if (Lext) L = niceAxis(Lext.min, Lext.max, B_TICKS.temp);
-    // 制冷强度轴（右轴）：固定 [1, pidColdMax()]，上限即 PID_COLD 上限（不取整档）
+    // 制冷强度轴（右轴）：动态跟随数据。下限固定 COLD_MIN=1；上限随数据自适应，但最低不低于制冷→风扇映射起始强度（上限的保底），最高不高于制冷上限
     if (Rext) {
-      var cmax = pidColdMax();
-      var cstep = niceStep(cmax / B_TICKS.segs, B_TICKS.cold);
-      R = { min: 1, max: cmax, step: cstep };
-      if (R.max <= R.min) R.max = R.min + 1;
-      if (!drawAxisDiag) { drawAxisDiag = true; uiLog('[轴] 制冷轴: 1~' + R.max + '（step ' + cstep + '，PID_COLD 上限 ' + cmax + '）'); }
+      var cLow = coldMapStart(), cHigh = pidColdMax();
+      R = { min: 1, max: Math.min(cHigh, Math.max(Rext.max, cLow)) };
+      if (!(R.max > R.min)) R.max = R.min + 10;
+      R.step = niceStep((R.max - R.min) / B_TICKS.segs, B_TICKS.cold);
+      if (!drawAxisDiag) { drawAxisDiag = true; uiLog('[轴] 制冷轴: 1~' + R.max + '（上限保底起始强度 ' + cLow + '，上限 ' + cHigh + '）'); }
     }
     // 单轴全无效值时该轴 null。
     // 双轴都不可画（全 null）则无曲线可画；仅一轴有效时仍画该轴。
@@ -731,10 +744,11 @@
     plot(rightSeries, rightV, R);
 
     // ===== A 当前值标注：每条序列最后一个有效采样点（曲线头部指针）=====
-    // 多条头部接近时标签易重叠：按碰撞簇垂直错开；簇过多/放不下时合并为一行，用 ' / ' 隔开。
+    // 头部合并逻辑（组上下端都落进阈值才合并）+ 标签优先放在空间大的一侧。
     function drawHeadMarkers() {
-      var LABEL_H = 12, MAX_STACK = 3;   // 错开间距；簇内超过 N 条则合并
-      function headLabel(s, v) { return s.unit === '°C' ? (v.toFixed(1) + '°C') : (s.key === 'rpm' ? (v + 'rpm') : (v + '%')); }
+      var LABEL_H = 11;                                // 标签近似高度（10px 字体）
+      var MERGE_Y = gapSec('WEBUI_LABEL_MERGE_PX', 9); // 合并阈值（px，默认 9≈0.8×标签高）
+      function headLabel(s, v) { return s.unit === '°C' ? (v.toFixed(1) + '°C') : (s.key === 'rpm' ? (v + '百rpm') : (s.key === 'coldReal' ? '' + v : (v + '%'))); }
       var entries = [];
       function collect(series, getV, axis) {
         if (!axis) return;
@@ -744,7 +758,7 @@
           if (last < 0) return;
           var x = padL + W * ((last + gap[last]) / totalUnits);
           var y = yOf(axis, lv);
-          if (y < padT + 4) y = padT + 4;
+          if (y < padT) y = padT;              // 对准曲线端点（顶满时与边框交点一致，不再偏下）
           if (y > padT + H) y = padT + H;
           entries.push({ x: x, y: y, color: s.color, label: headLabel(s, lv) });
         });
@@ -752,75 +766,56 @@
       collect(leftSeries, leftV, L);
       collect(rightSeries, rightV, R);
       if (!entries.length) return;
-      // 目标 x 与宽（默认圆点右侧，超右缘翻到左侧）
       ctx.font = '10px system-ui';
       entries.forEach(function (e) {
         e.w = ctx.measureText(e.label).width;
         e.tx = e.x + 6;
         if (e.tx + e.w > padL + W) e.tx = e.x - 6 - e.w;
         if (e.tx < 2) e.tx = 2;
-        e.x0 = e.tx; e.x1 = e.tx + e.w;
-        e.y0 = e.y - 13; e.y1 = e.y - 2;   // 文本垂直近似区间
       });
-      // 矩形相交 → 同一簇（连通）
-      function rectHit(a, b) { return a.x0 < b.x1 && b.x0 < a.x1 && a.y0 < b.y1 && b.y0 < a.y1; }
-      var clusters = [];
+      // 按 y 升序；组的上下端都落进阈值(< MERGE_Y)才合并，否则断成新组
+      entries.sort(function (a, b) { return a.y - b.y; });
+      var clusters = [], cur = null;
       entries.forEach(function (e) {
-        var host = null;
-        for (var i = 0; i < clusters.length; i++) {
-          if (clusters[i].some(function (o) { return rectHit(e, o); })) { host = clusters[i]; break; }
-        }
-        if (host) host.push(e);
-        else clusters.push([e]);
+        if (cur && e.y - cur[0].y < MERGE_Y) cur.push(e);
+        else { cur = [e]; clusters.push(cur); }
       });
+      // 标签基准 y：取空间更大的一侧（上方空间大→放上面；下方大→放下面）
+      function sideY(cl) {
+        var top = cl[0].y, bot = cl[cl.length - 1].y;
+        if ((top - padT) >= (padT + H - bot)) return top - 4;   // 上面
+        return bot + LABEL_H + 1;                               // 下面
+      }
       function dot(e) {
         ctx.fillStyle = e.color;
         ctx.beginPath(); ctx.arc(e.x, e.y, 3.2, 0, Math.PI * 2); ctx.fill();
         ctx.strokeStyle = dark ? '#101418' : '#ffffff'; ctx.lineWidth = 1; ctx.stroke();
       }
-      function leader(e, ly) {   // 错开后从圆点引细线到标签，防错认
-        ctx.strokeStyle = hexA(e.color, 0.4); ctx.lineWidth = 1;
-        ctx.beginPath(); ctx.moveTo(e.x + 2, e.y); ctx.lineTo(e.tx + 1, ly - 2); ctx.stroke();
-      }
-      function label(e, ly) { ctx.font = '10px system-ui'; ctx.fillStyle = e.color; ctx.fillText(e.label, e.tx, ly); }
-      function drawSingle(e) { dot(e); label(e, e.y - 4); }
-      function drawStack(cl) {   // 沿簇内原始 y 排序，围绕中心垂直错开
-        cl.sort(function (a, b) { return a.y - b.y; });
-        var mid = (cl[0].y + cl[cl.length - 1].y) / 2;
-        var lo = padT + 8, hi = padT + H + 10;
-        for (var i = 0; i < cl.length; i++) {
-          var ly = mid + (i - (cl.length - 1) / 2) * LABEL_H;
-          if (ly < lo) ly = lo;
-          if (ly > hi) ly = hi;
-          dot(cl[i]); leader(cl[i], ly); label(cl[i], ly);
+      clusters.forEach(function (c) {
+        var ly = sideY(c);
+        if (ly < padT) ly = padT;
+        if (ly > padT + H + LABEL_H) ly = padT + H + LABEL_H;
+        if (c.length === 1) {
+          dot(c[0]);
+          ctx.font = '10px system-ui'; ctx.fillStyle = c[0].color;
+          ctx.fillText(c[0].label, c[0].tx, ly);
+          return;
         }
-      }
-      function drawMerged(cl) {   // 合并为一行：每段自身颜色，' / ' 灰间隔
-        cl.sort(function (a, b) { return a.y - b.y; });
-        var cx = 0; cl.forEach(function (e) { cx += e.x; }); cx /= cl.length;
+        // 合并为一行：每段自身颜色，' / ' 灰间隔
+        var cx = 0; c.forEach(function (e) { cx += e.x; }); cx /= c.length;
         var sep = ctx.measureText(' / ').width;
-        var total = cl.reduce(function (s, e) { return s + e.w; }, 0) + sep * (cl.length - 1);
+        var total = c.reduce(function (s, e) { return s + e.w; }, 0) + sep * (c.length - 1);
         var tx = cx + 6;
         if (tx + total > padL + W) tx = cx - 6 - total;
         if (tx < 2) tx = 2;
-        var ly = cl[0].y + (cl[cl.length - 1].y - cl[0].y) / 2;
-        if (ly < padT + 8) ly = padT + 8;
-        if (ly > padT + H + 10) ly = padT + H + 10;
         ctx.font = '10px system-ui';
-        for (var i = 0; i < cl.length; i++) {
-          ctx.fillStyle = cl[i].color;
-          ctx.fillText(cl[i].label, tx, ly);
-          tx += cl[i].w;
-          if (i < cl.length - 1) { ctx.fillStyle = '#888'; ctx.fillText(' / ', tx, ly); tx += sep; }
+        for (var i = 0; i < c.length; i++) {
+          ctx.fillStyle = c[i].color;
+          ctx.fillText(c[i].label, tx, ly);
+          tx += c[i].w;
+          if (i < c.length - 1) { ctx.fillStyle = '#888'; ctx.fillText(' / ', tx, ly); tx += sep; }
         }
-        cl.forEach(dot);   // 合并仍保留各圆点，便于对应曲线
-      }
-      clusters.forEach(function (c) {
-        if (c.length === 1) { drawSingle(c[0]); return; }
-        // 能错开且不挤出画布则错开，否则合并
-        var need = (c.length - 1) * LABEL_H + 12;
-        if (c.length <= MAX_STACK && need <= H) drawStack(c);
-        else drawMerged(c);
+        c.forEach(dot);
       });
     }
     drawHeadMarkers();
