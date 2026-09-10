@@ -210,8 +210,6 @@ body.pin-scroll .config { overflow: visible; }
 .ctrl:last-child { border-bottom: 0; }
 .ctrl-label { flex: 1 1 45%; min-width: 45%; }
 .ctrl-desc { font-size: 11px; color: var(--muted); line-height: 1.25; }
-/* 取值顺序：multi 输入框下方一行，小号次要色，右对齐贴齐输入框；单行高（不挤压参数区） */
-.ctrl-order { flex: 1 1 100%; text-align: right; font-size: 10px; line-height: 1.2; color: var(--muted); }
 
 /* 输入框宽度由 JS 按"值长度+1ch"设置（fitInput），这里只给兜底 */
 .ctrl input[type=number], .ctrl input[type=text] {
@@ -219,8 +217,12 @@ body.pin-scroll .config { overflow: visible; }
   border-radius: 7px; padding: 4px 7px; font-size: 13px; text-align: right;
   min-width: 44px; max-width: 100%; box-sizing: border-box;
 }
-.multi { display: flex; gap: 6px; flex-wrap: wrap; }
+.multi { display: flex; gap: 6px; flex-wrap: wrap; align-items: flex-start; }
 .multi input[type=number] { text-align: right; min-width: 44px; max-width: 100%; }
+/* 单字段列：框在上、字段名紧贴其下（框折行时名字跟着走）；宽度按内容(=两者较宽者)，不参与压缩。
+   列内居中：框窄于说明则框居中在说明下，说明窄于框则说明居中在框下（列宽=max(框,名) → 不会溢出） */
+.multi-field { display: flex; flex-direction: column; align-items: center; flex: 0 0 auto; }
+.field-name { font-size: 10px; line-height: 1.2; color: var(--muted); }
 .multi .multicheck { display: inline-flex; align-items: center; gap: 5px; font-size: 13px; cursor: pointer; padding: 4px 4px; }
 .multi .multicheck input[type=checkbox] { width: 16px; height: 16px; flex: 0 0 auto; margin: 0; }
 /* 隐藏 number 微调按钮 */

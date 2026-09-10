@@ -254,12 +254,12 @@
     return lab;
   }
 
-  // 取值顺序提示：由 multi 的 fields 顺序自动生成，渲染在输入框下方（内容随 schema 变化，无需新增字段）
-  function buildOrderLine(def) {
-    var line = document.createElement('div');
-    line.className = 'ctrl-order';
-    line.textContent = '顺序：' + def.fields.map(function (f) { return f.label; }).join(' / ');
-    return line;
+  // 字段名行：紧贴该输入框下方，只写字段名（数值框下方各跟一行；勾选框名已在框旁，不重复）
+  function buildFieldName(text) {
+    var name = document.createElement('span');
+    name.className = 'field-name';
+    name.textContent = text;
+    return name;
   }
 
   function buildControl(key) {
@@ -295,7 +295,12 @@
           box.appendChild(cb); box.appendChild(tf);
           row.appendChild(box);
         } else {
-          row.appendChild(buildNumInput(key + '::' + i, parts[i] || '0', f.min, f.max, 1, f.label));
+          // 数值字段：框 + 紧贴其下的字段名（竖排时各自跟着自己的框走）
+          var field = document.createElement('div');
+          field.className = 'multi-field';
+          field.appendChild(buildNumInput(key + '::' + i, parts[i] || '0', f.min, f.max, 1, f.label));
+          field.appendChild(buildFieldName(f.label));
+          row.appendChild(field);
         }
       });
       function onMultiChange() {
@@ -310,7 +315,6 @@
       row.addEventListener('input', onMultiChange);
       row.addEventListener('change', onMultiChange);   // checkbox 用 change 事件
       wrap.appendChild(row);
-      wrap.appendChild(buildOrderLine(def));   // 取值顺序：放在输入框下面一行
 
     } else if (def.type === 'path') {
       var inp = document.createElement('input');
@@ -414,39 +418,97 @@
     return sec;
   }
 
-  // ---------- 参数行排布：输入框可多行（逐行取更矮的排布，参数区整体高度最小） ----------
+  // ---------- 参数行排布：逐行取最矮（说明列 × 输入框组行数 多候选实测） ----------
   // 行宽由屏幕固定（不可改），参数区整体高度 = 各行高之和，故逐行压行高即为整体最小面积。
-  // 每行两种排布：
-  //   ① 同行：说明列被输入框挤窄 → 说明折行多；
-  //   ② 多行：输入框另起一行，说明独占整行 → 说明折行少，代价是多占一行输入框高。
-  // 行高以实测取矮者：说明长（省下的折行高 > 输入框行高）→ 走②，说明短 → 走①。
-  // 取值顺序行（.ctrl-order，若有）恒为占满一行的兄弟项，不参与上面的宽度取舍。
-  var ROW_MIN_LABEL_W = 96;        // 同行排布下说明列可读下限（px），更窄没有意义，直接走多行
-  var ROW_ORDER_CLASS = 'ctrl-order';
+  // 说明列两种：① 与输入框组同行（说明列被挤窄 → 折行多）；② 输入框组另起一行（说明独占整行）。
+  // multi 输入框组占几行：不限宽（自然排）/ 限宽到恰好 2 行 / 恰好 3 行——组窄了说明列变宽，
+  // 两者互相拉扯，故不凭直觉，逐个候选真实测行高后取最矮。
+  // 字段名与框同属一个 .multi-field，框折行时字段名跟着走；开关字段名内联，不占名字行。
+  var MULTI_MAX_LINES = 3;     // 输入框组最多评估到几行
   function setRowLayout(row, label, share) {
-    row.style.flexWrap = 'wrap';                            // 顺序行独占一行，必须允许换行
-    label.style.flex = share ? '1 1 0' : '1 1 100%';        // 基准 0：与输入框同行；基准 100%：说明独占整行
+    row.style.flexWrap = 'wrap';
+    label.style.flex = share ? '1 1 0' : '1 1 100%';      // 基准 0：与输入框同行；基准 100%：说明独占整行
     label.style.minWidth = share ? '0' : '100%';
+  }
+  // 把字段宽按顺序切成 n 段（每段一行）时，最小可能的"最宽行"宽度 = 恰好排成 n 行所需的限宽
+  function multiCapFor(ws, n, gap) {
+    var k = ws.length;
+    if (n >= k) return Math.max.apply(null, ws);           // 每行至少一个字段
+    function lineW(a, b) { var w = 0; for (var i = a; i < b; i++) w += ws[i] + (i > a ? gap : 0); return w; }
+    var best = Infinity;
+    (function rec(start, lines, maxW) {
+      if (maxW >= best) return;
+      if (lines === 1) { best = Math.min(best, Math.max(maxW, lineW(start, k))); return; }
+      for (var end = start + 1; end <= k - (lines - 1); end++) rec(end, lines - 1, Math.max(maxW, lineW(start, end)));
+    })(0, n, 0);
+    return best;
+  }
+  // 候选限宽列表：'' = 不限宽（自然排）；字段数不足的 N 行候选直接跳过
+  function multiCaps(ws, gap) {
+    var k = ws.length;
+    if (k < 2) return [''];
+    var caps = [''];
+    for (var n = 2; n <= MULTI_MAX_LINES && n <= k; n++) caps.push(Math.ceil(multiCapFor(ws, n, gap)));
+    return caps;
+  }
+  function multiFieldWidths(multi) {
+    var fields = multi.children, ws = [], i;
+    for (i = 0; i < fields.length; i++) ws.push(fields[i].offsetWidth);
+    return ws;
+  }
+  // 输入框组实际占几行（按子项顶坐标分行，横排折行后行内顶坐标一致）
+  function multiLines(multi) {
+    var fields = multi.children, tops = {}, i, n = 0;
+    for (i = 0; i < fields.length; i++) {
+      if (tops[fields[i].offsetTop] === undefined) { tops[fields[i].offsetTop] = 1; n++; }
+    }
+    return n || 1;
+  }
+  // 开关是否独占一行（仅"需要换行"时用：占满整行宽度，其余字段在剩下的空间里折行）
+  function setSwitchOwnLine(multi, own) {
+    var fields = multi.children, i;
+    for (i = 0; i < fields.length; i++) {
+      if (fields[i].classList.contains('multicheck')) fields[i].style.flex = own ? '0 0 100%' : '';
+    }
   }
   function fitParamRow(row) {
     if (!row.clientWidth) return;                        // 未挂载 / 所属分组收起：测不到尺寸
     var label = row.querySelector('.ctrl-label');
     if (!label) return;
+    var multi = row.querySelector('.multi');
     var kids = row.children, ctrlW = 0, i;
-    for (i = 0; i < kids.length; i++) {
-      if (kids[i] === label || kids[i].classList.contains(ROW_ORDER_CLASS)) continue;   // 顺序行不占宽度
-      ctrlW += kids[i].offsetWidth;
-    }
+    for (i = 0; i < kids.length; i++) if (kids[i] !== label) ctrlW += kids[i].offsetWidth;
     if (!ctrlW) return;                                  // 无输入框的行不处理
-    var key = row.clientWidth + '/' + ctrlW;
-    if (row.dataset.fitKey === key) return;              // 行宽与输入框宽未变 → 上次结论仍有效
-    row.dataset.fitKey = key;
     var gap = parseFloat(window.getComputedStyle(row).columnGap) || 0;
-    setRowLayout(row, label, true);                                                  // ① 同行
-    var h1 = (row.clientWidth - ctrlW - gap) >= ROW_MIN_LABEL_W ? row.offsetHeight : Infinity;
-    setRowLayout(row, label, false);                                                 // ② 多行
-    var h2 = row.offsetHeight;
-    if (h1 <= h2) setRowLayout(row, label, true);                                    // 同行更矮 → 还原
+    var ws = multi ? multiFieldWidths(multi) : null;
+    var hasSwitch = !!(multi && multi.querySelector('.multicheck'));
+    var key = row.clientWidth + '/' + ctrlW + (ws ? '/' + ws.join(',') : '');
+    if (row.dataset.fitKey === key) return;              // 行宽与输入框/字段宽未变 → 上次结论仍有效
+    row.dataset.fitKey = key;
+    var caps = ws ? multiCaps(ws, gap) : [''];
+    var owns = hasSwitch ? [false, true] : [false];      // true：开关独占一行
+    var best = null;
+    caps.forEach(function (cap) {
+      owns.forEach(function (own) {
+        [true, false].forEach(function (share) {
+          if (multi) { multi.style.maxWidth = cap === '' ? '' : cap + 'px'; setSwitchOwnLine(multi, own); }
+          setRowLayout(row, label, share);
+          // 含开关的组：单行时开关不得独占（保持现状）；折行时开关必须独占
+          if (hasSwitch && own !== (multiLines(multi) > 1)) return;
+          var h = row.offsetHeight;
+          if (!best || h < best.h) best = { h: h, share: share, cap: cap, own: own };
+        });
+      });
+    });
+    if (best) {
+      if (multi) { multi.style.maxWidth = best.cap === '' ? '' : best.cap + 'px'; setSwitchOwnLine(multi, best.own); }
+      setRowLayout(row, label, best.share);
+    } else if (multi) {
+      // 无可行组合（理论不可达）：退回不限宽 + 含开关则独占行 + 说明同行
+      multi.style.maxWidth = '';
+      setSwitchOwnLine(multi, hasSwitch);
+      setRowLayout(row, label, true);
+    }
   }
   // force=true：字体/视口变化会改变实测宽度 → 清缓存整体重算
   function fitParamRows(force) {
@@ -1179,6 +1241,7 @@
       parseDataLines: parseDataLines,
       filterHotStep: filterHotStep, applyHotFilter: applyHotFilter,   // 热端曲线滤波
       fitParamRow: fitParamRow, fitParamRows: fitParamRows,           // 参数行排布
+      multiCapFor: multiCapFor, multiCaps: multiCaps,                 // 输入框组限宽候选
       fitOneLine: fitOneLine, updateLiveRow: updateLiveRow, refitBars: refitBars,   // 单行适配逻辑测试钩子
       fitChartTools: fitChartTools,                           // 时间窗口+图例子窗口整体缩放
       coldMapStart: coldMapStart,                             // 制冷→风扇映射起始强度
