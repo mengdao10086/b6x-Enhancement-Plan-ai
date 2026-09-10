@@ -743,32 +743,55 @@
     return t;
   }
 
-  // ---------- 热端温度曲线滤波 ----------
-  // 移植 tempctrl.c pid_compute() 的速度去噪（原文注释「|v| ≤ 0.1°C/周期 视为测量噪声归零，
-  // 超出部分对称向零收缩 0.1（不越过 0）」）：
-  //   if (v > 0.1f) v -= 0.1f; else if (v < -0.1f) v += 0.1f; else v = 0.0f;
-  // C 侧作用于速度 v（导数，供 PID 用），曲线侧作用于本周期偏差（原始值 − 滤波值），作用量纲同为 °C。
-  // 三段式对称向零收缩一致；偏差 ≤ 0.1 判为噪声 → 直接取实际值（C 侧该支归零），
-  // 故滤波值不会持续逼近却永远达不到实际值。收缩后再按「滤波幅度」EMA 靠拢。
-  var HOT_FILTER_ALPHA = 0.2;      // 滤波幅度：EMA 权重（对齐 C 侧百分比 20 → 0.2）
-  var HOT_FILTER_MIN_AMP = 0.1;    // 上升/下降的最小幅度（°C）
-  function filterHotStep(prev, raw) {
-    if (prev == null) return raw;
-    var dev = raw - prev;
-    if (dev > HOT_FILTER_MIN_AMP) dev -= HOT_FILTER_MIN_AMP;
-    else if (dev < -HOT_FILTER_MIN_AMP) dev += HOT_FILTER_MIN_AMP;
-    else return raw;
-    return prev + HOT_FILTER_ALPHA * dev;
-  }
-  // 顺序滤波整个样本序列（结果与显示窗口无关，同一份数据每次得到同一曲线）
-  function applyHotFilter(samples) {
-    var prev = null;
-    for (var i = 0; i < samples.length; i++) {
-      var d = samples[i];
-      if (d.hot == null || d.hot < 0) { d.hotF = null; prev = null; continue; }   // 无效值：断档，重新起滤波
-      d.hotF = filterHotStep(prev, d.hot);
-      prev = d.hotF;
+  // ---------- 热端温度曲线滤波（零相位双向平滑 + 最小步长） ----------
+  // 曲线仅用于展示、且 drawChart 每次重绘都对整段样本重算，故可用非因果平滑：
+  // 前向一遍 EMA 后，再对结果反向做一遍同一 EMA（等价 filtfilt）。两遍互为共轭 → 相位为零，
+  // 阶跃响应是对称 S 形（首尾斜率都趋 0），稳态等于原始值（无指数拖尾、无稳态偏置）。
+  // 平滑强度：单遍 EMA 白噪声方差抑制 = α/(2−α)；两遍 = [α/(2−α)]²·[1 + 2(1−α)²/(2α−α²)]。
+  var HOT_SMOOTH_ALPHA = 0.25;      // 每遍 EMA 权重（双向，实际平滑强于同 α 单遍）
+  // 最小步长：输出只取该值的整数倍。热端采样本身即 0.1°C 量化，故 0.1 就是显示量子；
+  // 作用是消灭平滑后残留的亚格点微挪（0.02 级抖动），而非改变曲线整体形状。
+  var HOT_SMOOTH_MIN_STEP = 0.1;
+  // 对一段连续有效样本就地双向平滑，结果写回 hotF。反向一遍以段末前向值为初值（末端延拓）：
+  // 末尾沿用因果值、不引入跳变，段内为完整零相位。
+  function smoothHotSegment(samples, idx) {
+    var m = idx.length, j, prev, cur;
+    prev = samples[idx[0]].hot;
+    samples[idx[0]].hotF = prev;
+    for (j = 1; j < m; j++) {
+      prev += HOT_SMOOTH_ALPHA * (samples[idx[j]].hot - prev);
+      samples[idx[j]].hotF = prev;
     }
+    cur = samples[idx[m - 1]].hotF;
+    for (j = m - 2; j >= 0; j--) {
+      cur += HOT_SMOOTH_ALPHA * (samples[idx[j]].hotF - cur);
+      samples[idx[j]].hotF = cur;
+    }
+    // 第三遍：最小步长量化。偏差达阈值才吸附到最近的 0.1 格点（一次可跨多格），
+    // 吸附后残差 ≤ 半格(0.05)；阈值取 0.9 格：须 > 半格才不会吸附后抖动，又须 < 1 格，
+    // 否则末级台阶（差值恰为 0.1）永远跨不过去、稳态会像旧实现一样永久差 0.1。
+    // 锚点须对齐 0.1 整格（原始值即整格），否则整条曲线会带一个常数偏移、且稳态不落在真值上。
+    var q = Math.round(samples[idx[0]].hotF / HOT_SMOOTH_MIN_STEP) * HOT_SMOOTH_MIN_STEP;
+    var thr = HOT_SMOOTH_MIN_STEP * 0.9;
+    samples[idx[0]].hotF = q;
+    for (j = 1; j < m; j++) {
+      var dx = samples[idx[j]].hotF - q;
+      if (dx >= thr || dx <= -thr) q += HOT_SMOOTH_MIN_STEP * Math.round(dx / HOT_SMOOTH_MIN_STEP);
+      samples[idx[j]].hotF = q;
+    }
+  }
+  // 顺序平滑整个样本序列（结果与显示窗口无关，同一份数据每次得到同一曲线）
+  function applyHotFilter(samples) {
+    var seg = [], i, n = samples.length;
+    for (i = 0; i < n; i++) {
+      if (samples[i].hot == null || samples[i].hot < 0) {   // 无效值：断档，段结束
+        samples[i].hotF = null;
+        if (seg.length) { smoothHotSegment(samples, seg); seg = []; }
+        continue;
+      }
+      seg.push(i);
+    }
+    if (seg.length) smoothHotSegment(samples, seg);
   }
 
   // ---------- 曲线（双纵轴：左 ℃/rpm，右 cold） ----------
@@ -1239,7 +1262,7 @@
     window.__B6X_TEST__ = {
       parseConfig: parseConfig, buildValues: buildValues, rebuildConfig: rebuildConfig,
       parseDataLines: parseDataLines,
-      filterHotStep: filterHotStep, applyHotFilter: applyHotFilter,   // 热端曲线滤波
+      smoothHotSegment: smoothHotSegment, applyHotFilter: applyHotFilter,   // 热端曲线滤波（零相位双向）
       fitParamRow: fitParamRow, fitParamRows: fitParamRows,           // 参数行排布
       multiCapFor: multiCapFor, multiCaps: multiCaps,                 // 输入框组限宽候选
       fitOneLine: fitOneLine, updateLiveRow: updateLiveRow, refitBars: refitBars,   // 单行适配逻辑测试钩子
