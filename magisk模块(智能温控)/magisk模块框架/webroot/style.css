@@ -158,9 +158,9 @@ body.pin-scroll .config { overflow: visible; }
   white-space: pre-wrap; word-break: break-all;
 }
 
-.group { background: var(--surface); margin: 8px 10px; border-radius: 10px; overflow: hidden; border: 1px solid var(--border); }
+.group { background: var(--surface); margin: 6px 10px; border-radius: 10px; overflow: hidden; border: 1px solid var(--border); }
 .group-head {
-  display: flex; align-items: center; gap: 8px; padding: 9px 10px; cursor: pointer;
+  display: flex; align-items: center; gap: 8px; padding: 6px 10px; cursor: pointer;
   user-select: none; -webkit-user-select: none;
 }
 /* 折叠小三角：原生风格 */
@@ -192,10 +192,10 @@ body.pin-scroll .config { overflow: visible; }
 .mode-slider::-webkit-scrollbar { display: none; }
 .mode-panel { flex: 0 0 100%; min-width: 100%; scroll-snap-align: start; }
 
-.group-body { padding: 2px 10px 10px; }
+.group-body { padding: 2px 10px 6px; }
 .group-body.collapsed { display: none; }
 .sub-panel {
-  margin-top: 8px; padding-top: 8px; border-top: 1px dashed var(--border);
+  margin-top: 6px; padding-top: 6px; border-top: 1px dashed var(--border);
   background: var(--surface2); border-radius: 8px;
 }
 .sub-panel-title { font-size: 12px; font-weight: 600; padding: 0 0 6px; }
@@ -205,11 +205,13 @@ body.pin-scroll .config { overflow: visible; }
 /* ---------- 控件 ---------- */
 .ctrl {
   display: flex; align-items: center; justify-content: space-between; gap: 8px 12px;
-  padding: 7px 0; border-bottom: 1px solid rgba(128,128,128,.12); flex-wrap: wrap;
+  padding: 4px 0; border-bottom: 1px solid rgba(128,128,128,.12); flex-wrap: wrap;
 }
 .ctrl:last-child { border-bottom: 0; }
 .ctrl-label { flex: 1 1 45%; min-width: 45%; }
-.ctrl-desc { font-size: 11px; color: var(--muted); margin-top: 1px; }
+.ctrl-desc { font-size: 11px; color: var(--muted); line-height: 1.25; }
+/* 取值顺序：multi 输入框下方一行，小号次要色，右对齐贴齐输入框；单行高（不挤压参数区） */
+.ctrl-order { flex: 1 1 100%; text-align: right; font-size: 10px; line-height: 1.2; color: var(--muted); }
 
 /* 输入框宽度由 JS 按"值长度+1ch"设置（fitInput），这里只给兜底 */
 .ctrl input[type=number], .ctrl input[type=text] {

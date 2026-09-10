@@ -222,6 +222,7 @@
   }
 
   function updateCollapse() {
+    var toggled = false;   // 是否有分组刚展开/收起（展开后参数行才可测量）
     SCHEMA.groups.forEach(function (g) {
       if (!hasCollapsible(g)) return;   // 无折叠内容：说明区常显，不处理折叠
       var head = $('head-' + g.id), chev = $('chev-' + g.id), badge = $('badge-' + g.id);
@@ -229,6 +230,7 @@
       if (!head || !body) return;
       // 全部大类固定默认收起、不随开关状态展开；仅组头点击做会话级手动展开/收起
       var open = !!S.manualExpand[g.id];
+      if (body.classList.contains('collapsed') === open) toggled = true;
       body.classList.toggle('collapsed', !open);
       chev.classList.toggle('on', open);
       // 组头暗色/徽标仍反映开关实际状态（仅视觉提示，不影响折叠）
@@ -237,6 +239,7 @@
       head.classList.toggle('off', !swOn);
       if (badge) badge.classList.toggle('hidden', swOn);
     });
+    if (toggled) fitParamRows();
   }
 
   // ---------- 控件构建 ----------
@@ -249,6 +252,14 @@
     cb.addEventListener('change', function () { setValue(key, cb.checked ? '1' : '0'); });
     lab.appendChild(cb); lab.appendChild(document.createElement('i'));
     return lab;
+  }
+
+  // 取值顺序提示：由 multi 的 fields 顺序自动生成，渲染在输入框下方（内容随 schema 变化，无需新增字段）
+  function buildOrderLine(def) {
+    var line = document.createElement('div');
+    line.className = 'ctrl-order';
+    line.textContent = '顺序：' + def.fields.map(function (f) { return f.label; }).join(' / ');
+    return line;
   }
 
   function buildControl(key) {
@@ -299,6 +310,8 @@
       row.addEventListener('input', onMultiChange);
       row.addEventListener('change', onMultiChange);   // checkbox 用 change 事件
       wrap.appendChild(row);
+      wrap.appendChild(buildOrderLine(def));   // 取值顺序：放在输入框下面一行
+
     } else if (def.type === 'path') {
       var inp = document.createElement('input');
       inp.type = 'text'; inp.className = 'text'; inp.dataset.key = key;
@@ -399,6 +412,55 @@
     }
 
     return sec;
+  }
+
+  // ---------- 参数行排布：输入框可多行（逐行取更矮的排布，参数区整体高度最小） ----------
+  // 行宽由屏幕固定（不可改），参数区整体高度 = 各行高之和，故逐行压行高即为整体最小面积。
+  // 每行两种排布：
+  //   ① 同行：说明列被输入框挤窄 → 说明折行多；
+  //   ② 多行：输入框另起一行，说明独占整行 → 说明折行少，代价是多占一行输入框高。
+  // 行高以实测取矮者：说明长（省下的折行高 > 输入框行高）→ 走②，说明短 → 走①。
+  // 取值顺序行（.ctrl-order，若有）恒为占满一行的兄弟项，不参与上面的宽度取舍。
+  var ROW_MIN_LABEL_W = 96;        // 同行排布下说明列可读下限（px），更窄没有意义，直接走多行
+  var ROW_ORDER_CLASS = 'ctrl-order';
+  function setRowLayout(row, label, share) {
+    row.style.flexWrap = 'wrap';                            // 顺序行独占一行，必须允许换行
+    label.style.flex = share ? '1 1 0' : '1 1 100%';        // 基准 0：与输入框同行；基准 100%：说明独占整行
+    label.style.minWidth = share ? '0' : '100%';
+  }
+  function fitParamRow(row) {
+    if (!row.clientWidth) return;                        // 未挂载 / 所属分组收起：测不到尺寸
+    var label = row.querySelector('.ctrl-label');
+    if (!label) return;
+    var kids = row.children, ctrlW = 0, i;
+    for (i = 0; i < kids.length; i++) {
+      if (kids[i] === label || kids[i].classList.contains(ROW_ORDER_CLASS)) continue;   // 顺序行不占宽度
+      ctrlW += kids[i].offsetWidth;
+    }
+    if (!ctrlW) return;                                  // 无输入框的行不处理
+    var key = row.clientWidth + '/' + ctrlW;
+    if (row.dataset.fitKey === key) return;              // 行宽与输入框宽未变 → 上次结论仍有效
+    row.dataset.fitKey = key;
+    var gap = parseFloat(window.getComputedStyle(row).columnGap) || 0;
+    setRowLayout(row, label, true);                                                  // ① 同行
+    var h1 = (row.clientWidth - ctrlW - gap) >= ROW_MIN_LABEL_W ? row.offsetHeight : Infinity;
+    setRowLayout(row, label, false);                                                 // ② 多行
+    var h2 = row.offsetHeight;
+    if (h1 <= h2) setRowLayout(row, label, true);                                    // 同行更矮 → 还原
+  }
+  // force=true：字体/视口变化会改变实测宽度 → 清缓存整体重算
+  function fitParamRows(force) {
+    var rows = document.querySelectorAll('#groups .ctrl');
+    for (var i = 0; i < rows.length; i++) {
+      if (force) rows[i].dataset.fitKey = '';
+      fitParamRow(rows[i]);
+    }
+  }
+  // 首次 + 视口/字体变化后重算（分组展开时由 updateCollapse 触发）
+  function initParamLayout() {
+    fitParamRows();
+    window.addEventListener('resize', debounce(function () { fitParamRows(true); }, 150));
+    if (document.fonts && document.fonts.ready) document.fonts.ready.then(function () { fitParamRows(true); });
   }
 
   // ---------- 档位表（已随 Gear 删除） ----------
@@ -567,19 +629,19 @@
     diagFit('liveRow', fitOneLine(el, 11, null, 0.96));   // 每帧重算；tabular-nums 定宽同字符数字号稳定
   }
 
-  // 制冷轴辅助：右轴上限固定 = PID_COLD 制冷上限（B6X 上限，默认 190）。
+  // 制冷轴辅助：右轴上限固定 = PID_COLD_RANGE 制冷上限（B6X 上限，默认 190）。
   // 按配置取 B6X 上限；总开关(PERF_ENABLED=1)未开启时回退默认 190。
   function pidColdMax() {
     if (S.values['PERF_ENABLED'] !== '1') return 190;   // 总开关未开启 → 默认 190
-    var pc = S.values['PID_COLD'];
+    var pc = S.values['PID_COLD_RANGE'];
     if (pc == null) return 190;
     var n = parseInt(String(pc).split(/[\s,]+/)[1], 10);   // 第二值 = B6X 上限
     return isFinite(n) && n > 0 ? n : 190;
   }
-  // 制冷轴辅助：低端 = COLD_MAP 第一值（制冷→风扇映射起始强度），轴不高于此起始强度。
+  // 制冷轴辅助：低端 = COLD_RPM_MAP 第一值（制冷→风扇映射起始强度），轴不高于此起始强度。
   function coldMapStart() {
     if (S.values['PERF_ENABLED'] !== '1') return 40;   // 总开关未开启 → 默认 40
-    var cm = S.values['COLD_MAP'];
+    var cm = S.values['COLD_RPM_MAP'];
     if (cm == null) return 40;
     var n = parseInt(String(cm).split(/[\s,]+/)[0], 10);
     return isFinite(n) && n > 0 ? n : 40;
@@ -591,12 +653,12 @@
 
   // ---------- B：整档刻度 / 数值格式化 ----------
   var B_TICKS = { segs: 4, minSegs: 3, temp: [1, 2, 2.5, 5, 10], cold: [1, 2, 5, 10] };
-  // 数值上滚到 steps 集合中 ≥ raw 的最近整档（×10^n）
+  // 数值上滚到 steps 集合中 ≥ raw 的最近整档（×10^n）；最小步进钳到 1（不出现亚单位步进）
   function niceStep(raw, steps) {
     if (!(raw > 0)) return 1;
     var mag = Math.pow(10, Math.floor(Math.log(raw) / Math.LN10));
-    for (var i = 0; i < steps.length; i++) { var v = steps[i] * mag; if (v >= raw - 1e-9) return v; }
-    return steps[steps.length - 1] * mag;
+    for (var i = 0; i < steps.length; i++) { var v = steps[i] * mag; if (v >= raw - 1e-9) return Math.max(1, v); }
+    return Math.max(1, steps[steps.length - 1] * mag);
   }
   // 由数据最小/最大求整档轴（保证 min≤dmin、max≥dmax，绝不裁点）
   function niceAxis(dmin, dmax, steps) {
@@ -619,8 +681,37 @@
     return t;
   }
 
+  // ---------- 热端温度曲线滤波 ----------
+  // 移植 tempctrl.c pid_compute() 的速度去噪（原文注释「|v| ≤ 0.1°C/周期 视为测量噪声归零，
+  // 超出部分对称向零收缩 0.1（不越过 0）」）：
+  //   if (v > 0.1f) v -= 0.1f; else if (v < -0.1f) v += 0.1f; else v = 0.0f;
+  // C 侧作用于速度 v（导数，供 PID 用），曲线侧作用于本周期偏差（原始值 − 滤波值），作用量纲同为 °C。
+  // 三段式对称向零收缩一致；偏差 ≤ 0.1 判为噪声 → 直接取实际值（C 侧该支归零），
+  // 故滤波值不会持续逼近却永远达不到实际值。收缩后再按「滤波幅度」EMA 靠拢。
+  var HOT_FILTER_ALPHA = 0.2;      // 滤波幅度：EMA 权重（对齐 C 侧百分比 20 → 0.2）
+  var HOT_FILTER_MIN_AMP = 0.1;    // 上升/下降的最小幅度（°C）
+  function filterHotStep(prev, raw) {
+    if (prev == null) return raw;
+    var dev = raw - prev;
+    if (dev > HOT_FILTER_MIN_AMP) dev -= HOT_FILTER_MIN_AMP;
+    else if (dev < -HOT_FILTER_MIN_AMP) dev += HOT_FILTER_MIN_AMP;
+    else return raw;
+    return prev + HOT_FILTER_ALPHA * dev;
+  }
+  // 顺序滤波整个样本序列（结果与显示窗口无关，同一份数据每次得到同一曲线）
+  function applyHotFilter(samples) {
+    var prev = null;
+    for (var i = 0; i < samples.length; i++) {
+      var d = samples[i];
+      if (d.hot == null || d.hot < 0) { d.hotF = null; prev = null; continue; }   // 无效值：断档，重新起滤波
+      d.hotF = filterHotStep(prev, d.hot);
+      prev = d.hotF;
+    }
+  }
+
   // ---------- 曲线（双纵轴：左 ℃/rpm，右 cold） ----------
   function drawChart() {
+    applyHotFilter(S.samples);                        // 热端滤波（曲线专用；实时数值栏仍显示原始值）
     var cv = $('chart'), dpr = window.devicePixelRatio || 1;
     var cw = cv.clientWidth, ch = cv.clientHeight;
     if (!cw || !ch) return;
@@ -667,8 +758,8 @@
       ctx.fillText(data.length < 2 ? '采样中…' : '无曲线', padL + W / 2 - 24, padT + H / 2);
       return;
     }
-    // 取值：左轴 = 温度(℃) 或 风扇转速÷100；右轴 = 制冷强度
-    function leftV(s, d) { return s.key === 'rpm' ? (d.rpm == null ? null : d.rpm / 100) : d[s.key]; }
+    // 取值：左轴 = 温度(℃) 或 风扇转速÷100；右轴 = 制冷强度；热端取滤波后的曲线值
+    function leftV(s, d) { return s.key === 'rpm' ? (d.rpm == null ? null : d.rpm / 100) : (s.key === 'hot' ? d.hotF : d[s.key]); }
     function rightV(s, d) { return d[s.key]; }
     var dark = !!(window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches);
     // 数据范围（未 padding，供整档轴；保证 min≤数据min、max≥数据max，绝不裁点）
@@ -748,7 +839,8 @@
     function drawHeadMarkers() {
       var LABEL_H = 11;                                // 标签近似高度（10px 字体）
       var MERGE_Y = gapSec('WEBUI_LABEL_MERGE_PX', 9); // 合并阈值（px，默认 9≈0.8×标签高）
-      function headLabel(s, v) { return s.unit === '°C' ? (v.toFixed(1) + '°C') : (s.key === 'rpm' ? (v + '百rpm') : (s.key === 'coldReal' ? '' + v : (v + '%'))); }
+      // 标签取实际物理值：温度 ℃ 一位小数、风扇转速换算回实际 rpm（纵轴单位仍是 ÷100 的百rpm）
+      function headLabel(s, v) { return s.unit === '°C' ? (v.toFixed(1) + '°C') : (s.key === 'rpm' ? (Math.round(v * 100) + 'rpm') : (s.key === 'coldReal' ? '' + v : (v + '%'))); }
       var entries = [];
       function collect(series, getV, axis) {
         if (!axis) return;
@@ -1061,6 +1153,7 @@
     initLogUI();
     initTopHeight();
     updateCollapse();
+    initParamLayout();   // 参数行排布（输入框可多行）
     if (errText) reportError(errText);
     else if (!Bridge.available) reportError('未检测到 WebUI 桥接 — 请在 KernelSU / KSU-Next / APatch 管理器内打开本模块 WebUI');
     else uiLog('已加载 · 桥接=' + (Bridge.kind || '?'));   // 合并进 UI 诊断日志（默认收起）
@@ -1084,6 +1177,8 @@
     window.__B6X_TEST__ = {
       parseConfig: parseConfig, buildValues: buildValues, rebuildConfig: rebuildConfig,
       parseDataLines: parseDataLines,
+      filterHotStep: filterHotStep, applyHotFilter: applyHotFilter,   // 热端曲线滤波
+      fitParamRow: fitParamRow, fitParamRows: fitParamRows,           // 参数行排布
       fitOneLine: fitOneLine, updateLiveRow: updateLiveRow, refitBars: refitBars,   // 单行适配逻辑测试钩子
       fitChartTools: fitChartTools,                           // 时间窗口+图例子窗口整体缩放
       coldMapStart: coldMapStart,                             // 制冷→风扇映射起始强度

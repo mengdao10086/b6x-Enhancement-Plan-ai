@@ -9,35 +9,34 @@
 ## 1. Git 子模块
 
 - **本目录是 git 子模块**。所有 `git add/commit/push/pull` 必须在本目录内执行。
-- 外层 `D:\下载\Claude Code\` 只追踪子模块指针，不要在外层 add/commit。
+- 外层工作区（本子模块的父目录）只追踪子模块指针，不要在外层 add/commit。
 - `origin` 使用 PAT 认证，push 需网络可达 GitHub。
 
 ## 2. 工作目录
 
-- 根目录：`D:\下载\Claude Code\飞智b6x增强计划`
+- 根目录：本目录
 - LSPosed 模块：`./lsp模块(apk修复+温控接口)/`（Android Studio 项目）
 - 智能温控 C：`./magisk模块(智能温控)/tempctrl.c`
 - **Bash 环境执行，分支 = main**
 
 ## 3. 分析 App 内部行为时
 
-MUST 先在 `参考资料/` 搜索关键词，再考虑加诊断钩子。这里已有完整 smali 反编译输出。
+先在 `参考资料/` 搜索关键词，再考虑加诊断钩子。这里已有完整 smali 反编译输出。
 
 ## 4. 修改代码前
 
-- 修改函数/类方法的**行为、签名或公共接口**前 → MUST 运行 `impact` 分析
-- MUST 向用户报告：直接调用者、受影响流程、风险级别
-- 重命名符号 MUST 用 `rename`（不得文本替换）
-- 改完后 MUST 运行 `detect_changes()` 检查影响范围
-- 风险 HIGH/CRITICAL → MUST 先告知用户再继续
-- 普通日志降级为 debug 时，必须用**对应功能分区的子开关**（如配置加载→`debug_config`、传感器→`debug_sensor`、PID→`debug_pid`），不得用通用 `write_log` 或乱选分区。注意 C 宏按文本顺序生效，调用点位于宏定义之前时需把 `debug_log`/`pid_log` 宏上移
-- **所有加到 `profile.conf` 的参数 → MUST 同步更新 `magisk模块框架/webroot/schema.js`**（键定义 + 分组 `subKeys` 归属 + 字段范围与 tempctrl.c clamp 一致），并同步 `逻辑说明.md` 参数表；改完 WebUI 需能正常编辑该参数
+- 改函数/类方法的**行为、签名或公共接口**前 → 先跑 `impact`，并向用户报告直接调用者、受影响流程、风险级别
+- 重命名符号用 `rename`，不得文本替换
+- 改完后跑 `detect_changes()` 检查影响范围
+- 风险 HIGH/CRITICAL → 先告知用户再继续
+- 普通日志降级为 debug 时，用**对应功能分区的子开关**（如配置加载→`debug_config`、传感器→`debug_sensor`、PID→`debug_pid`），不得用通用 `write_log` 或乱选分区。注意 C 宏按文本顺序生效，调用点位于宏定义之前时需把 `debug_log`/`pid_log` 宏上移
+- **所有加到 `profile.conf` 的参数 → 同步更新 `magisk模块框架/webroot/schema.js`**（键定义 + 分组 `subKeys` 归属 + 字段范围与 tempctrl.c clamp 一致），并同步 `逻辑说明.md` 参数表；改完 WebUI 需能正常编辑该参数
 
 ## 5. 编译须知
 
-- C 守护程序 MUST 使用 GitHub Actions（NDK r27c）编译，**不得建议 Termux 编译**
+- C 守护程序用 GitHub Actions（NDK r27c）编译，**不得建议 Termux 编译**
 - 编译命令：`aarch64-linux-android21-clang -static -O2 -ffunction-sections -fdata-sections -Wl,--gc-sections -Wl,--strip-all`
-- 每轮新对话和压缩上下文后的**首次 push** → MUST 跟踪 CI 检查是否报错
+- 每轮新对话和压缩上下文后的**首次 push** → 跟踪 CI 检查是否报错
 
 ## 6. 安全边界
 
@@ -88,7 +87,6 @@ MUST 先在 `参考资料/` 搜索关键词，再考虑加诊断钩子。这里�
 - 二级子文件夹按时间或版本号命名。
 - 同一项目下的命名风格保持一致。
 - 技术债记录文件 `TECH_DEBT.md` 放在项目根目录。
-- **magisk模块配置文件更新参数后必须同步修改webui**
 
 ### 文档内容规范
 - 同类信息只在**一个** md 中写全，其他 md 引用链接，不得复制内容

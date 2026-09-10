@@ -45,7 +45,7 @@
 | `mode` | int | 0=智能温控, 1=固定功率 |
 | `temperature` | int | 目标温度 (°C)，智能温控模式 |
 | `windOC` | int | 风扇固定转速 (RPM)，固定功率模式 |
-| `coldOC` | int | 制冷片强度（B6X: 0-194, B7X: 0-255），固定功率模式。194=SDK/硬件上限，190=温控默认下发上限（PID_COLD/档位表可调） |
+| `coldOC` | int | 制冷片强度（B6X: 0-194, B7X: 0-255），固定功率模式。194=SDK/硬件上限，190=温控默认下发上限（`PID_COLD_RANGE` 可调） |
 | `windLevel` | int | 风扇转速上限 (RPM)，智能温控模式 |
 | `modeCustom` | int | 保留（传 0） |
 | `extra` | int | 保留（传 0） |

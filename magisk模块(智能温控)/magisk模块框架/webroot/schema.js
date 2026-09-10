@@ -7,7 +7,8 @@
  * label：中文名词短语，简短；单位后缀用半角括号，如 (0.1°C) (%) (÷1000)。
  * desc：只陈述事实——用途、单位换算、默认值、生效条件、取值范围；
  *       可含示例（如「默认 1 20 10 = 远离 0.2、回归 0.1」）；开关类写「=0 关闭 / =1 开启」。
- * multi：字段标签自带单位；desc 写共享公式/默认值/生效条件，不逐值复述字段名。
+ * multi：字段标签自带单位；desc 写共享公式/默认值/生效条件，不逐值复述字段名
+ *       （取值顺序由 app.js 按 fields 顺序渲染在输入框下方，不写进 desc）。
  * 不加「（合并 xx）」来源注记；被合并/改名的旧键直接删除，不保留。
  * 已在别处删掉说明的参数，本文件保持 desc:""，不补写。
  * [4] WebUI 组的键无 tempctrl.c 依据，范围与语义以 app.js 实际使用为准。
@@ -38,10 +39,11 @@ window.B6X_SCHEMA = {
       keys: [],
       subKeys: ["RATE_LIMIT_FAN_UP", "RATE_LIMIT_FAN_DOWN",
                 "RATE_LIMIT_COLD", "RECONNECT_KEEP_CYCLES", "BATT_BASELINE", "CPU_FILTER_ALPHA",
-                "COLD_MAP", "HOT_MAP", "RPM_SMOOTH_ALPHA", "FAN_RPM",
+                "COLD_RPM_MAP", "HOT_RPM_MAP", "MAP_INPUT_SMOOTH_ALPHA", "FAN_RPM_RANGE",
+                "FAN_RPM_ROUND_UNIT",
                 "HOT_DERATE", "PID_KDP", "PID_KI_RATE", "PID_SPEED",
                 "PID_TARGET", "PID_CH_THRESHOLD", "PID_CPU_COMP", "PID_TARGET_DIR",
-                "PID_SPD_RECALL", "PID_COLD"]
+                "PID_SPEED_RECALL", "PID_COLD_RANGE"]
     },
     // [2] sysfs 路径与缩放：独立大类（SYSFS_ENABLED 开关控制加载）
     {
@@ -92,29 +94,31 @@ window.B6X_SCHEMA = {
       desc: "" },
     CPU_FILTER_ALPHA: { type: "int", min: 1, max: 100, label: "CPU 温度 EMA 平滑系数(%)",
       desc: "首次直取，此后按系数平滑；值越大越跟随原始值" },
-    COLD_MAP: { type: "multi", fields: [{ label: "起始强度", min: 0, max: 194 }, { label: "指数", min: 50, max: 500 }],
+    COLD_RPM_MAP: { type: "multi", fields: [{ label: "起始强度", min: 0, max: 194 }, { label: "指数", min: 50, max: 500 }],
       label: "制冷映射",
       desc: "转速 ∝ n^指数（n = 制冷超出起始强度的比例，指数 = 值/100，150 → 1.50）；指数 >1 时低制冷段风扇更慢；制冷低于起始强度时线性外推下限" },
-    HOT_MAP: { type: "multi", fields: [{ label: "最低温度", min: 200, max: 500 }, { label: "最高温度", min: 200, max: 500 }],
+    HOT_RPM_MAP: { type: "multi", fields: [{ label: "最低温度", min: 200, max: 500 }, { label: "最高温度", min: 200, max: 500 }],
       label: "热端线性映射范围",
       desc: "热端在此区间线性映射到风扇转速；低于最低或高于最高温度时线性外推（最终转速仍钳制在风扇范围内）" },
-    RPM_SMOOTH_ALPHA: { type: "int", min: 1, max: 99, label: "冷端/热端 → 风扇转速 平滑系数(%)",
-      desc: "冷端指数映射与热端线性映射共用；值越大越跟随原始值，越小越平滑" },
-    FAN_RPM: { type: "multi", fields: [{ label: "最低转速", min: 1000, max: 6000 }, { label: "最高转速(B6X)", min: 1000, max: 6000 }, { label: "最高转速(B7X)", min: 2000, max: 8000 }],
+    MAP_INPUT_SMOOTH_ALPHA: { type: "int", min: 1, max: 99, label: "冷端/热端映射输入 平滑系数(%)",
+      desc: "冷端指数映射与热端线性映射共用，输入先平滑、映射后不再滤波；值越大越跟随原始值，越小越平滑" },
+    FAN_RPM_RANGE: { type: "multi", fields: [{ label: "最低转速", min: 1000, max: 6000 }, { label: "最高转速(B6X)", min: 1000, max: 6000 }, { label: "最高转速(B7X)", min: 2000, max: 8000 }],
       label: "风扇转速范围", desc: "前两值须同给；B7X 最高转速目前与 B6X 相同，可单独调整" },
+    FAN_RPM_ROUND_UNIT: { type: "int", min: 1, max: 500, label: "风扇转速取整单位(RPM)",
+      desc: "下发风扇转速前就近取整到该单位的整数倍（默认 10：2044→2040、2045→2050）" },
     HOT_DERATE: { type: "multi", fields: [{ label: "阈值(0.1°C)", min: 350, max: 700 }, { label: "倍率=恢复值", min: 1, max: 20 }, { label: "冷却周期数(×5s)", min: 0, max: 20 }],
-      label: "热端过温制冷上限削减",
-      desc: "热端 > 阈值 → 单次削减 (热端 − 阈值) × 倍率 / 10；热端 ≤ 阈值且有削减 → 单次恢复「倍率」值；削减/恢复各自独立冷却 N 个周期" },
+      label: "热端过温制冷削减",
+      desc: "热端 > 阈值 → 单次削减 (热端 − 阈值) × 倍率 / 10：首次削减把上限压到「当前实际制冷值 − 削减量」，之后每次触发在当前上限上继续累减（不回看历史触发值）；热端 ≤ 阈值且有削减 → 上限每次 +「倍率」逐级上爬，封顶配置上限；削减/恢复各自独立冷却 N 个周期" },
     PID_KDP: { type: "int", min: 1, max: 1000, label: "KDP 融合系数(÷1000)",
       desc: "kdp = 系数/1000 ×（误差 + 速度项×0.33 + CPU 补偿）；速度项已按 PID_SPEED 缩放；无记忆，温度未变时沿用上周期值" },
     PID_KI_RATE: { type: "multi", fields: [{ label: "升速率", min: 1, max: 1000 }, { label: "降速率", min: 1, max: 1000 }],
       label: "KI 积分升/降速率(÷1000)",
-      desc: "被积项 = ch − 动态目标；被积项 ≥0 用升速率、<0 用降速率，每周期 积分累积值 += 速率/1000 × 被积项（不乘 dt）；默认两者相同" },
+      desc: "被积项 = ch − 动态目标；被积项 ≥0 用升速率、<0 用降速率，每周期 积分累积值 += 速率/1000 × 被积项（不乘 dt）；默认 20 30" },
     PID_SPEED: { type: "int", min: 0, max: 1000, label: "速度倍率(÷10)",
       desc: "100 = 速度×10；温度变化速度对控制量的权重，同时进入积分与 KDP；0=关闭" },
     PID_TARGET: { type: "multi", fields: [{ label: "目标系数", min: 1, max: 1000 }, { label: "目标平滑(%)", min: 1, max: 100 }, { label: "目标上限(0.1°C)", min: 1, max: 100 }],
       label: "动态目标",
-      desc: "动态目标 = clamp(误差 × 系数/1000, ±上限)；平滑%越大越快速跟随；上限默认 10=1.0°C；第 2 值仅在 PID_TARGET_DIR 开关=0 时生效" },
+      desc: "动态目标 = clamp(误差 × 系数/1000, ±上限)；平滑%越大越快速跟随；上限默认 15=1.5°C；第 2 值仅在 PID_TARGET_DIR 开关=0 时生效" },
     PID_CH_THRESHOLD: { type: "int", min: 1, max: 100, label: "稳态冻结阈值(0.1°C)",
       desc: "温度未变且上次 |ch| ≤ 阈值/10 时整轮冻结（积分/KDP/动态目标均不更新）；默认 2=0.2°C" },
     PID_CPU_COMP: { type: "multi", fields: [{ label: "平滑系数(%)", min: 1, max: 100 }, { label: "除数", min: 5, max: 200 }, { label: "偏移量(0.1°C)", min: 0, max: 500 }],
@@ -123,10 +127,10 @@ window.B6X_SCHEMA = {
     PID_TARGET_DIR: { type: "multi", fields: [{ label: "开关", min: 0, max: 1 }, { label: "远离基线 α(%)", min: 1, max: 100 }, { label: "回归基线 α(%)", min: 1, max: 100 }],
       label: "PID 目标方向性滤波",
       desc: "目标量级增大（远离基线）用「远离 α」求快，否则用「回归 α」求稳；默认 1 20 10 = 远离 0.2、回归 0.1；开关=0 时退回 PID_TARGET 第 2 值的单一 α" },
-    PID_SPD_RECALL: { type: "multi", fields: [{ label: "开关", min: 0, max: 1 }, { label: "回溯速度权重(÷1000)", min: 100, max: 1000 }],
+    PID_SPEED_RECALL: { type: "multi", fields: [{ label: "开关", min: 0, max: 1 }, { label: "回溯速度权重(÷1000)", min: 100, max: 1000 }],
       label: "PID 无变化回溯",
       desc: "温度未变时用最近一次变化前的温度作锚点算速度：v = (当前温度 − 锚点温度) ÷ 累计周期数 ÷ 10 × 权重/1000，不再额外限幅；默认 1 1000 = 开启、注入全量速度" },
-    PID_COLD: { type: "multi", fields: [{ label: "下限", min: 0, max: 194 }, { label: "上限(B6X)", min: 0, max: 194 }, { label: "上限(B7X)", min: 1, max: 255 }],
+    PID_COLD_RANGE: { type: "multi", fields: [{ label: "下限", min: 0, max: 194 }, { label: "上限(B6X)", min: 0, max: 194 }, { label: "上限(B7X)", min: 1, max: 255 }],
       label: "制冷强度范围", desc: "前两值须同给；B7X 上限为 1~255（B6X 为 0~194）" },
 
     // ---- [2] sysfs 路径与缩放 ----

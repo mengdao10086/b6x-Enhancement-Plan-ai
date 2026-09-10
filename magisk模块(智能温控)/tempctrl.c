@@ -67,10 +67,10 @@
 #define B7X_COLD_MAX       255
 #define B7X_FAN_RPM_MAX    8000
 
-// B7X 上限（FAN_RPM / PID_COLD 第三值，可配置，暂时与 B6X 一致）
+// B7X 上限（FAN_RPM_RANGE / PID_COLD_RANGE 第三值，可配置，暂时与 B6X 一致）
 // B7X_COLD_MAX / B7X_FAN_RPM_MAX 宏保留为 clamp 安全上界
-static int b7_pid_cold_max = 190;   // FAN_RPM/PID_COLD 第三值（B7X），默认同 B6X
-static int b7_fan_rpm_max  = 6000;  // FAN_RPM 第三值（B7X），默认同 B6X
+static int b7_pid_cold_max = 190;   // PID_COLD_RANGE 第三值（B7X），默认同 B6X
+static int b7_fan_rpm_max  = 6000;  // FAN_RPM_RANGE 第三值（B7X），默认同 B6X
 
 // ======================== 系统路径与缩放 ========================
 // --- sysfs 路径配置（可由 profile.conf 覆盖）---
@@ -97,18 +97,20 @@ static int BATT_BASELINE = 350;     // 基准温度 35.0°C
 // --- 控制模式：本实现仅保留 PID（Gear 已删除）---
 
 // --- 冷端→风扇映射 ---
-static int cold_map_start = 40;     // COLD_MAP 第一值=映射起始强度，低于此值时线性外推下限
-static int cold_map_exp = 150;      // COLD_MAP 第二值=n^exp（÷100，150=1.50），>1 低冷慢转
-static int rpm_smooth_alpha = 50;   // RPM_SMOOTH_ALPHA：冷/热端→风扇转速映射的 EMA 平滑系数（百分比，1~99）
+static int cold_map_start = 40;     // COLD_RPM_MAP 第一值=映射起始强度，低于此值时线性外推下限
+static int cold_map_exp = 150;      // COLD_RPM_MAP 第二值=n^exp（÷100，150=1.50），>1 低冷慢转
+// MAP_INPUT_SMOOTH_ALPHA：冷/热端映射输入（制冷强度/热端温度）共用的 EMA 平滑系数（%，1~99）
+static int rpm_smooth_alpha = 33;
 
 // --- 热端映射范围 ---
-static int hot_map_min = 350;       // HOT_MAP_MIN（0.1°C）
-static int hot_map_max = 450;       // HOT_MAP_MAX（0.1°C）
+static int hot_map_min = 350;       // HOT_RPM_MAP 第一值（0.1°C）
+static int hot_map_max = 450;       // HOT_RPM_MAP 第二值（0.1°C）
 
 // --- 风扇转速范围 ---
-static int fan_rpm_min = 2000;      // FAN_RPM_MIN
-static int fan_rpm_max = 6000;      // FAN_RPM_MAX
+static int fan_rpm_min = 2000;      // FAN_RPM_RANGE 第一值
+static int fan_rpm_max = 6000;      // FAN_RPM_RANGE 第二值
 static int fan_rpm_change_threshold = 200; // 变化阈值（0=不限制；仅风扇降低时防抖，距最低转速<阈值×1.5 时失效）
+static int fan_rpm_round_unit = 10; // FAN_RPM_ROUND_UNIT：下发转速前按该单位就近取整（RPM，1~500）
 
 // ======================== 速率限制 ========================
 // --- 固定值 ---
@@ -169,16 +171,16 @@ static time_t config_mtime = 0;
 static int pid_kdp_coef = 300;
 // PID_KI_RATE 第一值：积分升速率（÷1000，被积项 ch−target_f > 0 时用；acc 不乘 dt）
 static int pid_ki_up_coef = 20;
-// PID_KI_RATE 第二值：积分降速率（÷1000，被积项 < 0 时用；默认与升速率相同，可独立调）
-static int pid_ki_down_coef = 20;
+// PID_KI_RATE 第二值：积分降速率（÷1000，被积项 < 0 时用；默认 30，可独立调）
+static int pid_ki_down_coef = 30;
 // PID_SPEED：速度项倍率系数（÷10，100=速度×10，0=关闭；ch = error + v×speed_coef/10 + cpu_comp）
 static int pid_speed_coef = 100;
 // PID_TARGET 第一值：动态目标系数（÷1000，raw_target = clamp(error×target_coef, ±上限)）
 static int pid_target_coef = 20;
 // PID_TARGET 第二值：目标 EMA 平滑系数（%，滤波系数）
 static int pid_target_alpha = 10;
-// PID_TARGET 第三值：动态目标上限（0.1°C，默认 10=1.0°C）
-static int pid_target_max = 10;
+// PID_TARGET 第三值：动态目标上限（0.1°C，默认 15=1.5°C）
+static int pid_target_max = 15;
 // PID_TARGET_DIR：动态目标方向性 EMA（远离基线加快->away alpha，回归基线减慢->toward alpha）
 static int pid_target_dir_on = 1;                 // 第一值：方向性滤波开关（0=退回 PID_TARGET 第2值单 alpha）
 static int pid_target_away_alpha = 20;            // 第二值：远离基线 alpha（%，20=0.2）
@@ -191,9 +193,9 @@ static int pid_cpu_comp_filter_alpha = 25;      // PID_CPU_COMP 第一值：补�
 static int pid_cpu_comp_divisor = 30;           // PID_CPU_COMP 第二值：除数
 static int pid_cpu_comp_offset = 100;           // PID_CPU_COMP 第三值：偏移量（0.1°C，100=10.0°C）
 
-// PID_COLD：输出范围
-static int pid_cold_min = 1;              // PID_COLD 第一值：制冷强度下限
-static int pid_cold_max = 190;            // PID_COLD 第二值：制冷强度上限（B6X）
+// PID_COLD_RANGE：输出范围
+static int pid_cold_min = 1;              // PID_COLD_RANGE 第一值：制冷强度下限
+static int pid_cold_max = 190;            // PID_COLD_RANGE 第二值：制冷强度上限（B6X）
 
 // --- PID 运行时状态（单累积器）---
 static float pid_ki = 0.0f;               // 积分累积值（acc；float：限幅赋小数需保留）
@@ -202,12 +204,12 @@ static float pid_target_f = 0.0f;         // EMA 动态目标
 static float pid_last_error = 0.0f;       // 上周期纯电池误差（°C，v 计算用）
 static float pid_last_ch = 0.0f;          // 上周期 ch（|ch|≤阈值 → 整轮冻结判据）
 static time_t pid_last_change_time = 0;   // 上次重算时间戳（dt 锚点）
-// --- 无变化回溯（PID_SPD_RECALL）：锚点温度 + 累计周期数 → 重算速度 ---
+// --- 无变化回溯（PID_SPEED_RECALL）：锚点温度 + 累计周期数 → 重算速度 ---
 static int recall_anchor = 0;             // 最近一次温度变化前的温度（0.1°C）
 static int recall_prev_batt = 0;          // 上个控制周期的电池温度（0.1°C）
 static int recall_cycles = 0;             // 距该次变化的控制周期数（>0 才有效）
-static int pid_spd_recall_on = 1;         // PID_SPD_RECALL 第一值：开关
-static int pid_spd_recall_weight = 1000;  // PID_SPD_RECALL 第二值：回溯速度权重（÷1000，1000=全量）
+static int pid_spd_recall_on = 1;         // PID_SPEED_RECALL 第一值：开关
+static int pid_spd_recall_weight = 1000;  // PID_SPEED_RECALL 第二值：回溯速度权重（÷1000，1000=全量）
 
 // --- CPU 补偿运行状态 ---
 static int pid_cpu_comp_ready = 0;          // 补偿平滑是否已初始化（首次上次值用 0，从 0 爬升）
@@ -320,14 +322,15 @@ static DeviceType active_device = DEVICE_NONE;      // 当前控制的设备
 static int active_fan_max  = 6000;          // 当前设备风扇上限
 static int active_pid_cold_max = 190;       // 当前设备 PID 制冷上限
 
-// ======================== 热端过温制冷上限削减 ========================
-// 热端温度 > 阈值 → 每次削减制冷上限 (热端-阈值)×倍率，削减后 5 周期内不再削减；
-// 热端温度 ≤ 阈值 → 每次恢复 5（复用倍率值），恢复后 5 周期内不再恢复；
-// 削减与恢复的冷却独立（不共用）。削减基准上限：active_pid_cold_max（PID_COLD 第二/第三值）
+// ======================== 热端过温制冷削减 ========================
+// 热端温度 > 阈值 → 削低制冷上限 (热端-阈值)×倍率：首次削减把生效上限压到「当前实际制冷值 − 削减量」，
+//   之后每次触发在当前生效上限上继续累减（不回看历史触发值），削减后 5 周期内不再削减；
+// 热端温度 ≤ 阈值 → 生效上限每次 +5（复用倍率值）逐级上爬，封顶配置上限，恢复后 5 周期内不再恢复；
+// 削减与恢复的冷却独立（不共用）。hot_derate = 相对配置上限的削减量（0=无削减）
 static int HOT_DERATE_THRESHOLD = 450;   // 热端阈值（0.1°C，450=45.0°C）
 static int HOT_DERATE_MULT = 5;          // 削减倍率 = 单次恢复值（削减量=(热端-阈值)×mult/10）
 static int HOT_DERATE_COOLDOWN = 5;      // 削减/恢复后冷却周期数（5 个 5s 周期）
-static int hot_derate = 0;               // 当前制冷上限削减量
+static int hot_derate = 0;               // 当前削减量（相对配置上限；累减，恢复归零=封顶）
 static int hot_derate_cooldown = 0;      // 削减冷却剩余周期（独立）
 static int hot_recover_cooldown = 0;     // 恢复冷却剩余周期（独立）
 
@@ -472,11 +475,12 @@ static const struct IntCfgKey INT_CFG_KEYS[] = {
     { "BATT_BASELINE",             &BATT_BASELINE,               300, 500 },
     { "CPU_FILTER_ALPHA",          &CPU_FILTER_ALPHA,            1, 100 },
     { "RECONNECT_KEEP_CYCLES",     &reconnect_keep_cycles,       0, 30 },
-    // PID 单值键走表驱动；多值键（PID_KI_RATE / PID_TARGET / PID_TARGET_DIR / PID_COLD / PID_CPU_COMP / PID_SPD_RECALL）在 parse_pid_cfg 分段解析
+    // PID 单值键走表驱动；多值键（PID_KI_RATE / PID_TARGET / PID_TARGET_DIR / PID_COLD_RANGE / PID_CPU_COMP / PID_SPEED_RECALL）在 parse_pid_cfg 分段解析
     { "PID_KDP",                   &pid_kdp_coef,                1, 1000 },
     { "PID_SPEED",                 &pid_speed_coef,              0, 1000 },
     { "PID_CH_THRESHOLD",          &pid_ch_threshold,            1, 100 },
-    { "RPM_SMOOTH_ALPHA",          &rpm_smooth_alpha,            1, 99 },
+    { "MAP_INPUT_SMOOTH_ALPHA",    &rpm_smooth_alpha,            1, 99 },
+    { "FAN_RPM_ROUND_UNIT",        &fan_rpm_round_unit,          1, 500 },
     // sysfs 层（SYSFS_ENABLED=1）
     { "BATT_TEMP_DIVISOR",         &BATT_TEMP_DIVISOR,           1, 10000 },
     { "CPU_TEMP_DIVISOR",          &CPU_TEMP_DIVISOR,            1, 10000 },
@@ -536,7 +540,7 @@ static void parse_sysfs_cfg(const char *key, int val, const char *val_str) {
 /** PID 专属多值配置（PERF 层；单值键已并入 INT_CFG_KEYS 表驱动） */
 static int parse_pid_cfg(const char *key, int val, const char *val_str) {
     // PID_KI_RATE = KI升速率(÷1000) KI降速率(÷1000)
-    // 被积项 ch−target_f > 0 用升速率、< 0 用降速率；默认两者相同
+    // 被积项 ch−target_f > 0 用升速率、< 0 用降速率；默认 20 30
     if (strcmp(key, "PID_KI_RATE") == 0) {
         int a = pid_ki_up_coef, b = pid_ki_down_coef;
         int n = sscanf(val_str, "%d %d", &a, &b);
@@ -563,7 +567,7 @@ static int parse_pid_cfg(const char *key, int val, const char *val_str) {
         if (n >= 3) pid_target_toward_alpha = clamp(t, 1, 100);
         return 1;
     }
-    if (strcmp(key, "PID_COLD") == 0) {
+    if (strcmp(key, "PID_COLD_RANGE") == 0) {
         int a = pid_cold_min, b = pid_cold_max, c = b7_pid_cold_max;
         int n = sscanf(val_str, "%d %d %d", &a, &b, &c);
         if (n >= 2) { pid_cold_min=clamp(a,0,194); pid_cold_max=clamp(b,0,194); }
@@ -578,9 +582,9 @@ static int parse_pid_cfg(const char *key, int val, const char *val_str) {
         if (n >= 3) pid_cpu_comp_offset = clamp(c, 0, 500);
         return 1;
     }
-    // PID_SPD_RECALL = 开关 回溯速度权重(÷1000)
+    // PID_SPEED_RECALL = 开关 回溯速度权重(÷1000)
     // 默认 "1 1000" = 开启、注入全量速度；无上限（锚点+累计周期数）
-    if (strcmp(key, "PID_SPD_RECALL") == 0) {
+    if (strcmp(key, "PID_SPEED_RECALL") == 0) {
         int on = pid_spd_recall_on, w = pid_spd_recall_weight;
         int n = sscanf(val_str, "%d %d", &on, &w);
         if (n >= 1) pid_spd_recall_on = (on != 0);
@@ -594,12 +598,12 @@ static int parse_pid_cfg(const char *key, int val, const char *val_str) {
 
 /** 通用多值配置（PERF 层） */
 static int parse_common_cfg(const char *key, int val, const char *val_str) {
-    if (strcmp(key, "HOT_MAP") == 0) {
+    if (strcmp(key, "HOT_RPM_MAP") == 0) {
         int a = hot_map_min, b = hot_map_max;
         if (sscanf(val_str, "%d %d", &a, &b) >= 2) { hot_map_min = clamp(a,200,500); hot_map_max = clamp(b,200,500); }
         return 1;
     }
-    if (strcmp(key, "FAN_RPM") == 0) {
+    if (strcmp(key, "FAN_RPM_RANGE") == 0) {
         int a = fan_rpm_min, b = fan_rpm_max, c = b7_fan_rpm_max;
         int n = sscanf(val_str, "%d %d %d", &a, &b, &c);
         if (n >= 2) { fan_rpm_min = clamp(a,1000,6000); fan_rpm_max = clamp(b,1000,6000); }
@@ -630,8 +634,8 @@ static int parse_common_cfg(const char *key, int val, const char *val_str) {
         if (n >= 3) COLD_DEADZONE        = clamp(dz, 1, 50);
         return 1;
     }
-    // COLD_MAP = 映射起始强度 指数（双值）
-    if (strcmp(key, "COLD_MAP") == 0) {
+    // COLD_RPM_MAP = 映射起始强度 指数（双值）
+    if (strcmp(key, "COLD_RPM_MAP") == 0) {
         int s = cold_map_start, e = cold_map_exp;
         int n = sscanf(val_str, "%d %d", &s, &e);
         if (n >= 1) cold_map_start = clamp(s, 0, 194);
@@ -1024,8 +1028,8 @@ static void update_active_limits(void) {
     if (model != 6 && model != 7)
         model = (active_device == DEVICE_B7X) ? 7 : 6;  // 型号未知按包名兜底
     if (model == 7) {
-        active_fan_max  = b7_fan_rpm_max;    // FAN_RPM 第三值（B7X），默认同 B6X
-        active_pid_cold_max = b7_pid_cold_max; // PID_COLD 第三值（B7X），默认同 B6X
+        active_fan_max  = b7_fan_rpm_max;    // FAN_RPM_RANGE 第三值（B7X），默认同 B6X
+        active_pid_cold_max = b7_pid_cold_max; // PID_COLD_RANGE 第三值（B7X），默认同 B6X
     } else {
         active_fan_max  = fan_rpm_max;        // 使用 profile.conf 中的配置值
         active_pid_cold_max = pid_cold_max;   // 使用 profile.conf 中的配置值
@@ -1248,9 +1252,9 @@ static int read_cpu_temp_max(void) {
     return max_temp;
 }
 
-// ======================== 热端过温制冷上限削减 ========================
+// ======================== 热端过温制冷削减 ========================
 
-/** 当前生效的制冷强度上限 = 基准上限 - 热端过温削减，下限不低于冷端最小强度 */
+/** 当前生效的制冷强度上限 = 基准上限（配置上限）- 热端过温削减，下限不低于冷端最小强度 */
 static inline int eff_cold_max(int base_max, int cold_min) {
     int m = base_max - hot_derate;
     if (m < cold_min) m = cold_min;
@@ -1263,8 +1267,9 @@ static int active_cold_eff_max = 190;  // 有效制冷上限（含热端过温�
 
 /**
  * 每 5s 周期调用：根据散热器热端温度更新制冷上限削减量。
- * 热端 > 阈值 → 削减 (热端-阈值)×倍率，削减后 HOT_DERATE_COOLDOWN 周期内不再削减；
- * 热端 ≤ 阈值 → 恢复 5（=倍率值），恢复后 HOT_DERATE_COOLDOWN 周期内不再恢复；
+ * 热端 > 阈值 → 单次削减 (热端-阈值)×倍率：首次削减把生效上限压到「当前实际制冷值 − 削减量」，
+ *   之后每次触发在当前生效上限上继续累减（不回看历史触发值），削减后 HOT_DERATE_COOLDOWN 周期内不再削减；
+ * 热端 ≤ 阈值 → 生效上限每次 +5（=倍率值）逐级上爬，归零即封顶配置上限，恢复后冷却周期内不再恢复；
  * 削减/恢复冷却独立。热端数据无效（<0）时保持当前削减量。原始直算不加滤波。
  */
 static void update_hot_derate(void) {
@@ -1276,25 +1281,35 @@ static void update_hot_derate(void) {
         if (hot_derate_cooldown == 0) {
             int reduction = (cooler_hot_temp - HOT_DERATE_THRESHOLD) * HOT_DERATE_MULT / 10;
             if (reduction > 0) {   // 刚过阈值整数截断为 0 时跳过，不触发冷却
-                hot_derate += reduction;
+                int before = eff_cold_max(active_pid_cold_max, pid_cold_min);
+                if (hot_derate == 0) {
+                    // 首次削减：就地把上限压到「当前实际制冷值 − 削减量」（未就绪时按配置上限算）
+                    int cold_now = (actual_cold >= COLD_MIN) ? actual_cold : active_pid_cold_max;
+                    hot_derate = active_pid_cold_max - cold_now + reduction;
+                } else {
+                    hot_derate += reduction;   // 再次触发：在当前生效上限上累减
+                }
                 hot_derate_cooldown = HOT_DERATE_COOLDOWN;
-                write_log("热端过温 %d.%d°C 削减制冷上限 %d（总削减 %d）",
-                          cooler_hot_temp / 10, cooler_hot_temp % 10, reduction, hot_derate);
+                write_log("热端过温 %d.%d°C 削减制冷上限 %d→%d（削减量 %d）",
+                          cooler_hot_temp / 10, cooler_hot_temp % 10,
+                          before, eff_cold_max(active_pid_cold_max, pid_cold_min), reduction);
             }
         }
     } else {
         if (hot_derate > 0 && hot_recover_cooldown == 0) {
+            int before = eff_cold_max(active_pid_cold_max, pid_cold_min);
             hot_derate -= HOT_DERATE_MULT;
-            if (hot_derate < 0) hot_derate = 0;
+            if (hot_derate < 0) hot_derate = 0;   // 归零=封顶配置上限
             hot_recover_cooldown = HOT_DERATE_COOLDOWN;
-            write_log("热端回落 %d.%d°C 恢复制冷上限 %d（剩余削减 %d）",
-                      cooler_hot_temp / 10, cooler_hot_temp % 10, HOT_DERATE_MULT, hot_derate);
+            write_log("热端回落 %d.%d°C 恢复制冷上限 %d→%d（恢复量 %d）",
+                      cooler_hot_temp / 10, cooler_hot_temp % 10,
+                      before, eff_cold_max(active_pid_cold_max, pid_cold_min), HOT_DERATE_MULT);
         }
     }
 }
 
 /**
- * 计算 PID 模式有效制冷范围（上限 = PID_COLD 上限，含热端过温削减）。
+ * 计算 PID 模式有效制冷范围（默认上限 = PID_COLD_RANGE 上限，含热端过温削减）。
  * 每 5s 周期在 update_hot_derate 之后调用，供下发/去重/映射统一使用。
  */
 static void update_active_cold_range(void) {
@@ -1406,7 +1421,7 @@ static void rate_limit_cold(int desired_cold) {
 
 /**
  * 风扇转速限速（升降独立速率，含降速防抖）。
- * 返回限速后的实际风扇转速，向上取整到 50 的倍数并钳制到设备范围。
+ * 返回限速后的实际风扇转速，就近取整到 FAN_RPM_ROUND_UNIT 的倍数并钳制到设备范围。
  *
  * 防抖仅在下降低于阈值内时生效（上升自由爬升）
  * 距最低转速 < 阈值×1.5 时防抖失效（接近最低转速无需防突降噪音）。
@@ -1424,8 +1439,9 @@ static int rate_limit_fan(int desired_rpm) {
     // 否则风扇目标偏低时 actual_rpm 跌破 fan_rpm_min，rate_limited_execute 的就绪守卫会误判"未就绪"而永久跳过下发（死锁）。
     actual_rpm = clamp(actual_rpm, fan_rpm_min, active_fan_max);
 
-    // ---- 向上取整到 50 的倍数 ----
-    int send_rpm = ((actual_rpm + 49) / 50) * 50;
+    // ---- 就近取整到 FAN_RPM_ROUND_UNIT 的倍数（默认 10：2044→2040、2045→2050）----
+    int round_unit = (fan_rpm_round_unit > 0) ? fan_rpm_round_unit : 1;
+    int send_rpm = ((actual_rpm + round_unit / 2) / round_unit) * round_unit;
     send_rpm = clamp(send_rpm, fan_rpm_min, active_fan_max);
     debug_log(debug_exec, "rpm 限速 desired=%d → %d（防抖保持=%d）", desired_rpm, send_rpm,
               (fan_rpm_change_threshold > 0 && !near_min_rpm &&
@@ -1967,10 +1983,10 @@ static float pid_compute(int batt_10, float dt, float cpu_comp, int batt_window_
 }
 
 /**
- * 热端温度线性映射 + EMA 平滑 + 双向滞回：无上下限，低于 HOT_MAP_MIN 或高于 HOT_MAP_MAX 时线性外推
+ * 热端温度线性映射 + EMA 平滑 + 双向滞回：无上下限，低于 HOT_RPM_MAP 最低温度或高于最高温度时线性外推
  * 最终钳制在下发阶段（apply_gear_direct 内部）
  *
- * 平滑：输入先经 RPM_SMOOTH_ALPHA EMA 平滑（与冷端共用系数）
+ * 平滑：输入先经 MAP_INPUT_SMOOTH_ALPHA EMA 平滑（与冷端共用系数）
  * 滞回（基于平滑后的值）：
  *   降温（hot_s < prev_hot）→ 有效温度 = 实际 + 1°C，钳位 ≤ 上次 RPM
  *   升温（hot_s > prev_hot）→ 正常映射，但 RPM 不低于上次值
@@ -2026,28 +2042,32 @@ static int rpm_from_hot_end(int hot_10) {
 /**
  * 冷强度指数映射：n^exp，无上下限
  * cold < cold_map_start 时线性外推下限（powf 负数底数→NaN）
+ * 输入（制冷强度）先经 MAP_INPUT_SMOOTH_ALPHA EMA 平滑（与热端映射共用系数，首次直取）
  * 最终钳制在下发阶段（apply_gear_direct 内部）
  */
 static int rpm_from_cold_exp(int cold) {
-    static int cold_rpm_smoothed = -1;  // RPM_SMOOTH_ALPHA EMA 平滑
+    static int cold_in_smoothed = -1;   // 输入侧 EMA 平滑后的制冷强度
     int range = active_pid_cold_max - cold_map_start;
     if (range <= 0) return 0;
-    float n = (float)(cold - cold_map_start) / range;
-    int raw_rpm;
+
+    // 输入侧 EMA 平滑：平滑制冷强度本身，映射后再无输出滤波
+    if (cold_in_smoothed < 0) {
+        cold_in_smoothed = cold;
+    } else {
+        cold_in_smoothed = EMA_DIR(cold, cold_in_smoothed, rpm_smooth_alpha);
+    }
+    int cold_s = cold_in_smoothed;
+
+    float n = (float)(cold_s - cold_map_start) / range;
+    int rpm;
     if (n < 0.0f)
-        raw_rpm = fan_rpm_min + (int)(n * (active_fan_max - fan_rpm_min));
+        rpm = fan_rpm_min + (int)(n * (active_fan_max - fan_rpm_min));
     else {
         float n_exp = powf(n, cold_map_exp / 100.0f);
-        raw_rpm = fan_rpm_min + (int)(n_exp * (active_fan_max - fan_rpm_min));
+        rpm = fan_rpm_min + (int)(n_exp * (active_fan_max - fan_rpm_min));
     }
-    // EMA 平滑（系数可配置 RPM_SMOOTH_ALPHA）
-    if (cold_rpm_smoothed < 0) {
-        cold_rpm_smoothed = raw_rpm;
-    } else {
-        cold_rpm_smoothed = EMA_DIR(raw_rpm, cold_rpm_smoothed, rpm_smooth_alpha);
-    }
-    debug_log(debug_exec, "rpm 冷端 exp cold=%d → %d", cold, cold_rpm_smoothed);
-    return cold_rpm_smoothed;
+    debug_log(debug_exec, "rpm 冷端 exp cold=%d(平滑%d) → %d", cold, cold_s, rpm);
+    return rpm;
 }
 
 /**
@@ -2095,7 +2115,7 @@ static int apply_gear_direct(int mode, int target,
 
     // 过热钳制冷动作日志（仅在实际下发时输出，与去重判定一致）
     if (cold < cold_pre_clamp)
-        write_log("过热钳制冷 %d→%d（上限削减 %d）", cold_pre_clamp, cold, hot_derate);
+        write_log("过热钳制冷 %d→%d（削减量 %d）", cold_pre_clamp, cold, hot_derate);
 
     // 偏差 = (原始电池温度 + 补偿) - 目标温度
     int batt_10 = (cached_batt_raw >= 0) ? cached_batt_raw : BATT_BASELINE;
@@ -2383,7 +2403,7 @@ static void main_loop(void) {
         update_active_limits();
     }
 
-    // 0.5. 热端过温 → 制冷上限削减（先于 PID 决策，本周期即生效）
+    // 0.5. 热端过温 → 制冷削减（先于 PID 决策，本周期即生效）
     update_hot_derate();
     // 0.6. 当前模式有效制冷范围（统一计算，供下发/去重/映射使用，消除模式分支散落）
     update_active_cold_range();
