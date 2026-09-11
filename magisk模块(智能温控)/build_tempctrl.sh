@@ -7,6 +7,7 @@
 #         sh "magisk模块(智能温控)/build_tempctrl.sh" "magisk模块(智能温控)/tempctrl.c" tempctrl
 #
 # 链接方式：NDK 对 API 21+ 默认 -pie，动态链接（不传 -static）；依赖设备 /system/lib64/libc.so。
+# 注意：-lm 必需——动态链接下 libm 是独立的 libm.so，代码用了 powf，删掉会 undefined symbol。
 set -e
 
 if [ -z "$CC" ]; then
@@ -32,4 +33,4 @@ OUT="$2"
     -ffunction-sections -fdata-sections \
     -Wl,--gc-sections -Wl,--strip-all \
     -fno-unwind-tables -fno-asynchronous-unwind-tables \
-    -o "$OUT" "$SRC"
+    -o "$OUT" "$SRC" -lm

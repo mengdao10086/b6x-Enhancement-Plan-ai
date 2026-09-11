@@ -167,7 +167,20 @@ jobs:
           file tempctrl
           echo "=== 体积 ==="
           echo "SIZE=$(stat -c%s tempctrl) bytes"
-          size -A tempctrl 2>/dev/null | head -40 || true
+          python3 -c '
+          import struct
+          d = open("tempctrl", "rb").read()
+          shoff = struct.unpack_from("<Q", d, 0x28)[0]
+          shentsize = struct.unpack_from("<H", d, 0x3A)[0]
+          shnum = struct.unpack_from("<H", d, 0x3C)[0]
+          shstrndx = struct.unpack_from("<H", d, 0x3E)[0]
+          base = shoff + shstrndx * shentsize
+          strtab = d[struct.unpack_from("<Q", d, base + 0x18)[0]:]
+          offs = [shoff + i * shentsize for i in range(shnum)]
+          names = [strtab[struct.unpack_from("<I", d, o)[0]:].split(b"\x00")[0].decode("utf-8", "replace") for o in offs]
+          sizes = [struct.unpack_from("<Q", d, o + 0x20)[0] for o in offs]
+          print("SECTIONS:")
+          print("\n".join("  %-20s %8d" % (n, s) for n, s in sorted(zip(names, sizes), key=lambda x: -x[1]) if s))' || true
 
       - name: 上传编译日志（即使失败）
         if: always()
