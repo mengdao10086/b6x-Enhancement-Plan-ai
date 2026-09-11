@@ -201,6 +201,21 @@ jobs:
           echo "Module contents:"
           ls -la "CI记录/magisk模块/"
 
+      # 只处理上面拷进 CI记录/ 的副本，仓库内 webroot 源码保持可读
+      - name: 剥离前端资源注释与缩进（仅作用于 CI 副本）
+        run: |
+          SIZE_LOG="CI记录/compile_size.txt"
+          python3 "magisk模块(智能温控)/strip_webroot.py" "CI记录/magisk模块/webroot" | tee "$SIZE_LOG"
+          {
+            echo ""
+            echo "=== 模块包各文件体积（进 zip 前的原始字节）==="
+            ( cd "CI记录/magisk模块" && find . -type f -printf '%s %p\n' | sort -rn )
+            echo ""
+            echo "total_bytes=$(cd "CI记录/magisk模块" && find . -type f -printf '%s\n' | awk '{s+=$1} END {print s}')"
+          } >> "$SIZE_LOG"
+          echo "=== 体积报告 ==="
+          cat "$SIZE_LOG"
+
       - name: 获取版本号
         id: magisk-version
         run: echo "VERSION=$(grep '^version=' "magisk模块(智能温控)/magisk模块框架/module.prop" | sed 's/^version=v//')" >> $GITHUB_OUTPUT
@@ -211,3 +226,13 @@ jobs:
           name: b6x-EP-Magisk-v${{ steps.magisk-version.outputs.VERSION }}
           path: CI记录/magisk模块/
           if-no-files-found: error
+
+      # 单独上传体积报告：compile_size.txt 在打包步骤才生成，
+      # 早于它的「上传编译日志」步骤（path: CI记录/compile_*.txt）收不到
+      - name: 上传体积报告
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: size-report-magisk
+          path: CI记录/compile_size.txt
+          if-no-files-found: ignore

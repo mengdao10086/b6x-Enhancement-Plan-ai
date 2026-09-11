@@ -181,26 +181,12 @@ body.pin-scroll .config { overflow: visible; }
 }
 .badge.hidden { display: none; }
 
-/* 控制模式横滑（[4] 控制模式：PID / Gear 两侧，类似顶部曲线/日志） */
-.mode-slider {
-  display: flex; overflow-x: auto; overflow-y: hidden; margin-top: 8px;
-  align-items: flex-start;   /* 各模式面板各自高度，避免参数少的模式下方留整块灰底空区 */
-  scroll-snap-type: x mandatory;
-  -webkit-overflow-scrolling: touch;
-  transition: height .18s ease;   /* 自适应高度：滚动停稳后容器高度平滑伸缩到激活面板 */
-}
-.mode-slider::-webkit-scrollbar { display: none; }
-.mode-panel { flex: 0 0 100%; min-width: 100%; scroll-snap-align: start; }
-
 .group-body { padding: 2px 10px 6px; }
 .group-body.collapsed { display: none; }
 .sub-panel {
   margin-top: 6px; padding-top: 6px; border-top: 1px dashed var(--border);
   background: var(--surface2); border-radius: 8px;
 }
-.sub-panel-title { font-size: 12px; font-weight: 600; padding: 0 0 6px; }
-/* 模式子面板内的档位表：换回卡片底色避免与面板同色 */
-.sub-panel .gear-box { background: var(--surface); }
 
 /* ---------- 控件 ---------- */
 .ctrl {
@@ -243,31 +229,6 @@ input[type=number] { -moz-appearance: textfield; }
 }
 .switch input:checked + i { background: var(--accent); border-color: var(--accent); }
 .switch input:checked + i::after { transform: translateX(18px); }
-
-/* ---------- 档位表 ---------- */
-.gear-box { margin-top: 10px; padding: 8px; background: var(--surface2); border-radius: 8px; }
-.gear-title { font-size: 12px; font-weight: 600; margin-bottom: 6px; }
-.gear-table { display: flex; flex-direction: column; gap: 3px; }
-.gear-row { display: grid; grid-template-columns: 22px repeat(4, minmax(4em, 1fr)) 26px; gap: 4px; align-items: center; }
-.gear-head { font-size: 11px; color: var(--muted); }
-.gear-row input[type=number] {
-  width: 100%; min-width: 0; border: 1px solid var(--border); background: var(--surface);
-  color: var(--text); border-radius: 6px; padding: 4px 6px; font-size: 12px; text-align: right;
-  box-sizing: border-box;
-}
-.gear-row.dragging { background: var(--accent); color: #fff; border-radius: 6px; box-shadow: 0 4px 12px rgba(0,0,0,.35); }
-.gear-row.dragging input, .gear-row.dragging .gear-n, .gear-row.dragging .btn-del { color: #fff; }
-.gear-table.dragmode .gear-row:not(.dragging) { opacity: .55; }
-.gear-n { text-align: center; color: var(--muted); }
-.btn-del {
-  border: 0; background: transparent; color: var(--danger); font-size: 15px; cursor: pointer;
-  width: 26px; height: 26px; border-radius: 6px;
-}
-.btn-del:hover { background: rgba(217,48,37,.12); }
-.btn-add {
-  margin-top: 8px; width: 100%; padding: 6px; border: 1px dashed var(--border);
-  background: transparent; color: var(--accent); border-radius: 7px; font-size: 12px; cursor: pointer;
-}
 
 /* ---------- toast ---------- */
 .toast {
