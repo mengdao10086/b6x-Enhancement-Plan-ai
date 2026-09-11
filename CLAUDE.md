@@ -35,7 +35,7 @@
 ## 5. 编译须知
 
 - C 守护程序用 GitHub Actions（NDK r27c）编译，**不得建议 Termux 编译**
-- 编译命令：`aarch64-linux-android21-clang -static -O2 -ffunction-sections -fdata-sections -Wl,--gc-sections -Wl,--strip-all`
+- 编译命令见 `magisk模块(智能温控)/build_tempctrl.sh`（编译参数的唯一来源，勿在此处复制副本）
 - 每轮新对话和压缩上下文后的**首次 push** → 跟踪 CI 检查是否报错
 
 ## 6. 安全边界

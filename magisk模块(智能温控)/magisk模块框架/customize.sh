@@ -108,3 +108,49 @@ if [ -f "$MODPATH/profile.conf" ]; then
     fi
     ui_print "APP_WATCHDOG=$WATCHDOG_VALUE（可后续在 WebUI/配置文件 修改）"
 fi
+
+# ============================================================
+# 迁移旧版 uninstall.sh 中的 .log 清理行
+#   - 升级安装时旧模块仍在 /data/adb/modules/<id>/ 可读，
+#     新模块已解压到 $MODPATH，两者路径不同，互不干扰。
+#   - 仅迁移「删除对象以 .log 结尾」的 rm -f 行，
+#     新文件已包含的路径自动去重，其余默认行不受影响。
+#   - 迁移的 rm -f 行统一追加到新 uninstall.sh 末尾。
+# ============================================================
+OLD_UNINSTALL="/data/adb/modules/b6x-Enhancement-Plan/uninstall.sh"
+NEW_UNINSTALL="$MODPATH/uninstall.sh"
+
+if [ -f "$OLD_UNINSTALL" ] && [ -f "$NEW_UNINSTALL" ] && [ "$OLD_UNINSTALL" != "$NEW_UNINSTALL" ]; then
+    # 提取旧版中所有 .log 清理路径
+    OLD_LOGS=$(grep -E '^[[:space:]]*rm[[:space:]]+-f[[:space:]]+' "$OLD_UNINSTALL" 2>/dev/null \
+        | sed -E 's|^[[:space:]]*rm[[:space:]]+-f[[:space:]]+([^[:space:]]+).*|\1|' \
+        | grep '\.log$')
+    # 提取新版中已有的 .log 清理路径（用于去重）
+    NEW_LOGS=$(grep -E '^[[:space:]]*rm[[:space:]]+-f[[:space:]]+' "$NEW_UNINSTALL" 2>/dev/null \
+        | sed -E 's|^[[:space:]]*rm[[:space:]]+-f[[:space:]]+([^[:space:]]+).*|\1|' \
+        | grep '\.log$')
+
+    if [ -z "$OLD_LOGS" ]; then
+        ui_print "旧版 uninstall.sh 中无 .log 清理项，跳过迁移"
+    else
+        ADDED=0
+        ADDED_LIST=""
+        for p in $OLD_LOGS; do
+            # 新版已包含同路径 → 跳过（去重）
+            echo "$NEW_LOGS" | grep -qxF "$p" && continue
+            echo "rm -f $p" >> "$NEW_UNINSTALL"
+            ADDED=$((ADDED + 1))
+            ADDED_LIST="$ADDED_LIST $p"
+        done
+
+        if [ "$ADDED" -gt 0 ]; then
+            set_perm "$NEW_UNINSTALL" 0 0 0755
+            ui_print "已迁移 $ADDED 条旧版日志清理路径："
+            for p in $ADDED_LIST; do
+                ui_print "  + $p"
+            done
+        else
+            ui_print "旧版日志清理路径已全部包含在新版中，无需迁移"
+        fi
+    fi
+fi

@@ -80,8 +80,9 @@ window.B6X_SCHEMA = {
 
     // ---- [1] 性能参数 ----
     PERF_ENABLED: { type: "switch", label: "性能参数总开关", desc: "" },
-    RATE_LIMIT_FAN_UP: { type: "multi", fields: [{ label: "升速基础值", min: 50, max: 2000 }, { label: "升速倍率", min: 1, max: 200 }],
-      label: "风扇升速上限", desc: "升速上限 = 基础值 + d × 倍率 / 10（d = |电池温度 − 基准温度|，0.1°C），封顶 2000 RPM" },
+    RATE_LIMIT_FAN_UP: { type: "multi", fields: [{ label: "每周期最大升速量", min: 50, max: 2000 }, { label: "升速防抖阈值", min: 0, max: 2000 }],
+      label: "风扇升速上限",
+      desc: "升速量 ≤ 防抖阈值时保持不升（仅升速方向生效）；阈值 0=关闭防抖，距最高转速 < 阈值×1.5 时失效" },
     RATE_LIMIT_FAN_DOWN: { type: "multi", fields: [{ label: "每周期最大降速量", min: 50, max: 2000 }, { label: "降速防抖阈值", min: 0, max: 2000 }],
       label: "风扇降速上限",
       desc: "降速量 ≤ 防抖阈值时保持不降（仅降速方向生效）；阈值 0=关闭防抖，距最低转速 < 阈值×1.5 时失效" },

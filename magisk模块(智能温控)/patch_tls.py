@@ -18,8 +18,8 @@ def patch_tls_align(path: str) -> bool:
     """将 ELF 中 PT_TLS 段 p_align 强制设为 64。
 
     返回是否已处理成功（True=成功，无需区分"已修补"还是"原本就满足"）：
-    True = 已修补，或原本 p_align>=64 无需修改（同样视为成功）；
-    False = 打开失败 / 非 ELF / 非 64 位 / 头越界或损坏 / 未找到 PT_TLS。
+    True = 已修补，或原本 p_align>=64 无需修改，或文件中不存在 PT_TLS 段（均视为成功）；
+    False = 打开失败 / 非 ELF / 非 64 位 / 头越界或损坏 / 写入失败（真正的错误）。
     """
 
     try:
@@ -78,7 +78,10 @@ def patch_tls_align(path: str) -> bool:
             patched = True
 
         if not patched:
-            print('warning: no PT_TLS segment found', file=sys.stderr)
+            # 无 PT_TLS 段 = 本程序没有 TLS 变量，无需修补。属正常情况，按成功返回，
+            # 以免调用方（CI）把"无需修补"与"修补失败"混为一谈
+            print('PT_TLS segment not present - nothing to patch (OK)')
+            return True
 
         return patched
 

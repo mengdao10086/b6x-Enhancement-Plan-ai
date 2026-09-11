@@ -700,38 +700,69 @@
     var n = parseInt(String(pc).split(/[\s,]+/)[1], 10);   // 第二值 = B6X 上限
     return isFinite(n) && n > 0 ? n : 190;
   }
-  // 制冷轴辅助：低端 = COLD_RPM_MAP 第一值（制冷→风扇映射起始强度），轴不高于此起始强度。
-  function coldMapStart() {
-    if (S.values['PERF_ENABLED'] !== '1') return 40;   // 总开关未开启 → 默认 40
-    var cm = S.values['COLD_RPM_MAP'];
-    if (cm == null) return 40;
-    var n = parseInt(String(cm).split(/[\s,]+/)[0], 10);
-    return isFinite(n) && n > 0 ? n : 40;
-  }
   var drawAxisDiag = false;   // 制冷轴范围一次性诊断
 
   // 读可配置秒数（profile.conf WebUI 键，缺省/非法回落默认值）
   function gapSec(key, def) { var n = parseFloat(S.values[key]); return isFinite(n) && n >= 0 ? n : def; }
 
   // ---------- B：整档刻度 / 数值格式化 ----------
-  var B_TICKS = { segs: 4, minSegs: 3, temp: [1, 2, 2.5, 5, 10], cold: [1, 2, 5, 10] };
-  // 数值上滚到 steps 集合中 ≥ raw 的最近整档（×10^n）；最小步进钳到 1（不出现亚单位步进）
-  function niceStep(raw, steps) {
-    if (!(raw > 0)) return 1;
-    var mag = Math.pow(10, Math.floor(Math.log(raw) / Math.LN10));
-    for (var i = 0; i < steps.length; i++) { var v = steps[i] * mag; if (v >= raw - 1e-9) return Math.max(1, v); }
-    return Math.max(1, steps[steps.length - 1] * mag);
+  // 档位梯子：1、2、3，加所有 ≥5 的 5 的整数倍；最小档位即 1（无亚单位档位）
+  var TICK_SMALL = [1, 2, 3, 5];
+  var TICK_SEG_MIN = 3, TICK_SEG_MAX = 4, TICK_PREF = 3.5;   // 目标段数 3~4，理想步长 = 跨度÷3.5
+  // 枚举 [lo, hi] 内的全部档位（升序）
+  function ladderIn(lo, hi) {
+    var out = [], i, k;
+    for (i = 0; i < 3; i++) { if (TICK_SMALL[i] >= lo && TICK_SMALL[i] <= hi) out.push(TICK_SMALL[i]); }
+    var k0 = Math.max(1, Math.ceil(lo / 5 - 1e-9));
+    for (k = k0; 5 * k <= hi + 1e-9; k++) out.push(5 * k);
+    return out;
+  }
+  // 离 t 最近的档位（闭式，无搜索）：平局取较小档位
+  function nearestLadder(t) {
+    if (!(t > 1)) return 1;
+    if (t < 5) {
+      var best = 1, bd = Infinity;
+      for (var i = 0; i < TICK_SMALL.length; i++) {
+        var d = Math.abs(TICK_SMALL[i] - t);
+        if (d < bd) { bd = d; best = TICK_SMALL[i]; }
+      }
+      return best;
+    }
+    var a = 5 * Math.floor(t / 5), b = 5 * Math.ceil(t / 5);
+    return (t - a) <= (b - t) ? Math.max(1, a) : b;
+  }
+  // 刻度值数组的唯一来源（原先 drawGrid 内另有一份同构实现，已合并到此，改动请只改这里）
+  // 轴按 step 渲染出的刻度值数组（非整档对齐补原点刻度、末档补 max）
+  function ticksOf(lo, hi, step) {
+    var vals = [], v;
+    var firstMult = Math.ceil(lo / step - 1e-9) * step;
+    if (Math.abs(lo - firstMult) > step * 1e-6) vals.push(lo);
+    for (v = firstMult; v <= hi + 1e-9; v += step) vals.push(v);
+    var lastMult = Math.floor(hi / step + 1e-9) * step;
+    if (hi - lastMult > step * 1e-6) vals.push(hi);
+    return vals;
+  }
+  // 选档：先筛出能形成 3~4 段的候选档位，再取离「跨度÷3.5」最近者；无候选则纯取最近。
+  // 候选必落在 [跨度/4, 跨度)：步长≥跨度时段数≤2、步长<跨度/4 时段数≥5，故该区间枚举完备。
+  // 上下界按档位 floor/ceil 扩张，绝不裁点。
+  function pickAxis(dmin, dmax) {
+    if (!(dmax > dmin)) dmax = dmin + 1;
+    var span = dmax - dmin, target = span / TICK_PREF, best = null;
+    var cands = ladderIn(span / 4 * (1 - 1e-9), span * (1 + 1e-9));
+    for (var i = 0; i < cands.length; i++) {
+      var st = cands[i];
+      var lo = Math.floor(dmin / st) * st, hi = Math.ceil(dmax / st) * st;
+      var n = ticksOf(lo, hi, st).length - 1;      // 段数 = 实际渲染刻度数 − 1
+      if (n < TICK_SEG_MIN || n > TICK_SEG_MAX) continue;
+      var d = Math.abs(st - target);
+      if (!best || d < best.d) best = { step: st, d: d };
+    }
+    return (best || { step: nearestLadder(target) }).step;
   }
   // 由数据最小/最大求整档轴（保证 min≤dmin、max≥dmax，绝不裁点）
-  function niceAxis(dmin, dmax, steps) {
+  function niceAxis(dmin, dmax) {
     if (!(dmax > dmin)) dmax = dmin + 1;
-    var step = niceStep((dmax - dmin) / B_TICKS.segs, steps);
-    for (var g = 0; g < 6; g++) {
-      var mn = Math.floor(dmin / step) * step;
-      var mx = Math.ceil(dmax / step) * step;
-      if (Math.round((mx - mn) / step) >= B_TICKS.minSegs || step < 1e-6) return { min: mn, max: mx, step: step };
-      step = niceStep(step / 2, steps);
-    }
+    var step = pickAxis(dmin, dmax);
     return { min: Math.floor(dmin / step) * step, max: Math.ceil(dmax / step) * step, step: step };
   }
   // 按 step 决定小数位（整数去掉 .0；2.5 → 1 位）
@@ -748,10 +779,10 @@
   // 前向一遍 EMA 后，再对结果反向做一遍同一 EMA（等价 filtfilt）。两遍互为共轭 → 相位为零，
   // 阶跃响应是对称 S 形（首尾斜率都趋 0），稳态等于原始值（无指数拖尾、无稳态偏置）。
   // 平滑强度：单遍 EMA 白噪声方差抑制 = α/(2−α)；两遍 = [α/(2−α)]²·[1 + 2(1−α)²/(2α−α²)]。
-  var HOT_SMOOTH_ALPHA = 0.25;      // 每遍 EMA 权重（双向，实际平滑强于同 α 单遍）
+  var HOT_SMOOTH_ALPHA = 0.15;      // 每遍 EMA 权重（双向，实际平滑强于同 α 单遍）
   // 最小步长：输出只取该值的整数倍。热端采样本身即 0.1°C 量化，故 0.1 就是显示量子；
   // 作用是消灭平滑后残留的亚格点微挪（0.02 级抖动），而非改变曲线整体形状。
-  var HOT_SMOOTH_MIN_STEP = 0.1;
+  var HOT_SMOOTH_MIN_STEP = 0.05;
   // 对一段连续有效样本就地双向平滑，结果写回 hotF。反向一遍以段末前向值为初值（末端延拓）：
   // 末尾沿用因果值、不引入跳变，段内为完整零相位。
   function smoothHotSegment(samples, idx) {
@@ -856,48 +887,58 @@
       if (!isFinite(mn) || !isFinite(mx)) return null;
       return { min: mn, max: mx };
     }
-    var Lext = extent(leftSeries, leftV), Rext = extent(rightSeries, rightV);
+    var Lext = extent(leftSeries, leftV);
     var L = null, R = null;
-    if (Lext) L = niceAxis(Lext.min, Lext.max, B_TICKS.temp);
-    // 制冷强度轴（右轴）：动态跟随数据。下限固定 COLD_MIN=1；上限随数据自适应，但最低不低于制冷→风扇映射起始强度（上限的保底），最高不高于制冷上限
-    if (Rext) {
-      var cLow = coldMapStart(), cHigh = pidColdMax();
-      R = { min: 1, max: Math.min(cHigh, Math.max(Rext.max, cLow)) };
-      if (!(R.max > R.min)) R.max = R.min + 10;
-      R.step = niceStep((R.max - R.min) / B_TICKS.segs, B_TICKS.cold);
-      if (!drawAxisDiag) { drawAxisDiag = true; uiLog('[轴] 制冷轴: 1~' + R.max + '（上限保底起始强度 ' + cLow + '，上限 ' + cHigh + '）'); }
+    if (Lext) L = niceAxis(Lext.min, Lext.max);
+    // 制冷强度轴（右轴）：固定范围 [COLD_MIN=1, 制冷上限]。上限取 PID_COLD_RANGE 第二值（B6X 上限，默认 190），
+    // 不随数据浮动、不用映射起始强度保底；右轴只提供「值→高度」映射，刻度文字由左轴横线位置决定。
+    if (rightSeries.length) {
+      var cHigh = pidColdMax();
+      R = { min: 1, max: cHigh };
+      if (!drawAxisDiag) { drawAxisDiag = true; uiLog('[轴] 制冷轴固定 1~' + R.max + '（PID_COLD_RANGE 第二值，默认 190）'); }
     }
     // 单轴全无效值时该轴 null。
     // 双轴都不可画（全 null）则无曲线可画；仅一轴有效时仍画该轴。
     if (!L && !R) return;
     function yOf(axis, v) { return padT + H * (1 - (v - axis.min) / (axis.max - axis.min)); }
     // 刻度网格 + 轴标题（B 整档：只改标签与网格位置，不动数据点 x 映射）
-    function drawGrid(axis, side) {
-      var left = side === 'left';
+    // 左轴网格 + 刻度（整图唯一一套横线；右轴不再自算刻度、不再单独画线）
+    function drawGrid(axis) {
       ctx.font = '10px system-ui'; ctx.fillStyle = '#888';
-      ctx.textAlign = left ? 'right' : 'left';
-      var xTxt = left ? padL - 4 : padL + W + 4;
+      ctx.textAlign = 'right';
       var step = axis.step;
-      // 刻度值：轴非整档对齐（如制冷轴 min=1）补一个原点刻度；末档补 max
-      var vals = [];
-      var firstMult = Math.ceil(axis.min / step - 1e-9) * step;
-      if (Math.abs(axis.min - firstMult) > step * 1e-6) vals.push(axis.min);
-      for (var v = firstMult; v <= axis.max + 1e-9; v += step) vals.push(v);
-      var lastMult = Math.floor(axis.max / step + 1e-9) * step;
-      if (axis.max - lastMult > step * 1e-6) vals.push(axis.max);
+      // 刻度值：轴非整档对齐补一个原点刻度；末档补 max
+      var vals = ticksOf(axis.min, axis.max, step);
       for (var i = 0; i < vals.length; i++) {
         var val = vals[i];
         var y = yOf(axis, val);
-        ctx.fillText(fmtTick(val, step), xTxt, y + 3);
+        ctx.fillText(fmtTick(val, step), padL - 4, y + 3);
         ctx.strokeStyle = 'rgba(128,128,128,0.15)';
         ctx.beginPath(); ctx.moveTo(padL, y); ctx.lineTo(padL + W, y); ctx.stroke();
       }
       ctx.textAlign = 'left';
-      ctx.fillText(left ? '℃/百rpm' : 'cold', left ? 2 : padL + W + 4, padT - 7);
+      ctx.fillText('℃/百rpm', 2, padT - 7);
+    }
+    // 右轴刻度文字：沿左轴每条横线的高度标一个制冷强度整数（不画线）。
+    // 值 = 把该高度线性映射进 [1, 制冷上限] 后四舍五入；左轴无可依刻度时（左轴全关）不标。
+    function drawRightColdLabels(leftAxis, coldAxis) {
+      var lSpan = leftAxis.max - leftAxis.min;
+      var cSpan = coldAxis.max - coldAxis.min;
+      if (!(lSpan > 0) || !(cSpan > 0)) return;
+      var xTxt = padL + W + 4;
+      ctx.font = '10px system-ui'; ctx.fillStyle = '#888'; ctx.textAlign = 'left';
+      var vals = ticksOf(leftAxis.min, leftAxis.max, leftAxis.step);
+      for (var i = 0; i < vals.length; i++) {
+        var n = Math.round(coldAxis.min + cSpan * (vals[i] - leftAxis.min) / lSpan);
+        if (n < coldAxis.min) n = coldAxis.min;
+        if (n > coldAxis.max) n = coldAxis.max;
+        ctx.fillText(String(n), xTxt, yOf(leftAxis, vals[i]) + 3);
+      }
+      ctx.fillText('制冷', padL + W + 4, padT - 7);
     }
     // 渲染顺序：网格 → 折线 → 标注
-    if (L) drawGrid(L, 'left');
-    if (R) drawGrid(R, 'right');
+    if (L) drawGrid(L);
+    if (L && R) drawRightColdLabels(L, R);
     // 画线
     function plot(series, getV, axis) {
       if (!axis) return;   // 该轴范围无效（全 null），跳过该轴绘制
@@ -1267,7 +1308,6 @@
       multiCapFor: multiCapFor, multiCaps: multiCaps,                 // 输入框组限宽候选
       fitOneLine: fitOneLine, updateLiveRow: updateLiveRow, refitBars: refitBars,   // 单行适配逻辑测试钩子
       fitChartTools: fitChartTools,                           // 时间窗口+图例子窗口整体缩放
-      coldMapStart: coldMapStart,                             // 制冷→风扇映射起始强度
       init: init, renderGroups: renderGroups, updateCollapse: updateCollapse,
       onHeaderClick: onHeaderClick, setValue: setValue,
       S: S, SCHEMA: SCHEMA

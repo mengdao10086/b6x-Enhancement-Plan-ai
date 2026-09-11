@@ -136,7 +136,7 @@ jobs:
 
       - name: 计算 tempctrl 源码哈希（内容级变更检测）
         id: hash-tempctrl
-        run: echo "HASH=$(sha256sum 'magisk模块(智能温控)/tempctrl.c' 'magisk模块(智能温控)/patch_tls.py' | sha256sum | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
+        run: echo "HASH=$(sha256sum 'magisk模块(智能温控)/tempctrl.c' 'magisk模块(智能温控)/patch_tls.py' 'magisk模块(智能温控)/build_tempctrl.sh' | sha256sum | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
 
       - name: 缓存 tempctrl 二进制（源码未变时直接复用，跳过编译）
         id: cache-tempctrl
@@ -145,14 +145,14 @@ jobs:
           path: tempctrl
           key: tempctrl-${{ steps.hash-tempctrl.outputs.HASH }}
 
-      - name: 编译 tempctrl（静态链接，源码未变化时跳过）
+      - name: 编译 tempctrl（动态链接，源码未变化时跳过）
         if: steps.cache-tempctrl.outputs.cache-hit != 'true'
         run: |
           set +e
           CC=/opt/ndk/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android21-clang
           $CC --version > /dev/null 2>&1
           mkdir -p "CI记录"
-          $CC -static -O2 -ffunction-sections -fdata-sections -Wl,--gc-sections -Wl,--strip-all -fno-unwind-tables -fno-asynchronous-unwind-tables -o tempctrl "magisk模块(智能温控)/tempctrl.c" -lm > "CI记录/compile_ok.txt" 2>"CI记录/compile_err.txt"
+          CC="$CC" sh "magisk模块(智能温控)/build_tempctrl.sh" "magisk模块(智能温控)/tempctrl.c" tempctrl > "CI记录/compile_ok.txt" 2>"CI记录/compile_err.txt"
           RC=$?
           echo "=== exit code: $RC ==="
           echo "=== stdout ==="
@@ -165,6 +165,9 @@ jobs:
           fi
           echo "=== OK ==="
           file tempctrl
+          echo "=== 体积 ==="
+          echo "SIZE=$(stat -c%s tempctrl) bytes"
+          size -A tempctrl 2>/dev/null | head -40 || true
 
       - name: 上传编译日志（即使失败）
         if: always()
@@ -175,7 +178,7 @@ jobs:
           if-no-files-found: ignore
 
       - name: 修复 PT_TLS 对齐
-        run: python3 "magisk模块(智能温控)/patch_tls.py" tempctrl || echo "TLS patch skipped (not needed)"
+        run: python3 "magisk模块(智能温控)/patch_tls.py" tempctrl
 
       - name: 打包 Magisk 模块框架
         run: |
