@@ -62,7 +62,8 @@ window.B6X_SCHEMA = {
     {
       id: "g5", title: "[4] WebUI 界面",
       keys: [],
-      subKeys: ["WEBUI_GAP_DETECT_SEC", "WEBUI_GAP_MAX_SEC", "WEBUI_LABEL_MERGE_PX"]
+      subKeys: ["WEBUI_GAP_DETECT_SEC", "WEBUI_GAP_MAX_SEC", "WEBUI_LABEL_MERGE_PX",
+                "WEBUI_RPM_AXIS_MIN"]
     }
   ],
 
@@ -173,7 +174,9 @@ window.B6X_SCHEMA = {
     WEBUI_GAP_MAX_SEC: { type: "int", min: 1, max: 600, label: "断联空白最大宽度(秒)",
       desc: "" },
     WEBUI_LABEL_MERGE_PX: { type: "int", min: 1, max: 40, label: "标注合并阈值(px)",
-      desc: "两条及以上曲线头部垂直相距不超过此值时合并为一个标签行；默认 9=0.8×标签高" }
+      desc: "两条及以上曲线头部垂直相距不超过此值时合并为一个标签行；默认 9=0.8×标签高" },
+    WEBUI_RPM_AXIS_MIN: { type: "int", min: 0, max: 8000, label: "风扇转速纵轴下限(RPM)",
+      desc: "风扇转速低于此值的样本不参与左轴上下限计算，该段画到图外；0=关闭" }
   },
 
 };

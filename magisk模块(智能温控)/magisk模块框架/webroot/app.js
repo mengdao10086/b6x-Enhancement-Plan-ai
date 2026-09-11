@@ -691,7 +691,7 @@
     diagFit('liveRow', fitOneLine(el, 11, null, 0.96));   // 每帧重算；tabular-nums 定宽同字符数字号稳定
   }
 
-  // 制冷轴辅助：右轴上限固定 = PID_COLD_RANGE 制冷上限（B6X 上限，默认 190）。
+  // 制冷上限 = PID_COLD_RANGE 第二值（B6X 上限，默认 190）；右轴浮动上限的封顶值。
   // 按配置取 B6X 上限；总开关(PERF_ENABLED=1)未开启时回退默认 190。
   function pidColdMax() {
     if (S.values['PERF_ENABLED'] !== '1') return 190;   // 总开关未开启 → 默认 190
@@ -702,13 +702,33 @@
   }
   var drawAxisDiag = false;   // 制冷轴范围一次性诊断
 
+  // 冷端→风扇映射起始强度 = C 端 cold_map_start（tempctrl.c:100）= COLD_RPM_MAP 第一值
+  // （profile.conf:55 默认 40，schema.js 字段「起始强度」量程 0~194，C 端 clamp(0,194)）。
+  // 该键属 PERF 层（tempctrl.c:738 起 parse_common_cfg 仅 PERF_ENABLED=1 时解析），
+  // 总开关未开启时 C 端用编译默认 40，此处同样回落 40。
+  function coldMapStart() {
+    if (S.values['PERF_ENABLED'] !== '1') return 40;   // 总开关未开启 → 默认 40
+    var cm = S.values['COLD_RPM_MAP'];
+    if (cm == null) return 40;
+    var n = parseInt(String(cm).trim().split(/[\s,]+/)[0], 10);   // 第一值 = 映射起始强度
+    return isFinite(n) ? Math.max(0, Math.min(194, n)) : 40;
+  }
+
   // 读可配置秒数（profile.conf WebUI 键，缺省/非法回落默认值）
   function gapSec(key, def) { var n = parseFloat(S.values[key]); return isFinite(n) && n >= 0 ? n : def; }
+
+  // 左轴风扇转速下限（RPM，profile.conf WebUI 键 WEBUI_RPM_AXIS_MIN）。
+  // 缺键/非数值 → 回落 3000；0 与负值一律归 0 = 关闭过滤（与改动前逐位一致）。
+  var RPM_AXIS_MIN_DEFAULT = 3000;
+  function rpmAxisMin() {
+    var n = parseInt(String(S.values['WEBUI_RPM_AXIS_MIN']), 10);
+    return isFinite(n) ? Math.max(0, n) : RPM_AXIS_MIN_DEFAULT;
+  }
 
   // ---------- B：整档刻度 / 数值格式化 ----------
   // 档位梯子：1、2、3，加所有 ≥5 的 5 的整数倍；最小档位即 1（无亚单位档位）
   var TICK_SMALL = [1, 2, 3, 5];
-  var TICK_SEG_MIN = 3, TICK_SEG_MAX = 4, TICK_PREF = 3.5;   // 目标段数 3~4，理想步长 = 跨度÷3.5
+  var TICK_SEG_MIN = 3, TICK_SEG_MAX = 5, TICK_PREF = 4.0;   // 目标段数 3~5，理想步长 = 跨度÷4
   // 枚举 [lo, hi] 内的全部档位（升序）
   function ladderIn(lo, hi) {
     var out = [], i, k;
@@ -742,13 +762,14 @@
     if (hi - lastMult > step * 1e-6) vals.push(hi);
     return vals;
   }
-  // 选档：先筛出能形成 3~4 段的候选档位，再取离「跨度÷3.5」最近者；无候选则纯取最近。
-  // 候选必落在 [跨度/4, 跨度)：步长≥跨度时段数≤2、步长<跨度/4 时段数≥5，故该区间枚举完备。
+  // 选档：先筛出能形成 3~5 段的候选档位，再取离「跨度÷4」最近者；无候选则纯取最近。
+  // 段数 n = ceil(dmax/步长) − floor(dmin/步长) ≥ 跨度/步长 ⟹ 步长≥跨度时 n≤2、步长<跨度/5 时 n≥6，
+  // 二者都不合格，故所有合格候选必落在 [跨度/5, 跨度) 内，该区间枚举完备。
   // 上下界按档位 floor/ceil 扩张，绝不裁点。
   function pickAxis(dmin, dmax) {
     if (!(dmax > dmin)) dmax = dmin + 1;
     var span = dmax - dmin, target = span / TICK_PREF, best = null;
-    var cands = ladderIn(span / 4 * (1 - 1e-9), span * (1 + 1e-9));
+    var cands = ladderIn(span / 5 * (1 - 1e-9), span * (1 + 1e-9));
     for (var i = 0; i < cands.length; i++) {
       var st = cands[i];
       var lo = Math.floor(dmin / st) * st, hi = Math.ceil(dmax / st) * st;
@@ -877,6 +898,15 @@
     // 取值：左轴 = 温度(℃) 或 风扇转速÷100；右轴 = 制冷强度；热端取滤波后的曲线值
     function leftV(s, d) { return s.key === 'rpm' ? (d.rpm == null ? null : d.rpm / 100) : (s.key === 'hot' ? d.hotF : d[s.key]); }
     function rightV(s, d) { return d[s.key]; }
+    // 左轴转速下限：阈值 >0 时低于它的 rpm 样本一律不参与纵轴取值（按原始整数 d.rpm 比较，不换算）。
+    // 兜底只在"过滤后左轴一条有效数据都不剩"时触发，见下方 Lext 处。
+    var rpmMin = rpmAxisMin();
+    // 仅供左轴 extent 取值用（绘图/头部标注一律用 leftV，勿混用）：低于下限的 rpm 样本返回 null
+    // → 不参与纵轴上下限计算；曲线仍按原值绘制，故低速段允许落到画布外被裁掉。
+    function leftVAxis(s, d) {
+      if (s.key === 'rpm' && rpmMin > 0 && d.rpm != null && d.rpm < rpmMin) return null;
+      return leftV(s, d);
+    }
     var dark = !!(window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches);
     // 数据范围（未 padding，供整档轴；保证 min≤数据min、max≥数据max，绝不裁点）
     function extent(series, getV) {
@@ -887,15 +917,23 @@
       if (!isFinite(mn) || !isFinite(mx)) return null;
       return { min: mn, max: mx };
     }
-    var Lext = extent(leftSeries, leftV);
+    var Lext = extent(leftSeries, leftVAxis);   // 仅轴计算用过滤 getter；绘制走 leftV（见 leftVAxis 注释）
+    // 兜底：过滤后左轴一条有效数据都不剩（extent 返回 null；leftSeries 为空时同样返回 null）→ 退回不过滤。
+    // extent 的 null 充要条件即"所有系列、所有样本取值全为 null/无样本"，故该判定严格等价于"过滤后无可用数据"。
+    if (Lext == null) Lext = extent(leftSeries, leftV);
     var L = null, R = null;
     if (Lext) L = niceAxis(Lext.min, Lext.max);
-    // 制冷强度轴（右轴）：固定范围 [COLD_MIN=1, 制冷上限]。上限取 PID_COLD_RANGE 第二值（B6X 上限，默认 190），
-    // 不随数据浮动、不用映射起始强度保底；右轴只提供「值→高度」映射，刻度文字由左轴横线位置决定。
+    // 制冷强度轴（右轴）：下限恒为 1（硬编码）＝ C 端 COLD_MIN；上限浮动 =
+    // 「右曲线在当前可见窗口内的最高值」夹进 [映射起始强度 coldMapStart(), 制冷上限 pidColdMax()]。
+    // 窗口口径与左轴完全同一套：都取本函数的 data（已按 window 秒/条数收紧），复用 extent() 求峰值。
+    // 无有效数据（无样本 / coldReal 全为 null）时上限回落 pidColdMax()：右曲线本就不画，
+    // 回落 40 无意义，保持改动前的默认量程最不突兀，也与"等待数据…"期间的旧观感一致。
+    // 右轴只提供「值→高度」映射，刻度文字由左轴横线位置决定。
     if (rightSeries.length) {
-      var cHigh = pidColdMax();
-      R = { min: 1, max: cHigh };
-      if (!drawAxisDiag) { drawAxisDiag = true; uiLog('[轴] 制冷轴固定 1~' + R.max + '（PID_COLD_RANGE 第二值，默认 190）'); }
+      var cHigh = pidColdMax(), cLow = coldMapStart();
+      var Rext = extent(rightSeries, rightV);
+      R = { min: 1, max: (Rext == null ? cHigh : Math.max(cLow, Math.min(cHigh, Rext.max))) };
+      if (!drawAxisDiag) { drawAxisDiag = true; uiLog('[轴] 制冷轴 1~' + R.max + '（上限浮动：窗口内制冷峰值夹在 ' + cLow + '~' + cHigh + '）'); }
     }
     // 单轴全无效值时该轴 null。
     // 双轴都不可画（全 null）则无曲线可画；仅一轴有效时仍画该轴。
@@ -920,7 +958,8 @@
       ctx.fillText('℃/百rpm', 2, padT - 7);
     }
     // 右轴刻度文字：沿左轴每条横线的高度标一个制冷强度整数（不画线）。
-    // 值 = 把该高度线性映射进 [1, 制冷上限] 后四舍五入；左轴无可依刻度时（左轴全关）不标。
+    // 值 = 把该高度线性映射进 [1, 当前右轴上限 R.max] 后四舍五入；左轴无可依刻度时（左轴全关）不标。
+    // 因 ticksOf 只产出 [leftAxis.min, leftAxis.max] 内的高度，映射系数 ∈[0,1]，故下方两处钳位恒不触发。
     function drawRightColdLabels(leftAxis, coldAxis) {
       var lSpan = leftAxis.max - leftAxis.min;
       var cSpan = coldAxis.max - coldAxis.min;
