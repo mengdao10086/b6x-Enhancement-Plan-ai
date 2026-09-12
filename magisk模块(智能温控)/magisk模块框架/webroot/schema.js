@@ -43,7 +43,8 @@ window.B6X_SCHEMA = {
                 "FAN_RPM_ROUND_UNIT",
                 "HOT_DERATE", "PID_KDP", "PID_KI_RATE", "PID_SPEED",
                 "PID_TARGET", "PID_CH_THRESHOLD", "PID_CPU_COMP", "PID_TARGET_DIR",
-                "PID_SPEED_RECALL", "PID_COLD_RANGE"]
+                "PID_SPEED_RECALL", "PID_COLD_RANGE",
+                "PID_KI_DYN_T", "PID_KI_DYN_GATE", "PID_KI_DYN_WIN"]
     },
     // [2] sysfs 路径与缩放：独立大类（SYSFS_ENABLED 开关控制加载）
     {
@@ -134,6 +135,15 @@ window.B6X_SCHEMA = {
       desc: "温度未变时用最近一次变化前的温度作锚点算速度：v = (当前温度 − 锚点温度) ÷ 累计周期数 ÷ 10 × 权重/1000，不再额外限幅；默认 1 1000 = 开启、注入全量速度" },
     PID_COLD_RANGE: { type: "multi", fields: [{ label: "下限", min: 0, max: 194 }, { label: "上限(B6X)", min: 0, max: 194 }, { label: "上限(B7X)", min: 1, max: 255 }],
       label: "制冷强度范围", desc: "前两值须同给；B7X 上限为 1~255（B6X 为 0~194）" },
+    PID_KI_DYN_T: { type: "multi", fields: [{ label: "T1 抖动上限(码²×100)", min: 1, max: 10000 }, { label: "T2 满削减阈值(码²×100)", min: 1, max: 10000 }, { label: "M 方向系数(码²×100)", min: 1, max: 10000 }],
+      label: "动态 KI 阈值/方向系数",
+      desc: "三值均 ×100 存值（默认 470 120 75 = 4.70 / 1.20 / 0.75 码²）；护栏 T1 > T2 与 M < T1，越界拒绝并保留旧值；M > T2 仅提示效果打折；P+Q ≥ T1 不削减、P+Q ≤ T2 削减到下限" },
+    PID_KI_DYN_GATE: { type: "multi", fields: [{ label: "θ 门控半宽(码)", min: 3, max: 10 }, { label: "削减下限(×100)", min: 10, max: 100 }],
+      label: "动态 KI 门控/削减下限",
+      desc: "θ 单位码（1 码 = 0.1°C，默认 5 = 0.5°C），窗口均值偏离基准超过 θ 时整机制不干预；削减下限 ×100（默认 50 = 0.50），scale 触底钳到该值" },
+    PID_KI_DYN_WIN: { type: "multi", fields: [{ label: "N 窗口样本数", min: 6, max: 128 }, { label: "α EMA 系数(×100)", min: 1, max: 100 }],
+      label: "动态 KI 窗口/平滑",
+      desc: "N 为窗口样本容量（记温度变化次数非时间，默认 36，少于 6 个样本时机制不干预）；α ×100（默认 30 = 0.30），有求值结果时步进一次，温度未变不步进" },
 
     // ---- [2] sysfs 路径与缩放 ----
     SYSFS_ENABLED: { type: "switch", label: "sysfs 路径与缩放开关", desc: "" },
