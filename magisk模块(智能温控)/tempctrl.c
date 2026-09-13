@@ -109,19 +109,17 @@ static int hot_map_max = 450;       // HOT_RPM_MAP 第二值（0.1°C）
 // --- 风扇转速范围 ---
 static int fan_rpm_min = 2000;      // FAN_RPM_RANGE 第一值
 static int fan_rpm_max = 6000;      // FAN_RPM_RANGE 第二值
-static int fan_rpm_drop_threshold = 50; // 降速防抖阈值（0=不限制；仅风扇降低时生效，距最低转速<阈值×1.5 时失效）
-static int fan_rpm_rise_threshold = 50; // 升速防抖阈值（0=不限制；仅风扇升高时生效，距最高转速<阈值×1.5 时失效）
 static int fan_rpm_round_unit = 10; // FAN_RPM_ROUND_UNIT：下发转速前按该单位就近取整（RPM，1~500）
 
 // ======================== 速率限制 ========================
 // --- 固定值 ---
-static int RATE_LIMIT_FAN_DOWN = 250;   // 风扇降速每周期最大变化量（RPM）
+static int RATE_LIMIT_FAN = 250;   // RATE_LIMIT_FAN 第一值：风扇每周期最大变化量（RPM，升/降共用，双值键）
 static int RATE_LIMIT_COLD = 25;   // 制冷强度升降速基础值：升速=base+dev×mult/10，降速=base-dev×mult/10，负值→0=禁止该方向
 
 // --- 动态值（根据电池温差自动调整）---
 static int RATE_LIMIT_COLD_MULT = 10;  // 制冷强度倍率：升速/降速 = base ± dev(0.1°C) × mult / 10
 static int COLD_DEADZONE = 3;          // 制冷最小变化幅度（RATE_LIMIT_COLD 第三值）：与散热器实际 |差值| < 该值时不升不降
-static int RATE_LIMIT_FAN_UP = 250;   // 风扇升速每周期最大变化量（RPM）；防抖阈值见 fan_rpm_rise_threshold
+static int RATE_LIMIT_FAN_DEBOUNCE = 50;   // RATE_LIMIT_FAN 第二值：防抖阈值（RPM/周期，0=关闭防抖）；变化量 ≤ 阈值且距方向端点（升=最高/降=最低）≥ 阈值×1.5 时保持不动
 static int cycle_batt_temp = -1;       // 本周期电池温度（-1=未就绪）
 // --- 1s 采集缓存：5s 控制块直接读缓存，不再重复读 sysfs/状态文件 ---
 static int cached_batt_raw = -1;   // 电池温度（0.1°C），保留上次成功值抗抖
@@ -701,11 +699,12 @@ static int parse_common_cfg(const char *key, int val, const char *val_str) {
         if (n >= 3) HOT_DERATE_COOLDOWN = clamp(c, 0, 20);
         return 1;
     }
-    if (strcmp(key, "RATE_LIMIT_FAN_DOWN") == 0) {
-        int base = RATE_LIMIT_FAN_DOWN, thr = fan_rpm_drop_threshold;
-        int n = sscanf(val_str, "%d %d", &base, &thr);
-        if (n >= 1) RATE_LIMIT_FAN_DOWN = clamp(base, 50, 2000);
-        if (n >= 2) fan_rpm_drop_threshold = clamp(thr, 0, 2000);
+    // RATE_LIMIT_FAN = 每周期最大变化量 防抖阈值（双值，升降共用步长；阈值 0=关闭防抖）
+    if (strcmp(key, "RATE_LIMIT_FAN") == 0) {
+        int step = RATE_LIMIT_FAN, thr = RATE_LIMIT_FAN_DEBOUNCE;
+        int n = sscanf(val_str, "%d %d", &step, &thr);
+        if (n >= 1) RATE_LIMIT_FAN          = clamp(step, 50, 2000);
+        if (n >= 2) RATE_LIMIT_FAN_DEBOUNCE = clamp(thr, 0, 2000);
         return 1;
     }
     if (strcmp(key, "RATE_LIMIT_COLD") == 0) {
@@ -723,15 +722,6 @@ static int parse_common_cfg(const char *key, int val, const char *val_str) {
         int n = sscanf(val_str, "%d %d", &s, &e);
         if (n >= 1) cold_map_start = clamp(s, 0, 194);
         if (n >= 2) cold_map_exp   = clamp(e, 50, 500);
-        return 1;
-    }
-    // RATE_LIMIT_FAN_UP = 每周期最大升速量 升速防抖阈值（双值；阈值 0=关闭防抖）
-    if (strcmp(key, "RATE_LIMIT_FAN_UP") == 0) {
-        int rise = RATE_LIMIT_FAN_UP, thr = fan_rpm_rise_threshold;
-        if (sscanf(val_str, "%d %d", &rise, &thr) >= 1) {
-            RATE_LIMIT_FAN_UP      = clamp(rise, 50, 2000);
-            fan_rpm_rise_threshold = clamp(thr, 0, 2000);
-        }
         return 1;
     }
     return 0;
@@ -1477,13 +1467,13 @@ static void send_am_broadcast(int mode, int target, int windOC, int coldOC, int 
 }
 
 /**
- * 计算速率上限：风扇升速用固定值（防抖在 rate_limit_fan 内单独判定）；制冷强度按电池温差动态算
- * @param out_fan_up    风扇升速上限（RPM，= RATE_LIMIT_FAN_UP 固定值）
+ * 计算速率上限：风扇升降共用固定步长（防抖在 rate_limit_fan 内单独判定）；制冷强度按电池温差动态算
+ * @param out_fan_step  风扇每周期最大变化量（RPM，= RATE_LIMIT_FAN 固定值，升/降共用）
  * @param out_cold_up   制冷强度升速上限（有符号温差，负值→0=禁止升）
  * @param out_cold_down 制冷强度降速上限（有符号温差，负值→0=禁止降）
  */
-static void calc_dynamic_rates(int *out_fan_up, int *out_cold_up, int *out_cold_down) {
-    *out_fan_up = RATE_LIMIT_FAN_UP;
+static void calc_dynamic_rates(int *out_fan_step, int *out_cold_up, int *out_cold_down) {
+    *out_fan_step = RATE_LIMIT_FAN;
     // 制冷强度：有符号温差 dev，升速/降速独立；负值 → clamp 到 0（禁止该方向）
     int dev = 0;
     if (cycle_batt_temp >= 0) dev = cycle_batt_temp - BATT_BASELINE;
@@ -1498,8 +1488,8 @@ static void calc_dynamic_rates(int *out_fan_up, int *out_cold_up, int *out_cold_
  * 更新 actual_cold；调用方随后用限速后的实际制冷重算风扇目标。
  */
 static void rate_limit_cold(int desired_cold) {
-    int fan_up, cold_up, cold_down;
-    calc_dynamic_rates(&fan_up, &cold_up, &cold_down);
+    int fan_step, cold_up, cold_down;
+    calc_dynamic_rates(&fan_step, &cold_up, &cold_down);
     int old_cold = actual_cold;
     rate_limit(&actual_cold, desired_cold, cold_up, cold_down);
     debug_log(debug_exec, "cold 限速 %d→%d desired=%d（升%d 降%d）",
@@ -1507,29 +1497,32 @@ static void rate_limit_cold(int desired_cold) {
 }
 
 /**
- * 风扇转速限速（升降各自独立速率，降速/升速各带一段防抖）。
+ * 风扇转速限速（升/降共用同一步长，两个方向各带一段防抖）。
  * 返回限速后的实际风扇转速，就近取整到 FAN_RPM_ROUND_UNIT 的倍数并钳制到设备范围。
  *
  * 防抖是「幅度阈值」：本周期变化量不超过阈值就整步不做（不看时间、不计数）；
  * 距最低转速（降）/最高转速（升）< 阈值×1.5 时防抖失效（贴近端点无需再抑制）。
  */
 static int rate_limit_fan(int desired_rpm) {
-    int fan_up, cold_up, cold_down;
-    calc_dynamic_rates(&fan_up, &cold_up, &cold_down);
+    int fan_step, cold_up, cold_down;
+    calc_dynamic_rates(&fan_step, &cold_up, &cold_down);
 
-    int drop_hold = fan_rpm_drop_threshold > 0 &&
-                    (actual_rpm - fan_rpm_min) >= fan_rpm_drop_threshold * 3 / 2 &&
-                    desired_rpm < actual_rpm &&
-                    (actual_rpm - desired_rpm) <= fan_rpm_drop_threshold;
-    if (drop_hold) desired_rpm = actual_rpm;   // 降速防抖：降幅不超阈值 → 本周期不降
+    // 防抖判定：升/降两条同构守卫已收敛为一次求值，方向由 rising 定死；
+    // 原实现靠「降速分支先改写 desired」隐式保证两条互斥，勿拆回两条。
+    int rising = (desired_rpm > actual_rpm);
+    int ref_room = rising ? (active_fan_max - actual_rpm)    // 升速：距最高转速（现场读，active_fan_max 为运行时量）
+                          : (actual_rpm - fan_rpm_min);      // 降速：距最低转速
+    int delta = abs(desired_rpm - actual_rpm);
+    // 阈值 ×1.5 必须先乘后除（* 3 / 2）：写成 /2*3 时阈值 51 得 75 而非 76，差 1 RPM 即移动 >= 边界
+    int hold = delta > 0 &&
+               ref_room >= RATE_LIMIT_FAN_DEBOUNCE * 3 / 2 &&
+               delta <= RATE_LIMIT_FAN_DEBOUNCE;
+    if (hold) desired_rpm = actual_rpm;   // 防抖：变化量不超阈值 → 本周期保持不动
+    int drop_hold = hold && !rising;      // 降速防抖命中
+    int rise_hold = hold && rising;       // 升速防抖命中
 
-    int rise_hold = fan_rpm_rise_threshold > 0 &&
-                    (active_fan_max - actual_rpm) >= fan_rpm_rise_threshold * 3 / 2 &&
-                    desired_rpm > actual_rpm &&
-                    (desired_rpm - actual_rpm) <= fan_rpm_rise_threshold;
-    if (rise_hold) desired_rpm = actual_rpm;   // 升速防抖：升幅不超阈值 → 本周期不升
-
-    rate_limit(&actual_rpm, desired_rpm, fan_up, RATE_LIMIT_FAN_DOWN);
+    // 单键语义：两个实参必须同值
+    rate_limit(&actual_rpm, desired_rpm, fan_step, fan_step);
     // 下限钳制：内部 actual_rpm 与 send_rpm 对齐，恒不低于 fan_rpm_min。
     // 否则风扇目标偏低时 actual_rpm 跌破 fan_rpm_min，rate_limited_execute 的就绪守卫会误判"未就绪"而永久跳过下发（死锁）。
     actual_rpm = clamp(actual_rpm, fan_rpm_min, active_fan_max);

@@ -74,6 +74,10 @@ body.pin-scroll .config { overflow: visible; }
   align-items: center; justify-content: center; cursor: pointer; font-size: 14px;
 }
 .icon-btn.active, .icon-btn:hover { color: var(--accent); border-color: var(--accent); }
+/* 右上角操作组：保存 + 图钉靠在一起，不被 .top-bar 的 space-between 摆到正中 */
+.top-actions { display: flex; gap: 6px; align-items: center; }
+/* 有未保存改动时的高亮：由 app.js 的 updateSaveBtn() 切换 .has-dirty */
+#saveBtn.has-dirty { background: var(--accent); border-color: var(--accent); color: var(--surface); }
 
 .top-slider {
   flex: 1; min-height: 0;
@@ -115,11 +119,15 @@ body.pin-scroll .config { overflow: visible; }
 .series-item i { width: 8px; height: 8px; border-radius: 50%; display: inline-block; flex: 0 0 auto; }
 
 .chart-wrap { flex: 1; min-height: 0; position: relative; }
-#chart { width: 100%; height: 100%; display: block; }
+/* canvas 画不到位图之外：向下外扩 12px，让曲线头部点越到接缝以下被 .live 盖住
+   （app.js 实测外扩量 ov = ch − wrap.clientHeight，取 padB = 4 + ov 抵消，绘图区高度不变） */
+#chart { position: absolute; left: 0; top: 0; width: 100%; height: calc(100% + 12px); display: block; }
 .live {
   flex: 0 0 auto; padding: 4px 10px 0; font-size: 11px; color: var(--muted);
   border-top: 1px solid var(--border); white-space: nowrap; overflow: hidden;
   font-variant-numeric: tabular-nums;   /* 数字定宽：内容变长度不变，仅位数变化才变 */
+  /* 背景色与 .top 同源，主题改底色时需同步；不定位会被绝对定位的 canvas 压住 */
+  position: relative; z-index: 1; background: var(--surface);
 }
 
 /* ---------- 日志面板 ---------- */

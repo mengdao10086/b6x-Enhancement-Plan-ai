@@ -37,7 +37,7 @@ window.B6X_SCHEMA = {
       id: "g0", title: "[1] 性能参数", master: "PERF_ENABLED",
       headerSwitch: "PERF_ENABLED",
       keys: [],
-      subKeys: ["RATE_LIMIT_FAN_UP", "RATE_LIMIT_FAN_DOWN",
+      subKeys: ["RATE_LIMIT_FAN",
                 "RATE_LIMIT_COLD", "RECONNECT_KEEP_CYCLES", "BATT_BASELINE", "CPU_FILTER_ALPHA",
                 "COLD_RPM_MAP", "HOT_RPM_MAP", "MAP_INPUT_SMOOTH_ALPHA", "FAN_RPM_RANGE",
                 "FAN_RPM_ROUND_UNIT",
@@ -63,8 +63,8 @@ window.B6X_SCHEMA = {
     {
       id: "g5", title: "[4] WebUI 界面",
       keys: [],
-      subKeys: ["WEBUI_GAP_DETECT_SEC", "WEBUI_GAP_MAX_SEC", "WEBUI_LABEL_MERGE_PX",
-                "WEBUI_RPM_AXIS_MIN"]
+      subKeys: ["WEBUI_GAP_SEC", "WEBUI_LABEL_MERGE_PX", "WEBUI_RPM_AXIS_MIN",
+                "WEBUI_CURVE_FILTER", "WEBUI_AUTOSAVE"]
     }
   ],
 
@@ -82,12 +82,9 @@ window.B6X_SCHEMA = {
 
     // ---- [1] 性能参数 ----
     PERF_ENABLED: { type: "switch", label: "性能参数总开关", desc: "" },
-    RATE_LIMIT_FAN_UP: { type: "multi", fields: [{ label: "每周期最大升速量", min: 50, max: 2000 }, { label: "升速防抖阈值", min: 0, max: 2000 }],
-      label: "风扇升速上限",
-      desc: "升速量 ≤ 防抖阈值时保持不升（仅升速方向生效）；阈值 0=关闭防抖，距最高转速 < 阈值×1.5 时失效" },
-    RATE_LIMIT_FAN_DOWN: { type: "multi", fields: [{ label: "每周期最大降速量", min: 50, max: 2000 }, { label: "降速防抖阈值", min: 0, max: 2000 }],
-      label: "风扇降速上限",
-      desc: "降速量 ≤ 防抖阈值时保持不降（仅降速方向生效）；阈值 0=关闭防抖，距最低转速 < 阈值×1.5 时失效" },
+    RATE_LIMIT_FAN: { type: "multi", fields: [{ label: "每周期最大变化量", min: 50, max: 2000 }, { label: "防抖阈值", min: 0, max: 2000 }],
+      label: "风扇限速",
+      desc: "变化量升/降共用同一步长；防抖生效条件：变化量 ≤ 阈值 且 升速时距最高、降速时距最低 ≥ 阈值×1.5（更近则失效）；阈值 0=关闭防抖" },
     RATE_LIMIT_COLD: { type: "multi", fields: [{ label: "基础值", min: 1, max: 194 }, { label: "倍率", min: 1, max: 100 }, { label: "死区", min: 1, max: 50 }],
       label: "制冷强度限速",
       desc: "升速 = 基础值 + dev × 倍率 / 10，降速 = 基础值 − dev × 倍率 / 10（dev = 电池温度 − 基准温度，有符号），负值取 0=禁止该方向；|目标 − 回传| < 死区时升降都不下发" },
@@ -179,14 +176,19 @@ window.B6X_SCHEMA = {
       desc: "实际制冷停滞（=上周期实际）且未达目标（≠上周期下发）连续 N 次下发 → kill app 并重新拉起；0=关闭；前置条件 APP_LAUNCH_ENABLED=1（自动拉起关闭时运行时强制置 0）" },
 
     // ---- [4] WebUI 界面 ----
-    WEBUI_GAP_DETECT_SEC: { type: "int", min: 1, max: 120, label: "断联判定阈值(秒)",
-      desc: "" },
-    WEBUI_GAP_MAX_SEC: { type: "int", min: 1, max: 600, label: "断联空白最大宽度(秒)",
-      desc: "" },
+    WEBUI_GAP_SEC: { type: "multi", fields: [{ label: "断联判定阈值", min: 1, max: 120 }, { label: "空白最大宽度", min: 1, max: 600 }],
+      label: "断联显示", value: "5 15",
+      desc: "相邻采样时间差超过第一值(秒)视为一次断联，曲线在该处断开；空白按真实断开时长等比显示，超过第二值(秒)封顶" },
     WEBUI_LABEL_MERGE_PX: { type: "int", min: 1, max: 40, label: "标注合并阈值(px)",
       desc: "两条及以上曲线头部垂直相距不超过此值时合并为一个标签行；默认 9=0.8×标签高" },
     WEBUI_RPM_AXIS_MIN: { type: "int", min: 0, max: 8000, label: "风扇转速纵轴下限(RPM)",
-      desc: "风扇转速低于此值的样本不参与左轴上下限计算，该段画到图外；0=关闭" }
+      desc: "风扇转速低于此值的样本不参与左轴上下限计算，该段画到图外；0=关闭" },
+    WEBUI_CURVE_FILTER: { type: "multi", fields: [{ label: "每遍权重α(×100)", min: 0, max: 100 }, { label: "最小步长(×100)", min: 0, max: 100 }],
+      label: "曲线滤波", value: "15 5",
+      desc: "热端与电池共用；零相位双向EMA+格点吸附。α=0或100都视为关闭滤波，最小步长=0视为关闭吸附，默认 15 5 = 0.15/0.05" },
+    WEBUI_AUTOSAVE: { type: "multi", fields: [{ label: "自动保存", min: 0, max: 1 }, { label: "提示延迟(秒)", min: 0, max: 60 }],
+      label: "保存", value: "1 3",
+      desc: "开关=0时只有手动点保存按钮才落盘；延迟为自动保存成功后等的秒数，期间再次自动保存则重新计时；手动保存与错误提示不受延迟影响" }
   },
 
 };

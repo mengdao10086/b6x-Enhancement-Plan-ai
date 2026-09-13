@@ -49,12 +49,22 @@
   // 安全的 localStorage 包装（WebView 禁用/测试环境时静默降级）
   function storeGet(k) { try { return window.localStorage ? window.localStorage.getItem(k) : null; } catch (e) { return null; } }
   function storeSet(k, v) { try { if (window.localStorage) window.localStorage.setItem(k, v); } catch (e) {} }
+  // 自动保存的延迟提示计时器。与 toast 自身的隐藏计时器 t._h 无关：
+  // t._h 负责 2200ms 后把提示隐藏，复用它会让提示提前消失。
+  var saveToastTimer = null;
   function toast(msg, kind) {
+    clearTimeout(saveToastTimer); saveToastTimer = null;   // 有提示立即弹出时，取消待发的延迟提示
     var t = $('toast');
     t.textContent = msg;
     t.className = 'toast show' + (kind === 'err' ? ' err' : '');
     clearTimeout(t._h);
     t._h = setTimeout(function () { t.className = 'toast'; }, 2200);
+  }
+  // 保存成功提示：延迟秒数 <=0 立即弹，否则延后弹（期间任何其它提示都会取消它）
+  function showSavedToast(delaySec) {
+    if (delaySec <= 0) { toast('已保存'); return; }
+    clearTimeout(saveToastTimer);
+    saveToastTimer = setTimeout(function () { toast('已保存'); }, delaySec * 1000);
   }
 
   // ---------- 桥接：识别注入全局并归一化 exec ----------
@@ -202,11 +212,22 @@
       else if (el.tagName === 'INPUT' && !el.dataset.rowField) el.value = val;
     }
     if (key === 'PERF_ENABLED' || key === 'DEBUG_ENABLED') updateCollapse();
+    updateSaveBtn();
     scheduleSave();
   }
 
+  // 保存按钮高亮：有未保存改动时加 has-dirty 类（补偿「关闭自动保存后界面无未保存提示」）
+  function updateSaveBtn() {
+    var b = $('saveBtn');
+    if (b) b.classList.toggle('has-dirty', Object.keys(S.dirty).length > 0 || !!S.dirtySpecial);
+  }
+
   // ---------- 折叠逻辑：固定默认收起 + 组头点击手动展开（不随开关状态） ----------
-  function masterOn(key) { return S.values[key] !== '0'; }
+  // 全文件唯一的「开关值是否算开启」判据：值不为 '0' 即为开（缺项 / 空值 / 非 0 的其他值一律算开）。
+  // 渲染端（multi 的 0/1 复选框）与读取端（autoSaveCfg 等）共用此函数，
+  // 避免两处各写一遍判据后漂移（曾出现复选框按 === '1' 渲染、读取按 !== '0' 判定，越界值下二者反向）。
+  function switchOn(v) { return String(v == null ? '' : v) !== '0'; }
+  function masterOn(key) { return switchOn(S.values[key]); }
 
   // 分组是否有可折叠内容（子面板/模式面板/档位表/直接参数）；无折叠内容的分组
   // 不渲染小三角、不响应组头点击，说明区常显
@@ -279,7 +300,12 @@
     } else if (def.type === 'int') {
       wrap.appendChild(buildNumInput(key, val, def.min, def.max, def.step || 1, def.unit || ''));
     } else if (def.type === 'multi') {
-      var parts = String(val).split(/\s+/);
+      // 切分口径与多字段配置值的读取端（cfgFields）保持一致：按空白或逗号切
+      var parts = String(val).split(/[\s,]+/);
+      // 字段缺项（键在、但少写/留空）时回落该字段在 schema 里的默认值，而不是 '0'：
+      // 否则 UI 显示值与代码兜底值不一致（如只写 WEBUI_CURVE_FILTER=15 → 框显 0=关闭吸附，实际生效 0.05）
+      var defParts = String(def.value == null ? '' : def.value).split(/[\s,]+/);
+      function fieldVal(i) { return parts[i] || defParts[i] || '0'; }
       var row = document.createElement('div');
       row.className = 'multi';
       def.fields.forEach(function (f, i) {
@@ -289,7 +315,10 @@
           box.className = 'multicheck';
           var cb = document.createElement('input');
           cb.type = 'checkbox'; cb.dataset.multiKey = key + '::' + i;
-          cb.checked = (parts[i] || '0') === '1';
+          // 勾选状态与读取端同判据（switchOn），任何取值下都等于代码对该字段的开启判定。
+          // 此处直接喂原始字段值、不套 fieldVal 的默认值回落：读取端也是直接看原始字段，
+          // 套了回落反而会在"键在但字段留空 + schema 默认为 '0'"这种组合下与读取端判反。
+          cb.checked = switchOn(parts[i]);
           var tf = document.createElement('span');
           tf.textContent = f.label;
           box.appendChild(cb); box.appendChild(tf);
@@ -298,7 +327,7 @@
           // 数值字段：框 + 紧贴其下的字段名（竖排时各自跟着自己的框走）
           var field = document.createElement('div');
           field.className = 'multi-field';
-          field.appendChild(buildNumInput(key + '::' + i, parts[i] || '0', f.min, f.max, 1, f.label));
+          field.appendChild(buildNumInput(key + '::' + i, fieldVal(i), f.min, f.max, 1, f.label));
           field.appendChild(buildFieldName(f.label));
           row.appendChild(field);
         }
@@ -528,9 +557,19 @@
   // ---------- 档位表（已随 Gear 删除） ----------
   // ---------- 改即存（防抖自动写配置） ----------
   var saveTimer = null;
+  var prevAutoSaveOn = true;   // 上一次的自动保存开关状态（用于「开→关」跳变时补一次落盘）
   function scheduleSave() {
     clearTimeout(saveTimer);
-    saveTimer = setTimeout(save, 600);
+    var cfg = autoSaveCfg();
+    if (prevAutoSaveOn && !cfg.enabled) {
+      // 「开→关」跳变：关闭动作本身也走本通道，不补存这次关闭就存不下来（下次打开又变回开启）
+      prevAutoSaveOn = false;
+      save('manual');
+      return;
+    }
+    prevAutoSaveOn = cfg.enabled;
+    if (!cfg.enabled) return;   // 自动保存已关闭：不挂定时器
+    saveTimer = setTimeout(function () { save(); }, 600);
   }
 
   function b64(str) {
@@ -538,7 +577,8 @@
     return btoa(unescape(encodeURIComponent(str)));
   }
 
-  async function save() {
+  // src：'manual' = 用户点保存按钮；其余（含未传参的定时自动保存）= 自动保存走延迟提示
+  async function save(src) {
     if (!Bridge.available) { toast('无桥接，无法保存', 'err'); return; }
     if (!Object.keys(S.dirty).length && !S.dirtySpecial) return;
     var text = rebuildConfig();
@@ -550,7 +590,10 @@
     S.dirty = {}; S.dirtySpecial = false;
     // 保存只重置 dirty，不清空 S.manualExpand
     updateCollapse();
-    toast('已保存');
+    updateSaveBtn();
+    // 手动保存立即提示；自动保存按配置延迟提示（失败/无桥接分支仍为立即弹出的 err 提示）
+    if (src === 'manual') toast('已保存');
+    else showSavedToast(autoSaveCfg().delaySec);
   }
 
   // ---------- 曲线数据：读 C 每 1s 写的数据文件（无现场采样） ----------
@@ -717,6 +760,42 @@
   // 读可配置秒数（profile.conf WebUI 键，缺省/非法回落默认值）
   function gapSec(key, def) { var n = parseFloat(S.values[key]); return isFinite(n) && n >= 0 ? n : def; }
 
+  // 多字段配置值的统一切分：按空白/逗号分隔（缺键 → 空数组，各字段自然判为无效）
+  function cfgFields(key) {
+    var v = S.values[key];
+    return String(v == null ? '' : v).split(/[\s,]+/);
+  }
+
+  // 读「断联检测秒数 最大空白秒数」成对配置（WEBUI_GAP_SEC，如 "5 15"）。
+  // 逐字段判有效性：非有限数或非正数即视为无效，各自回落 5 / 15。
+  function gapPair() {
+    var p = cfgFields('WEBUI_GAP_SEC');
+    var a = parseFloat(p[0]), b = parseFloat(p[1]);
+    return {
+      detectSec: (isFinite(a) && a > 0) ? a : 5,
+      maxSec: (isFinite(b) && b > 0) ? b : 15
+    };
+  }
+
+  // 读曲线滤波配置（WEBUI_CURVE_FILTER = 「α×100 格点×100」，如 "15 5" → α=0.15、步长=0.05）。
+  // 缺键或字段无效（非有限数/负数）回落 0.15 / 0.05；0 是合法值（表示关闭该级滤波），不得当无效处理。
+  function curveFilterCfg() {
+    var p = cfgFields('WEBUI_CURVE_FILTER');
+    function pct(v, def) { var n = parseFloat(v); return (isFinite(n) && n >= 0) ? n / 100 : def; }
+    return { alpha: pct(p[0], 0.15), step: pct(p[1], 0.05) };
+  }
+
+  // 读自动保存配置（WEBUI_AUTOSAVE = 「开关 延迟秒」，如 "1 3"）。
+  // 开关：第一字段按 switchOn 判（不为 '0' 即为开，缺键时默认开）；延迟：整数，无效回落 3，钳制到 0~60。
+  function autoSaveCfg() {
+    var p = cfgFields('WEBUI_AUTOSAVE');
+    var d = parseInt(p[1], 10);
+    if (!isFinite(d)) d = 3;
+    if (d < 0) d = 0;
+    if (d > 60) d = 60;
+    return { enabled: switchOn(p[0]), delaySec: d };
+  }
+
   // 左轴风扇转速下限（RPM，profile.conf WebUI 键 WEBUI_RPM_AXIS_MIN）。
   // 缺键/非数值 → 回落 3000；0 与负值一律归 0 = 关闭过滤（与改动前逐位一致）。
   var RPM_AXIS_MIN_DEFAULT = 3000;
@@ -795,60 +874,79 @@
     return t;
   }
 
-  // ---------- 热端温度曲线滤波（零相位双向平滑 + 最小步长） ----------
+  // ---------- 曲线滤波（零相位双向平滑 + 可选最小步长） ----------
+  // 参数由 profile.conf 的 WEBUI_CURVE_FILTER 配置（α×100 格点×100），热端与电池共用同一对参数。
   // 曲线仅用于展示、且 drawChart 每次重绘都对整段样本重算，故可用非因果平滑：
   // 前向一遍 EMA 后，再对结果反向做一遍同一 EMA（等价 filtfilt）。两遍互为共轭 → 相位为零，
   // 阶跃响应是对称 S 形（首尾斜率都趋 0），稳态等于原始值（无指数拖尾、无稳态偏置）。
   // 平滑强度：单遍 EMA 白噪声方差抑制 = α/(2−α)；两遍 = [α/(2−α)]²·[1 + 2(1−α)²/(2α−α²)]。
-  var HOT_SMOOTH_ALPHA = 0.15;      // 每遍 EMA 权重（双向，实际平滑强于同 α 单遍）
-  // 最小步长：输出只取该值的整数倍。热端采样本身即 0.1°C 量化，故 0.1 就是显示量子；
-  // 作用是消灭平滑后残留的亚格点微挪（0.02 级抖动），而非改变曲线整体形状。
-  var HOT_SMOOTH_MIN_STEP = 0.05;
-  // 对一段连续有效样本就地双向平滑，结果写回 hotF。反向一遍以段末前向值为初值（末端延拓）：
+  // 关闭语义：α=0 或 α≥0.999 只跳过双向 EMA，step=0 只跳过格点吸附；两级互相独立，
+  // 且无论走哪条分支，段内每个样本的 outKey 都会被赋值（绝不跳过整个函数）。
+  // α 的判定阈值取 0.999 而非 1：配置按 ×100 整数写入，正常只会出现 0 或 100，
+  // 留这点容差是为了让手改的 99.95~100 区间一律按"关闭"处理——该区间 EMA 已几乎不改变输出，
+  // 却会因浮点残差让曲线与原始值差出亚格点级噪声，按关闭处理更符合直觉。
+  //
+  // 对一段连续有效样本就地滤波，结果写回 outKey。反向一遍以段末前向值为初值（末端延拓）：
   // 末尾沿用因果值、不引入跳变，段内为完整零相位。
-  function smoothHotSegment(samples, idx) {
+  function smoothSegment(samples, idx, srcKey, outKey, alpha, step) {
     var m = idx.length, j, prev, cur;
-    prev = samples[idx[0]].hot;
-    samples[idx[0]].hotF = prev;
-    for (j = 1; j < m; j++) {
-      prev += HOT_SMOOTH_ALPHA * (samples[idx[j]].hot - prev);
-      samples[idx[j]].hotF = prev;
+    // 第一级：双向 EMA（仅 0 < α < 0.999 生效；α=0 或 α≥0.999 即关闭，原值写回）
+    if (alpha > 0 && alpha < 0.999) {
+      prev = samples[idx[0]][srcKey];
+      samples[idx[0]][outKey] = prev;
+      for (j = 1; j < m; j++) {
+        prev += alpha * (samples[idx[j]][srcKey] - prev);
+        samples[idx[j]][outKey] = prev;
+      }
+      cur = samples[idx[m - 1]][outKey];
+      for (j = m - 2; j >= 0; j--) {
+        cur += alpha * (samples[idx[j]][outKey] - cur);
+        samples[idx[j]][outKey] = cur;
+      }
+    } else {
+      for (j = 0; j < m; j++) samples[idx[j]][outKey] = samples[idx[j]][srcKey];
     }
-    cur = samples[idx[m - 1]].hotF;
-    for (j = m - 2; j >= 0; j--) {
-      cur += HOT_SMOOTH_ALPHA * (samples[idx[j]].hotF - cur);
-      samples[idx[j]].hotF = cur;
-    }
-    // 第三遍：最小步长量化。偏差达阈值才吸附到最近的 0.1 格点（一次可跨多格），
-    // 吸附后残差 ≤ 半格(0.05)；阈值取 0.9 格：须 > 半格才不会吸附后抖动，又须 < 1 格，
-    // 否则末级台阶（差值恰为 0.1）永远跨不过去、稳态会像旧实现一样永久差 0.1。
-    // 锚点须对齐 0.1 整格（原始值即整格），否则整条曲线会带一个常数偏移、且稳态不落在真值上。
-    var q = Math.round(samples[idx[0]].hotF / HOT_SMOOTH_MIN_STEP) * HOT_SMOOTH_MIN_STEP;
-    var thr = HOT_SMOOTH_MIN_STEP * 0.9;
-    samples[idx[0]].hotF = q;
+    if (!(step > 0)) return;   // 第二级关闭：保留上一步结果
+    // 第二级：最小步长量化。输出只取 step 的整数倍。温度采样本身即 0.1°C 量化，
+    // 该级作用是消灭平滑后残留的亚格点微挪（0.02 级抖动），而非改变曲线整体形状。
+    // 偏差达阈值才吸附到最近的 step 格点（一次可跨多格），吸附后残差 ≤ 半格(step/2)；
+    // 阈值取 0.9 格：须 > 半格才不会吸附后抖动，又须 < 1 格，否则末级台阶（差值恰为 step）
+    // 永远跨不过去、稳态会像旧实现一样永久差一格。
+    // 锚点须对齐 step 整格（原始值即整格），否则整条曲线会带一个常数偏移、且稳态不落在真值上。
+    var q = Math.round(samples[idx[0]][outKey] / step) * step;
+    var thr = step * 0.9;
+    samples[idx[0]][outKey] = q;
     for (j = 1; j < m; j++) {
-      var dx = samples[idx[j]].hotF - q;
-      if (dx >= thr || dx <= -thr) q += HOT_SMOOTH_MIN_STEP * Math.round(dx / HOT_SMOOTH_MIN_STEP);
-      samples[idx[j]].hotF = q;
+      var dx = samples[idx[j]][outKey] - q;
+      if (dx >= thr || dx <= -thr) q += step * Math.round(dx / step);
+      samples[idx[j]][outKey] = q;
     }
   }
-  // 顺序平滑整个样本序列（结果与显示窗口无关，同一份数据每次得到同一曲线）
-  function applyHotFilter(samples) {
+  // 顺序滤波整个样本序列（结果与显示窗口无关，同一份数据每次得到同一曲线）。
+  // 按 srcKey 取字段做无效值判定（null 或负数即无效），电池与热端判据完全一致。
+  // 无效样本写 null 断档，有效样本至少写回原值——leftV 只认滤波后的字段，
+  // 任何样本漏赋值（undefined）都会让整条曲线消失，故"关闭滤波"也必须照常遍历一遍。
+  function applyCurveFilter(samples, srcKey, outKey, alpha, step) {
     var seg = [], i, n = samples.length;
     for (i = 0; i < n; i++) {
-      if (samples[i].hot == null || samples[i].hot < 0) {   // 无效值：断档，段结束
-        samples[i].hotF = null;
-        if (seg.length) { smoothHotSegment(samples, seg); seg = []; }
+      var v = samples[i][srcKey];
+      if (v == null || v < 0) {   // 无效值：断档，段结束
+        samples[i][outKey] = null;
+        if (seg.length) { smoothSegment(samples, seg, srcKey, outKey, alpha, step); seg = []; }
         continue;
       }
       seg.push(i);
     }
-    if (seg.length) smoothHotSegment(samples, seg);
+    if (seg.length) smoothSegment(samples, seg, srcKey, outKey, alpha, step);
   }
 
   // ---------- 曲线（双纵轴：左 ℃/rpm，右 cold） ----------
   function drawChart() {
-    applyHotFilter(S.samples);                        // 热端滤波（曲线专用；实时数值栏仍显示原始值）
+    var cf = curveFilterCfg();                        // 滤波参数（热端与电池共用同一对 α/step）
+    applyCurveFilter(S.samples, 'hot', 'hotF', cf.alpha, cf.step);      // 热端滤波
+    // 电池滤波：曲线与纵轴范围都走滤波值，而下方实时数值栏 updateLiveRow 仍显示原始值——
+    // 该栏语义是「C 端当前读数」而非「曲线上的点」；且零相位滤波在阶跃处会"先动"，属算法固有现象。
+    applyCurveFilter(S.samples, 'batt', 'battF', cf.alpha, cf.step);
     var cv = $('chart'), dpr = window.devicePixelRatio || 1;
     var cw = cv.clientWidth, ch = cv.clientHeight;
     if (!cw || !ch) return;
@@ -856,13 +954,21 @@
     var ctx = cv.getContext('2d');
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     ctx.clearRect(0, 0, cw, ch);
-    var padL = 36, padR = 36, padT = 16, padB = 4;
+    var padL = 36, padR = 36, padT = 16;
+    // 画布底边留白：实测画布与父级(.live)的高度差 = CSS 让 #chart 外扩到 .live 之下的那部分(ov)。
+    // padB 随 ov 同步增大，故 H = ch - padT - padB 与未外扩时恒等 → 纵轴刻度零变化；
+    // 两文件版本不一致（CSS 未外扩）时 ov 读到 0，几何自动退回旧行为，不会错位。
+    var ov = Math.max(0, ch - (cv.parentElement ? cv.parentElement.clientHeight : ch));
+    var padB = 4 + ov;
+    var seamY = ch - ov;   // 接缝（.live 顶边）在画布坐标里的 y
     var W = cw - padL - padR, H = ch - padT - padB;
     var data = S.samples.slice(-(S.window || 360));   // 先按条数收紧
     // 再按时间戳收紧到"最近 window 秒"：纵轴/曲线只依据显示窗口内的样本。
     // 否则断联或稀疏采样时条数≠秒数，窗口之外的早期样本会抬高纵轴上下限。
     var winSec = S.window || 360;
-    var lastT = data[data.length - 1].t;
+    // data 可能为空（parseDataLines 遇全是无效行的数据文件会返回 []），取末元素前先判长度；
+    // 空数组时 lastT 置 null，后面的 isFinite 判定自然跳过，末尾的 data.length < 2 分支照常显示"采样中…"
+    var lastT = data.length ? data[data.length - 1].t : null;
     if (data.length > 1 && isFinite(lastT)) {
       var cutoff = lastT - winSec;
       var start = 0;
@@ -876,9 +982,10 @@
     // C 端断联时不写曲线数据行（重连才续写），曲线数据里断联表现为相邻采样时间戳跳变。
     // 相邻采样时间差 > 断联判定阈值 视为一次断联：断开曲线，并按真实断开时长插入空白
     // （空白宽度 = 正常绘制该秒数的宽度，封顶到最大宽度），直观反映断联长短。
-    // 阈值/最大宽度由 profile.conf 配置（WEBUI_GAP_DETECT_SEC / WEBUI_GAP_MAX_SEC）。
-    var gapDetectSec = gapSec('WEBUI_GAP_DETECT_SEC', 5);
-    var gapMaxSec    = gapSec('WEBUI_GAP_MAX_SEC', 15);
+    // 阈值/最大宽度由 profile.conf 配置（WEBUI_GAP_SEC = 「检测秒数 最大秒数」）。
+    var gp = gapPair();
+    var gapDetectSec = gp.detectSec;
+    var gapMaxSec    = gp.maxSec;
     var gap = new Array(data.length);
     var totalGap = 0, di;
     for (di = 0; di < data.length; di++) {
@@ -895,8 +1002,15 @@
       ctx.fillText(data.length < 2 ? '采样中…' : '无曲线', padL + W / 2 - 24, padT + H / 2);
       return;
     }
-    // 取值：左轴 = 温度(℃) 或 风扇转速÷100；右轴 = 制冷强度；热端取滤波后的曲线值
-    function leftV(s, d) { return s.key === 'rpm' ? (d.rpm == null ? null : d.rpm / 100) : (s.key === 'hot' ? d.hotF : d[s.key]); }
+    // 取值：左轴 = 温度(℃) 或 风扇转速÷100；右轴 = 制冷强度；热端/电池取滤波后的曲线值
+    function leftV(s, d) {
+      if (s.key === 'rpm') return d.rpm == null ? null : d.rpm / 100;
+      // 热端/电池走滤波值（与纵轴范围同源），而实时数值栏 updateLiveRow 仍显示原始值：
+      // 该栏语义是「C 端当前读数」而非「曲线上的点」；且零相位滤波在阶跃处会"先动"，属算法固有现象。
+      if (s.key === 'hot') return d.hotF;
+      if (s.key === 'batt') return d.battF;
+      return d[s.key];
+    }
     function rightV(s, d) { return d[s.key]; }
     // 左轴转速下限：阈值 >0 时低于它的 rpm 样本一律不参与纵轴取值（按原始整数 d.rpm 比较，不换算）。
     // 兜底只在"过滤后左轴一条有效数据都不剩"时触发，见下方 Lext 处。
@@ -909,6 +1023,7 @@
     }
     var dark = !!(window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches);
     // 数据范围（未 padding，供整档轴；保证 min≤数据min、max≥数据max，绝不裁点）
+    // 注：电池轴范围现随滤波值收缩——滤波输出必落在原始 min/max 之间，只可能缩小刻度跨度。
     function extent(series, getV) {
       var mn = Infinity, mx = -Infinity;
       series.forEach(function (s) {
@@ -1015,8 +1130,11 @@
           if (last < 0) return;
           var x = padL + W * ((last + gap[last]) / totalUnits);
           var y = yOf(axis, lv);
-          if (y < padT) y = padT;              // 对准曲线端点（顶满时与边框交点一致，不再偏下）
-          if (y > padT + H) y = padT + H;
+          // 对准曲线端点（顶满时与边框交点一致，不再偏下）；只有 rpm 系列允许下越界到接缝，
+          // 其余曲线（含右轴 coldReal）一律钳制在作图区下沿，行为与改动前逐位一致。
+          var yMax = (s.key === 'rpm') ? seamY : padT + H;
+          if (y < padT) y = padT;
+          if (y > yMax) y = yMax;
           entries.push({ x: x, y: y, color: s.color, label: headLabel(s, lv) });
         });
       }
@@ -1040,6 +1158,9 @@
       // 标签基准 y：取空间更大的一侧（上方空间大→放上面；下方大→放下面）
       function sideY(cl) {
         var top = cl[0].y, bot = cl[cl.length - 1].y;
+        // 该簇最低点已越界（落到接缝之下）→ 改放上方：否则标签会被展示栏盖住，
+        // 还会连带把同簇合并的其它标签一起藏掉。
+        if (bot > padT + H) return top - 4;
         if ((top - padT) >= (padT + H - bot)) return top - 4;   // 上面
         return bot + LABEL_H + 1;                               // 下面
       }
@@ -1141,6 +1262,13 @@
       setSegActive(p > 0.5 ? 'log' : 'chart');
     }, 120);
     slider.addEventListener('scroll', syncSeg, { passive: true });
+    // 保存按钮：立即落盘。先取消待发的自动保存，避免点一次写两次盘、弹两次提示
+    var saveBtn = $('saveBtn');
+    if (saveBtn) saveBtn.addEventListener('click', function () {
+      clearTimeout(saveTimer); saveTimer = null;
+      if (!Object.keys(S.dirty).length && !S.dirtySpecial) { toast('无改动'); return; }
+      save('manual');
+    });
     // 图钉：图标蓝底状态完全由 body 的 pin-fixed 类驱动（初始/点击后都走 syncPinState）
     $('pinBtn').addEventListener('click', function () {
       document.body.classList.toggle('pin-fixed');
@@ -1307,6 +1435,7 @@
       errText = '初始化异常: ' + e.message + ' — ' + bridgeLine;
       S.items = []; S.values = {};
     }
+    prevAutoSaveOn = autoSaveCfg().enabled;   // 与已加载配置对齐，避免首次改动被误判为「开→关」
     try {
       renderGroups();
     } catch (e) {
@@ -1314,6 +1443,7 @@
     }
     initTop();
     syncPinState();
+    updateSaveBtn();   // 初始无改动 → 清掉保存按钮高亮
     initChartUI();
     initLogUI();
     initTopHeight();
@@ -1342,7 +1472,7 @@
     window.__B6X_TEST__ = {
       parseConfig: parseConfig, buildValues: buildValues, rebuildConfig: rebuildConfig,
       parseDataLines: parseDataLines,
-      smoothHotSegment: smoothHotSegment, applyHotFilter: applyHotFilter,   // 热端曲线滤波（零相位双向）
+      smoothSegment: smoothSegment, applyCurveFilter: applyCurveFilter,   // 曲线滤波（零相位双向，热端/电池共用）
       fitParamRow: fitParamRow, fitParamRows: fitParamRows,           // 参数行排布
       multiCapFor: multiCapFor, multiCaps: multiCaps,                 // 输入框组限宽候选
       fitOneLine: fitOneLine, updateLiveRow: updateLiveRow, refitBars: refitBars,   // 单行适配逻辑测试钩子
