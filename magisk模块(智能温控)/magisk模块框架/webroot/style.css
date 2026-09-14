@@ -43,14 +43,10 @@ body {
   -webkit-text-size-adjust: 100%;
 }
 
-/* ---------- 布局：固定 vs 滚动隐藏 ---------- */
+/* ---------- 布局：顶部区（曲线/日志面板）恒为固定 ---------- */
 body.pin-fixed .app { height: 100dvh; display: flex; flex-direction: column; overflow: hidden; }
 body.pin-fixed .top { flex: 0 0 max(var(--top-h, 36dvh), 220px); min-height: 0; }   /* 顶部高度保底 220px */
 body.pin-fixed .config { flex: 1; overflow-y: auto; min-height: 0; }
-
-body.pin-scroll .app { display: block; }
-body.pin-scroll .top { height: max(var(--top-h, 36dvh), 220px); }   /* 顶部高度保底 220px */
-body.pin-scroll .config { overflow: visible; }
 
 /* ---------- 顶部横滑容器 ---------- */
 .top {
@@ -74,10 +70,10 @@ body.pin-scroll .config { overflow: visible; }
   align-items: center; justify-content: center; cursor: pointer; font-size: 14px;
 }
 .icon-btn.active, .icon-btn:hover { color: var(--accent); border-color: var(--accent); }
-/* 右上角操作组：保存 + 图钉靠在一起，不被 .top-bar 的 space-between 摆到正中 */
+/* 右上角操作组：不被 .top-bar 的 space-between 摆到正中 */
 .top-actions { display: flex; gap: 6px; align-items: center; }
-/* 有未保存改动时的高亮：由 app.js 的 updateSaveBtn() 切换 .has-dirty */
-#saveBtn.has-dirty { background: var(--accent); border-color: var(--accent); color: var(--surface); }
+/* 常蓝态：自动保存开启时恒亮，另由 app.js 的 flashSaveBtn() 在手点保存后临时点亮 1 秒 */
+#saveBtn.lit { background: var(--accent); border-color: var(--accent); color: var(--surface); }
 
 .top-slider {
   flex: 1; min-height: 0;
@@ -223,6 +219,8 @@ body.pin-scroll .config { overflow: visible; }
 input[type=number]::-webkit-inner-spin-button,
 input[type=number]::-webkit-outer-spin-button { -webkit-appearance: none; margin: 0; }
 input[type=number] { -moz-appearance: textfield; }
+/* 聚焦描边统一为蓝色：覆盖 UA 默认焦点环（后者受 color-scheme 影响，深色模式下是亮/白色） */
+input:focus { outline: 2px solid var(--accent); outline-offset: 1px; }
 
 /* 开关 */
 .switch { position: relative; display: inline-block; width: 42px; height: 24px; flex: 0 0 auto; }

@@ -216,10 +216,22 @@
     scheduleSave();
   }
 
-  // 保存按钮高亮：有未保存改动时加 has-dirty 类（补偿「关闭自动保存后界面无未保存提示」）
+  // 保存按钮常蓝态：自动保存开启 → 恒亮（改动即自动落盘，无需提示）；关闭 → 灰，仅手点保存后由 flashSaveBtn() 临时点亮
   function updateSaveBtn() {
     var b = $('saveBtn');
-    if (b) b.classList.toggle('has-dirty', Object.keys(S.dirty).length > 0 || !!S.dirtySpecial);
+    if (b) b.classList.toggle('lit', autoSaveCfg().enabled);
+  }
+
+  // 手点保存后的 1 秒高亮计时器。与 saveToastTimer 无关，勿复用后者：
+  // toast() 首行会 clearTimeout(saveToastTimer)，复用会导致高亮永不熄灭。
+  var saveFlashTimer = null;
+  function flashSaveBtn() {
+    var b = $('saveBtn');
+    if (!b) return;
+    clearTimeout(saveFlashTimer);
+    b.classList.add('lit');
+    // 到点重跑 updateSaveBtn() 而非直接 remove('lit')：自动保存开着时按钮本就该常蓝，直接 remove 会误灭
+    saveFlashTimer = setTimeout(updateSaveBtn, 1000);
   }
 
   // ---------- 折叠逻辑：固定默认收起 + 组头点击手动展开（不随开关状态） ----------
@@ -577,22 +589,24 @@
     return btoa(unescape(encodeURIComponent(str)));
   }
 
-  // src：'manual' = 用户点保存按钮；其余（含未传参的定时自动保存）= 自动保存走延迟提示
+  // src：'btn' = 用户点保存按钮（唯一闪蓝来源）；'manual' = 「开→关」跳变的程序补存；无参 = 定时自动保存
   async function save(src) {
     if (!Bridge.available) { toast('无桥接，无法保存', 'err'); return; }
-    if (!Object.keys(S.dirty).length && !S.dirtySpecial) return;
+    if (!Object.keys(S.dirty).length) return;
     var text = rebuildConfig();
     var r = await Bridge.exec('echo ' + b64(text) + ' | base64 -d > ' + CFG);
     if (r.errno !== 0) { toast('保存失败: ' + (r.stderr || 'errno ' + r.errno), 'err'); return; }
     // 把刚写入的内容同步回 S.items 快照
     S.items = parseConfig(text);
     S.values = buildValues(S.items);
-    S.dirty = {}; S.dirtySpecial = false;
+    S.dirty = {};
     // 保存只重置 dirty，不清空 S.manualExpand
     updateCollapse();
     updateSaveBtn();
-    // 手动保存立即提示；自动保存按配置延迟提示（失败/无桥接分支仍为立即弹出的 err 提示）
-    if (src === 'manual') toast('已保存');
+    // 仅用户手点按钮时闪 1 秒蓝；须在 updateSaveBtn() 之后，否则刚点亮的 lit 会被按「自动保存已关」抹掉
+    if (src === 'btn') flashSaveBtn();
+    // 手动保存与程序补存立即提示；自动保存按配置延迟提示（失败/无桥接分支仍为立即弹出的 err 提示）
+    if (src === 'btn' || src === 'manual') toast('已保存');
     else showSavedToast(autoSaveCfg().delaySec);
   }
 
@@ -1164,6 +1178,16 @@
         if ((top - padT) >= (padT + H - bot)) return top - 4;   // 上面
         return bot + LABEL_H + 1;                               // 下面
       }
+      // 标签绘制：先用背景色描边（halo）再填色，避免曲线穿过字形时同色糊在一起。
+      // 描边色 = 图表背后实际底色（.top 的 var(--surface)：深色 #171c22 / 浅色 #ffffff）。
+      function label(text, x, y, color) {
+        ctx.font = '10px system-ui';
+        ctx.lineWidth = 3;
+        ctx.strokeStyle = dark ? '#171c22' : '#ffffff';
+        ctx.strokeText(text, x, y);
+        ctx.fillStyle = color;
+        ctx.fillText(text, x, y);
+      }
       function dot(e) {
         ctx.fillStyle = e.color;
         ctx.beginPath(); ctx.arc(e.x, e.y, 3.2, 0, Math.PI * 2); ctx.fill();
@@ -1175,8 +1199,7 @@
         if (ly > padT + H + LABEL_H) ly = padT + H + LABEL_H;
         if (c.length === 1) {
           dot(c[0]);
-          ctx.font = '10px system-ui'; ctx.fillStyle = c[0].color;
-          ctx.fillText(c[0].label, c[0].tx, ly);
+          label(c[0].label, c[0].tx, ly, c[0].color);
           return;
         }
         // 合并为一行：每段自身颜色，' / ' 灰间隔
@@ -1188,10 +1211,9 @@
         if (tx < 2) tx = 2;
         ctx.font = '10px system-ui';
         for (var i = 0; i < c.length; i++) {
-          ctx.fillStyle = c[i].color;
-          ctx.fillText(c[i].label, tx, ly);
+          label(c[i].label, tx, ly, c[i].color);
           tx += c[i].w;
-          if (i < c.length - 1) { ctx.fillStyle = '#888'; ctx.fillText(' / ', tx, ly); tx += sep; }
+          if (i < c.length - 1) { label(' / ', tx, ly, '#888'); tx += sep; }
         }
         c.forEach(dot);
       });
@@ -1266,15 +1288,8 @@
     var saveBtn = $('saveBtn');
     if (saveBtn) saveBtn.addEventListener('click', function () {
       clearTimeout(saveTimer); saveTimer = null;
-      if (!Object.keys(S.dirty).length && !S.dirtySpecial) { toast('无改动'); return; }
-      save('manual');
-    });
-    // 图钉：图标蓝底状态完全由 body 的 pin-fixed 类驱动（初始/点击后都走 syncPinState）
-    $('pinBtn').addEventListener('click', function () {
-      document.body.classList.toggle('pin-fixed');
-      var pinned = document.body.classList.contains('pin-fixed');
-      document.body.classList.toggle('pin-scroll', !pinned);   // 互斥：移除另一类
-      syncPinState();
+      if (!Object.keys(S.dirty).length) { toast('无改动'); return; }
+      save('btn');
     });
   }
 
@@ -1356,7 +1371,7 @@
     $('logFollowBtn').addEventListener('click', function () { S.manualScroll = false; scrollLogBottom(); $('logFollowBtn').classList.remove('off'); });
   }
 
-  // ---------- 顶部高度：点住即拖动改高度（不记忆，每次加载回默认 = 渲染窗口的 2/5，pin-fixed/pin-scroll 均生效） ----------
+  // ---------- 顶部高度：点住即拖动改高度（不记忆，每次加载回默认 = 渲染窗口的 2/5） ----------
   var TOP_H_MIN = 15, TOP_H_MAX = 80;      // dvh 范围
   var TOP_H_DEFAULT = 36;                  // 默认顶部高度（dvh）
 
@@ -1401,11 +1416,6 @@
     window.addEventListener('mouseup', onUp);
   }
 
-  // 图钉状态同步：仅固定时蓝色（蓝底 = body 有 pin-fixed）
-  function syncPinState() {
-    $('pinBtn').classList.toggle('active', document.body.classList.contains('pin-fixed'));
-  }
-
   // ---------- 启动 ----------
   async function init() {
     var errText = null;
@@ -1442,8 +1452,7 @@
       errText = (errText ? errText + ' | ' : '') + '渲染异常: ' + e.message;
     }
     initTop();
-    syncPinState();
-    updateSaveBtn();   // 初始无改动 → 清掉保存按钮高亮
+    updateSaveBtn();   // 初始按自动保存配置同步保存按钮的常蓝状态
     initChartUI();
     initLogUI();
     initTopHeight();
