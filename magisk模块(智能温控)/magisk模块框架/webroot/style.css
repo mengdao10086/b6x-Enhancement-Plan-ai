@@ -108,7 +108,8 @@ body.pin-fixed .config { flex: 1; overflow-y: auto; min-height: 0; }
   border-radius: 6px; padding: 2px 8px; font-size: 11px;
 }
 .win-btn.active { color: #fff; background: var(--accent); border-color: var(--accent); }
-.series { display: flex; gap: 8px; flex-wrap: nowrap; overflow: hidden; align-items: center; font-size: 11px; }
+/* gap 5px = 原 8px 减去图例勾选框焦点环占掉的 3px；环已不画，视觉间距保持不变 */
+.series { display: flex; gap: 5px; flex-wrap: nowrap; overflow: hidden; align-items: center; font-size: 11px; }
 .series-item { display: inline-flex; align-items: center; gap: 4px; color: var(--muted); white-space: nowrap; flex: 0 0 auto; }
 .series-item input { accent-color: var(--accent); }
 .series-item input[type=checkbox] { width: 16px; height: 16px; flex: 0 0 auto; }
@@ -221,6 +222,8 @@ input[type=number]::-webkit-outer-spin-button { -webkit-appearance: none; margin
 input[type=number] { -moz-appearance: textfield; }
 /* 聚焦描边统一为蓝色：覆盖 UA 默认焦点环（后者受 color-scheme 影响，深色模式下是亮/白色） */
 input:focus { outline: 2px solid var(--accent); outline-offset: 1px; }
+/* 图例勾选框例外：.series 是 overflow:hidden，焦点环上下被裁掉、只剩左右两条竖线 */
+.series-item input:focus { outline: none; }
 
 /* 开关 */
 .switch { position: relative; display: inline-block; width: 42px; height: 24px; flex: 0 0 auto; }

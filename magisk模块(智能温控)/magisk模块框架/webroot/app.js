@@ -1191,7 +1191,8 @@
       function dot(e) {
         ctx.fillStyle = e.color;
         ctx.beginPath(); ctx.arc(e.x, e.y, 3.2, 0, Math.PI * 2); ctx.fill();
-        ctx.strokeStyle = dark ? '#101418' : '#ffffff'; ctx.lineWidth = 1; ctx.stroke();
+        // 描边色同 label 的 halo = 图表背后底色（.top 的 var(--surface)）
+        ctx.strokeStyle = dark ? '#171c22' : '#ffffff'; ctx.lineWidth = 1; ctx.stroke();
       }
       clusters.forEach(function (c) {
         var ly = sideY(c);
