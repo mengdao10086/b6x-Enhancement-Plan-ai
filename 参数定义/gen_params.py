@@ -2,15 +2,17 @@
 # -*- coding: utf-8 -*-
 """B6X 温控参数定义 —— 生成脚本（R1 单一来源）
 
+定位（本文件是唯一实现处）：
+  · 唯一手写处是 参数定义/params.def.json。
+  · 全部产物由本文件生成；**来源清单（SOURCES）与产物清单（PRODUCTS）也只在本文件声明**。
+  · check_params.py 只做校验，一律 import 本文件的常量与函数，不另行声明来源/产物。
+
 用法：
-    python 参数定义/gen_params.py              # 生成 assets/params.json（幂等）
-    python 参数定义/gen_params.py --audit      # 只做四源漂移审计，不写文件（漂移则退出 2）
+    python 参数定义/gen_params.py            # 生成全部产物（幂等）
+    python 参数定义/gen_params.py --audit    # 只做三源漂移审计，不写文件（漂移则退出 2）
     python 参数定义/gen_params.py --audit --quiet
 
-来源：参数定义/params.def.json（唯一手写处）
-产物：lsp模块(apk修复+温控接口)/app/src/main/assets/params.json
-
-零第三方依赖（仅标准库）。定位 C 侧信息一律用「函数名 / 键名 / 表名 + 关键判据」，
+零第三方依赖（仅标准库）。定位 C 侧信息一律用「函数名 / 键名 / 表名 / 宏名 + 关键判据」，
 不写死行号（本工程索引行号恒比工作树小 1，行号不可靠）。
 """
 
@@ -20,18 +22,56 @@ import json
 import os
 import re
 import sys
+from collections import namedtuple
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.dirname(HERE)
 
 DEF_PATH = os.path.join(HERE, "params.def.json")
-PRODUCT_REL_DEFAULT = "lsp模块(apk修复+温控接口)/app/src/main/assets/params.json"
 
-MAGISK_DIR = os.path.join(REPO, "magisk模块(智能温控)")
-C_PATH = os.path.join(MAGISK_DIR, "tempctrl.c")
-CONF_PATH = os.path.join(MAGISK_DIR, "magisk模块框架", "profile.conf")
-SCHEMA_PATH = os.path.join(MAGISK_DIR, "magisk模块框架", "webroot", "schema.js")
-DOC_PATH = os.path.join(MAGISK_DIR, "逻辑说明.md")
+# --------------------------------------------------------------------------
+# 来源清单（三源）：check_params.py 直接引用此处，不得在别处重复声明
+# --------------------------------------------------------------------------
+
+Source = namedtuple("Source", "id path desc")
+
+SOURCES = (
+    Source("conf", "lsp模块/daemon/profile.conf",
+           "配置文件出厂模板（部署到设备，C 端热重载）"),
+    Source("doc", "逻辑说明.md",
+           "设计说明的参数表段（仓库根；其余章节不由本工具维护）"),
+    Source("c", "lsp模块/daemon/tempctrl.c",
+           "守护进程源码：解析的键、clamp 边界、护栏"),
+)
+
+
+def source_path(source):
+    return os.path.join(REPO, source.path)
+
+
+# --------------------------------------------------------------------------
+# 产物清单：check_params.py 断言 A 逐项复核
+#   kind = full   → 整个文件由定义生成
+#   kind = region → 只重写文件内的标记区间（其余内容由人工维护）
+# --------------------------------------------------------------------------
+
+Product = namedtuple("Product", "id path kind desc")
+
+PRODUCTS = (
+    Product("params.json", "lsp模块/app/src/main/assets/params.json", "full",
+            "界面消费的键/范围/默认值（APK assets）"),
+    Product("profile.conf", "lsp模块/daemon/profile.conf", "full",
+            "配置文件出厂模板（含注释）"),
+    Product("doc-table", "逻辑说明.md", "region",
+            "逻辑说明.md 的参数表段（标记区间内）"),
+    Product("c-header", "lsp模块/daemon/params_generated.h", "full",
+            "C 端键表与 clamp 边界（供 tempctrl.c 包含）"),
+)
+
+DOC_START = "<!-- params-table:start （本节由 参数定义/gen_params.py 生成，勿手改） -->"
+DOC_END = "<!-- params-table:end -->"
+
+DEF_REL = "参数定义/params.def.json"
 
 REQUIRED_KEY_FIELDS = (
     "key", "group", "role", "type", "label", "desc",
@@ -49,8 +89,19 @@ def load_def():
     return json.loads(read_text(DEF_PATH))
 
 
+def product_path(product):
+    return os.path.join(REPO, product.path)
+
+
+def product_by_id(pid):
+    for p in PRODUCTS:
+        if p.id == pid:
+            return p
+    raise KeyError(pid)
+
+
 # --------------------------------------------------------------------------
-# 产物构建
+# 产物构建：assets/params.json
 # --------------------------------------------------------------------------
 
 def _field_product(field):
@@ -66,7 +117,7 @@ def _field_product(field):
     return out
 
 
-def build_product(definition):
+def build_params_json(definition):
     """由定义构建界面消费的 params.json（键序完全由定义决定，保证幂等）。"""
     keys_out = {}
     for entry in definition["keys"]:
@@ -109,7 +160,7 @@ def build_product(definition):
         "formatVersion": definition["meta"]["productFormatVersion"],
         "moduleId": definition["meta"]["moduleId"],
         "configFileName": definition["meta"]["configFileName"],
-        "generatedFrom": "参数定义/params.def.json",
+        "generatedFrom": DEF_REL,
         "chart": {
             "windowOptionsSec": list(chart["windowOptionsSec"]),
             "windowDefaultSec": chart["windowDefaultSec"],
@@ -120,32 +171,287 @@ def build_product(definition):
     }
 
 
-def render(product):
-    return json.dumps(product, ensure_ascii=False, indent=2) + "\n"
-
-
-def product_path(definition):
-    return os.path.join(REPO, definition["meta"]["productPath"]
-                        if definition["meta"].get("productPath") else PRODUCT_REL_DEFAULT)
-
-
-def write_product(definition):
-    path = product_path(definition)
-    text = render(build_product(definition))
-    changed = True
-    if os.path.exists(path):
-        changed = read_text(path) != text
-    if changed:
-        d = os.path.dirname(path)
-        if not os.path.isdir(d):
-            os.makedirs(d)
-        with io.open(path, "w", encoding="utf-8", newline="\n") as fh:
-            fh.write(text)
-    return path, changed, text
+def render_params_json(definition):
+    return json.dumps(build_params_json(definition), ensure_ascii=False,
+                      indent=2) + "\n"
 
 
 # --------------------------------------------------------------------------
-# 四源审计：定位一律用「函数名 / 表名 / 键名」判据，不用行号
+# 产物构建：profile.conf
+# --------------------------------------------------------------------------
+
+def group_tag(group):
+    m = re.match(r"^(\[\d+\])\s*", group["title"])
+    return m.group(1) if m else ""
+
+
+def _conf_value(entry):
+    """profile.conf 写出的是**出厂值**（配置文件不存在时由部署流程写入的值）。"""
+    val = entry["factory"]
+    if entry["type"] == "multi":
+        return " ".join(str(v) for v in val)
+    return str(val)
+
+
+def _conf_inline_pads(entries):
+    """行内注释对齐：定义中**相邻**的带 confInline 的键为一段，段内 '#' 对齐到最宽 KEY=VALUE + 4。"""
+    pads = {}
+    run = []
+
+    def flush():
+        if run:
+            width = max(len("%s=%s" % (e["key"], _conf_value(e))) for e in run) + 4
+            for e in run:
+                pads[e["key"]] = width
+    for entry in entries:
+        if entry.get("confInline"):
+            run.append(entry)
+        else:
+            flush()
+            run = []
+    flush()
+    return pads
+
+
+def render_conf(definition):
+    out = []
+    for line in definition["conf"]["header"]:
+        out.append(("# " + line).rstrip())
+    out.append("")
+
+    for group in definition["groups"]:
+        tag = group_tag(group)
+        entries = [e for e in definition["keys"] if e["group"] == group["id"]]
+        pads = _conf_inline_pads(entries)
+        first = True
+        for entry in entries:
+            section = entry.get("confSection")
+            if section:
+                if not first:
+                    out.append("")
+                out.append(("# %s %s" % (tag, section)).rstrip())
+            elif first:
+                out.append(("# " + group["title"]
+                            + group.get("confTitleNote", "")).rstrip())
+            elif entry.get("confNote"):
+                out.append("")
+            first = False
+            for line in (entry.get("confNote") or []):
+                out.append(("# " + line).rstrip())
+            text = "%s=%s" % (entry["key"], _conf_value(entry))
+            if entry.get("confInline"):
+                text = text.ljust(pads[entry["key"]]) + "# " + entry["confInline"]
+            out.append(text)
+        out.append("")
+
+    while out and out[-1] == "":
+        out.pop()
+    return "\n".join(out) + "\n"
+
+
+# --------------------------------------------------------------------------
+# 产物构建：逻辑说明.md 的参数表段（标记区间）
+# --------------------------------------------------------------------------
+
+def doc_order_key(entry):
+    return entry.get("docOrder", 0)
+
+
+def _doc_default_cell(entry):
+    val = entry["default"]
+    if entry["type"] == "multi":
+        return " ".join(str(v) for v in val)
+    return str(val)
+
+
+def render_doc_region(definition):
+    entries = sorted([e for e in definition["keys"] if e.get("docDesc")],
+                     key=doc_order_key)
+    out = [DOC_START]
+    for line in definition["doc"]["intro"]:
+        out.append(("> " + line).rstrip() if line else ">")
+    out.append("")
+    out.append("| 参数 | 默认值 | 说明 |")
+    out.append("|------|--------|------|")
+    for entry in entries:
+        out.append("| `%s` | %s | %s |"
+                   % (entry["key"], _doc_default_cell(entry), entry["docDesc"]))
+    out.append(DOC_END)
+    return "\n".join(out) + "\n"
+
+
+def find_doc_region(text):
+    """返回 (起点, 终点)；起点 = 起始标记行首，终点 = 结束标记行尾（不含换行）。"""
+    i = text.find(DOC_START)
+    j = text.find(DOC_END)
+    if i < 0 or j < 0:
+        raise ValueError("逻辑说明.md 缺少参数表标记区间（%s ... %s）"
+                         % (DOC_START, DOC_END))
+    return i, j + len(DOC_END)
+
+
+# --------------------------------------------------------------------------
+# 产物构建：C 端键表与 clamp 边界（params_generated.h）
+#   逐键/逐字段的 clamp 边界全部由定义给出；多值键的**解析代码**仍在 tempctrl.c
+#   手写（取位、全或无提交等语义不在定义表达范围内），只由审计覆盖。
+# --------------------------------------------------------------------------
+
+def first_cvar(definition, key):
+    """键在 tempctrl.c 内的首个 C 变量名（无则 None）。"""
+    vars_ = definition["audit"]["cVars"].get(key) or []
+    return vars_[0] if vars_ else None
+
+
+def c_slot_ident(entry, idx):
+    """clamp 边界宏的标识：单值键 = 键名；多值键 = 键名_字段序号（1 起）。"""
+    if entry["type"] == "multi":
+        return "%s_%d" % (entry["key"], idx + 1)
+    return entry["key"]
+
+
+def _c_default(entry):
+    val = entry["default"]
+    if isinstance(val, str):
+        return json.dumps(val, ensure_ascii=False)
+    return str(val)
+
+
+def build_c_header(definition):
+    entries = definition["keys"]
+    daemon = [e for e in entries if e.get("daemonConsumes", True)]
+    webui = [e for e in entries if not e.get("daemonConsumes", True)]
+    perf_int = [e for e in entries if e.get("cTable") == "perf-int"]
+    sysfs = [e for e in entries if e.get("cTable") == "sysfs"]
+
+    lines = []
+    lines.append("/* 本文件由 python 参数定义/gen_params.py 生成，勿手改。")
+    lines.append(" * 唯一手写处：%s；改动后重跑生成脚本。" % DEF_REL)
+    lines.append(" * 只定义宏。X 宏的展开点必须在 struct SysfsCfgKey / enum SK_* 与所有被取地址的")
+    lines.append(" * static 变量（BATT_TEMP_PATH、log_file_path、LOG_MAX 等）声明之后。 */")
+    lines.append("#ifndef PARAMS_GENERATED_H")
+    lines.append("#define PARAMS_GENERATED_H")
+    lines.append("")
+    lines.append("/* 键数：守护进程消费 / 仅界面读取 */")
+    lines.append("#define CFG_DAEMON_KEY_COUNT %d" % len(daemon))
+    lines.append("#define CFG_WEBUI_KEY_COUNT %d" % len(webui))
+    lines.append("")
+
+    lines.append("/* 性能层单值键表（PERF_ENABLED=1）→ INT_CFG_KEYS[]：X(键名, C 变量, min, max) */")
+    lines.append("#define CFG_PERF_INT_KEYS(X) \\")
+    rows = []
+    for e in perf_int:
+        rows.append('    X("%s", %s, %d, %d)'
+                    % (e["key"], first_cvar(definition, e["key"]), e["min"], e["max"]))
+    lines.append(" \\\n".join(rows))
+    lines.append("")
+
+    lines.append("/* sysfs 层键表（SYSFS_ENABLED=1）→ SYSFS_CFG_KEYS[]：")
+    lines.append(" *   X(键名, kind, ivar, imin, imax, svar, ssize)")
+    lines.append(" * kind/SK_INT 槽位钳制范围由本表给出；SK_ZONE/SK_RESCAN 的逐字段范围见 CFG_MIN/MAX_*。 */")
+    lines.append("#define CFG_SYSFS_KEYS(X) \\")
+    rows = []
+    for e in sysfs:
+        cvar = first_cvar(definition, e["key"])
+        if e.get("cKind") == "SK_INT":
+            rows.append('    X("%s", SK_INT, &%s, %d, %d, NULL, 0)'
+                        % (e["key"], cvar, e["min"], e["max"]))
+        elif e.get("cKind") == "SK_PATH":
+            rows.append('    X("%s", SK_PATH, NULL, 0, 0, %s, sizeof(%s))'
+                        % (e["key"], cvar, cvar))
+        else:
+            rows.append('    X("%s", %s, NULL, 0, 0, NULL, 0)'
+                        % (e["key"], e.get("cKind")))
+    lines.append(" \\\n".join(rows))
+    lines.append("")
+
+    lines.append("/* 逐键/逐字段 clamp 边界（单值键 = 键名；多值键 = 键名_字段序号）。")
+    lines.append(" * 多值键与 SK_ZONE/SK_RESCAN 的解析代码仍在 tempctrl.c 手写，此处只提供边界值。 */")
+    for e in daemon:
+        if e["type"] not in ("int", "multi"):
+            continue
+        fields = e.get("fields")
+        if e["type"] == "multi" and fields:
+            for i, f in enumerate(fields):
+                if f.get("bool"):
+                    continue
+                ident = c_slot_ident(e, i)
+                cvar = f.get("cVar")
+                tail = ("  /* C 变量 %s */" % cvar) if cvar else ""
+                lines.append("#define CFG_MIN_%s %d%s" % (ident, f["min"], tail))
+                lines.append("#define CFG_MAX_%s %d" % (ident, f["max"]))
+        else:
+            cvar = first_cvar(definition, e["key"])
+            tail = ("  /* C 变量 %s */" % cvar) if cvar else ""
+            lines.append("#define CFG_MIN_%s %d%s" % (e["key"], e["min"], tail))
+            lines.append("#define CFG_MAX_%s %d" % (e["key"], e["max"]))
+    lines.append("")
+
+    paths = [e for e in daemon if e["type"] == "path"]
+    lines.append("/* 路径键默认值（C 端同名变量初值；LOG_FILE 运行期由 PRIVATE_DIR + 二进制名派生）*/")
+    for e in paths:
+        lines.append("#define CFG_DEFAULT_%s %s" % (e["key"], _c_default(e)))
+    lines.append("")
+    lines.append("#endif  /* PARAMS_GENERATED_H */")
+    return "\n".join(lines) + "\n"
+
+
+# --------------------------------------------------------------------------
+# 产物写入
+# --------------------------------------------------------------------------
+
+def render_product(pid, definition):
+    if pid == "params.json":
+        return render_params_json(definition)
+    if pid == "profile.conf":
+        return render_conf(definition)
+    if pid == "c-header":
+        return build_c_header(definition)
+    if pid == "doc-table":
+        return render_doc_region(definition)
+    raise KeyError(pid)
+
+
+def expected_product(pid, definition):
+    """产物应有的落盘内容（全文口径；region 产物返回整文件应有内容）。"""
+    product = product_by_id(pid)
+    text = render_product(pid, definition)
+    path = product_path(product)
+    if product.kind == "full":
+        return text
+    if not os.path.exists(path):
+        raise IOError("产物不存在：%s" % path)
+    current = read_text(path)
+    i, j = find_doc_region(current)
+    return current[:i] + text.rstrip("\n") + current[j:]
+
+
+def write_product(pid, definition):
+    product = product_by_id(pid)
+    path = product_path(product)
+    text = render_product(pid, definition)
+    if product.kind == "full":
+        new_text = text
+    else:
+        current = read_text(path) if os.path.exists(path) else ""
+        i, j = find_doc_region(current)
+        new_text = current[:i] + text.rstrip("\n") + current[j:]
+    old_text = read_text(path) if os.path.exists(path) else None
+    changed = old_text != new_text
+    if changed:
+        d = os.path.dirname(path)
+        if d and not os.path.isdir(d):
+            os.makedirs(d)
+        with io.open(path, "w", encoding="utf-8", newline="\n") as fh:
+            fh.write(new_text)
+    return path, changed
+
+
+def write_all(definition):
+    return [write_product(p.id, definition) for p in PRODUCTS]
+
+
+# --------------------------------------------------------------------------
+# 三源审计：定位一律用「函数名 / 表名 / 键名 / 宏名」判据，不用行号
 # --------------------------------------------------------------------------
 
 def _block(text, start_pat, stop_pat):
@@ -198,24 +504,49 @@ def parse_gradle_application_id(gradle_text):
     return m.group(1) if m else None
 
 
+C_TABLE_NAME = {"perf-int": "INT_CFG_KEYS", "sysfs": "SYSFS_CFG_KEYS"}
+
+INT_ROW_RE = re.compile(r'\{\s*"([A-Z0-9_]+)"\s*,\s*&(\w+)\s*,\s*'
+                        r'([A-Za-z_0-9]+)\s*,\s*([A-Za-z_0-9]+)\s*\}')
+SYSFS_ROW_RE = re.compile(r'\{\s*"([A-Z0-9_]+)"\s*,\s*(SK_\w+)\s*,\s*([^,]+?)\s*,\s*'
+                          r'([A-Za-z_0-9]+)\s*,\s*([A-Za-z_0-9]+)\s*,\s*([^,]+?)\s*,\s*([^}]+?)\s*\}')
+
+
+def _c_table_block(c_text, table):
+    return _block(c_text, r"%s\s*\[\s*\]\s*=\s*\{" % table, r"\n\};")
+
+
+def parse_c_tables(c_text):
+    """C 端两张键表的 (键, 变量/kind, min, max) 行集合。
+
+    表体若已被生成头接管（`<表名>(CFG_ROW)` 形态）则返回空行集，交由调用方按产物口径处理。
+    """
+    rows = {"perf-int": [], "sysfs": []}
+    for pid, table in C_TABLE_NAME.items():
+        if re.search(r"%s\s*\(\s*\w+\s*\)" % table, c_text):
+            continue          # 表体由 params_generated.h 的 X 宏展开
+        body = _c_table_block(c_text, table)
+        if pid == "perf-int":
+            for m in INT_ROW_RE.finditer(body):
+                rows[pid].append((m.group(1), m.group(2), m.group(3), m.group(4)))
+        else:
+            for m in SYSFS_ROW_RE.finditer(body):
+                rows[pid].append((m.group(1), m.group(3).strip("& "), m.group(4), m.group(5)))
+    return rows
+
+
 def parse_c_keys(c_text):
     """C 端实际解析的配置键集合 + 各键出处。"""
     found = {}
-
-    table = _block(c_text, r"INT_CFG_KEYS\s*\[\s*\]\s*=\s*\{", r"\n\};")
-    for m in re.finditer(r'\{\s*"([A-Z0-9_]+)"\s*,\s*&(\w+)\s*,\s*'
-                         r'([A-Za-z_0-9]+)\s*,\s*([A-Za-z_0-9]+)\s*\}', table):
-        found[m.group(1)] = "INT_CFG_KEYS"
-
+    tables = parse_c_tables(c_text)
+    for pid, table in C_TABLE_NAME.items():
+        for row in tables[pid]:
+            found[row[0]] = table
     for func in ("parse_debug_cfg", "parse_sysfs_cfg", "parse_pid_cfg",
                  "parse_common_cfg", "load_config"):
         body = _func_body(c_text, func)
         for m in re.finditer(r'strcmp\(\s*key\s*,\s*"([A-Z0-9_]+)"\s*\)', body):
             found.setdefault(m.group(1), func)
-
-    sysfs_body = _func_body(c_text, "is_sysfs_key")
-    found["__is_sysfs_key__"] = set(
-        m.group(1) for m in re.finditer(r'strcmp\(\s*key\s*,\s*"([A-Z0-9_]+)"\s*\)', sysfs_body))
     return found
 
 
@@ -249,11 +580,18 @@ def parse_c_ranges(c_text, macros):
         return None
 
     table = _block(c_text, r"INT_CFG_KEYS\s*\[\s*\]\s*=\s*\{", r"\n\};")
-    for m in re.finditer(r'\{\s*"([A-Z0-9_]+)"\s*,\s*&(\w+)\s*,\s*'
-                         r'([A-Za-z_0-9]+)\s*,\s*([A-Za-z_0-9]+)\s*\}', table):
+    for m in INT_ROW_RE.finditer(table):
         lo, hi = resolve(m.group(3)), resolve(m.group(4))
         if lo is not None and hi is not None:
             ranges.setdefault(m.group(2), set()).add((lo, hi))
+
+    sysfs_table = _block(c_text, r"SYSFS_CFG_KEYS\s*\[\s*\]\s*=\s*\{", r"\n\};")
+    for m in SYSFS_ROW_RE.finditer(sysfs_table):
+        if m.group(2) != "SK_INT":
+            continue          # SK_PATH 无范围；SK_ZONE / SK_RESCAN 的 clamp 在下方按调用点收
+        lo, hi = resolve(m.group(4)), resolve(m.group(5))
+        if lo is not None and hi is not None:
+            ranges.setdefault(m.group(3).strip("& "), set()).add((lo, hi))
 
     for m in re.finditer(r"(\w+)\s*=\s*clamp\(\s*[^,]+,\s*([A-Za-z_0-9]+)\s*,"
                          r"\s*([A-Za-z_0-9]+)\s*\)", c_text):
@@ -273,41 +611,127 @@ def parse_conf_keys(conf_text):
     return keys
 
 
-def parse_schema_keys(schema_text):
-    body = _block(schema_text, r"keys\s*:\s*\{", r"\n\s*\},\s*\n")
-    keys = [m.group(1) for m in re.finditer(r'^ {4}([A-Z][A-Z0-9_]*)\s*:\s*\{',
-                                            body, re.M)]
-    return keys
-
-
 def parse_doc_keys(doc_text):
-    """定位参数表：找表头行（含「参数」「默认值」「说明」），再收 52 行键行。"""
-    lines = doc_text.splitlines()
-    start = None
-    for i, line in enumerate(lines):
-        if "默认值" in line and "说明" in line and line.lstrip().startswith("|"):
-            start = i + 2  # 跳过表头与其下的分隔行
-            break
-    if start is None:
+    """定位参数表标记区间内的键行（表头之下的 `| \\`KEY\\` | ...` 行）。"""
+    try:
+        i, j = find_doc_region(doc_text)
+    except ValueError:
         return []
     keys = []
-    for line in lines[start:]:
-        if not line.lstrip().startswith("|"):
-            break
-        m = re.match(r"\|\s*`([A-Z0-9_]+)`", line)
-        if not m:
-            break
-        keys.append(m.group(1))
+    for line in doc_text[i:j].splitlines():
+        m = re.match(r"^\|\s*`([A-Z0-9_]+)`", line)
+        if m:
+            keys.append(m.group(1))
     return keys
 
 
-def audit(definition, repo_paths=None, verbose=True):
-    """四源漂移审计。返回 findings 列表；每项 (级别, 文本)，级别 ∈ ERROR/INFO。"""
-    paths = repo_paths or {}
-    c_path = paths.get("c", C_PATH)
-    conf_path = paths.get("conf", CONF_PATH)
-    schema_path = paths.get("schema", SCHEMA_PATH)
-    doc_path = paths.get("doc", DOC_PATH)
+def parse_literals(text, prefix_pat):
+    """收集文本中形如 com.flydigi.x / com.fdg.x 的包名字面量（排序去重）。"""
+    return sorted(set(re.findall(prefix_pat, text)))
+
+
+# 反向核对只认「应用包名」形态：4 段全小写（com.<brand>.<product>.<flavor>）。
+# 不认广播 action（com.flydigi.SET_TEMPERATURE）与 SDK 类名（com.flydigi.sdk.waspwing.WaspWingManager）。
+PKG_LITERAL_PAT = r"com\.(?:flydigi|fdg)\.[a-z][a-z0-9_]*\.[a-z][a-z0-9_]*(?![\w.])"
+
+
+def audit_packages(definition, findings):
+    """R4：飞智三个包名的单一来源核对（五处手抄 → def 一处声明）。"""
+    spec = definition.get("packages")
+    if not spec:
+        findings.append(("ERROR", "定义缺少 packages 段（R4 包名单一来源）"))
+        return
+    apps = {a["id"]: a["value"] for a in spec["apps"]}
+    declared = set(apps.values())
+    for site in spec["sites"]:
+        path = os.path.join(REPO, site["file"])
+        if not os.path.exists(path):
+            findings.append(("INFO", "包名核对跳过（文件不存在）：%s" % site["file"]))
+            continue
+        text = read_text(path)
+        if site["check"] == "cMacroSet":
+            got = parse_c_string_macros(text)
+            for aid in site["expect"]:
+                macro = apps and next(a for a in spec["apps"] if a["id"] == aid)["cMacro"]
+                if got.get(macro) != apps[aid]:
+                    findings.append(("ERROR",
+                                     "R4 %s 的 %s=%r ≠ 定义 %r"
+                                     % (site["file"], macro, got.get(macro), apps[aid])))
+        elif site["check"] == "javaConstSet":
+            got = dict(re.findall(r'(PACKAGE_\w+)\s*=\s*"([^"]+)"', text))
+            for a in spec["apps"]:
+                if not a.get("javaConst"):
+                    continue
+                if got.get(a["javaConst"]) != a["value"]:
+                    findings.append(("ERROR",
+                                     "R4 %s 的 %s=%r ≠ 定义 %r"
+                                     % (site["file"], a["javaConst"],
+                                        got.get(a["javaConst"]), a["value"])))
+        elif site["check"] == "xmlItemSet":
+            got = set(re.findall(r"<item>([^<]+)</item>", text))
+            if got != declared:
+                findings.append(("ERROR", "R4 %s 的 <item> 集合与定义不一致：多 %s / 少 %s"
+                                 % (site["file"], sorted(got - declared),
+                                    sorted(declared - got))))
+        elif site["check"] == "literalsPresent":
+            for aid in site["expect"]:
+                short = next((a.get("short") for a in spec["apps"] if a["id"] == aid), None)
+                if apps[aid] not in text and not (short and short in text):
+                    findings.append(("ERROR", "R4 %s 未出现包名 %s（或其简称 %s）"
+                                     % (site["file"], apps[aid], short)))
+        else:
+            findings.append(("ERROR", "R4 未知核对方式 %r（%s）"
+                             % (site["check"], site["file"])))
+        extra = set(parse_literals(text, PKG_LITERAL_PAT)) - declared
+        if extra:
+            findings.append(("ERROR", "R4 %s 出现未声明的飞智包名：%s（应进定义 packages 段）"
+                             % (site["file"], sorted(extra))))
+
+
+def audit_app_package(definition, findings):
+    """R6：本项目包名 —— applicationId 为真源，其余落点由它推出。"""
+    spec = definition.get("appPackage")
+    if not spec:
+        findings.append(("ERROR", "定义缺少 appPackage 段（R6 本项目包名）"))
+        return
+    value = spec["value"]
+    expected_dir = "/data/data/%s/files" % value
+
+    truth_path = os.path.join(REPO, spec["truthFile"])
+    app_id = (parse_gradle_application_id(read_text(truth_path))
+              if os.path.exists(truth_path) else None)
+    if app_id is None:
+        findings.append(("INFO", "R6 无法读取 applicationId：%s" % spec["truthFile"]))
+    elif app_id != value:
+        findings.append(("ERROR", "R6 真源不一致：%s 的 applicationId=%r ≠ 定义 %r"
+                         % (spec["truthFile"], app_id, value)))
+
+    for site in spec["privateDirSites"]:
+        path = os.path.join(REPO, site["file"])
+        if not os.path.exists(path):
+            findings.append(("INFO", "R6 核对跳过（文件不存在）：%s" % site["file"]))
+            continue
+        text = read_text(path)
+        if site["kind"] == "cMacro":
+            got = parse_c_string_macros(text).get(site["name"])
+        elif site["kind"] == "javaConst":
+            m = re.search(r'%s\s*=\s*"([^"]+)"' % re.escape(site["name"]), text)
+            got = m.group(1) if m else None
+        else:
+            findings.append(("ERROR", "R6 未知核对方式 %r（%s）"
+                             % (site["kind"], site["file"])))
+            continue
+        if got != expected_dir:
+            findings.append(("ERROR", "R6 %s 的 %s=%r ≠ /data/data/<applicationId>/files = %r"
+                             % (site["file"], site["name"], got, expected_dir)))
+
+
+def audit(definition, verbose=True):
+    """三源漂移审计。返回 findings 列表；每项 (级别, 文本)，级别 ∈ ERROR/INFO。"""
+    paths = {s.id: source_path(s) for s in SOURCES}
+    c_path = paths["c"]
+    conf_path = paths["conf"]
+    doc_path = paths["doc"]
 
     findings = []
     def err(msg):
@@ -320,12 +744,17 @@ def audit(definition, repo_paths=None, verbose=True):
     daemon_keys = [e["key"] for e in entries if e.get("daemonConsumes", True)]
     webui_keys = [e["key"] for e in entries if not e.get("daemonConsumes", True)]
 
-    missing_files = [p for p in (c_path, conf_path, schema_path, doc_path)
-                     if not os.path.exists(p)]
-    for p in missing_files:
-        info("来源文件不存在，跳过对应核对：%s" % p)
+    for s in SOURCES:
+        if not os.path.exists(paths[s.id]):
+            info("来源文件不存在，跳过对应核对：%s" % s.path)
 
-    # ---- 1. 四份来源的键集合 ----
+    # ---- 0. 分组标题必须带 [N] 段标（profile.conf 段标自它派生） ----
+    for group in definition["groups"]:
+        if not group_tag(group):
+            err("分组 %r 的标题缺少「[N]」段标（profile.conf 段标自组标题派生）"
+                % group["id"])
+
+    # ---- 1. 三份来源的键集合 ----
     if os.path.exists(conf_path):
         conf_keys = parse_conf_keys(read_text(conf_path))
         if conf_keys != def_keys:
@@ -333,28 +762,38 @@ def audit(definition, repo_paths=None, verbose=True):
                 % (sorted(set(conf_keys) - set(def_keys)),
                    sorted(set(def_keys) - set(conf_keys)),
                    conf_keys != def_keys and not (set(conf_keys) ^ set(def_keys))))
-    if os.path.exists(schema_path):
-        schema_keys = parse_schema_keys(read_text(schema_path))
-        if set(schema_keys) != set(def_keys):
-            err("schema.js keys 与定义不一致：多 %s / 少 %s"
-                % (sorted(set(schema_keys) - set(def_keys)),
-                   sorted(set(def_keys) - set(schema_keys))))
-        elif schema_keys != def_keys:
-            info("schema.js keys 与定义键序不同（不影响功能；schema.js 文件头已将该自述标注为已知失效项）")
     if os.path.exists(doc_path):
         doc_keys = parse_doc_keys(read_text(doc_path))
+        doc_order = [e["key"] for e in sorted(
+            [e for e in entries if e.get("docDesc")], key=doc_order_key)]
         if set(doc_keys) != set(def_keys):
             err("逻辑说明.md 参数表与定义不一致：多 %s / 少 %s"
                 % (sorted(set(doc_keys) - set(def_keys)),
                    sorted(set(def_keys) - set(doc_keys))))
-        else:
-            info("逻辑说明.md 参数表键序与定义不同（文档为按功能重排的扁平表，属预期）")
+        elif doc_keys != doc_order:
+            err("逻辑说明.md 参数表键序 ≠ 定义的 docOrder")
+        orders = [e["docOrder"] for e in entries if e.get("docDesc")]
+        if len(orders) != len(def_keys) or len(set(orders)) != len(orders):
+            err("docOrder 缺项或重复：%d 项 / %d 键"
+                % (len(set(orders)), len(def_keys)))
 
     if os.path.exists(c_path):
         c_text = read_text(c_path)
         macros = parse_c_macros(c_text)
+        c_tables = parse_c_tables(c_text)
         c_keys = parse_c_keys(c_text)
-        table_keys = [k for k in c_keys if not k.startswith("__")]
+        table_keys = list(c_keys)
+        adopted = [pid for pid, table in C_TABLE_NAME.items()
+                   if re.search(r"%s\s*\(\s*\w+\s*\)" % table, c_text)]
+        for pid in adopted:
+            table_keys.extend(e["key"] for e in entries if e.get("cTable") == pid)
+        if adopted and '#include "params_generated.h"' not in c_text:
+            err("tempctrl.c 用 X 宏展开键表（%s）但未 #include \"params_generated.h\""
+                % ", ".join(C_TABLE_NAME[p] for p in adopted))
+        if adopted:
+            info("C 端键表已由 params_generated.h 承接，按产物口径核对：%s"
+                 % ", ".join(C_TABLE_NAME[p] for p in adopted))
+
         if set(table_keys) != set(daemon_keys):
             err("tempctrl.c 解析的键与定义（daemonConsumes=true）不一致：C 多 %s / C 少 %s"
                 % (sorted(set(table_keys) - set(daemon_keys)),
@@ -363,12 +802,28 @@ def audit(definition, repo_paths=None, verbose=True):
             if wk in table_keys:
                 err("定义声明 %s 守护进程不消费，但 tempctrl.c 实际解析了它" % wk)
 
+        # 两张表的**归属**核对：同一键不得同时/错位地落进另一张表（PERF 与 SYSFS 是两个独立开关）
+        for pid, table in C_TABLE_NAME.items():
+            if pid in adopted:
+                continue
+            expect = [e["key"] for e in entries if e.get("cTable") == pid]
+            got = [row[0] for row in c_tables[pid]]
+            if set(got) != set(expect):
+                err("%s 表的键与定义 cTable=%r 不一致：C 多 %s / C 少 %s"
+                    % (table, pid, sorted(set(got) - set(expect)),
+                       sorted(set(expect) - set(got))))
+            elif got != expect:
+                info("%s 表键序与定义不同（不影响功能）" % table)
+
         sysfs_group = set(e["key"] for e in entries
                           if e["group"] == "sysfs" and e["role"] != "master")
-        is_sysfs = c_keys.get("__is_sysfs_key__", set())
-        if is_sysfs != sysfs_group:
-            err("is_sysfs_key() 的键集合与 sysfs 分组不一致（漏改会被静默忽略）：函数多 %s / 少 %s"
-                % (sorted(is_sysfs - sysfs_group), sorted(sysfs_group - is_sysfs)))
+        if "sysfs" in adopted:
+            got_sysfs = set(e["key"] for e in entries if e.get("cTable") == "sysfs")
+        else:
+            got_sysfs = set(row[0] for row in c_tables["sysfs"])
+        if got_sysfs != sysfs_group:
+            err("SYSFS_CFG_KEYS 的键集合与 sysfs 分组不一致（漏改会被静默忽略）：表多 %s / 表少 %s"
+                % (sorted(got_sysfs - sysfs_group), sorted(sysfs_group - got_sysfs)))
 
         # ---- 2. C 端默认值 / clamp 范围 ----
         defaults = parse_c_defaults(c_text)
@@ -461,11 +916,9 @@ def audit(definition, repo_paths=None, verbose=True):
                                 % (rid, rule["key"], f, entry[f], rule["macro"], expect))
             elif rule["kind"] == "macroEqualsAppIdPrivateDir":
                 macro_val = str_macros.get(rule["macro"])
-                gpath = os.path.join(REPO, rule["gradleRelPath"])
-                app_id = (parse_gradle_application_id(read_text(gpath))
-                          if os.path.exists(gpath) else None)
+                app_id = definition.get("appPackage", {}).get("value")
                 if macro_val is None or app_id is None:
-                    info("crossCheck「%s」无法自动核对：宏 %s %s；applicationId %s"
+                    info("crossCheck「%s」无法自动核对：宏 %s %s；定义 appPackage %s"
                          % (rid, rule["macro"],
                             "缺失" if macro_val is None else repr(macro_val),
                             "缺失" if app_id is None else repr(app_id)))
@@ -474,6 +927,27 @@ def audit(definition, repo_paths=None, verbose=True):
                     if macro_val != expect:
                         err("crossCheck「%s」不一致：tempctrl.c 的 %s=%r ≠ /data/data/<applicationId>/files = %r"
                             % (rid, rule["macro"], macro_val, expect))
+            elif rule["kind"] == "chartMaxEqualsMacro":
+                macro_val = macros.get(rule["macro"])
+                chart = definition["chart"]
+                if macro_val is None:
+                    info("crossCheck「%s」无法自动核对：tempctrl.c 内未找到数值宏 %s"
+                         % (rid, rule["macro"]))
+                elif int(macro_val) != chart["rollingMaxLines"]:
+                    err("crossCheck「%s」不一致：C 宏 %s=%s ≠ 定义 rollingMaxLines=%d"
+                        % (rid, rule["macro"], macro_val, chart["rollingMaxLines"]))
+                if max(chart["windowOptionsSec"]) != chart["rollingMaxLines"]:
+                    err("曲线档位上限 %d ≠ rollingMaxLines %d（档位不得超过缓冲容量）"
+                        % (max(chart["windowOptionsSec"]), chart["rollingMaxLines"]))
+                if chart["windowDefaultSec"] not in chart["windowOptionsSec"]:
+                    err("曲线默认档位 %d 不在档位表内"
+                        % chart["windowDefaultSec"])
+            else:
+                err("未知 crossCheck 类型 %r（%s）" % (rule["kind"], rid))
+
+    # ---- 4. R4 包名单一来源 / R6 本项目包名 ----
+    audit_packages(definition, findings)
+    audit_app_package(definition, findings)
 
     return findings
 
@@ -481,19 +955,19 @@ def audit(definition, repo_paths=None, verbose=True):
 # --------------------------------------------------------------------------
 
 def main(argv=None):
-    ap = argparse.ArgumentParser(description="B6X 参数定义生成 / 四源审计")
-    ap.add_argument("--audit", action="store_true", help="只做四源漂移审计，不写产物")
+    ap = argparse.ArgumentParser(description="B6X 参数定义生成 / 三源审计")
+    ap.add_argument("--audit", action="store_true", help="只做三源漂移审计，不写产物")
     ap.add_argument("--quiet", action="store_true", help="只输出结论行")
     args = ap.parse_args(argv)
 
     definition = load_def()
 
     if not args.audit:
-        path, changed, _ = write_product(definition)
         n = len(definition["keys"])
-        print("[gen_params] 已生成 %d 键 → %s%s"
-              % (n, os.path.relpath(path, REPO).replace("\\", "/"),
-                 "（内容有更新）" if changed else "（无变化）"))
+        for path, changed in write_all(definition):
+            print("[gen_params] %d 键 → %s%s"
+                  % (n, os.path.relpath(path, REPO).replace("\\", "/"),
+                     "（内容有更新）" if changed else "（无变化）"))
         return 0
 
     findings = audit(definition)

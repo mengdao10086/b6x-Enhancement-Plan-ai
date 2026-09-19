@@ -1,5 +1,11 @@
 # 强制 C 源文件使用 LF 换行，防止 NDK clang 下 \<CRLF> 续行问题
-magisk模块(智能温控)/*.c text eol=lf
-magisk模块(智能温控)/*.h text eol=lf
+lsp模块/daemon/*.c text eol=lf
+lsp模块/daemon/*.h text eol=lf
 .github/workflows/*.yml text eol=lf
 *.sh text eol=lf
+
+# 生成器产物同样固定 LF：gen_params.py 用 newline="\n" 写盘，
+# 不加此规则则本机（autocrlf）会把它们签出成 CRLF，之后生成段一改就是"改 1 行、diff 全文件"
+lsp模块/daemon/profile.conf text eol=lf
+lsp模块/app/src/main/assets/params.json text eol=lf
+逻辑说明.md text eol=lf

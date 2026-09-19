@@ -1,10 +1,10 @@
 {
   "formatVersion": 1,
   "notes": [
-    "本文件是 B6X 温控参数的**单一来源**（R1）。schema / profile.conf / 逻辑说明参数表 / C 端键表与 clamp 均由它派生。",
+    "本文件是 B6X 温控参数的**单一来源**（R1）。profile.conf / 逻辑说明参数表 / C 端键表与 clamp（params_generated.h）均由它派生。",
     "两个默认值概念必须分开，不得混用：",
-    "  default = 代码默认（tempctrl.c 内编译进二进制的初值）。配置项缺失时 C 端使用它。界面只读展示。",
-    "  factory = 出厂值（配置文件**不存在**时由部署流程写入的值）。配置文件已存在时一律保留既有值，不覆盖。",
+    "  default = 代码默认（tempctrl.c 内编译进二进制的初值）。配置项缺失时 C 端使用它。界面只读展示，逻辑说明参数表写出的是它。",
+    "  factory = 出厂值（配置文件**不存在**时由部署流程写入的值）。配置文件已存在时一律保留既有值，不覆盖。profile.conf 写出的是它。",
     "  绝大多数键两者相同；不同者仅 PERF_ENABLED / APP_LAUNCH_ENABLED / APP_WATCHDOG 三个（见 对齐报告.md）。",
     "键序 = profile.conf 的书写顺序（同时也是界面渲染顺序）；范围以 tempctrl.c 的 clamp/护栏为准。",
     "type 取值：switch（0/1 布尔）· int（单整数）· multi（多值，范围在 fields）· path（路径字符串，无范围）。",
@@ -13,18 +13,21 @@
     "requires：该键生效的前置键（值为 1 时本键才被读取）。",
     "daemonConsumes=false 表示守护进程完全忽略该键（只有界面读取）。",
     "fields[].cVar 指向 tempctrl.c 内的 C 变量名，供 gen_params.py --audit 自动核对默认值与 clamp 范围；null 表示该字段无需核对或无法自动核对。",
-    "禁止手改 lsp模块(apk修复+温控接口)/app/src/main/assets/params.json —— 它由 gen_params.py 生成，手改会被 check_params.py 判红。",
+    "禁止手改 gen_params.py 的任何产物（app/src/main/assets/params.json、lsp模块/daemon/profile.conf、params_generated.h、逻辑说明.md 的参数表段）—— 手改会被 check_params.py 判红。",
     "【内部溯源，不进产物】本文件是唯一允许写内部来源的地方；desc / unitNote / defaultNote / factoryNote / rangeNote 等**会进产物**的字段只写用户可读的事实，禁止出现源文件名、宏名、C 符号名或历史沿革（产物是界面直接渲染的文本，用户读不到仓库）。",
-    "【内部溯源】WebUI 组 5 键（WEBUI_*）的范围与语义在合并前取自 webroot/app.js；路线 A 已删除该文件，界面重建后这些口径由原生界面承接，仍需人工在 逻辑说明.md 的「曲线」一节核对。",
+    "【内部溯源】WebUI 组 5 键（WEBUI_*）只有界面读取；范围与语义无 C 端依据，须人工在 逻辑说明.md 的「曲线」/「状态页」两节核对。",
     "【内部溯源】PID_KI_DYN_WIN 的 N 上限 128 = tempctrl.c 的 KI_DYN_WIN_MAX（窗口环形缓冲容量），改该宏须同步改本定义该字段的 max。",
-    "【内部溯源】chart 段：档位上限 720 = tempctrl.c 的 WEBUI_DATA_MAX_LINES，默认档位 360 原由 app.js 的 localStorage 持有（文件已删除）。",
-    "【内部溯源】PERF_ENABLED 的 factory=0 沿用合并前 profile.conf 的出厂值，非代码默认（代码默认见 default=1）。"
+    "【内部溯源】chart 段：档位上限 720 = tempctrl.c 的 WEBUI_DATA_MAX_LINES（crossChecks 自动核对）；默认档位 360 为界面默认值，须落在档位表内。",
+    "【内部溯源】PERF_ENABLED 的 factory=0 沿用合并前 profile.conf 的出厂值，非代码默认（代码默认见 default=1）。",
+    "【字段用途】docOrder/docDesc 决定 逻辑说明.md 参数表（docOrder = 表序，docDesc = 说明列，按功能重排）。",
+    "【字段用途】confNote/confSection/confInline/confTitleNote 决定 profile.conf 的注释、段标与行内注释；confSection 只用冒号后的文字（段标 [N] 由所属分组标题给出）。",
+    "【字段用途】cTable/cKind 与 audit.cVars / fields[].cVar/rangeMacro/bool 是 C 端绑定：cTable = 所属 C 键表，cKind = sysfs 表槽位类型（SK_INT/SK_PATH/SK_ZONE/SK_RESCAN），cVar = 变量名，rangeMacro = C 端同名上界宏，bool = 布尔子开关（无需 clamp）。生成的两张 C 表与 clamp 边界供 tempctrl.c 展开。",
+    "【字段用途】packages / appPackage 是非参数段：飞智三个包名与本项目包名的唯一声明处，由 gen_params.py --audit 核对五处手抄。"
   ],
   "meta": {
     "moduleId": "b6x-Enhancement-Plan",
     "configFileName": "profile.conf",
     "daemonBinary": "tempctrl",
-    "productPath": "lsp模块(apk修复+温控接口)/app/src/main/assets/params.json",
     "productFormatVersion": 1
   },
   "chart": {
@@ -47,16 +50,19 @@
     {
       "id": "sysfs",
       "title": "[2] sysfs 路径与缩放",
+      "confTitleNote": "（独立大类：SYSFS_ENABLED=1 时加载，独立于性能总开关）",
       "master": "SYSFS_ENABLED"
     },
     {
       "id": "launch",
       "title": "[3] 自动拉起散热器 app",
+      "confTitleNote": "（独立于性能总开关，任何模式都生效）",
       "master": "APP_LAUNCH_ENABLED"
     },
     {
       "id": "webui",
       "title": "[4] WebUI 界面",
+      "confTitleNote": "（仅 WebUI 读取，守护进程忽略）",
       "master": null
     }
   ],
@@ -68,6 +74,9 @@
       "type": "switch",
       "label": "调试日志总开关",
       "desc": "调试日志总开关（独立于性能总开关，=1 开启调试分区输出）",
+      "docOrder": 38,
+      "docDesc": "调试日志总开关（独立于 PERF_ENABLED，=1 开启调试分区输出）",
+      "confNote": ["调试日志总开关（独立于性能总开关，=1 开启调试分区输出）"],
       "unit": "",
       "unitNote": "布尔开关，取值 0/1，无单位",
       "default": 0,
@@ -85,6 +94,10 @@
       "type": "switch",
       "label": "传感器读数",
       "desc": "[传感器] 电池/CPU 读数调试日志（需 DEBUG_ENABLED=1 才生效）",
+      "docOrder": 39,
+      "docDesc": "[传感器] 电池/CPU 读数调试日志",
+      "confNote": ["分区开关（仅 DEBUG_ENABLED=1 时生效）"],
+      "confInline": "传感器读数",
       "unit": "",
       "unitNote": "布尔开关，取值 0/1，无单位",
       "default": 0,
@@ -102,6 +115,9 @@
       "type": "switch",
       "label": "执行下发",
       "desc": "[执行下发] 速率限制/am broadcast + 风扇转速调试日志（需 DEBUG_ENABLED=1 才生效）",
+      "docOrder": 40,
+      "docDesc": "[执行下发] 速率限制/am broadcast + 风扇转速调试日志（需 DEBUG_ENABLED=1 才生效）",
+      "confInline": "执行下发",
       "unit": "",
       "unitNote": "布尔开关，取值 0/1，无单位",
       "default": 0,
@@ -119,6 +135,9 @@
       "type": "switch",
       "label": "连接状态",
       "desc": "[连接状态] App 存活/BLE/重连调试日志（需 DEBUG_ENABLED=1 才生效）",
+      "docOrder": 41,
+      "docDesc": "[连接状态] App 存活/BLE/重连调试日志",
+      "confInline": "连接状态",
       "unit": "",
       "unitNote": "布尔开关，取值 0/1，无单位",
       "default": 0,
@@ -136,6 +155,9 @@
       "type": "switch",
       "label": "配置加载",
       "desc": "[配置加载] 配置文件解析过程调试日志（需 DEBUG_ENABLED=1 才生效）",
+      "docOrder": 42,
+      "docDesc": "[配置加载] 配置文件解析过程调试日志",
+      "confInline": "配置加载",
       "unit": "",
       "unitNote": "布尔开关，取值 0/1，无单位",
       "default": 0,
@@ -153,6 +175,9 @@
       "type": "switch",
       "label": "主循环",
       "desc": "[主循环] main_loop 流程跟踪调试日志（需 DEBUG_ENABLED=1 才生效）",
+      "docOrder": 43,
+      "docDesc": "[主循环] main_loop 流程跟踪调试日志",
+      "confInline": "主循环",
       "unit": "",
       "unitNote": "布尔开关，取值 0/1，无单位",
       "default": 0,
@@ -170,6 +195,9 @@
       "type": "switch",
       "label": "PID",
       "desc": "[PID] PID 控制调试日志（需 DEBUG_ENABLED=1 才生效）",
+      "docOrder": 44,
+      "docDesc": "[PID] PID 控制调试日志",
+      "confInline": "PID",
       "unit": "",
       "unitNote": "布尔开关，取值 0/1，无单位",
       "default": 0,
@@ -187,6 +215,9 @@
       "type": "switch",
       "label": "自动拉起",
       "desc": "[自动拉起] 目标选择/回退/跳过调试日志；拉起成功/失败始终输出（不归此分区）（需 DEBUG_ENABLED=1 才生效）",
+      "docOrder": 45,
+      "docDesc": "[自动拉起] 目标选择/回退/跳过调试日志；拉起成功/失败始终输出（不归此分区）",
+      "confInline": "自动拉起",
       "unit": "",
       "unitNote": "布尔开关，取值 0/1，无单位",
       "default": 0,
@@ -204,6 +235,13 @@
       "type": "switch",
       "label": "性能参数总开关",
       "desc": "=1 正常加载全部性能参数；=0 时除 DEBUG_ENABLED / SYSFS_ENABLED / [3] 自动拉起 三个独立大类外，性能参数一律使用代码内默认值",
+      "docOrder": 1,
+      "docDesc": "性能参数总开关（0=性能参数使用代码默认值，日志/调试不受影响）",
+      "confSection": "性能总开关",
+      "confNote": [
+        "=1：正常加载所有性能参数",
+        "=0：除 DEBUG_ENABLED / SYSFS_ENABLED / [3]自动拉起 三个独立大类外，全部使用代码内默认值"
+      ],
       "unit": "",
       "unitNote": "布尔开关，取值 0/1，无单位",
       "default": 1,
@@ -223,6 +261,17 @@
       "type": "multi",
       "label": "风扇限速",
       "desc": "变化量升/降共用同一步长；防抖生效条件：变化量 ≤ 阈值 且 升速时距最高、降速时距最低 ≥ 阈值×1.5（更近则失效）；阈值 0=关闭防抖",
+      "docOrder": 32,
+      "docDesc": "风扇升降速限制（双值：每周期最大变化量 防抖阈值，**升与降共用同一组参数**——不再是两个独立键）。变化量固定值不受温差影响，升速与降速共用（范围 50~2000）；防抖阈值：0=关闭防抖，本周期变化量 ≤ 阈值时该方向整步不做（升速方向保持当前值不升、降速方向保持当前值不降，防突降噪音），升速时距最高转速 / 降速时距最低转速 < 阈值×1.5 时该方向防抖失效。范围 0~2000",
+      "confSection": "通用参数",
+      "confNote": [
+        "--- 速率限制 ---",
+        "每 5 秒周期实际值向目标靠拢的最大步长；风扇升/降共用一套步长与防抖，制冷另有独立多值键",
+        "未完成量下周期继续累积（每周期从当前实际值重算，不从旧目标续算）",
+        "风扇限速（双值）：每周期最大变化量 50~2000 · 防抖阈值 0~2000，默认 250 50",
+        "  变化量升/降共用同一步长；防抖生效条件：变化量 ≤ 阈值 且 升速时距最高、降速时距最低 ≥ 阈值×1.5，更近则防抖失效",
+        "  阈值 0=关闭防抖"
+      ],
       "unit": "",
       "unitNote": "多值键，各字段单位见 fields",
       "default": [250, 50],
@@ -244,6 +293,14 @@
       "type": "multi",
       "label": "制冷强度限速",
       "desc": "升速 = 基础值 + dev × 倍率 / 10，降速 = 基础值 − dev × 倍率 / 10（dev = 电池温度 − 基准温度，有符号），负值取 0=禁止该方向；|目标 − 回传| < 死区时升降都不下发",
+      "docOrder": 33,
+      "docDesc": "制冷片强度限速 + 最小变化幅度（三值：基础值 倍率 最小变化幅度，原 `COLD_DEADZONE` 并入第三值）。升速 = 基础值 + d × 倍率 / 10，降速 = 基础值 − d × 倍率 / 10（d = 有符号温差，0.1°C）；负值禁止该方向（≥37.5°C 禁降 / ≤32.5°C 禁升）。基础值范围 1~194，倍率范围 1~100，最小变化幅度范围 1~50（目标与制冷实际 `\\|差值\\|` < 死区时上升下降都不下发，距最高/最低 < 死区×2 时失效允许精确到位）。热端过温削减的下发边界钳制可绕过此禁降，见「热端过温制冷削减」节",
+      "confNote": [
+        "制冷强度限速 + 变化死区（三值）：基础值 1~194 · 倍率 1~100 · 死区 1~50",
+        "  升速 = 基础值 + dev × 倍率 / 10，降速 = 基础值 − dev × 倍率 / 10",
+        "  dev = 电池温度 − BATT_BASELINE（有符号）；算出为负 → 取 0 = 禁止该方向",
+        "  死区：目标与回传实际 |差值| < 死区时升降都不下发；距最高/最低制冷 < 死区×2 时死区失效，允许精确到位"
+      ],
       "unit": "",
       "unitNote": "多值键，各字段单位见 fields",
       "default": [25, 10, 3],
@@ -266,6 +323,14 @@
       "type": "int",
       "label": "断联保留状态周期数",
       "desc": "断联时长 < N×5 秒时保留 PID 状态（积分/误差等）；超过 N×5 秒或设为 0 → 完整重置并进入待对齐",
+      "cTable": "perf-int",
+      "docOrder": 13,
+      "docDesc": "断联保留状态周期数（范围 0~30，×5 秒，默认 3=15 秒）。断联少于 N 个控制周期不重置 PID 状态（ki/kdp/target/误差），仍以散热器回传实际值对齐 `actual_cold`/`actual_rpm`，输出连续不跳变；长断联或=0 时完整重置。详见 [主循环逻辑](#主循环逻辑)",
+      "confNote": [
+        "--- 断联保留 ---",
+        "断联保留 PID 状态的周期数（0~30，默认 3 = 15 秒）：断联时长 < N×5 秒时保留积分/误差等状态，输出不跳变",
+        "  超过 N×5 秒或设为 0 → 完整重置并进入待对齐（等真实回传就绪再起步，不用回传值直接起步）"
+      ],
       "unit": "控制周期（1 周期 = 5 秒）",
       "unitNote": "",
       "default": 3,
@@ -283,6 +348,13 @@
       "type": "int",
       "label": "基准温度(0.1°C)",
       "desc": "基准温度（0.1°C，默认 350=35.0°C）：误差 = (电池温度 − 此值) / 10",
+      "cTable": "perf-int",
+      "docOrder": 11,
+      "docDesc": "电池基准温度 (0.1°C)",
+      "confNote": [
+        "--- PID 参数（本实现仅 PID 单模式）---",
+        "基准温度（0.1°C，范围 300~500，默认 350=35.0°C）：误差 = (电池温度 − 此值) / 10"
+      ],
       "unit": "0.1°C",
       "unitNote": "",
       "default": 350,
@@ -300,6 +372,10 @@
       "type": "int",
       "label": "CPU 温度 EMA 平滑系数(%)",
       "desc": "首次直取，此后按系数平滑；值越大越跟随原始值",
+      "cTable": "perf-int",
+      "docOrder": 12,
+      "docDesc": "CPU 滤波系数 (百分比)",
+      "confNote": ["CPU 温度 EMA 平滑系数（%，1~100，默认 25，即 α=0.25）：首次直取，此后按系数平滑；值越大越跟随原始值"],
       "unit": "%",
       "unitNote": "",
       "default": 25,
@@ -317,6 +393,13 @@
       "type": "multi",
       "label": "制冷映射",
       "desc": "转速 ∝ n^指数（n = 制冷超出起始强度的比例，指数 = 值/100，150 → 1.50）；指数 >1 时低制冷段风扇更慢；制冷低于起始强度时线性外推下限",
+      "docOrder": 26,
+      "docDesc": "冷端→RPM 映射（双值：起始强度 指数）。起始强度：低于此值时线性外推下限；指数：n^exp（÷100，150=1.50），>1 低冷慢转",
+      "confNote": [
+        "制冷强度 → 风扇转速映射（双值）：起始强度 0~194 · 指数 50~500",
+        "  转速 ∝ n^指数（n = 制冷超出起始强度的比例，指数 = 值/100，150 → 1.50）；指数 >1 时低制冷段风扇更慢",
+        "  制冷低于起始强度时线性外推下限（避开负数底数）"
+      ],
       "unit": "",
       "unitNote": "多值键，各字段单位见 fields",
       "default": [40, 150],
@@ -338,6 +421,9 @@
       "type": "multi",
       "label": "热端线性映射范围",
       "desc": "热端在此区间线性映射到风扇转速；低于最低或高于最高温度时线性外推（最终转速仍钳制在风扇范围内）",
+      "docOrder": 27,
+      "docDesc": "热端映射范围（双值：最低温度 最高温度，0.1°C）",
+      "confNote": ["热端线性映射范围（双值：最低温度 最高温度，0.1°C，范围各 200~500，须双值同给）"],
       "unit": "",
       "unitNote": "多值键，各字段单位见 fields",
       "default": [350, 450],
@@ -359,6 +445,13 @@
       "type": "int",
       "label": "冷端/热端映射输入 平滑系数(%)",
       "desc": "冷端指数映射与热端线性映射共用，输入先平滑、映射后不再滤波；值越大越跟随原始值，越小越平滑",
+      "cTable": "perf-int",
+      "docOrder": 28,
+      "docDesc": "冷端/热端映射输入共用的 EMA 平滑系数（%，1~99，默认 33 即 α=0.33）。输入（制冷强度 / 热端温度）**先平滑再进映射**，映射输出不再滤波；值越大越跟随原始值，越小越平滑",
+      "confNote": [
+        "冷端/热端映射输入（制冷强度 / 热端温度）共用的 EMA 平滑系数（%，1~99，默认 33，即 α=0.33）",
+        "  输入先平滑再进映射，映射输出不再滤波；值越大越跟随原始值，越小越平滑"
+      ],
       "unit": "%",
       "unitNote": "",
       "default": 33,
@@ -376,6 +469,12 @@
       "type": "multi",
       "label": "风扇转速范围",
       "desc": "前两值须同给；B7X 最高转速目前与 B6X 相同，可单独调整",
+      "docOrder": 29,
+      "docDesc": "风扇转速范围（三值：最低 最高(B6X) 最高(B7X) RPM，范围 1000~6000 / 1000~6000 / 2000~8000）。B7X 最高暂时与 B6X 一致",
+      "confNote": [
+        "风扇转速范围（三值）：最低转速 1000~6000 · B6X 最高转速 1000~6000 · B7X 最高转速 2000~8000（前两值须同给）",
+        "  B7X 最高转速目前与 B6X 相同，可单独调整"
+      ],
       "unit": "",
       "unitNote": "多值键，各字段单位见 fields",
       "default": [2000, 6000, 6000],
@@ -398,6 +497,10 @@
       "type": "int",
       "label": "风扇转速取整单位(RPM)",
       "desc": "下发风扇转速前就近取整到该单位的整数倍（默认 10：2044→2040、2045→2050）",
+      "cTable": "perf-int",
+      "docOrder": 30,
+      "docDesc": "风扇转速取整单位（RPM，1~500）。下发前把转速**就近取整**到该单位的整数倍（默认 10：2044→2040、2045→2050），取整后仍钳制在风扇范围内",
+      "confNote": ["风扇转速取整单位（RPM，1~500，默认 10）：下发转速前就近取整到该单位的整数倍（2044→2040、2045→2050）"],
       "unit": "RPM",
       "unitNote": "",
       "default": 10,
@@ -415,6 +518,16 @@
       "type": "multi",
       "label": "热端过温制冷削减",
       "desc": "热端 > 阈值 → 单次削减 (热端 − 阈值) × 倍率 / 10：首次削减把上限压到「当前实际制冷值 − 削减量」，之后每次触发在当前上限上继续累减（不回看历史触发值）；热端 ≤ 阈值且有削减 → 上限每次 +「倍率」逐级上爬，封顶配置上限；削减/恢复各自独立冷却 N 个周期",
+      "docOrder": 31,
+      "docDesc": "热端过温制冷削减（三值：阈值(0.1°C，450=45.0°C) 倍率=单次恢复值 冷却周期数）。热端 > 阈值 → 单次削减量 `(热端−阈值)×倍率/10`：**首次触发把生效上限压到「当前实际制冷值 − 削减量」，之后每次触发在当前生效上限上继续累减（不回看历史触发值）**；热端 ≤ 阈值且有削减 → 生效上限每次 +「倍率」逐级上爬，**封顶配置上限**；削减后/恢复后各自冷却周期内不再触发（独立计数）",
+      "confNote": [
+        "--- 热端过温制冷削减 ---",
+        "热端过温 → 削低制冷上限以保护散热器（三值）：阈值 350~700（0.1°C） · 倍率 1~20 · 冷却周期 0~20（×5 秒）",
+        "  热端 > 阈值 → 单次削减 (热端 − 阈值) × 倍率 / 10：首次削减把上限压到「当前实际制冷值 − 削减量」，",
+        "  之后每次触发在当前上限上继续累减（不回看历史触发值）",
+        "  热端 ≤ 阈值且已有削减 → 上限每次 +「倍率」逐级上爬，封顶配置上限（PID_COLD_RANGE 上限）",
+        "  削减与恢复各自独立冷却 N 个周期；热端数据无效（<0）时保持当前削减量"
+      ],
       "unit": "",
       "unitNote": "多值键，各字段单位见 fields",
       "default": [450, 5, 5],
@@ -437,6 +550,15 @@
       "type": "int",
       "label": "KDP 融合系数(÷1000)",
       "desc": "kdp = 系数/1000 ×（误差 + 速度项×0.33 + CPU 补偿）；速度项已按 PID_SPEED 缩放；无记忆，温度未变时沿用上周期值",
+      "cTable": "perf-int",
+      "docOrder": 14,
+      "docDesc": "KDP 融合系数（÷1000）。`kdp = 系数 × ch_kdp`（速度按 0.33 衰减；无记忆，温度未变沿用上次值）",
+      "confSection": "PID 控制（单累积器）",
+      "confNote": [
+        "--- 响应增益 ---",
+        "KDP 融合系数（÷1000，1~1000，默认 300）：kdp = 系数/1000 ×（误差 + 速度项×0.33 + CPU 补偿）",
+        "  无记忆；温度未变时沿用上周期 kdp（速度项定义见 PID_SPEED）"
+      ],
       "unit": "×1000（存储值 300 = 实际系数 0.300）",
       "unitNote": "",
       "default": 300,
@@ -454,6 +576,13 @@
       "type": "multi",
       "label": "KI 积分升/降速率(÷1000)",
       "desc": "被积项 = ch − 动态目标；被积项 ≥0 用升速率、<0 用降速率，每周期 积分累积值 += 速率/1000 × 被积项（不乘 dt）；默认 20 30",
+      "docOrder": 15,
+      "docDesc": "KI 积分升/降速率（双值，均 ÷1000：升速率 降速率）。被积项 `ch−target_f ≥ 0` 用升速率、`< 0` 用降速率；`acc += 速率×(ch−target_f)` 不乘 dt，`acc` 钳 `[0, 1−kdp]`（抗 windup）。默认 20 30（降快于升），可独立调整",
+      "confNote": [
+        "KI 积分升/降速率（双值，均 ÷1000，各 1~1000，默认 20 30）：被积项 ≥0 用升速率、<0 用降速率",
+        "  每周期 积分累积值 += 速率/1000 × 被积项（不乘 dt），并钳制在 [0, 1−kdp] 内（抗 windup）",
+        "  被积项 = ch − 动态目标（ch 见 PID_KDP 公式）"
+      ],
       "unit": "",
       "unitNote": "多值键，各字段单位见 fields",
       "default": [20, 30],
@@ -475,6 +604,15 @@
       "type": "multi",
       "label": "动态 KI 阈值/方向系数",
       "desc": "三值均 ×100 存值（默认 470 120 75 = 4.70 / 1.20 / 0.75 码²）；护栏 T1 > T2 与 M < T1，越界拒绝并保留旧值；M > T2 仅提示效果打折；P+Q ≥ T1 不削减、P+Q ≤ T2 削减到下限",
+      "docOrder": 16,
+      "docDesc": "动态 KI 抑制的抖动阈值与方向系数（三值，各 ×100，单位 码²：T1 抖动上限 4.70 · T2 满削减阈值 1.20 · M 方向系数 0.75）。护栏 T1 > T2 与 M < T1，越界**拒绝**（保留旧值）而非钳位；M > T2 仅提示「效果打折」。见 [PID 控制模式](#pid-控制模式)",
+      "confNote": [
+        "--- 动态 KI 抑制（三键；配置值均为整数，除 θ 外一律 ×100 换算进内部）---",
+        "电池温度窗口散布 → 压低积分速率：温度越稳、越贴基线，削减越深（仅窗口有更新时求值）",
+        "一、抖动阈值 / 方向系数（三值，各 ×100，单位 码²；默认 470 120 75 = 4.70 / 1.20 / 0.75）",
+        "  T1 抖动上限：P+Q ≥ T1 不削减 · T2 满削减阈值：P+Q ≤ T2 削减到下限 · M 方向系数：偏向侧少削",
+        "  护栏：各值 1~10000，T1 > T2，M < T1；越界拒绝并保留旧值；M > T2 仅提示「效果打折」不拦"
+      ],
       "unit": "",
       "unitNote": "多值键，各字段单位见 fields",
       "default": [470, 120, 75],
@@ -497,6 +635,13 @@
       "type": "multi",
       "label": "动态 KI 门控/削减下限",
       "desc": "θ 单位码（1 码 = 0.1°C，默认 5 = 0.5°C），窗口均值偏离基准超过 θ 时整机制不干预；削减下限 ×100（默认 50 = 0.50），scale 触底钳到该值",
+      "docOrder": 17,
+      "docDesc": "动态 KI 抑制的门控半宽与削减下限（双值：θ 单位**码**（0.1°C，**零换算**，默认 5 = 0.5°C，范围 3~10）· 削减下限 ×100（默认 50 = 0.50，范围 10~100））。θ 越大门控越宽、机制可用率越高；窗口均值偏离基准超过 θ 时机制整体不干预",
+      "confNote": [
+        "二、门控半宽 / 削减下限（双值：θ 单位码、下限 ×100；默认 5 50 = 0.5°C / 0.50）",
+        "  θ（码，1 码 = 0.1°C，零换算）：窗口均值偏离基准温度超过 θ 时整机制不干预，范围 3~10（= 0.3~1.0°C）",
+        "  削减下限：scale 触底钳到该值，范围 10~100（= 0.10~1.00）"
+      ],
       "unit": "",
       "unitNote": "多值键，各字段单位见 fields",
       "default": [5, 50],
@@ -518,6 +663,13 @@
       "type": "multi",
       "label": "动态 KI 窗口/平滑",
       "desc": "N 为窗口样本容量（记温度变化次数非时间，默认 36，少于 6 个样本时机制不干预）；α ×100（默认 30 = 0.30），有求值结果时步进一次，温度未变不步进",
+      "docOrder": 18,
+      "docDesc": "动态 KI 抑制的窗口容量与 EMA 系数（双值：N 样本个数（零换算，范围 6~128）· α ×100（默认 30 = 0.30，范围 1~100 = (0,1]））。N 记**温度变化次数**而非时间；样本少于 6 个时机制不干预",
+      "confNote": [
+        "三、窗口容量 / EMA 系数（双值：N 零换算、α ×100；默认 36 30 = 36 样本 / 0.30）",
+        "  N：窗口样本容量（记温度变化次数，非时间），范围 6~128；样本少于 6 个时机制不干预",
+        "  α：每有一次求值步进一次，温度未变不步进；范围 1~100（= (0,1]，越小平滑越强）"
+      ],
       "unit": "",
       "unitNote": "多值键，各字段单位见 fields",
       "default": [36, 30],
@@ -539,6 +691,10 @@
       "type": "int",
       "label": "速度倍率(÷10)",
       "desc": "100 = 速度×10；温度变化速度对控制量的权重，同时进入积分与 KDP；0=关闭",
+      "cTable": "perf-int",
+      "docOrder": 19,
+      "docDesc": "速度倍率（÷10，100=速度×10，0=关闭）。`ch = error + v×系数/10 + cpu_comp`（v 为 ±0.1°C/周期去噪后的速度），同时进入 KDP 的 `ch_kdp`（速度项按 0.33 衰减）；越大越跟手",
+      "confNote": ["速度倍率（÷10，0~1000，默认 100=速度×10，0=关闭）：温度变化速度对控制量的权重，同时进入积分与 KDP；越大越跟手，过大易抖"],
       "unit": "×10（存储值 100 = 实际倍率 10）",
       "unitNote": "",
       "default": 100,
@@ -556,6 +712,14 @@
       "type": "multi",
       "label": "动态目标",
       "desc": "动态目标 = clamp(误差 × 系数/1000, ±上限)；平滑%越大越快速跟随；上限默认 15=1.5°C；第 2 值仅在 PID_TARGET_DIR 开关=0 时生效",
+      "docOrder": 20,
+      "docDesc": "PID 目标组合（单参数多值：目标系数÷1000 · 目标EMA平滑%(滤波) · 目标上限(0.1°C)，默认 15=±1.5°C）。动态目标：`raw_target = clamp(error×target_coef, ±上限/10)`；目标 EMA：`pid_target_f += α×(raw_target − pid_target_f)`，α=目标EMA平滑%/100（作为 PID_TARGET_DIR 关闭时的兜底单一 alpha）",
+      "confNote": [
+        "--- 动态目标 ---",
+        "三值：目标系数 ÷1000 [1~1000] · 目标 EMA 平滑 % [1~100] · 目标上限（0.1°C）[1~100]",
+        "  动态目标 = clamp(误差 × 系数/1000, ±上限)；平滑值越小越平稳，上限默认 15=1.5°C",
+        "  第 2 值仅在 PID_TARGET_DIR 开关=0 时生效"
+      ],
       "unit": "",
       "unitNote": "多值键，各字段单位见 fields",
       "default": [20, 10, 15],
@@ -578,6 +742,14 @@
       "type": "int",
       "label": "稳态冻结阈值(0.1°C)",
       "desc": "温度未变且上次 |ch| ≤ 阈值/10 时整轮冻结（积分/KDP/动态目标均不更新）；默认 2=0.2°C",
+      "cTable": "perf-int",
+      "docOrder": 22,
+      "docDesc": "跳过重算的 ch 阈值（0.1°C，1~100）。温度未变且 `\\|last_ch\\|≤` 此值 → 整轮冻结",
+      "confNote": [
+        "--- 稳态冻结 ---",
+        "稳态冻结阈值（1~100，0.1°C，默认 2=0.2°C）：温度未变且上次 |ch| ≤ 阈值/10 时整轮冻结",
+        "  冻结范围：积分/KDP/动态目标/上次 ch 全不更新，仅更新 CPU 补偿的比对基准（防冻结死锁）"
+      ],
       "unit": "0.1°C",
       "unitNote": "",
       "default": 2,
@@ -595,6 +767,14 @@
       "type": "multi",
       "label": "CPU 补偿",
       "desc": "补偿 = clamp(CPU 平滑温度 − 电池温度 − 偏移量, 0) ÷ (除数 × 10)，再按平滑系数 EMA；门控滞回：条件消失后平滑值归零才退出",
+      "docOrder": 24,
+      "docDesc": "CPU 补偿（三值：补偿滤波系数 除数 偏移量(0.1°C)）。`comp = clamp(cpu滤波温度 − 电池 − 偏移, 0) ÷ (divisor × 10)`，按补偿滤波系数 EMA 平滑（独立于 CPU_FILTER_ALPHA，首次上次值用 0 从 0 爬升）。偏移默认 100=10.0°C。门控滞回：条件满足进入补偿、条件消失后平滑值向 0 收敛归零才退出。始终生效、无开关",
+      "confNote": [
+        "--- 输入补偿（始终生效）---",
+        "三值：平滑系数 1~100 · 除数 5~200 · 偏移量 0~500（0.1°C）",
+        "  补偿 = clamp(CPU 平滑温度 − 电池温度 − 偏移量, 0) ÷ (除数 × 10)，再按平滑系数做 EMA",
+        "  门控滞回：CPU 高于电池+偏移时进入补偿；条件消失后平滑值向 0 收敛，归零才退出"
+      ],
       "unit": "",
       "unitNote": "多值键，各字段单位见 fields",
       "default": [25, 30, 100],
@@ -617,6 +797,14 @@
       "type": "multi",
       "label": "PID 目标方向性滤波",
       "desc": "目标量级增大（远离基线）用「远离 α」求快，否则用「回归 α」求稳；默认 1 20 10 = 远离 0.2、回归 0.1；开关=0 时退回 PID_TARGET 第 2 值的单一 α",
+      "docOrder": 21,
+      "docDesc": "目标 EMA 方向性滤波（三值：开关 · 远离基线alpha% · 回归基线alpha%）。alpha 动态：目标量级回升(远离基线，\\|raw_target\\|>\\|pid_target_f\\|)用\"远离alpha\"求快、回落(回归基线)用\"回归alpha\"求稳；默认远离 20=0.2、回归 10=0.1",
+      "confNote": [
+        "--- 动态目标方向性滤波（仅 PID 生效）---",
+        "三值：开关 · 远离基线 α% [1~100] · 回归基线 α% [1~100]",
+        "  目标量级增大（|原始目标| 超过当前平滑目标）时用「远离 α」求快，否则用「回归 α」求稳",
+        "  默认 1 20 10 = 远离 0.2、回归 0.1；开关=0 时退回 PID_TARGET 第 2 值的单一 α"
+      ],
       "unit": "",
       "unitNote": "多值键，各字段单位见 fields",
       "default": [1, 20, 10],
@@ -627,7 +815,7 @@
       "requires": ["PERF_ENABLED"],
       "daemonConsumes": true,
       "fields": [
-        { "label": "开关", "unit": "", "unitNote": "布尔子开关，取值 0/1", "min": 0, "max": 1, "default": 1, "cVar": null },
+        { "bool": true, "label": "开关", "unit": "", "unitNote": "布尔子开关，取值 0/1", "min": 0, "max": 1, "default": 1, "cVar": null },
         { "label": "远离基线 α(%)", "unit": "%", "min": 1, "max": 100, "default": 20, "cVar": "pid_target_away_alpha" },
         { "label": "回归基线 α(%)", "unit": "%", "min": 1, "max": 100, "default": 10, "cVar": "pid_target_toward_alpha" }
       ]
@@ -639,6 +827,14 @@
       "type": "multi",
       "label": "PID 无变化回溯",
       "desc": "温度未变时用最近一次变化前的温度作锚点算速度：v = (当前温度 − 锚点温度) ÷ 累计周期数 ÷ 10 × 权重/1000，不再额外限幅；默认 1 1000 = 开启、注入全量速度",
+      "docOrder": 25,
+      "docDesc": "ch 无变化回溯（两值：开关 · 回溯速度权重÷1000）。温度窗口未变但触发重算时，用\"最近一次变化前的锚点温度 + 累计周期数\"重算速度并注入 v（注入后与常规 v 一样经 ±0.1°C/周期去噪）；权重 1000=注入全量。**无周期上限**（锚点+周期计数），`cycles<=0` 或锚点无效则退化为 v=0（除零/开机守卫）。输出端不再有 EMA 滤波（PID_OUT_FILTER 已删除），每周期最大变化量由 `RATE_LIMIT_COLD` 承担",
+      "confNote": [
+        "--- 无变化回溯（仅 PID 生效）---",
+        "两值：开关 · 速度权重 ÷1000 [100~1000]，默认 1 1000 = 开启、注入全量速度",
+        "  温度未变（本周期无新样本）时，用最近一次变化前的温度作锚点算速度",
+        "  v = (当前温度 − 锚点温度) ÷ 累计周期数 ÷ 10 × 权重/1000，不再额外限幅"
+      ],
       "unit": "",
       "unitNote": "多值键，各字段单位见 fields",
       "default": [1, 1000],
@@ -649,7 +845,7 @@
       "requires": ["PERF_ENABLED"],
       "daemonConsumes": true,
       "fields": [
-        { "label": "开关", "unit": "", "unitNote": "布尔子开关，取值 0/1", "min": 0, "max": 1, "default": 1, "cVar": null },
+        { "bool": true, "label": "开关", "unit": "", "unitNote": "布尔子开关，取值 0/1", "min": 0, "max": 1, "default": 1, "cVar": null },
         { "label": "回溯速度权重(÷1000)", "unit": "×1000", "min": 100, "max": 1000, "default": 1000, "cVar": "pid_spd_recall_weight" }
       ]
     },
@@ -660,6 +856,12 @@
       "type": "multi",
       "label": "制冷强度范围",
       "desc": "前两值须同给；B7X 上限为 1~255（B6X 为 0~194）",
+      "docOrder": 23,
+      "docDesc": "制冷强度范围（三值：下限 上限(B6X) 上限(B7X)，范围 0~194 / 0~194 / 1~255）。B7X 上限暂时与 B6X 一致",
+      "confNote": [
+        "--- 输出范围 ---",
+        "制冷强度范围（三值）：下限 0~194 · B6X 上限 0~194 · B7X 上限 1~255（前两值须同给）"
+      ],
       "unit": "",
       "unitNote": "多值键，各字段单位见 fields",
       "default": [1, 190, 190],
@@ -682,6 +884,13 @@
       "type": "switch",
       "label": "sysfs 路径与缩放开关",
       "desc": "sysfs 路径与缩放独立大类（=1 加载 BATT_TEMP_* / BATT_CURRENT_* / CPU_TEMP_* / CPU_ZONE* / LOG_* 路径与系数配置，=0 使用代码内默认路径）",
+      "docOrder": 2,
+      "docDesc": "sysfs 路径与缩放独立大类（1=加载 BATT_*/CPU_*/LOG_* 路径配置，0=使用代码默认路径）",
+      "confNote": [
+        "传感器 sysfs 路径，不同机型可能位置不同，可自行修改",
+        "缩放系数（DIVISOR）：内部值 = 原始值 ÷ 系数（电池温度、CPU 温度各一个），内部单位为 0.1°C",
+        "以下为 K60 机型推荐值，其他小米系一般通用，其他品牌请自行测试"
+      ],
       "unit": "",
       "unitNote": "布尔开关，取值 0/1，无单位",
       "default": 0,
@@ -699,6 +908,11 @@
       "type": "path",
       "label": "电池温度 sysfs",
       "desc": "电池温度 sysfs 路径；不同机型可能不同，K60 及多数小米系通用",
+      "cTable": "sysfs",
+      "cKind": "SK_PATH",
+      "docOrder": 3,
+      "docDesc": "电池温度 sysfs 路径",
+      "confNote": ["电池温度"],
       "unit": "",
       "unitNote": "文件路径字符串，无单位",
       "default": "/sys/class/power_supply/battery/temp",
@@ -717,6 +931,11 @@
       "type": "int",
       "label": "电池温度缩放系数",
       "desc": "内部值 = 原始值 ÷ 系数，结果以精确至 0.1°C 为宜（原始单位已是 0.1°C 时填 1）",
+      "cTable": "sysfs",
+      "cKind": "SK_INT",
+      "docOrder": 6,
+      "docDesc": "电池温度缩放系数（原始值÷此值→0.1°C）",
+      "confInline": "范围1~10000",
       "unit": "",
       "unitNote": "无量纲缩放系数（除法因子）",
       "default": 1,
@@ -734,6 +953,11 @@
       "type": "path",
       "label": "电池电流 sysfs",
       "desc": "电池电流 sysfs 路径；不同机型可能不同",
+      "cTable": "sysfs",
+      "cKind": "SK_PATH",
+      "docOrder": 5,
+      "docDesc": "电池电流 sysfs 路径",
+      "confNote": ["电池电流（当前版本未参与控制，仅解析保留；原始值 µA ÷ 系数 = 0.01A）"],
       "unit": "",
       "unitNote": "文件路径字符串，无单位",
       "default": "/sys/class/power_supply/battery/current_now",
@@ -752,6 +976,11 @@
       "type": "int",
       "label": "电池电流缩放系数",
       "desc": "内部值 = 原始值 ÷ 系数，结果以精确至 0.01A 为宜；当前版本未参与控制，仅解析保留",
+      "cTable": "sysfs",
+      "cKind": "SK_INT",
+      "docOrder": 8,
+      "docDesc": "电池电流缩放系数（当前版本未参与控制，仅解析保留；原始值 µA ÷此值→0.01A）",
+      "confInline": "范围1~100000",
       "unit": "",
       "unitNote": "无量纲缩放系数（除法因子）",
       "default": 10000,
@@ -769,6 +998,11 @@
       "type": "path",
       "label": "CPU 温度 sysfs 模板",
       "desc": "%d 会替换为目标 thermal_zone 编号",
+      "cTable": "sysfs",
+      "cKind": "SK_PATH",
+      "docOrder": 4,
+      "docDesc": "CPU 温度 sysfs 路径模板（%d=zone编号）",
+      "confNote": ["CPU 温度（%d 会替换为目标 thermal_zone 编号）"],
       "unit": "",
       "unitNote": "路径模板字符串（含 %d 占位），无单位",
       "default": "/sys/class/thermal/thermal_zone%d/temp",
@@ -787,6 +1021,11 @@
       "type": "int",
       "label": "CPU 温度缩放系数",
       "desc": "内部值 = 原始值 ÷ 系数，结果以精确至 0.1°C 为宜（原始单位 m°C 时填 100）",
+      "cTable": "sysfs",
+      "cKind": "SK_INT",
+      "docOrder": 7,
+      "docDesc": "CPU 温度缩放系数（原始值 m°C ÷100→0.1°C）",
+      "confInline": "范围1~10000",
       "unit": "",
       "unitNote": "无量纲缩放系数（除法因子）",
       "default": 100,
@@ -804,6 +1043,14 @@
       "type": "multi",
       "label": "CPU thermal_zone 扫描范围",
       "desc": "首次扫描此区间建立有效 zone 名单，后续只扫名单内 zone；缩小范围可加速首次扫描，K60 推荐 30~40",
+      "cTable": "sysfs",
+      "cKind": "SK_ZONE",
+      "docOrder": 9,
+      "docDesc": "CPU 温度扫描范围（双值：起始zone 结束zone）",
+      "confNote": [
+        "CPU thermal_zone 首次扫描范围（双值，各 0~99，须双值同给；后续只扫命中的 zone）",
+        "  缩小范围可加速首次扫描，K60 机型推荐 30~40"
+      ],
       "unit": "",
       "unitNote": "多值键，各字段单位见 fields",
       "default": [0, 99],
@@ -825,6 +1072,14 @@
       "type": "multi",
       "label": "CPU zone 重扫间隔/保留数",
       "desc": "首次真全量扫描建立有效 zone 名单（排除初值 ≤0）；此后每「重扫间隔」秒在名单内重排，保留温度最高的 N 个",
+      "cTable": "sysfs",
+      "cKind": "SK_RESCAN",
+      "docOrder": 10,
+      "docDesc": "CPU thermal_zone 重扫间隔 + 保留温度值个数（双值：间隔(秒，5~3600) 保留数(1~64)）。首次真全量扫描建立有效 zone 名单（排除初值≤0），后续只在此名单内重排保留最高温 N 个",
+      "confNote": [
+        "有效 zone 名单与重扫（双值）：重扫间隔 5~3600（秒） · 保留个数 1~64，默认 60 10",
+        "  首次真全量扫描建立有效 zone 名单（排除初值 ≤0）；此后每「重扫间隔」秒在名单内重排，保留温度最高的 N 个"
+      ],
       "unit": "",
       "unitNote": "多值键，各字段单位见 fields",
       "default": [60, 10],
@@ -846,6 +1101,11 @@
       "type": "path",
       "label": "日志文件路径",
       "desc": "日志文件路径（SYSFS_ENABLED=1 时加载；配置留空则按二进制名自动生成 <私有目录>/<二进制名>.log）。**本值必须与 C 端 tempctrl.c 的 PRIVATE_DIR 宏、以及 app/build.gradle.kts 的 applicationId 三处一致**——三者任一处改动而另两处未同步，日志会落到 app 卸载/清除数据时被删除的位置，或写不进去",
+      "cTable": "sysfs",
+      "cKind": "SK_PATH",
+      "docOrder": 46,
+      "docDesc": "日志文件路径（应用私有目录；私有目录不可用时兜底回 `/cache/<二进制名>.log` 并写 stderr）",
+      "confNote": ["日志文件路径（SYSFS_ENABLED=1 时加载；空则自动按二进制名在应用私有目录生成）"],
       "unit": "",
       "unitNote": "文件路径字符串，无单位",
       "default": "/data/data/com.example.waspwingtempctrl/files/tempctrl.log",
@@ -865,6 +1125,11 @@
       "type": "int",
       "label": "日志上限(字节)",
       "desc": "超限时截断保留尾部并从完整行首起；0=关闭日志；需 SYSFS_ENABLED=1",
+      "cTable": "sysfs",
+      "cKind": "SK_INT",
+      "docOrder": 47,
+      "docDesc": "日志文件大小上限 (字节)，0=关闭日志。超限时 ftruncate 截断保留尾部（从完整行首起）",
+      "confNote": ["日志文件大小上限（字节，0~1048576，需 SYSFS_ENABLED=1）：0=关闭日志；超限时截断保留尾部并从完整行首起"],
       "unit": "字节",
       "unitNote": "",
       "default": 16256,
@@ -882,6 +1147,10 @@
       "type": "switch",
       "label": "自动拉起散热器 app",
       "desc": "自动拉起散热器 app 开关（独立于 PERF_ENABLED，任何模式生效）。无散热器 app 存活时自动拉起上次使用的 app（目标已运行/未安装则跳过；拉起后自动后台化，但依旧会闪烁一下界面）；是锁死自动重启（APP_WATCHDOG）的前置条件：本开关关闭时 C 端在运行时强制关闭 watchdog（不改配置文件）",
+      "cTable": "pre",
+      "docOrder": 34,
+      "docDesc": "自动拉起散热器 app 开关（独立于 PERF_ENABLED，任何模式生效）。无散热器 app 存活时按上次使用的 app 自动拉起（启动等待/运行中断连时，按 `APP_LAUNCH_COOLDOWN` 冷却，**默认关闭**，需在界面中开启）。**是锁死自动重启（APP_WATCHDOG）的前置条件**：C 端检测到本开关关闭时，无论 APP_WATCHDOG 配置如何都会在运行时强制关闭 watchdog",
+      "confNote": ["=1：断联或无散热器 app 存活时，自动拉起上次使用的 app（目标已运行/未安装则跳过；拉起后自动后台化，但依旧会闪烁一下界面）；=0：关闭（默认，需在界面中开启）"],
       "unit": "",
       "unitNote": "布尔开关，取值 0/1，无单位",
       "default": 0,
@@ -899,6 +1168,10 @@
       "type": "int",
       "label": "拉起冷却间隔(秒)",
       "desc": "两次拉起的最小间隔，防断连频繁拉起；0=不冷却",
+      "cTable": "pre",
+      "docOrder": 35,
+      "docDesc": "两次拉起最小间隔（秒，0~3600），防断连频繁拉起；0=不冷却",
+      "confNote": ["拉起冷却间隔（秒，0~3600，默认 60）：两次拉起的最小间隔，防断连频繁拉起；0=不冷却"],
       "unit": "秒",
       "unitNote": "",
       "default": 60,
@@ -916,6 +1189,14 @@
       "type": "multi",
       "label": "拉起前屏幕状态门禁",
       "desc": "仅 mWakefulness=Awake 才拉起，灭屏/息屏跳过并每 5 秒重试；第 2 值 = 读取失败时是否可拉起（1=可拉起）；第 3 值 = 1 时 Dozing 也算亮屏",
+      "cTable": "pre",
+      "docOrder": 36,
+      "docDesc": "拉起前屏幕状态门禁（三值：开关 · 读取失败默认值 · Dozing是否算亮屏）。仅 `dumpsys power` 的 `mWakefulness=Awake` 才拉起；Asleep/Dozing 算灭屏跳过，每 5 秒重试直到亮屏；读取失败兜底默认 1=可拉起（防探测失败死锁）。Dozing 默认=0（算灭屏，AOD 期间不拉起）",
+      "confNote": [
+        "拉起前屏幕状态门禁（三值）：开关 · 读取失败默认值 · Dozing 是否算亮屏",
+        "  仅 mWakefulness=Awake 才拉起，灭屏/息屏跳过并每 5 秒重试",
+        "  默认 1 1 0 = 开启、读取失败按「可拉起」兜底（防探测失败死锁）、Dozing 不算亮屏"
+      ],
       "unit": "",
       "unitNote": "多值键，各字段单位见 fields",
       "default": [1, 1, 0],
@@ -926,9 +1207,9 @@
       "requires": ["APP_LAUNCH_ENABLED"],
       "daemonConsumes": true,
       "fields": [
-        { "label": "开关", "unit": "", "unitNote": "布尔子开关，取值 0/1", "min": 0, "max": 1, "default": 1, "cVar": null },
-        { "label": "读取失败默认值", "unit": "", "unitNote": "布尔子开关，取值 0/1", "min": 0, "max": 1, "default": 1, "cVar": null },
-        { "label": "Dozing 算亮屏", "unit": "", "unitNote": "布尔子开关，取值 0/1", "min": 0, "max": 1, "default": 0, "cVar": null }
+        { "bool": true, "label": "开关", "unit": "", "unitNote": "布尔子开关，取值 0/1", "min": 0, "max": 1, "default": 1, "cVar": null },
+        { "bool": true, "label": "读取失败默认值", "unit": "", "unitNote": "布尔子开关，取值 0/1", "min": 0, "max": 1, "default": 1, "cVar": null },
+        { "bool": true, "label": "Dozing 算亮屏", "unit": "", "unitNote": "布尔子开关，取值 0/1", "min": 0, "max": 1, "default": 0, "cVar": null }
       ]
     },
     {
@@ -938,6 +1219,14 @@
       "type": "int",
       "label": "锁死自动重启停滞次数",
       "desc": "实际制冷停滞（=上周期实际）且未达目标（≠上周期下发）连续 N 次下发 → kill app 并重新拉起；0=关闭；前置条件 APP_LAUNCH_ENABLED=1（自动拉起关闭时运行时强制置 0）",
+      "cTable": "pre",
+      "docOrder": 37,
+      "docDesc": "锁死自动重启停滞次数（独立于 PERF_ENABLED，任何模式生效）。每次实际下发制冷变化后判定：实际制冷停滞（=上周期实际）且未达目标（≠上周期下发）连续 N 次时，kill 散热器 app 并重新拉起（散热器重启无效，需重建 App 进程恢复连接栈）；0=关闭（默认）；**前置条件：APP_LAUNCH_ENABLED=1 才生效**（自动拉起关闭时运行时强制关闭）",
+      "confNote": [
+        "散热器锁死自动重启（watchdog，独立于性能总开关，任何模式都生效）",
+        "停滞次数（0~120，0=关闭）：实际制冷停滞（=上周期实际）且未达目标（≠上周期下发）连续 N 次下发 → kill app 并重新拉起",
+        "  前置条件 APP_LAUNCH_ENABLED=1；自动拉起关闭时运行时强制置 0（不改配置文件）"
+      ],
       "unit": "次（连续下发周期数）",
       "unitNote": "",
       "default": 0,
@@ -955,6 +1244,12 @@
       "type": "multi",
       "label": "断联显示",
       "desc": "相邻采样时间差超过第一值(秒)视为一次断联，曲线在该处断开；空白按真实断开时长等比显示，超过第二值(秒)封顶",
+      "docOrder": 48,
+      "docDesc": "WebUI 断联判定阈值 + 空白最大宽度（双值，秒）：相邻采样时间差超过第一值（1~120）视为一次断联、曲线在该处断开；断联空白按真实断开时长等比显示，超过第二值（1~600）封顶。**仅 WebUI 读取，守护进程忽略**",
+      "confNote": [
+        "断联（双值）：判定阈值 1~120（秒） · 空白最大宽度 1~600（秒）",
+        "  相邻采样时间差超过第一值视为一次断联、曲线在该处断开；断联空白按真实断开时长等比显示，超过第二值封顶"
+      ],
       "unit": "",
       "unitNote": "多值键，各字段单位见 fields",
       "default": [5, 15],
@@ -976,6 +1271,9 @@
       "type": "int",
       "label": "标注合并阈值(px)",
       "desc": "两条及以上曲线头部垂直相距不超过此值时合并为一个标签行；默认 9=0.8×标签高",
+      "docOrder": 49,
+      "docDesc": "WebUI 头部标注合并阈值（px）：曲线头部垂直相距不超过此值且上下端都落入时才合并为一个标签行；默认 9≈0.8×标签高。**仅 WebUI 读取，守护进程忽略**",
+      "confNote": ["标注合并阈值（px，1~40，默认 9=0.8×标签高）：两条及以上曲线头部垂直相距不超过此值时合并为一个标签行"],
       "unit": "px（像素）",
       "unitNote": "",
       "default": 9,
@@ -993,6 +1291,9 @@
       "type": "int",
       "label": "风扇转速纵轴下限(RPM)",
       "desc": "风扇转速低于此值的样本不参与左轴上下限计算，该段画到图外；0=关闭",
+      "docOrder": 50,
+      "docDesc": "WebUI 左轴风扇转速下限（RPM，0~8000）：低于此值的 rpm 样本不参与左轴上下限计算，该段画到图外；过滤后左轴无有效数据时退回不过滤；0=关闭。**仅 WebUI 读取，守护进程忽略**",
+      "confNote": ["纵轴风扇转速下限（RPM，0~8000，默认 3000）：风扇转速低于此值的样本不参与左轴上下限计算，该段画到图外；过滤后左轴无有效数据时退回不过滤；0=关闭过滤"],
       "unit": "RPM",
       "unitNote": "",
       "default": 3000,
@@ -1010,6 +1311,13 @@
       "type": "multi",
       "label": "曲线滤波",
       "desc": "热端与电池共用；零相位双向EMA+格点吸附。α=0或100都视为关闭滤波，最小步长=0视为关闭吸附，默认 15 5 = 0.15/0.05",
+      "docOrder": 51,
+      "docDesc": "WebUI 曲线滤波（双值，均 ×100）：每遍权重 α（0~100，默认 15=0.15）+ 最小步长（0~100，默认 5=0.05）。**热端与电池两条曲线共用**这一对参数；α = 0 或 100（恒等变换）视为关闭滤波、最小步长 = 0 视为关闭格点吸附（两个子步骤各自独立开关）。**仅 WebUI 读取，守护进程忽略**",
+      "confNote": [
+        "曲线滤波（双值，均 ×100）：每遍权重 α 0~100 · 最小步长 0~100，默认 15 5 = 0.15 / 0.05",
+        "  热端与电池两条曲线共用这一对参数；零相位双向 EMA + 最小步长格点吸附",
+        "  α = 0 或 100 都视为关闭滤波（100 = 1.0 = 恒等）；最小步长 = 0 视为关闭格点吸附"
+      ],
       "unit": "",
       "unitNote": "多值键，各字段单位见 fields",
       "default": [15, 5],
@@ -1031,6 +1339,13 @@
       "type": "multi",
       "label": "保存",
       "desc": "开关=0时只有手动点保存按钮才落盘；延迟为自动保存成功后等的秒数，期间再次自动保存则重新计时；手动保存与错误提示不受延迟影响",
+      "docOrder": 52,
+      "docDesc": "WebUI 自动保存（双值）：开关（0/1，默认 1）+ 自动保存成功后的提示延迟秒数（0~60，默认 3）。开关=0 时只有手动点保存按钮才落盘（「开→关」跳变时补一次落盘）；提示延迟只作用于自动保存，手动保存/保存失败/无桥接的提示一律立即弹出。**仅 WebUI 读取，守护进程忽略**",
+      "confNote": [
+        "自动保存（双值）：开关 0/1 · 提示延迟 0~60（秒），默认 1 3",
+        "  开关=0 时只有手动点保存按钮才落盘；延迟为「自动保存成功后等的秒数」，期间再次自动保存则重新计时",
+        "  手动保存、保存失败、无桥接的错误提示一律立即弹出，不受延迟影响"
+      ],
       "unit": "",
       "unitNote": "多值键，各字段单位见 fields",
       "default": [1, 3],
@@ -1041,16 +1356,59 @@
       "requires": [],
       "daemonConsumes": false,
       "fields": [
-        { "label": "自动保存", "unit": "", "unitNote": "布尔子开关，取值 0/1", "min": 0, "max": 1, "default": 1, "cVar": null },
+        { "bool": true, "label": "自动保存", "unit": "", "unitNote": "布尔子开关，取值 0/1", "min": 0, "max": 1, "default": 1, "cVar": null },
         { "label": "提示延迟(秒)", "unit": "秒", "min": 0, "max": 60, "default": 3, "cVar": null }
       ]
     }
   ],
+  "conf": {
+    "header": [
+      "飞智 B6X 增强计划 — 智能温控配置",
+      "格式：KEY=VALUE（等号两边不要空格），# 开头为注释，空行自动跳过",
+      "修改后无需重启 daemon，下一轮 5 秒循环自动热重载",
+      "本文件由 参数定义/gen_params.py 生成，勿手改（手改会被 check_params.py 判红）；设备上的副本可自由修改",
+      "段标编号与界面分组一致（分组定义见 参数定义/params.def.json）：[0]日志 [1]性能参数 [2]sysfs [3]自动拉起 [4]WebUI"
+    ]
+  },
+  "doc": {
+    "intro": [
+      "下表「默认值」均为**代码内默认**（tempctrl.c 中的初值）；出厂值（`factory`）由 `参数定义/params.def.json` 给出并经 `assets/params.json` 下发，实际以设备上的 profile.conf 为准。",
+      "",
+      "本表由 `python 参数定义/gen_params.py` 生成（键序 = `params.def.json` 的 `docOrder`，按功能重排）；唯一手写处是 `参数定义/params.def.json`。审计对账的**三份来源**：`lsp模块/daemon/profile.conf`、本表、`lsp模块/daemon/tempctrl.c` —— `python 参数定义/check_params.py` 漂移即报错。"
+    ]
+  },
+  "packages": {
+    "description": "R4 单一来源：飞智三个包名（B6X 老/新 app、B7X 游戏厅）只在本段声明，其余文件由 gen_params.py --audit 逐处核对。short = 文档/说明里的简称（正向出现核对接受简称）；反向核对只认 4 段全小写的应用包名形态，广播 action 与 SDK 类名不算。",
+    "apps": [
+      {"id": "B6X_OLD", "short": "老 B6X app", "value": "com.flydigi.waspwing.experimental", "cMacro": "APP_PKG_B6X_OLD", "javaConst": "PACKAGE_B6X"},
+      {"id": "B6X_NEW", "short": "新 B6X app", "value": "com.flydigi.waspwing.experimentanliuliu", "cMacro": "APP_PKG_B6X_NEW", "javaConst": "PACKAGE_B6X_NEW"},
+      {"id": "B7X", "short": "farsef", "value": "com.fdg.flashplay.farsef", "cMacro": "APP_PKG_B7X", "javaConst": "PACKAGE_B7X"}
+    ],
+    "sites": [
+      {"file": "lsp模块/daemon/tempctrl.c", "check": "cMacroSet", "expect": ["B6X_OLD", "B6X_NEW", "B7X"]},
+      {"file": "lsp模块/app/src/main/java/com/example/waspwingtempctrl/MainHook.java", "check": "javaConstSet", "expect": ["B6X_OLD", "B6X_NEW", "B7X"]},
+      {"file": "lsp模块/app/src/main/res/values/arrays.xml", "check": "xmlItemSet", "expect": ["B6X_OLD", "B6X_NEW", "B7X"]},
+      {"file": "lsp模块/README.md", "check": "literalsPresent", "expect": ["B6X_OLD", "B6X_NEW", "B7X"]},
+      {"file": "逻辑说明.md", "check": "literalsPresent", "expect": ["B6X_OLD", "B6X_NEW", "B7X"]}
+    ]
+  },
+  "appPackage": {
+    "description": "R6 单一来源：本项目包名。真源是 app/build.gradle.kts 的 applicationId；定义值必须与它相等，其余落点由它推出。",
+    "value": "com.example.waspwingtempctrl",
+    "truthFile": "lsp模块/app/build.gradle.kts",
+    "privateDirSites": [
+      { "file": "lsp模块/daemon/tempctrl.c", "kind": "cMacro", "name": "PRIVATE_DIR" },
+      { "file": "lsp模块/app/src/main/java/com/example/waspwingtempctrl/ConfigStore.java", "kind": "javaConst", "name": "DAEMON_PRIVATE_DIR" }
+    ]
+  },
   "audit": {
     "description": [
       "本段只服务 gen_params.py --audit 的自动核对，不进入产物 params.json。",
       "cVars：键 → 与取值位一一对应的 tempctrl.c 变量名（null = 无法自动核对：布尔子开关、护栏式校验或结构体字段）。",
-      "skipDefault：C 内静态初值不直接等于 default 的键（附原因），只跳过默认值核对，范围仍核对。"
+      "skipDefault：C 内静态初值不直接等于 default 的键（附原因），只跳过默认值核对，范围仍核对。",
+      "cTable：该键由 C 端哪张表驱动 —— perf-int = INT_CFG_KEYS[]（性能层单值，PERF_ENABLED=1）/ sysfs = SYSFS_CFG_KEYS[]（SYSFS_ENABLED=1，cKind 给出槽位类型）/ pre = load_config 第一遍预读（不受任何总开关约束）；无 cTable = 在 parse_* 分段函数内手写。",
+      "crossChecks：跨「定义默认值 ↔ C 宏 ↔ applicationId ↔ 曲线档位」的自动核对。",
+      "packages / appPackage：R4/R6 的包名单一来源声明（非参数段，不进任何产物）。"
     ],
     "skipDefault": {
       "LOG_FILE": "C 内 log_file_path 静态初值为空串，运行期按二进制名派生 <PRIVATE_DIR>/<二进制名>.log，私有目录不可用时回落 /cache/<二进制名>.log。静态初值≠default 属预期，故豁免；其真实一致性由 crossChecks 第 1 条核对"
@@ -1064,10 +1422,14 @@
         "suffix": "tempctrl.log"
       },
       {
-        "id": "tempctrl.c 的 PRIVATE_DIR = /data/data/<applicationId>/files（applicationId 取自 app/build.gradle.kts）",
+        "id": "tempctrl.c 的 PRIVATE_DIR = /data/data/<applicationId>/files（applicationId 见 appPackage 段与 app/build.gradle.kts）",
         "kind": "macroEqualsAppIdPrivateDir",
-        "macro": "PRIVATE_DIR",
-        "gradleRelPath": "lsp模块(apk修复+温控接口)/app/build.gradle.kts"
+        "macro": "PRIVATE_DIR"
+      },
+      {
+        "id": "曲线缓冲容量：C 宏 WEBUI_DATA_MAX_LINES = 定义 chart.rollingMaxLines = 档位上限",
+        "kind": "chartMaxEqualsMacro",
+        "macro": "WEBUI_DATA_MAX_LINES"
       }
     ],
     "cVars": {

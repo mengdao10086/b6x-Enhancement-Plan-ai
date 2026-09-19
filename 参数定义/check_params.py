@@ -2,14 +2,19 @@
 # -*- coding: utf-8 -*-
 """B6X 温控参数定义 —— CI 校验脚本
 
+定位：本文件**只做校验**，不含任何生成逻辑；来源清单（gen_params.SOURCES）与产物清单
+（gen_params.PRODUCTS）一律从 gen_params 取，不在此重复声明第二份。
+
 断言（任一不过即非 0 退出）：
-  A 产物可复现：重跑生成逻辑，与落盘的 assets/params.json 必须逐字节一致   → 退出 1
+  A 产物可复现：重跑生成逻辑，与落盘的 4 个产物必须一致（比较按换行归一化） → 退出 1
   B 产物自洽：52 键齐全、必需字段完整、min ≤ default/factory ≤ max、分组可解析 → 退出 1
-  C 四源无漂移：与 schema.js / profile.conf / 逻辑说明.md / tempctrl.c 对账     → 退出 2
+  C 三源无漂移：与 profile.conf / 逻辑说明.md 参数表 / tempctrl.c 对账（含包名） → 退出 2
+  D 产物形态自检：C 头括号配平、X 宏实参个数、tempctrl.c 格式串转换符 vs 实参 → 退出 1
+    （本机与 CI 均无 C 编译器，D 是编译期错误的替代检查）
 
 用法：
     python 参数定义/check_params.py
-    python 参数定义/check_params.py --no-audit     # 只查产物（线 A 正在改 tempctrl.c 时临时用）
+    python 参数定义/check_params.py --no-audit     # 只查产物（线 2 正在改 tempctrl.c 时临时用）
 
 零第三方依赖（仅标准库）。
 
@@ -17,7 +22,7 @@ CI 接线（写入 .github/workflows/build.yml，本脚本不改该文件）：
     在「构建 LSPosed 模块」job 的 **checkout 之后、Gradle 编译之前**加一步
       - name: 校验参数定义产物
         run: python 参数定义/check_params.py
-    （该步骤需在 tempctrl.c 与 assets/params.json 都已就位的工作树上运行；
+    （该步骤需在 tempctrl.c 与全部产物都已就位的工作树上运行；
       它同时充当 R1 要求的「生成后 git diff --exit-code」等价校验。）
 """
 
@@ -25,6 +30,7 @@ import argparse
 import io
 import json
 import os
+import re
 import sys
 
 sys.dont_write_bytecode = True   # 不在 参数定义/ 里留 __pycache__（.gitignore 未覆盖它）
@@ -39,18 +45,24 @@ class Failure(Exception):
     pass
 
 
+def _rel(path):
+    return os.path.relpath(path, gen_params.REPO).replace("\\", "/")
+
+
 def fail_check_a(definition):
-    """A 产物可复现。"""
-    path = gen_params.product_path(definition)
-    expected = gen_params.render(gen_params.build_product(definition))
-    if not os.path.exists(path):
-        raise Failure("产物不存在：%s（先跑 python 参数定义/gen_params.py）" % path)
-    with io.open(path, "r", encoding="utf-8") as fh:
-        actual = fh.read()
-    if actual != expected:
-        raise Failure("产物与定义不一致（手改过 params.json，或定义改了没重新生成）：%s" % path)
-    return "A 产物可复现：%s 与定义逐字节一致" % (
-        os.path.relpath(path, gen_params.REPO).replace("\\", "/"))
+    """A 产物可复现：4 个产物逐一与重跑结果比较。"""
+    notes = []
+    for product in gen_params.PRODUCTS:
+        path = gen_params.product_path(product)
+        if not os.path.exists(path):
+            raise Failure("产物不存在：%s（先跑 python 参数定义/gen_params.py）" % _rel(path))
+        expected = gen_params.expected_product(product.id, definition)
+        with io.open(path, "r", encoding="utf-8") as fh:
+            actual = fh.read()
+        if actual != expected:
+            raise Failure("产物与定义不一致（手改过，或定义改了没重新生成）：%s" % _rel(path))
+        notes.append("%s%s" % (product.path, "（区间）" if product.kind == "region" else ""))
+    return "A 产物可复现：%d 个产物与定义一致（按换行归一化）—— %s" % (len(notes), " / ".join(notes))
 
 
 def _num_ok(v):
@@ -59,7 +71,8 @@ def _num_ok(v):
 
 def fail_check_b(definition):
     """B 产物自洽（不依赖生成逻辑，独立复核）。"""
-    with io.open(gen_params.product_path(definition), "r", encoding="utf-8") as fh:
+    with io.open(gen_params.product_path(
+            gen_params.product_by_id("params.json")), "r", encoding="utf-8") as fh:
         product = json.load(fh)
 
     keys = product["keys"]
@@ -152,10 +165,177 @@ def fail_check_b(definition):
         len(keys), len(product["groups"]))
 
 
+# --------------------------------------------------------------------------
+# D 产物形态自检（无 C 编译器 → 用静态检查替代编译期错误）
+# --------------------------------------------------------------------------
+
+def _strip_c_comments(text):
+    """去掉 C 注释（字符串/字符字面量内的注释符号不误删）。"""
+    out = []
+    i = 0
+    n = len(text)
+    while i < n:
+        ch = text[i]
+        if ch == '"' or ch == "'":
+            q = ch
+            out.append(ch)
+            i += 1
+            while i < n:
+                out.append(text[i])
+                if text[i] == "\\":
+                    if i + 1 < n:
+                        out.append(text[i + 1])
+                        i += 1
+                elif text[i] == q:
+                    i += 1
+                    break
+                i += 1
+            continue
+        if ch == "/" and i + 1 < n and text[i + 1] == "/":
+            while i < n and text[i] != "\n":
+                i += 1
+            continue
+        if ch == "/" and i + 1 < n and text[i + 1] == "*":
+            i += 2
+            while i + 1 < n and not (text[i] == "*" and text[i + 1] == "/"):
+                i += 1
+            i += 2
+            continue
+        out.append(ch)
+        i += 1
+    return "".join(out)
+
+
+def _split_args(arg_text):
+    """按顶层逗号切分实参（括号/方括号深度为 0 处）。"""
+    args = []
+    depth = 0
+    cur = []
+    i = 0
+    n = len(arg_text)
+    while i < n:
+        ch = arg_text[i]
+        if ch in "([{":
+            depth += 1
+        elif ch in ")]}":
+            depth -= 1
+        if ch == "," and depth == 0:
+            args.append("".join(cur).strip())
+            cur = []
+        else:
+            cur.append(ch)
+        i += 1
+    if "".join(cur).strip():
+        args.append("".join(cur).strip())
+    return args
+
+
+def _call_args(text, open_paren):
+    """从 '(' 处取配对实参文本。"""
+    depth = 0
+    i = open_paren
+    while i < len(text):
+        ch = text[i]
+        if ch == "(":
+            depth += 1
+        elif ch == ")":
+            depth -= 1
+            if depth == 0:
+                return text[open_paren + 1:i]
+        i += 1
+    return None
+
+
+def fail_check_d(definition):
+    """D 产物形态自检：C 头结构 + C 端格式串（无编译器时的替代检查）。"""
+    notes = []
+
+    # ---- D1 生成头：括号配平 + X 宏实参个数 ----
+    h_path = gen_params.product_path(gen_params.product_by_id("c-header"))
+    with io.open(h_path, "r", encoding="utf-8") as fh:
+        h_text = fh.read()
+    code = _strip_c_comments(h_text)
+    for pair in (("(", ")"), ("{", "}"), ("[", "]")):
+        if code.count(pair[0]) != code.count(pair[1]):
+            raise Failure("D1 %s 括号不配平：%r %d 个 / %r %d 个"
+                          % (_rel(h_path), pair[0], code.count(pair[0]),
+                             pair[1], code.count(pair[1])))
+    arity = {"CFG_PERF_INT_KEYS": 4, "CFG_SYSFS_KEYS": 7}
+    for name in arity:
+        rows = re.findall(r"(?m)^\s*X\((.*?)\)\s*\\?$", h_text)
+        body = gen_params._block(h_text, r"#define\s+%s\(X\)" % name, r"(?m)^#define\s")
+        rows = re.findall(r"(?m)^\s*X\((.*)\)\s*\\?$", body)
+        if not rows:
+            raise Failure("D1 %s 内没有 X(...) 行" % name)
+        for row in rows:
+            if len(_split_args(row)) != arity[name]:
+                raise Failure("D1 %s 的 X 宏实参个数 %d ≠ 声明 %d：X(%s)"
+                              % (name, len(_split_args(row)), arity[name], row))
+    notes.append("头文件括号配平 / X 宏实参个数（%d 行）"
+                 % sum(len(re.findall(r"(?m)^\s*X\(", gen_params._block(
+                     h_text, r"#define\s+%s\(X\)" % n, r"(?m)^#define\s"))) for n in arity))
+
+    # ---- D2 C 端格式串：转换符个数 vs 实参个数 ----
+    c_path = gen_params.source_path(
+        next(s for s in gen_params.SOURCES if s.id == "c"))
+    with io.open(c_path, "r", encoding="utf-8") as fh:
+        c_text = fh.read()
+    str_macros = gen_params.parse_c_string_macros(c_text)
+    code = _strip_c_comments(c_text)
+    # 函数名 → 格式串所在实参序号（0 起）
+    fmt_pos = {
+        "write_log": 0, "pid_log": 0, "printf": 0,
+        "debug_log": 1, "fprintf": 1, "sprintf": 1, "sscanf": 1, "fscanf": 1,
+        "snprintf": 2, "asprintf": 1,
+    }
+    spec_re = re.compile(r"%[-+ #0']*(?:\*|\d+)?(?:\.(?:\*|\d+))?(?:hh|h|ll|l|j|z|t|L)?[diouxXeEfFgGaAcspn%]")
+    checked = 0
+    skipped = 0
+    problems = []
+    for m in re.finditer(r"\b(%s)\s*\(" % "|".join(fmt_pos), code):
+        name = m.group(1)
+        if re.search(r"#\s*define\s+%s\s*\(" % name, code[:m.start()].rsplit("\n", 1)[-1]):
+            continue
+        raw = _call_args(code, m.end() - 1)
+        if raw is None:
+            continue
+        args = _split_args(raw)
+        idx = fmt_pos[name]
+        if len(args) <= idx:
+            problems.append("%s 调用实参不足（%d 个）" % (name, len(args)))
+            continue
+        fmt_arg = args[idx]
+        literal = None
+        parts = re.findall(r'"((?:[^"\\]|\\.)*)"', fmt_arg)
+        if parts and re.fullmatch(r'\s*(?:"(?:[^"\\]|\\.)*"\s*)+', fmt_arg):
+            literal = "".join(parts)
+        elif re.fullmatch(r"[A-Za-z_]\w*", fmt_arg) and fmt_arg in str_macros:
+            literal = str_macros[fmt_arg]
+        if literal is None:
+            skipped += 1                 # 格式串是变量/拼接/跨宏，无法静态核对
+            continue
+        n_args = len(args) - (idx + 1)
+        n_spec = 0
+        for sm in spec_re.finditer(literal):
+            if sm.group(0) == "%%":
+                continue
+            n_spec += 1 + sm.group(0).count("*")
+        checked += 1
+        if n_spec != n_args:
+            line_no = code[:m.start()].count("\n") + 1
+            problems.append("%s:%d %s 格式串需 %d 个参数，实际 %d 个：%s"
+                            % (_rel(c_path), line_no, name, n_spec, n_args, literal))
+    if problems:
+        raise Failure("D2 格式串核对失败 %d 条：\n  - %s"
+                      % (len(problems), "\n  - ".join(problems)))
+    notes.append("C 格式串核对 %d 处（%d 处格式串非字面量已跳过）" % (checked, skipped))
+    return "D 产物形态自检：%s" % "；".join(notes)
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description="B6X 参数定义 CI 校验")
     ap.add_argument("--no-audit", action="store_true",
-                    help="跳过四源漂移审计（线 A 正在改 tempctrl.c 时临时用）")
+                    help="跳过三源漂移审计（线 2 正在改 tempctrl.c 时临时用）")
     args = ap.parse_args(argv)
 
     try:
@@ -167,22 +347,24 @@ def main(argv=None):
     try:
         print("[PASS] " + fail_check_a(definition))
         print("[PASS] " + fail_check_b(definition))
+        print("[PASS] " + fail_check_d(definition))
     except Failure as exc:
         print("[FAIL] " + str(exc))
         return 1
 
+    sources = " / ".join(s.path for s in gen_params.SOURCES)
     if args.no_audit:
-        print("[SKIP] 四源漂移审计（--no-audit）")
+        print("[SKIP] 三源漂移审计（--no-audit）：%s" % sources)
         return 0
 
-    findings = gen_params.audit(definition, verbose=False)
+    findings = gen_params.audit(definition)
     errors = [t for lvl, t in findings if lvl == "ERROR"]
     for t in errors:
         print("[FAIL] " + t)
     if errors:
-        print("[FAIL] C 四源漂移 %d 条" % len(errors))
+        print("[FAIL] C 三源漂移 %d 条" % len(errors))
         return 2
-    print("[PASS] C 四源无漂移（schema.js / profile.conf / 逻辑说明.md / tempctrl.c）")
+    print("[PASS] C 三源无漂移（%s）" % sources)
     return 0
 
 

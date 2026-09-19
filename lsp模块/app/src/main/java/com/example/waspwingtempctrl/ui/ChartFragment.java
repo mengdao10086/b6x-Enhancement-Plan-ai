@@ -31,7 +31,7 @@ import java.util.Locale;
  * 曲线页（D2）：档位选择 + 图例 + 自绘画布 + 失败可诊断。
  *
  * <p>绘制口径在 {@link ChartView}（自绘）与 {@link ChartAxis}/{@link ChartDataset}/
- * {@link ChartWindow} 内，逐条对齐 WebUI 的 {@code drawChart()}。
+ * {@link ChartWindow} 内，逐条对齐 {@code 逻辑说明.md}（仓库根）的「曲线」一节。
  *
  * <p><b>线程</b>：文件读取、{@code profile.conf} 与 {@code params.json} 的读取全部在后台线程
  * （{@link ChartLoader}/{@link ChartConfig}）；主线程只做渲染。Context 一律在主线程取出后
@@ -327,7 +327,7 @@ public class ChartFragment extends Fragment {
 
     // ==================== 控件构建 ====================
 
-    /** 图例：6 条曲线，默认开关照 WebUI；勾选框着色 = 该曲线的 chart_series_* 色。 */
+    /** 图例：6 条曲线，默认开关照 {@code 逻辑说明.md} 的「曲线」一节〈系列开关〉；勾选框着色 = 该曲线的 chart_series_* 色。 */
     private void buildLegend() {
         LayoutInflater inflater = LayoutInflater.from(requireContext());
         legendRow.removeAllViews();

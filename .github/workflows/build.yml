@@ -1,7 +1,8 @@
 name: 自动构建
 
 on:
-  # 所有推送都触发构建（不设 paths 过滤——中文路径存在 Unicode 匹配问题）
+  # 所有推送都触发构建（不设 paths 过滤——中文路径存在 Unicode 匹配问题，
+  # paths 过滤会静默失配，出现"该建的不建"且无任何报错）
   # 由 detect-changes job 内部判断是否有相关变更
   push:
   # 标签推送（v*）→ detect-changes 中会设为全量构建
@@ -9,7 +10,12 @@ on:
   workflow_dispatch:
 
 # 旧版独立 workflow（build-apk/build-lsposed/build-magisk）已废弃，合并至此文件
-# 交付物为单一 APK：C 守护程序在本 job 内编译后注入 app/src/main/assets/，再出 APK
+# 交付物为单一 APK：C 守护程序（源码在 lsp模块/daemon/）在本 job 内编译后注入
+# lsp模块/app/src/main/assets/，再出 APK
+# 注意：C 源码与 APK 工程现在同在 lsp模块/ 下，两个构建信号已并入单一信号
+#
+# 目录名 ↔ CI 路径正则的耦合：下列正则里的 `lsp模块/` 前缀是硬编码的，
+# 再次重命名该目录时必须同步改本文件（含哈希/编译/注入/working-directory 各处）
 
 jobs:
   # ──────────────────────────────────────
@@ -19,8 +25,7 @@ jobs:
     name: 检测变更模块
     runs-on: ubuntu-latest
     outputs:
-      lsposed: ${{ steps.check.outputs.lsposed }}
-      magisk: ${{ steps.check.outputs.magisk }}
+      changed: ${{ steps.check.outputs.changed }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -32,8 +37,7 @@ jobs:
           # workflow_dispatch / 标签推送 → 全量构建
           if [[ "${{ github.event_name }}" == "workflow_dispatch" || \
                 "${{ github.ref_type }}" == "tag" ]]; then
-            echo "lsposed=true" >> "$GITHUB_OUTPUT"
-            echo "magisk=true" >> "$GITHUB_OUTPUT"
+            echo "changed=true" >> "$GITHUB_OUTPUT"
             exit 0
           fi
 
@@ -41,18 +45,20 @@ jobs:
           BEFORE="${{ github.event.before }}"
           if [[ -z "$BEFORE" || "$BEFORE" == "0000000000000000000000000000000000000000" ]]; then
             # 首次推送无 before → 全量
-            echo "lsposed=true" >> "$GITHUB_OUTPUT"
-            echo "magisk=true" >> "$GITHUB_OUTPUT"
+            echo "changed=true" >> "$GITHUB_OUTPUT"
           else
             # core.quotePath=false 防止中文路径被转义为八进制导致 grep 匹配失败
             CHANGES=$(git -c core.quotePath=false diff --name-only "$BEFORE" "${{ github.sha }}")
             # 排除文档类文件（*.md），改文档不触发构建
             CHANGES=$(echo "$CHANGES" | grep -v '\.md$' || true)
-            # APK 侧：app/ 代码、gradle 配置，以及参数定义（assets/params.json 的单一来源）变更
-            # 注意：只改 参数定义/ 而没重新生成 params.json 时必须让 CI 跑到校验步骤
-            echo "$CHANGES" | grep -qE '^(lsp模块\(apk修复\+温控接口\)/(app/|build\.gradle\.kts|settings\.gradle\.kts|gradle\.properties|gradlew|gradle/)|参数定义/)' && echo "lsposed=true" >> "$GITHUB_OUTPUT" || echo "lsposed=false" >> "$GITHUB_OUTPUT"
-            # C 源码：编译后注入 APK，目录内构建相关变更才构建（md 已排除）
-            echo "$CHANGES" | grep -q '^magisk模块(智能温控)/' && echo "magisk=true" >> "$GITHUB_OUTPUT" || echo "magisk=false" >> "$GITHUB_OUTPUT"
+            # 单一信号，三类输入任一变更即重建（APK 内含 C 二进制，产物不可分割）：
+            #   lsp模块/app/      —— APK 代码
+            #   lsp模块/daemon/   —— C 守护程序源码与构建脚本
+            #   lsp模块/*.kts 等  —— Gradle 配置
+            #   参数定义/          —— assets/params.json 与 daemon/profile.conf 的单一来源
+            # 注意：只改 参数定义/ 而没重新生成产物时必须让 CI 跑到校验步骤
+            echo "$CHANGES" | grep -qE '^(lsp模块/(app/|daemon/|build\.gradle\.kts|settings\.gradle\.kts|gradle\.properties|gradlew|gradle/)|参数定义/)' \
+              && echo "changed=true" >> "$GITHUB_OUTPUT" || echo "changed=false" >> "$GITHUB_OUTPUT"
           fi
 
   # ──────────────────────────────────────
@@ -62,16 +68,46 @@ jobs:
   build:
     name: 编译 APK（含 C 守护程序）
     needs: detect-changes
-    if: needs.detect-changes.outputs.lsposed == 'true' || needs.detect-changes.outputs.magisk == 'true'
+    if: needs.detect-changes.outputs.changed == 'true'
     runs-on: ubuntu-latest
 
     steps:
       - uses: actions/checkout@v4
 
       # ── 参数定义校验（R1「单一来源」的唯一自动化保护）──
-      # 退出码：0 通过 / 1 产物与定义不一致或字段不自洽 / 2 四源漂移
+      # 退出码：0 通过 / 1 产物不可复现或字段不自洽 / 2 三源漂移（profile.conf / 逻辑说明.md 参数表 / tempctrl.c）
       - name: 校验参数定义产物
         run: python3 参数定义/check_params.py
+
+      # ── 跨端协议一致性内联断言 ──
+      # 不新建脚本（避免与 参数定义/ 的独占范围冲突），就地 grep 两端声明比对。
+      # R2：广播 extra 名与顺序两端一致。权威声明处 = tempctrl.c 的 BROADCAST_EXTRAS[]；
+      #     消费处 = MainHook.java 的 getIntExtra() 序列。两端靠人工保持，本断言是唯一自动防线。
+      - name: 断言广播协议两端一致（R2）
+        run: |
+          C_EXTRAS=$(sed -n '/BROADCAST_EXTRAS\[\] *= *{/,/};/p' lsp模块/daemon/tempctrl.c \
+                     | grep -o '"[^"]*"' | tr -d '"' | paste -sd' ' -)
+          J_EXTRAS=$(grep -o 'getIntExtra("[^"]*"' \
+                     lsp模块/app/src/main/java/com/example/waspwingtempctrl/MainHook.java \
+                     | sed 's/.*getIntExtra("//; s/"$//' | paste -sd' ' -)
+          echo "C  端 BROADCAST_EXTRAS[]: [$C_EXTRAS]"
+          echo "Java 端 getIntExtra()    : [$J_EXTRAS]"
+          [ -n "$C_EXTRAS" ] || { echo "未解析到 C 端 BROADCAST_EXTRAS[]，断言失效"; exit 1; }
+          [ "$C_EXTRAS" = "$J_EXTRAS" ] \
+            || { echo "广播协议漂移：extra 名或顺序两端不一致（权威处见 tempctrl.c 的 BROADCAST_EXTRAS[]）"; exit 1; }
+          echo "OK：extra 名与顺序一致"
+
+      # R7：曲线数据行格式的转换符个数须等于 WEBUI_DATA_COLS（同文件相邻两行声明）。
+      - name: 断言曲线行格式列数一致（R7）
+        run: |
+          COLS=$(sed -n 's/^#define *WEBUI_DATA_COLS *\([0-9]\+\).*/\1/p' lsp模块/daemon/tempctrl.c)
+          FMT=$(sed -n 's/^#define *WEBUI_ROW_FMT *"\(.*\)".*/\1/p' lsp模块/daemon/tempctrl.c)
+          N=$(printf '%s' "$FMT" | grep -o '%' | wc -l | tr -d ' ')
+          echo "WEBUI_DATA_COLS=$COLS  WEBUI_ROW_FMT=$FMT  转换符个数=$N"
+          [ -n "$COLS" ] && [ -n "$FMT" ] || { echo "未解析到 WEBUI_DATA_COLS/WEBUI_ROW_FMT，断言失效"; exit 1; }
+          [ "$COLS" = "$N" ] \
+            || { echo "曲线行格式漂移：转换符 $N 个 ≠ WEBUI_DATA_COLS $COLS（改一处须同步另一处）"; exit 1; }
+          echo "OK：列数与格式串一致"
 
       # ── 工具链 ──
       - name: 设置 JDK 17
@@ -108,21 +144,30 @@ jobs:
           ls /opt/ndk/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android* | head -3
 
       # ── C 守护程序编译（内容级变更检测 + 缓存）──
-      # R6：对 magisk模块(智能温控)/ 整目录取哈希（排除 *.md），不再只取三个文件。
-      # 只哈希 tempctrl.c / patch_tls.py / build_tempctrl.sh 时，一旦拆出 .h 或第二个 .c
-      # 会命中缓存并静默跳过编译、产出旧二进制。
-      - name: 计算 tempctrl 源码哈希（整目录内容级变更检测）
+      # 哈希范围 = 三个必要构建件 + daemon/ 下全部 .c/.h。
+      # 排除 profile.conf：它是参数定义的生成物、会频繁变，且不参与编译，
+      # 纳入会让每次改配置模板都作废二进制缓存。
+      # *.c/*.h 走通配而非固定清单：新增或拆出头文件（如由 gen_params.py 生成的
+      # params_generated.h）会被自动覆盖，不会命中缓存静默跳过编译、产出旧二进制。
+      - name: 计算 tempctrl 源码哈希（构建件 + 全部 .c/.h）
         id: hash-tempctrl
         run: |
-          if [ ! -d "magisk模块(智能温控)" ]; then
-            echo "源码目录不存在：magisk模块(智能温控)/"
+          SRC="lsp模块/daemon"
+          if [ ! -d "$SRC" ]; then
+            echo "源码目录不存在：$SRC/"
             exit 1
           fi
+          FILES="tempctrl.c build_tempctrl.sh patch_tls.py"
+          for f in "$SRC"/*.c "$SRC"/*.h; do
+            [ -f "$f" ] || continue
+            b=${f##*/}
+            case " $FILES " in *" $b "*) ;; *) FILES="$FILES $b" ;; esac
+          done
+          FILES=$(printf '%s\n' $FILES | LC_ALL=C sort | tr '\n' ' ')
           echo "=== 参与哈希的文件 ==="
-          (cd "magisk模块(智能温控)" && find . -type f ! -name '*.md' | LC_ALL=C sort)
-          HASH=$(cd "magisk模块(智能温控)" \
-                 && find . -type f ! -name '*.md' -print0 \
-                 | LC_ALL=C sort -z | xargs -0 -r sha256sum | sha256sum | cut -d' ' -f1)
+          for f in $FILES; do echo "  $SRC/$f"; done
+          # 三个必要构建件始终在列：缺失时 sha256sum 报错、步骤失败，不会静默少哈希
+          HASH=$(cd "$SRC" && sha256sum $FILES | sha256sum | cut -d' ' -f1)
           echo "HASH=$HASH" >> "$GITHUB_OUTPUT"
 
       - name: 缓存 tempctrl 二进制（源码未变时直接复用，跳过编译）
@@ -132,14 +177,15 @@ jobs:
           path: tempctrl
           key: tempctrl-${{ steps.hash-tempctrl.outputs.HASH }}
 
-      - name: 编译 tempctrl（动态链接，源码未变化时跳过）
+      # 编译参数（含链接方式）的唯一来源是 lsp模块/daemon/build_tempctrl.sh，CI 不复制一份
+      - name: 编译 tempctrl（参数见 lsp模块/daemon/build_tempctrl.sh，源码未变化时跳过）
         if: steps.cache-tempctrl.outputs.cache-hit != 'true'
         run: |
           set +e
           CC=/opt/ndk/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android21-clang
           $CC --version > /dev/null 2>&1
           mkdir -p "CI记录"
-          CC="$CC" sh "magisk模块(智能温控)/build_tempctrl.sh" "magisk模块(智能温控)/tempctrl.c" tempctrl > "CI记录/compile_ok.txt" 2>"CI记录/compile_err.txt"
+          CC="$CC" sh "lsp模块/daemon/build_tempctrl.sh" "lsp模块/daemon/tempctrl.c" tempctrl > "CI记录/compile_ok.txt" 2>"CI记录/compile_err.txt"
           RC=$?
           echo "=== exit code: $RC ==="
           echo "=== stdout ==="
@@ -178,13 +224,13 @@ jobs:
           if-no-files-found: ignore
 
       - name: 修复 PT_TLS 对齐
-        run: python3 "magisk模块(智能温控)/patch_tls.py" tempctrl
+        run: python3 "lsp模块/daemon/patch_tls.py" tempctrl
 
       # ── 二进制注入 APK assets ──
       # 落点固定为 assets/tempctrl-arm64（Deployer.BIN_ASSET 依赖该名字）
       - name: 注入 C 二进制到 APK assets
         run: |
-          DEST="lsp模块(apk修复+温控接口)/app/src/main/assets/tempctrl-arm64"
+          DEST="lsp模块/app/src/main/assets/tempctrl-arm64"
           mkdir -p "$(dirname "$DEST")"
           cp tempctrl "$DEST"
           if [ ! -s "$DEST" ]; then
@@ -197,25 +243,26 @@ jobs:
 
       # ── 出 APK ──
       - name: 编译 APK（b6x keystore 签名）
-        working-directory: ./lsp模块(apk修复+温控接口)
+        working-directory: ./lsp模块
         run: |
           chmod +x gradlew
           ./gradlew assembleRelease
 
       - name: 获取版本号
         id: apk-version
-        working-directory: ./lsp模块(apk修复+温控接口)
+        working-directory: ./lsp模块
         run: echo "VERSION=$(grep "versionName" app/build.gradle.kts | sed 's/.*"\(.*\)".*/\1/')" >> $GITHUB_OUTPUT
 
+      # 该 APK 已是唯一交付物，产物名不再带 LSPosed 后缀
       - name: 重命名 APK
         run: |
           mkdir -p "$GITHUB_WORKSPACE/CI记录"
-          cp "lsp模块(apk修复+温控接口)/app/build/outputs/apk/release/"*.apk "$GITHUB_WORKSPACE/CI记录/b6x-EP-LSPosed-v${{ steps.apk-version.outputs.VERSION }}.apk"
+          cp "lsp模块/app/build/outputs/apk/release/"*.apk "$GITHUB_WORKSPACE/CI记录/b6x-EP-v${{ steps.apk-version.outputs.VERSION }}.apk"
 
       # 注入是否真的进了产物，只有拆开 APK 才能确认（cp 失败不会让 Gradle 报错）
       - name: 校验 APK 内含 C 二进制
         run: |
-          APK=$(ls CI记录/b6x-EP-LSPosed-v*.apk | head -1)
+          APK=$(ls CI记录/b6x-EP-v*.apk | head -1)
           echo "=== $APK 内的 assets ==="
           unzip -l "$APK" | grep 'assets/' || true
           unzip -l "$APK" | grep -q 'assets/tempctrl-arm64' \
@@ -224,5 +271,5 @@ jobs:
       - name: 上传 APK 构建产物
         uses: actions/upload-artifact@v4
         with:
-          name: b6x-EP-LSPosed-v${{ steps.apk-version.outputs.VERSION }}
-          path: CI记录/b6x-EP-LSPosed-v*.apk
+          name: b6x-EP-v${{ steps.apk-version.outputs.VERSION }}
+          path: CI记录/b6x-EP-v*.apk

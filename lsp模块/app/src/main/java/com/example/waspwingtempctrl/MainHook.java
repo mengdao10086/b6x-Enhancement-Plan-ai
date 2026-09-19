@@ -321,7 +321,7 @@ public class MainHook implements IXposedHookLoadPackage {
             while (true) {
                 try {
                     tick++;
-                    writeStatusFile();   // 每 1 秒写一次 status（供 daemon 3s 判死 + WebUI 曲线）
+                    writeStatusFile();   // 每 1 秒写一次 status（供 daemon 3s 判死 + 曲线页）
 
                     // ═══ 后台自动重连 ═══
                     // 保持 5 秒节奏（tick%5==0）

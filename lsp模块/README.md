@@ -66,14 +66,10 @@ am broadcast -a com.flydigi.SET_TEMPERATURE_B7 \
 
 ## 源码结构
 
-```
-app/src/main/
-├── AndroidManifest.xml       ← 模块声明 + Xposed 元数据
-├── assets/xposed_init        ← Xposed 入口点声明
-└── java/.../
-    ├── MainHook.java         ← 核心：Xposed 钩子 + 广播接收
-    └── (其他辅助类)
-```
+本模块分两部分：`app/`（Android 工程：Xposed 钩子 + 原生配置界面）与 `daemon/`（C 守护程序源码与构建脚本，CI 编译后注入 `app/src/main/assets/tempctrl-arm64`）。
+
+> 目录与文件的权威清单见仓库根 [CLAUDE.md](../CLAUDE.md) 的「关键文件索引」表（全仓库以该表为准）；
+> 架构、进程协作与各文件落点见仓库根 [逻辑说明.md](../逻辑说明.md)。
 
 ---
 
@@ -128,12 +124,15 @@ TARGET_TEMP=180     ← 18.0°C
 
 **命令行**：
 ```bash
-cd lsp模块(apk修复+温控接口)
+cd lsp模块
 export ANDROID_HOME=/path/to/Android/Sdk
 ./gradlew assembleRelease
 ```
 
-**GitHub Actions**：推送 `v*` 标签或手动触发 workflow_dispatch。
+> 本地构建出的 APK 内**不含** `assets/tempctrl-arm64`（C 二进制由 CI 编译后注入），
+> 部署时 `Deployer.probe()` 会如实报「APK 内资源不完整」。
+
+**GitHub Actions**：推送 `v*` 标签或手动触发 workflow_dispatch。产物名 `b6x-EP-v<versionName>.apk`。
 
 ---
 

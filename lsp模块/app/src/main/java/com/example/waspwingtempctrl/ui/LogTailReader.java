@@ -19,8 +19,8 @@ import java.util.Locale;
  *
  * <p>三条硬约束：
  * <ol>
- *   <li>只读文件末尾 {@link #TAIL_BYTES} 字节，语义等价现有 WebUI 的
- *       {@code tail -c 400KB}（口径见 {@code 逻辑说明.md} 的「日志页」一节），绝不整文件读入。</li>
+ *   <li>只读文件末尾 {@link #TAIL_BYTES} 字节，语义等价 {@code tail -c 400KB}
+ *       （口径见 {@code 逻辑说明.md}（仓库根）的「日志页」一节），绝不整文件读入。</li>
  *   <li>读取一律走 {@link AppFiles}（{@link AppFiles#readTailText(File, int)}），
  *       不自己开 {@code FileInputStream}，失败信息才不会丢。</li>
  *   <li>渲染行数上限 {@link #MAX_LINES}：400KB 全量上屏会卡死，只保留尾部这么多行，

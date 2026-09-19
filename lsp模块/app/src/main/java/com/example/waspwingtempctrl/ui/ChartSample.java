@@ -3,12 +3,12 @@ package com.example.waspwingtempctrl.ui;
 /**
  * 曲线数据文件的一行样本。
  *
- * <p>列序与 C 端 {@code write_webui_data()} 完全一致（{@code tempctrl.c:2665}）：
+ * <p>列序与 C 端 {@code write_webui_data()} 里 {@code fprintf(wf, WEBUI_ROW_FMT, ...)} 的格式串完全一致：
  * {@code epoch,电池,CPU,热端,冷端,实际转速,实际制冷,目标制冷}。温度列已在解析层
- * ×0.1 折算为 ℃；哨兵值 -1（未就绪）一律转为 {@link #INVALID}，与 WebUI 的
- * {@code temp(v) = v>=0 ? v/10 : null} 同一口径（{@code 逻辑说明.md} 的「状态页数据源（C 每 1s 写数据文件）」一节）。
+ * ×0.1 折算为 ℃；哨兵值 -1（未就绪）一律转为 {@link #INVALID}，即
+ * {@code v>=0 ? v/10 : 无效}（口径见 {@code 逻辑说明.md}（仓库根）的「状态页数据源（C 每 1s 写数据文件）」一节）。
  *
- * <p>第 8 列（目标制冷）落盘但 WebUI 从未消费，本类同样不保留。
+ * <p>第 8 列（目标制冷）落盘但旧 WebUI 从未消费，本类同样不保留。
  */
 final class ChartSample {
 

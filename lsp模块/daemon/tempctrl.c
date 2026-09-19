@@ -9,11 +9,7 @@
 // 温度单位：整型 0.1°C（电池原生单位，CPU m°C ÷ 100）
 //   例：350 = 35.0°C, 753 = 75.3°C
 //
-// 编译（请使用 GitHub Actions CI，NDK r27c）：
-//   Termux 的 clang -static 链接 Termux 的 libc，非 Android libc，
-//   编译出的二进制在真机上 PT_TLS 对齐错误，不可用。
-//   NDK 编译命令：aarch64-linux-android21-clang -static -O2 -ffunction-sections -fdata-sections -Wl,--gc-sections -Wl,--strip-all
-//   （NDK 静态编译后需要 python3 patch_tls.py 修复 PT_TLS 对齐）
+// 编译：参数与工具链约束见同目录 build_tempctrl.sh（唯一来源，勿在此复制命令行）
 //
 // ================================================================
 
@@ -63,7 +59,7 @@
 
 // ======================== 常量与边界 ========================
 #define COLD_MIN             1
-#define COLD_MAX           194     // 最大有效值（B6X 硬件上限）
+#define COLD_MAX           194     // 制冷强度最大有效值（B6X 硬件上限），PID_COLD_RANGE/RATE_LIMIT_COLD/COLD_RPM_MAP 的 clamp 上界
 // B7X 独立上限（运行时根据 active_device 选择）
 #define B7X_COLD_MAX       255
 #define B7X_FAN_RPM_MAX    8000
@@ -76,7 +72,7 @@ static int b7_fan_rpm_max  = 6000;  // FAN_RPM_RANGE 第三值（B7X），默认
 // ======================== 私有目录（配置/日志/曲线数据落点） ========================
 // status 双文件仍留 /data/local/tmp/（与 MainHook.java 共享，原样不动）
 // tempctrl_last_dev 归宿主 app 私有目录，由 MainHook 独用，daemon 不参与
-// 此路径必须与 lsp模块(apk修复+温控接口)/app/build.gradle.kts 的 applicationId 一致：
+// 此路径必须与 lsp模块/app/build.gradle.kts 的 applicationId 一致：
 // 安装后的包名由 applicationId 决定，数据目录名即等于它，改任一处都要同步另一处
 #define PRIVATE_DIR "/data/data/com.example.waspwingtempctrl/files"
 
@@ -101,6 +97,14 @@ static int ensure_private_dir(void) {
     struct stat st;
     return stat(PRIVATE_DIR, &st) == 0 && S_ISDIR(st.st_mode);
 }
+
+// ======================== 系统命令路径 ========================
+// 一律用绝对路径：daemon 由 service.d 拉起，环境 PATH 未必含 /system/bin；
+// 裸命令名会静默失败（system() 只返回非零，execlp 子进程 _exit(127)）。
+// 路径不含空格/元字符，与后续参数用空格分隔拼进同一 shell 词即可，无需引号。
+#define AM_BIN      "/system/bin/am"
+#define PM_BIN      "/system/bin/pm"
+#define DUMPSYS_BIN "/system/bin/dumpsys"
 
 // ======================== 系统路径与缩放 ========================
 // --- sysfs 路径配置（可由 profile.conf 覆盖）---
@@ -319,6 +323,11 @@ static char status_file_path_b7[512] = "/data/local/tmp/tempctrl_b7x.status";
 #define WEBUI_DATA_PATH       PRIVATE_DIR "/tempctrl_webui.data"
 #define WEBUI_DATA_MAX_LINES  720   // = 曲线最大时间挡位（秒）
 
+// 曲线行格式：列数唯一声明（CI 断言可 grep 本行数 % 个数，须等于 WEBUI_DATA_COLS）
+// 列序：epoch, 电池, CPU, 热端, 冷端, 实际转速, 实际制冷, 目标制冷（0.1°C，未就绪为 -1）
+#define WEBUI_DATA_COLS       8
+#define WEBUI_ROW_FMT         "%ld,%d,%d,%d,%d,%d,%d,%d\n"
+
 // 三方 app 包名（farsef 在最近连 B6X 散热器时也参与仲裁）
 #define APP_PKG_B6X_OLD "com.flydigi.waspwing.experimental"
 #define APP_PKG_B6X_NEW "com.flydigi.waspwing.experimentanliuliu"
@@ -463,24 +472,50 @@ static char *config_parse_line(char *line, char **out_key) {
     return eq + 1;
 }
 
-/** sysfs 路径与缩放层键集合（SYSFS_ENABLED=1 时解析，独立于性能/调试总开关） */
-static int is_sysfs_key(const char *key) {
-    return strcmp(key, "BATT_TEMP_PATH") == 0
-        || strcmp(key, "BATT_TEMP_DIVISOR") == 0
-        || strcmp(key, "BATT_CURRENT_PATH") == 0
-        || strcmp(key, "BATT_CURRENT_DIVISOR") == 0
-        || strcmp(key, "CPU_TEMP_PATH_FMT") == 0
-        || strcmp(key, "CPU_TEMP_DIVISOR") == 0
-        || strcmp(key, "CPU_ZONE") == 0
-        || strcmp(key, "CPU_ZONE_RESCAN") == 0
-        || strcmp(key, "LOG_FILE") == 0
-        || strcmp(key, "LOG_MAX") == 0;
-}
-
 // ======================== 配置解析（表驱动 + 分段函数） ========================
 
-// --- 配置表驱动：纯 int clamp 单值键（layer 0=性能层 / 1=sysfs层；键互不重叠）---
-struct IntCfgKey { const char *key; int *var; int min; int max; int layer; };
+// --- sysfs 层键表：键名与解析方式的唯一权威名单 ---
+// is_sysfs_key 与 parse_sysfs_cfg 同源查表，新增键只在此加一行；
+// 不存在"名单里有、分发里没有"而被静默忽略的可能。
+enum { SK_INT = 0, SK_PATH, SK_ZONE, SK_RESCAN };
+
+struct SysfsCfgKey {
+    const char *key;
+    int kind;               // SK_INT / SK_PATH / SK_ZONE / SK_RESCAN
+    int *ivar;              // SK_INT：目标变量
+    int imin, imax;         // SK_INT：clamp 范围
+    char *svar;             // SK_PATH：目标路径缓冲
+    size_t ssize;           // SK_PATH：缓冲大小
+};
+
+static const struct SysfsCfgKey SYSFS_CFG_KEYS[] = {
+    { "BATT_TEMP_PATH",       SK_PATH,   NULL,                  0,  0,       BATT_TEMP_PATH,      sizeof(BATT_TEMP_PATH) },
+    { "BATT_TEMP_DIVISOR",    SK_INT,    &BATT_TEMP_DIVISOR,    1,  10000,   NULL,                0 },
+    { "BATT_CURRENT_PATH",    SK_PATH,   NULL,                  0,  0,       BATT_CURRENT_PATH,   sizeof(BATT_CURRENT_PATH) },
+    { "BATT_CURRENT_DIVISOR", SK_INT,    &BATT_CURRENT_DIVISOR, 1,  100000,  NULL,                0 },
+    { "CPU_TEMP_PATH_FMT",    SK_PATH,   NULL,                  0,  0,       CPU_TEMP_PATH_FMT,   sizeof(CPU_TEMP_PATH_FMT) },
+    { "CPU_TEMP_DIVISOR",     SK_INT,    &CPU_TEMP_DIVISOR,     1,  10000,   NULL,                0 },
+    { "CPU_ZONE",             SK_ZONE,   NULL,                  0,  0,       NULL,                0 },
+    { "CPU_ZONE_RESCAN",      SK_RESCAN, NULL,                  0,  0,       NULL,                0 },
+    { "LOG_FILE",             SK_PATH,   NULL,                  0,  0,       log_file_path,       sizeof(log_file_path) },
+    { "LOG_MAX",              SK_INT,    &LOG_MAX,              0,  1048576, NULL,                0 },
+};
+
+/** sysfs 层键查找：命中返回表项，未命中返回 NULL */
+static const struct SysfsCfgKey *sysfs_key_lookup(const char *key) {
+    int n = (int)(sizeof(SYSFS_CFG_KEYS) / sizeof(SYSFS_CFG_KEYS[0]));
+    for (int i = 0; i < n; i++)
+        if (strcmp(key, SYSFS_CFG_KEYS[i].key) == 0) return &SYSFS_CFG_KEYS[i];
+    return NULL;
+}
+
+/** sysfs 路径与缩放层键集合（SYSFS_ENABLED=1 时解析，独立于性能/调试总开关） */
+static int is_sysfs_key(const char *key) {
+    return sysfs_key_lookup(key) != NULL;
+}
+
+// --- 配置表驱动：纯 int clamp 单值键（性能层，PERF_ENABLED=1）---
+struct IntCfgKey { const char *key; int *var; int min; int max; };
 
 static const struct IntCfgKey INT_CFG_KEYS[] = {
     // 性能层（PERF_ENABLED=1）
@@ -493,18 +528,13 @@ static const struct IntCfgKey INT_CFG_KEYS[] = {
     { "PID_CH_THRESHOLD",          &pid_ch_threshold,            1, 100 },
     { "MAP_INPUT_SMOOTH_ALPHA",    &rpm_smooth_alpha,            1, 99 },
     { "FAN_RPM_ROUND_UNIT",        &fan_rpm_round_unit,          1, 500 },
-    // sysfs 层（SYSFS_ENABLED=1）
-    { "BATT_TEMP_DIVISOR",         &BATT_TEMP_DIVISOR,           1, 10000 },
-    { "CPU_TEMP_DIVISOR",          &CPU_TEMP_DIVISOR,            1, 10000 },
-    { "BATT_CURRENT_DIVISOR",      &BATT_CURRENT_DIVISOR,        1, 100000 },
-    { "LOG_MAX",                   &LOG_MAX,                     0, 1048576 },
 };
 
-/** 配置表查找：命中（layer 匹配 + 键名一致）则 clamp 赋值，返回 1 */
-static int parse_int_cfg(const char *key, int val, int layer) {
+/** 配置表查找：命中（键名一致）则 clamp 赋值，返回 1 */
+static int parse_int_cfg(const char *key, int val) {
     int n = (int)(sizeof(INT_CFG_KEYS) / sizeof(INT_CFG_KEYS[0]));
     for (int i = 0; i < n; i++) {
-        if (INT_CFG_KEYS[i].layer == layer && strcmp(key, INT_CFG_KEYS[i].key) == 0) {
+        if (strcmp(key, INT_CFG_KEYS[i].key) == 0) {
             *INT_CFG_KEYS[i].var = clamp(val, INT_CFG_KEYS[i].min, INT_CFG_KEYS[i].max);
             return 1;
         }
@@ -523,28 +553,30 @@ static void parse_debug_cfg(const char *key, int val) {
     else if (strcmp(key, "DEBUG_LAUNCH") == 0)  debug_launch = (val != 0);
 }
 
-/** sysfs 路径与缩放层（SYSFS_ENABLED=1 时） */
+/** sysfs 路径与缩放层（SYSFS_ENABLED=1 时）；解析方式由 SYSFS_CFG_KEYS 表驱动 */
 static void parse_sysfs_cfg(const char *key, int val, const char *val_str) {
-    if (parse_int_cfg(key, val, 1)) return;
-    if      (strcmp(key, "BATT_TEMP_PATH") == 0)
-        config_read_path(BATT_TEMP_PATH, sizeof(BATT_TEMP_PATH), val_str);
-    else if (strcmp(key, "CPU_TEMP_PATH_FMT") == 0)
-        config_read_path(CPU_TEMP_PATH_FMT, sizeof(CPU_TEMP_PATH_FMT), val_str);
-    else if (strcmp(key, "BATT_CURRENT_PATH") == 0)
-        config_read_path(BATT_CURRENT_PATH, sizeof(BATT_CURRENT_PATH), val_str);
-    else if (strcmp(key, "CPU_ZONE") == 0) {
+    const struct SysfsCfgKey *e = sysfs_key_lookup(key);
+    if (!e) return;
+    switch (e->kind) {
+    case SK_INT:
+        *e->ivar = clamp(val, e->imin, e->imax);
+        break;
+    case SK_PATH:
+        config_read_path(e->svar, e->ssize, (char *)val_str);
+        break;
+    case SK_ZONE: {
         int a = CPU_ZONE_MIN, b = CPU_ZONE_MAX;
         if (sscanf(val_str, "%d %d", &a, &b) >= 2) { CPU_ZONE_MIN = clamp(a,0,99); CPU_ZONE_MAX = clamp(b,0,99); }
+        break;
     }
-    else if (strcmp(key, "CPU_ZONE_RESCAN") == 0) {
+    case SK_RESCAN: {
         // 双值：重扫间隔（秒） 保留温度值个数
         int a = cpu_zone_rescan_sec, b = cpu_zone_keep;
         int n = sscanf(val_str, "%d %d", &a, &b);
         if (n >= 1) cpu_zone_rescan_sec = clamp(a, 5, 3600);
         if (n >= 2) cpu_zone_keep = clamp(b, 1, 64);
+        break;
     }
-    else if (strcmp(key, "LOG_FILE") == 0) {
-        config_read_path(log_file_path, sizeof(log_file_path), val_str);
     }
 }
 
@@ -581,7 +613,7 @@ static int parse_pid_cfg(const char *key, int val, const char *val_str) {
     if (strcmp(key, "PID_COLD_RANGE") == 0) {
         int a = pid_cold_min, b = pid_cold_max, c = b7_pid_cold_max;
         int n = sscanf(val_str, "%d %d %d", &a, &b, &c);
-        if (n >= 2) { pid_cold_min=clamp(a,0,194); pid_cold_max=clamp(b,0,194); }
+        if (n >= 2) { pid_cold_min=clamp(a,0,COLD_MAX); pid_cold_max=clamp(b,0,COLD_MAX); }
         if (n >= 3) { b7_pid_cold_max = clamp(c, 1, B7X_COLD_MAX); }
         return 1;
     }
@@ -699,7 +731,7 @@ static int parse_common_cfg(const char *key, int val, const char *val_str) {
         // RATE_LIMIT_COLD = 基础值 倍率 最小变化幅度（三值）
         int base = RATE_LIMIT_COLD, mult = RATE_LIMIT_COLD_MULT, dz = COLD_DEADZONE;
         int n = sscanf(val_str, "%d %d %d", &base, &mult, &dz);
-        if (n >= 1) RATE_LIMIT_COLD      = clamp(base, 1, 194);
+        if (n >= 1) RATE_LIMIT_COLD      = clamp(base, 1, COLD_MAX);
         if (n >= 2) RATE_LIMIT_COLD_MULT = clamp(mult, 1, 100);
         if (n >= 3) COLD_DEADZONE        = clamp(dz, 1, 50);
         return 1;
@@ -708,7 +740,7 @@ static int parse_common_cfg(const char *key, int val, const char *val_str) {
     if (strcmp(key, "COLD_RPM_MAP") == 0) {
         int s = cold_map_start, e = cold_map_exp;
         int n = sscanf(val_str, "%d %d", &s, &e);
-        if (n >= 1) cold_map_start = clamp(s, 0, 194);
+        if (n >= 1) cold_map_start = clamp(s, 0, COLD_MAX);
         if (n >= 2) cold_map_exp   = clamp(e, 50, 500);
         return 1;
     }
@@ -799,7 +831,7 @@ static void load_config(const char *path) {
         if (!perf_enabled) continue;
 
         // 表驱动单值 → 分段函数（PID/通用），键互不重叠、唯一命中
-        if (parse_int_cfg(key, val, 0)) continue;
+        if (parse_int_cfg(key, val)) continue;
         if (parse_pid_cfg(key, val, val_str)) continue;
         if (parse_common_cfg(key, val, val_str)) continue;
         debug_log(debug_config, "配置 未识别键 %s（已忽略）", key);
@@ -1382,16 +1414,26 @@ static void update_active_cold_range(void) {
 
 // 档位查表参数构造（build_params）已随 Gear 删除
 
+// ======================== 广播协议（须与 MainHook.java 侧一致） ========================
+// Action / extra 名的唯一权威名单，改此处须同步 lsp模块/app/ 内 MainHook.java
+#define BROADCAST_ACTION_B6X  "com.flydigi.SET_TEMPERATURE"
+#define BROADCAST_ACTION_B7X  "com.flydigi.SET_TEMPERATURE_B7"
+// extra 名按下发顺序排列，与 send_am_broadcast 的取值数组逐项对应
+static const char *const BROADCAST_EXTRAS[] = {
+    "mode", "temperature", "windOC", "coldOC", "windLevel", "modeCustom", "extra",
+};
+#define BROADCAST_EXTRAS_N  ((int)(sizeof(BROADCAST_EXTRAS) / sizeof(BROADCAST_EXTRAS[0])))
+#define BROADCAST_VAL_MAX   12   // 整型 extra 字符串缓冲（int 最长 11 字符 + NUL）
+
 /**
  * 通过 am broadcast 下发控制参数到 LSPosed 模块（fork+exec，3s 超时）
  */
 static void send_am_broadcast(int mode, int target, int windOC, int coldOC, int windLevel) {
-    char m_s[12], t_s[12], woc_s[12], coc_s[12], wl_s[12];
-    snprintf(m_s, sizeof(m_s), "%d", mode);
-    snprintf(t_s, sizeof(t_s), "%d", target);
-    snprintf(woc_s, sizeof(woc_s), "%d", windOC);
-    snprintf(coc_s, sizeof(coc_s), "%d", coldOC);
-    snprintf(wl_s, sizeof(wl_s), "%d", windLevel);
+    // 取值顺序必须与 BROADCAST_EXTRAS 一致（前 5 项来自形参，后 2 项固定 0）
+    const int vals[BROADCAST_EXTRAS_N] = { mode, target, windOC, coldOC, windLevel, 0, 0 };
+    char v_s[BROADCAST_EXTRAS_N][BROADCAST_VAL_MAX];
+    for (int i = 0; i < BROADCAST_EXTRAS_N; i++)
+        snprintf(v_s[i], sizeof(v_s[i]), "%d", vals[i]);
 
     pid_t pid = fork();
     if (pid < 0) {
@@ -1407,21 +1449,26 @@ static void send_am_broadcast(int mode, int target, int windOC, int coldOC, int 
         }
         // 根据当前控制的设备选择广播 Action
         const char *action = (active_device == DEVICE_B7X)
-            ? "com.flydigi.SET_TEMPERATURE_B7"
-            : "com.flydigi.SET_TEMPERATURE";
+            ? BROADCAST_ACTION_B7X
+            : BROADCAST_ACTION_B6X;
         // 用绝对路径执行 am：daemon 环境 PATH 若缺 /system/bin，execlp 会静默失败
         // （子进程 _exit(127)，父进程 waitpid 正常返回，故障不可见）。
-        // execl 不依赖 PATH，标准 Android/MIUI 的 am 均在 /system/bin/am。
-        execl("/system/bin/am", "am", "broadcast", "--user", "0",
-              "-a", action,
-              "--ei", "mode", m_s,
-              "--ei", "temperature", t_s,
-              "--ei", "windOC", woc_s,
-              "--ei", "coldOC", coc_s,
-              "--ei", "windLevel", wl_s,
-              "--ei", "modeCustom", "0",
-              "--ei", "extra", "0",
-              (char *)NULL);
+        // execv 不依赖 PATH；argv 由 extra 名单驱动，避免形参序与 --ei 序错位。
+        char *argv[6 + 3 * BROADCAST_EXTRAS_N + 1];
+        int ai = 0;
+        argv[ai++] = (char *)"am";
+        argv[ai++] = (char *)"broadcast";
+        argv[ai++] = (char *)"--user";
+        argv[ai++] = (char *)"0";
+        argv[ai++] = (char *)"-a";
+        argv[ai++] = (char *)action;
+        for (int i = 0; i < BROADCAST_EXTRAS_N; i++) {
+            argv[ai++] = (char *)"--ei";
+            argv[ai++] = (char *)BROADCAST_EXTRAS[i];
+            argv[ai++] = v_s[i];
+        }
+        argv[ai] = NULL;
+        execv(AM_BIN, argv);
         _exit(127);
     }
     // 父进程：限时等待子进程（3 秒超时）
@@ -1641,7 +1688,7 @@ static void app_process_scan(const char *pkgs[], int alive[], int count) {
 static int is_screen_awake(void) {
     char cmd[256];
     snprintf(cmd, sizeof(cmd),
-             "dumpsys power 2>/dev/null | awk -F'=' '/mWakefulness=/{ if ($0 !~ /Override/) { print $2; exit } }'");
+             DUMPSYS_BIN " power 2>/dev/null | awk -F'=' '/mWakefulness=/{ if ($0 !~ /Override/) { print $2; exit } }'");
     FILE *fp = popen(cmd, "r");
     if (!fp) return -1;
     char val[32] = {0};
@@ -1662,8 +1709,8 @@ static int is_foreground_pkg(const char *pkg) {
     // grep -m1 截断管道，dumpsys 收到 SIGPIPE 提前退出，实际开销远低于完整 dumpsys
     char cmd[1024];
     snprintf(cmd, sizeof(cmd),
-             "dumpsys window 2>/dev/null | grep -m1 'mCurrentFocus='; "
-             "dumpsys activity activities 2>/dev/null | grep -m1 -E 'topResumedActivity|mResumedActivity'");
+             DUMPSYS_BIN " window 2>/dev/null | grep -m1 'mCurrentFocus='; "
+             DUMPSYS_BIN " activity activities 2>/dev/null | grep -m1 -E 'topResumedActivity|mResumedActivity'");
     FILE *fp = popen(cmd, "r");
     if (!fp) return 0;
     char line[1024];
@@ -1684,7 +1731,7 @@ static int run_cmd_silent(const char *fmt, const char *arg) {
 
 /** 判断指定包名是否已安装（pm path 有输出即已安装） */
 static int app_installed(const char *pkg) {
-    return (run_cmd_silent("pm path %s > /dev/null 2>&1", pkg) == 0);
+    return (run_cmd_silent(PM_BIN " path %s > /dev/null 2>&1", pkg) == 0);
 }
 
 /**
@@ -1718,10 +1765,10 @@ static int am_start_app(const char *pkg) {
     char cmd[320];
     if (act)
         snprintf(cmd, sizeof(cmd),
-                 "am start -n %s/%s --es b6x_auto_launch 1 > /dev/null 2>&1", pkg, act);
+                 AM_BIN " start -n %s/%s --es b6x_auto_launch 1 > /dev/null 2>&1", pkg, act);
     else
         snprintf(cmd, sizeof(cmd),
-                 "am start -a android.intent.action.MAIN -c android.intent.category.LAUNCHER "
+                 AM_BIN " start -a android.intent.action.MAIN -c android.intent.category.LAUNCHER "
                  "-p %s --es b6x_auto_launch 1 > /dev/null 2>&1", pkg);
     return system(cmd);
 }
@@ -1774,7 +1821,7 @@ static void launch_last_app(void) {
 static void force_kill_and_relaunch(void) {
     const char *pkg = resolve_launch_pkg();
     write_log("锁死自动重启 强制停止 %s 并重新拉起", pkg);
-    run_cmd_silent("am force-stop %s > /dev/null 2>&1", pkg);
+    run_cmd_silent(AM_BIN " force-stop %s > /dev/null 2>&1", pkg);
     // 等进程退出（最多 2s）
     for (int i = 0; i < 20; i++) {
         int alive = 0;
@@ -1849,7 +1896,7 @@ static void evict_app_if_eligible(int alive, const char *keep, const char *pkg) 
     if (alive && keep != pkg && !is_foreground_pkg(pkg)) {
         write_log("app 仲裁 强制停止 %s（保留 %s）", pkg, keep);
         // 输出重定向到 /dev/null
-        run_cmd_silent("am force-stop %s > /dev/null 2>&1", pkg);
+        run_cmd_silent(AM_BIN " force-stop %s > /dev/null 2>&1", pkg);
     }
 }
 
@@ -2637,7 +2684,7 @@ static void main_loop(void) {
 // ======================== 程序入口 ========================
 
 // ======================== WebUI 曲线数据 ========================
-// 每 1s 追加 1 行，行格式：epoch,电池,CPU,热端,冷端,实际转速,实际制冷,目标制冷（0.1°C，未就绪为 -1）。
+// 每 1s 追加 1 行，行格式见 WEBUI_ROW_FMT / WEBUI_DATA_COLS（上方声明处）。
 // 每 WEBUI_COMPACT_EVERY 行压缩一次（删最旧行，文件 720~780 行）
 #define WEBUI_COMPACT_EVERY 60   // 每追加 60 行（≈60s）压缩一次，文件最多膨胀到 720+60=780 行
 static int webui_lines_since_compact = 0;   // 自上次压缩以来追加的行数
@@ -2662,7 +2709,7 @@ static void write_webui_data(void) {
     // 快速路径：追加 1 行到文件（mtime 每 1s 更新）
     FILE *wf = fopen(WEBUI_DATA_PATH, "a");
     if (wf) {
-        fprintf(wf, "%ld,%d,%d,%d,%d,%d,%d,%d\n",
+        fprintf(wf, WEBUI_ROW_FMT,
                 (long)time(NULL), batt, cpu,
                 cooler_hot_temp, cooler_cold_temp,
                 cooler_rpm_real, cooler_cold_real, actual_cold);

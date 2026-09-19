@@ -23,8 +23,8 @@ import java.util.List;
  *   <li>{@code WEBUI_GAP_SEC} / {@code WEBUI_LABEL_MERGE_PX} / {@code WEBUI_RPM_AXIS_MIN} /
  *       {@code WEBUI_CURVE_FILTER}，以及右轴上限口径所需的 {@code COLD_RPM_MAP} /
  *       {@code PID_COLD_RANGE} / {@code PERF_ENABLED} —— 一律经 {@link ConfigStore} 读
- *       （口径清单 §13）。字段缺项（如只写 {@code WEBUI_CURVE_FILTER=15}）回落该字段的
- *       schema 默认值，与 WebUI 的 {@code fieldVal()} 同口径。</li>
+ *       （口径清单 §13）。字段缺项（如只写 {@code WEBUI_CURVE_FILTER=15}）回落该字段在
+ *       {@code assets/params.json} 里声明的默认值。</li>
  *   <li>{@code params.json} 的 {@code chart} 块（窗口档位/默认档位/滚动行数上限）——
  *       {@link ConfigStore} 只暴露 {@code groups()/keys()/key()}，{@code chart} 不是键，
  *       故本类直接读该 asset（<b>本页唯一允许碰 assets 的地方，只读</b>）。
@@ -33,7 +33,7 @@ import java.util.List;
  */
 final class ChartConfig {
 
-    /** {@code chart} 块读不到时的回落档位（与 schema.js:24 一致）。 */
+    /** {@code chart} 块读不到时的回落档位（与 {@code assets/params.json} 的 {@code chart} 块同值）。 */
     static final int[] FALLBACK_WINDOW_OPTIONS = {120, 180, 240, 360, 480, 720};
     static final int FALLBACK_WINDOW_DEFAULT = 360;
     static final int FALLBACK_ROLLING_MAX_LINES = 720;
