@@ -56,8 +56,9 @@ jobs:
             #   lsp模块/daemon/   —— C 守护程序源码与构建脚本
             #   lsp模块/*.kts 等  —— Gradle 配置
             #   参数定义/          —— assets/params.json 与 daemon/profile.conf 的单一来源
+            #   .github/           —— workflow 自身（否则改 workflow 会「绿色但什么都没跑」）
             # 注意：只改 参数定义/ 而没重新生成产物时必须让 CI 跑到校验步骤
-            echo "$CHANGES" | grep -qE '^(lsp模块/(app/|daemon/|build\.gradle\.kts|settings\.gradle\.kts|gradle\.properties|gradlew|gradle/)|参数定义/)' \
+            echo "$CHANGES" | grep -qE '^(lsp模块/(app/|daemon/|build\.gradle\.kts|settings\.gradle\.kts|gradle\.properties|gradlew|gradle/)|参数定义/|\.github/)' \
               && echo "changed=true" >> "$GITHUB_OUTPUT" || echo "changed=false" >> "$GITHUB_OUTPUT"
           fi
 
