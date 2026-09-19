@@ -117,7 +117,9 @@ jobs:
           java-version: 17
 
       - name: 设置 Android SDK
-        uses: android-actions/setup-android@v3
+        # v3 会执行 `sdkmanager tools`，而 runner 的 cmdline-tools 16.0 已无该包
+        # （Failed to find package 'tools'）→ 必失败。v4 于 2026-09-17 发布，即为此类漂移。
+        uses: android-actions/setup-android@v4
 
       - name: 缓存 Gradle（依赖 + 构建缓存，二次构建大幅提速）
         uses: gradle/actions/setup-gradle@v4
