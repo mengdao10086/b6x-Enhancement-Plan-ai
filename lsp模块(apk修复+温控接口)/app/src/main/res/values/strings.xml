@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 界面外壳（SetupActivity / StatusFragment）的文案。三个界面子 agent 各自维护自己的 strings_*.xml。 -->
+<resources>
+    <string name="title_setup">飞智b6x增强模块</string>
+
+    <string name="tab_status">状态</string>
+    <string name="tab_config">配置</string>
+    <string name="tab_chart">曲线</string>
+    <string name="tab_log">日志</string>
+
+    <!-- 状态页 -->
+    <string name="status_section_deploy">部署状态</string>
+    <string name="status_section_device">设备与版本</string>
+    <string name="status_section_actions">操作记录</string>
+    <string name="status_loading">读取中…</string>
+    <string name="status_action_refresh">刷新状态</string>
+    <string name="status_action_deploy">一键部署</string>
+    <string name="status_action_uninstall">卸载部署</string>
+    <string name="status_action_start">拉起守护进程</string>
+    <string name="status_action_diag">su 诊断</string>
+    <string name="status_busy_other">上一个动作还没结束，请稍候</string>
+    <string name="status_dialog_diag">诊断</string>
+    <string name="status_dialog_failed">执行失败</string>
+    <string name="status_dialog_close">关闭</string>
+    <string name="status_busy_probe">读取部署状态…</string>
+    <string name="status_busy_deploy">部署中…（落盘 + root 就位 + 省电白名单）</string>
+    <string name="status_busy_uninstall">卸载部署中…</string>
+    <string name="status_busy_start">拉起守护进程…</string>
+    <string name="status_busy_diag">采集 su 诊断…</string>
+</resources>

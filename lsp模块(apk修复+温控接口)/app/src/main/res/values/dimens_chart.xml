@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    曲线页（D2）专用尺寸。间距/字号/圆角一律复用 dimens.xml 的 space_*/text_*/card_radius/chart_height，
+    这里只放"曲线页控件特有、且现有标尺没有对应项"的量。
+    绘制用像素（padL/padT/线宽/字号等）由 ChartView 内按 density 换算，不进本文件。
+-->
+<resources>
+
+    <!-- 档位按钮最小高度（MaterialButton 默认 48dp 太占高，档位行要紧凑成一行） -->
+    <dimen name="chart_chip_min_height">32dp</dimen>
+</resources>

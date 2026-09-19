@@ -2,17 +2,18 @@ name: 自动构建
 
 on:
   # 所有推送都触发构建（不设 paths 过滤——中文路径存在 Unicode 匹配问题）
-  # 由 detect-changes job 内部判断哪些模块有变更
+  # 由 detect-changes job 内部判断是否有相关变更
   push:
   # 标签推送（v*）→ detect-changes 中会设为全量构建
   # 手动触发：全量构建
   workflow_dispatch:
 
 # 旧版独立 workflow（build-apk/build-lsposed/build-magisk）已废弃，合并至此文件
+# 交付物为单一 APK：C 守护程序在本 job 内编译后注入 app/src/main/assets/，再出 APK
 
 jobs:
   # ──────────────────────────────────────
-  # 检测哪些模块有变更
+  # 检测是否有相关变更
   # ──────────────────────────────────────
   detect-changes:
     name: 检测变更模块
@@ -45,29 +46,34 @@ jobs:
           else
             # core.quotePath=false 防止中文路径被转义为八进制导致 grep 匹配失败
             CHANGES=$(git -c core.quotePath=false diff --name-only "$BEFORE" "${{ github.sha }}")
-            # 排除文档类文件（*.md），改文档不触发任何构建
+            # 排除文档类文件（*.md），改文档不触发构建
             CHANGES=$(echo "$CHANGES" | grep -v '\.md$' || true)
-            # LSP：仅 app/ 代码或 gradle 配置文件变更才构建（目录内文档/资料不触发）
-            echo "$CHANGES" | grep -qE '^lsp模块\(apk修复\+温控接口\)/(app/|build\.gradle\.kts|settings\.gradle\.kts|gradle\.properties|gradlew|gradle/)' && echo "lsposed=true" >> "$GITHUB_OUTPUT" || echo "lsposed=false" >> "$GITHUB_OUTPUT"
-            # Magisk：目录内构建相关变更才构建（md 已排除）
+            # APK 侧：app/ 代码、gradle 配置，以及参数定义（assets/params.json 的单一来源）变更
+            # 注意：只改 参数定义/ 而没重新生成 params.json 时必须让 CI 跑到校验步骤
+            echo "$CHANGES" | grep -qE '^(lsp模块\(apk修复\+温控接口\)/(app/|build\.gradle\.kts|settings\.gradle\.kts|gradle\.properties|gradlew|gradle/)|参数定义/)' && echo "lsposed=true" >> "$GITHUB_OUTPUT" || echo "lsposed=false" >> "$GITHUB_OUTPUT"
+            # C 源码：编译后注入 APK，目录内构建相关变更才构建（md 已排除）
             echo "$CHANGES" | grep -q '^magisk模块(智能温控)/' && echo "magisk=true" >> "$GITHUB_OUTPUT" || echo "magisk=false" >> "$GITHUB_OUTPUT"
           fi
 
   # ──────────────────────────────────────
-  # 编译 LSPosed 模块 APK
+  # 编译单一交付物：C 守护程序 → 注入 APK assets → 出 APK
+  # 两侧任一有变更都整体重建（APK 内含 C 二进制，产物不可分割）
   # ──────────────────────────────────────
-  build-lsposed:
-    name: 编译 LSPosed 模块 APK
+  build:
+    name: 编译 APK（含 C 守护程序）
     needs: detect-changes
-    if: needs.detect-changes.outputs.lsposed == 'true'
+    if: needs.detect-changes.outputs.lsposed == 'true' || needs.detect-changes.outputs.magisk == 'true'
     runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: ./lsp模块(apk修复+温控接口)
 
     steps:
       - uses: actions/checkout@v4
 
+      # ── 参数定义校验（R1「单一来源」的唯一自动化保护）──
+      # 退出码：0 通过 / 1 产物与定义不一致或字段不自洽 / 2 四源漂移
+      - name: 校验参数定义产物
+        run: python3 参数定义/check_params.py
+
+      # ── 工具链 ──
       - name: 设置 JDK 17
         uses: actions/setup-java@v4
         with:
@@ -77,41 +83,8 @@ jobs:
       - name: 设置 Android SDK
         uses: android-actions/setup-android@v3
 
-      - name: 授权 gradlew
-        run: chmod +x gradlew
-
       - name: 缓存 Gradle（依赖 + 构建缓存，二次构建大幅提速）
         uses: gradle/actions/setup-gradle@v4
-
-      - name: 编译 APK（b6x keystore 签名）
-        run: ./gradlew assembleRelease
-
-      - name: 获取版本号
-        id: lsposed-version
-        run: echo "VERSION=$(grep "versionName" app/build.gradle.kts | sed 's/.*"\(.*\)".*/\1/')" >> $GITHUB_OUTPUT
-
-      - name: 重命名 APK
-        run: |
-          mkdir -p "$GITHUB_WORKSPACE/CI记录"
-          cp app/build/outputs/apk/release/*.apk "$GITHUB_WORKSPACE/CI记录/b6x-EP-LSPosed-v${{ steps.lsposed-version.outputs.VERSION }}.apk"
-
-      - name: 上传 APK 构建产物
-        uses: actions/upload-artifact@v4
-        with:
-          name: b6x-EP-LSPosed-v${{ steps.lsposed-version.outputs.VERSION }}
-          path: CI记录/b6x-EP-LSPosed-v*.apk
-
-  # ──────────────────────────────────────
-  # 编译 Magisk 模块（C 守护程序 + 模块框架）
-  # ──────────────────────────────────────
-  build-magisk:
-    name: 编译 Magisk 模块
-    needs: detect-changes
-    if: needs.detect-changes.outputs.magisk == 'true'
-    runs-on: ubuntu-latest
-
-    steps:
-      - uses: actions/checkout@v4
 
       - name: 缓存 NDK
         id: cache-ndk
@@ -134,9 +107,23 @@ jobs:
           test -d /opt/ndk && echo "NDK ready at /opt/ndk"
           ls /opt/ndk/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android* | head -3
 
-      - name: 计算 tempctrl 源码哈希（内容级变更检测）
+      # ── C 守护程序编译（内容级变更检测 + 缓存）──
+      # R6：对 magisk模块(智能温控)/ 整目录取哈希（排除 *.md），不再只取三个文件。
+      # 只哈希 tempctrl.c / patch_tls.py / build_tempctrl.sh 时，一旦拆出 .h 或第二个 .c
+      # 会命中缓存并静默跳过编译、产出旧二进制。
+      - name: 计算 tempctrl 源码哈希（整目录内容级变更检测）
         id: hash-tempctrl
-        run: echo "HASH=$(sha256sum 'magisk模块(智能温控)/tempctrl.c' 'magisk模块(智能温控)/patch_tls.py' 'magisk模块(智能温控)/build_tempctrl.sh' | sha256sum | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
+        run: |
+          if [ ! -d "magisk模块(智能温控)" ]; then
+            echo "源码目录不存在：magisk模块(智能温控)/"
+            exit 1
+          fi
+          echo "=== 参与哈希的文件 ==="
+          (cd "magisk模块(智能温控)" && find . -type f ! -name '*.md' | LC_ALL=C sort)
+          HASH=$(cd "magisk模块(智能温控)" \
+                 && find . -type f ! -name '*.md' -print0 \
+                 | LC_ALL=C sort -z | xargs -0 -r sha256sum | sha256sum | cut -d' ' -f1)
+          echo "HASH=$HASH" >> "$GITHUB_OUTPUT"
 
       - name: 缓存 tempctrl 二进制（源码未变时直接复用，跳过编译）
         id: cache-tempctrl
@@ -186,53 +173,56 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: compile-logs-magisk
+          name: compile-logs
           path: CI记录/compile_*.txt
           if-no-files-found: ignore
 
       - name: 修复 PT_TLS 对齐
         run: python3 "magisk模块(智能温控)/patch_tls.py" tempctrl
 
-      - name: 打包 Magisk 模块框架
+      # ── 二进制注入 APK assets ──
+      # 落点固定为 assets/tempctrl-arm64（Deployer.BIN_ASSET 依赖该名字）
+      - name: 注入 C 二进制到 APK assets
         run: |
-          mkdir -p "CI记录/magisk模块"
-          cp tempctrl "magisk模块(智能温控)/magisk模块框架/"
-          cp -r "magisk模块(智能温控)/magisk模块框架/"* "CI记录/magisk模块/"
-          echo "Module contents:"
-          ls -la "CI记录/magisk模块/"
+          DEST="lsp模块(apk修复+温控接口)/app/src/main/assets/tempctrl-arm64"
+          mkdir -p "$(dirname "$DEST")"
+          cp tempctrl "$DEST"
+          if [ ! -s "$DEST" ]; then
+            echo "注入失败：$DEST 不存在或为空"
+            exit 1
+          fi
+          echo "=== 已注入 ==="
+          ls -l "$DEST"
+          md5sum "$DEST"
 
-      # 只处理上面拷进 CI记录/ 的副本，仓库内 webroot 源码保持可读
-      - name: 剥离前端资源注释与缩进（仅作用于 CI 副本）
+      # ── 出 APK ──
+      - name: 编译 APK（b6x keystore 签名）
+        working-directory: ./lsp模块(apk修复+温控接口)
         run: |
-          SIZE_LOG="CI记录/compile_size.txt"
-          python3 "magisk模块(智能温控)/strip_webroot.py" "CI记录/magisk模块/webroot" | tee "$SIZE_LOG"
-          {
-            echo ""
-            echo "=== 模块包各文件体积（进 zip 前的原始字节）==="
-            ( cd "CI记录/magisk模块" && find . -type f -printf '%s %p\n' | sort -rn )
-            echo ""
-            echo "total_bytes=$(cd "CI记录/magisk模块" && find . -type f -printf '%s\n' | awk '{s+=$1} END {print s}')"
-          } >> "$SIZE_LOG"
-          echo "=== 体积报告 ==="
-          cat "$SIZE_LOG"
+          chmod +x gradlew
+          ./gradlew assembleRelease
 
       - name: 获取版本号
-        id: magisk-version
-        run: echo "VERSION=$(grep '^version=' "magisk模块(智能温控)/magisk模块框架/module.prop" | sed 's/^version=v//')" >> $GITHUB_OUTPUT
+        id: apk-version
+        working-directory: ./lsp模块(apk修复+温控接口)
+        run: echo "VERSION=$(grep "versionName" app/build.gradle.kts | sed 's/.*"\(.*\)".*/\1/')" >> $GITHUB_OUTPUT
 
-      - name: 上传 Magisk 模块包
+      - name: 重命名 APK
+        run: |
+          mkdir -p "$GITHUB_WORKSPACE/CI记录"
+          cp "lsp模块(apk修复+温控接口)/app/build/outputs/apk/release/"*.apk "$GITHUB_WORKSPACE/CI记录/b6x-EP-LSPosed-v${{ steps.apk-version.outputs.VERSION }}.apk"
+
+      # 注入是否真的进了产物，只有拆开 APK 才能确认（cp 失败不会让 Gradle 报错）
+      - name: 校验 APK 内含 C 二进制
+        run: |
+          APK=$(ls CI记录/b6x-EP-LSPosed-v*.apk | head -1)
+          echo "=== $APK 内的 assets ==="
+          unzip -l "$APK" | grep 'assets/' || true
+          unzip -l "$APK" | grep -q 'assets/tempctrl-arm64' \
+            || { echo "APK 内缺少 assets/tempctrl-arm64"; exit 1; }
+
+      - name: 上传 APK 构建产物
         uses: actions/upload-artifact@v4
         with:
-          name: b6x-EP-Magisk-v${{ steps.magisk-version.outputs.VERSION }}
-          path: CI记录/magisk模块/
-          if-no-files-found: error
-
-      # 单独上传体积报告：compile_size.txt 在打包步骤才生成，
-      # 早于它的「上传编译日志」步骤（path: CI记录/compile_*.txt）收不到
-      - name: 上传体积报告
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: size-report-magisk
-          path: CI记录/compile_size.txt
-          if-no-files-found: ignore
+          name: b6x-EP-LSPosed-v${{ steps.apk-version.outputs.VERSION }}
+          path: CI记录/b6x-EP-LSPosed-v*.apk

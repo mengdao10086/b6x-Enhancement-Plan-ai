@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    配置页（D1）文案。外壳/状态页的文案在 strings.xml，本文件只放本页自己的。
+    同一份文案只在此处出现一次：布局与 Java 都引用资源名，不写重复字面量。
+-->
+<resources>
+
+    <!-- ===== 定义加载失败的错误态 ===== -->
+    <string name="config_error_title">参数定义加载失败</string>
+    <string name="config_error_body">无法生成配置表单：应用内置的参数定义没有加载成功。以下为诊断信息。</string>
+
+    <!-- ===== 分组卡头 ===== -->
+    <string name="config_arrow_collapsed">▸</string>
+    <string name="config_arrow_expanded">▾</string>
+    <string name="config_action_expand">展开本组</string>
+    <string name="config_action_collapse">折叠本组</string>
+    <string name="config_group_ungrouped">未分组</string>
+
+    <!-- ===== 键行 ===== -->
+    <string name="config_badge_inactive">未生效</string>
+    <string name="config_badge_inactive_desc">依赖项未开启，本项当前不生效</string>
+    <string name="config_ui_only">界面自用，守护进程不读取</string>
+    <string name="config_hint_value">数值</string>
+    <string name="config_hint_path">路径</string>
+    <string name="config_range">范围 %1$s~%2$s</string>
+    <string name="config_clamped">原值 %1$s → 已按定义范围钳制为 %2$s（界面钳制，不等于 C 端语义）</string>
+    <string name="config_guardrail_rejected">未写入：%1$s。C 端会整组拒绝并保留旧值，请调整后再提交</string>
+    <string name="config_input_restored">输入为空或不可解析，已恢复为上一次的值</string>
+    <string name="config_path_note">路径提示：%1$s</string>
+
+    <!-- ===== 诊断区 ===== -->
+    <string name="config_diag_title">诊断信息</string>
+    <string name="config_diag_mtime">配置 mtime：%1$s</string>
+    <string name="config_diag_mtime_missing">配置 mtime：配置文件不存在</string>
+    <string name="config_diag_render_ok">键渲染自检：界面 %1$d 项 = 定义 %2$d 项</string>
+    <string name="config_diag_render_mismatch">键渲染自检：界面 %1$d 项 ≠ 定义 %2$d 项（键表可能已变更）</string>
+    <string name="config_diag_action_refresh">刷新诊断</string>
+    <string name="config_unknown_keys">配置含未定义键（界面不显示，写入时也不会改动）：%1$s</string>
+</resources>

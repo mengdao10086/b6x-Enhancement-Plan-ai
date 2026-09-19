@@ -2,7 +2,7 @@
 // tempctrl.c — 飞智 WaspWing 散热器智能温控守护程序
 // ================================================================
 //
-// 运行环境：root 常驻守护进程，由 APK 部署的 service.d 脚本拉起并守护
+// 运行环境：Magisk / KernelSU 模块，由 service.sh 启动并守护
 // App 进程检测：直读 /proc/<pid>/cmdline 精确比对包名
 // 控制指令：am broadcast → LSPosed 模块 → WaspWingManager.setRunMode
 //
@@ -25,7 +25,6 @@
 #include <time.h>
 #include <stdarg.h>
 #include <sys/stat.h>
-#include <sys/file.h>
 #include <sys/wait.h>
 #include <fcntl.h>
 #include <dirent.h>
@@ -73,35 +72,6 @@
 static int b7_pid_cold_max = 190;   // PID_COLD_RANGE 第三值（B7X），默认同 B6X
 static int b7_fan_rpm_max  = 6000;  // FAN_RPM_RANGE 第三值（B7X），默认同 B6X
 
-// ======================== 私有目录（配置/日志/曲线数据落点） ========================
-// status 双文件仍留 /data/local/tmp/（与 MainHook.java 共享，原样不动）
-// tempctrl_last_dev 归宿主 app 私有目录，由 MainHook 独用，daemon 不参与
-// 此路径必须与 lsp模块(apk修复+温控接口)/app/build.gradle.kts 的 applicationId 一致：
-// 安装后的包名由 applicationId 决定，数据目录名即等于它，改任一处都要同步另一处
-#define PRIVATE_DIR "/data/data/com.example.waspwingtempctrl/files"
-
-/** 确保私有目录存在（守护进程以 root 运行，但目录可能尚未创建）。返回 1=可用，0=不可用
- *  只 mkdir 这一层：父目录 /data/data/<包名> 不存在时 ENOENT 直接失败，绝不逐级创建
- *  （父目录须由系统 installd 创建并打 SELinux 标签，root 抢建会坏事）
- *  新建时把属主改为父目录（=app 数据目录）的属主，与系统建 files/ 一致：
- *  否则 root 先建会使 app 自身（写配置走 Framework File API）无写权限 */
-static int ensure_private_dir(void) {
-    if (mkdir(PRIVATE_DIR, 0771) == 0) {
-        char parent[256];
-        snprintf(parent, sizeof(parent), "%s", PRIVATE_DIR);
-        char *slash = strrchr(parent, '/');
-        if (slash) {
-            *slash = '\0';
-            struct stat pst;
-            if (stat(parent, &pst) == 0)
-                chown(PRIVATE_DIR, pst.st_uid, pst.st_gid);   // best-effort，失败不影响 root 自身读写
-        }
-        return 1;
-    }
-    struct stat st;
-    return stat(PRIVATE_DIR, &st) == 0 && S_ISDIR(st.st_mode);
-}
-
 // ======================== 系统路径与缩放 ========================
 // --- sysfs 路径配置（可由 profile.conf 覆盖）---
 static char BATT_TEMP_PATH[128] = "/sys/class/power_supply/battery/temp";
@@ -139,17 +109,19 @@ static int hot_map_max = 450;       // HOT_RPM_MAP 第二值（0.1°C）
 // --- 风扇转速范围 ---
 static int fan_rpm_min = 2000;      // FAN_RPM_RANGE 第一值
 static int fan_rpm_max = 6000;      // FAN_RPM_RANGE 第二值
+static int fan_rpm_drop_threshold = 200; // 降速防抖阈值（0=不限制；仅风扇降低时生效，距最低转速<阈值×1.5 时失效）
+static int fan_rpm_rise_threshold = 50;    // 升速防抖阈值（0=不限制；仅风扇升高时生效，距最高转速<阈值×1.5 时失效）
 static int fan_rpm_round_unit = 10; // FAN_RPM_ROUND_UNIT：下发转速前按该单位就近取整（RPM，1~500）
 
 // ======================== 速率限制 ========================
 // --- 固定值 ---
-static int RATE_LIMIT_FAN = 250;   // RATE_LIMIT_FAN 第一值：风扇每周期最大变化量（RPM，升/降共用，双值键）
+static int RATE_LIMIT_FAN_DOWN = 400;   // 风扇降速每周期最大变化量（RPM）
 static int RATE_LIMIT_COLD = 25;   // 制冷强度升降速基础值：升速=base+dev×mult/10，降速=base-dev×mult/10，负值→0=禁止该方向
 
 // --- 动态值（根据电池温差自动调整）---
 static int RATE_LIMIT_COLD_MULT = 10;  // 制冷强度倍率：升速/降速 = base ± dev(0.1°C) × mult / 10
 static int COLD_DEADZONE = 3;          // 制冷最小变化幅度（RATE_LIMIT_COLD 第三值）：与散热器实际 |差值| < 该值时不升不降
-static int RATE_LIMIT_FAN_DEBOUNCE = 50;   // RATE_LIMIT_FAN 第二值：防抖阈值（RPM/周期，0=关闭防抖）；变化量 ≤ 阈值且距方向端点（升=最高/降=最低）≥ 阈值×1.5 时保持不动
+static int RATE_LIMIT_FAN_UP = 250;   // 风扇升速每周期最大变化量（RPM）；防抖阈值见 fan_rpm_rise_threshold
 static int cycle_batt_temp = -1;       // 本周期电池温度（-1=未就绪）
 // --- 1s 采集缓存：5s 控制块直接读缓存，不再重复读 sysfs/状态文件 ---
 static int cached_batt_raw = -1;   // 电池温度（0.1°C），保留上次成功值抗抖
@@ -187,6 +159,8 @@ static int debug_launch = 0;    // [自动拉起] 目标选择/回退/跳过（�
 // ======================== 配置文件系统 ========================
 // 配置文件路径（自动检测或 --config 指定）
 static char config_path[256] = "";
+// 卸载脚本路径（由 config_path 推导：$MODDIR/uninstall.sh，用于记录自定义日志路径）
+static char uninstall_script_path[256] = "";
 // 配置文件的最后修改时间（用于热重载检测）
 static time_t config_mtime = 0;
 
@@ -223,20 +197,6 @@ static int pid_cpu_comp_offset = 100;           // PID_CPU_COMP 第三值：偏�
 static int pid_cold_min = 1;              // PID_COLD_RANGE 第一值：制冷强度下限
 static int pid_cold_max = 190;            // PID_COLD_RANGE 第二值：制冷强度上限（B6X）
 
-// --- 动态 KI 抑制机制参数（配置值为整数，×100 换算进内部；θ 例外，单位即码）---
-// PID_KI_DYN_T    = T1 T2 M（各自 ×100，单位 码²；默认 470 120 75 → 4.70 / 1.20 / 0.75）
-// PID_KI_DYN_GATE = θ 削减下限（θ 单位码 = 0.1°C、零换算；下限 ×100；默认 5 50 → 0.5°C / 0.50）
-// PID_KI_DYN_WIN  = N α（N 零换算为样本个数；α ×100；默认 36 30 → 36 / 0.30）
-#define KI_DYN_P100(v)  ((v) * 0.01f)     // 配置整数（×100）→ 内部浮点
-static struct {
-    float t1, t2;      // T1 / T2 抖动阈值（码²）
-    float m;           // M 方向系数（码²）
-    int   theta;       // θ 门控半宽（码）
-    float floor;       // 削减下限（无量纲）
-    int   n;           // N 窗口样本容量（个）
-    float alpha;       // α EMA 系数（无量纲）
-} ki_dyn_cfg = { 4.70f, 1.20f, 0.75f, 5, 0.50f, 36, 0.30f };
-
 // --- PID 运行时状态（单累积器）---
 static float pid_ki = 0.0f;               // 积分累积值（acc；float：限幅赋小数需保留）
 static float pid_kdp = 0.0f;              // 融合 P+D 项（kdp = kdp_coef×ch_kdp；无记忆，跳过①用 last 值）
@@ -266,17 +226,6 @@ static int pid_batt_snap_done = 0;        // 停机后是否已做一次"恢复�
 // --- 输出映射与对齐 ---
 static int pid_align_rpm = 2000;          // PID 目标 RPM（仅初始化对齐与日志使用；风扇下发已由 compute_fan_target 独立计算）
 static int pid_align_cold = 1;            // PID 目标制冷强度
-
-// --- 动态 KI 抑制机制运行状态 ---
-#define KI_DYN_WIN_MAX 128        // 环形缓冲容量（= N 的上限）；取模恒用此固定值，改 N 不越界
-#define KI_DYN_SAMPLE_MIN 6       // 样本数门槛（个）：窗口样本少于此值时机制不干预
-static struct {
-    int   win[KI_DYN_WIN_MAX];  // 电池温度样本（原始值，0.1°C）
-    int   head;                 // 下次写入位置
-    int   count;                // 已推入样本数（上限 N）
-    float scale_up;             // 升侧 EMA 平滑值（初值 1.0 = 不削减）
-    float scale_down;           // 降侧 EMA 平滑值
-} ki_dyn = { {0}, 0, 0, 1.0f, 1.0f };
 
 // ======================== 散热器回传参数 ========================
 static int cooler_hot_temp = -1;          // 热端温度（0.1°C）
@@ -316,7 +265,7 @@ static char status_file_path_b6[512] = "/data/local/tmp/tempctrl_b6x.status";
 static char status_file_path_b7[512] = "/data/local/tmp/tempctrl_b7x.status";
 
 // WebUI 曲线数据文件（每 1 秒一行，滚动保留最大曲线窗口秒数）
-#define WEBUI_DATA_PATH       PRIVATE_DIR "/tempctrl_webui.data"
+#define WEBUI_DATA_PATH       "/data/local/tmp/tempctrl_webui.data"
 #define WEBUI_DATA_MAX_LINES  720   // = 曲线最大时间挡位（秒）
 
 // 三方 app 包名（farsef 在最近连 B6X 散热器时也参与仲裁）
@@ -463,6 +412,45 @@ static char *config_parse_line(char *line, char **out_key) {
     return eq + 1;
 }
 
+/**
+ * 将日志路径追加到卸载脚本 uninstall.sh（幂等），供卸载时清理用户自定义日志文件。
+ * 用户修改 LOG_FILE 后热重载，新路径会被记录；脚本中已存在的路径不重复追加。
+ * uninstall_script_path 由 config_path（$MODDIR/profile.conf）推导。
+ */
+static void record_log_path_for_uninstall(const char *path) {
+    if (path == NULL || path[0] == '\0') return;
+    // 懒初始化：从 config_path 推导 $MODDIR/uninstall.sh
+    if (uninstall_script_path[0] == '\0' && config_path[0] != '\0') {
+        char *slash = strrchr(config_path, '/');
+        if (slash) {
+            int len = (int)(slash - config_path);
+            snprintf(uninstall_script_path, sizeof(uninstall_script_path),
+                     "%.*s/uninstall.sh", len, config_path);
+        }
+    }
+    if (uninstall_script_path[0] == '\0') return;
+
+    // 幂等检查：脚本中已存在该路径的 rm 行则跳过
+    char needle[512];
+    snprintf(needle, sizeof(needle), "rm -f %s", path);
+    FILE *f = fopen(uninstall_script_path, "r");
+    char line[512];
+    int found = 0;
+    if (f) {
+        while (fgets(line, sizeof(line), f)) {
+            if (strstr(line, needle)) { found = 1; break; }
+        }
+        fclose(f);
+    }
+    if (found) return;
+
+    f = fopen(uninstall_script_path, "a");
+    if (f) {
+        fprintf(f, "rm -f %s\n", path);
+        fclose(f);
+    }
+}
+
 /** sysfs 路径与缩放层键集合（SYSFS_ENABLED=1 时解析，独立于性能/调试总开关） */
 static int is_sysfs_key(const char *key) {
     return strcmp(key, "BATT_TEMP_PATH") == 0
@@ -545,6 +533,7 @@ static void parse_sysfs_cfg(const char *key, int val, const char *val_str) {
     }
     else if (strcmp(key, "LOG_FILE") == 0) {
         config_read_path(log_file_path, sizeof(log_file_path), val_str);
+        record_log_path_for_uninstall(log_file_path);  // 记录自定义日志路径供卸载清理
     }
 }
 
@@ -602,64 +591,6 @@ static int parse_pid_cfg(const char *key, int val, const char *val_str) {
         if (n >= 2) pid_spd_recall_weight = clamp(w, 100, 1000);
         return 1;
     }
-    // PID_KI_DYN_T = T1 T2 M（各自 ×100，单位 码²；默认 470 120 75）
-    // 护栏：各值 ∈ [1,10000]，T1 > T2，M < T1；M > T2 仅提示"效果打折"不拦。校验完整候选、全或无提交。
-    if (strcmp(key, "PID_KI_DYN_T") == 0) {
-        int t1 = (int)(ki_dyn_cfg.t1 * 100.0f + 0.5f);
-        int t2 = (int)(ki_dyn_cfg.t2 * 100.0f + 0.5f);
-        int m  = (int)(ki_dyn_cfg.m  * 100.0f + 0.5f);
-        if (sscanf(val_str, "%d %d %d", &t1, &t2, &m) < 1) return 1;
-        const char *bad = NULL;
-        if      (t1 < 1 || t1 > 10000) bad = "T1 超 [1,10000]";
-        else if (t2 < 1 || t2 > 10000) bad = "T2 超 [1,10000]";
-        else if (m  < 1 || m  > 10000) bad = "M 超 [1,10000]";
-        else if (t1 <= t2)             bad = "T1<=T2";
-        else if (m >= t1)              bad = "M>=T1";
-        if (bad) {
-            write_log("配置 PID_KI_DYN_T 拒绝（%s）：T1=%d T2=%d M=%d 未生效", bad, t1, t2, m);
-            return 1;
-        }
-        ki_dyn_cfg.t1 = KI_DYN_P100(t1);
-        ki_dyn_cfg.t2 = KI_DYN_P100(t2);
-        ki_dyn_cfg.m  = KI_DYN_P100(m);
-        if (m > t2)
-            write_log("配置 PID_KI_DYN_T M=%d > T2=%d，方向机制效果打折（不拦）", m, t2);
-        return 1;
-    }
-    // PID_KI_DYN_GATE = θ 削减下限（θ 单位码 = 0.1°C、零换算；下限 ×100；默认 5 50）
-    // 护栏：θ ∈ [3,10] 码、下限 ∈ [10,100]（内部 0.10~1.00）。全或无提交。
-    if (strcmp(key, "PID_KI_DYN_GATE") == 0) {
-        int th = ki_dyn_cfg.theta;
-        int fl = (int)(ki_dyn_cfg.floor * 100.0f + 0.5f);
-        if (sscanf(val_str, "%d %d", &th, &fl) < 1) return 1;
-        const char *bad = NULL;
-        if      (th < 3  || th > 10)  bad = "theta 超 [3,10] 码";
-        else if (fl < 10 || fl > 100) bad = "削减下限超 [10,100]";
-        if (bad) {
-            write_log("配置 PID_KI_DYN_GATE 拒绝（%s）：theta=%d 下限=%d 未生效", bad, th, fl);
-            return 1;
-        }
-        ki_dyn_cfg.theta = th;
-        ki_dyn_cfg.floor = KI_DYN_P100(fl);
-        return 1;
-    }
-    // PID_KI_DYN_WIN = N α（N 零换算；α ×100；默认 36 30）
-    // 护栏：N ∈ [6,128]（上限 = KI_DYN_WIN_MAX）、α ∈ [1,100]（内部 (0,1]）。全或无提交。
-    if (strcmp(key, "PID_KI_DYN_WIN") == 0) {
-        int nn = ki_dyn_cfg.n;
-        int al = (int)(ki_dyn_cfg.alpha * 100.0f + 0.5f);
-        if (sscanf(val_str, "%d %d", &nn, &al) < 1) return 1;
-        const char *bad = NULL;
-        if      (nn < KI_DYN_SAMPLE_MIN || nn > KI_DYN_WIN_MAX) bad = "N 超 [6,128]";
-        else if (al < 1 || al > 100)                            bad = "alpha 超 [1,100]";
-        if (bad) {
-            write_log("配置 PID_KI_DYN_WIN 拒绝（%s）：N=%d alpha=%d 未生效", bad, nn, al);
-            return 1;
-        }
-        ki_dyn_cfg.n = nn;
-        ki_dyn_cfg.alpha = KI_DYN_P100(al);
-        return 1;
-    }
     return 0;
 }
 
@@ -687,12 +618,11 @@ static int parse_common_cfg(const char *key, int val, const char *val_str) {
         if (n >= 3) HOT_DERATE_COOLDOWN = clamp(c, 0, 20);
         return 1;
     }
-    // RATE_LIMIT_FAN = 每周期最大变化量 防抖阈值（双值，升降共用步长；阈值 0=关闭防抖）
-    if (strcmp(key, "RATE_LIMIT_FAN") == 0) {
-        int step = RATE_LIMIT_FAN, thr = RATE_LIMIT_FAN_DEBOUNCE;
-        int n = sscanf(val_str, "%d %d", &step, &thr);
-        if (n >= 1) RATE_LIMIT_FAN          = clamp(step, 50, 2000);
-        if (n >= 2) RATE_LIMIT_FAN_DEBOUNCE = clamp(thr, 0, 2000);
+    if (strcmp(key, "RATE_LIMIT_FAN_DOWN") == 0) {
+        int base = RATE_LIMIT_FAN_DOWN, thr = fan_rpm_drop_threshold;
+        int n = sscanf(val_str, "%d %d", &base, &thr);
+        if (n >= 1) RATE_LIMIT_FAN_DOWN = clamp(base, 50, 2000);
+        if (n >= 2) fan_rpm_drop_threshold = clamp(thr, 0, 2000);
         return 1;
     }
     if (strcmp(key, "RATE_LIMIT_COLD") == 0) {
@@ -710,6 +640,15 @@ static int parse_common_cfg(const char *key, int val, const char *val_str) {
         int n = sscanf(val_str, "%d %d", &s, &e);
         if (n >= 1) cold_map_start = clamp(s, 0, 194);
         if (n >= 2) cold_map_exp   = clamp(e, 50, 500);
+        return 1;
+    }
+    // RATE_LIMIT_FAN_UP = 每周期最大升速量 升速防抖阈值（双值；阈值 0=关闭防抖）
+    if (strcmp(key, "RATE_LIMIT_FAN_UP") == 0) {
+        int rise = RATE_LIMIT_FAN_UP, thr = fan_rpm_rise_threshold;
+        if (sscanf(val_str, "%d %d", &rise, &thr) >= 1) {
+            RATE_LIMIT_FAN_UP      = clamp(rise, 50, 2000);
+            fan_rpm_rise_threshold = clamp(thr, 0, 2000);
+        }
         return 1;
     }
     return 0;
@@ -835,35 +774,38 @@ static int get_exe_basename(char *buf, size_t size) {
 
 /**
  * 根据二进制名设定默认日志路径
- * 例：tempctrl → <PRIVATE_DIR>/tempctrl.log
+ * 例：tempctrl → /cache/tempctrl.log
  * 此值为默认值，profile.conf 中 LOG_FILE 可覆盖
- * 私有目录不可用时兜底回原 /cache 落点，并写 stderr（不静默失败）
  */
 static void set_default_log_path(void) {
     char basename[64];
-    if (!get_exe_basename(basename, sizeof(basename))) {
-        strncpy(basename, "tempctrl", sizeof(basename) - 1);
-        basename[sizeof(basename) - 1] = '\0';
-    }
-    if (ensure_private_dir()) {
-        snprintf(log_file_path, sizeof(log_file_path), PRIVATE_DIR "/%s.log", basename);
+    if (get_exe_basename(basename, sizeof(basename))) {
+        snprintf(log_file_path, sizeof(log_file_path), "/cache/%s.log", basename);
         return;
     }
-    fprintf(stderr, "tempctrl: 私有目录 %s 不可用，日志回退 /cache\n", PRIVATE_DIR);
-    snprintf(log_file_path, sizeof(log_file_path), "/cache/%s.log", basename);
+    // fallback
+    strncpy(log_file_path, "/cache/tempctrl.log", sizeof(log_file_path) - 1);
 }
 
 /**
  * 自动检测配置文件路径
  *
- * 默认在私有目录下找 profile.conf（--config 指定的绝对路径优先，见 main）
+ * 通过 /proc/self/exe 获取 tempctrl 自身路径，
+ * 在同目录下找 profile.conf
  *
  * 返回 1=找到，0=未找到
  */
 static int detect_config_path(void) {
-    if (!ensure_private_dir()) return 0;
+    char exe_path[512];
+    if (!read_self_exe(exe_path, sizeof(exe_path))) return 0;
 
-    snprintf(config_path, sizeof(config_path), PRIVATE_DIR "/profile.conf");
+    // 获取 exe 所在目录
+    char *last_slash = strrchr(exe_path, '/');
+    if (!last_slash) return 0;
+    *last_slash = '\0';
+
+    // 在同目录下找 profile.conf
+    snprintf(config_path, sizeof(config_path), "%s/profile.conf", exe_path);
     if (access(config_path, F_OK) == 0) return 1;
 
     config_path[0] = '\0';
@@ -941,14 +883,6 @@ static inline int clamp(int val, int lo, int hi) {
     return val;
 }
 
-/** 浮点钳制；lo > hi 时把 hi 提到 lo，防调用方给错区间时返回越界值 */
-static inline float clampf(float val, float lo, float hi) {
-    if (hi < lo) hi = lo;
-    if (val < lo) return lo;
-    if (val > hi) return hi;
-    return val;
-}
-
 /** 设备代号（日志显示用）：B7X→"b7x"，其余（B6X / 无设备）→"b6x" */
 static const char *device_tag_of(DeviceType dev) {
     return (dev == DEVICE_B7X) ? "b7x" : "b6x";
@@ -997,6 +931,12 @@ static void create_status_files(void) {
         } else {
             write_log("状态文件 创建失败 %s", paths[i]);
         }
+    }
+    // 预创建 MAC 记录文件（0666 权限；路径与 MainHook LAST_DEV_FILE 一致）
+    FILE *mf = fopen("/data/local/tmp/tempctrl_last_dev", "a");
+    if (mf) {
+        fclose(mf);
+        chmod("/data/local/tmp/tempctrl_last_dev", 0666);
     }
 }
 
@@ -1446,13 +1386,13 @@ static void send_am_broadcast(int mode, int target, int windOC, int coldOC, int 
 }
 
 /**
- * 计算速率上限：风扇升降共用固定步长（防抖在 rate_limit_fan 内单独判定）；制冷强度按电池温差动态算
- * @param out_fan_step  风扇每周期最大变化量（RPM，= RATE_LIMIT_FAN 固定值，升/降共用）
+ * 计算速率上限：风扇升速用固定值（防抖在 rate_limit_fan 内单独判定）；制冷强度按电池温差动态算
+ * @param out_fan_up    风扇升速上限（RPM，= RATE_LIMIT_FAN_UP 固定值）
  * @param out_cold_up   制冷强度升速上限（有符号温差，负值→0=禁止升）
  * @param out_cold_down 制冷强度降速上限（有符号温差，负值→0=禁止降）
  */
-static void calc_dynamic_rates(int *out_fan_step, int *out_cold_up, int *out_cold_down) {
-    *out_fan_step = RATE_LIMIT_FAN;
+static void calc_dynamic_rates(int *out_fan_up, int *out_cold_up, int *out_cold_down) {
+    *out_fan_up = RATE_LIMIT_FAN_UP;
     // 制冷强度：有符号温差 dev，升速/降速独立；负值 → clamp 到 0（禁止该方向）
     int dev = 0;
     if (cycle_batt_temp >= 0) dev = cycle_batt_temp - BATT_BASELINE;
@@ -1467,8 +1407,8 @@ static void calc_dynamic_rates(int *out_fan_step, int *out_cold_up, int *out_col
  * 更新 actual_cold；调用方随后用限速后的实际制冷重算风扇目标。
  */
 static void rate_limit_cold(int desired_cold) {
-    int fan_step, cold_up, cold_down;
-    calc_dynamic_rates(&fan_step, &cold_up, &cold_down);
+    int fan_up, cold_up, cold_down;
+    calc_dynamic_rates(&fan_up, &cold_up, &cold_down);
     int old_cold = actual_cold;
     rate_limit(&actual_cold, desired_cold, cold_up, cold_down);
     debug_log(debug_exec, "cold 限速 %d→%d desired=%d（升%d 降%d）",
@@ -1476,32 +1416,29 @@ static void rate_limit_cold(int desired_cold) {
 }
 
 /**
- * 风扇转速限速（升/降共用同一步长，两个方向各带一段防抖）。
+ * 风扇转速限速（升降各自独立速率，降速/升速各带一段防抖）。
  * 返回限速后的实际风扇转速，就近取整到 FAN_RPM_ROUND_UNIT 的倍数并钳制到设备范围。
  *
  * 防抖是「幅度阈值」：本周期变化量不超过阈值就整步不做（不看时间、不计数）；
  * 距最低转速（降）/最高转速（升）< 阈值×1.5 时防抖失效（贴近端点无需再抑制）。
  */
 static int rate_limit_fan(int desired_rpm) {
-    int fan_step, cold_up, cold_down;
-    calc_dynamic_rates(&fan_step, &cold_up, &cold_down);
+    int fan_up, cold_up, cold_down;
+    calc_dynamic_rates(&fan_up, &cold_up, &cold_down);
 
-    // 防抖判定：升/降两条同构守卫已收敛为一次求值，方向由 rising 定死；
-    // 原实现靠「降速分支先改写 desired」隐式保证两条互斥，勿拆回两条。
-    int rising = (desired_rpm > actual_rpm);
-    int ref_room = rising ? (active_fan_max - actual_rpm)    // 升速：距最高转速（现场读，active_fan_max 为运行时量）
-                          : (actual_rpm - fan_rpm_min);      // 降速：距最低转速
-    int delta = abs(desired_rpm - actual_rpm);
-    // 阈值 ×1.5 必须先乘后除（* 3 / 2）：写成 /2*3 时阈值 51 得 75 而非 76，差 1 RPM 即移动 >= 边界
-    int hold = delta > 0 &&
-               ref_room >= RATE_LIMIT_FAN_DEBOUNCE * 3 / 2 &&
-               delta <= RATE_LIMIT_FAN_DEBOUNCE;
-    if (hold) desired_rpm = actual_rpm;   // 防抖：变化量不超阈值 → 本周期保持不动
-    int drop_hold = hold && !rising;      // 降速防抖命中
-    int rise_hold = hold && rising;       // 升速防抖命中
+    int drop_hold = fan_rpm_drop_threshold > 0 &&
+                    (actual_rpm - fan_rpm_min) >= fan_rpm_drop_threshold * 3 / 2 &&
+                    desired_rpm < actual_rpm &&
+                    (actual_rpm - desired_rpm) <= fan_rpm_drop_threshold;
+    if (drop_hold) desired_rpm = actual_rpm;   // 降速防抖：降幅不超阈值 → 本周期不降
 
-    // 单键语义：两个实参必须同值
-    rate_limit(&actual_rpm, desired_rpm, fan_step, fan_step);
+    int rise_hold = fan_rpm_rise_threshold > 0 &&
+                    (active_fan_max - actual_rpm) >= fan_rpm_rise_threshold * 3 / 2 &&
+                    desired_rpm > actual_rpm &&
+                    (desired_rpm - actual_rpm) <= fan_rpm_rise_threshold;
+    if (rise_hold) desired_rpm = actual_rpm;   // 升速防抖：升幅不超阈值 → 本周期不升
+
+    rate_limit(&actual_rpm, desired_rpm, fan_up, RATE_LIMIT_FAN_DOWN);
     // 下限钳制：内部 actual_rpm 与 send_rpm 对齐，恒不低于 fan_rpm_min。
     // 否则风扇目标偏低时 actual_rpm 跌破 fan_rpm_min，rate_limited_execute 的就绪守卫会误判"未就绪"而永久跳过下发（死锁）。
     actual_rpm = clamp(actual_rpm, fan_rpm_min, active_fan_max);
@@ -1964,145 +1901,6 @@ static int cpu_comp_now(int batt) {
     return (int)(pid_cpu_comp_smooth * 10 + 0.5f);
 }
 
-// ======================== 动态 KI 抑制机制 ========================
-// 电池温度窗口散布 → 压低积分升/降速率：温度越稳、越贴基线，削减越深。
-// 单位：样本 / 窗口均值 / θ 为码（0.1°C）；P / Q / T1 / T2 / M 为 码²；r / g / scale / 下限 / N / α 无量纲。
-// 窗口推入用原始值 batt_raw；PID 输入用的是滤波值 pid_batt_filtered（两序列不同源）。
-
-/** 求值结果：正常时 8 个体检字段有效；退化时 reason 非空、数值不用 */
-typedef struct {
-    const char *reason;   // NULL = 正常；否则为退化原因（静态串）
-    int   sample_count;   // 参与求值的样本数（个）
-    float r_mean;         // 窗口均值 R（码）
-    float pq;             // P+Q（码²）
-    float pq_d;           // P−Q（码²）
-    float g_up;           // 升侧方向系数
-    float g_down;         // 降侧方向系数
-    float scale_up;       // 升侧钳制后、EMA 前的目标值
-    float scale_dn;       // 降侧钳制后、EMA 前的目标值
-    float r;              // 削减量
-} KiDynOut;
-
-/** 清空窗口与 EMA 状态（启动 / 长断连复位） */
-static void ki_dyn_reset(void) {
-    ki_dyn.head = 0;
-    ki_dyn.count = 0;
-    ki_dyn.scale_up = 1.0f;
-    ki_dyn.scale_down = 1.0f;
-}
-
-/** 推入一个原始电池温度样本（码）；容量满后覆盖最旧 */
-static void ki_dyn_push(int sample) {
-    ki_dyn.win[ki_dyn.head] = sample;
-    ki_dyn.head = (ki_dyn.head + 1) % KI_DYN_WIN_MAX;   // 取模用固定容量，改 N 不越界
-    if (ki_dyn.count < ki_dyn_cfg.n) ki_dyn.count++;
-}
-
-/** 三角数 pow_k(d) = d × (|d| + 1) / 2（码²） */
-static inline float ki_dyn_powk(float d) {
-    return d * (d > 0.0f ? d + 1.0f : 1.0f - d) / 2.0f;
-}
-
-/** 求值：填 8 个体检字段；任一门未过则填 reason 并返回 */
-static void ki_dyn_eval(KiDynOut *o) {
-    o->reason = NULL;
-    o->sample_count = 0;
-    o->r_mean = 0.0f;
-    o->pq = 0.0f;
-    o->pq_d = 0.0f;
-    o->g_up = 1.0f;
-    o->g_down = 1.0f;
-    o->scale_up = 1.0f;
-    o->scale_dn = 1.0f;
-    o->r = 0.0f;
-
-    // 参数护栏按内部值域（配置层是整数口径，拦不住换算/赋值事故）
-    const char *bad = NULL;
-    if      (ki_dyn_cfg.m <= 0.0f)                        bad = "M<=0";
-    else if (ki_dyn_cfg.m >= ki_dyn_cfg.t1)               bad = "M>=T1";
-    else if (ki_dyn_cfg.t1 <= ki_dyn_cfg.t2)              bad = "T1<=T2";
-    else if (ki_dyn_cfg.t2 <= 0.0f)                       bad = "T2<=0";
-    else if (!(ki_dyn_cfg.alpha > 0.0f && ki_dyn_cfg.alpha <= 1.0f)) bad = "alpha 不在 (0,1]";
-    else if (!(ki_dyn_cfg.floor > 0.0f && ki_dyn_cfg.floor <= 1.0f)) bad = "floor 不在 (0,1]";
-    else if (ki_dyn_cfg.n < KI_DYN_SAMPLE_MIN || ki_dyn_cfg.n > KI_DYN_WIN_MAX) bad = "N 超范围";
-    if (bad) { o->reason = bad; return; }
-
-    int sample_count = (ki_dyn.count < ki_dyn_cfg.n) ? ki_dyn.count : ki_dyn_cfg.n;
-    o->sample_count = sample_count;
-    if (sample_count < KI_DYN_SAMPLE_MIN) { o->reason = "count_low"; return; }
-
-    // 窗口均值 R（码），取最近 sample_count 个样本
-    int sum = 0;
-    for (int i = 0; i < sample_count; i++)
-        sum += ki_dyn.win[(ki_dyn.head - sample_count + i + KI_DYN_WIN_MAX) % KI_DYN_WIN_MAX];
-    float r_mean = (float)sum / (float)sample_count;
-    o->r_mean = r_mean;
-
-    // 门控：窗口均值偏离基线的幅度超过 θ（码）则整机制不干预
-    float dev = r_mean - (float)BATT_BASELINE;
-    if (dev > (float)ki_dyn_cfg.theta || -dev > (float)ki_dyn_cfg.theta) {
-        o->reason = "gate_off";
-        return;
-    }
-
-    // 正偏 / 负偏半方差（码²）
-    float sum_pos_dev = 0.0f, sum_neg_dev = 0.0f;
-    for (int i = 0; i < sample_count; i++) {
-        float d = ki_dyn.win[(ki_dyn.head - sample_count + i + KI_DYN_WIN_MAX) % KI_DYN_WIN_MAX] - r_mean;
-        if (d > 0.0f) sum_pos_dev += ki_dyn_powk(d);
-        else          sum_neg_dev += ki_dyn_powk(-d);
-    }
-    float p = sum_pos_dev / (float)sample_count;
-    float q = sum_neg_dev / (float)sample_count;
-    o->pq = p + q;
-    o->pq_d = p - q;
-
-    // 削减量 r：P+Q ≥ T1 不削减，P+Q < T1 按 (T1−T2) 线性内插，下限钳 0
-    float cut_ratio = 0.0f;
-    if (o->pq < ki_dyn_cfg.t1)
-        cut_ratio = 0.5f * (ki_dyn_cfg.t1 - o->pq) / (ki_dyn_cfg.t1 - ki_dyn_cfg.t2);
-    if (cut_ratio < 0.0f) cut_ratio = 0.0f;
-    o->r = cut_ratio;
-
-    // 方向系数：偏向侧少削、另一侧满额（无分支双式写法，两侧都算）
-    float pos_excess = (o->pq_d > 0.0f) ? o->pq_d : 0.0f;
-    float neg_excess = (o->pq_d < 0.0f) ? -o->pq_d : 0.0f;
-    float gate_up   = 1.0f - clampf(pos_excess / ki_dyn_cfg.m, 0.0f, 1.0f);
-    float gate_down = 1.0f - clampf(neg_excess / ki_dyn_cfg.m, 0.0f, 1.0f);
-    o->g_up = gate_up;
-    o->g_down = gate_down;
-
-    // 两侧各自钳到削减下限
-    o->scale_up = clampf(1.0f - cut_ratio * gate_up,   ki_dyn_cfg.floor, 1.0f);
-    o->scale_dn = clampf(1.0f - cut_ratio * gate_down, ki_dyn_cfg.floor, 1.0f);
-}
-
-/** EMA 平滑：s += α × (target − s)；窗口无新样本时不调用，s 原样保持 */
-static void ki_dyn_ema(float target_up, float target_down, float *out_up, float *out_down) {
-    ki_dyn.scale_up   += ki_dyn_cfg.alpha * (target_up   - ki_dyn.scale_up);
-    ki_dyn.scale_down += ki_dyn_cfg.alpha * (target_down - ki_dyn.scale_down);
-    *out_up = ki_dyn.scale_up;
-    *out_down = ki_dyn.scale_down;
-}
-
-/** 诊断日志：正常周期打 8 个体检字段，退化周期打一行原因（每周期只出一行） */
-static void ki_dyn_log(const KiDynOut *o) {
-    if (!o->reason) {
-        pid_log("KI动态 R=%.1f PQ=%.3f PQd=%.3f gup=%.3f gdn=%.3f sup=%.3f sdn=%.3f r=%.4f",
-                o->r_mean, o->pq, o->pq_d, o->g_up, o->g_down, o->scale_up, o->scale_dn, o->r);
-        return;
-    }
-    if (strcmp(o->reason, "count_low") == 0) {
-        pid_log("KI动态 退化 count_low m=%d/%d", o->sample_count, KI_DYN_SAMPLE_MIN);
-    } else if (strcmp(o->reason, "gate_off") == 0) {
-        float devf = o->r_mean - (float)BATT_BASELINE;
-        if (devf < 0.0f) devf = -devf;
-        pid_log("KI动态 退化 gate_off |R-B|=%d > theta=%d", (int)(devf + 0.5f), ki_dyn_cfg.theta);
-    } else {
-        pid_log("KI动态 退化 guard_fail %s", o->reason);
-    }
-}
-
 // ======================== PID 控制函数 ========================
 
 /**
@@ -2118,12 +1916,9 @@ static void ki_dyn_log(const KiDynOut *o) {
  * @param dt       距上次重算以来的 5 秒周期数（钳位 0.6~6，1 = 5s）
  * @param cpu_comp CPU 补偿（°C，已 EMA 平滑）
  * @param batt_window_changed 本周期温度窗口是否变化（0=温度未变，kdp 沿用）
- * @param ki_scale_up   动态 KI 升侧缩放（0~1，1.0=不削减）
- * @param ki_scale_down 动态 KI 降侧缩放（0~1，1.0=不削减）
  * @return 归一化输出 0.0~1.0
  */
-static float pid_compute(int batt_10, float dt, float cpu_comp, int batt_window_changed, int recall_on, float recall_v,
-                         float ki_scale_up, float ki_scale_down) {
+static float pid_compute(int batt_10, float dt, float cpu_comp, int batt_window_changed, int recall_on, float recall_v) {
     // 输入误差（纯电池）
     float error = (batt_10 - BATT_BASELINE) / 10.0f;
 
@@ -2161,11 +1956,10 @@ static float pid_compute(int batt_10, float dt, float cpu_comp, int batt_window_
         pid_target_f += ta * (raw_target - pid_target_f);
     }
 
-    // 积分累积（acc；不乘 dt）：被积项为正走升速率、为负走降速率，各自乘动态 KI 缩放
+    // 积分累积（acc；不乘 dt）：被积项为正走升速率、为负走降速率
     {
         float integrand = ch - pid_target_f;
-        float ki_rate = (integrand >= 0.0f) ? pid_ki_up_coef * ki_scale_up
-                                            : pid_ki_down_coef * ki_scale_down;
+        float ki_rate = (integrand >= 0.0f) ? pid_ki_up_coef : pid_ki_down_coef;
         pid_ki += (ki_rate / 1000.0f) * integrand;
     }
 
@@ -2366,7 +2160,6 @@ static void pid_reset_core(void) {
     recall_anchor = 0;
     recall_prev_batt = 0;
     recall_cycles = 0;
-    ki_dyn_reset();
 }
 
 // Gear 模式切换对齐（pid_align_from_gear）已随 Gear 删除
@@ -2575,20 +2368,8 @@ static void pid_cycle(void) {
                    * (pid_spd_recall_weight / 1000.0f);
     }
 
-    // --- 动态 KI 抑制：推送窗口 + 求值 + 步进 EMA（三者同受本守卫，温度未变则 s 原样保持）---
-    // 窗口推入用原始值 batt_raw；PID 进的是滤波值 pid_batt_filtered（两序列不同源）
-    float ki_scale_up = 1.0f, ki_scale_down = 1.0f;
-    if (batt_window_changed) {
-        ki_dyn_push(batt_raw);
-        KiDynOut dyn_out;
-        ki_dyn_eval(&dyn_out);
-        ki_dyn_ema(dyn_out.scale_up, dyn_out.scale_dn, &ki_scale_up, &ki_scale_down);
-        ki_dyn_log(&dyn_out);
-    }
-
     // --- PID 计算（电池 error 用滤波值 pid_batt_filtered + cpu_comp；snap 后==batt_raw 故恢复原始值；温度未变时 kdp 沿用）---
-    float pid_out = pid_compute(pid_batt_filtered, dt, cpu_comp, batt_window_changed, recall_on, recall_v,
-                                ki_scale_up, ki_scale_down);
+    float pid_out = pid_compute(pid_batt_filtered, dt, cpu_comp, batt_window_changed, recall_on, recall_v);
 
     // 直接映射到物理值（无输出平滑）：PID 输出 → 制冷强度（风扇目标由 compute_fan_target 独立计算）
     int cmax = active_cold_eff_max;
@@ -2694,45 +2475,9 @@ static void write_webui_data(void) {
     }
 }
 
-// ======================== 单实例锁 ========================
-// service.d 开机拉起 + app 内手动拉起两条路径都直接执行启动命令，由本锁保证幂等。
-// 锁文件与配置/日志/曲线数据同处私有目录。
-// 残留后果（不美化）：app「清除数据」会把锁文件一起删掉，运行中的实例与新实例随即锁到
-// 不同 inode，那一次锁失效；兜底靠部署脚本的开机自检。
-#define LOCK_FILE_PATH        PRIVATE_DIR "/tempctrl.lock"
-#define EXIT_ALREADY_RUNNING  2     // 退出码 2：已有实例在跑（其它启动失败路径均返回 0）
-static int lock_fd = -1;
-
-/** 取单实例锁（flock 非阻塞）。返回 1=取到可继续启动，0=已有实例在运行
- *  私有目录不可用（mkdir 被拒 / 父目录不存在）时不阻塞启动，仅 stderr 记录 */
-static int acquire_single_instance_lock(void) {
-    if (!ensure_private_dir()) {
-        fprintf(stderr, "tempctrl: 私有目录 %s 不可用，跳过单实例检查\n", PRIVATE_DIR);
-        return 1;
-    }
-    lock_fd = open(LOCK_FILE_PATH, O_RDWR | O_CREAT | O_CLOEXEC, 0666);
-    if (lock_fd < 0) {
-        // 锁文件建不了 → 不阻塞启动，仅 stderr 记录
-        fprintf(stderr, "tempctrl: 锁文件 %s 不可用（跳过单实例检查）\n", LOCK_FILE_PATH);
-        return 1;
-    }
-    if (flock(lock_fd, LOCK_EX | LOCK_NB) != 0) {
-        close(lock_fd);
-        lock_fd = -1;
-        return 0;
-    }
-    return 1;   // 锁随进程存活持有，退出即自动释放
-}
-
 int main(int argc, char *argv[]) {
     signal(SIGTERM, handle_signal);
     signal(SIGINT,  handle_signal);
-
-    // --- 单实例锁：已有实例在跑则退出（退出码 EXIT_ALREADY_RUNNING，与普通启动失败区分）---
-    if (!acquire_single_instance_lock()) {
-        fprintf(stderr, "tempctrl: 已有实例在运行（锁 %s），本次退出\n", LOCK_FILE_PATH);
-        return EXIT_ALREADY_RUNNING;
-    }
 
     // --- 日志路径、配置加载 ---
     set_default_log_path();
@@ -2743,8 +2488,7 @@ int main(int argc, char *argv[]) {
     } else if (detect_config_path()) {
         load_config(config_path);
     } else {
-        config_path[0] = '\0';   // 未找到配置（私有目录不可用或文件不存在）→ 全部用代码默认值
-        write_log("配置 未找到 %s/profile.conf，使用代码默认值", PRIVATE_DIR);
+        config_path[0] = '\0';
     }
     if (config_path[0] != '\0') {
         struct stat st;
@@ -2757,7 +2501,6 @@ int main(int argc, char *argv[]) {
     create_status_files();
 
     write_log("脚本启动成功");
-    write_log("单实例锁 已获取 %s", LOCK_FILE_PATH);
     sleep(BOOT_START_DELAY_SEC);   // 延迟开始运行：等待系统/蓝牙就绪（守护进程保持存活，watchdog 不会误重启）
 
     // --- 等待任一设备模块就绪 + BLE 连接（BLE 字段语义见 read_single_status） ---

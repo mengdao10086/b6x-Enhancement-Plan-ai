@@ -2,7 +2,7 @@
 // tempctrl.c — 飞智 WaspWing 散热器智能温控守护程序
 // ================================================================
 //
-// 运行环境：root 常驻守护进程，由 APK 部署的 service.d 脚本拉起并守护
+// 运行环境：Magisk / KernelSU 模块，由 service.sh 启动并守护
 // App 进程检测：直读 /proc/<pid>/cmdline 精确比对包名
 // 控制指令：am broadcast → LSPosed 模块 → WaspWingManager.setRunMode
 //
@@ -25,7 +25,6 @@
 #include <time.h>
 #include <stdarg.h>
 #include <sys/stat.h>
-#include <sys/file.h>
 #include <sys/wait.h>
 #include <fcntl.h>
 #include <dirent.h>
@@ -72,35 +71,6 @@
 // B7X_COLD_MAX / B7X_FAN_RPM_MAX 宏保留为 clamp 安全上界
 static int b7_pid_cold_max = 190;   // PID_COLD_RANGE 第三值（B7X），默认同 B6X
 static int b7_fan_rpm_max  = 6000;  // FAN_RPM_RANGE 第三值（B7X），默认同 B6X
-
-// ======================== 私有目录（配置/日志/曲线数据落点） ========================
-// status 双文件仍留 /data/local/tmp/（与 MainHook.java 共享，原样不动）
-// tempctrl_last_dev 归宿主 app 私有目录，由 MainHook 独用，daemon 不参与
-// 此路径必须与 lsp模块(apk修复+温控接口)/app/build.gradle.kts 的 applicationId 一致：
-// 安装后的包名由 applicationId 决定，数据目录名即等于它，改任一处都要同步另一处
-#define PRIVATE_DIR "/data/data/com.example.waspwingtempctrl/files"
-
-/** 确保私有目录存在（守护进程以 root 运行，但目录可能尚未创建）。返回 1=可用，0=不可用
- *  只 mkdir 这一层：父目录 /data/data/<包名> 不存在时 ENOENT 直接失败，绝不逐级创建
- *  （父目录须由系统 installd 创建并打 SELinux 标签，root 抢建会坏事）
- *  新建时把属主改为父目录（=app 数据目录）的属主，与系统建 files/ 一致：
- *  否则 root 先建会使 app 自身（写配置走 Framework File API）无写权限 */
-static int ensure_private_dir(void) {
-    if (mkdir(PRIVATE_DIR, 0771) == 0) {
-        char parent[256];
-        snprintf(parent, sizeof(parent), "%s", PRIVATE_DIR);
-        char *slash = strrchr(parent, '/');
-        if (slash) {
-            *slash = '\0';
-            struct stat pst;
-            if (stat(parent, &pst) == 0)
-                chown(PRIVATE_DIR, pst.st_uid, pst.st_gid);   // best-effort，失败不影响 root 自身读写
-        }
-        return 1;
-    }
-    struct stat st;
-    return stat(PRIVATE_DIR, &st) == 0 && S_ISDIR(st.st_mode);
-}
 
 // ======================== 系统路径与缩放 ========================
 // --- sysfs 路径配置（可由 profile.conf 覆盖）---
@@ -187,6 +157,8 @@ static int debug_launch = 0;    // [自动拉起] 目标选择/回退/跳过（�
 // ======================== 配置文件系统 ========================
 // 配置文件路径（自动检测或 --config 指定）
 static char config_path[256] = "";
+// 卸载脚本路径（由 config_path 推导：$MODDIR/uninstall.sh，用于记录自定义日志路径）
+static char uninstall_script_path[256] = "";
 // 配置文件的最后修改时间（用于热重载检测）
 static time_t config_mtime = 0;
 
@@ -316,7 +288,7 @@ static char status_file_path_b6[512] = "/data/local/tmp/tempctrl_b6x.status";
 static char status_file_path_b7[512] = "/data/local/tmp/tempctrl_b7x.status";
 
 // WebUI 曲线数据文件（每 1 秒一行，滚动保留最大曲线窗口秒数）
-#define WEBUI_DATA_PATH       PRIVATE_DIR "/tempctrl_webui.data"
+#define WEBUI_DATA_PATH       "/data/local/tmp/tempctrl_webui.data"
 #define WEBUI_DATA_MAX_LINES  720   // = 曲线最大时间挡位（秒）
 
 // 三方 app 包名（farsef 在最近连 B6X 散热器时也参与仲裁）
@@ -463,6 +435,45 @@ static char *config_parse_line(char *line, char **out_key) {
     return eq + 1;
 }
 
+/**
+ * 将日志路径追加到卸载脚本 uninstall.sh（幂等），供卸载时清理用户自定义日志文件。
+ * 用户修改 LOG_FILE 后热重载，新路径会被记录；脚本中已存在的路径不重复追加。
+ * uninstall_script_path 由 config_path（$MODDIR/profile.conf）推导。
+ */
+static void record_log_path_for_uninstall(const char *path) {
+    if (path == NULL || path[0] == '\0') return;
+    // 懒初始化：从 config_path 推导 $MODDIR/uninstall.sh
+    if (uninstall_script_path[0] == '\0' && config_path[0] != '\0') {
+        char *slash = strrchr(config_path, '/');
+        if (slash) {
+            int len = (int)(slash - config_path);
+            snprintf(uninstall_script_path, sizeof(uninstall_script_path),
+                     "%.*s/uninstall.sh", len, config_path);
+        }
+    }
+    if (uninstall_script_path[0] == '\0') return;
+
+    // 幂等检查：脚本中已存在该路径的 rm 行则跳过
+    char needle[512];
+    snprintf(needle, sizeof(needle), "rm -f %s", path);
+    FILE *f = fopen(uninstall_script_path, "r");
+    char line[512];
+    int found = 0;
+    if (f) {
+        while (fgets(line, sizeof(line), f)) {
+            if (strstr(line, needle)) { found = 1; break; }
+        }
+        fclose(f);
+    }
+    if (found) return;
+
+    f = fopen(uninstall_script_path, "a");
+    if (f) {
+        fprintf(f, "rm -f %s\n", path);
+        fclose(f);
+    }
+}
+
 /** sysfs 路径与缩放层键集合（SYSFS_ENABLED=1 时解析，独立于性能/调试总开关） */
 static int is_sysfs_key(const char *key) {
     return strcmp(key, "BATT_TEMP_PATH") == 0
@@ -545,6 +556,7 @@ static void parse_sysfs_cfg(const char *key, int val, const char *val_str) {
     }
     else if (strcmp(key, "LOG_FILE") == 0) {
         config_read_path(log_file_path, sizeof(log_file_path), val_str);
+        record_log_path_for_uninstall(log_file_path);  // 记录自定义日志路径供卸载清理
     }
 }
 
@@ -835,35 +847,38 @@ static int get_exe_basename(char *buf, size_t size) {
 
 /**
  * 根据二进制名设定默认日志路径
- * 例：tempctrl → <PRIVATE_DIR>/tempctrl.log
+ * 例：tempctrl → /cache/tempctrl.log
  * 此值为默认值，profile.conf 中 LOG_FILE 可覆盖
- * 私有目录不可用时兜底回原 /cache 落点，并写 stderr（不静默失败）
  */
 static void set_default_log_path(void) {
     char basename[64];
-    if (!get_exe_basename(basename, sizeof(basename))) {
-        strncpy(basename, "tempctrl", sizeof(basename) - 1);
-        basename[sizeof(basename) - 1] = '\0';
-    }
-    if (ensure_private_dir()) {
-        snprintf(log_file_path, sizeof(log_file_path), PRIVATE_DIR "/%s.log", basename);
+    if (get_exe_basename(basename, sizeof(basename))) {
+        snprintf(log_file_path, sizeof(log_file_path), "/cache/%s.log", basename);
         return;
     }
-    fprintf(stderr, "tempctrl: 私有目录 %s 不可用，日志回退 /cache\n", PRIVATE_DIR);
-    snprintf(log_file_path, sizeof(log_file_path), "/cache/%s.log", basename);
+    // fallback
+    strncpy(log_file_path, "/cache/tempctrl.log", sizeof(log_file_path) - 1);
 }
 
 /**
  * 自动检测配置文件路径
  *
- * 默认在私有目录下找 profile.conf（--config 指定的绝对路径优先，见 main）
+ * 通过 /proc/self/exe 获取 tempctrl 自身路径，
+ * 在同目录下找 profile.conf
  *
  * 返回 1=找到，0=未找到
  */
 static int detect_config_path(void) {
-    if (!ensure_private_dir()) return 0;
+    char exe_path[512];
+    if (!read_self_exe(exe_path, sizeof(exe_path))) return 0;
 
-    snprintf(config_path, sizeof(config_path), PRIVATE_DIR "/profile.conf");
+    // 获取 exe 所在目录
+    char *last_slash = strrchr(exe_path, '/');
+    if (!last_slash) return 0;
+    *last_slash = '\0';
+
+    // 在同目录下找 profile.conf
+    snprintf(config_path, sizeof(config_path), "%s/profile.conf", exe_path);
     if (access(config_path, F_OK) == 0) return 1;
 
     config_path[0] = '\0';
@@ -997,6 +1012,12 @@ static void create_status_files(void) {
         } else {
             write_log("状态文件 创建失败 %s", paths[i]);
         }
+    }
+    // 预创建 MAC 记录文件（0666 权限；路径与 MainHook LAST_DEV_FILE 一致）
+    FILE *mf = fopen("/data/local/tmp/tempctrl_last_dev", "a");
+    if (mf) {
+        fclose(mf);
+        chmod("/data/local/tmp/tempctrl_last_dev", 0666);
     }
 }
 
@@ -2694,45 +2715,9 @@ static void write_webui_data(void) {
     }
 }
 
-// ======================== 单实例锁 ========================
-// service.d 开机拉起 + app 内手动拉起两条路径都直接执行启动命令，由本锁保证幂等。
-// 锁文件与配置/日志/曲线数据同处私有目录。
-// 残留后果（不美化）：app「清除数据」会把锁文件一起删掉，运行中的实例与新实例随即锁到
-// 不同 inode，那一次锁失效；兜底靠部署脚本的开机自检。
-#define LOCK_FILE_PATH        PRIVATE_DIR "/tempctrl.lock"
-#define EXIT_ALREADY_RUNNING  2     // 退出码 2：已有实例在跑（其它启动失败路径均返回 0）
-static int lock_fd = -1;
-
-/** 取单实例锁（flock 非阻塞）。返回 1=取到可继续启动，0=已有实例在运行
- *  私有目录不可用（mkdir 被拒 / 父目录不存在）时不阻塞启动，仅 stderr 记录 */
-static int acquire_single_instance_lock(void) {
-    if (!ensure_private_dir()) {
-        fprintf(stderr, "tempctrl: 私有目录 %s 不可用，跳过单实例检查\n", PRIVATE_DIR);
-        return 1;
-    }
-    lock_fd = open(LOCK_FILE_PATH, O_RDWR | O_CREAT | O_CLOEXEC, 0666);
-    if (lock_fd < 0) {
-        // 锁文件建不了 → 不阻塞启动，仅 stderr 记录
-        fprintf(stderr, "tempctrl: 锁文件 %s 不可用（跳过单实例检查）\n", LOCK_FILE_PATH);
-        return 1;
-    }
-    if (flock(lock_fd, LOCK_EX | LOCK_NB) != 0) {
-        close(lock_fd);
-        lock_fd = -1;
-        return 0;
-    }
-    return 1;   // 锁随进程存活持有，退出即自动释放
-}
-
 int main(int argc, char *argv[]) {
     signal(SIGTERM, handle_signal);
     signal(SIGINT,  handle_signal);
-
-    // --- 单实例锁：已有实例在跑则退出（退出码 EXIT_ALREADY_RUNNING，与普通启动失败区分）---
-    if (!acquire_single_instance_lock()) {
-        fprintf(stderr, "tempctrl: 已有实例在运行（锁 %s），本次退出\n", LOCK_FILE_PATH);
-        return EXIT_ALREADY_RUNNING;
-    }
 
     // --- 日志路径、配置加载 ---
     set_default_log_path();
@@ -2743,8 +2728,7 @@ int main(int argc, char *argv[]) {
     } else if (detect_config_path()) {
         load_config(config_path);
     } else {
-        config_path[0] = '\0';   // 未找到配置（私有目录不可用或文件不存在）→ 全部用代码默认值
-        write_log("配置 未找到 %s/profile.conf，使用代码默认值", PRIVATE_DIR);
+        config_path[0] = '\0';
     }
     if (config_path[0] != '\0') {
         struct stat st;
@@ -2757,7 +2741,6 @@ int main(int argc, char *argv[]) {
     create_status_files();
 
     write_log("脚本启动成功");
-    write_log("单实例锁 已获取 %s", LOCK_FILE_PATH);
     sleep(BOOT_START_DELAY_SEC);   // 延迟开始运行：等待系统/蓝牙就绪（守护进程保持存活，watchdog 不会误重启）
 
     // --- 等待任一设备模块就绪 + BLE 连接（BLE 字段语义见 read_single_status） ---

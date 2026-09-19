@@ -1,0 +1,113 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    曲线页（D2）。三段式：顶部信息条（路径/大小/时间/解析量/档位与上限）→
+    档位 + 图例控件行（整块等比缩放，见 ChartFragment#fitToolsRow）→ 曲线画布。
+    读取失败时不进画布，把 AppFiles.diagnose() 原文铺在曲线区，绝不静默留白。
+-->
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:background="?attr/colorSurface"
+    android:orientation="vertical"
+    android:padding="@dimen/page_padding">
+
+    <!-- ===== 信息条 ===== -->
+    <com.google.android.material.card.MaterialCardView
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content">
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical"
+            android:padding="@dimen/card_padding">
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="@string/chart_section_file"
+                android:textAppearance="@style/TextAppearance.B6XTempCtrl.SectionTitle" />
+
+            <TextView
+                android:id="@+id/chart_info_text"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="@dimen/space_s"
+                android:text="@string/chart_loading"
+                android:textAppearance="@style/TextAppearance.B6XTempCtrl.Mono"
+                android:textIsSelectable="true" />
+        </LinearLayout>
+    </com.google.android.material.card.MaterialCardView>
+
+    <!-- ===== 档位 + 图例：整块超宽时 setScaleX/Y 等比缩放 ===== -->
+    <com.google.android.material.card.MaterialCardView
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="@dimen/space_m">
+
+        <FrameLayout
+            android:id="@+id/chart_tools_clip"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:padding="@dimen/space_s">
+
+            <LinearLayout
+                android:id="@+id/chart_tools_row"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:orientation="horizontal">
+
+                <com.google.android.material.button.MaterialButtonToggleGroup
+                    android:id="@+id/chart_window_group"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    app:selectionRequired="true"
+                    app:singleSelection="true" />
+
+                <LinearLayout
+                    android:id="@+id/chart_legend_row"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_marginStart="@dimen/space_s"
+                    android:gravity="center_vertical"
+                    android:orientation="horizontal" />
+            </LinearLayout>
+        </FrameLayout>
+    </com.google.android.material.card.MaterialCardView>
+
+    <!-- ===== 曲线区：画布 / 读取失败诊断 ===== -->
+    <com.google.android.material.card.MaterialCardView
+        android:layout_width="match_parent"
+        android:layout_height="0dp"
+        android:layout_marginTop="@dimen/space_m"
+        android:layout_weight="1"
+        android:minHeight="@dimen/chart_height">
+
+        <FrameLayout
+            android:layout_width="match_parent"
+            android:layout_height="match_parent">
+
+            <com.example.waspwingtempctrl.ui.ChartView
+                android:id="@+id/chart_view"
+                android:layout_width="match_parent"
+                android:layout_height="match_parent" />
+
+            <ScrollView
+                android:id="@+id/chart_failure_scroll"
+                android:layout_width="match_parent"
+                android:layout_height="match_parent"
+                android:padding="@dimen/card_padding"
+                android:visibility="gone">
+
+                <TextView
+                    android:id="@+id/chart_failure_text"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:textAppearance="@style/TextAppearance.B6XTempCtrl.Mono"
+                    android:textIsSelectable="true" />
+            </ScrollView>
+        </FrameLayout>
+    </com.google.android.material.card.MaterialCardView>
+
+</LinearLayout>

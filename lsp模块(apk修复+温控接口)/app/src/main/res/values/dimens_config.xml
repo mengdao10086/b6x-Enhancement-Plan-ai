@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    配置页专属尺寸。能用 values/dimens.xml 的共用标尺就不要在这里新增
+    （间距一律 @dimen/space_*、圆角 @dimen/field_radius/card_radius）。
+-->
+<resources>
+
+    <!--
+        "未生效"行的压暗透明度（1=不压暗）。它是最小可读性与"一眼看出未生效"之间的折中：
+        再低会把标签压到看不清，再高就看不出差别。
+    -->
+    <item name="config_dim_alpha" format="float" type="dimen">0.55</item>
+</resources>

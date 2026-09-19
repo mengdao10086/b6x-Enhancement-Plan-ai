@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    一个输入字段（int 键一个，multi 键每个字段一个）。label 作 hint、单位与单位说明作下方灰字，
+    这样长单位（如"制冷强度档位（0~194 硬件原始档位值）"）能整行折行，不会被后缀挤压输入框。
+-->
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content"
+    android:orientation="vertical">
+
+    <com.google.android.material.textfield.TextInputLayout
+        android:id="@+id/config_field_layout"
+        style="@style/Widget.Material3.TextInputLayout.OutlinedBox"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        app:boxCornerRadiusBottomEnd="@dimen/field_radius"
+        app:boxCornerRadiusBottomStart="@dimen/field_radius"
+        app:boxCornerRadiusTopEnd="@dimen/field_radius"
+        app:boxCornerRadiusTopStart="@dimen/field_radius">
+
+        <com.google.android.material.textfield.TextInputEditText
+            android:id="@+id/config_field_input"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:imeOptions="actionDone"
+            android:inputType="number"
+            android:maxLines="1" />
+    </com.google.android.material.textfield.TextInputLayout>
+
+    <TextView
+        android:id="@+id/config_field_note"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="@dimen/space_xs"
+        android:textAppearance="@style/TextAppearance.B6XTempCtrl.Caption"
+        android:visibility="gone" />
+</LinearLayout>

@@ -23,8 +23,23 @@
             android:name="xposedscope"
             android:resource="@array/xposed_scope" />
 
-        <!-- 无 Activity — 纯模块，安装后 LSPosed 中勾选即可 -->
+        <!-- 最小启动壳：显示构建信息与 root 状态；界面本体属线 D -->
+        <activity
+            android:name=".SetupActivity"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
 
     </application>
+
+    <!--
+        本批次不新增任何权限：
+        - SetupActivity 只读构建信息、执行 su，二者都不需要权限
+        - RootShell 走 Runtime.exec，不需要权限
+        后续批次按需再加（如通知、前台服务），加之前先确认用途。
+    -->
 
 </manifest>

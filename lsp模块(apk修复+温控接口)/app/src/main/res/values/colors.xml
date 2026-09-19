@@ -1,0 +1,65 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    浅色配色（对齐 Material 3 的 tonal 思路）。深色同名覆盖见 values-night/colors.xml。
+    命名分四类：
+      brand_*    品牌主色（主题 colorPrimary 等）
+      app_*      中性面（surface / outline）
+      state_*    语义状态色（状态页与"未生效"徽标共用）
+      chart_* / log_*  曲线与日志专用（这两个页面独立于主题色，避免跟随品牌色漂移）
+    三个界面子 agent 一律引用本文件的颜色名，不要自己写死十六进制值。
+-->
+<resources>
+
+    <!-- ===== 品牌主色（青蓝，冷色调，贴合散热场景） ===== -->
+    <color name="brand_primary">#00696E</color>
+    <color name="brand_on_primary">#FFFFFF</color>
+    <color name="brand_container">#9CF1F2</color>
+    <color name="brand_on_container">#002022</color>
+    <color name="brand_secondary">#4A6365</color>
+    <color name="brand_on_secondary">#FFFFFF</color>
+    <color name="brand_secondary_container">#CCE8E9</color>
+    <color name="brand_on_secondary_container">#051F21</color>
+
+    <!-- ===== 中性面 ===== -->
+    <color name="app_surface">#F7FAFB</color>
+    <color name="app_surface_container">#EDF1F2</color>
+    <color name="app_surface_container_high">#E6EAEB</color>
+    <color name="app_surface_variant">#DAE4E5</color>
+    <color name="app_on_surface">#171C1D</color>
+    <color name="app_on_surface_variant">#4A5254</color>
+    <color name="app_outline">#7A8285</color>
+    <color name="app_outline_variant">#C2CACC</color>
+
+    <!-- ===== 语义状态色 ===== -->
+    <color name="state_ok">#2E6B33</color>
+    <color name="state_warn">#8A5200</color>
+    <color name="state_error">#B3261E</color>
+    <color name="state_idle">#6B7275</color>
+    <color name="state_ok_container">#D7F0D9</color>
+    <color name="state_warn_container">#FFE0B3</color>
+    <color name="state_error_container">#F9DEDC</color>
+    <color name="state_idle_container">#E4E9EA</color>
+
+    <!-- ===== 徽标（"未生效" / "已生效"） ===== -->
+    <color name="badge_muted_bg">#E4E9EA</color>
+    <color name="badge_muted_fg">#4A5254</color>
+
+    <!-- ===== 曲线（D2 用；6 条系列，色相沿用 WebUI 的语义分配，明度按 Material 观感重调） =====
+         batt/hot/cold/cpu 走左轴，rpm 走左轴（百 rpm），cool 走右轴（制冷档位）。 -->
+    <color name="chart_series_batt">#C62828</color>
+    <color name="chart_series_hot">#AD1457</color>
+    <color name="chart_series_cold">#1565C0</color>
+    <color name="chart_series_cpu">#B57A00</color>
+    <color name="chart_series_rpm">#6A1B9A</color>
+    <color name="chart_series_cool">#2E7D32</color>
+    <color name="chart_grid">#DDE3E4</color>
+    <color name="chart_axis">#8A9295</color>
+    <color name="chart_bg">#FFFFFF</color>
+
+    <!-- ===== 日志分级（D3 用） ===== -->
+    <color name="log_level_debug">#6B7275</color>
+    <color name="log_level_info">#0F5FA8</color>
+    <color name="log_level_warn">#8A5200</color>
+    <color name="log_level_error">#B3261E</color>
+
+</resources>

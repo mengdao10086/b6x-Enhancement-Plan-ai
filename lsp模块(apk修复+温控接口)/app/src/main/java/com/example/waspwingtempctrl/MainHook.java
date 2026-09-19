@@ -47,7 +47,11 @@ public class MainHook implements IXposedHookLoadPackage {
     // 双文件路径
     private static final String STATUS_FILE_B6 = "/data/local/tmp/tempctrl_b6x.status";
     private static final String STATUS_FILE_B7 = "/data/local/tmp/tempctrl_b7x.status";
-    private static final String LAST_DEV_FILE = "/data/local/tmp/tempctrl_last_dev";  // 上次连接的散热器 MAC（持久化，冷启动自动连接用）
+    // 上次连接的散热器 MAC（持久化，冷启动自动连接用）的落点。
+    // 由固定 /data/local/tmp/tempctrl_last_dev 改为宿主 app 私有目录：各包各记、不再跨包共享。
+    // 包名常量有 3 个（B6X / B6X_NEW / B7X）而 appKind 只有 6、7 两值，故必须按命中的包名常量拼，
+    // 按 appKind 拼会把两个 B6X 包合并成同一个文件。在 handleLoadPackage 里赋值。
+    private static String lastDevFile = null;
     private static final String AUTO_LAUNCH_EXTRA = "b6x_auto_launch";               // tempctrl 拉起 app 时携带的标志
     // 广播 Action（按 appKind 选择）
     private static final String ACTION_TEMP_B6 = "com.flydigi.SET_TEMPERATURE";      // B6X 温控广播
@@ -389,9 +393,11 @@ public class MainHook implements IXposedHookLoadPackage {
             appKind = 6;
             currentStatusFile = STATUS_FILE_B6;
             isNewB6App = lpparam.packageName.equals(PACKAGE_B6X_NEW);
+            lastDevFile = lastDevFileFor(isNewB6App ? PACKAGE_B6X_NEW : PACKAGE_B6X);
         } else if (lpparam.packageName.equals(PACKAGE_B7X)) {
             appKind = 7;
             currentStatusFile = STATUS_FILE_B7;
+            lastDevFile = lastDevFileFor(PACKAGE_B7X);
         } else {
             XposedBridge.log(TAG + " 跳过非目标包: " + lpparam.packageName);
             return;
@@ -1069,11 +1075,24 @@ public class MainHook implements IXposedHookLoadPackage {
 
     // ========== 上次设备持久化 + 自动拉起后台化 ==========
 
+    /**
+     * 上次设备 MAC 的落点：宿主 app 私有目录，各包各记。
+     * 冷启动时本方法可能早于 Application 挂载运行，getFilesDir() 拿不到 context，
+     * 故直接按包名拼死路径。
+     */
+    private static String lastDevFileFor(String pkg) {
+        return "/data/data/" + pkg + "/files/tempctrl_last_dev";
+    }
+
     /** 持久化上次连接的散热器 MAC（供冷启动自动连接 / 自动拉起使用） */
     private static void saveLastDeviceAddress(String addr) {
+        if (lastDevFile == null) return;
         try {
+            // 未用 getFilesDir()，不能假定 files/ 已存在，写前先建父目录
+            File parent = new File(lastDevFile).getParentFile();
+            if (parent != null) parent.mkdirs();
             // 用 FileOutputStream 直写地址并补 \n；读取时 trim
-            FileOutputStream fos = new FileOutputStream(LAST_DEV_FILE);
+            FileOutputStream fos = new FileOutputStream(lastDevFile);
             fos.write((addr + "\n").getBytes());
             fos.close();
         } catch (Throwable t) {
@@ -1083,14 +1102,15 @@ public class MainHook implements IXposedHookLoadPackage {
 
     /** 读取持久化的上次设备 MAC；无记录返回 null */
     private static String loadLastDeviceAddress() {
+        if (lastDevFile == null) return null;
         try {
-            BufferedReader br = new BufferedReader(new java.io.FileReader(LAST_DEV_FILE));
+            BufferedReader br = new BufferedReader(new java.io.FileReader(lastDevFile));
             String line = br.readLine();
             br.close();
             return (line != null && !line.trim().isEmpty()) ? line.trim() : null;
         } catch (Throwable t) {
             // 冷启动读取失败（每进程一次，低频）：区分"无记录"与"读文件异常"
-            XposedBridge.log(TAG + " 读取上次设备 MAC 失败: " + LAST_DEV_FILE
+            XposedBridge.log(TAG + " 读取上次设备 MAC 失败: " + lastDevFile
                     + " 异常类型=" + t.getClass().getSimpleName()
                     + " msg=" + t.getMessage());
             return null;

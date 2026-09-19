@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 时间窗口档位按钮（在 MaterialButtonToggleGroup 里单选）。 -->
+<com.google.android.material.button.MaterialButton
+    xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
+    style="?attr/materialButtonOutlinedStyle"
+    android:layout_width="wrap_content"
+    android:layout_height="wrap_content"
+    android:layout_marginEnd="@dimen/space_xs"
+    android:checkable="true"
+    android:insetBottom="0dp"
+    android:insetTop="0dp"
+    android:minHeight="@dimen/chart_chip_min_height"
+    android:minWidth="0dp"
+    android:paddingStart="@dimen/space_s"
+    android:paddingEnd="@dimen/space_s"
+    android:textSize="@dimen/text_caption"
+    app:cornerRadius="@dimen/chip_radius" />

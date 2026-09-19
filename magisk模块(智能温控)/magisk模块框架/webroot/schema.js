@@ -1,3 +1,15 @@
+/* ⚠ 状态：本文件**不是运行期文件**（P0 参数定义冻结批次加注）
+ * 路线 A 合并模块后 WebUI 已被删除，运行期无任何代码读取 window.B6X_SCHEMA。
+ * 它当前的唯一作用是 `参数定义/check_params.py` 的**对账输入之一**
+ * （与 profile.conf、逻辑说明.md 参数表、tempctrl.c 四方比对键集合）。
+ * 因此下述自述与常量**已与现状不符，属已知项而非待修项**：
+ *   · configPath 指向 /data/adb/modules/…（旧 Magisk 模块路径）
+ *   · dataFile 指向 /data/local/tmp/…（随 tempctrl.c 的 PRIVATE_DIR 迁入应用私有目录）
+ *   · 头部「顺序与 profile.conf 一致」自述已失效（PID 段 10 键错位）
+ *   · 头部「[4] WebUI 组以 app.js 实际使用为准」引用的 app.js 已删除
+ * **权威来源是 `参数定义/params.def.json`**；本文件将由脚本由该定义生成，
+ * 在此之前请勿按上述自述反推现状。差异由 check_params.py 自动报告。
+ * ============================================================ */
 /* ============================================================
  * B6X 智能温控 WebUI — 参数定义 (schema)
  * 键范围以 tempctrl.c 的 clamp() 为准；说明摘自 profile.conf 注释

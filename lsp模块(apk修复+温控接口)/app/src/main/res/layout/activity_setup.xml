@@ -1,0 +1,51 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    应用外壳：工具栏 + 四个页签 + 页面容器。
+    页签内容由 SetupActivity 挂载 Fragment；本文件不承载任何页面业务。
+    子 agent 不要改本文件，各自的页面布局放 fragment_<页面>.xml。
+-->
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:background="?attr/colorSurface"
+    android:fitsSystemWindows="true"
+    android:orientation="vertical">
+
+    <com.google.android.material.appbar.MaterialToolbar
+        android:id="@+id/toolbar"
+        android:layout_width="match_parent"
+        android:layout_height="?attr/actionBarSize"
+        android:background="?attr/colorSurface"
+        app:title="@string/title_setup" />
+
+    <com.google.android.material.tabs.TabLayout
+        android:id="@+id/tab_layout"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:background="?attr/colorSurface"
+        app:tabGravity="fill"
+        app:tabIndicatorFullWidth="false"
+        app:tabMode="fixed">
+
+        <com.google.android.material.tabs.TabItem android:text="@string/tab_status" />
+
+        <com.google.android.material.tabs.TabItem android:text="@string/tab_config" />
+
+        <com.google.android.material.tabs.TabItem android:text="@string/tab_chart" />
+
+        <com.google.android.material.tabs.TabItem android:text="@string/tab_log" />
+    </com.google.android.material.tabs.TabLayout>
+
+    <View
+        android:layout_width="match_parent"
+        android:layout_height="@dimen/divider_height"
+        android:background="?attr/colorOutlineVariant" />
+
+    <FrameLayout
+        android:id="@+id/page_container"
+        android:layout_width="match_parent"
+        android:layout_height="0dp"
+        android:layout_weight="1" />
+
+</LinearLayout>

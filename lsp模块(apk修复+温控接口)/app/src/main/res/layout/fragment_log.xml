@@ -1,0 +1,148 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    日志页（D3）。三段式：顶部信息条（诊断信息）→ 关键词过滤 → 日志列表（占满剩余高度）。
+    读取失败时不进列表，直接把 AppFiles.diagnose() 的原文铺在列表位置，绝不静默留白。
+-->
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:background="?attr/colorSurface"
+    android:orientation="vertical"
+    android:padding="@dimen/page_padding">
+
+    <!-- ===== 顶部信息条：路径 / 大小 / 修改时间 / 渲染量 ===== -->
+    <com.google.android.material.card.MaterialCardView
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content">
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical"
+            android:padding="@dimen/card_padding">
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="@string/log_section_file"
+                android:textAppearance="@style/TextAppearance.B6XTempCtrl.SectionTitle" />
+
+            <TextView
+                android:id="@+id/log_info_text"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="@dimen/space_s"
+                android:text="@string/log_loading"
+                android:textAppearance="@style/TextAppearance.B6XTempCtrl.Mono"
+                android:textIsSelectable="true" />
+        </LinearLayout>
+    </com.google.android.material.card.MaterialCardView>
+
+    <!-- ===== 关键词过滤 ===== -->
+    <com.google.android.material.card.MaterialCardView
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="@dimen/space_m">
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical"
+            android:padding="@dimen/card_padding">
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginBottom="@dimen/space_s"
+                android:text="@string/log_section_filter"
+                android:textAppearance="@style/TextAppearance.B6XTempCtrl.SectionTitle" />
+
+            <com.google.android.material.textfield.TextInputLayout
+                android:id="@+id/log_filter_layout"
+                style="@style/Widget.Material3.TextInputLayout.OutlinedBox"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:hint="@string/log_filter_hint"
+                app:endIconMode="clear_text"
+                app:boxCornerRadiusBottomEnd="@dimen/field_radius"
+                app:boxCornerRadiusBottomStart="@dimen/field_radius"
+                app:boxCornerRadiusTopEnd="@dimen/field_radius"
+                app:boxCornerRadiusTopStart="@dimen/field_radius">
+
+                <com.google.android.material.textfield.TextInputEditText
+                    android:id="@+id/log_filter_input"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:imeOptions="actionDone"
+                    android:inputType="text"
+                    android:maxLines="1"
+                    android:textAppearance="@style/TextAppearance.B6XTempCtrl.Mono" />
+            </com.google.android.material.textfield.TextInputLayout>
+
+            <TextView
+                android:id="@+id/log_count_text"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="@dimen/space_xs"
+                android:textAppearance="@style/TextAppearance.B6XTempCtrl.Caption" />
+        </LinearLayout>
+    </com.google.android.material.card.MaterialCardView>
+
+    <!-- ===== 日志区：列表 / 读取失败诊断 / 空态 / 回到底部 ===== -->
+    <com.google.android.material.card.MaterialCardView
+        android:layout_width="match_parent"
+        android:layout_height="0dp"
+        android:layout_marginTop="@dimen/space_m"
+        android:layout_weight="1">
+
+        <FrameLayout
+            android:layout_width="match_parent"
+            android:layout_height="match_parent">
+
+            <androidx.recyclerview.widget.RecyclerView
+                android:id="@+id/log_list"
+                android:layout_width="match_parent"
+                android:layout_height="match_parent"
+                android:clipToPadding="false"
+                android:padding="@dimen/space_s"
+                android:scrollbars="vertical" />
+
+            <!-- 读取失败：原样展示 AppFiles.diagnose() 的多行诊断 -->
+            <ScrollView
+                android:id="@+id/log_failure_scroll"
+                android:layout_width="match_parent"
+                android:layout_height="match_parent"
+                android:padding="@dimen/card_padding"
+                android:visibility="gone">
+
+                <TextView
+                    android:id="@+id/log_failure_text"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:textAppearance="@style/TextAppearance.B6XTempCtrl.Mono"
+                    android:textIsSelectable="true" />
+            </ScrollView>
+
+            <TextView
+                android:id="@+id/log_empty_text"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_gravity="center"
+                android:padding="@dimen/space_l"
+                android:gravity="center"
+                android:textAppearance="@style/TextAppearance.B6XTempCtrl.Caption"
+                android:visibility="gone" />
+
+            <com.google.android.material.button.MaterialButton
+                android:id="@+id/log_follow_btn"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_gravity="bottom|end"
+                android:layout_margin="@dimen/space_s"
+                android:text="@string/log_action_follow_bottom"
+                android:visibility="gone" />
+        </FrameLayout>
+    </com.google.android.material.card.MaterialCardView>
+
+</LinearLayout>

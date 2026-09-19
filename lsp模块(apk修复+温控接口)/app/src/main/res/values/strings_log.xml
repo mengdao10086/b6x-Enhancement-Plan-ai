@@ -1,0 +1,34 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 日志页（D3）专属文案。其他页面不要引用本文件。 -->
+<resources>
+
+    <string name="log_section_file">日志文件</string>
+    <string name="log_section_filter">关键词过滤</string>
+
+    <string name="log_filter_hint">关键词（大小写不敏感）</string>
+    <string name="log_loading">正在读取日志…</string>
+
+    <!-- 顶部信息条：路径 / 大小 / 修改时间 -->
+    <string name="log_info_fmt">路径：%1$s\n大小：%2$s\n修改时间：%3$s</string>
+    <string name="log_size_fmt">%1$d 字节</string>
+    <string name="log_size_unknown">未知（stat 失败）</string>
+    <string name="log_value_unknown">—</string>
+
+    <!-- 渲染量与截断说明（必须显式写出，不让用户以为看到了全部） -->
+    <string name="log_render_fmt">已渲染 %1$d 行；仅显示最近 %2$d 行（尾读共 %3$d 行）；尾读上限 %4$d 字节</string>
+    <string name="log_render_failed">读取失败：未渲染任何行</string>
+
+    <!-- 过滤命中计数 -->
+    <string name="log_count_all_fmt">最近 %1$d 行（渲染上限 %2$d 行）</string>
+    <string name="log_count_hit_fmt">命中 %1$d / 最近 %2$d 行</string>
+    <string name="log_count_failed">读取失败：未渲染任何行</string>
+
+    <string name="log_empty_no_lines">没有可显示的行（日志内容为空）</string>
+    <string name="log_empty_no_hit">没有命中「%1$s」的行（仅在最近 %2$d 行内匹配）</string>
+
+    <string name="log_failure_title">读取失败（下方为原始诊断）</string>
+    <string name="log_empty_file_hint">提示：文件存在但为 0 字节 —— 守护进程还没写过日志，或 LOG_MAX=0 关闭了日志。</string>
+
+    <string name="log_action_follow_bottom">回到底部</string>
+
+</resources>

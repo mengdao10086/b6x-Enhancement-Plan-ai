@@ -16,16 +16,28 @@ ps -A 2>/dev/null | grep -i tempctrl || ps 2>/dev/null | grep -i tempctrl || ech
 echo "--- 散热器 app 进程（flydigi/extool，空 = app 没起来）---"
 ps -A 2>/dev/null | grep -iE "flydigi|extool|waspwing" || ps 2>/dev/null | grep -iE "flydigi|extool|waspwing" || echo "(未找到散热器 app 进程——app 被拉起后未存活)"
 
-echo "--- 模块版本 ---"
-if [ -d /data/adb/modules ]; then
-    for f in /data/adb/modules/*/module.prop; do
-        [ -f "$f" ] || continue
-        echo "[$f]"
-        grep -E "^(name|version|versionCode)=" "$f"
-    done
-else
-    echo "(无 /data/adb/modules，Magisk/KSU 模块目录不存在)"
-fi
+echo "--- 部署状态 ---"
+# 路线 A 合并后不再有 Magisk 模块，故不再靠 /data/adb/modules/*/module.prop 取版本（那会恒落空），
+# 改为直接看部署产物，版本从 APK 取。
+echo "  二进制：$(ls -l /data/local/tmp/tempctrl 2>/dev/null || echo '不存在（未部署 / 已卸载）')"
+for d in /data/adb/service.d /data/adb/ksu/service.d; do
+    if [ -f "$d/b6x-tempctrl.sh" ]; then
+        echo "  service.d 脚本：$d/b6x-tempctrl.sh"
+    fi
+done
+echo "  看门狗 shell：$(pgrep -f b6x-tempctrl.sh > /dev/null 2>&1 && echo '在跑' || echo '不在跑')"
+echo "  配置：$(ls -l /data/data/com.example.waspwingtempctrl/files/profile.conf 2>/dev/null || echo '不存在（私有目录不可用或未部署）')"
+echo "  APK 版本：$(dumpsys package com.example.waspwingtempctrl 2>/dev/null | grep -m1 versionName || echo '取不到（未安装 / dumpsys 不可用）')"
+echo "--- 旧版 Magisk 模块残留（合并后应为空；这里有输出说明还在用老模块）---"
+found=0
+for f in /data/adb/modules/*/module.prop; do
+    [ -f "$f" ] || continue
+    grep -qiE "tempctrl|b6x|waspwing" "$f" 2>/dev/null || continue
+    found=1
+    echo "[$f]"
+    grep -E "^(name|version|versionCode)=" "$f"
+done
+[ "$found" = "1" ] || echo "(无 tempctrl 相关的 Magisk 模块——符合合并后的形态)"
 
 echo ""
 echo "========== [2] 状态文件内容与最后写入时间（关键：BLE= 是否为 0） =========="
@@ -43,7 +55,21 @@ for f in /data/local/tmp/tempctrl_b6x.status /data/local/tmp/tempctrl_b7x.status
 done
 
 echo "========== [3] 上次连接设备 MAC 记录（冷启动自动连接依据） =========="
-cat /data/local/tmp/tempctrl_last_dev 2>/dev/null || echo "(无 /data/local/tmp/tempctrl_last_dev)"
+# 新落点：各散热器 app 自己的私有目录（各包各记）。
+# 这里用通配符扫目录、不列包名——包名手抄已是已知漂移点（待办 R4：三处包名被手抄五份），
+# 诊断脚本不再新增一份；飞智以后改包名或加第四个包会自动跟上。
+# 旧落点 /data/local/tmp/tempctrl_last_dev 仅作老版本兼容。
+found_mac=0
+for p in /data/data/*/files/tempctrl_last_dev /data/local/tmp/tempctrl_last_dev; do
+    [ -f "$p" ] || continue
+    found_mac=1
+    echo "[$p]"
+    cat "$p" 2>/dev/null
+    echo ""
+done
+if [ "$found_mac" = "0" ]; then
+    echo "(无 tempctrl_last_dev：app 从未成功连接过，或 MAC 未持久化)"
+fi
 
 echo ""
 echo "========== [4] 蓝牙开关状态 =========="

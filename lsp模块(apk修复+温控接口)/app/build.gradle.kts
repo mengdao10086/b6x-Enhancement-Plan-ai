@@ -10,8 +10,8 @@ android {
         applicationId = "com.example.waspwingtempctrl"
         minSdk = 25
         targetSdk = 34
-        versionCode = 4
-        versionName = "2.6"
+        versionCode = 5
+        versionName = "3.0"
     }
 
     signingConfigs {
@@ -44,5 +44,10 @@ dependencies {
     // Xposed API (LSPosed 兼容)
     compileOnly("de.robv.android.xposed:api:82")
     compileOnly("de.robv.android.xposed:api:82:sources")
+
+    // 原生界面（androidx Material / appcompat）。版本对齐 compileSdk 34：
+    // material 1.11.0 要求 compileSdk 34，appcompat 1.6.1 与之匹配。
+    implementation("androidx.appcompat:appcompat:1.6.1")
+    implementation("com.google.android.material:material:1.11.0")
 }
 

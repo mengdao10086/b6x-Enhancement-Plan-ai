@@ -1,0 +1,70 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    一个分组卡片 = 卡头（标题 + 组头开关 + 展开箭头）+ 分隔线 + 键行容器。
+    卡片样式来自主题 materialCardViewStyle（Widget.B6XTempCtrl.Card），本文件不写死颜色/圆角。
+    组头开关只在 role=master 的组出现；webui 组 master 为 null，开关保持 gone。
+-->
+<com.google.android.material.card.MaterialCardView xmlns:android="http://schemas.android.com/apk/res/android"
+    android:id="@+id/config_group_card"
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content"
+    android:layout_marginTop="@dimen/space_m">
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="vertical">
+
+        <LinearLayout
+            android:id="@+id/config_group_header"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:background="?attr/selectableItemBackground"
+            android:clickable="true"
+            android:focusable="true"
+            android:gravity="center_vertical"
+            android:minHeight="@dimen/row_min_height"
+            android:orientation="horizontal"
+            android:padding="@dimen/card_padding">
+
+            <TextView
+                android:id="@+id/config_group_title"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:textAppearance="@style/TextAppearance.B6XTempCtrl.SectionTitle" />
+
+            <com.google.android.material.materialswitch.MaterialSwitch
+                android:id="@+id/config_group_master"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginStart="@dimen/space_s"
+                android:visibility="gone" />
+
+            <TextView
+                android:id="@+id/config_group_arrow"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginStart="@dimen/space_s"
+                android:text="@string/config_arrow_collapsed"
+                android:textAppearance="@style/TextAppearance.B6XTempCtrl.Caption" />
+        </LinearLayout>
+
+        <View
+            android:id="@+id/config_group_divider"
+            android:layout_width="match_parent"
+            android:layout_height="@dimen/divider_height"
+            android:background="@color/app_outline_variant"
+            android:visibility="gone" />
+
+        <LinearLayout
+            android:id="@+id/config_group_body"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical"
+            android:paddingStart="@dimen/card_padding"
+            android:paddingEnd="@dimen/card_padding"
+            android:paddingBottom="@dimen/card_padding"
+            android:visibility="gone" />
+    </LinearLayout>
+</com.google.android.material.card.MaterialCardView>

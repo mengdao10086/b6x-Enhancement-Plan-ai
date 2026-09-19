@@ -1,0 +1,60 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    深色配色：与 values/colors.xml 一一同名，只换值。
+    这样 themes.xml 只需一份（引用颜色名即可自动跟随明暗）。
+    不要在此新增颜色名，也不要在 values/colors.xml 缺失同名项。
+-->
+<resources>
+
+    <!-- ===== 品牌主色 ===== -->
+    <color name="brand_primary">#7FD5D6</color>
+    <color name="brand_on_primary">#003739</color>
+    <color name="brand_container">#004F52</color>
+    <color name="brand_on_container">#9CF1F2</color>
+    <color name="brand_secondary">#B0CCCE</color>
+    <color name="brand_on_secondary">#1B3537</color>
+    <color name="brand_secondary_container">#324B4D</color>
+    <color name="brand_on_secondary_container">#CCE8E9</color>
+
+    <!-- ===== 中性面 ===== -->
+    <color name="app_surface">#0E1416</color>
+    <color name="app_surface_container">#1A2123</color>
+    <color name="app_surface_container_high">#242B2D</color>
+    <color name="app_surface_variant">#2A3133</color>
+    <color name="app_on_surface">#DEE4E5</color>
+    <color name="app_on_surface_variant">#B0B8BA</color>
+    <color name="app_outline">#8A9295</color>
+    <color name="app_outline_variant">#3E4648</color>
+
+    <!-- ===== 语义状态色 ===== -->
+    <color name="state_ok">#7ED494</color>
+    <color name="state_warn">#F2B457</color>
+    <color name="state_error">#FFB4AB</color>
+    <color name="state_idle">#9AA2A5</color>
+    <color name="state_ok_container">#14401F</color>
+    <color name="state_warn_container">#432C00</color>
+    <color name="state_error_container">#5C1510</color>
+    <color name="state_idle_container">#2A3133</color>
+
+    <!-- ===== 徽标 ===== -->
+    <color name="badge_muted_bg">#2A3133</color>
+    <color name="badge_muted_fg">#B0B8BA</color>
+
+    <!-- ===== 曲线（与 values 同名，深色下提亮保对比） ===== -->
+    <color name="chart_series_batt">#FF8A80</color>
+    <color name="chart_series_hot">#F48FB1</color>
+    <color name="chart_series_cold">#82B1FF</color>
+    <color name="chart_series_cpu">#FFC46B</color>
+    <color name="chart_series_rpm">#CE93D8</color>
+    <color name="chart_series_cool">#81C784</color>
+    <color name="chart_grid">#2A3133</color>
+    <color name="chart_axis">#9AA2A5</color>
+    <color name="chart_bg">#121A1C</color>
+
+    <!-- ===== 日志分级 ===== -->
+    <color name="log_level_debug">#9AA2A5</color>
+    <color name="log_level_info">#7CB8F0</color>
+    <color name="log_level_warn">#F2B457</color>
+    <color name="log_level_error">#FFB4AB</color>
+
+</resources>

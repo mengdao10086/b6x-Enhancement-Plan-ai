@@ -30,19 +30,21 @@
 - 改完后跑 `detect_changes()` 检查影响范围
 - 风险 HIGH/CRITICAL → 先告知用户再继续
 - 普通日志降级为 debug 时，用**对应功能分区的子开关**（如配置加载→`debug_config`、传感器→`debug_sensor`、PID→`debug_pid`），不得用通用 `write_log` 或乱选分区。注意 C 宏按文本顺序生效，调用点位于宏定义之前时需把 `debug_log`/`pid_log` 宏上移
-- **所有加到 `profile.conf` 的参数 → 同步更新 `magisk模块框架/webroot/schema.js`**（键定义 + 分组 `subKeys` 归属 + 字段范围与 tempctrl.c clamp 一致），并同步 `逻辑说明.md` 参数表；改完 WebUI 需能正常编辑该参数
+- **加/改配置参数**：`参数定义/params.def.json` 是 52 个键的**唯一手写处**。改定义 → `python 参数定义/gen_params.py` 重新生成 `lsp模块(apk修复+温控接口)/app/src/main/assets/params.json` → `python 参数定义/check_params.py` 必须 EXIT=0（该项已接入 CI，在 checkout 之后、Gradle 编译之前）。该脚本对账 `schema.js` / `profile.conf` / `逻辑说明.md` / `tempctrl.c` 四源，漂移则退出 2
+- **手工同步的派生副本**（改了上面任一处都要跟着改，界面表单**不**用改——它读 `params.json` 动态生成）：`magisk模块框架/profile.conf`（键序 + 注释）、`magisk模块框架/webroot/schema.js`（键定义 + 字段范围，须与 tempctrl.c 的 clamp 一致）、`逻辑说明.md` 参数表
 
 ## 5. 编译须知
 
 - C 守护程序用 GitHub Actions（NDK r27c）编译，**不得建议 Termux 编译**
 - 编译命令见 `magisk模块(智能温控)/build_tempctrl.sh`（编译参数的唯一来源，勿在此处复制副本）
+- CI 只有一条构建链（`.github/workflows/build.yml` 的单一 `build` job）：编译 C → 注入 `app/src/main/assets/tempctrl-arm64` → `assembleRelease` 出**唯一交付物 APK**；不再有 Magisk 模块产物
 - 每轮新对话和压缩上下文后的**首次 push** → 跟踪 CI 检查是否报错
 
 ## 6. 安全边界
 
 - 不得自动执行 git push、部署、发布、破坏性迁移
 - 修改 `.env` 前需说明用途，用户确认后再执行
-- **版本号不自动更新**：`module.prop`、`build.gradle.kts` versionName、`CHANGELOG.md` 等版本号一律保持现状，不因审查/清理/重构主动修改；需要改版本号由用户明确要求
+- **版本号不自动更新**：`build.gradle.kts` versionName、`CHANGELOG.md` 等版本号一律保持现状，不因审查/清理/重构主动修改；需要改版本号由用户明确要求
 
 ---
 
@@ -54,7 +56,10 @@
 |------|------|
 | `magisk模块(智能温控)/tempctrl.c` | 智能温控 C 守护程序 |
 | `magisk模块(智能温控)/逻辑说明.md` | 技术设计文档 |
-| `magisk模块(智能温控)/magisk模块框架/profile.conf` | 运行时配置参数 |
+| `magisk模块(智能温控)/magisk模块框架/profile.conf` | 配置模板（键序与注释的参考；出厂值由 `params.json` 的 `factory` 提供） |
+| `参数定义/params.def.json` | 52 个配置键的单一来源（唯一手写处） |
+| `参数定义/check_params.py` | 四源漂移校验（CI 已接入，EXIT=0 为通过） |
+| `参数定义/对齐报告.md` | 参数定义的对账与裁定记录 |
 | `lsp模块(apk修复+温控接口)/app/src/main/java/.../MainHook.java` | LSPosed 模块核心 |
 | `TECH_DEBT.md` | 技术债与未解决问题记录 |
 | `待办.md` | 项目待办清单 |

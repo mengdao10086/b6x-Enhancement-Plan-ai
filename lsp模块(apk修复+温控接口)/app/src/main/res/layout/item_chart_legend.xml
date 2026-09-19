@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 图例项：勾选框（按钮着色 = 该曲线的 chart_series_* 色，运行时按主题取）。 -->
+<CheckBox xmlns:android="http://schemas.android.com/apk/res/android"
+    android:id="@+id/chart_legend_check"
+    android:layout_width="wrap_content"
+    android:layout_height="wrap_content"
+    android:layout_marginEnd="@dimen/space_xs"
+    android:textAppearance="@style/TextAppearance.B6XTempCtrl.Caption" />

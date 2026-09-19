@@ -1,0 +1,48 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    曲线页（D2）文案。色值不在此文件、也不在布局里写死：曲线配色统一走 colors.xml 的 chart_*。
+    读取失败时的诊断正文来自 AppFiles.diagnose()（Java 侧拼好），不经字符串资源。
+-->
+<resources>
+
+    <!-- ===== 区块标题 ===== -->
+    <string name="chart_section_file">数据文件</string>
+    <string name="chart_section_window">时间窗口与图例</string>
+
+    <!-- ===== 信息条 ===== -->
+    <string name="chart_loading">读取中…</string>
+    <string name="chart_info_path_fmt">路径：%1$s</string>
+    <string name="chart_info_meta_fmt">大小：%1$s ｜ 修改时间：%2$s</string>
+    <string name="chart_info_parse_fmt">解析：%1$d 行 ｜ 跳过：%2$d 行 ｜ 窗口：%3$ds ｜ 行数上限：%4$d 行</string>
+    <string name="chart_info_break_fmt">窗口内断联：%1$d 处 ｜ 真实断开合计 %2$d 秒（空白已按封顶值显示）</string>
+    <string name="chart_size_fmt">%1$d 字节</string>
+    <string name="chart_size_unknown">未知</string>
+    <string name="chart_value_unknown">—</string>
+    <string name="chart_render_failed">解析：失败（诊断见下方曲线区）</string>
+
+    <!-- ===== 档位按钮 ===== -->
+    <string name="chart_window_btn_fmt">%1$ds</string>
+
+    <!-- ===== 曲线系列（图例） ===== -->
+    <string name="chart_series_batt">电池℃</string>
+    <string name="chart_series_hot">热端℃</string>
+    <string name="chart_series_cold">冷端℃</string>
+    <string name="chart_series_cpu">CPU℃</string>
+    <string name="chart_series_rpm">风扇rpm</string>
+    <string name="chart_series_cool">制冷</string>
+
+    <!-- ===== 画布内文字 ===== -->
+    <string name="chart_axis_left">℃/百rpm</string>
+    <string name="chart_axis_right">制冷</string>
+    <string name="chart_waiting">采样中…</string>
+    <string name="chart_no_series">无曲线</string>
+
+    <!-- ===== 失败态（前缀；正文一律跟 AppFiles.diagnose() 原文） ===== -->
+    <string name="chart_failure_title">数据文件读取失败 —— 原始诊断如下</string>
+    <string name="chart_fail_stat">读取失败：stat 失败，文件不可达或路径不存在。</string>
+    <string name="chart_fail_not_file">读取失败：该路径不是普通文件。</string>
+    <string name="chart_fail_no_perm">读取失败：文件存在，但 app 无读权限（SELinux/属主问题）。</string>
+    <string name="chart_fail_empty">读取失败：数据文件为 0 字节，守护进程还没有写入过。</string>
+    <string name="chart_fail_read">读取失败：%1$s</string>
+    <string name="chart_fail_parse_empty">读取成功（%1$d 字节）但解析出 0 行有效数据：每行至少需要 8 列（epoch,电池,CPU,热端,冷端,转速,实际制冷,目标制冷）。</string>
+</resources>
