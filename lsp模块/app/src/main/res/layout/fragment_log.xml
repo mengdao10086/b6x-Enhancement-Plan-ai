@@ -1,8 +1,9 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!--
-    日志页（D3）。三段式：日志文件卡（路径 / 修改时间 + 已读取统计）→ 关键词过滤
-    → 日志列表（占满剩余高度）。日志窗口压在页面最下方。
+    日志页（D3）。两段式：日志文件卡（路径 / 修改时间 + 已读取统计 + 关键词过滤输入 ——
+    都属"这是哪份日志、看到多少、筛掉哪些"的一组信息，故同卡）→ 日志列表（占满剩余高度）。
     读取失败时不进列表，直接把 AppFiles.diagnose() 的原文铺在列表位置，绝不静默留白。
+    上内边距单独归零让首卡贴顶：page_padding 三页共用，故在本页把四边拆开写，不动维度值。
 -->
 <LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:app="http://schemas.android.com/apk/res-auto"
@@ -10,9 +11,12 @@
     android:layout_height="match_parent"
     android:background="?attr/colorSurface"
     android:orientation="vertical"
-    android:padding="@dimen/page_padding">
+    android:paddingLeft="@dimen/page_padding"
+    android:paddingTop="0dp"
+    android:paddingRight="@dimen/page_padding"
+    android:paddingBottom="@dimen/page_padding">
 
-    <!-- ===== 日志文件卡：路径 / 修改时间 + 已读取统计 ===== -->
+    <!-- ===== 日志文件卡：路径 / 修改时间 + 已读取统计 + 关键词过滤 ===== -->
     <com.google.android.material.card.MaterialCardView
         android:layout_width="match_parent"
         android:layout_height="wrap_content">
@@ -46,37 +50,17 @@
                 android:layout_marginTop="@dimen/space_xs"
                 android:text="@string/log_loading"
                 android:textAppearance="@style/TextAppearance.B6XTempCtrl.Caption" />
-        </LinearLayout>
-    </com.google.android.material.card.MaterialCardView>
-
-    <!-- ===== 关键词过滤 ===== -->
-    <com.google.android.material.card.MaterialCardView
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:layout_marginTop="@dimen/space_m">
-
-        <LinearLayout
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:orientation="vertical"
-            android:padding="@dimen/card_padding">
-
-            <TextView
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:layout_marginBottom="@dimen/space_s"
-                android:text="@string/log_section_filter"
-                android:textAppearance="@style/TextAppearance.B6XTempCtrl.SectionTitle" />
 
             <!--
                 高度显式给死（@dimen/field_height，与配置页输入框等高）才能压过 OutlinedBox
-                按内容算出的默认高。
+                按内容算出的默认高。与上方统计行的间距取 space_s：两者不同组，需比组内间距大。
             -->
             <com.google.android.material.textfield.TextInputLayout
                 android:id="@+id/log_filter_layout"
                 style="@style/Widget.Material3.TextInputLayout.OutlinedBox"
                 android:layout_width="match_parent"
                 android:layout_height="@dimen/field_height"
+                android:layout_marginTop="@dimen/space_s"
                 android:hint="@string/log_filter_hint"
                 app:endIconMode="clear_text"
                 app:boxCornerRadiusBottomEnd="@dimen/field_radius"
@@ -104,7 +88,7 @@
                     android:textSize="@dimen/log_filter_text_size" />
             </com.google.android.material.textfield.TextInputLayout>
 
-            <!-- 命中计数：由 LogFragment 在有关键词时显示，其余情况置 GONE（行数信息在「日志文件」卡里） -->
+            <!-- 命中计数：由 LogFragment 在有关键词时显示，其余情况置 GONE（无关键词时行数见上方统计行） -->
             <TextView
                 android:id="@+id/log_count_text"
                 android:layout_width="match_parent"

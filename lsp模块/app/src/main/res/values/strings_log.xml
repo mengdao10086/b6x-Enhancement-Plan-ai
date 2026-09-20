@@ -3,7 +3,6 @@
 <resources>
 
     <string name="log_section_file">日志文件</string>
-    <string name="log_section_filter">关键词过滤</string>
 
     <string name="log_filter_hint">关键词（大小写不敏感）</string>
     <string name="log_loading">正在读取日志…</string>
