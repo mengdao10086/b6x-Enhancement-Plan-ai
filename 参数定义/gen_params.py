@@ -111,6 +111,10 @@ def _field_product(field):
     }
     if field.get("unitNote"):
         out["unitNote"] = field["unitNote"]
+    # 布尔子字段（定义里 fields[].bool = true）要在产物里带上：界面据此渲成开关而非数字输入框。
+    # 只在真为 true 时输出，避免每个字段都多一个恒 false 的键。
+    if field.get("bool"):
+        out["bool"] = True
     out["min"] = field["min"]
     out["max"] = field["max"]
     out["default"] = field["default"]

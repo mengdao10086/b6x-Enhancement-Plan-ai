@@ -47,6 +47,12 @@ public class MainHook implements IXposedHookLoadPackage {
     // 双文件路径
     private static final String STATUS_FILE_B6 = "/data/local/tmp/tempctrl_b6x.status";
     private static final String STATUS_FILE_B7 = "/data/local/tmp/tempctrl_b7x.status";
+    /**
+     * 界面开关标志文件（守护进程写、本进程读，见 {@code tempctrl.c} 的 {@code UIPREFS_PATH}）。
+     * 界面与钩子分属两个进程、不共享内存，这是界面 → 钩子的唯一通道
+     * （反向的钩子 → 守护进程走 status 文件）。
+     */
+    private static final String UIPREFS_FILE = "/data/local/tmp/tempctrl_uiprefs";
     // 上次连接的散热器 MAC（持久化，冷启动自动连接用）的落点。
     // 由固定 /data/local/tmp/tempctrl_last_dev 改为宿主 app 私有目录：各包各记、不再跨包共享。
     // 包名常量有 3 个（B6X / B6X_NEW / B7X）而 appKind 只有 6、7 两值，故必须按命中的包名常量拼，
@@ -1187,11 +1193,38 @@ public class MainHook implements IXposedHookLoadPackage {
     }
 
     /**
+     * 读界面上的「返回退出自动隐藏后台」开关（守护进程写的 {@code BACK_HIDE=0/1} 标志文件）。
+     *
+     * <p>每次返回键都读一次：返回键是低频事件，一次小文件读取代价可忽略，换来"改了立即生效"。
+     * 读不到（文件不存在 / 无该行 / 值异常）时返回 true —— 与界面默认值一致，行为总是「默认开启」。
+     */
+    private static boolean readBackHideEnabled() {
+        try {
+            BufferedReader br = new BufferedReader(new java.io.FileReader(UIPREFS_FILE));
+            String line;
+            while ((line = br.readLine()) != null) {
+                if (line.startsWith("BACK_HIDE=")) {
+                    String v = line.substring("BACK_HIDE=".length()).trim();
+                    br.close();
+                    return !"0".equals(v);   // 只有明确的 0 才关闭
+                }
+            }
+            br.close();
+        } catch (Throwable ignored) {
+            // 文件不存在属正常（守护进程尚未写过），走默认值
+        }
+        return true;
+    }
+
+    /**
      * 返回键退出时把 app 收进后台，而不是真正退出（借鉴 Scene 的做法）。
      *
      * <p>只在"这一下返回会结束整个任务"时接管：{@code isTaskRoot()} 为真即表示当前 Activity 是
      * 任务根、再返回就退出 app，此时阻断默认 finish 并切后台；子页面之间的正常返回不受影响。
      * 宿主 app 未启用预测性返回，{@code onBackPressed} 就是框架默认返回路径的入口。
+     *
+     * <p>受界面开关 {@code UI_BACK_HIDE} 约束：关闭时不设 result，直接走系统默认的 finish。
+     * 开关值由守护进程转写成标志文件（见 {@link #readBackHideEnabled()}）。
      *
      * <p>三包通用（不区分 B6X / B7X / farsef），故注册在通用分发处而非 {@code hookB6Activity}。
      */
@@ -1203,6 +1236,9 @@ public class MainHook implements IXposedHookLoadPackage {
                     try {
                         Activity act = (Activity) param.thisObject;
                         if (act.isTaskRoot() && !act.isFinishing()) {
+                            if (!readBackHideEnabled()) {
+                                return;   // 开关关闭：不接管，走系统默认退出
+                            }
                             param.setResult(null);   // 阻断默认的 finish
                             backgroundActivity(act, "返回键");
                         }

@@ -374,6 +374,14 @@ static int app_launch_screen_gate_enabled = 1;  // APP_LAUNCH_SCREEN_GATE 第一
 static int app_launch_screen_fail_ok    = 1;    // 第二值：读取失败默认值（1=可拉起，0=跳过）
 static int app_launch_screen_dozing_on  = 0;    // 第三值：Dozing 是否算亮屏（默认 0）
 
+// --- 界面开关转写（UI_BACK_HIDE）---
+// 界面与 Xposed 钩子分属两个进程、不共享内存：本机不消费该值，只把它写进一个双方都能访问的文件，
+// 由钩子读取。这是界面 → 钩子的唯一通道（钩子 → 守护进程走 status 文件，方向相反）。
+#define UIPREFS_PATH "/data/local/tmp/tempctrl_uiprefs"
+static int back_hide_enabled     = 1;    // UI_BACK_HIDE：1=返回键收后台（默认），0=恢复系统默认退出
+static int uiprefs_last_back_hide = -1;  // 上次已写出的值（-1 = 尚未写过，首轮必写一次）
+static int uiprefs_fail_logged    = 0;   // 写失败只记一条日志，避免每轮重复刷屏
+
 #define BOOT_START_DELAY_SEC 30         // 脚本启动成功后延迟开始运行（等待系统/蓝牙就绪，避开开机初期拉起 app 闪烁）
 
 // 双设备 BLE 连接状态
@@ -761,6 +769,40 @@ static int parse_common_cfg(const char *key, int val, const char *val_str) {
     return 0;
 }
 
+/**
+ * 把界面侧开关转写成 /data/local/tmp 标志文件（BACK_HIDE=0/1），供宿主进程里的钩子读取。
+ *
+ * <p>只在值变化时写；写失败不更新「已写出」记录，下一轮配置重载会重试，且只记一条日志。
+ * 先写 .tmp 再 rename，避免钩子读到半行。
+ */
+static void publish_uiprefs(void) {
+    if (back_hide_enabled == uiprefs_last_back_hide) {
+        return;
+    }
+    char tmp[64];
+    snprintf(tmp, sizeof(tmp), "%s.tmp", UIPREFS_PATH);
+    FILE *f = fopen(tmp, "w");
+    if (!f) {
+        if (!uiprefs_fail_logged) {
+            write_log("界面开关 标志文件不可写 %s（返回键后台化将按默认值生效）", UIPREFS_PATH);
+            uiprefs_fail_logged = 1;
+        }
+        return;
+    }
+    fprintf(f, "BACK_HIDE=%d\n", back_hide_enabled ? 1 : 0);
+    fclose(f);
+    if (rename(tmp, UIPREFS_PATH) != 0) {
+        if (!uiprefs_fail_logged) {
+            write_log("界面开关 标志文件替换失败 %s", UIPREFS_PATH);
+            uiprefs_fail_logged = 1;
+        }
+        remove(tmp);
+        return;
+    }
+    uiprefs_last_back_hide = back_hide_enabled;
+    uiprefs_fail_logged = 0;
+}
+
 static void load_config(const char *path) {
     FILE *f = fopen(path, "r");
     if (!f) {
@@ -795,8 +837,15 @@ static void load_config(const char *path) {
             if (n >= 1) app_launch_screen_gate_enabled = (on != 0);
             if (n >= 2) app_launch_screen_fail_ok    = (f != 0);
             if (n >= 3) app_launch_screen_dozing_on  = (dz != 0);
+        } else if (strcmp(key, "UI_BACK_HIDE") == 0) {
+            // 界面键里唯一被守护进程读取的一个：本机不消费，只转写标志文件供钩子读取。
+            // 与 APP_LAUNCH_ENABLED 同理，必须在第一遍读掉——否则 PERF/DEBUG/SYSFS 全关时本函数会提前 return。
+            back_hide_enabled = (atoi(val_str) != 0);
         }
     }
+
+    // 转写要在下面的前置处理与提前 return 之前完成（总开关全关时也要发布）
+    publish_uiprefs();
 
     // 前置条件：自动拉起关闭 → 锁死自动重启（watchdog）强制关闭（不改配置，仅运行时生效）。
     if (!APP_LAUNCH_ENABLED && app_watchdog_cycles > 0) {

@@ -1359,6 +1359,30 @@
         { "bool": true, "label": "自动保存", "unit": "", "unitNote": "布尔子开关，取值 0/1", "min": 0, "max": 1, "default": 1, "cVar": null },
         { "label": "提示延迟(秒)", "unit": "秒", "min": 0, "max": 60, "default": 3, "cVar": null }
       ]
+    },
+    {
+      "key": "UI_BACK_HIDE",
+      "group": "webui",
+      "role": "setting",
+      "type": "switch",
+      "label": "返回退出自动隐藏后台",
+      "desc": "开启后，返回键将结束整个任务时改为把散热器 app 收进后台而不结束进程；关闭则恢复系统默认退出",
+      "docOrder": 53,
+      "docDesc": "返回退出自动隐藏后台（0/1，默认 1）：开启后宿主 app 在「这一下返回会结束整个任务」时改为收进后台，子页面之间的正常返回不受影响；关闭则恢复系统默认退出。**本键是本组唯一被守护进程读取的键**——界面与钩子分属两个进程、不共享内存，故由守护进程把它写进 `/data/local/tmp/tempctrl_uiprefs`（BACK_HIDE=0/1）供 Xposed 钩子读取。",
+      "confNote": [
+        "返回退出自动隐藏后台（0/1，默认 1）：关闭则返回键恢复系统默认退出",
+        "  本组唯一被守护进程读取的键：写入 /data/local/tmp/tempctrl_uiprefs 供钩子读取"
+      ],
+      "confInline": "返回退出自动隐藏后台",
+      "unit": "",
+      "unitNote": "布尔开关，取值 0/1，无单位",
+      "default": 1,
+      "factory": 1,
+      "min": 0,
+      "max": 1,
+      "requires": [],
+      "daemonConsumes": true,
+      "fields": null
     }
   ],
   "conf": {
@@ -1367,7 +1391,7 @@
       "格式：KEY=VALUE（等号两边不要空格），# 开头为注释，空行自动跳过",
       "修改后无需重启 daemon，下一轮 5 秒循环自动热重载",
       "本文件由 参数定义/gen_params.py 生成，勿手改（手改会被 check_params.py 判红）；设备上的副本可自由修改",
-      "段标编号与界面分组一致（分组定义见 参数定义/params.def.json）：[0]日志 [1]性能参数 [2]sysfs [3]自动拉起 [4]WebUI"
+      "段标编号与界面分组一致（分组定义见 参数定义/params.def.json）：[0]日志 [1]性能参数 [2]sysfs [3]自动拉起 [4]界面"
     ]
   },
   "doc": {
@@ -1484,7 +1508,8 @@
       "UI_LABEL_MERGE_PX": [],
       "UI_RPM_AXIS_MIN": [],
       "UI_CURVE_FILTER": [],
-      "UI_AUTOSAVE": []
+      "UI_AUTOSAVE": [],
+      "UI_BACK_HIDE": ["back_hide_enabled"]
     }
   }
 }

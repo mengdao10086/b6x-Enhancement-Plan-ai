@@ -96,7 +96,8 @@
         "UI_LABEL_MERGE_PX",
         "UI_RPM_AXIS_MIN",
         "UI_CURVE_FILTER",
-        "UI_AUTOSAVE"
+        "UI_AUTOSAVE",
+        "UI_BACK_HIDE"
       ]
     }
   ],
@@ -1002,6 +1003,7 @@
           "label": "开关",
           "unit": "",
           "unitNote": "布尔子开关，取值 0/1",
+          "bool": true,
           "min": 0,
           "max": 1,
           "default": 1
@@ -1051,6 +1053,7 @@
           "label": "开关",
           "unit": "",
           "unitNote": "布尔子开关，取值 0/1",
+          "bool": true,
           "min": 0,
           "max": 1,
           "default": 1
@@ -1437,6 +1440,7 @@
           "label": "开关",
           "unit": "",
           "unitNote": "布尔子开关，取值 0/1",
+          "bool": true,
           "min": 0,
           "max": 1,
           "default": 1
@@ -1445,6 +1449,7 @@
           "label": "读取失败默认值",
           "unit": "",
           "unitNote": "布尔子开关，取值 0/1",
+          "bool": true,
           "min": 0,
           "max": 1,
           "default": 1
@@ -1453,6 +1458,7 @@
           "label": "Dozing 算亮屏",
           "unit": "",
           "unitNote": "布尔子开关，取值 0/1",
+          "bool": true,
           "min": 0,
           "max": 1,
           "default": 0
@@ -1617,6 +1623,7 @@
           "label": "自动保存",
           "unit": "",
           "unitNote": "布尔子开关，取值 0/1",
+          "bool": true,
           "min": 0,
           "max": 1,
           "default": 1
@@ -1629,6 +1636,23 @@
           "default": 3
         }
       ]
+    },
+    "UI_BACK_HIDE": {
+      "key": "UI_BACK_HIDE",
+      "group": "webui",
+      "role": "setting",
+      "type": "switch",
+      "label": "返回退出自动隐藏后台",
+      "desc": "开启后，返回键将结束整个任务时改为把散热器 app 收进后台而不结束进程；关闭则恢复系统默认退出",
+      "unit": "",
+      "unitNote": "布尔开关，取值 0/1，无单位",
+      "default": 1,
+      "factory": 1,
+      "min": 0,
+      "max": 1,
+      "requires": [],
+      "daemonConsumes": true,
+      "fields": null
     }
   }
 }
