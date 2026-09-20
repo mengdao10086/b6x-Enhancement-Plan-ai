@@ -2,6 +2,9 @@ package com.example.waspwingtempctrl.ui;
 
 import android.view.MotionEvent;
 import android.view.View;
+import android.view.ViewGroup;
+
+import androidx.recyclerview.widget.RecyclerView;
 
 /**
  * 给任意可垂直滚动的 View 接上「按住滚动条拖动」。
@@ -37,7 +40,7 @@ public final class ScrollbarDrag {
     /**
      * 给视图接上拖动。可重复调用（后一次覆盖前一次）。
      *
-     * @param view 可垂直滚动的视图（ScrollView / RecyclerView 均可）
+     * @param view 可垂直滚动的视图（{@code ScrollView} / {@code RecyclerView} 均可）
      */
     public static void attach(final View view) {
         if (view == null) {
@@ -66,14 +69,14 @@ public final class ScrollbarDrag {
                         }
                         grabOffset = track.grabOffsetAt(event.getY());
                         dragging = true;
-                        v.scrollBy(0, track.offsetAt(event.getY(), grabOffset) - v.computeVerticalScrollOffset());
+                        v.scrollBy(0, track.offsetAt(event.getY(), grabOffset) - track.offset);
                         return true;
                     case MotionEvent.ACTION_MOVE:
                         if (!dragging) {
                             return false;
                         }
                         Track moved = new Track(v, density);
-                        v.scrollBy(0, moved.offsetAt(event.getY(), grabOffset) - v.computeVerticalScrollOffset());
+                        v.scrollBy(0, moved.offsetAt(event.getY(), grabOffset) - moved.offset);
                         return true;
                     case MotionEvent.ACTION_UP:
                     case MotionEvent.ACTION_CANCEL:
@@ -89,31 +92,65 @@ public final class ScrollbarDrag {
         });
     }
 
-    /** 一条滚动条轨道的几何量：按当前滚动状态现算，不缓存（拖动中每秒都在变）。 */
+    /**
+     * 一次取齐当前滚动量（偏移 / 范围 / 可视）。
+     *
+     * <p>{@code computeVerticalScrollOffset/Extent/Range} 在 {@code View} 里是 <b>protected</b>，
+     * 外部类不能调；{@code RecyclerView} 把这三个重写成了 public，故按类型分流：
+     * RecyclerView 直接取，其余（ScrollView 一类）用 {@code getScrollY()} 与内容高度自己算。
+     */
+    private static final class Metrics {
+        final int offset;
+        final int range;
+        final int extent;
+
+        Metrics(View v) {
+            if (v instanceof RecyclerView) {
+                RecyclerView rv = (RecyclerView) v;
+                offset = rv.computeVerticalScrollOffset();
+                range = rv.computeVerticalScrollRange();
+                extent = rv.computeVerticalScrollExtent();
+            } else {
+                int viewport = Math.max(0, v.getHeight() - v.getPaddingTop() - v.getPaddingBottom());
+                View content = (v instanceof ViewGroup && ((ViewGroup) v).getChildCount() > 0)
+                        ? ((ViewGroup) v).getChildAt(0) : null;
+                extent = viewport;
+                range = Math.max(viewport, content == null ? viewport : content.getHeight());
+                offset = Math.max(0, Math.min(v.getScrollY(), range - extent));
+            }
+        }
+
+        /** 可滚动余量。 */
+        int maxOffset() {
+            return Math.max(0, range - extent);
+        }
+    }
+
+    /** 一条滚动条轨道的几何量：按当前滚动状态现算，不缓存（拖动中每帧都在变）。 */
     private static final class Track {
         /** 轨道顶端（= 视图上内边距，滚动条画在内边距带里）。 */
         private final float top;
-        /** 轨道长度。 */
-        private final float length;
         /** 滑块长度（按 range 比例，且有下限）。 */
         private final float thumbLen;
         /** 滑块可走的行程 = 轨道长 − 滑块长。 */
         private final float usable;
-        /** 可滚动余量 = range − extent。 */
+        /** 可滚动余量。 */
         private final float maxOffset;
         /** 当前滚动位置在行程上的比例 0~1。 */
         private final float frac;
+        /** 当前滚动偏移（拖动时用来算增量）。 */
+        final int offset;
 
         Track(View v, float density) {
-            int range = v.computeVerticalScrollRange();
-            int extent = v.computeVerticalScrollExtent();
+            Metrics m = new Metrics(v);
+            float length = v.getHeight() - v.getPaddingTop() - v.getPaddingBottom();
             this.top = v.getPaddingTop();
-            this.length = v.getHeight() - v.getPaddingTop() - v.getPaddingBottom();
+            this.offset = m.offset;
+            this.maxOffset = m.maxOffset();
             this.thumbLen = Math.min(length,
-                    range <= 0 ? length : Math.max(MIN_THUMB_DP * density, length * extent / (float) range));
+                    m.range <= 0 ? length : Math.max(MIN_THUMB_DP * density, length * m.extent / (float) m.range));
             this.usable = length - thumbLen;
-            this.maxOffset = Math.max(0f, range - extent);
-            this.frac = maxOffset <= 0f ? 0f : v.computeVerticalScrollOffset() / maxOffset;
+            this.frac = maxOffset <= 0f ? 0f : offset / maxOffset;
         }
 
         /** 滑块顶端在视图里的 y。 */
@@ -127,7 +164,7 @@ public final class ScrollbarDrag {
             return (dy >= thumbTop() && dy <= thumbTop() + thumbLen) ? dy - thumbTop() : thumbLen / 2f;
         }
 
-        /** 手指位置换算出的目标滚动位置（未钳制到视图自身的边界，由 scrollBy 收口）。 */
+        /** 手指位置换算出的目标滚动位置（由 scrollBy 自行收口到视图边界）。 */
         int offsetAt(float fingerY, float grabOffset) {
             float f = (fingerY - top - grabOffset) / usable;
             if (f < 0f) {
