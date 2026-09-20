@@ -166,10 +166,17 @@ public class StatusFragment extends Fragment {
         return head + "\n\n" + deployer.probe().describe();
     }
 
+    /**
+     * 部署：跑完部署动作后<b>重新探测</b>，把探测结果上屏——不再把部署动作日志（含步骤列表）
+     * 灌进状态区：部署成没成看状态文本就够，步骤细节在「诊断信息」里。
+     */
     private void deploy() {
         final Context app = requireContext().getApplicationContext();
-        runAsync(getString(R.string.status_busy_deploy),
-                () -> Deployer.get(app).deploy().describe());
+        runAsync(getString(R.string.status_busy_deploy), () -> {
+            Deployer deployer = Deployer.get(app);
+            deployer.deploy();
+            return deployer.probe().describe();
+        });
     }
 
     private void uninstall() {
