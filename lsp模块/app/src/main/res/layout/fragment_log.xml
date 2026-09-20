@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!--
-    日志页（D3）。四段式：顶部信息条（路径 / 修改时间）→ 关键词过滤 → 日志列表（占满剩余高度）
-    → 底部统计行（已读取行数 / 渲染上限，文件大小 / 尾读上限）。日志窗口压在页面最下方。
+    日志页（D3）。三段式：日志文件卡（路径 / 修改时间 + 已读取统计）→ 关键词过滤
+    → 日志列表（占满剩余高度）。日志窗口压在页面最下方。
     读取失败时不进列表，直接把 AppFiles.diagnose() 的原文铺在列表位置，绝不静默留白。
 -->
 <LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
@@ -12,7 +12,7 @@
     android:orientation="vertical"
     android:padding="@dimen/page_padding">
 
-    <!-- ===== 顶部信息条：路径 / 修改时间 ===== -->
+    <!-- ===== 日志文件卡：路径 / 修改时间 + 已读取统计 ===== -->
     <com.google.android.material.card.MaterialCardView
         android:layout_width="match_parent"
         android:layout_height="wrap_content">
@@ -37,6 +37,15 @@
                 android:text="@string/log_loading"
                 android:textAppearance="@style/TextAppearance.B6XTempCtrl.Mono"
                 android:textIsSelectable="true" />
+
+            <!-- 统计行紧跟路径/时间：同一份"这是哪个文件、读了多少"的信息，不再单独占页面底部一行 -->
+            <TextView
+                android:id="@+id/log_stat_text"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="@dimen/space_xs"
+                android:text="@string/log_loading"
+                android:textAppearance="@style/TextAppearance.B6XTempCtrl.Caption" />
         </LinearLayout>
     </com.google.android.material.card.MaterialCardView>
 
@@ -59,12 +68,15 @@
                 android:text="@string/log_section_filter"
                 android:textAppearance="@style/TextAppearance.B6XTempCtrl.SectionTitle" />
 
-            <!-- 高度显式给死（@dimen/log_filter_height）才能压过 OutlinedBox 的默认高 -->
+            <!--
+                高度显式给死（@dimen/field_height，与配置页输入框等高）才能压过 OutlinedBox
+                按内容算出的默认高。
+            -->
             <com.google.android.material.textfield.TextInputLayout
                 android:id="@+id/log_filter_layout"
                 style="@style/Widget.Material3.TextInputLayout.OutlinedBox"
                 android:layout_width="match_parent"
-                android:layout_height="@dimen/log_filter_height"
+                android:layout_height="@dimen/field_height"
                 android:hint="@string/log_filter_hint"
                 app:endIconMode="clear_text"
                 app:boxCornerRadiusBottomEnd="@dimen/field_radius"
@@ -92,7 +104,7 @@
                     android:textSize="@dimen/log_filter_text_size" />
             </com.google.android.material.textfield.TextInputLayout>
 
-            <!-- 命中计数：由 LogFragment 在有关键词时显示，其余情况置 GONE（行数信息在底部统计行） -->
+            <!-- 命中计数：由 LogFragment 在有关键词时显示，其余情况置 GONE（行数信息在「日志文件」卡里） -->
             <TextView
                 android:id="@+id/log_count_text"
                 android:layout_width="match_parent"
@@ -115,18 +127,18 @@
             android:layout_height="match_parent">
 
             <!--
-                滚动条：跟随刷新每 2 秒滚动一次会把滚动条反复唤醒 → 亮灭闪烁。
-                延迟给到 2000ms（≈刷新周期）后它不再闪灭，但仍在无操作后自行淡出
-                （fadeScrollbars 保持默认 true，不做成"永不消失"）。
+                滚动条：常显（fadeScrollbars=false）并加粗（@dimen/scrollbar_size），
+                配合 ui/ScrollbarDrag 才能按住拖动。常显之后原先"跟随刷新时亮灭闪烁"的问题不复存在，
+                故那两条淡出延时属性一并去掉。
             -->
             <androidx.recyclerview.widget.RecyclerView
                 android:id="@+id/log_list"
                 android:layout_width="match_parent"
                 android:layout_height="match_parent"
                 android:clipToPadding="false"
+                android:fadeScrollbars="false"
                 android:padding="@dimen/space_s"
-                android:scrollbarDefaultDelayBeforeFade="2000"
-                android:scrollbarFadeDuration="400"
+                android:scrollbarSize="@dimen/scrollbar_size"
                 android:scrollbars="vertical" />
 
             <!-- 读取失败：原样展示 AppFiles.diagnose() 的多行诊断 -->
@@ -156,37 +168,31 @@
                 android:visibility="gone" />
 
             <!--
-                纯图标按钮（无 android:text）：用 Material3 的图标按钮样式，它自带圆形轮廓与 48dp 触控尺寸；
-                再加 minWidth/minHeight、iconPadding 归零与 iconGravity，避免被文字内边距撑成长条。
+                纯图标按钮（无 android:text）：正圆要四项一起写死 —— 宽高同为
+                @dimen/log_follow_btn_size、四边 inset 归零、iconPadding 归零、圆角显式 50%。
+                只把上下 inset 归零会画成椭圆：IconButton 样式左右各留 4dp inset，背景比控件窄，
+                这就是先前"理论上圆形、实测不是"的原因。圆角样式见 values/styles_log.xml。
                 contentDescription 保留「回到底部」语义，供读屏使用。
             -->
             <com.google.android.material.button.MaterialButton
                 android:id="@+id/log_follow_btn"
-                style="@style/Widget.Material3.Button.IconButton.Filled"
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
+                style="@style/Widget.B6XTempCtrl.Button.IconButton.Filled"
+                android:layout_width="@dimen/log_follow_btn_size"
+                android:layout_height="@dimen/log_follow_btn_size"
                 android:layout_gravity="bottom|end"
                 android:layout_margin="@dimen/space_s"
                 android:contentDescription="@string/log_action_follow_bottom"
+                android:insetLeft="0dp"
+                android:insetRight="0dp"
                 android:insetTop="0dp"
                 android:insetBottom="0dp"
-                android:minWidth="@dimen/log_follow_btn_size"
-                android:minHeight="@dimen/log_follow_btn_size"
                 android:visibility="gone"
                 app:icon="@drawable/ic_arrow_down"
                 app:iconGravity="textStart"
                 app:iconPadding="0dp"
-                app:iconTint="?attr/colorOnPrimary" />
+                app:iconTint="?attr/colorOnPrimary"
+                app:shapeAppearanceOverlay="@style/ShapeAppearance.B6XTempCtrl.Circle" />
         </FrameLayout>
     </com.google.android.material.card.MaterialCardView>
-
-    <!-- ===== 底部统计行：已读取行数 / 渲染上限，文件大小 / 尾读上限 ===== -->
-    <TextView
-        android:id="@+id/log_tail_text"
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:layout_marginTop="@dimen/space_s"
-        android:text="@string/log_loading"
-        android:textAppearance="@style/TextAppearance.B6XTempCtrl.Caption" />
 
 </LinearLayout>

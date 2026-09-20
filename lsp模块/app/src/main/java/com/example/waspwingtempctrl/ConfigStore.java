@@ -195,7 +195,7 @@ public final class ConfigStore {
         return configFileNameFromDef;
     }
 
-    /** 键总数（I1 冻结为 52；界面可据此自检）。 */
+    /** 键总数（定义里现有 53；界面可据此自检）。 */
     public int keyCount() {
         return keys.size();
     }
@@ -759,7 +759,8 @@ public final class ConfigStore {
                             fo.optString("unit", ""),
                             fo.isNull("min") ? null : Integer.valueOf(fo.optInt("min")),
                             fo.isNull("max") ? null : Integer.valueOf(fo.optInt("max")),
-                            fo.optInt("default", 0)));
+                            fo.optInt("default", 0),
+                            fo.optBoolean("bool", false)));
                 }
             }
             this.fields = f.isEmpty() ? null : Collections.unmodifiableList(f);
@@ -850,13 +851,21 @@ public final class ConfigStore {
         public final Integer min;
         public final Integer max;
         public final int defaultValue;
+        /**
+         * true = 布尔子开关（值只有 0/1）。界面据此把该字段渲染成开关而不是数字输入框
+         * （定义里 PID_TARGET_DIR[0] / PID_SPEED_RECALL[0] / APP_LAUNCH_SCREEN_GATE[0..2] /
+         * UI_AUTOSAVE[0] 为 true）；C 端的逐字段 clamp 边界生成时也跳过这些字段。
+         */
+        public final boolean bool;
 
-        FieldMeta(String label, String unit, Integer min, Integer max, int defaultValue) {
+        FieldMeta(String label, String unit, Integer min, Integer max, int defaultValue,
+                  boolean bool) {
             this.label = label;
             this.unit = unit;
             this.min = min;
             this.max = max;
             this.defaultValue = defaultValue;
+            this.bool = bool;
         }
     }
 

@@ -97,7 +97,16 @@ public final class Deployer {
 
     // ==================== 状态 / 判定 ====================
 
-    /** 部署状态（{@link #describe()} 直接可显示）。 */
+    /**
+     * 部署状态。
+     *
+     * <p>出屏有两种形态，都由本类给：
+     * <ul>
+     *   <li>{@link #describe()} —— 状态区用（简短版）：结论行 + 异常项，
+     *       正常时的路径、配置、逐项描述一律不展开；</li>
+     *   <li>{@link #detailed()} —— 诊断信息用（详细版）：逐项细节一个不少。</li>
+     * </ul>
+     */
     public static final class Status {
         public final boolean suOk;
         public final boolean binExists;
@@ -146,35 +155,99 @@ public final class Deployer {
             this.notes = Collections.unmodifiableList(notes);
         }
 
+        /**
+         * 状态区用（简短版）：只给结论行与异常项。正常时的二进制/脚本路径、配置、逐项描述
+         * 都移到 {@link #detailed()} 里，状态区不再铺满细节。
+         */
         public String describe() {
-            StringBuilder sb = new StringBuilder();
-            // 「无 su」紧跟部署状态：它是部署未完成最常见的原因，单列一行容易被当成另一件事
-            sb.append("部署状态：").append(deployed ? "已完成" : "未完成")
-                    .append(suOk ? "" : "（无 su）").append('\n');
+            StringBuilder sb = new StringBuilder(summaryLine()).append('\n');
+            if (suOk) {
+                if (deployed) {
+                    // 判据全过 → 两个哈希必然一致，合成一行即可（逐位比对只在异常时才有意义）
+                    sb.append("  哈希：二进制一致、脚本一致\n");
+                } else {
+                    appendBinaryIssues(sb);
+                    appendScriptIssues(sb);
+                }
+            }
+            // su 不通时逐项探测只会读到"不存在"，列出来是误导；原因在下面的提示行里
+            appendNotes(sb);
+            return sb.toString();
+        }
+
+        /**
+         * 诊断信息用（详细版）：结论行 + 二进制 / 脚本 / 配置 / 守护进程逐项，信息不裁剪。
+         * 哈希值本身只在<b>不一致</b>时给出（一致时两条 32 位串只是噪音），不一致的两行可逐位比对。
+         */
+        public String detailed() {
+            StringBuilder sb = new StringBuilder(summaryLine()).append('\n');
             sb.append("  二进制 ").append(BIN_DEST).append("：")
                     .append(!binExists ? "不存在" : (binExecutable ? "存在且可执行" : "存在但不可执行"))
                     .append(binHashOk ? "，哈希一致" : "，哈希不一致")
                     .append('\n');
-            // 两组哈希各占两行：并排时位数一多就无法逐位比对
-            if (!binExpectedMd5.isEmpty()) {
-                sb.append("    apk  = ").append(binExpectedMd5).append('\n');
-                sb.append("    设备 = ").append(binMd5.isEmpty() ? "—" : binMd5).append('\n');
-            }
+            appendHashPair(sb, binExpectedMd5, binMd5);
             sb.append("  service.d 脚本：")
                     .append(scriptPresent ? scriptPath : "未安装")
                     .append(scriptPresent && !scriptHashOk ? "（哈希不一致）" : "").append('\n');
-            if (scriptPresent && !scriptExpectedMd5.isEmpty()) {
-                sb.append("    apk  = ").append(scriptExpectedMd5).append('\n');
-                sb.append("    设备 = ").append(scriptMd5.isEmpty() ? "—" : scriptMd5).append('\n');
+            if (scriptPresent) {
+                appendHashPair(sb, scriptExpectedMd5, scriptMd5);
             }
             sb.append("  配置 ").append(configPath).append("：")
                     .append(configPresent ? "已存在" : "不存在（守护进程将用代码默认值）")
                     .append(configPathAligned ? "" : "，且与 C 端落点不一致").append('\n');
             sb.append("  守护进程：").append(daemonRunning ? "运行中" : "未运行").append('\n');
+            appendNotes(sb);
+            return sb.toString();
+        }
+
+        /** 结论行（两种形态共用）：「无 su」紧跟其后 —— 它是部署未完成最常见的原因，单列容易被当成另一件事。 */
+        private String summaryLine() {
+            return "部署状态：" + (deployed ? "已完成" : "未完成") + (suOk ? "" : "（无 su）");
+        }
+
+        /** 简短版里的二进制异常项；二进制正常则一行都不写。 */
+        private void appendBinaryIssues(StringBuilder sb) {
+            if (!binExists) {
+                sb.append("  二进制不存在\n");
+                return;
+            }
+            if (!binExecutable) {
+                sb.append("  二进制存在但不可执行\n");
+            }
+            if (!binHashOk) {
+                sb.append("  二进制哈希不一致\n");
+                appendHashPair(sb, binExpectedMd5, binMd5);
+            }
+        }
+
+        /** 简短版里的 service.d 脚本异常项；脚本正常则一行都不写。 */
+        private void appendScriptIssues(StringBuilder sb) {
+            if (!scriptPresent) {
+                sb.append("  service.d 脚本未安装\n");
+            } else if (!scriptHashOk) {
+                sb.append("  脚本哈希不一致\n");
+                appendHashPair(sb, scriptExpectedMd5, scriptMd5);
+            }
+        }
+
+        /**
+         * 哈希逐位比对用的两行：apk 侧与设备侧各一行（并排位数一多就没法逐位看）。
+         * 只在<b>确实不一致</b>时给出；apk 侧哈希为空（APK 内资源缺失）时无从比对，也不给。
+         * 该文件不在设备上时由调用处先判，不在这里管。
+         */
+        private void appendHashPair(StringBuilder sb, String expected, String actual) {
+            if (expected.isEmpty() || expected.equals(actual)) {
+                return;
+            }
+            sb.append("    apk  = ").append(expected).append('\n');
+            sb.append("    设备 = ").append(actual.isEmpty() ? "—" : actual).append('\n');
+        }
+
+        /** 提示行：每条提示都是一个"需要用户知道"的异常（资源缺失、缺 md5sum、目录不一致、root 不通）。 */
+        private void appendNotes(StringBuilder sb) {
             for (String note : notes) {
                 sb.append("  提示：").append(note).append('\n');
             }
-            return sb.toString();
         }
     }
 
@@ -262,6 +335,10 @@ public final class Deployer {
             this.status = status;
         }
 
+        /**
+         * 动作 + 步骤 + 状态。状态部分走 {@link Status#describe()} 的简短版（状态区直接上屏），
+         * 逐项细节看诊断信息。
+         */
         public String describe() {
             StringBuilder sb = new StringBuilder();
             sb.append(action).append(ok ? "：成功" : "：失败");
@@ -510,10 +587,10 @@ public final class Deployer {
         return "1".equals(parseKv(r.stdout).get("RUN"));
     }
 
-    /** 诊断串：部署状态 + 配置状态 + root 诊断。阻塞。 */
+    /** 诊断串：部署状态 + 配置状态 + root 诊断。阻塞。部署状态取详细版。 */
     public String buildDiagnostics() {
         StringBuilder sb = new StringBuilder();
-        sb.append("=== 部署 ===\n").append(probe().describe()).append('\n');
+        sb.append("=== 部署 ===\n").append(probe().detailed()).append('\n');
         sb.append("=== 配置 ===\n").append(configStore.describeState()).append('\n');
         sb.append("=== root ===\n").append(shell.buildDiagnostics());
         return sb.toString();

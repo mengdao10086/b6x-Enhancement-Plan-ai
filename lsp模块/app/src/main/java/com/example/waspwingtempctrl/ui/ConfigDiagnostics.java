@@ -19,6 +19,10 @@ import java.util.concurrent.ExecutorService;
  * 配置页的诊断区（<b>只读展示</b>）：{@link ConfigStore#describeState()}（含落点是否与守护进程一致、
  * 护栏键自检、键数）与配置 mtime。
  *
+ * <p>本区整块默认折叠（{@code config_diag_body} 初始 gone）：数据文件信息、键渲染自检
+ * （由 {@link ConfigFormFragment} 写进 {@code config_diag_selfcheck}）与本节正文都在折叠体内，
+ * 展开才占高度。本类只管自己的两个 TextView，不碰自检那份（它每次刷新都会被整段覆盖）。
+ *
  * <p>本区不提供任何写动作：出厂配置由 {@link com.example.waspwingtempctrl.Deployer} 在部署时写出
  * （{@code ConfigStore.writeFactoryIfAbsent()} 的 javadoc 明确"界面不要自己调"），
  * 界面另开一个写入口就是绕过 I5 的重复写入路径。

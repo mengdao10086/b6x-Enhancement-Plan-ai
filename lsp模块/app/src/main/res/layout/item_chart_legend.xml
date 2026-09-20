@@ -1,8 +1,15 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- 图例项：勾选框（按钮着色 = 该曲线的 chart_series_* 色，运行时按主题取）。 -->
+<!--
+    图例项：勾选框（着色 = 该曲线的 chart_series_* 色，运行时按主题取）。
+    高度压到档位按钮同一标尺（chart_chip_min_height）：默认走 Material 复选行的 48dp 触控高，
+    6 项在窄屏会摊成三行、占掉一大块曲线区；这里与图例的"轻量开关"定位一致。
+-->
 <CheckBox xmlns:android="http://schemas.android.com/apk/res/android"
     android:id="@+id/chart_legend_check"
     android:layout_width="wrap_content"
     android:layout_height="wrap_content"
     android:layout_marginEnd="@dimen/space_xs"
+    android:minHeight="@dimen/chart_chip_min_height"
+    android:paddingTop="0dp"
+    android:paddingBottom="0dp"
     android:textAppearance="@style/TextAppearance.B6XTempCtrl.Caption" />

@@ -36,6 +36,14 @@ import java.util.List;
  * <p>键的 label / desc / 单位 / 范围 / 依赖全部来自 {@link KeyMeta}（背后是 assets/params.json），
  * 本类不手抄任何键定义，也不自己解析 params.json。
  *
+ * <h3>形态（配合 {@link FlowWrapLayout}）</h3>
+ * <ul>
+ *   <li>第一行 = 参数名 + 输入框；输入框宽度按内容实测（见 {@link #measureFieldWidth}），
+ *       故窄的键能与同组其它键并排，放不下由外层流式容器换行。</li>
+ *   <li>switch 型键整行独占（向容器声明 fullLine）：参数名 + 右侧开关，开关才贴得到行尾。</li>
+ *   <li>multi 键带 {@code fields[].bool} 的字段渲染成开关（值只有 0/1），其余字段仍是输入框。</li>
+ * </ul>
+ *
  * <h3>什么时候落盘（三条规则）</h3>
  * <ul>
  *   <li><b>switch</b>：值只有 0/1，切换即完整 → 立即排入防抖队列。</li>
@@ -49,10 +57,12 @@ import java.util.List;
  * {@link ConfigStore#isGuardrailValidated} 为 true 的键，若 {@link ConfigStore#daemonAccepts}
  * 判定 C 端不接受，则<b>不落盘</b>，行内显示拒绝原因，控件保留用户输入以便其修改。
  * 理由：写进去 C 端也不认，只会造成"界面显示 X、守护进程用 Y"的假象。
+ *
+ * <p>"未生效"的标注只做在分组卡头一次（见 {@link ConfigGroupBinder}），行内只压暗不重复标注。
  */
 final class ConfigKeyRow {
 
-    /** 行与外界的交互面（由 ConfigFormFragment 实现）。 */
+    /** 行与外界的交互面（由 ConfigFormFragment / UiSettingsFragment 实现）。 */
     interface Host {
         @NonNull
         ConfigStore store();
@@ -75,23 +85,43 @@ final class ConfigKeyRow {
         void notifyUser(String message, boolean error);
     }
 
-    /** 一个输入字段：一个 TextInputEditText 对应值里的一个整数/一段路径文本。 */
+    /**
+     * 一个输入字段：值里的一个整数/一段路径文本，或一个布尔子开关 —— 二者互斥，
+     * 由定义里的 {@code fields[].bool} 决定（见 {@link ConfigStore.FieldMeta#bool}）。
+     */
     private static final class Field {
         final TextInputEditText input;
+        final MaterialSwitch toggle;
 
-        Field(TextInputEditText input) {
+        Field(TextInputEditText input, MaterialSwitch toggle) {
             this.input = input;
+            this.toggle = toggle;
+        }
+
+        /** 该字段当前值；输入框"还没输完"时返回 null（开关永远有完整值）。 */
+        @Nullable
+        Integer value() {
+            if (toggle != null) {
+                return toggle.isChecked() ? 1 : 0;
+            }
+            return parseInt(textOf(input));
+        }
+
+        void setValue(int value) {
+            if (toggle != null) {
+                toggle.setChecked(value != 0);
+            } else {
+                input.setText(String.valueOf(value));
+            }
         }
     }
 
     private final KeyMeta meta;
     private final Host host;
     private final View root;
-    private final View dimContainer;
     private final LinearLayout control;
     private final TextView labelView;
     private final TextView descView;
-    private final TextView badgeView;
     private final TextView noteView;
     private final TextView statusView;
     private final MaterialSwitch toggle;
@@ -102,8 +132,12 @@ final class ConfigKeyRow {
     private boolean suppressChange;
 
     static ConfigKeyRow create(@NonNull LayoutInflater inflater, @NonNull ViewGroup parent,
-                               @NonNull KeyMeta meta, @NonNull Host host) {
+                               @NonNull KeyMeta meta, @NonNull ConfigKeyRow.Host host) {
         View root = inflater.inflate(R.layout.item_config_row, parent, false);
+        if (parent instanceof FlowWrapLayout) {
+            // 开关型键要求"参数名 + 右侧开关"占满一行，否则开关会紧跟在参数名后面、贴不到行尾
+            ((FlowWrapLayout) parent).setFullLine(root, meta.isSwitch());
+        }
         return new ConfigKeyRow(inflater, root, meta, host);
     }
 
@@ -113,11 +147,9 @@ final class ConfigKeyRow {
         this.host = host;
         this.dimAlpha = readDimAlpha(root.getResources());
 
-        dimContainer = root.findViewById(R.id.config_key_dim);
         control = root.findViewById(R.id.config_key_control);
         labelView = root.findViewById(R.id.config_key_label);
         descView = root.findViewById(R.id.config_key_desc);
-        badgeView = root.findViewById(R.id.config_key_badge);
         noteView = root.findViewById(R.id.config_key_note);
         statusView = root.findViewById(R.id.config_key_status);
         toggle = root.findViewById(R.id.config_key_switch);
@@ -128,7 +160,6 @@ final class ConfigKeyRow {
         } else {
             descView.setText(meta.desc);
         }
-        badgeView.setContentDescription(root.getContext().getString(R.string.config_badge_inactive_desc));
 
         List<String> rowNotes = new ArrayList<>();
         if (!meta.daemonConsumes) {
@@ -144,6 +175,7 @@ final class ConfigKeyRow {
         }
 
         if (meta.isSwitch()) {
+            makeLabelFillRow();
             toggle.setVisibility(View.VISIBLE);
             toggle.setOnCheckedChangeListener((button, checked) -> {
                 if (suppressChange) {
@@ -162,14 +194,23 @@ final class ConfigKeyRow {
         return root;
     }
 
+    /**
+     * 开关型键：参数名吃掉整行剩余宽度，把开关顶到行尾（像设置项那样）。
+     *
+     * <p>用 weight 而不是"夹一个占位 Space"：本行是整行独占（{@link FlowWrapLayout} 按行宽
+     * EXACTLY 测量），父容器一定有多余宽度可分，weight 的行为是确定的；wrap_content 的行
+     * 有没有富余则取决于父容器给的测量模式，结果不确定。
+     */
+    private void makeLabelFillRow() {
+        LinearLayout.LayoutParams params = (LinearLayout.LayoutParams) labelView.getLayoutParams();
+        params.width = 0;
+        params.weight = 1f;
+        labelView.setLayoutParams(params);
+    }
+
     @NonNull
     String key() {
         return meta.key;
-    }
-
-    /** 分组容器里第一行不画分隔线（组头和它之间已有分隔线）。 */
-    void setDividerVisible(boolean visible) {
-        root.findViewById(R.id.config_key_divider).setVisibility(visible ? View.VISIBLE : View.GONE);
     }
 
     // ==================== 控件构建 ====================
@@ -181,54 +222,104 @@ final class ConfigKeyRow {
             // inflate 的第三参 false = 不挂到父容器，必须自己 addView：
             // 否则控件被创建、绑好监听后就被丢掉，行内只剩标签没有输入框。
             control.addView(fieldView);
-            if (i > 0) {
-                LinearLayout.LayoutParams params = (LinearLayout.LayoutParams) fieldView.getLayoutParams();
-                params.topMargin = control.getResources().getDimensionPixelSize(R.dimen.space_s);
-                fieldView.setLayoutParams(params);
-            }
-            TextInputLayout layout = fieldView.findViewById(R.id.config_field_layout);
-            TextInputEditText input = fieldView.findViewById(R.id.config_field_input);
-            TextView note = fieldView.findViewById(R.id.config_field_note);
+            // 字段之间的间距由外层流式容器的行距/列距给，本行不再各加一截 topMargin
 
-            String hint;
-            String unit;
-            String unitNote;
-            if (meta.isMulti()) {
-                FieldMeta fieldMeta = meta.fields.get(i);
-                hint = fieldMeta.label;
-                unit = fieldMeta.unit == null ? "" : fieldMeta.unit;
-                // ConfigStore.FieldMeta 没有解析 params.json 的字段级 unitNote，
-                // 界面不自行读 assets（I1/I3 边界），故多值字段只显示 unit 能拿到的部分。
-                unitNote = "";
+            if (isBoolField(i)) {
+                buildBoolField(fieldView, i);
             } else {
-                hint = control.getContext().getString(
-                        meta.isPath() ? R.string.config_hint_path : R.string.config_hint_value);
-                unit = meta.unit;
-                unitNote = meta.unitNote;
+                buildNumberField(fieldView, i);
             }
-            layout.setHint(hint);
-            if (meta.isPath()) {
-                input.setInputType(InputType.TYPE_CLASS_TEXT);
-            }
-            String caption = joinParts(joinParts(unit, rangeText(i)), unitNote);
-            if (caption.isEmpty()) {
-                note.setVisibility(View.GONE);
-            } else {
-                note.setText(caption);
-            }
-
-            input.addTextChangedListener(new Watcher());
-            input.setOnFocusChangeListener((v, hasFocus) -> {
-                if (!hasFocus) {
-                    commit(true);
-                }
-            });
-            input.setOnEditorActionListener((v, actionId, event) -> {
-                v.clearFocus();
-                return true;
-            });
-            fields.add(new Field(input));
         }
+    }
+
+    /** 定义里 {@code fields[i].bool} 为 true 的字段用开关渲染（值只有 0/1）。 */
+    private boolean isBoolField(int index) {
+        return meta.isMulti() && meta.fields.get(index).bool;
+    }
+
+    /** 布尔字段：字段名 + 开关。宽度同样自适应（字段名宽度决定），高度与输入框同一行居中。 */
+    private void buildBoolField(View fieldView, int index) {
+        FieldMeta fieldMeta = meta.fields.get(index);
+        View row = fieldView.findViewById(R.id.config_field_switch_row);
+        row.setVisibility(View.VISIBLE);
+        TextView label = fieldView.findViewById(R.id.config_field_switch_label);
+        label.setText(fieldMeta.label);
+        MaterialSwitch boolSwitch = fieldView.findViewById(R.id.config_field_switch);
+        boolSwitch.setOnCheckedChangeListener((button, checked) -> {
+            if (suppressChange) {
+                return;
+            }
+            commitBoolField();
+        });
+        // 数值字段的输入框与范围说明都不适用：0/1 的"范围 0~1"是噪音
+        fieldView.findViewById(R.id.config_field_layout).setVisibility(View.GONE);
+        fields.add(new Field(null, boolSwitch));
+    }
+
+    /** 数值/路径字段：输入框宽度按内容实测，高度统一 @dimen/field_height。 */
+    private void buildNumberField(View fieldView, int index) {
+        TextInputLayout layout = fieldView.findViewById(R.id.config_field_layout);
+        TextInputEditText input = fieldView.findViewById(R.id.config_field_input);
+        TextView note = fieldView.findViewById(R.id.config_field_note);
+
+        String hint;
+        String unit;
+        String unitNote;
+        if (meta.isMulti()) {
+            FieldMeta fieldMeta = meta.fields.get(index);
+            hint = fieldMeta.label;
+            unit = fieldMeta.unit == null ? "" : fieldMeta.unit;
+            // ConfigStore.FieldMeta 没有解析 params.json 的字段级 unitNote，
+            // 界面不自行读 assets（I1/I3 边界），故多值字段只显示 unit 能拿到的部分。
+            unitNote = "";
+        } else {
+            hint = control.getContext().getString(
+                    meta.isPath() ? R.string.config_hint_path : R.string.config_hint_value);
+            unit = meta.unit;
+            unitNote = meta.unitNote;
+        }
+        layout.setHint(hint);
+        if (meta.isPath()) {
+            input.setInputType(InputType.TYPE_CLASS_TEXT);
+        }
+        String caption = joinParts(joinParts(unit, rangeText(index)), unitNote);
+        if (caption.isEmpty()) {
+            note.setVisibility(View.GONE);
+        } else {
+            note.setText(caption);
+        }
+
+        // 宽度必须在这里定下来：外层流式容器按子视图的 LayoutParams 宽排布，早于首次测量
+        // （此时控件已 inflate、hint 已设，量出来的才是最终宽度）
+        layout.getLayoutParams().width = measureFieldWidth(layout);
+
+        input.addTextChangedListener(new Watcher());
+        input.setOnFocusChangeListener((v, hasFocus) -> {
+            if (!hasFocus) {
+                commit(true);
+            }
+        });
+        input.setOnEditorActionListener((v, actionId, event) -> {
+            v.clearFocus();
+            return true;
+        });
+        fields.add(new Field(input, null));
+    }
+
+    /**
+     * 输入框的自适应宽度：先让控件按 wrap_content 量一次（OutlinedBox 会把 hint 的宽度算进去），
+     * 再钳进 [min, max]。
+     *
+     * <p><b>为什么不按当前值算</b>：值一变宽度就跟着变，边输边跳且越输越宽——旧 WebUI 的
+     * "改参不被撑宽"就是这个意思。宽度只由 hint（字段名）与上下限决定，输入过程中恒定。
+     */
+    private int measureFieldWidth(TextInputLayout layout) {
+        Resources res = layout.getResources();
+        int min = res.getDimensionPixelSize(R.dimen.config_field_min_width);
+        int max = res.getDimensionPixelSize(R.dimen.config_field_max_width);
+        layout.measure(View.MeasureSpec.makeMeasureSpec(max, View.MeasureSpec.AT_MOST),
+                View.MeasureSpec.makeMeasureSpec(0, View.MeasureSpec.UNSPECIFIED));
+        return Math.max(min, Math.min(layout.getMeasuredWidth(), max));
     }
 
     /**
@@ -289,7 +380,7 @@ final class ConfigKeyRow {
                 fields.get(0).input.setText(value.text());
             } else {
                 for (int i = 0; i < fields.size(); i++) {
-                    fields.get(i).input.setText(String.valueOf(value.intAt(i)));
+                    fields.get(i).setValue(value.intAt(i));
                 }
             }
         } finally {
@@ -304,18 +395,32 @@ final class ConfigKeyRow {
      */
     @Nullable
     private Value readInputs() {
+        return readInputs(false);
+    }
+
+    /**
+     * 读控件当前值。
+     *
+     * @param fallbackForUnparsed true 时把"还没输完"的输入框退回当前有效值（再退一步是定义默认值），
+     *                            使布尔开关单独切换也能写出整键；false 时一个字段没输完就整键不写
+     */
+    @Nullable
+    private Value readInputs(boolean fallbackForUnparsed) {
         if (meta.isPath()) {
             String text = textOf(fields.get(0).input).trim();
             return text.isEmpty() ? null : Value.ofText(text);
         }
+        Value current = fallbackForUnparsed ? host.effectiveValue(meta.key) : null;
         int count = fields.size();
         int[] numbers = new int[count];
         for (int i = 0; i < count; i++) {
-            Integer parsed = parseInt(textOf(fields.get(i).input));
-            if (parsed == null) {
+            Integer parsed = fields.get(i).value();
+            if (parsed == null && !fallbackForUnparsed) {
                 return null;
             }
-            numbers[i] = parsed;
+            numbers[i] = parsed != null ? parsed
+                    : (current != null && current.size() > i
+                            ? current.intAt(i) : meta.fields.get(i).defaultValue);
         }
         return Value.ofNumbers(numbers);
     }
@@ -433,6 +538,30 @@ final class ConfigKeyRow {
         host.onPendingChange();
     }
 
+    /**
+     * 布尔子开关的提交：0/1 只有两个完整状态，切换即排入防抖队列（与整键 switch 同语义）。
+     *
+     * <p>写的是整键：同一键里数字字段取输入框当前值，输到一半时回退到当前有效值，
+     * 绝不把"没输完"当成 0 写下去。
+     */
+    private void commitBoolField() {
+        if (suppressChange || meta.isPath()) {
+            return;
+        }
+        Value raw = readInputs(true);
+        if (raw == null) {
+            return;
+        }
+        Value ui = host.store().assess(meta.key, raw).uiValue;
+        Value onDisk = host.diskValue(meta.key);
+        if (onDisk != null && ui.equals(onDisk)) {
+            host.queue().cancel(meta.key);
+        } else {
+            host.queue().schedule(meta.key, ui);
+        }
+        host.onPendingChange();
+    }
+
     /** 开关的提交：0/1 只有两个完整状态，切换即排入防抖队列。 */
     static void commitSwitch(@NonNull MaterialSwitch toggle, @NonNull KeyMeta meta,
                              @NonNull Host host) {
@@ -452,49 +581,32 @@ final class ConfigKeyRow {
         host.onPendingChange();
     }
 
-    // ==================== 依赖徽标 ====================
+    // ==================== 依赖状态 ====================
 
     /**
-     * 依 {@code requires} 刷新"未生效"徽标与压暗。
+     * 依 {@code requires} 压暗本行。
      *
      * <p>依赖键名取自 {@link KeyMeta#requires}，本类不硬编码任何键名；任一依赖键当前值
      * （取整数值，文件缺失时用定义默认值）为 0 即视为未生效。
+     * "未生效"的徽标由 {@link ConfigGroupBinder} 在分组卡头显示一次，故本方法只压暗并回报状态。
+     *
+     * @return true 表示本行当前未生效（供分组卡头汇总）
      */
-    void refreshDependencyState() {
+    boolean refreshDependencyState() {
         boolean unsatisfied = false;
-        List<String> missing = new ArrayList<>();
         for (String dependency : meta.requires) {
             Value value = host.effectiveValue(dependency);
             if (value == null || value.intAt(0) == 0) {
-                missing.add(dependency);
                 unsatisfied = true;
+                break;
             }
         }
-        badgeView.setVisibility(unsatisfied ? View.VISIBLE : View.GONE);
         float alpha = unsatisfied ? dimAlpha : 1f;
-        dimContainer.setAlpha(alpha);
+        labelView.setAlpha(alpha);
+        descView.setAlpha(alpha);
         control.setAlpha(alpha);
         noteView.setAlpha(alpha);
-        if (unsatisfied) {
-            badgeView.setContentDescription(
-                    control.getContext().getString(R.string.config_badge_inactive_desc)
-                            + "：" + describeMissing(missing));
-        } else {
-            badgeView.setContentDescription(
-                    control.getContext().getString(R.string.config_badge_inactive_desc));
-        }
-    }
-
-    private String describeMissing(List<String> missing) {
-        StringBuilder sb = new StringBuilder();
-        for (int i = 0; i < missing.size(); i++) {
-            if (i > 0) {
-                sb.append("、");
-            }
-            KeyMeta dependency = host.store().key(missing.get(i));
-            sb.append(dependency == null ? missing.get(i) : dependency.label);
-        }
-        return sb.toString();
+        return unsatisfied;
     }
 
     // ==================== 状态文字 ====================

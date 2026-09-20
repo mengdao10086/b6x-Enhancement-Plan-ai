@@ -52,9 +52,7 @@
     <color name="chart_series_cpu">#B57A00</color>
     <color name="chart_series_rpm">#6A1B9A</color>
     <color name="chart_series_cool">#2E7D32</color>
-    <color name="chart_grid">#DDE3E4</color>
     <color name="chart_axis">#8A9295</color>
-    <color name="chart_bg">#FFFFFF</color>
 
     <!-- ===== 日志分级（D3 用） ===== -->
     <color name="log_level_debug">#6B7275</color>

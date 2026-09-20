@@ -1,80 +1,61 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!--
     一个配置键的行。四种 type（switch / int / multi / path）共用本布局：
-      switch 用 config_key_switch（在标题行右侧，像设置项）
-      int / multi / path 用 config_key_control（下方，由 ConfigKeyRow 按字段数填 item_config_field）
-      "未生效"徽标在标题行右侧；压暗只压 dim/control/note，徽标与控件保持可读可操作
+      第一行 = 参数名 + 输入框（或在右侧的开关），行内垂直居中；多值键的多个输入框放在
+      config_key_control（流式容器）里，一行放不下时在行内自行换行。
+      desc / 单位说明 / 状态文字放第一行下方，宽度 wrap_content：
+      它们短时本行的盒子就窄，能与其它键并排；长时自然占满一整行。
+      switch 键整行独占（由 ConfigKeyRow 向 FlowWrapLayout 声明），开关贴行尾。
+      "未生效"的标注在分组卡头做一次（见 item_config_group），行内只压暗不重复标注。
 -->
 <LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
-    android:layout_width="match_parent"
+    android:layout_width="wrap_content"
     android:layout_height="wrap_content"
     android:orientation="vertical">
 
-    <View
-        android:id="@+id/config_key_divider"
-        android:layout_width="match_parent"
-        android:layout_height="@dimen/divider_height"
-        android:background="@color/app_outline_variant" />
-
     <LinearLayout
-        android:layout_width="match_parent"
+        android:id="@+id/config_key_line"
+        android:layout_width="wrap_content"
         android:layout_height="wrap_content"
         android:gravity="center_vertical"
-        android:minHeight="@dimen/row_min_height"
-        android:orientation="horizontal"
-        android:paddingTop="@dimen/space_s"
-        android:paddingBottom="@dimen/space_s">
-
-        <LinearLayout
-            android:id="@+id/config_key_dim"
-            android:layout_width="0dp"
-            android:layout_height="wrap_content"
-            android:layout_weight="1"
-            android:orientation="vertical">
-
-            <TextView
-                android:id="@+id/config_key_label"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:textColor="@color/app_on_surface"
-                android:textSize="@dimen/text_body" />
-
-            <TextView
-                android:id="@+id/config_key_desc"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:layout_marginTop="@dimen/space_xs"
-                android:textAppearance="@style/TextAppearance.B6XTempCtrl.Caption"
-                android:visibility="gone" />
-        </LinearLayout>
+        android:orientation="horizontal">
 
         <TextView
-            android:id="@+id/config_key_badge"
-            style="@style/Widget.B6XTempCtrl.Badge"
+            android:id="@+id/config_key_label"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:textColor="@color/app_on_surface"
+            android:textSize="@dimen/text_body" />
+
+        <com.example.waspwingtempctrl.ui.FlowWrapLayout
+            android:id="@+id/config_key_control"
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
             android:layout_marginStart="@dimen/space_s"
-            android:text="@string/config_badge_inactive"
             android:visibility="gone" />
 
         <com.google.android.material.materialswitch.MaterialSwitch
             android:id="@+id/config_key_switch"
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
-            android:layout_marginStart="@dimen/space_s"
+            android:layout_marginStart="@dimen/space_xs"
+            android:layout_marginEnd="@dimen/switch_trim_end"
+            android:scaleX="0.75"
+            android:scaleY="0.75"
             android:visibility="gone" />
     </LinearLayout>
 
-    <LinearLayout
-        android:id="@+id/config_key_control"
-        android:layout_width="match_parent"
+    <TextView
+        android:id="@+id/config_key_desc"
+        android:layout_width="wrap_content"
         android:layout_height="wrap_content"
-        android:orientation="vertical"
+        android:layout_marginTop="@dimen/space_xs"
+        android:textAppearance="@style/TextAppearance.B6XTempCtrl.Caption"
         android:visibility="gone" />
 
     <TextView
         android:id="@+id/config_key_note"
-        android:layout_width="match_parent"
+        android:layout_width="wrap_content"
         android:layout_height="wrap_content"
         android:layout_marginTop="@dimen/space_xs"
         android:textAppearance="@style/TextAppearance.B6XTempCtrl.Caption"
@@ -82,7 +63,7 @@
 
     <TextView
         android:id="@+id/config_key_status"
-        android:layout_width="match_parent"
+        android:layout_width="wrap_content"
         android:layout_height="wrap_content"
         android:layout_marginTop="@dimen/space_xs"
         android:layout_marginBottom="@dimen/space_xs"

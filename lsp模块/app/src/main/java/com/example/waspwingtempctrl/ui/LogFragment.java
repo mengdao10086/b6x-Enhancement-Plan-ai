@@ -58,7 +58,7 @@ public class LogFragment extends Fragment {
     private LogListAdapter adapter;
     private TextView infoView;
     private TextView countView;
-    private TextView tailView;
+    private TextView statView;
     private TextView emptyView;
     private TextView failureView;
     private View failureScroll;
@@ -116,7 +116,7 @@ public class LogFragment extends Fragment {
         listView = view.findViewById(R.id.log_list);
         infoView = view.findViewById(R.id.log_info_text);
         countView = view.findViewById(R.id.log_count_text);
-        tailView = view.findViewById(R.id.log_tail_text);
+        statView = view.findViewById(R.id.log_stat_text);
         emptyView = view.findViewById(R.id.log_empty_text);
         failureView = view.findViewById(R.id.log_failure_text);
         failureScroll = view.findViewById(R.id.log_failure_scroll);
@@ -128,6 +128,8 @@ public class LogFragment extends Fragment {
         // 日志行不做增删动画：整批替换时动画只会变成闪烁
         listView.setItemAnimator(null);
         listView.setAdapter(adapter);
+        // 滚动条常显 + 加粗（见 fragment_log.xml），这里才接得上"按住滚动条拖动"
+        ScrollbarDrag.attach(listView);
         listView.addOnScrollListener(new RecyclerView.OnScrollListener() {
             @Override
             public void onScrolled(@NonNull RecyclerView rv, int dx, int dy) {
@@ -163,6 +165,7 @@ public class LogFragment extends Fragment {
         });
 
         infoView.setText(R.string.log_loading);
+        statView.setText(R.string.log_loading);
         countView.setText("");
         lastFollowCount = -1;
     }
@@ -205,7 +208,7 @@ public class LogFragment extends Fragment {
         adapter = null;
         infoView = null;
         countView = null;
-        tailView = null;
+        statView = null;
         emptyView = null;
         failureView = null;
         failureScroll = null;
@@ -319,7 +322,7 @@ public class LogFragment extends Fragment {
             return;
         }
         infoView.setText(buildInfoText(snap));
-        tailView.setText(buildTailText(snap));
+        statView.setText(buildStatText(snap));
         updateCountView(snap, keyword);
 
         if (!snap.ok) {
@@ -366,7 +369,7 @@ public class LogFragment extends Fragment {
         followButton.setVisibility(show ? View.VISIBLE : View.GONE);
     }
 
-    /** 顶部信息条：路径 / 修改时间（诊断的一部分）。 */
+    /** 信息条首行：路径 / 修改时间（诊断的一部分）。 */
     private String buildInfoText(LogTailReader.Snapshot snap) {
         AppFiles.Probe p = snap.probe;
         if (p == null) {
@@ -379,23 +382,24 @@ public class LogFragment extends Fragment {
     }
 
     /**
-     * 底部统计行：已读取行数 / 渲染上限行数，文件大小 / 尾读上限。
+     * 统计行（同在「日志文件」卡里，紧跟路径/修改时间）：已读取行数 / 渲染上限行数，
+     * 文件大小 / 尾读上限。
      * 行数取参与匹配的最近 N 行（{@link LogTailReader.Snapshot#candidateLines}），
      * 大小取文件字节数（超过上限即说明尾读被截断）。
      */
-    private String buildTailText(LogTailReader.Snapshot snap) {
+    private String buildStatText(LogTailReader.Snapshot snap) {
         AppFiles.Probe p = snap.probe;
         if (p == null) {
             return getString(R.string.log_loading);
         }
         if (!snap.ok) {
-            return getString(R.string.log_tail_failed);
+            return getString(R.string.log_stat_failed);
         }
-        return getString(R.string.log_tail_fmt, snap.candidateLines, LogTailReader.MAX_LINES,
+        return getString(R.string.log_stat_fmt, snap.candidateLines, LogTailReader.MAX_LINES,
                 formatK(p.size), formatK(LogTailReader.TAIL_BYTES));
     }
 
-    /** 命中计数只在有关键词时才有意义；无关键词时行数信息统一在底部统计行。 */
+    /** 命中计数只在有关键词时才有意义；无关键词时行数信息统一在「日志文件」卡的统计行。 */
     private void updateCountView(LogTailReader.Snapshot snap, String keyword) {
         boolean filtered = snap.ok && !keyword.isEmpty();
         countView.setVisibility(filtered ? View.VISIBLE : View.GONE);

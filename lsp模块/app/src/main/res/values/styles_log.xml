@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    日志页专属样式。主题样式在 themes.xml（那份不许改），这里只放本页控件自己的形状。
+-->
+<resources>
+
+    <!--
+        正圆角。cornerFamily 写死 rounded，不跟随 theme 的 shapeCornerFamily，
+        否则主题若把圆角族改成 cut，50% 会变成菱形角。
+    -->
+    <style name="ShapeAppearance.B6XTempCtrl.Circle" parent="">
+        <item name="cornerFamily">rounded</item>
+        <item name="cornerSize">50%</item>
+    </style>
+
+    <!--
+        「回到底部」按钮。原样式 Widget.Material3.Button.IconButton.Filled 的圆角本就是 50%
+        （ShapeAppearance.M3.Sys.Shape.Corner.Full），但左右各带 4dp inset（m3_btn_inset），
+        画出的背景比控件窄 → 实测是椭圆/胶囊而不是正圆。这里显式覆盖圆角，
+        宽高与四边 inset 由布局写死（fragment_log.xml），凑齐才是正圆。
+    -->
+    <style name="Widget.B6XTempCtrl.Button.IconButton.Filled"
+        parent="Widget.Material3.Button.IconButton.Filled">
+        <item name="shapeAppearanceOverlay">@style/ShapeAppearance.B6XTempCtrl.Circle</item>
+    </style>
+
+</resources>

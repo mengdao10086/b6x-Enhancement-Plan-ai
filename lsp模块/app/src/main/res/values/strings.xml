@@ -1,7 +1,9 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!-- 界面外壳（SetupActivity / StatusFragment）的文案。三个界面子 agent 各自维护自己的 strings_*.xml。 -->
 <resources>
-    <string name="title_setup">b6x温控增强</string>
+    <string name="title_setup">飞智温控增强</string>
+    <!-- 标题栏右侧设置按钮（点开为「[4] 界面」那组界面参数） -->
+    <string name="action_settings">设置</string>
 
     <string name="tab_status">状态</string>
     <string name="tab_config">配置</string>

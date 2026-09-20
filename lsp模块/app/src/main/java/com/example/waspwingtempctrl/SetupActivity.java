@@ -1,9 +1,11 @@
 package com.example.waspwingtempctrl;
 
+import android.content.Intent;
 import android.os.Bundle;
 import android.view.GestureDetector;
 import android.view.MotionEvent;
 import android.view.View;
+import android.view.animation.DecelerateInterpolator;
 import android.widget.FrameLayout;
 
 import androidx.annotation.NonNull;
@@ -16,47 +18,62 @@ import androidx.fragment.app.FragmentTransaction;
 import com.example.waspwingtempctrl.ui.ConfigFormFragment;
 import com.example.waspwingtempctrl.ui.LogFragment;
 import com.example.waspwingtempctrl.ui.StatusFragment;
-import com.google.android.material.tabs.TabLayout;
+import com.google.android.material.bottomnavigation.BottomNavigationView;
 
 /**
- * 应用外壳：工具栏 + 三个页签（状态 / 配置 · 曲线 / 日志）+ 页面容器。
+ * 应用外壳：标题栏（标题 + 右侧设置按钮）+ 页面容器 + 底部页签栏（状态 / 配置 · 曲线 / 日志）。
  *
  * <p>本类<b>不含任何业务</b>：部署动作在 {@link StatusFragment}（I5 边界在那里），配置与曲线
- * 在 {@code ConfigFormFragment}（曲线是它的子 Fragment），日志在 {@code LogFragment}。
+ * 在 {@code ConfigFormFragment}（曲线是它的子 Fragment），日志在 {@code LogFragment}，
+ * 界面参数（原「[4] 界面」组）在 {@link SettingsActivity}。
  *
- * <p><b>为什么在 onCreate 里 setTheme</b>：{@code AndroidManifest.xml} 本轮冻结、不许加
- * {@code android:theme}，而 {@link AppCompatActivity} 要求 AppCompat/Material 主题。故在
- * {@code super.onCreate()} 之前手动应用 {@code R.style.Theme_B6XTempCtrl}。
- * 代价：onCreate 之前的一瞬仍是系统默认窗口背景（无碍）。
+ * <p><b>为什么在 onCreate 里 setTheme</b>：{@code AndroidManifest.xml} 无 {@code android:theme}，
+ * 而 {@link AppCompatActivity} 要求 AppCompat/Material 主题。故在 {@code super.onCreate()}
+ * 之前手动应用 {@code R.style.Theme_B6XTempCtrl}。代价：onCreate 之前的一瞬仍是系统默认窗口背景（无碍）。
  *
- * <p><b>页签数量与顺序必须与 {@link #TAGS} 一一对应</b>（同为 3 个、同序），声明在
- * {@code activity_setup.xml}。不一致会让选中态页签与要挂的页面错位：页签被 TabLayout 自动
- * 选中后，对它再 {@code select()} 只派发 {@code onTabReselected}（{@code onTabSelected}
- * 不来），页面可能一直不挂载——首屏空白正是这么来的。
+ * <p><b>页签数量与顺序必须与 {@link #TAGS} / {@link #MENU_IDS} 一一对应</b>（同为 3 个、同序），
+ * 菜单顺序声明在 {@code res/menu/menu_bottom.xml}。不一致会让选中项与要挂的页面错位：底栏的
+ * 首项在布局里就被自动选中，对它再 {@code setSelectedItemId()} 不会派发选中回调，
+ * 页面可能一直不挂载——首屏空白正是这么来的。
  *
  * <p><b>切页</b>：add/hide/show（不用 ViewPager、不引 Navigation 组件）——
  * <b>被隐藏的 Fragment 生命周期仍是 RESUMED</b>，故页面若要起定时器/重绘，必须实现
  * {@code onHiddenChanged()} 并在其中停启；曲线区（配置页的子 Fragment）另由配置页转达。
  * 页签点击与左右滑动都汇到 {@link #selectPage(int)}；横向滑动用 {@link GestureDetector}
  * 在触摸分发链上旁路观察，<b>不消费事件</b>，不影响列表/滚动视图自己的滑动。
+ *
+ * <p><b>切页转场</b>：{@link #animateIn} 手写（Fragment 自带的 {@code setCustomAnimations}
+ * 对 hide/show 无效，理由见该方法注释）。
  */
 public class SetupActivity extends AppCompatActivity {
 
     private static final String KEY_TAB = "ww_selected_tab";
 
     /**
-     * 页签与页面一一对应，顺序必须与 {@code activity_setup.xml} 的 TabItem 顺序一致。
+     * 页签与页面一一对应，顺序必须与 {@code res/menu/menu_bottom.xml} 的菜单项顺序一致。
      */
     private static final String[] TAGS = {"status", "config", "log"};
+
+    /** 底栏菜单项 id，顺序与 {@link #TAGS} 一一对应。 */
+    private static final int[] MENU_IDS = {R.id.tab_status, R.id.tab_config, R.id.tab_log};
 
     /** 认定一次左右滑的最小横向位移（dp）。 */
     private static final int SWIPE_MIN_DP = 24;
 
-    private TabLayout tabs;
+    /** 切页转场时长（ms）。 */
+    private static final long PAGE_ANIM_MS = 180L;
+
+    /** 转场位移量占页面宽度的比例。 */
+    private static final float PAGE_ANIM_SHIFT = 0.25f;
+
+    private BottomNavigationView nav;
     private FrameLayout pageContainer;
     private GestureDetector gestures;
 
-    /** 本次手势是否起始于页面容器内（工具栏/页签上的滑动不算切页）。 */
+    /** 当前页序号（-1 = 尚未挂过任何页）：滑动切页的起点与转场方向都取它。 */
+    private int currentIndex = -1;
+
+    /** 本次手势是否起始于页面容器内（标题栏/底栏上的滑动不算切页）。 */
     private boolean swipeInPage;
     /** 横向滑动的判定阈值（px），按 density 换算。 */
     private float swipeMinPx;
@@ -71,27 +88,22 @@ public class SetupActivity extends AppCompatActivity {
         setContentView(R.layout.activity_setup);
 
         pageContainer = findViewById(R.id.page_container);
-        tabs = findViewById(R.id.tab_layout);
+        nav = findViewById(R.id.bottom_nav);
         swipeMinPx = SWIPE_MIN_DP * getResources().getDisplayMetrics().density;
         gestures = new GestureDetector(this, new SwipeListener());
 
-        tabs.addOnTabSelectedListener(new TabLayout.OnTabSelectedListener() {
-            @Override
-            public void onTabSelected(TabLayout.Tab tab) {
-                showPage(tab.getPosition());
-            }
-
-            @Override
-            public void onTabUnselected(TabLayout.Tab tab) {
-            }
-
-            @Override
-            public void onTabReselected(TabLayout.Tab tab) {
-                // 首个页签在布局里就被 TabLayout 自动选中，此后对它 select() 只会走到这里
-                // （onTabSelected 不来）；showPage 幂等，这里兜一次，避免"页签选中但页面没挂上"。
-                showPage(tab.getPosition());
-            }
+        nav.setOnItemSelectedListener(item -> {
+            showPage(indexOf(item.getItemId()));
+            return true;
         });
+        nav.setOnItemReselectedListener(item -> {
+            // 首项在布局里就被自动选中，之后点它只走到这里；showPage 幂等，兜一次避免"选中但没挂上"。
+            showPage(indexOf(item.getItemId()));
+        });
+
+        // 界面参数（原「[4] 界面」组）的入口：标题栏右侧设置按钮
+        findViewById(R.id.action_settings).setOnClickListener(v ->
+                startActivity(new Intent(this, SettingsActivity.class)));
 
         int index = savedInstanceState == null ? 0 : savedInstanceState.getInt(KEY_TAB, 0);
         final int initial = index < 0 || index >= TAGS.length ? 0 : index;
@@ -107,23 +119,32 @@ public class SetupActivity extends AppCompatActivity {
     @Override
     protected void onSaveInstanceState(@NonNull Bundle outState) {
         super.onSaveInstanceState(outState);
-        if (tabs != null) {
-            outState.putInt(KEY_TAB, tabs.getSelectedTabPosition());
+        if (nav != null) {
+            outState.putInt(KEY_TAB, Math.max(0, indexOf(nav.getSelectedItemId())));
         }
     }
 
     // ==================== 页签 ====================
 
-    /** 切到第 {@code index} 页并同步页签（页签点击与滑动切页共用）。 */
+    /** 菜单项 id → 页序号；不属于本菜单时返回 -1。 */
+    private static int indexOf(int itemId) {
+        for (int i = 0; i < MENU_IDS.length; i++) {
+            if (MENU_IDS[i] == itemId) {
+                return i;
+            }
+        }
+        return -1;
+    }
+
+    /** 切到第 {@code index} 页并同步底栏选中项（底栏点击与滑动切页共用）。 */
     private void selectPage(int index) {
         if (index < 0 || index >= TAGS.length) {
             return;
         }
-        TabLayout.Tab tab = tabs.getTabAt(index);
-        if (tab != null && !tab.isSelected()) {
-            tab.select();   // 触发 onTabSelected → showPage(index)
+        if (nav != null && nav.getSelectedItemId() != MENU_IDS[index]) {
+            nav.setSelectedItemId(MENU_IDS[index]);   // 触发选中回调 → showPage(index)
         }
-        // 页签已在选中态时 select() 不会回调 onTabSelected（首个页签就是这样）：
+        // 该项已在选中态时 setSelectedItemId 不派发选中回调（首项就是这样）：
         // 故这里必须自己兜底提交一次；showPage 幂等，重复调用无副作用。
         showPage(index);
     }
@@ -151,7 +172,10 @@ public class SetupActivity extends AppCompatActivity {
                 tx.hide(existing);
             }
         }
+        final int from = currentIndex;
         commitNow(tx);
+        currentIndex = index;
+        animateIn(target, from, index);
     }
 
     /**
@@ -177,6 +201,42 @@ public class SetupActivity extends AppCompatActivity {
             default:
                 return new LogFragment();
         }
+    }
+
+    // ==================== 切页转场 ====================
+
+    /**
+     * 手写转场：新页从切换方向平移 1/4 屏宽并淡入（约 180ms）。
+     *
+     * <p><b>为什么不用 Fragment 自带动画</b>：{@code setCustomAnimations} 的文档与源码只覆盖
+     * add/attach（进入）与 remove/detach（退出），参数说明写的就是"being added or attached"
+     * 与"being removed or detached"；hide/show 路径只做 {@code mView.setVisibility}。
+     * 本外壳是 add/hide/show 结构 ⇒ 自带动画不会生效。
+     *
+     * <p>只动进入页：旧页被新页整屏盖住，它被瞬时隐藏看不出来。
+     * 首屏（{@code from < 0}）不做转场——冷启动让它直接出现，免得"开屏先飘一下"。
+     *
+     * @param target 刚显示的那一页（{@code commitNow} 之后其视图已就位）
+     * @param from   切换前的页序号（-1 = 首屏）
+     * @param to     切换后的页序号
+     */
+    private void animateIn(Fragment target, int from, int to) {
+        if (from < 0 || from == to) {
+            return;
+        }
+        View view = target == null ? null : target.getView();
+        if (view == null) {
+            return;
+        }
+        float shift = pageContainer.getWidth() * PAGE_ANIM_SHIFT * (to > from ? 1f : -1f);
+        view.setAlpha(0f);
+        view.setTranslationX(shift);
+        view.animate()
+                .alpha(1f)
+                .translationX(0f)
+                .setDuration(PAGE_ANIM_MS)
+                .setInterpolator(new DecelerateInterpolator())
+                .start();
     }
 
     // ==================== 左右滑切页 ====================
@@ -229,7 +289,7 @@ public class SetupActivity extends AppCompatActivity {
             if (Math.abs(dx) < swipeMinPx || Math.abs(dx) < Math.abs(dy) * 1.5f) {
                 return false;
             }
-            int current = tabs == null ? 0 : tabs.getSelectedTabPosition();
+            int current = currentIndex < 0 ? 0 : currentIndex;
             selectPage(dx < 0f ? current + 1 : current - 1);
             return true;
         }

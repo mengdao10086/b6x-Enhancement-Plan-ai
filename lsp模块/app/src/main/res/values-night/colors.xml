@@ -47,9 +47,7 @@
     <color name="chart_series_cpu">#FFC46B</color>
     <color name="chart_series_rpm">#CE93D8</color>
     <color name="chart_series_cool">#81C784</color>
-    <color name="chart_grid">#2A3133</color>
     <color name="chart_axis">#9AA2A5</color>
-    <color name="chart_bg">#121A1C</color>
 
     <!-- ===== 日志分级 ===== -->
     <color name="log_level_debug">#9AA2A5</color>

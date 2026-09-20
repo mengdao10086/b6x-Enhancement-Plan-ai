@@ -1,0 +1,52 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    设置页外壳（SettingsActivity）：标题栏 + 页面容器。
+    标题栏几何与外壳（activity_setup.xml）逐项对齐：@dimen/title_pad_top + 标题行高（TitleLarge 约 28dp）
+    + @dimen/space_l ≈ 51dp；标题字号取同一主题属性，故两页标题逐像素同位同大。
+    返回按钮 28dp（@dimen/title_action_size）：与标题同一行的行高约束下的最大值。
+    页面内容由 UiSettingsFragment 挂进 settings_container，本文件不承载任何页面业务。
+-->
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:background="?attr/colorSurface"
+    android:fitsSystemWindows="true"
+    android:orientation="vertical">
+
+    <!-- ===== 标题栏（返回 + 标题） ===== -->
+    <LinearLayout
+        android:id="@+id/settings_header"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:gravity="center_vertical"
+        android:orientation="horizontal"
+        android:paddingStart="@dimen/space_l"
+        android:paddingTop="@dimen/title_pad_top"
+        android:paddingEnd="@dimen/space_l"
+        android:paddingBottom="@dimen/space_l">
+
+        <ImageButton
+            android:id="@+id/settings_back"
+            android:layout_width="@dimen/title_action_size"
+            android:layout_height="@dimen/title_action_size"
+            android:background="?attr/selectableItemBackgroundBorderless"
+            android:contentDescription="@string/config_back_desc"
+            android:scaleType="centerInside"
+            android:src="@drawable/ic_arrow_back"
+            app:tint="?attr/colorOnSurfaceVariant" />
+
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginStart="@dimen/space_s"
+            android:text="@string/action_settings"
+            android:textAppearance="?attr/textAppearanceTitleLarge" />
+    </LinearLayout>
+
+    <FrameLayout
+        android:id="@+id/settings_container"
+        android:layout_width="match_parent"
+        android:layout_height="0dp"
+        android:layout_weight="1" />
+</LinearLayout>

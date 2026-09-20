@@ -9,8 +9,6 @@ import android.view.LayoutInflater;
 import android.view.View;
 import android.view.ViewGroup;
 import android.widget.CheckBox;
-import android.widget.FrameLayout;
-import android.widget.LinearLayout;
 import android.widget.ScrollView;
 import android.widget.TextView;
 
@@ -29,6 +27,11 @@ import java.util.Locale;
 
 /**
  * 曲线区：档位选择 + 图例 + 自绘画布 + 失败可诊断。
+ *
+ * <p><b>布局</b>：档位行、图例（3 列、放满一行向下换行）与画布同处一张卡内，全部按自然尺寸排布——
+ * 不整体缩放、也不改写容器高度（原「超宽时整块缩放到 0.5 并覆写裁切框高度」的做法会把图例裁掉、
+ * 高度塌成一条）。画布高度由 {@code fragment_chart.xml} 的固定尺寸给出（本区在配置页的
+ * {@code ScrollView} 里，{@code layout_weight} 会被量成 0，不能用）。
  *
  * <p><b>现在是配置页（{@code ConfigFormFragment}）的子 Fragment</b>（合并成「配置 · 曲线」一页，
  * 页签由 4 个减为 3 个），本类不再由 {@code SetupActivity} 直接挂载。因此：
@@ -62,18 +65,11 @@ public class ChartFragment extends Fragment {
     /** 自动刷新间隔（C 端 write_webui_data 约 1s 一行）。 */
     private static final long REFRESH_INTERVAL_MS = 1000L;
 
-    /** 整块控件行缩放时的可用宽余量（原实现 0.96，即 4% 缓冲）。 */
-    private static final float FIT_LIMIT_RATIO = 0.96f;
-
-    /** 缩放下限（原实现 max(0.5, fitLimit/total)）。 */
-    private static final float MIN_SCALE = 0.5f;
-
     private ChartView chartView;
     private ScrollView failureScroll;
     private TextView failureText;
-    private FrameLayout toolsClip;
-    private LinearLayout toolsRow;
-    private LinearLayout legendRow;
+    /** 图例容器（布局里是 3 列的 GridLayout）。 */
+    private ViewGroup legendRow;
     private MaterialButtonToggleGroup windowGroup;
 
     private final Handler mainHandler = new Handler(Looper.getMainLooper());
@@ -99,7 +95,6 @@ public class ChartFragment extends Fragment {
     private boolean lastOk;
     private int lastBreaks;
     private int lastBreakSeconds;
-    private int lastToolsWidth = -1;
 
     private final Runnable tick = new Runnable() {
         @Override
@@ -127,10 +122,11 @@ public class ChartFragment extends Fragment {
         chartView = view.findViewById(R.id.chart_view);
         failureScroll = view.findViewById(R.id.chart_failure_scroll);
         failureText = view.findViewById(R.id.chart_failure_text);
-        toolsClip = view.findViewById(R.id.chart_tools_clip);
-        toolsRow = view.findViewById(R.id.chart_tools_row);
         legendRow = view.findViewById(R.id.chart_legend_row);
         windowGroup = view.findViewById(R.id.chart_window_group);
+
+        // 失败诊断可按住滚动条拖动（滚动条常显，见布局）
+        ScrollbarDrag.attach(failureScroll);
 
         dataFile = AppFiles.dataFile(context);
 
@@ -151,15 +147,6 @@ public class ChartFragment extends Fragment {
             }
             windowSec = sec;
             rebuildWindow();
-            fitToolsRow();
-        });
-        // 控件行宽度变化（首次布局 / 旋转）后重算整体缩放；宽度没变就跳过，避免布局回环
-        toolsClip.addOnLayoutChangeListener((v, l, t, r, b, ol, ot, or, ob) -> {
-            int w = r - l;
-            if (w != lastToolsWidth) {
-                lastToolsWidth = w;
-                fitToolsRow();
-            }
         });
     }
 
@@ -235,8 +222,6 @@ public class ChartFragment extends Fragment {
         chartView = null;
         failureScroll = null;
         failureText = null;
-        toolsClip = null;
-        toolsRow = null;
         legendRow = null;
         windowGroup = null;
         super.onDestroyView();
@@ -382,7 +367,10 @@ public class ChartFragment extends Fragment {
 
     // ==================== 控件构建 ====================
 
-    /** 图例：6 条曲线，默认开关照 {@code 逻辑说明.md} 的「曲线」一节〈系列开关〉；勾选框着色 = 该曲线的 chart_series_* 色。 */
+    /**
+     * 图例：6 条曲线，默认开关照 {@code 逻辑说明.md} 的「曲线」一节〈系列开关〉；勾选框着色 = 该曲线的
+     * chart_series_* 色。容器是 3 列的 GridLayout：第 4 项起自动换到第二行，窄屏也不会被裁。
+     */
     private void buildLegend() {
         LayoutInflater inflater = LayoutInflater.from(requireContext());
         legendRow.removeAllViews();
@@ -422,7 +410,6 @@ public class ChartFragment extends Fragment {
                 break;
             }
         }
-        fitToolsRow();
     }
 
     private static boolean containsOption(ChartConfig cfg, int sec) {
@@ -432,42 +419,6 @@ public class ChartFragment extends Fragment {
             }
         }
         return false;
-    }
-
-    /**
-     * 档位 + 图例整块等比缩放（口径清单 §7）：量出自然宽，超过可用宽 × 0.96 时整块
-     * {@code setScaleX/Y}（pivot 左上）。最小 0.5，不做复位按钮。
-     */
-    private void fitToolsRow() {
-        if (toolsRow == null || toolsClip == null) {
-            return;
-        }
-        int avail = toolsClip.getWidth() - toolsClip.getPaddingLeft() - toolsClip.getPaddingRight();
-        if (avail <= 0) {
-            return;
-        }
-        toolsRow.setScaleX(1f);
-        toolsRow.setScaleY(1f);
-        int spec = View.MeasureSpec.makeMeasureSpec(0, View.MeasureSpec.UNSPECIFIED);
-        toolsRow.measure(spec, spec);
-        int total = toolsRow.getMeasuredWidth();
-        int naturalH = toolsRow.getMeasuredHeight();
-        if (total <= 0 || naturalH <= 0) {
-            return;
-        }
-        float fitLimit = avail * FIT_LIMIT_RATIO;
-        float z = total > fitLimit ? Math.max(MIN_SCALE, fitLimit / total) : 1f;
-        toolsRow.setPivotX(0f);
-        toolsRow.setPivotY(0f);
-        toolsRow.setScaleX(z);
-        toolsRow.setScaleY(z);
-        // 容器高度跟着缩放后的实际高度走，否则底部留一片空白
-        int wantH = Math.max(1, Math.round(naturalH * z));
-        ViewGroup.LayoutParams lp = toolsClip.getLayoutParams();
-        if (lp != null && lp.height != wantH) {
-            lp.height = wantH;
-            toolsClip.setLayoutParams(lp);
-        }
     }
 
     private static final SimpleDateFormat TIME_FMT =

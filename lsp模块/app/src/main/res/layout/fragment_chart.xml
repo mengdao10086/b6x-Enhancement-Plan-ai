@@ -1,12 +1,18 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!--
     曲线区（合并进配置页，挂在 fragment_config.xml 的 config_chart_container 下）。
-    两段：档位 + 图例控件行（整块等比缩放，见 ChartFragment#fitToolsRow）→ 曲线画布。
-    读取失败时不进画布，把 AppFiles.diagnose() 原文铺在曲线区，绝不静默留白。
+    按要求「曲线/时间/图例/数据展示在视觉上不要分窗口」：本区只用一张卡，卡内自上而下三段——
+      ① 时间窗口档位按钮 → ② 图例 6 项（3 列，装不下向下换行）→ ③ 曲线画布。
+    三段一律按自然尺寸排布：不做任何缩放，也不改写容器高度（原「整块缩放到 0.5 并覆写
+    chart_tools_clip 高度」的做法已删，见 ChartFragment）。
+    卡内不出现第二块底色/描边/圆角：画布自身不铺底色，与卡片底色连成一片（见 ChartView#onDraw）。
 
+    高度一律不许用 weight（本区在配置页的 ScrollView 里，weight 会被量成 0），
+    故画布高度取固定值 @dimen/chart_canvas_height（取值依据见 dimens_chart.xml）。
+
+    读取失败时不进画布，把 AppFiles.diagnose() 原文铺在曲线区，绝不静默留白。
     原独立成页时的顶部「数据文件」信息条与页面内边距已移走：信息条并入配置页「诊断信息」
     头部（ChartFragment 经 ChartFragment.Host 回调交给配置页渲染），页面内边距由配置页给。
-    高度一律不许用 weight（本区在配置页的 ScrollView 里，weight 会被量成 0）。
 -->
 <LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:app="http://schemas.android.com/apk/res-auto"
@@ -15,71 +21,72 @@
     android:background="?attr/colorSurface"
     android:orientation="vertical">
 
-    <!-- ===== 档位 + 图例：整块超宽时 setScaleX/Y 等比缩放 ===== -->
     <com.google.android.material.card.MaterialCardView
         android:layout_width="match_parent"
         android:layout_height="wrap_content">
 
-        <FrameLayout
-            android:id="@+id/chart_tools_clip"
+        <LinearLayout
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:padding="@dimen/space_s">
+            android:orientation="vertical"
+            android:paddingStart="@dimen/space_s"
+            android:paddingTop="@dimen/space_s"
+            android:paddingEnd="@dimen/space_s"
+            android:paddingBottom="0dp">
 
-            <LinearLayout
-                android:id="@+id/chart_tools_row"
+            <!-- ===== ① 时间窗口档位：一行自然宽，不缩放 ===== -->
+            <com.google.android.material.button.MaterialButtonToggleGroup
+                android:id="@+id/chart_window_group"
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
-                android:orientation="horizontal">
+                app:selectionRequired="true"
+                app:singleSelection="true" />
 
-                <com.google.android.material.button.MaterialButtonToggleGroup
-                    android:id="@+id/chart_window_group"
-                    android:layout_width="wrap_content"
-                    android:layout_height="wrap_content"
-                    app:selectionRequired="true"
-                    app:singleSelection="true" />
-
-                <LinearLayout
-                    android:id="@+id/chart_legend_row"
-                    android:layout_width="wrap_content"
-                    android:layout_height="wrap_content"
-                    android:layout_marginStart="@dimen/space_s"
-                    android:gravity="center_vertical"
-                    android:orientation="horizontal" />
-            </LinearLayout>
-        </FrameLayout>
-    </com.google.android.material.card.MaterialCardView>
-
-    <!-- ===== 曲线区：画布 / 读取失败诊断 ===== -->
-    <com.google.android.material.card.MaterialCardView
-        android:layout_width="match_parent"
-        android:layout_height="@dimen/chart_height"
-        android:layout_marginTop="@dimen/space_m">
-
-        <FrameLayout
-            android:layout_width="match_parent"
-            android:layout_height="match_parent">
-
-            <com.example.waspwingtempctrl.ui.ChartView
-                android:id="@+id/chart_view"
+            <!--
+                ===== ② 图例：按自然尺寸排布，放不下自动换行（窄屏也全部可见，不缩放不裁切） =====
+                用配置页同一套可换行容器：项目里只保留一种换行实现，也不依赖 GridLayout 的
+                「columnCount 是否会自动另起一行」这一行为（该行为未在本机核实过）。
+            -->
+            <com.example.waspwingtempctrl.ui.FlowWrapLayout
+                android:id="@+id/chart_legend_row"
                 android:layout_width="match_parent"
-                android:layout_height="match_parent" />
+                android:layout_height="wrap_content"
+                android:layout_marginTop="@dimen/space_s" />
 
-            <ScrollView
-                android:id="@+id/chart_failure_scroll"
+            <!--
+                ===== ③ 画布 / 读取失败诊断 =====
+                画布贴到卡片下沿（父容器 paddingBottom = 0），使「最低一条网格线 → 卡片下沿」
+                正好等于画布内的下内边距（ChartView 的 PAD_B_DP）。
+            -->
+            <FrameLayout
                 android:layout_width="match_parent"
-                android:layout_height="match_parent"
-                android:padding="@dimen/card_padding"
-                android:visibility="gone">
+                android:layout_height="@dimen/chart_canvas_height"
+                android:layout_marginTop="@dimen/space_s">
 
-                <TextView
-                    android:id="@+id/chart_failure_text"
+                <com.example.waspwingtempctrl.ui.ChartView
+                    android:id="@+id/chart_view"
                     android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:textAppearance="@style/TextAppearance.B6XTempCtrl.Mono"
-                    android:textIsSelectable="true" />
-            </ScrollView>
-        </FrameLayout>
+                    android:layout_height="match_parent" />
+
+                <ScrollView
+                    android:id="@+id/chart_failure_scroll"
+                    android:layout_width="match_parent"
+                    android:layout_height="match_parent"
+                    android:fadeScrollbars="false"
+                    android:padding="@dimen/card_padding"
+                    android:scrollbarSize="@dimen/scrollbar_size"
+                    android:scrollbars="vertical"
+                    android:visibility="gone">
+
+                    <TextView
+                        android:id="@+id/chart_failure_text"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:textAppearance="@style/TextAppearance.B6XTempCtrl.Mono"
+                        android:textIsSelectable="true" />
+                </ScrollView>
+            </FrameLayout>
+        </LinearLayout>
     </com.google.android.material.card.MaterialCardView>
 
 </LinearLayout>

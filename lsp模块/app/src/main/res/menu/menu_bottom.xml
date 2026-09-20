@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    底部页签菜单。**item 的顺序必须与 SetupActivity.TAGS / MENU_IDS 严格一致**（同为 3 项、同序），
+    三处的对应关系错了会出现"点第二个页签显示第一页"这类静默错位。
+-->
+<menu xmlns:android="http://schemas.android.com/apk/res/android">
+    <item
+        android:id="@+id/tab_status"
+        android:icon="@drawable/ic_tab_status"
+        android:title="@string/tab_status" />
+    <item
+        android:id="@+id/tab_config"
+        android:icon="@drawable/ic_tab_config"
+        android:title="@string/config_tab_title" />
+    <item
+        android:id="@+id/tab_log"
+        android:icon="@drawable/ic_tab_log"
+        android:title="@string/tab_log" />
+</menu>

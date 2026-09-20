@@ -1,12 +1,13 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!--
-    应用外壳：工具栏 + 三个页签（状态 / 配置 · 曲线 / 日志）+ 页面容器。
-    页签内容由 SetupActivity 挂载 Fragment；本文件不承载任何页面业务。
-    子 agent 不要改本文件，各自的页面布局放 fragment_<页面>.xml。
+    应用外壳：标题栏（标题 + 右侧设置按钮）+ 页面容器 + 底部页签栏（状态 / 配置 · 曲线 / 日志）。
 
-    页签数量与顺序必须与 SetupActivity.TAGS 严格一一对应（同为 3 个、同序）。
-    两者不一致会让「选中态页签」与「要挂的页面」错位：页签被 TabLayout 自动选中后，
-    对它再 select() 只会派发 onTabReselected（onTabSelected 不来），页面就可能一直不挂载。
+    - 页签在底部：本文件只是菜单的承载处，顺序由 res/menu/menu_bottom.xml 决定，
+      而那份顺序必须与 SetupActivity.MENU_IDS / TAGS 严格一致（错位会静默显示错页）。
+    - 标题栏几何：标题到窗口顶端的距离 = title_pad_top(7dp)（原为 ?attr/actionBarSize 里垂直居中的约 14dp 的一半）；
+      标题到标题栏下边界 = 到窗口左侧 = space_l(16dp)。因此标题栏高度不再取 ?attr/actionBarSize，
+      行高由标题文本行高决定；右侧设置按钮受同一行高约束，故取 title_action_size(28dp)。
+    - 子 agent 不要改本文件。
 -->
 <LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:app="http://schemas.android.com/apk/res-auto"
@@ -16,38 +17,54 @@
     android:fitsSystemWindows="true"
     android:orientation="vertical">
 
-    <com.google.android.material.appbar.MaterialToolbar
-        android:id="@+id/toolbar"
-        android:layout_width="match_parent"
-        android:layout_height="?attr/actionBarSize"
-        android:background="?attr/colorSurface"
-        app:title="@string/title_setup" />
-
-    <com.google.android.material.tabs.TabLayout
-        android:id="@+id/tab_layout"
+    <!-- ===== 标题栏 ===== -->
+    <LinearLayout
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:background="?attr/colorSurface"
-        app:tabGravity="fill"
-        app:tabIndicatorFullWidth="false"
-        app:tabMode="fixed">
+        android:gravity="center_vertical"
+        android:orientation="horizontal"
+        android:paddingStart="@dimen/space_l"
+        android:paddingTop="@dimen/title_pad_top"
+        android:paddingEnd="@dimen/space_l"
+        android:paddingBottom="@dimen/space_l">
 
-        <com.google.android.material.tabs.TabItem android:text="@string/tab_status" />
+        <TextView
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:text="@string/title_setup"
+            android:textAppearance="?attr/textAppearanceTitleLarge" />
 
-        <com.google.android.material.tabs.TabItem android:text="@string/config_tab_title" />
+        <!-- 设置按钮：原「[4] 界面」那组界面参数搬到了独立设置页，入口在这里 -->
+        <ImageButton
+            android:id="@+id/action_settings"
+            android:layout_width="@dimen/title_action_size"
+            android:layout_height="@dimen/title_action_size"
+            android:background="?attr/selectableItemBackgroundBorderless"
+            android:contentDescription="@string/action_settings"
+            android:scaleType="centerInside"
+            android:src="@drawable/ic_settings"
+            app:tint="?attr/colorOnSurfaceVariant" />
+    </LinearLayout>
 
-        <com.google.android.material.tabs.TabItem android:text="@string/tab_log" />
-    </com.google.android.material.tabs.TabLayout>
-
-    <View
-        android:layout_width="match_parent"
-        android:layout_height="@dimen/divider_height"
-        android:background="?attr/colorOutlineVariant" />
-
+    <!-- ===== 页面容器：三个页面（add/hide/show）挂在这里 ===== -->
     <FrameLayout
         android:id="@+id/page_container"
         android:layout_width="match_parent"
         android:layout_height="0dp"
         android:layout_weight="1" />
 
+    <View
+        android:layout_width="match_parent"
+        android:layout_height="@dimen/divider_height"
+        android:background="?attr/colorOutlineVariant" />
+
+    <!-- ===== 底部页签栏 ===== -->
+    <com.google.android.material.bottomnavigation.BottomNavigationView
+        android:id="@+id/bottom_nav"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:background="?attr/colorSurface"
+        app:labelVisibilityMode="labeled"
+        app:menu="@menu/menu_bottom" />
 </LinearLayout>

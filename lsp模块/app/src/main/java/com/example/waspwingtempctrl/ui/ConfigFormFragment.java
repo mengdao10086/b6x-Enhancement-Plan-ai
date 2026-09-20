@@ -42,8 +42,12 @@ import java.util.concurrent.RejectedExecutionException;
  * <h3>结构</h3>
  * 自上而下三段（见 {@code fragment_config.xml}）：曲线区（{@link ChartFragment} 作为子
  * Fragment 挂在 {@code config_chart_container}，曲线自己不再单独占一个页签）→ 参数区
- * （分组卡片）→ 诊断区。曲线把「数据文件信息」经 {@link ChartFragment.Host} 交给本页，
- * 渲染在诊断信息头部（原曲线页顶部的那条信息条）。
+ * （分组卡片，键行由 {@link FlowWrapLayout} 流式排列）→ 诊断区。曲线把「数据文件信息」经
+ * {@link ChartFragment.Host} 交给本页，渲染在诊断折叠体内（原曲线页顶部的那条信息条），
+ * 键渲染自检同样在折叠体内，默认都不可见。
+ *
+ * <p>{@code webui} 组（「[4] 界面」）不由本页渲染：它在顶栏设置按钮打开的独立设置页
+ * （{@link UiSettingsFragment}）里，但自检口径仍要把它算进来（见 {@link #renderSelfCheck}）。
  *
  * <h3>边界（I3）</h3>
  * 界面读写 {@code profile.conf} 只经 {@link ConfigStore}，不自己拼 shell、不直接碰文件、
@@ -51,8 +55,8 @@ import java.util.concurrent.RejectedExecutionException;
  * {@code groups() / keys() / key(String)}。
  *
  * <h3>交互</h3>
- * 折叠分组 + 组头总开关 + "未生效"徽标 + min/max 钳制 + 改即存防抖（{@link ConfigWriteQueue}）。
- * 所有文件 I/O 在单线程 executor 上，主线程只做渲染。
+ * 折叠分组 + 组头总开关 + "未生效"徽标（每组建一校）+ min/max 钳制 + 改即存防抖
+ * （{@link ConfigWriteQueue}）。所有文件 I/O 在单线程 executor 上，主线程只做渲染。
  *
  * <h3>生命周期</h3>
  * 外壳用 add/hide/show 切页，<b>被隐藏的 Fragment 生命周期仍是 RESUMED</b>：
@@ -87,8 +91,9 @@ public class ConfigFormFragment extends Fragment
     private ChartFragment chart;
 
     private boolean viewAlive;
-    /** 键渲染自检的两个分项（口径见 renderSelfCheck）。 */
+    /** 键渲染自检的三个分项（口径见 renderSelfCheck）。 */
     private int renderedRowCount;
+    private int renderedSettingsCount;
     private int renderedMasterCount;
 
     @Override
@@ -109,10 +114,12 @@ public class ConfigFormFragment extends Fragment
         errorCard = root.findViewById(R.id.config_error_card);
         errorText = root.findViewById(R.id.config_error_text);
         groupContainer = root.findViewById(R.id.config_group_container);
-        selfCheckView = root.findViewById(R.id.config_self_check);
+        selfCheckView = root.findViewById(R.id.config_diag_selfcheck);
         dataFileView = root.findViewById(R.id.config_diag_datafile_text);
         diagnostics = new ConfigDiagnostics(root, store, io, main);
         viewAlive = true;
+        // 滚动条常显（fadeScrollbars=false）+ 加粗到 scrollbar_size，按住即可拖动
+        ScrollbarDrag.attach(scroll);
         ensureChartFragment();
         buildForm(inflater);
         reloadAsync();
@@ -165,6 +172,15 @@ public class ConfigFormFragment extends Fragment
 
         Set<String> covered = new LinkedHashSet<>();
         for (GroupMeta group : store.groups()) {
+            if (UiSettingsFragment.isSettingsGroup(group)) {
+                // 「[4] 界面」组的键在独立设置页渲染（顶栏设置按钮进入），本页不重复给入口。
+                // 仍要记进 covered：否则下面的"未分组兜底"会把它们当孤儿键又列一遍。
+                covered.addAll(group.keys);
+                if (group.master != null) {
+                    covered.add(group.master);
+                }
+                continue;
+            }
             List<KeyMeta> keyMetas = new ArrayList<>();
             for (String key : group.keys) {
                 KeyMeta meta = store.key(key);
@@ -199,9 +215,10 @@ public class ConfigFormFragment extends Fragment
             rows.addAll(binder.rows());
         }
 
-        // 自检口径：一个定义键算"有可编辑入口"，当且仅当它是键行，或者是某个分组的组头开关
-        // （role=master 的键不由键行承载，由 ConfigGroupBinder 渲染成组头开关）。
+        // 自检口径：一个定义键算"有可编辑入口"，当且仅当它是本页键行、设置页的键，或某个分组的
+        // 组头开关（role=master 的键不由键行承载，由 ConfigGroupBinder 渲染成组头开关）。
         // 用去重集合计数：同名键被两个分组重复列出时也不虚增。
+        // 设置页键数取自 UiSettingsFragment.webuiKeys()——那是设置页真正渲染的那一份，不另写数字。
         Set<String> rowKeys = new LinkedHashSet<>();
         for (ConfigKeyRow row : rows) {
             rowKeys.add(row.key());
@@ -214,6 +231,7 @@ public class ConfigFormFragment extends Fragment
             }
         }
         renderedRowCount = rowKeys.size();
+        renderedSettingsCount = UiSettingsFragment.webuiKeys(store).size();
         renderedMasterCount = masterKeys.size();
 
         for (ConfigKeyRow row : rows) {
@@ -263,21 +281,22 @@ public class ConfigFormFragment extends Fragment
     }
 
     /**
-     * 键渲染自检：<b>每个定义键都要有可编辑入口</b>——键行（role=setting）或组头开关（role=master）。
-     * 顺带把未定义键与读取提示摆出来。
+     * 键渲染自检：<b>每个定义键都要有可编辑入口</b>——本页键行（role=setting）、设置页的键
+     * （{@code webui} 组）或组头开关（role=master）。顺带把未定义键与读取提示摆出来。
      *
      * <p>口径说明：{@code params.json} 里 role=master 的键（总开关）不出现在任何
-     * {@code group.keys} 里，它们是分组卡头上的开关，故只数键行会恒少于定义数。
+     * {@code group.keys} 里，它们是分组卡头上的开关；{@code webui} 组的键在本页不渲染，
+     * 故只数本页键行会恒少于定义数。自检文本渲染在诊断区（折叠体内），默认不可见。
      */
     private void renderSelfCheck(Snapshot snapshot) {
         int defined = store.keyCount();
         StringBuilder sb = new StringBuilder();
-        if (renderedRowCount + renderedMasterCount == defined) {
+        if (renderedRowCount + renderedSettingsCount + renderedMasterCount == defined) {
             sb.append(getString(R.string.config_diag_render_ok,
-                    renderedRowCount, renderedMasterCount, defined));
+                    renderedRowCount, renderedSettingsCount, renderedMasterCount, defined));
         } else {
             sb.append(getString(R.string.config_diag_render_mismatch,
-                    renderedRowCount, renderedMasterCount, defined));
+                    renderedRowCount, renderedSettingsCount, renderedMasterCount, defined));
         }
         if (!snapshot.unknownKeys.isEmpty()) {
             sb.append('\n').append(getString(R.string.config_unknown_keys,

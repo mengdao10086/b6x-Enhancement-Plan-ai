@@ -1,8 +1,12 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!--
-    一个分组卡片 = 卡头（标题 + 组头开关 + 展开箭头）+ 分隔线 + 键行容器。
+    一个分组卡片 = 卡头（标题 + "未生效"徽标 + 组头开关 + 展开箭头）+ 分隔线 + 键行容器。
     卡片样式来自主题 materialCardViewStyle（Widget.B6XTempCtrl.Card），本文件不写死颜色/圆角。
-    组头开关只在 role=master 的组出现；webui 组 master 为 null，开关保持 gone。
+    组头开关只在 role=master 的组出现；webui 组已搬到设置页（ConfigGroupBinder 仍支持 master 为 null）。
+    徽标默认 gone：本组存在"依赖未满足"的键时由 ConfigGroupBinder 显示一次（行内不再逐键标注）。
+
+    卡头高度：箭头锁高 @dimen/arrow_box(24dp)，故卡头 = 24 + 12×2 = 48dp（与 @dimen/row_min_height 一致）；
+    带总开关的组因开关自身 32dp 略高（约 56dp），属取舍。
 -->
 <com.google.android.material.card.MaterialCardView xmlns:android="http://schemas.android.com/apk/res/android"
     android:id="@+id/config_group_card"
@@ -34,18 +38,32 @@
                 android:layout_weight="1"
                 android:textAppearance="@style/TextAppearance.B6XTempCtrl.SectionTitle" />
 
+            <TextView
+                android:id="@+id/config_group_badge"
+                style="@style/Widget.B6XTempCtrl.Badge"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginStart="@dimen/space_s"
+                android:text="@string/config_badge_inactive"
+                android:visibility="gone" />
+
             <com.google.android.material.materialswitch.MaterialSwitch
                 android:id="@+id/config_group_master"
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
-                android:layout_marginStart="@dimen/space_s"
+                android:layout_marginStart="@dimen/space_xs"
+                android:layout_marginEnd="@dimen/switch_trim_end"
+                android:scaleX="0.75"
+                android:scaleY="0.75"
                 android:visibility="gone" />
 
             <TextView
                 android:id="@+id/config_group_arrow"
                 android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:layout_marginStart="@dimen/space_s"
+                android:layout_height="@dimen/arrow_box"
+                android:layout_marginStart="@dimen/space_xs"
+                android:gravity="center"
+                android:includeFontPadding="false"
                 android:text="@string/config_arrow_collapsed"
                 android:textAppearance="@style/TextAppearance.B6XTempCtrl.Caption"
                 android:textSize="@dimen/text_arrow" />
@@ -58,12 +76,13 @@
             android:background="@color/app_outline_variant"
             android:visibility="gone" />
 
-        <LinearLayout
+        <!-- 键行容器是流式布局：窄的键并排、放不下换行（见 FlowWrapLayout） -->
+        <com.example.waspwingtempctrl.ui.FlowWrapLayout
             android:id="@+id/config_group_body"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:orientation="vertical"
             android:paddingStart="@dimen/card_padding"
+            android:paddingTop="@dimen/space_s"
             android:paddingEnd="@dimen/card_padding"
             android:paddingBottom="@dimen/card_padding"
             android:visibility="gone" />

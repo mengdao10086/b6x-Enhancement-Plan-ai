@@ -2,7 +2,7 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
     <application
-        android:label="b6x温控增强"
+        android:label="飞智温控增强"
         android:icon="@android:drawable/ic_menu_compass"
         android:allowBackup="false"
         android:supportsRtl="true">
@@ -32,6 +32,12 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+
+        <!-- 设置页：原「[4] 界面」那组界面参数（含「返回退出自动隐藏后台」）的落点，
+             入口是 SetupActivity 标题栏右侧的设置按钮，故不导出 -->
+        <activity
+            android:name=".SettingsActivity"
+            android:exported="false" />
 
     </application>
 

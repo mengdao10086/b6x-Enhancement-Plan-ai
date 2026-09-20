@@ -8,19 +8,19 @@
     <string name="log_filter_hint">关键词（大小写不敏感）</string>
     <string name="log_loading">正在读取日志…</string>
 
-    <!-- 顶部信息条：路径 / 修改时间（大小与行数统一在底部统计行，不重复展示） -->
+    <!-- 信息条首行：路径 / 修改时间（大小与行数紧接其后，见 log_stat_fmt，不重复展示） -->
     <string name="log_info_fmt">路径：%1$s\n修改时间：%2$s</string>
     <string name="log_value_unknown">—</string>
 
     <!--
-        底部统计行：行数（已读取 / 渲染上限 = LogTailReader.MAX_LINES）
+        统计行（同在「日志文件」卡里，紧跟路径/修改时间）：行数（已读取 / 渲染上限 = LogTailReader.MAX_LINES）
         与大小（文件字节数 / 尾读上限 = LogTailReader.TAIL_BYTES），k = 1024 字节。
         截断必须显式写出，不让用户以为看到了全部。
     -->
-    <string name="log_tail_fmt">已读取 %1$d / %2$d 行，%3$s / %4$s k</string>
-    <string name="log_tail_failed">读取失败：未渲染任何行</string>
+    <string name="log_stat_fmt">已读取 %1$d / %2$d 行，%3$s / %4$s k</string>
+    <string name="log_stat_failed">读取失败：未渲染任何行</string>
 
-    <!-- 过滤命中计数：只在有关键词时显示（无关键词时行数在底部统计行里） -->
+    <!-- 过滤命中计数：只在有关键词时显示（无关键词时行数在「日志文件」卡的统计行里） -->
     <string name="log_count_hit_fmt">命中 %1$d 行</string>
 
     <string name="log_empty_no_lines">没有可显示的行（日志内容为空）</string>

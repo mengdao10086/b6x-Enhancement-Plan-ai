@@ -1,19 +1,52 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!--
-    一个输入字段（int 键一个，multi 键每个字段一个）。label 作 hint、单位与单位说明作下方灰字，
-    这样长单位（如"制冷强度档位（0~194 硬件原始档位值）"）能整行折行，不会被后缀挤压输入框。
+    一个输入字段（int 键一个，multi 键每个字段一个）。两种形态按定义里的 fields[].bool 二选一：
+      布尔字段 → config_field_switch_row（字段名 + 开关，与其它输入框同高感、行内垂直居中）
+      数值字段 → config_field_layout（label 作 hint、单位与范围作下方灰字）
+    下方灰字整行折行，长单位（如"制冷强度档位（0~194 硬件原始档位值）"）不会被后缀挤压输入框。
+
+    宽度不写死：ConfigKeyRow 按内容实测出像素宽再回写 layout_width（见 measureFieldWidth），
+    使多个字段能在同一行内自适应排列；这里给 wrap_content 只是"未被回写时"的兜底。
+    高度写死 @dimen/field_height：Material OutlinedBox 默认高约 56dp，不给死压不下来；
+    内层 EditText 的 minHeight 与垂直内边距同步收小，16sp 文字才放得进压缩后的框（同日志搜索框）。
 -->
 <LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:app="http://schemas.android.com/apk/res-auto"
-    android:layout_width="match_parent"
+    android:layout_width="wrap_content"
     android:layout_height="wrap_content"
     android:orientation="vertical">
+
+    <!-- 高度取 @dimen/field_height：与同一键里的输入框等高，同一行内才对齐（开关自身居中） -->
+    <LinearLayout
+        android:id="@+id/config_field_switch_row"
+        android:layout_width="wrap_content"
+        android:layout_height="@dimen/field_height"
+        android:gravity="center_vertical"
+        android:orientation="horizontal"
+        android:visibility="gone">
+
+        <TextView
+            android:id="@+id/config_field_switch_label"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:textColor="@color/app_on_surface"
+            android:textSize="@dimen/text_body" />
+
+        <com.google.android.material.materialswitch.MaterialSwitch
+            android:id="@+id/config_field_switch"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginStart="@dimen/space_xs"
+            android:layout_marginEnd="@dimen/switch_trim_end"
+            android:scaleX="0.75"
+            android:scaleY="0.75" />
+    </LinearLayout>
 
     <com.google.android.material.textfield.TextInputLayout
         android:id="@+id/config_field_layout"
         style="@style/Widget.Material3.TextInputLayout.OutlinedBox"
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
+        android:layout_width="wrap_content"
+        android:layout_height="@dimen/field_height"
         app:boxCornerRadiusBottomEnd="@dimen/field_radius"
         app:boxCornerRadiusBottomStart="@dimen/field_radius"
         app:boxCornerRadiusTopEnd="@dimen/field_radius"
@@ -24,8 +57,13 @@
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:imeOptions="actionDone"
+            android:includeFontPadding="false"
             android:inputType="number"
-            android:maxLines="1" />
+            android:maxLines="1"
+            android:minHeight="0dp"
+            android:paddingTop="@dimen/space_xs"
+            android:paddingBottom="@dimen/space_xs"
+            android:textSize="@dimen/config_field_text_size" />
     </com.google.android.material.textfield.TextInputLayout>
 
     <TextView

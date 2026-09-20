@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!--
-    配置页（D1）文案。外壳/状态页的文案在 strings.xml，本文件只放本页自己的。
+    配置页（D1）与设置页文案。外壳/状态页的文案在 strings.xml，本文件只放本页自己的。
     同一份文案只在此处出现一次：布局与 Java 都引用资源名，不写重复字面量。
 -->
 <resources>
@@ -8,7 +8,7 @@
     <!-- ===== 合并页（配置 · 曲线） ===== -->
     <!-- 页签文案：曲线页已并入本页（页签由 4 个减为 3 个） -->
     <string name="config_tab_title">配置 · 曲线</string>
-    <!-- 参数区区标题：行高与分组卡头一致（@dimen/row_min_height + @dimen/card_padding） -->
+    <!-- 参数区区标题：行高压到约 40dp（16sp 行高 24dp + 上下各 @dimen/space_s） -->
     <string name="config_section_title">配置</string>
 
     <!-- ===== 定义加载失败的错误态 ===== -->
@@ -21,10 +21,10 @@
     <string name="config_action_expand">展开本组</string>
     <string name="config_action_collapse">折叠本组</string>
     <string name="config_group_ungrouped">未分组</string>
+    <string name="config_group_badge_desc">本组有 %1$d 项依赖未开启，暂不生效</string>
 
     <!-- ===== 键行 ===== -->
     <string name="config_badge_inactive">未生效</string>
-    <string name="config_badge_inactive_desc">依赖项未开启，本项当前不生效</string>
     <string name="config_ui_only">界面自用，守护进程不读取</string>
     <string name="config_hint_value">数值</string>
     <string name="config_hint_path">路径</string>
@@ -34,13 +34,22 @@
     <string name="config_input_restored">输入为空或不可解析，已恢复为上一次的值</string>
     <string name="config_path_note">路径提示：%1$s</string>
 
+    <!-- ===== 设置页（[4] 界面 组的独立页，从顶栏设置按钮进入） ===== -->
+    <string name="config_back_desc">返回上一页</string>
+    <string name="config_settings_empty">参数定义里没有「界面」分组，本页暂无可调项</string>
+
     <!-- ===== 诊断区 ===== -->
     <string name="config_diag_title">诊断信息</string>
     <string name="config_diag_mtime">配置 mtime：%1$s</string>
     <string name="config_diag_mtime_missing">配置 mtime：配置文件不存在</string>
-    <!-- 自检口径 = 每个定义键都要有可编辑入口：键行（role=setting）+ 组头开关（role=master） -->
-    <string name="config_diag_render_ok">键渲染自检：键行 %1$d + 组头开关 %2$d = 定义 %3$d 项</string>
-    <string name="config_diag_render_mismatch">键渲染自检：键行 %1$d + 组头开关 %2$d ≠ 定义 %3$d 项（键表可能已变更）</string>
+    <!--
+        自检口径 = 每个定义键都要有可编辑入口，三处入口相加应等于定义键数：
+          本页 = 本页键行（role=setting，不含 webui 组）
+          设置页 = webui 组的键（搬到独立设置页，来源同 UiSettingsFragment.webuiKeys()）
+          组头开关 = role=master 的键（由 ConfigGroupBinder 渲染成卡头开关）
+    -->
+    <string name="config_diag_render_ok">键渲染自检：本页 %1$d + 设置页 %2$d + 组头开关 %3$d = 定义 %4$d 项</string>
+    <string name="config_diag_render_mismatch">键渲染自检：本页 %1$d + 设置页 %2$d + 组头开关 %3$d ≠ 定义 %4$d 项（键表可能已变更）</string>
     <string name="config_diag_action_refresh">刷新诊断</string>
     <string name="config_unknown_keys">配置含未定义键（界面不显示，写入时也不会改动）：%1$s</string>
 </resources>

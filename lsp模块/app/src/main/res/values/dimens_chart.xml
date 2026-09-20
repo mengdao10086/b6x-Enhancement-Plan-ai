@@ -1,11 +1,22 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!--
-    曲线页（D2）专用尺寸。间距/字号/圆角一律复用 dimens.xml 的 space_*/text_*/card_radius/chart_height，
-    这里只放"曲线页控件特有、且现有标尺没有对应项"的量。
+    曲线区专用尺寸。间距/字号/圆角一律复用 dimens.xml 的 space_*/text_*/card_radius/scrollbar_size，
+    这里只放"曲线区控件特有、且现有标尺没有对应项"的量。
     绘制用像素（padL/padT/线宽/字号等）由 ChartView 内按 density 换算，不进本文件。
 -->
 <resources>
 
     <!-- 档位按钮最小高度（MaterialButton 默认 48dp 太占高，档位行要紧凑成一行） -->
     <dimen name="chart_chip_min_height">32dp</dimen>
+
+    <!--
+        曲线画布高。不再引用 dimens.xml 的 chart_height（本区不要那个值，也不必耦合）。
+        取值依据（360dp 宽机型的推算，真机需目测）：
+          画布宽 = 屏宽 − 配置页左右内边距 2×16 − 卡片左右内边距 2×8 = 312dp；
+          绘图区宽 = 画布宽 − ChartView 左右内边距各 36 = 240dp；
+          取绘图区近正方：画布高 = 240 + 上内边距 24 + 下内边距 8 = 272dp。
+        效果：绘图区 240×240，比原来（画布 260、上下各 16 → 绘图区 228 高）高约 12dp，
+        抵掉图例第二行占去的高度；整张卡约 430dp，在 640dp 以上的页面上不挤掉参数区。
+    -->
+    <dimen name="chart_canvas_height">272dp</dimen>
 </resources>

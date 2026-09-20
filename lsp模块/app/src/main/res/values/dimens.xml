@@ -38,19 +38,28 @@
     <dimen name="badge_padding_h">6dp</dimen>
     <dimen name="badge_padding_v">2dp</dimen>
 
-    <!-- 曲线页 -->
-    <dimen name="chart_height">260dp</dimen>
-    <dimen name="chart_legend_height">24dp</dimen>
+    <!--
+        标题栏：大标题到窗口顶端的距离（标题原在 ?attr/actionBarSize 里垂直居中，上下各约 14dp → 这里减半）；
+        到标题栏下边界的距离与到窗口左侧的距离一致，均为 space_l = 16dp。
+        标题行内容高度由标题文本行高决定（TitleLarge 约 28dp），故标题栏总高约 51dp（不再是 56dp）。
+        右侧设置按钮受同一行高约束，故取 28dp（图标 24dp）——比 48dp 触控规范小，是"标题上下留白相等"的必然取舍。
+    -->
+    <dimen name="title_pad_top">7dp</dimen>
+    <dimen name="title_action_size">28dp</dimen>
+
+    <!-- 滚动条：所有可滚动视图统一加粗并常显（取消自动淡出），配合 ui/ScrollbarDrag 才能按住拖动 -->
+    <dimen name="scrollbar_size">6dp</dimen>
 
     <!-- 日志页 -->
     <dimen name="log_line_spacing">2dp</dimen>
 
     <!--
-        关键词搜索框高度：Material3 OutlinedBox 单行默认约 56dp（原布局未给高度，走的就是默认值），
-        压到 2/3 ≈ 37dp。必须显式给 TextInputLayout 定高，否则压不过它内部按内容算出的高度；
+        输入框高度：日志关键词搜索框与配置页各输入框共用同一个值（要求两者等高）。
+        Material3 OutlinedBox 单行默认约 56dp；给 49dp = 日志框原 37dp 的 4/3。
+        必须显式给 TextInputLayout 定高，否则压不过它内部按内容算出的高度；
         内层 EditText 的 minHeight 与垂直内边距同步收小，16sp 文字才放得下。
     -->
-    <dimen name="log_filter_height">37dp</dimen>
+    <dimen name="field_height">49dp</dimen>
     <!-- 搜索框字号：12sp × 4/3 = 16sp。不复用 text_mono，避免波及日志行本身。 -->
     <dimen name="log_filter_text_size">16sp</dimen>
     <!-- 「回到底部」纯图标按钮的触控尺寸。宽高相同 + Material3 全圆角 → 正圆。 -->

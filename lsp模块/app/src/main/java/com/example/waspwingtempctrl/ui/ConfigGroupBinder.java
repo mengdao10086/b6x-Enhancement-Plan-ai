@@ -19,20 +19,25 @@ import java.util.Collections;
 import java.util.List;
 
 /**
- * 一个分组卡片：卡头（标题 + 组头开关 + 展开箭头）+ 键行容器。
+ * 一个分组卡片：卡头（标题 + "未生效"徽标 + 组头开关 + 展开箭头）+ 分隔线 + 键行容器。
  *
  * <p>组头开关就是 {@code role=master} 的那个键（<b>也是普通键</b>，改它同样走"改即存"），
- * 故绑定逻辑与行内开关完全共用 {@link ConfigKeyRow#commitSwitch}。
- * {@code webui} 组 master 为 null，卡头不放开关键。
+ * 故绑定逻辑与行内开关完全共用 {@link ConfigKeyRow#commitSwitch}。master 为 null 的组
+ * （"未分组"兜底组、设置页的 {@code webui} 组）卡头不放开关键。
  *
- * <p>默认全部折叠：本页 5 组 52 键，全展开时长列表滚到目标键要翻很久；折叠态一屏能看清全部
- * 分组与总开关，先开总开关再进组的顺序也更贴合参数之间的依赖关系。
+ * <p>"未生效"徽标只在本组卡头显示一次（行内不再逐键标注）：本组只要有一个键的依赖未满足就显示，
+ * 并在组内逐行压暗，指向关系靠"压暗的行 + 组头一个徽标"表达，避免每行都挂一枚徽标。
+ *
+ * <p>默认全部折叠：配置页 4 组 43 键（另加 4 个组头开关），全展开时长列表滚到目标键要翻很久；
+ * 折叠态一屏能看清全部分组与总开关，先开总开关再进组的顺序也更贴合参数之间的依赖关系。
+ * 「[4] 界面」那 6 个键在独立设置页（{@link UiSettingsFragment}），不在本页渲染。
  */
 final class ConfigGroupBinder {
 
     private final View card;
     private final LinearLayout body;
     private final TextView titleView;
+    private final TextView badgeView;
     private final TextView arrowView;
     private final View divider;
     private final MaterialSwitch masterSwitch;
@@ -57,6 +62,7 @@ final class ConfigGroupBinder {
         this.masterMeta = masterMeta;
         body = card.findViewById(R.id.config_group_body);
         titleView = card.findViewById(R.id.config_group_title);
+        badgeView = card.findViewById(R.id.config_group_badge);
         arrowView = card.findViewById(R.id.config_group_arrow);
         divider = card.findViewById(R.id.config_group_divider);
         masterSwitch = card.findViewById(R.id.config_group_master);
@@ -75,9 +81,8 @@ final class ConfigGroupBinder {
             });
         }
 
-        for (int i = 0; i < keyMetas.size(); i++) {
-            ConfigKeyRow row = ConfigKeyRow.create(inflater, body, keyMetas.get(i), host);
-            row.setDividerVisible(i > 0);
+        for (KeyMeta keyMeta : keyMetas) {
+            ConfigKeyRow row = ConfigKeyRow.create(inflater, body, keyMeta, host);
             body.addView(row.view());
             rows.add(row);
         }
@@ -115,13 +120,23 @@ final class ConfigGroupBinder {
         }
     }
 
+    /** 刷新组内各行的压暗，并把"有键未生效"汇总成卡头上的一枚徽标。 */
     void refreshBadges() {
+        int unsatisfied = 0;
         for (ConfigKeyRow row : rows) {
-            row.refreshDependencyState();
+            if (row.refreshDependencyState()) {
+                unsatisfied++;
+            }
+        }
+        badgeView.setVisibility(unsatisfied > 0 ? View.VISIBLE : View.GONE);
+        if (unsatisfied > 0) {
+            badgeView.setContentDescription(card.getContext().getString(
+                    R.string.config_group_badge_desc, unsatisfied));
         }
     }
 
-    private void setExpanded(boolean value) {
+    /** 展开/折叠本组。构造时默认折叠（长列表先看分组名），设置页只此一组故由调用方改为默认展开。 */
+    void setExpanded(boolean value) {
         expanded = value;
         body.setVisibility(value ? View.VISIBLE : View.GONE);
         divider.setVisibility(value ? View.VISIBLE : View.GONE);

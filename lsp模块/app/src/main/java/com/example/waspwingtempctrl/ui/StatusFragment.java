@@ -91,6 +91,9 @@ public class StatusFragment extends Fragment {
         view.findViewById(R.id.btn_uninstall).setOnClickListener(v -> uninstall());
         view.findViewById(R.id.btn_start).setOnClickListener(v -> startDaemon());
         view.findViewById(R.id.btn_diag).setOnClickListener(v -> showDiagnostics());
+
+        // 滚动条常显 + 加粗（见 fragment_status.xml），这里才接得上"按住滚动条拖动"
+        ScrollbarDrag.attach(view.findViewById(R.id.status_scroll));
     }
 
     @Override

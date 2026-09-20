@@ -22,8 +22,7 @@ import java.util.List;
  * 曲线自绘控件（D2）。口径逐条对齐 {@code 逻辑说明.md}（仓库根）的「曲线」一节，
  * 依据与行号见 {@code .claude/路线A-线D-曲线口径.md}（历史记录）。
  *
- * <p><b>性能硬约束</b>：{@code onDraw} 只做 drawColor / drawLine / drawRect / drawPath /
- * drawCircle / drawText。全部几何量（轴与刻度、每系列 {@link Path}、标注位置与文本宽度、
+ * <p><b>性能硬约束</b>：{@code onDraw} 只做 drawLine / drawPath / drawCircle / drawText。全部几何量（轴与刻度、每系列 {@link Path}、标注位置与文本宽度、
  * 断联空白）都在 {@link #rebuild()} 里算好并缓存；rebuild 只在数据/窗口/系列开关/尺寸/配色
  * 变化时触发，<b>绝不在 onDraw 内重建 Path</b>。
  *
@@ -32,12 +31,15 @@ import java.util.List;
  *
  * <p><b>配色</b>：全部运行时按当前主题取（{@code getColor(id, theme)}），深色由
  * {@code values-night/colors.xml} 同名覆盖；本类不出现任何十六进制色值。
+ * 底色须与卡片底色一致（{@code app_surface_container}，即本类所在的卡片色）、网格线走主题的
+ * 分隔线色（{@code app_outline_variant}），其余曲线配色走 {@code chart_*}。
  */
 public class ChartView extends View {
 
     // ---- 口径常量（CSS px → dp，绘制时乘 density）----
     private static final int PAD_H_DP = 36;          // padL = padR = 36
-    private static final int PAD_V_DP = 16;          // padT = padB = 16（原 padB = 4 + 12 外扩）
+    private static final int PAD_T_DP = 24;          // 上内边距 24：绘图区整体下移 8dp
+    private static final int PAD_B_DP = 8;           // 下内边距 8：与 PAD_T 之和仍是 32，绘图区高度不变、只整体下移
     private static final float LINE_WIDTH_DP = 1.6f; // 折线
     private static final float GRID_WIDTH_DP = 1f;   // 网格
     private static final float HALO_WIDTH_DP = 3f;   // 文字 halo
@@ -46,6 +48,7 @@ public class ChartView extends View {
     private static final float TICK_TEXT_DP = 10f;   // 刻度 / 标注 / 轴标题字号
     private static final float EMPTY_TEXT_DP = 12f;  // 「采样中…」字号
     private static final float SEAM_EXTRA_DP = 4f;   // 转速圆点允许下越界的量
+    private static final float SEAM_BOTTOM_DP = 5f;  // 接缝离画布下沿的下限：圆点（半径 3.2 + 外圈 0.5）不许被裁
     private static final float LABEL_GAP_DP = 6f;    // 标签与端点的水平间距
 
     private final Paint gridPaint = new Paint();
@@ -60,6 +63,7 @@ public class ChartView extends View {
     private final ChartSeries[] series = ChartSeries.createAll();
 
     private float density;
+    /** 画布视觉底色（= 卡片底色）。本类不铺底色（避免与卡片形成第二个色块），此色只用于文字 halo 与圆点外圈。 */
     private int colorBg;
     private int colorGrid;
     private int colorAxis;
@@ -186,8 +190,12 @@ public class ChartView extends View {
     private void loadColors() {
         Resources res = getResources();
         Theme theme = getContext().getTheme();
-        colorBg = res.getColor(R.color.chart_bg, theme);
-        colorGrid = res.getColor(R.color.chart_grid, theme);
+        // 底色 = 卡片底色（themes.xml 的 cardBackgroundColor = @color/app_surface_container）：
+        // halo 与圆点外圈靠它把穿过的曲线遮住，两者不同色就会露出异色描边
+        colorBg = res.getColor(R.color.app_surface_container, theme);
+        // 网格线：底色由纯白变为浅灰的卡片色后，原网格色与底色的明度差几乎减半（ΔRGB 34 → 16），
+        // 故改用主题的分隔线色（= 卡片描边色）保住可见度；深色下同样比原网格色更清楚
+        colorGrid = res.getColor(R.color.app_outline_variant, theme);
         colorAxis = res.getColor(R.color.chart_axis, theme);
         if (seriesColors.length != series.length) {
             seriesColors = new int[series.length];
@@ -223,15 +231,18 @@ public class ChartView extends View {
             return;
         }
         float padH = PAD_H_DP * density;
-        float padV = PAD_V_DP * density;
+        float padT = PAD_T_DP * density;
+        float padB = PAD_B_DP * density;
         fPadL = padH;
-        fPadT = padV;
+        fPadT = padT;
         fW = w - 2f * padH;
-        fH = h - 2f * padV;
+        fH = h - padT - padB;
         if (fW <= 8f * density || fH <= 8f * density) {
             return;
         }
-        fSeamY = Math.min(fPadT + fH + SEAM_EXTRA_DP * density, h - 1f);
+        // 接缝（转速圆点允许下越界的下限）：仍以绘图区下沿为基准外扩，但再被画布下沿收住，
+        // 否则圆点会画出画布（下内边距从 16 缩到 8 后，原来的 h−1 上限已不够）
+        fSeamY = Math.min(fPadT + fH + SEAM_EXTRA_DP * density, h - SEAM_BOTTOM_DP * density);
 
         titleLeft = getContext().getString(R.string.chart_axis_left);
         titleRight = getContext().getString(R.string.chart_axis_right);
@@ -454,6 +465,10 @@ public class ChartView extends View {
 
         Paint.FontMetrics fm = tickPaint.getFontMetrics();
         float labelH = fm.descent - fm.ascent;
+        // 标注基线允许的最低位置：绘图区下沿 + 一行高（原口径）再被「画布下沿 − descent」收住，
+        // 否则最低那条标注的文字会越出画布被裁（下内边距从 16 缩到 8 后必然发生）。
+        // 上侧不用额外钳制：ly 下限是 fPadT（24dp），已大于 10sp 文字的 ascent
+        float labelMaxY = Math.min(fPadT + fH + labelH, getHeight() - fm.descent);
         List<ChartLabelOp> textOps = new ArrayList<>();
         List<ChartDotOp> dotOps = new ArrayList<>();
         for (List<ChartLabelOp> cl : clusters) {
@@ -470,8 +485,8 @@ public class ChartView extends View {
             if (ly < fPadT) {
                 ly = fPadT;
             }
-            if (ly > fPadT + fH + labelH) {
-                ly = fPadT + fH + labelH;
+            if (ly > labelMaxY) {
+                ly = labelMaxY;
             }
 
             if (cl.size() == 1) {
@@ -519,7 +534,7 @@ public class ChartView extends View {
 
     @Override
     protected void onDraw(Canvas canvas) {
-        canvas.drawColor(colorBg);
+        // 不自铺底色：底色由卡片给（画布透明），否则卡内会多出一块直角色块
         int w = getWidth();
         int h = getHeight();
         if (w <= 0 || h <= 0) {

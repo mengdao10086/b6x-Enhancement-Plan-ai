@@ -10,4 +10,34 @@
         再低会把标签压到看不清，再高就看不出差别。
     -->
     <item name="config_dim_alpha" format="float" type="dimen">0.55</item>
+
+    <!--
+        输入框宽度的自适应区间。
+        下限：Material OutlinedBox 的内容内边距（左右各约 16dp）加上短 hint（"数值"）本身，
+              再窄就会挤压数字本身；上限：hint 很长（如"每遍权重α(×100)"，浮起后约 120dp）时既不许
+              把标签省略号化，也不许一个框占满整行 —— 整行宽度会把同一行的其它参数全挤到下一行，
+              流式排布就退化成"每参数一行"。
+        实际宽度由 ConfigKeyRow 按「wrap_content 量出来的宽度」取值后钳进本区间。
+    -->
+    <dimen name="config_field_min_width">72dp</dimen>
+    <dimen name="config_field_max_width">160dp</dimen>
+    <!--
+        输入框字号：与 @dimen/log_filter_text_size 同为 16sp，对应 @dimen/field_height 的 49dp
+        （两处输入框要求等高，字号也必须同档，否则等高之下一个显空一个显挤）。
+    -->
+    <dimen name="config_field_text_size">16sp</dimen>
+
+    <!--
+        展开/收起小三角的固定高度：三角字号是 @dimen/text_arrow(36sp)，若不锁高，36sp 的行高会把
+        分组卡头从 48dp 顶到约 68dp。锁到 24dp 后卡头内容高度 = 24dp，即卡头 24 + 12×2 = 48dp，
+        与设计一致；三角墨迹约 20dp，居中后仍完整可见（行高多出的部分不含墨迹，被裁掉无影响）。
+    -->
+    <dimen name="arrow_box">24dp</dimen>
+
+    <!--
+        开关缩放 0.75 后墨迹左右各内缩约 6dp（track 52dp → 39dp）。取负的 end 外边距把这圈
+        空白还给布局：有 weight 的兄弟（键行里的占位 Space）会多分到这 6dp，开关贴到行尾；
+        无 weight 的兄弟（卡头里的展开箭头）会左移 6dp，正好落进开关的空白里。
+    -->
+    <dimen name="switch_trim_end">-6dp</dimen>
 </resources>

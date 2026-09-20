@@ -2,19 +2,24 @@
 <!--
     配置 + 曲线合并页（页签「配置 · 曲线」）。自上而下三段，对齐旧 WebUI 的形态：
       ① 曲线区（区标题 + config_chart_container，ChartFragment 作为子 Fragment 挂进去）
-      ② 参数区（区标题 + config_group_container + 错误态/键渲染自检）
-      ③ 诊断区（数据文件信息常显在头部 + 可折叠的配置诊断正文）
+      ② 参数区（区标题 + config_group_container + 错误态）
+      ③ 诊断区（默认只有一行标题；展开后是数据文件信息 + 键渲染自检 + 配置诊断正文）
     分组卡片由 ConfigGroupBinder 动态加入 config_group_container，每个键的行由 ConfigKeyRow
-    动态生成（数据源是 ConfigStore，背后即 assets/params.json）。
+    动态生成（数据源是 ConfigStore，背后即 assets/params.json）。「[4] 界面」组不在此渲染，它在
+    顶栏设置按钮打开的独立设置页（UiSettingsFragment）。
     本文件不承载任何键定义，改动键表不需要动布局；曲线区自身的内容在 fragment_chart.xml。
-    区标题的行高一律与分组卡头一致（@dimen/row_min_height + @dimen/card_padding）。
+    区标题行高压到约 40dp（16sp 行高 24dp + 上下各 @dimen/space_s），不再跟随分组卡头的 48dp。
+    滚动条常显（fadeScrollbars=false）+ 加粗到 @dimen/scrollbar_size，配合 ui/ScrollbarDrag 才能按住拖动。
 -->
 <ScrollView xmlns:android="http://schemas.android.com/apk/res/android"
     android:id="@+id/config_scroll"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
     android:background="?attr/colorSurface"
-    android:fillViewport="true">
+    android:fadeScrollbars="false"
+    android:fillViewport="true"
+    android:scrollbarSize="@dimen/scrollbar_size"
+    android:scrollbars="vertical">
 
     <LinearLayout
         android:layout_width="match_parent"
@@ -22,13 +27,15 @@
         android:orientation="vertical"
         android:padding="@dimen/page_padding">
 
-        <!-- ===== ① 曲线区区标题（行高同分组卡头） ===== -->
+        <!-- ===== ① 曲线区区标题 ===== -->
         <TextView
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:gravity="center_vertical"
-            android:minHeight="@dimen/row_min_height"
-            android:padding="@dimen/card_padding"
+            android:paddingStart="@dimen/card_padding"
+            android:paddingTop="@dimen/space_s"
+            android:paddingEnd="@dimen/card_padding"
+            android:paddingBottom="@dimen/space_s"
             android:text="@string/chart_section_curve"
             android:textAppearance="@style/TextAppearance.B6XTempCtrl.SectionTitle" />
 
@@ -38,14 +45,16 @@
             android:layout_width="match_parent"
             android:layout_height="wrap_content" />
 
-        <!-- ===== ② 参数区区标题（行高同分组卡头，48dp 那一套） ===== -->
+        <!-- ===== ② 参数区区标题 ===== -->
         <TextView
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:layout_marginTop="@dimen/space_m"
             android:gravity="center_vertical"
-            android:minHeight="@dimen/row_min_height"
-            android:padding="@dimen/card_padding"
+            android:paddingStart="@dimen/card_padding"
+            android:paddingTop="@dimen/space_s"
+            android:paddingEnd="@dimen/card_padding"
+            android:paddingBottom="@dimen/space_s"
             android:text="@string/config_section_title"
             android:textAppearance="@style/TextAppearance.B6XTempCtrl.SectionTitle" />
 
@@ -87,14 +96,6 @@
             </LinearLayout>
         </com.google.android.material.card.MaterialCardView>
 
-        <!-- ===== ② 键渲染自检 / 未定义键 / 读取提示 ===== -->
-        <TextView
-            android:id="@+id/config_self_check"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:textAppearance="@style/TextAppearance.B6XTempCtrl.Caption"
-            android:visibility="gone" />
-
         <!-- ===== ② 分组容器 ===== -->
         <LinearLayout
             android:id="@+id/config_group_container"
@@ -102,7 +103,7 @@
             android:layout_height="wrap_content"
             android:orientation="vertical" />
 
-        <!-- ===== ③ 诊断区（可展开） ===== -->
+        <!-- ===== ③ 诊断区（可展开，默认折叠） ===== -->
         <com.google.android.material.card.MaterialCardView
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
@@ -132,25 +133,35 @@
                         android:text="@string/config_diag_title"
                         android:textAppearance="@style/TextAppearance.B6XTempCtrl.SectionTitle" />
 
+                    <!-- 三角锁高 @dimen/arrow_box：36sp 的行高不锁高会把这一行顶到约 68dp，
+                         与分组卡头（48dp）不一致（同 item_config_group.xml 的处理） -->
                     <TextView
                         android:id="@+id/config_diag_arrow"
                         android:layout_width="wrap_content"
-                        android:layout_height="wrap_content"
+                        android:layout_height="@dimen/arrow_box"
                         android:layout_marginStart="@dimen/space_s"
+                        android:gravity="center"
+                        android:includeFontPadding="false"
                         android:text="@string/config_arrow_collapsed"
                         android:textAppearance="@style/TextAppearance.B6XTempCtrl.Caption"
                         android:textSize="@dimen/text_arrow" />
                 </LinearLayout>
 
-                <!-- 数据文件信息（原曲线页信息条）：常显，折叠只作用于下方的配置诊断正文。
-                     内容由 ChartFragment 经 ChartFragment.Host 回调提供，曲线卡内不再重复。 -->
+                <!--
+                    折叠体：默认整块隐藏（诊断信息与键渲染自检都属排障内容，不该常驻参数区上方）。
+                    自上而下：数据文件信息（原曲线页信息条，由 ChartFragment 经 ChartFragment.Host
+                    回调提供，曲线卡内不再重复）→ 键渲染自检 → 配置诊断正文（落点/护栏/未知键/mtime）。
+                    自检单独一个 TextView：config_diag_text 每次刷新都被 ConfigDiagnostics 整段覆盖。
+                -->
                 <LinearLayout
+                    android:id="@+id/config_diag_body"
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
                     android:orientation="vertical"
                     android:paddingStart="@dimen/card_padding"
                     android:paddingEnd="@dimen/card_padding"
-                    android:paddingBottom="@dimen/card_padding">
+                    android:paddingBottom="@dimen/card_padding"
+                    android:visibility="gone">
 
                     <TextView
                         android:layout_width="match_parent"
@@ -166,22 +177,20 @@
                         android:text="@string/chart_loading"
                         android:textAppearance="@style/TextAppearance.B6XTempCtrl.Mono"
                         android:textIsSelectable="true" />
-                </LinearLayout>
 
-                <LinearLayout
-                    android:id="@+id/config_diag_body"
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:orientation="vertical"
-                    android:paddingStart="@dimen/card_padding"
-                    android:paddingEnd="@dimen/card_padding"
-                    android:paddingBottom="@dimen/card_padding"
-                    android:visibility="gone">
+                    <TextView
+                        android:id="@+id/config_diag_selfcheck"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="@dimen/space_s"
+                        android:textAppearance="@style/TextAppearance.B6XTempCtrl.Caption"
+                        android:visibility="gone" />
 
                     <TextView
                         android:id="@+id/config_diag_mtime"
                         android:layout_width="match_parent"
                         android:layout_height="wrap_content"
+                        android:layout_marginTop="@dimen/space_s"
                         android:textAppearance="@style/TextAppearance.B6XTempCtrl.Caption" />
 
                     <TextView

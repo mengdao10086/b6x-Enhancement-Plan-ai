@@ -1,4 +1,4 @@
-# b6x温控增强 — LSPosed 模块
+# 飞智温控增强 — LSPosed 模块
 
 > 本目录是 git 子模块的一部分，非独立仓库。git 操作在父目录 `飞智b6x增强计划/` 中执行。
 
@@ -6,7 +6,8 @@
 
 ## 功能
 
-- **内置原生配置界面**：状态 / 配置 · 曲线 / 日志三页，取代原 WebUI；左右滑可切页
+- **内置原生配置界面**：状态 / 配置 · 曲线 / 日志三页（底部页签，可左右滑切页，带转场动画），取代原 WebUI；标题栏右侧设置按钮进入界面参数设置页
+- **返回键收后台**：返回键会结束整个任务时把散热器 app 收进后台而不退出（可在设置页关闭）
 - **一键部署守护进程**：C 守护程序（`daemon/tempctrl.c`）随 APK 打包，装好 APK 后在状态页一键部署，**无需刷 Magisk 模块**；配置与日志存 APK 私有目录，卸载即清
 - **BLE 修复**：修复 Android 16 上飞智散热器工具（B6X + B7X）无法连接的 4 层连环 Bug（[完整修复历程](../参考资料/完整修复历程.md)）
 - **双设备支持**：自动检测包名选择 B6X 老 app（`com.flydigi.waspwing.experimental`）、B6X 新 app（`com.flydigi.waspwing.experimentanliuliu`）或 B7X（`com.fdg.flashplay.farsef`）钩子集，B7X WaspWingManager 混淆名 `t9.j` 自动 fallback
@@ -117,6 +118,22 @@ TARGET_TEMP=180     ← 18.0°C
 - 温度字段全部使用 0.1°C 内部单位（C 端 `atoi()` 直接解析，无需浮点）
 - `lastWaspWingInfo` 为 `null` 时只输出 `BLE=` + `CONNECTED_AT=` + `BLE_OWNER_LAST=` 行（模块启动初期或 WaspWingInfo 未就绪）
 - 文件名区分设备；文件内部 `BLE=` 按设备编码：B6X 文件 1/2（区分两个 app），B7X 文件 6/7（实际散热器型号），断连统一为 0
+
+---
+
+## 界面开关文件协议（daemon → 钩子）
+
+`UI_BACK_HIDE`（「返回退出自动隐藏后台」，设置页可关）是唯一需要送达宿主编进程的界面开关。
+界面与钩子分属两个进程、不共享内存，故由 daemon 转写成一行标志文件，钩子每次返回键读一次：
+
+| 项 | 值 |
+|---|---|
+| 路径 | `/data/local/tmp/tempctrl_uiprefs` |
+| 内容 | `BACK_HIDE=0/1`（换行结尾；`.tmp` + `rename` 原子替换） |
+| 写入方 | tempctrl daemon（root），每次配置重载时按需写（值未变不写） |
+| 读取方 | `MainHook.readBackHideEnabled()`（宿主 app 进程），**读不到按 1（开启）处理** |
+
+> 方向与 status 文件相反：status 是「钩子写、daemon 读」，本文件是「daemon 写、钩子读」。
 
 ---
 
