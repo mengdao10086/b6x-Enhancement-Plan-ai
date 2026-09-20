@@ -3,7 +3,8 @@
     应用外壳：标题栏（标题 + 右侧设置按钮）+ 页面容器 + 底部页签栏（状态 / 配置 · 曲线 / 日志）。
 
     - 页签在底部：本文件只是菜单的承载处，顺序由 res/menu/menu_bottom.xml 决定，
-      而那份顺序必须与 SetupActivity.MENU_IDS / TAGS 严格一致（错位会静默显示错页）。
+      而那份顺序必须与 SetupActivity.MENU_IDS 严格一致（错位会静默显示错页）。
+    - 页面容器是 ViewPager2：翻页由它接管（跟手滑动），故外壳不再有手势代码与手写转场。
     - 标题栏几何：标题到窗口顶端的距离 = title_pad_top(7dp)（原为 ?attr/actionBarSize 里垂直居中的约 14dp 的一半）；
       标题到标题栏下边界 = 到窗口左侧 = space_l(16dp)。因此标题栏高度不再取 ?attr/actionBarSize，
       行高由标题文本行高决定；右侧设置按钮受同一行高约束，故取 title_action_size(28dp)。
@@ -47,9 +48,9 @@
             app:tint="?attr/colorOnSurfaceVariant" />
     </LinearLayout>
 
-    <!-- ===== 页面容器：三个页面（add/hide/show）挂在这里 ===== -->
-    <FrameLayout
-        android:id="@+id/page_container"
+    <!-- ===== 页面容器：ViewPager2（跟手滑动 + fling 吸附；三页由 FragmentStateAdapter 持有） ===== -->
+    <androidx.viewpager2.widget.ViewPager2
+        android:id="@+id/page_pager"
         android:layout_width="match_parent"
         android:layout_height="0dp"
         android:layout_weight="1" />

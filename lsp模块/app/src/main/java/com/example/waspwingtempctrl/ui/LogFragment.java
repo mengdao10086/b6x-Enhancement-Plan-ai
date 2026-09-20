@@ -21,6 +21,7 @@ import androidx.fragment.app.Fragment;
 import androidx.recyclerview.widget.LinearLayoutManager;
 import androidx.recyclerview.widget.RecyclerView;
 
+import com.example.waspwingtempctrl.PageAware;
 import com.example.waspwingtempctrl.R;
 
 import java.io.File;
@@ -36,23 +37,29 @@ import java.util.Locale;
  * <p><b>线程</b>：所有 File IO 在后台线程（{@link LogTailReader#read}）；主线程只做渲染。
  * Context 一律在主线程取出后捕获进闭包，后台线程不再调 {@code requireContext()}。
  *
- * <p><b>刷新</b>：页面可见时每 {@link #REFRESH_INTERVAL_MS} 毫秒重读一次；
- * 外壳用 add/hide/show 切页（见 {@code SetupActivity}），被隐藏的 Fragment 生命周期仍是
- * RESUMED，所以除了 {@code onPause}/{@code onResume}，{@code onHiddenChanged} 也必须停/启刷新。
- * 三处都走幂等的 {@link #startRefresh()} / {@link #stopRefresh()}。
+ * <p><b>刷新</b>：页面可见时每 {@link #REFRESH_INTERVAL_MS} 毫秒重读一次。外壳用 ViewPager2
+ * 切页（见 {@code SetupActivity}），页面生命周期不再随切页暂停/恢复，故除了
+ * {@code onPause}/{@code onResume}，{@link #onPageVisible(boolean)} 也必须停/启刷新——
+ * 三个入口都走幂等的 {@link #startRefresh()} / {@link #stopRefresh()}。
  *
  * <p><b>无变化跳过</b>：内容指纹（size:mtime）与关键词都没变时，{@link LogTailReader} 直接返回
  * {@code unchanged}，不触碰 UI —— 否则每 2 秒重建一次 2000 行列表会白白抖动。
  *
- * <p><b>软键盘</b>：日志窗口压在页面最下方，键盘弹出时不顶起页面（只覆盖）。窗口的
- * softInputMode 是 Activity 级设置，故本页可见时接管、离开时还原，三处入口与刷新同一套。
+ * <p><b>软键盘</b>：键盘弹出时不顶起页面（只覆盖）。窗口的
+ * softInputMode 是 Activity 级设置，故本页可见时接管、离开时还原，入口与刷新同一套。
  */
-public class LogFragment extends Fragment {
+public class LogFragment extends Fragment implements PageAware {
 
     /** 自动刷新间隔。 */
     private static final long REFRESH_INTERVAL_MS = 2000L;
     /** 输入关键词后的去抖间隔（过滤本身在后台线程做）。 */
     private static final long FILTER_DEBOUNCE_MS = 250L;
+
+    /**
+     * 本页是否为当前页（外壳 ViewPager2 广播，见 {@code PageAware}）：切页不再 hide/show、
+     * 也不派发 onPause，故「是不是当前页」只能自己记着。
+     */
+    private boolean pageVisible;
 
     private RecyclerView listView;
     private LogListAdapter adapter;
@@ -173,7 +180,7 @@ public class LogFragment extends Fragment {
     @Override
     public void onResume() {
         super.onResume();
-        if (!isHidden()) {
+        if (pageVisible) {
             startRefresh();
             pinImeOverlap();
         }
@@ -187,15 +194,16 @@ public class LogFragment extends Fragment {
     }
 
     @Override
-    public void onHiddenChanged(boolean hidden) {
-        super.onHiddenChanged(hidden);
-        // 隐藏时生命周期仍是 RESUMED，不在这里停就一直在后台刷
-        if (hidden) {
-            stopRefresh();
-            restoreImeMode();
-        } else if (isResumed()) {
+    public void onPageVisible(boolean visible) {
+        pageVisible = visible;
+        // 非当前页只是被压到 STARTED（不派发 onPause），不在这里停就一直后台刷；
+        // 同理软键盘设置是 Activity 级的，离开本页必须还回去
+        if (visible) {
             startRefresh();
             pinImeOverlap();
+        } else {
+            stopRefresh();
+            restoreImeMode();
         }
     }
 

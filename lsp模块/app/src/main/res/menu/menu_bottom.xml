@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!--
-    底部页签菜单。**item 的顺序必须与 SetupActivity.TAGS / MENU_IDS 严格一致**（同为 3 项、同序），
+    底部页签菜单。**item 的顺序必须与 SetupActivity.MENU_IDS 严格一致**（同为 3 项、同序），
     三处的对应关系错了会出现"点第二个页签显示第一页"这类静默错位。
 -->
 <menu xmlns:android="http://schemas.android.com/apk/res/android">

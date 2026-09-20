@@ -22,6 +22,7 @@ import com.example.waspwingtempctrl.ConfigStore.KeyMeta;
 import com.example.waspwingtempctrl.ConfigStore.Snapshot;
 import com.example.waspwingtempctrl.ConfigStore.Value;
 import com.example.waspwingtempctrl.ConfigStore.WriteResult;
+import com.example.waspwingtempctrl.PageAware;
 import com.example.waspwingtempctrl.R;
 import com.google.android.material.snackbar.Snackbar;
 
@@ -59,12 +60,13 @@ import java.util.concurrent.RejectedExecutionException;
  * （{@link ConfigWriteQueue}）。所有文件 I/O 在单线程 executor 上，主线程只做渲染。
  *
  * <h3>生命周期</h3>
- * 外壳用 add/hide/show 切页，<b>被隐藏的 Fragment 生命周期仍是 RESUMED</b>：
- * 故 {@link #onHiddenChanged(boolean)} 在隐藏时冲刷待写项、停掉曲线区刷新，回到本页时重新读盘；
+ * 外壳用 ViewPager2 切页，<b>页面生命周期不再随切页暂停/恢复</b>（非当前页被压到 STARTED，
+ * 不派发 {@code onPause}，也没有 hide/show 的 {@code onHiddenChanged}）：
+ * 故 {@link #onPageVisible(boolean)} 在离开本页时冲刷待写项、停掉曲线区刷新，回到本页时重新读盘；
  * {@link #onPause()} 与 {@link #onDestroyView()} 也各自冲刷一次，不丢改动。
  */
 public class ConfigFormFragment extends Fragment
-        implements ConfigKeyRow.Host, ChartFragment.Host {
+        implements ConfigKeyRow.Host, ChartFragment.Host, PageAware {
 
     /** 曲线区（子 Fragment）的 tag。 */
     private static final String TAG_CHART = "config_chart";
@@ -415,18 +417,17 @@ public class ConfigFormFragment extends Fragment
     }
 
     @Override
-    public void onHiddenChanged(boolean hidden) {
-        super.onHiddenChanged(hidden);
-        // 曲线区是子 Fragment，父页的 hide() 不会传播到子级，刷新停/启必须在这里转达
+    public void onPageVisible(boolean visible) {
+        // 曲线区是子 Fragment，父页不可见不会传播到子级，刷新停/启必须在这里转达
         if (chart != null) {
-            chart.setPageHidden(hidden);
+            chart.setPageHidden(!visible);
         }
-        if (hidden) {
-            // 被隐藏的 Fragment 生命周期仍是 RESUMED（onPause 不会来），故在这里也冲刷一次
-            queue.flushNow();
-        } else {
+        if (visible) {
             // 回到本页：配置可能被 C 端或部署流程改过，重新读盘
             reloadAsync();
+        } else {
+            // 生命周期不随切页暂停（onPause 不会来），故在这里也冲刷一次
+            queue.flushNow();
         }
     }
 
