@@ -1414,17 +1414,15 @@
       "group": "launch",
       "role": "setting",
       "type": "multi",
-      "label": "拉起前屏幕状态门禁",
-      "desc": "仅 mWakefulness=Awake 才拉起，灭屏/息屏跳过并每 5 秒重试；第 2 值 = 读取失败时是否可拉起（1=可拉起）；第 3 值 = 1 时 Dozing 也算亮屏",
+      "label": "屏幕状态门禁",
+      "desc": "仅 mWakefulness=Awake 才拉起，灭屏/息屏跳过并每 5 秒重试；第 2 值 = 1 时 Dozing 也算亮屏",
       "unit": "",
       "unitNote": "多值键，各字段单位见 fields",
       "default": [
         1,
-        1,
         0
       ],
       "factory": [
-        1,
         1,
         0
       ],
@@ -1438,15 +1436,6 @@
       "fields": [
         {
           "label": "开关",
-          "unit": "",
-          "unitNote": "布尔子开关，取值 0/1",
-          "bool": true,
-          "min": 0,
-          "max": 1,
-          "default": 1
-        },
-        {
-          "label": "读取失败默认值",
           "unit": "",
           "unitNote": "布尔子开关，取值 0/1",
           "bool": true,

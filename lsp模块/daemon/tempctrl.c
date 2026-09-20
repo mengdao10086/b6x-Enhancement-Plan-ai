@@ -371,8 +371,7 @@ static time_t last_launch_attempt = 0;  // 上次拉起尝试时间（冷却用�
 static time_t last_arbitrate = 0;       // 上次 app 存活仲裁时间（ARBITRATE_INTERVAL 节流）
 static int app_launch_cooldown = 60;    // APP_LAUNCH_COOLDOWN：两次拉起最小间隔（秒，默认 60）
 static int app_launch_screen_gate_enabled = 1;  // APP_LAUNCH_SCREEN_GATE 第一值：屏幕门禁开关
-static int app_launch_screen_fail_ok    = 1;    // 第二值：读取失败默认值（1=可拉起，0=跳过）
-static int app_launch_screen_dozing_on  = 0;    // 第三值：Dozing 是否算亮屏（默认 0）
+static int app_launch_screen_dozing_on  = 0;    // 第二值：Dozing 是否算亮屏（默认 0）
 
 // --- 界面开关转写（UI_BACK_HIDE）---
 // 界面与 Xposed 钩子分属两个进程、不共享内存：本机不消费该值，只把它写进一个双方都能访问的文件，
@@ -831,12 +830,12 @@ static void load_config(const char *path) {
         } else if (strcmp(key, "APP_LAUNCH_COOLDOWN") == 0) {
             app_launch_cooldown = clamp(atoi(val_str), 0, 3600);  // 两次拉起最小间隔（秒，0=不冷却）
         } else if (strcmp(key, "APP_LAUNCH_SCREEN_GATE") == 0) {
-            // 屏幕门禁（多值：开关 读取失败默认值 Dozing是否算亮屏）；仅 mWakefulness=Awake 才拉起
-            int on = app_launch_screen_gate_enabled, f = app_launch_screen_fail_ok, dz = app_launch_screen_dozing_on;
-            int n = sscanf(val_str, "%d %d %d", &on, &f, &dz);
+            // 屏幕门禁（二值：开关 Dozing是否算亮屏）；仅 mWakefulness=Awake 才拉起
+            // 注：旧三值行（开关 读取失败默认值 Dozing）按二值口径取前两个 token，中间的旧值即被当成 Dozing
+            int on = app_launch_screen_gate_enabled, dz = app_launch_screen_dozing_on;
+            int n = sscanf(val_str, "%d %d", &on, &dz);
             if (n >= 1) app_launch_screen_gate_enabled = (on != 0);
-            if (n >= 2) app_launch_screen_fail_ok    = (f != 0);
-            if (n >= 3) app_launch_screen_dozing_on  = (dz != 0);
+            if (n >= 2) app_launch_screen_dozing_on  = (dz != 0);
         } else if (strcmp(key, "UI_BACK_HIDE") == 0) {
             // 界面键里唯一被守护进程读取的一个：本机不消费，只转写标志文件供钩子读取。
             // 与 APP_LAUNCH_ENABLED 同理，必须在第一遍读掉——否则 PERF/DEBUG/SYSFS 全关时本函数会提前 return。
@@ -1866,11 +1865,11 @@ static void launch_last_app(void) {
         return;
     }
 
-    // 屏幕状态门禁（APP_LAUNCH_SCREEN_GATE）：仅 mWakefulness=Awake 才拉起；屏灭/失败跳过本周期（下一 5s 重试）
+    // 屏幕状态门禁（APP_LAUNCH_SCREEN_GATE）：仅 mWakefulness=Awake 才拉起；屏灭跳过本周期（下一 5s 重试）
     if (app_launch_screen_gate_enabled) {
         int sc = is_screen_awake();
         if (sc == 2) sc = app_launch_screen_dozing_on ? 1 : 0;   // Dozing 按配置是否算亮屏（默认 0=算灭）
-        if (sc < 0) sc = app_launch_screen_fail_ok;              // 读取失败兜底（默认 1=可拉起，防永久不拉起）
+        if (sc < 0) sc = 1;                                      // 读取失败一律按可拉起兜底（防探测坏掉后永久不拉起）
         if (sc != 1) {
             debug_log(debug_launch, "自动拉起 屏幕未亮（mWakefulness 非 Awake），本周期跳过");
             return;

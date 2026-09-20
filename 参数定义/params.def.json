@@ -1187,20 +1187,20 @@
       "group": "launch",
       "role": "setting",
       "type": "multi",
-      "label": "拉起前屏幕状态门禁",
-      "desc": "仅 mWakefulness=Awake 才拉起，灭屏/息屏跳过并每 5 秒重试；第 2 值 = 读取失败时是否可拉起（1=可拉起）；第 3 值 = 1 时 Dozing 也算亮屏",
+      "label": "屏幕状态门禁",
+      "desc": "仅 mWakefulness=Awake 才拉起，灭屏/息屏跳过并每 5 秒重试；第 2 值 = 1 时 Dozing 也算亮屏",
       "cTable": "pre",
       "docOrder": 36,
-      "docDesc": "拉起前屏幕状态门禁（三值：开关 · 读取失败默认值 · Dozing是否算亮屏）。仅 `dumpsys power` 的 `mWakefulness=Awake` 才拉起；Asleep/Dozing 算灭屏跳过，每 5 秒重试直到亮屏；读取失败兜底默认 1=可拉起（防探测失败死锁）。Dozing 默认=0（算灭屏，AOD 期间不拉起）",
+      "docDesc": "屏幕状态门禁（二值：开关 · Dozing是否算亮屏）。仅 `dumpsys power` 的 `mWakefulness=Awake` 才拉起；Asleep/Dozing 算灭屏跳过，每 5 秒重试直到亮屏；屏幕状态读取失败一律按「可拉起」兜底（防探测失败死锁，不可配置）。Dozing 默认=0（算灭屏，AOD 期间不拉起）",
       "confNote": [
-        "拉起前屏幕状态门禁（三值）：开关 · 读取失败默认值 · Dozing 是否算亮屏",
+        "屏幕状态门禁（二值）：开关 · Dozing 是否算亮屏",
         "  仅 mWakefulness=Awake 才拉起，灭屏/息屏跳过并每 5 秒重试",
-        "  默认 1 1 0 = 开启、读取失败按「可拉起」兜底（防探测失败死锁）、Dozing 不算亮屏"
+        "  默认 1 0 = 开启、Dozing 不算亮屏；屏幕状态读取失败一律按「可拉起」兜底（防探测失败死锁）"
       ],
       "unit": "",
       "unitNote": "多值键，各字段单位见 fields",
-      "default": [1, 1, 0],
-      "factory": [1, 1, 0],
+      "default": [1, 0],
+      "factory": [1, 0],
       "min": null,
       "max": null,
       "rangeNote": "范围逐字段见 fields",
@@ -1208,7 +1208,6 @@
       "daemonConsumes": true,
       "fields": [
         { "bool": true, "label": "开关", "unit": "", "unitNote": "布尔子开关，取值 0/1", "min": 0, "max": 1, "default": 1, "cVar": null },
-        { "bool": true, "label": "读取失败默认值", "unit": "", "unitNote": "布尔子开关，取值 0/1", "min": 0, "max": 1, "default": 1, "cVar": null },
         { "bool": true, "label": "Dozing 算亮屏", "unit": "", "unitNote": "布尔子开关，取值 0/1", "min": 0, "max": 1, "default": 0, "cVar": null }
       ]
     },
@@ -1502,7 +1501,7 @@
       "LOG_MAX": ["LOG_MAX"],
       "APP_LAUNCH_ENABLED": ["APP_LAUNCH_ENABLED"],
       "APP_LAUNCH_COOLDOWN": ["app_launch_cooldown"],
-      "APP_LAUNCH_SCREEN_GATE": ["app_launch_screen_gate_enabled", "app_launch_screen_fail_ok", "app_launch_screen_dozing_on"],
+      "APP_LAUNCH_SCREEN_GATE": ["app_launch_screen_gate_enabled", "app_launch_screen_dozing_on"],
       "APP_WATCHDOG": ["app_watchdog_cycles"],
       "UI_GAP_SEC": [],
       "UI_LABEL_MERGE_PX": [],

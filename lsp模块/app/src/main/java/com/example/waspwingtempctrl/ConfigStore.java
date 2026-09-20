@@ -853,7 +853,7 @@ public final class ConfigStore {
         public final int defaultValue;
         /**
          * true = 布尔子开关（值只有 0/1）。界面据此把该字段渲染成开关而不是数字输入框
-         * （定义里 PID_TARGET_DIR[0] / PID_SPEED_RECALL[0] / APP_LAUNCH_SCREEN_GATE[0..2] /
+         * （定义里 PID_TARGET_DIR[0] / PID_SPEED_RECALL[0] / APP_LAUNCH_SCREEN_GATE[0..1] /
          * UI_AUTOSAVE[0] 为 true）；C 端的逐字段 clamp 边界生成时也跳过这些字段。
          */
         public final boolean bool;
