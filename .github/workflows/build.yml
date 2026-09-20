@@ -27,7 +27,7 @@ jobs:
     outputs:
       changed: ${{ steps.check.outputs.changed }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0   # 需要 commit 历史做 git diff
 
@@ -77,7 +77,7 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # ── 参数定义校验（R1「单一来源」的唯一自动化保护）──
       # 退出码：0 通过 / 1 产物不可复现或字段不自洽 / 2 三源漂移（profile.conf / 逻辑说明.md 参数表 / tempctrl.c）
@@ -145,7 +145,7 @@ jobs:
 
       # ── 工具链 ──
       - name: 设置 JDK 17
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@v6
         with:
           distribution: temurin
           java-version: 17
@@ -156,11 +156,11 @@ jobs:
         uses: android-actions/setup-android@v4
 
       - name: 缓存 Gradle（依赖 + 构建缓存，二次构建大幅提速）
-        uses: gradle/actions/setup-gradle@v4
+        uses: gradle/actions/setup-gradle@v6
 
       - name: 缓存 NDK
         id: cache-ndk
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: /opt/ndk
           key: ndk-r27c-${{ runner.os }}
@@ -208,7 +208,7 @@ jobs:
 
       - name: 缓存 tempctrl 二进制（源码未变时直接复用，跳过编译）
         id: cache-tempctrl
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: tempctrl
           key: tempctrl-${{ steps.hash-tempctrl.outputs.HASH }}
@@ -253,7 +253,7 @@ jobs:
 
       - name: 上传编译日志（即使失败）
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: compile-logs
           path: CI记录/compile_*.txt
@@ -305,7 +305,7 @@ jobs:
             || { echo "APK 内缺少 assets/tempctrl-arm64"; exit 1; }
 
       - name: 上传 APK 构建产物
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: b6x-EP-v${{ steps.apk-version.outputs.VERSION }}
           path: CI记录/b6x-EP-v*.apk
