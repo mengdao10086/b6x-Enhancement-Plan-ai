@@ -28,6 +28,11 @@
 #include <limits.h>
 #include <math.h>
 
+// C 端键表与 clamp 边界的唯一手写处是 参数定义/params.def.json，本头由 gen_params.py 生成。
+// 本文件只取宏：CFG_PERF_INT_KEYS / CFG_SYSFS_KEYS 的展开点必须在下方 struct 与所有被取地址的
+// static 变量声明之后（见 params_generated.h 头部说明）。
+#include "params_generated.h"
+
 // --- 通用宏 ---
 #define EMA(new_val, old_val, alpha_pct) \
     (((new_val) * (alpha_pct) + (old_val) * (100 - (alpha_pct))) / 100)
@@ -319,6 +324,25 @@ static int app_was_alive = 0;
 static char status_file_path_b6[512] = "/data/local/tmp/tempctrl_b6x.status";
 static char status_file_path_b7[512] = "/data/local/tmp/tempctrl_b7x.status";
 
+// status 文件协议：行格式「字段名=值」，由 LSP 侧写入、本进程只读。
+// 协议的唯一规范处是 lsp模块/README.md（改了这里必须同步改 LSP 侧与那份说明）。
+// 字段名集中在此声明：字段名、比较长度、取值偏移三者由一处推导，
+// 避免改名字却漏改长度/偏移（原先三处各自硬编码，是同一缺陷的三个面）。
+#define STF_BLE            "BLE="
+#define STF_CONNECTED_AT   "CONNECTED_AT="
+#define STF_BLE_OWNER_LAST "BLE_OWNER_LAST="
+#define STF_HOT_TEMP       "HOT_TEMP="
+#define STF_COLD_TEMP      "COLD_TEMP="
+#define STF_RUN_MODE       "RUN_MODE="
+#define STF_RPM_REAL       "RPM_REAL="
+#define STF_COLD_REAL      "COLD_REAL="
+
+/** 行首若为该字段名，返回值的起点指针；否则返回 NULL。长度直接取自字段名本身。 */
+static const char *status_field_value(const char *line, const char *field) {
+    size_t n = strlen(field);
+    return strncmp(line, field, n) == 0 ? line + n : NULL;
+}
+
 // WebUI 曲线数据文件（每 1 秒一行，滚动保留最大曲线窗口秒数）
 #define WEBUI_DATA_PATH       PRIVATE_DIR "/tempctrl_webui.data"
 #define WEBUI_DATA_MAX_LINES  720   // = 曲线最大时间挡位（秒）
@@ -489,16 +513,11 @@ struct SysfsCfgKey {
 };
 
 static const struct SysfsCfgKey SYSFS_CFG_KEYS[] = {
-    { "BATT_TEMP_PATH",       SK_PATH,   NULL,                  0,  0,       BATT_TEMP_PATH,      sizeof(BATT_TEMP_PATH) },
-    { "BATT_TEMP_DIVISOR",    SK_INT,    &BATT_TEMP_DIVISOR,    1,  10000,   NULL,                0 },
-    { "BATT_CURRENT_PATH",    SK_PATH,   NULL,                  0,  0,       BATT_CURRENT_PATH,   sizeof(BATT_CURRENT_PATH) },
-    { "BATT_CURRENT_DIVISOR", SK_INT,    &BATT_CURRENT_DIVISOR, 1,  100000,  NULL,                0 },
-    { "CPU_TEMP_PATH_FMT",    SK_PATH,   NULL,                  0,  0,       CPU_TEMP_PATH_FMT,   sizeof(CPU_TEMP_PATH_FMT) },
-    { "CPU_TEMP_DIVISOR",     SK_INT,    &CPU_TEMP_DIVISOR,     1,  10000,   NULL,                0 },
-    { "CPU_ZONE",             SK_ZONE,   NULL,                  0,  0,       NULL,                0 },
-    { "CPU_ZONE_RESCAN",      SK_RESCAN, NULL,                  0,  0,       NULL,                0 },
-    { "LOG_FILE",             SK_PATH,   NULL,                  0,  0,       log_file_path,       sizeof(log_file_path) },
-    { "LOG_MAX",              SK_INT,    &LOG_MAX,              0,  1048576, NULL,                0 },
+    // 表行由 params_generated.h 的 CFG_SYSFS_KEYS 展开，键序与 clamp 边界随定义，勿在此手抄
+#define CFG_ROW(k, kind, ivar, imin, imax, svar, ssize) \
+    { k, kind, ivar, imin, imax, svar, ssize },
+    CFG_SYSFS_KEYS(CFG_ROW)
+#undef CFG_ROW
 };
 
 /** sysfs 层键查找：命中返回表项，未命中返回 NULL */
@@ -518,16 +537,11 @@ static int is_sysfs_key(const char *key) {
 struct IntCfgKey { const char *key; int *var; int min; int max; };
 
 static const struct IntCfgKey INT_CFG_KEYS[] = {
-    // 性能层（PERF_ENABLED=1）
-    { "BATT_BASELINE",             &BATT_BASELINE,               300, 500 },
-    { "CPU_FILTER_ALPHA",          &CPU_FILTER_ALPHA,            1, 100 },
-    { "RECONNECT_KEEP_CYCLES",     &reconnect_keep_cycles,       0, 30 },
-    // PID 单值键走表驱动；多值键（PID_KI_RATE / PID_TARGET / PID_TARGET_DIR / PID_COLD_RANGE / PID_CPU_COMP / PID_SPEED_RECALL）在 parse_pid_cfg 分段解析
-    { "PID_KDP",                   &pid_kdp_coef,                1, 1000 },
-    { "PID_SPEED",                 &pid_speed_coef,              0, 1000 },
-    { "PID_CH_THRESHOLD",          &pid_ch_threshold,            1, 100 },
-    { "MAP_INPUT_SMOOTH_ALPHA",    &rpm_smooth_alpha,            1, 99 },
-    { "FAN_RPM_ROUND_UNIT",        &fan_rpm_round_unit,          1, 500 },
+    // 表行由 params_generated.h 的 CFG_PERF_INT_KEYS 展开，键序与 clamp 边界随定义，勿在此手抄。
+    // 多值键（PID_KI_RATE / PID_TARGET / PID_TARGET_DIR / PID_COLD_RANGE / PID_CPU_COMP / PID_SPEED_RECALL）在 parse_pid_cfg 分段解析
+#define CFG_ROW(k, var, lo, hi) { k, &var, lo, hi },
+    CFG_PERF_INT_KEYS(CFG_ROW)
+#undef CFG_ROW
 };
 
 /** 配置表查找：命中（键名一致）则 clamp 赋值，返回 1 */
@@ -1050,8 +1064,9 @@ static void read_single_status(const char *path, int is_b6_file,
     if (!f) return;
     char line[64];
     while (fgets(line, sizeof(line), f)) {
-        if (strncmp(line, "BLE=", 4) == 0) {
-            int ble = atoi(line + 4);
+        const char *v;
+        if ((v = status_field_value(line, STF_BLE)) != NULL) {
+            int ble = atoi(v);
             *out_connected = (ble != 0);
             if (is_b6_file) {
                 if (ble == 1 || ble == 2) b6_owner = ble;
@@ -1059,12 +1074,12 @@ static void read_single_status(const char *path, int is_b6_file,
             } else if (out_model && (ble == 6 || ble == 7)) {
                 *out_model = ble;   // B7X 文件型号编码
             }
-        } else if (strncmp(line, "CONNECTED_AT=", 13) == 0) {
-            *out_connected_at = (time_t)atol(line + 13);
-        } else if (strncmp(line, "BLE_OWNER_LAST=", 15) == 0) {
+        } else if ((v = status_field_value(line, STF_CONNECTED_AT)) != NULL) {
+            *out_connected_at = (time_t)atol(v);
+        } else if ((v = status_field_value(line, STF_BLE_OWNER_LAST)) != NULL) {
             int owner = 0;
             long at = 0;
-            if (sscanf(line + 15, "%d %ld", &owner, &at) == 2 && owner > 0) {
+            if (sscanf(v, "%d %ld", &owner, &at) == 2 && owner > 0) {
                 if (is_b6_file) { b6_last_owner = owner; b6_last_at = (time_t)at; }
                 else { b7_last_owner = owner; b7_last_at = (time_t)at; }
             }
@@ -1145,18 +1160,19 @@ static void read_cooler_params(void) {
     char line[64];
     int run_mode_seen = 0;   // 本帧是否读到 RUN_MODE（与 COLD_REAL 同块写入，lastWaspWingInfo 就绪才有）
     while (fgets(line, sizeof(line), f)) {
-        if (strncmp(line, "BLE=", 4) == 0) {
-            app_ble_connected = (atoi(line + 4) != 0);
-        } else if (strncmp(line, "HOT_TEMP=", 9) == 0) {
-            cooler_hot_temp = atoi(line + 9);
-        } else if (strncmp(line, "COLD_TEMP=", 10) == 0) {
-            cooler_cold_temp = atoi(line + 10);
-        } else if (strncmp(line, "RUN_MODE=", 9) == 0) {
+        const char *v;
+        if ((v = status_field_value(line, STF_BLE)) != NULL) {
+            app_ble_connected = (atoi(v) != 0);
+        } else if ((v = status_field_value(line, STF_HOT_TEMP)) != NULL) {
+            cooler_hot_temp = atoi(v);
+        } else if ((v = status_field_value(line, STF_COLD_TEMP)) != NULL) {
+            cooler_cold_temp = atoi(v);
+        } else if (status_field_value(line, STF_RUN_MODE) != NULL) {
             run_mode_seen = 1;
-        } else if (strncmp(line, "RPM_REAL=", 9) == 0) {
-            cooler_rpm_real = atoi(line + 9);
-        } else if (strncmp(line, "COLD_REAL=", 10) == 0) {
-            cooler_cold_real = atoi(line + 10);
+        } else if ((v = status_field_value(line, STF_RPM_REAL)) != NULL) {
+            cooler_rpm_real = atoi(v);
+        } else if ((v = status_field_value(line, STF_COLD_REAL)) != NULL) {
+            cooler_cold_real = atoi(v);
         }
     }
     fclose(f);
@@ -1743,10 +1759,10 @@ static const char *resolve_launch_pkg(void) {
     if      (last_owner == 2)                     pkg = APP_PKG_B6X_NEW;
     else if (last_owner == 6 || last_owner == 7)  pkg = APP_PKG_B7X;
     else                                          pkg = APP_PKG_B6X_OLD;  // 无记录/老 app
-    if (pkg == APP_PKG_B6X_OLD && !app_installed(pkg) && app_installed(APP_PKG_B6X_NEW)) {
+    if (strcmp(pkg, APP_PKG_B6X_OLD) == 0 && !app_installed(pkg) && app_installed(APP_PKG_B6X_NEW)) {
         debug_log(debug_launch, "自动拉起 老 B6X app 未安装，改用新 app");
         pkg = APP_PKG_B6X_NEW;
-    } else if (pkg == APP_PKG_B6X_NEW && !app_installed(pkg) && app_installed(APP_PKG_B6X_OLD)) {
+    } else if (strcmp(pkg, APP_PKG_B6X_NEW) == 0 && !app_installed(pkg) && app_installed(APP_PKG_B6X_OLD)) {
         debug_log(debug_launch, "自动拉起 新 B6X app 未安装，改用老 app");
         pkg = APP_PKG_B6X_OLD;
     }
@@ -1938,7 +1954,7 @@ static void arbitrate_apps(void) {
     // 注意：B6X app 连接事件会同时更新本文件 CONNECTED_AT 与 BLE_OWNER_LAST，
     // 故常规流程下 b6_connected_at 与 b6_last_at 同值、此分支实际不可达；
     // 保留作为对写入方时序不一致 / 旧版 LSP 的防御性兜底。
-    if (keep == APP_PKG_B7X && b6_connected_at > last_owner_at)
+    if (strcmp(keep, APP_PKG_B7X) == 0 && b6_connected_at > last_owner_at)
         keep = (b6_owner == 2) ? APP_PKG_B6X_NEW : APP_PKG_B6X_OLD;
 
     // 淘汰其他存活参与者（非前台才 force-stop）

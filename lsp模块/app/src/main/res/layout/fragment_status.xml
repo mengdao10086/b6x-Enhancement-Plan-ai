@@ -50,7 +50,7 @@
                 <LinearLayout
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
-                    android:layout_marginTop="@dimen/space_m"
+                    android:layout_marginTop="@dimen/status_buttons_gap"
                     android:orientation="horizontal">
 
                     <com.google.android.material.button.MaterialButton
@@ -129,7 +129,7 @@
             </LinearLayout>
         </com.google.android.material.card.MaterialCardView>
 
-        <!-- ===== 操作记录 ===== -->
+        <!-- ===== 操作记录（默认折叠：记录会越来越长，需要时才展开） ===== -->
         <com.google.android.material.card.MaterialCardView
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
@@ -141,11 +141,34 @@
                 android:orientation="vertical"
                 android:padding="@dimen/card_padding">
 
-                <TextView
-                    android:layout_width="wrap_content"
+                <!-- 卡头整行可点：展开/收起操作记录 -->
+                <LinearLayout
+                    android:id="@+id/action_log_header"
+                    android:layout_width="match_parent"
                     android:layout_height="wrap_content"
-                    android:text="@string/status_section_actions"
-                    android:textAppearance="@style/TextAppearance.B6XTempCtrl.SectionTitle" />
+                    android:minHeight="@dimen/row_min_height"
+                    android:orientation="horizontal"
+                    android:gravity="center_vertical"
+                    android:clickable="true"
+                    android:focusable="true"
+                    android:background="?attr/selectableItemBackground">
+
+                    <TextView
+                        android:layout_width="0dp"
+                        android:layout_height="wrap_content"
+                        android:layout_weight="1"
+                        android:text="@string/status_section_actions"
+                        android:textAppearance="@style/TextAppearance.B6XTempCtrl.SectionTitle" />
+
+                    <TextView
+                        android:id="@+id/action_log_arrow"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:layout_marginStart="@dimen/space_s"
+                        android:text="@string/config_arrow_collapsed"
+                        android:textAppearance="@style/TextAppearance.B6XTempCtrl.Caption"
+                        android:textSize="@dimen/text_arrow" />
+                </LinearLayout>
 
                 <TextView
                     android:id="@+id/action_log_text"
@@ -153,7 +176,8 @@
                     android:layout_height="wrap_content"
                     android:layout_marginTop="@dimen/space_s"
                     android:textAppearance="@style/TextAppearance.B6XTempCtrl.Mono"
-                    android:textIsSelectable="true" />
+                    android:textIsSelectable="true"
+                    android:visibility="gone" />
             </LinearLayout>
         </com.google.android.material.card.MaterialCardView>
 

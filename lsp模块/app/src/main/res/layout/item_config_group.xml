@@ -47,7 +47,8 @@
                 android:layout_height="wrap_content"
                 android:layout_marginStart="@dimen/space_s"
                 android:text="@string/config_arrow_collapsed"
-                android:textAppearance="@style/TextAppearance.B6XTempCtrl.Caption" />
+                android:textAppearance="@style/TextAppearance.B6XTempCtrl.Caption"
+                android:textSize="@dimen/text_arrow" />
         </LinearLayout>
 
         <View

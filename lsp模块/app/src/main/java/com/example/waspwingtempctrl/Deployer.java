@@ -148,19 +148,25 @@ public final class Deployer {
 
         public String describe() {
             StringBuilder sb = new StringBuilder();
-            sb.append("部署状态：").append(deployed ? "已完成" : "未完成").append('\n');
-            sb.append("  su 通道：").append(suOk ? "可用" : "不可用").append('\n');
+            // 「无 su」紧跟部署状态：它是部署未完成最常见的原因，单列一行容易被当成另一件事
+            sb.append("部署状态：").append(deployed ? "已完成" : "未完成")
+                    .append(suOk ? "" : "（无 su）").append('\n');
             sb.append("  二进制 ").append(BIN_DEST).append("：")
                     .append(!binExists ? "不存在" : (binExecutable ? "存在且可执行" : "存在但不可执行"))
                     .append(binHashOk ? "，哈希一致" : "，哈希不一致")
                     .append('\n');
+            // 两组哈希各占两行：并排时位数一多就无法逐位比对
             if (!binExpectedMd5.isEmpty()) {
-                sb.append("    apk=").append(binExpectedMd5).append(" 设备=")
-                        .append(binMd5.isEmpty() ? "—" : binMd5).append('\n');
+                sb.append("    apk  = ").append(binExpectedMd5).append('\n');
+                sb.append("    设备 = ").append(binMd5.isEmpty() ? "—" : binMd5).append('\n');
             }
             sb.append("  service.d 脚本：")
                     .append(scriptPresent ? scriptPath : "未安装")
                     .append(scriptPresent && !scriptHashOk ? "（哈希不一致）" : "").append('\n');
+            if (scriptPresent && !scriptExpectedMd5.isEmpty()) {
+                sb.append("    apk  = ").append(scriptExpectedMd5).append('\n');
+                sb.append("    设备 = ").append(scriptMd5.isEmpty() ? "—" : scriptMd5).append('\n');
+            }
             sb.append("  配置 ").append(configPath).append("：")
                     .append(configPresent ? "已存在" : "不存在（守护进程将用代码默认值）")
                     .append(configPathAligned ? "" : "，且与 C 端落点不一致").append('\n');
@@ -221,6 +227,18 @@ public final class Deployer {
                 scriptPath, scriptPresent, scriptHashOk, scriptMd5, expectedScript,
                 configStore.exists(), aligned, "1".equals(kv.get("RUNNING")),
                 deployed, r.stdout, configStore.getConfigFile().getAbsolutePath(), notes);
+    }
+
+    /**
+     * 主动尝试获取 root（会触发系统授权框）。<b>阻塞</b>。
+     *
+     * <p>与 {@link #probe()} 的区别：probe 只读现状，本方法会真的发起一次 su 往返，
+     * 用于"首次启动试一次"的场景。
+     *
+     * @return true 表示已确认拿到 uid=0
+     */
+    public boolean ensureRoot() {
+        return shell.checkAlive();
     }
 
     // ==================== 部署 / 卸载 ====================
@@ -336,6 +354,50 @@ public final class Deployer {
 
         Status st = probe();
         return new Result(st.deployed, "部署", steps, st.deployed ? "" : "部署后自检未通过", raw.toString(), st);
+    }
+
+    /**
+     * 只重推 service.d 脚本：不动二进制、不重启守护进程、不碰配置。<b>阻塞</b>（root 往返 1 次）。
+     *
+     * <p>用途：{@link #probe()} 发现设备上的脚本与 APK 内资源哈希不一致时自动纠正。脚本是纯文本、
+     * 无运行态，重推无损；二进制若不一致仍须走完整 {@link #deploy()}（重推会重启守护进程，代价高得多）。
+     */
+    public Result updateScript() {
+        List<String> steps = new ArrayList<>();
+        File staging = new File(configStore.getPrivateDir(), "deploy");
+        if (!staging.isDirectory() && !staging.mkdirs()) {
+            return new Result(false, "更新脚本", steps, "私有目录中转目录创建失败：" + staging, "", null);
+        }
+        File stagedScript = new File(staging, SCRIPT_NAME);
+        String scriptMd5;
+        try {
+            scriptMd5 = stageAsset(SCRIPT_ASSET, stagedScript, true);
+        } catch (IOException e) {
+            return new Result(false, "更新脚本", steps, e.getMessage(), "", null);
+        }
+        steps.add("脚本已落到私有目录并授权：" + stagedScript + "（md5=" + scriptMd5 + "）");
+
+        RootShell.Result r = shell.exec(updateScriptScript(stagedScript), EXEC_TIMEOUT_MS);
+        Map<String, String> kv = parseKv(r.stdout);
+        if (!r.isOk()) {
+            return new Result(false, "更新脚本", steps, "root 执行失败：" + r.describe(), r.stdout, null);
+        }
+        String svcd = nvl(kv.get("SVCD"));
+        if (svcd.isEmpty()) {
+            return new Result(false, "更新脚本", steps, "未能确定 service.d 目录", r.stdout, null);
+        }
+        steps.add("service.d 目录：" + svcd);
+        if (!"1".equals(kv.get("SCRIPT_OK"))) {
+            return new Result(false, "更新脚本", steps, "脚本写入失败（" + svcd + "）", r.stdout, null);
+        }
+        String onDevice = nvl(kv.get("SCRIPT_MD5"));
+        if (!scriptMd5.equals(onDevice)) {
+            return new Result(false, "更新脚本", steps,
+                    "落盘脚本与 APK 内资源不一致（apk=" + scriptMd5 + "，设备=" + onDevice + "）",
+                    r.stdout, null);
+        }
+        steps.add("脚本哈希核对通过：" + svcd + "/" + SCRIPT_NAME);
+        return new Result(true, "更新脚本", steps, "", r.stdout, null);
     }
 
     /**
@@ -608,9 +670,12 @@ public final class Deployer {
                 + "pgrep -f \"$BIN\" > /dev/null 2>&1 && echo RUNNING=1 || echo RUNNING=0\n";
     }
 
-    private String deployScript(File stagedBin, File stagedScript) {
-        return "BIN=" + BIN_DEST + "\n"
-                + "svcd=\"\"\n"
+    /**
+     * 定位 service.d 目录的 shell 片段（含 KernelSU 新旧版本分界判定）。
+     * 由 {@link #deployScript} 与 {@link #updateScriptScript} 共用，保证两处选目录的口径一致。
+     */
+    private static String serviceDirPreamble() {
+        return "svcd=\"\"\n"
                 + "ver=\"\"\n"
                 + "if [ -d /data/adb/ksu ]; then\n"
                 + "  ksud=$(command -v ksud 2>/dev/null || echo /data/adb/ksu/bin/ksud)\n"
@@ -620,12 +685,30 @@ public final class Deployer {
                 + "fi\n"
                 + "[ -n \"$svcd\" ] || svcd=" + SERVICE_D_MODERN + "\n"
                 + "echo \"SVCD=$svcd\"\n"
-                + "echo \"KSU_VER=$ver\"\n"
+                + "echo \"KSU_VER=$ver\"\n";
+    }
+
+    /** 把脚本装到 $svcd 并回吐 SCRIPT_OK 的片段（部署与单独更新脚本共用）。 */
+    private static String scriptInstallSnippet(File stagedScript) {
+        return "cp -f " + quote(stagedScript.getAbsolutePath()) + " \"$svcd/" + SCRIPT_NAME + "\" "
+                + "&& chmod 0755 \"$svcd/" + SCRIPT_NAME + "\" && echo SCRIPT_OK=1 || echo SCRIPT_OK=0\n";
+    }
+
+    /** 只重推脚本时的 shell（完全不碰 $BIN）。 */
+    private String updateScriptScript(File stagedScript) {
+        return serviceDirPreamble()
+                + "mkdir -p \"$svcd\" 2>&1\n"
+                + scriptInstallSnippet(stagedScript)
+                + "echo \"SCRIPT_MD5=$(md5sum \"$svcd/" + SCRIPT_NAME + "\" 2>/dev/null | cut -d' ' -f1)\"\n";
+    }
+
+    private String deployScript(File stagedBin, File stagedScript) {
+        return "BIN=" + BIN_DEST + "\n"
+                + serviceDirPreamble()
                 + "mkdir -p \"$svcd\" 2>&1\n"
                 + "cp -f " + quote(stagedBin.getAbsolutePath()) + " \"$BIN\" && chmod 0755 \"$BIN\" "
                 + "&& echo BIN_OK=1 || echo BIN_OK=0\n"
-                + "cp -f " + quote(stagedScript.getAbsolutePath()) + " \"$svcd/" + SCRIPT_NAME + "\" "
-                + "&& chmod 0755 \"$svcd/" + SCRIPT_NAME + "\" && echo SCRIPT_OK=1 || echo SCRIPT_OK=0\n"
+                + scriptInstallSnippet(stagedScript)
                 + "echo \"BIN_MD5=$(md5sum \"$BIN\" 2>/dev/null | cut -d' ' -f1)\"\n"
                 + "echo \"SCRIPT_MD5=$(md5sum \"$svcd/" + SCRIPT_NAME + "\" 2>/dev/null | cut -d' ' -f1)\"\n";
     }

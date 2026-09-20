@@ -2,7 +2,7 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
     <application
-        android:label="飞智b6x增强模块"
+        android:label="b6x温控增强"
         android:icon="@android:drawable/ic_menu_compass"
         android:allowBackup="false"
         android:supportsRtl="true">
@@ -16,7 +16,7 @@
             android:value="53" />
         <meta-data
             android:name="xposeddescription"
-            android:value="修复B6X/B7X超频软件在安卓16的蓝牙问题，通过status文件为智能温控守护进程提供控制接口" />
+            android:value="修复B6X/B7X超频软件在安卓16的蓝牙问题，并内置智能温控：原生界面调参、一键部署守护进程" />
 
         <!-- LSPosed 推荐作用域：管理器 > 模块 > 推荐勾选的应用 -->
         <meta-data

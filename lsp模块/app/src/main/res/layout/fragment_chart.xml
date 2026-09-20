@@ -1,50 +1,24 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!--
-    曲线页（D2）。三段式：顶部信息条（路径/大小/时间/解析量/档位与上限）→
-    档位 + 图例控件行（整块等比缩放，见 ChartFragment#fitToolsRow）→ 曲线画布。
+    曲线区（合并进配置页，挂在 fragment_config.xml 的 config_chart_container 下）。
+    两段：档位 + 图例控件行（整块等比缩放，见 ChartFragment#fitToolsRow）→ 曲线画布。
     读取失败时不进画布，把 AppFiles.diagnose() 原文铺在曲线区，绝不静默留白。
+
+    原独立成页时的顶部「数据文件」信息条与页面内边距已移走：信息条并入配置页「诊断信息」
+    头部（ChartFragment 经 ChartFragment.Host 回调交给配置页渲染），页面内边距由配置页给。
+    高度一律不许用 weight（本区在配置页的 ScrollView 里，weight 会被量成 0）。
 -->
 <LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:app="http://schemas.android.com/apk/res-auto"
     android:layout_width="match_parent"
-    android:layout_height="match_parent"
+    android:layout_height="wrap_content"
     android:background="?attr/colorSurface"
-    android:orientation="vertical"
-    android:padding="@dimen/page_padding">
-
-    <!-- ===== 信息条 ===== -->
-    <com.google.android.material.card.MaterialCardView
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content">
-
-        <LinearLayout
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:orientation="vertical"
-            android:padding="@dimen/card_padding">
-
-            <TextView
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:text="@string/chart_section_file"
-                android:textAppearance="@style/TextAppearance.B6XTempCtrl.SectionTitle" />
-
-            <TextView
-                android:id="@+id/chart_info_text"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:layout_marginTop="@dimen/space_s"
-                android:text="@string/chart_loading"
-                android:textAppearance="@style/TextAppearance.B6XTempCtrl.Mono"
-                android:textIsSelectable="true" />
-        </LinearLayout>
-    </com.google.android.material.card.MaterialCardView>
+    android:orientation="vertical">
 
     <!-- ===== 档位 + 图例：整块超宽时 setScaleX/Y 等比缩放 ===== -->
     <com.google.android.material.card.MaterialCardView
         android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:layout_marginTop="@dimen/space_m">
+        android:layout_height="wrap_content">
 
         <FrameLayout
             android:id="@+id/chart_tools_clip"
@@ -79,10 +53,8 @@
     <!-- ===== 曲线区：画布 / 读取失败诊断 ===== -->
     <com.google.android.material.card.MaterialCardView
         android:layout_width="match_parent"
-        android:layout_height="0dp"
-        android:layout_marginTop="@dimen/space_m"
-        android:layout_weight="1"
-        android:minHeight="@dimen/chart_height">
+        android:layout_height="@dimen/chart_height"
+        android:layout_marginTop="@dimen/space_m">
 
         <FrameLayout
             android:layout_width="match_parent"

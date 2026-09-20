@@ -14,6 +14,7 @@ import android.widget.TextView;
 import androidx.annotation.NonNull;
 import androidx.annotation.Nullable;
 import androidx.fragment.app.Fragment;
+import androidx.fragment.app.FragmentManager;
 
 import com.example.waspwingtempctrl.ConfigStore;
 import com.example.waspwingtempctrl.ConfigStore.GroupMeta;
@@ -35,7 +36,14 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.RejectedExecutionException;
 
 /**
- * 配置页：由 {@link ConfigStore}（背后是 assets/params.json）<b>动态生成</b>原生 Material 表单。
+ * 配置 + 曲线合并页（页签「配置 · 曲线」）：由 {@link ConfigStore}（背后是 assets/params.json）
+ * <b>动态生成</b>原生 Material 表单。
+ *
+ * <h3>结构</h3>
+ * 自上而下三段（见 {@code fragment_config.xml}）：曲线区（{@link ChartFragment} 作为子
+ * Fragment 挂在 {@code config_chart_container}，曲线自己不再单独占一个页签）→ 参数区
+ * （分组卡片）→ 诊断区。曲线把「数据文件信息」经 {@link ChartFragment.Host} 交给本页，
+ * 渲染在诊断信息头部（原曲线页顶部的那条信息条）。
  *
  * <h3>边界（I3）</h3>
  * 界面读写 {@code profile.conf} 只经 {@link ConfigStore}，不自己拼 shell、不直接碰文件、
@@ -48,10 +56,14 @@ import java.util.concurrent.RejectedExecutionException;
  *
  * <h3>生命周期</h3>
  * 外壳用 add/hide/show 切页，<b>被隐藏的 Fragment 生命周期仍是 RESUMED</b>：
- * 故 {@link #onHiddenChanged(boolean)} 在隐藏时冲刷待写项、回到本页时重新读盘；
+ * 故 {@link #onHiddenChanged(boolean)} 在隐藏时冲刷待写项、停掉曲线区刷新，回到本页时重新读盘；
  * {@link #onPause()} 与 {@link #onDestroyView()} 也各自冲刷一次，不丢改动。
  */
-public class ConfigFormFragment extends Fragment implements ConfigKeyRow.Host {
+public class ConfigFormFragment extends Fragment
+        implements ConfigKeyRow.Host, ChartFragment.Host {
+
+    /** 曲线区（子 Fragment）的 tag。 */
+    private static final String TAG_CHART = "config_chart";
 
     private ConfigStore store;
     private ConfigWriteQueue queue;
@@ -69,9 +81,15 @@ public class ConfigFormFragment extends Fragment implements ConfigKeyRow.Host {
     private TextView errorText;
     private View errorCard;
     private TextView selfCheckView;
+    /** 诊断信息头部：数据文件信息（由曲线区回调填充）。 */
+    private TextView dataFileView;
+    /** 曲线区（子 Fragment）；页面视图销毁后置空。 */
+    private ChartFragment chart;
 
     private boolean viewAlive;
-    private int renderedKeyCount;
+    /** 键渲染自检的两个分项（口径见 renderSelfCheck）。 */
+    private int renderedRowCount;
+    private int renderedMasterCount;
 
     @Override
     public void onCreate(@Nullable Bundle savedInstanceState) {
@@ -92,11 +110,35 @@ public class ConfigFormFragment extends Fragment implements ConfigKeyRow.Host {
         errorText = root.findViewById(R.id.config_error_text);
         groupContainer = root.findViewById(R.id.config_group_container);
         selfCheckView = root.findViewById(R.id.config_self_check);
+        dataFileView = root.findViewById(R.id.config_diag_datafile_text);
         diagnostics = new ConfigDiagnostics(root, store, io, main);
         viewAlive = true;
+        ensureChartFragment();
         buildForm(inflater);
         reloadAsync();
         return root;
+    }
+
+    /**
+     * 挂上曲线区（子 Fragment）。
+     *
+     * <p>宿主在事务提交前接上：子页第一次回调就有落点；页面重建（config change / 进程恢复）
+     * 时 {@code getChildFragmentManager()} 里已有恢复出来的实例，只重新接宿主，不重复添加。
+     * 用异步 {@code commit()}：本方法在父页的 onCreateView 里跑，此时子 FragmentManager
+     * 可能正在派发自己的状态，{@code commitNow()} 会抛"already executing transactions"。
+     */
+    private void ensureChartFragment() {
+        FragmentManager cfm = getChildFragmentManager();
+        for (Fragment existing : cfm.getFragments()) {
+            if (existing instanceof ChartFragment) {
+                chart = (ChartFragment) existing;
+                chart.setHost(this);
+                return;
+            }
+        }
+        chart = new ChartFragment();
+        chart.setHost(this);
+        cfm.beginTransaction().replace(R.id.config_chart_container, chart, TAG_CHART).commit();
     }
 
     // ==================== 构建表单（结构来自 ConfigStore） ====================
@@ -157,7 +199,23 @@ public class ConfigFormFragment extends Fragment implements ConfigKeyRow.Host {
             rows.addAll(binder.rows());
         }
 
-        renderedKeyCount = rows.size();
+        // 自检口径：一个定义键算"有可编辑入口"，当且仅当它是键行，或者是某个分组的组头开关
+        // （role=master 的键不由键行承载，由 ConfigGroupBinder 渲染成组头开关）。
+        // 用去重集合计数：同名键被两个分组重复列出时也不虚增。
+        Set<String> rowKeys = new LinkedHashSet<>();
+        for (ConfigKeyRow row : rows) {
+            rowKeys.add(row.key());
+        }
+        Set<String> masterKeys = new LinkedHashSet<>();
+        for (ConfigGroupBinder group : groups) {
+            String masterKey = group.masterKey();
+            if (masterKey != null) {
+                masterKeys.add(masterKey);
+            }
+        }
+        renderedRowCount = rowKeys.size();
+        renderedMasterCount = masterKeys.size();
+
         for (ConfigKeyRow row : rows) {
             row.applyValue(diskValues.get(row.key()));
         }
@@ -204,14 +262,22 @@ public class ConfigFormFragment extends Fragment implements ConfigKeyRow.Host {
         diagnostics.refresh();
     }
 
-    /** 键数自检（界面渲染数 = 定义数）；顺带把未定义键与读取提示摆出来。 */
+    /**
+     * 键渲染自检：<b>每个定义键都要有可编辑入口</b>——键行（role=setting）或组头开关（role=master）。
+     * 顺带把未定义键与读取提示摆出来。
+     *
+     * <p>口径说明：{@code params.json} 里 role=master 的键（总开关）不出现在任何
+     * {@code group.keys} 里，它们是分组卡头上的开关，故只数键行会恒少于定义数。
+     */
     private void renderSelfCheck(Snapshot snapshot) {
         int defined = store.keyCount();
         StringBuilder sb = new StringBuilder();
-        if (renderedKeyCount == defined) {
-            sb.append(getString(R.string.config_diag_render_ok, renderedKeyCount, defined));
+        if (renderedRowCount + renderedMasterCount == defined) {
+            sb.append(getString(R.string.config_diag_render_ok,
+                    renderedRowCount, renderedMasterCount, defined));
         } else {
-            sb.append(getString(R.string.config_diag_render_mismatch, renderedKeyCount, defined));
+            sb.append(getString(R.string.config_diag_render_mismatch,
+                    renderedRowCount, renderedMasterCount, defined));
         }
         if (!snapshot.unknownKeys.isEmpty()) {
             sb.append('\n').append(getString(R.string.config_unknown_keys,
@@ -308,6 +374,19 @@ public class ConfigFormFragment extends Fragment implements ConfigKeyRow.Host {
         Snackbar.make(scroll, message, error ? Snackbar.LENGTH_LONG : Snackbar.LENGTH_SHORT).show();
     }
 
+    // ==================== ChartFragment.Host ====================
+
+    /**
+     * 曲线区的「数据文件信息」上屏位置：诊断信息头部（曲线卡内不再重复）。
+     * 本页不做任何加工，原文照贴；读取失败时的诊断正文也在其中。
+     */
+    @Override
+    public void onChartInfo(@NonNull String text) {
+        if (dataFileView != null) {
+            dataFileView.setText(text);
+        }
+    }
+
     // ==================== 生命周期：不丢改动 ====================
 
     @Override
@@ -319,6 +398,10 @@ public class ConfigFormFragment extends Fragment implements ConfigKeyRow.Host {
     @Override
     public void onHiddenChanged(boolean hidden) {
         super.onHiddenChanged(hidden);
+        // 曲线区是子 Fragment，父页的 hide() 不会传播到子级，刷新停/启必须在这里转达
+        if (chart != null) {
+            chart.setPageHidden(hidden);
+        }
         if (hidden) {
             // 被隐藏的 Fragment 生命周期仍是 RESUMED（onPause 不会来），故在这里也冲刷一次
             queue.flushNow();
@@ -344,6 +427,8 @@ public class ConfigFormFragment extends Fragment implements ConfigKeyRow.Host {
         errorCard = null;
         errorText = null;
         selfCheckView = null;
+        dataFileView = null;
+        chart = null;   // 子 Fragment 实例仍在（视图随本页一起销毁），只是不再从这里驱动它
         super.onDestroyView();
     }
 

@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 状态页专用尺寸。共用标尺在 dimens.xml，此处只放本页独有的项。 -->
+<resources>
+
+    <!--
+        部署状态文本与按钮行之间的间隔。原为 space_m(12dp)，按要求收到 3/5 ≈ 7dp；
+        相邻按钮之间与按钮行之间的间距不动（那不是"与文本的间隔"）。
+    -->
+    <dimen name="status_buttons_gap">7dp</dimen>
+</resources>

@@ -4,8 +4,8 @@ package com.example.waspwingtempctrl.ui;
  * 数据文件解析结果 + 曲线滤波（口径清单 §2/§3/§10）。
  *
  * <p>解析口径见 {@code 逻辑说明.md} 的「状态页数据源（C 每 1s 写数据文件）」一节：
- * 按 {@code \n} 切行、<b>列数不足 8 的整行跳过</b>（不中断、不产生断点）；温度列
- * {@code v>=0 ? v/10 : 无效}，转速/制冷列 {@code v>=0 ? v : 无效}，故哨兵 -1 变无效。
+ * 按 {@code \n} 切行、<b>列数不足 {@link #COL_COUNT} 的整行跳过</b>（不中断、不产生断点）；
+ * 温度列 {@code v>=0 ? v/10 : 无效}，转速/制冷列 {@code v>=0 ? v : 无效}，故哨兵 -1 变无效。
  *
  * <p>行数上限 {@code rollingMaxLines}（= C 端 {@code WEBUI_DATA_MAX_LINES}）用环形覆盖保留
  * 最近 N 行，与 C 端压缩口径一致。
@@ -14,6 +14,36 @@ package com.example.waspwingtempctrl.ui;
  * {@code drawChart 每次重绘对整段样本重算}（口径见 {@code 逻辑说明.md} 的「曲线」一节〈分段处理〉），同一份数据永远得到同一条曲线。
  */
 final class ChartDataset {
+
+    /**
+     * 一行至少有这么多列 —— 等于 C 端 {@code WEBUI_DATA_COLS}（{@code tempctrl.c} 的
+     * {@code WEBUI_ROW_FMT = "%ld,%d,%d,%d,%d,%d,%d,%d\n"}，共 8 个转换符）。改本值必须同步改 C 端声明。
+     *
+     * <p>列序（与 C 端 {@code write_webui_data()} 里 {@code fprintf} 的实参一一对应，
+     * 权威声明在 {@code tempctrl.c} 的 {@code WEBUI_ROW_FMT} 上方注释）：
+     * <pre>
+     *   [0] epoch      时间戳（Unix 秒）        → ChartSample.t
+     *   [1] batt       电池   0.1°C             → temp()
+     *   [2] cpu        CPU    0.1°C             → temp()
+     *   [3] 热端            0.1°C              → temp()
+     *   [4] 冷端            0.1°C              → temp()
+     *   [5] 实际转速        原始 RPM            → raw()
+     *   [6] 实际制冷        制冷档位            → raw()
+     * </pre>
+     *
+     * <p><b>[7] 目标制冷：写端有，读端有意不消费。</b>本界面（图例 6 条系列 + 实时数值列）
+     * 都不展示目标制冷（{@code 逻辑说明.md} 的「曲线」一节〈实时数值列〉明确"不含目标制冷"），
+     * 故 8 列里只读前 7 列；<b>但列数校验仍按 8 列</b>——校验的是"写端格式"，读端不擅自放宽或收紧。
+     */
+    static final int COL_COUNT = 8;
+
+    private static final int COL_TS = 0;
+    private static final int COL_BATT = 1;
+    private static final int COL_CPU = 2;
+    private static final int COL_HOT = 3;
+    private static final int COL_COLD = 4;
+    private static final int COL_RPM = 5;
+    private static final int COL_COOL = 6;
 
     /** 全量样本（已滤波）。 */
     final ChartSample[] all;
@@ -40,19 +70,19 @@ final class ChartDataset {
                 continue;
             }
             String[] p = line.split(",", -1);
-            if (p.length < 8) {
+            if (p.length < COL_COUNT) {
                 skipped++;
                 continue;
             }
-            Long ts = parseLong(p[0]);
+            Long ts = parseLong(p[COL_TS]);
             ring[total % cap] = new ChartSample(
                     ts != null ? ts : 0L,
-                    temp(parseInt(p[1])),
-                    temp(parseInt(p[2])),
-                    temp(parseInt(p[3])),
-                    temp(parseInt(p[4])),
-                    raw(parseInt(p[5])),
-                    raw(parseInt(p[6])));
+                    temp(parseInt(p[COL_BATT])),
+                    temp(parseInt(p[COL_CPU])),
+                    temp(parseInt(p[COL_HOT])),
+                    temp(parseInt(p[COL_COLD])),
+                    raw(parseInt(p[COL_RPM])),
+                    raw(parseInt(p[COL_COOL])));
             total++;
         }
         int keep = Math.min(total, cap);

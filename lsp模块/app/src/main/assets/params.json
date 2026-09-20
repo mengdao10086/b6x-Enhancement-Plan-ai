@@ -89,14 +89,14 @@
     },
     {
       "id": "webui",
-      "title": "[4] WebUI 界面",
+      "title": "[4] 界面",
       "master": null,
       "keys": [
-        "WEBUI_GAP_SEC",
-        "WEBUI_LABEL_MERGE_PX",
-        "WEBUI_RPM_AXIS_MIN",
-        "WEBUI_CURVE_FILTER",
-        "WEBUI_AUTOSAVE"
+        "UI_GAP_SEC",
+        "UI_LABEL_MERGE_PX",
+        "UI_RPM_AXIS_MIN",
+        "UI_CURVE_FILTER",
+        "UI_AUTOSAVE"
       ]
     }
   ],
@@ -1478,8 +1478,8 @@
       "daemonConsumes": true,
       "fields": null
     },
-    "WEBUI_GAP_SEC": {
-      "key": "WEBUI_GAP_SEC",
+    "UI_GAP_SEC": {
+      "key": "UI_GAP_SEC",
       "group": "webui",
       "role": "setting",
       "type": "multi",
@@ -1517,8 +1517,8 @@
         }
       ]
     },
-    "WEBUI_LABEL_MERGE_PX": {
-      "key": "WEBUI_LABEL_MERGE_PX",
+    "UI_LABEL_MERGE_PX": {
+      "key": "UI_LABEL_MERGE_PX",
       "group": "webui",
       "role": "setting",
       "type": "int",
@@ -1534,8 +1534,8 @@
       "daemonConsumes": false,
       "fields": null
     },
-    "WEBUI_RPM_AXIS_MIN": {
-      "key": "WEBUI_RPM_AXIS_MIN",
+    "UI_RPM_AXIS_MIN": {
+      "key": "UI_RPM_AXIS_MIN",
       "group": "webui",
       "role": "setting",
       "type": "int",
@@ -1551,8 +1551,8 @@
       "daemonConsumes": false,
       "fields": null
     },
-    "WEBUI_CURVE_FILTER": {
-      "key": "WEBUI_CURVE_FILTER",
+    "UI_CURVE_FILTER": {
+      "key": "UI_CURVE_FILTER",
       "group": "webui",
       "role": "setting",
       "type": "multi",
@@ -1590,8 +1590,8 @@
         }
       ]
     },
-    "WEBUI_AUTOSAVE": {
-      "key": "WEBUI_AUTOSAVE",
+    "UI_AUTOSAVE": {
+      "key": "UI_AUTOSAVE",
       "group": "webui",
       "role": "setting",
       "type": "multi",

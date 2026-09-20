@@ -419,6 +419,7 @@ public class MainHook implements IXposedHookLoadPackage {
         if (appKind == 7) hookB7Obfuscated(lpparam);     // c0.s1 + 混淆适配（仅 B7X）
         hookApplicationCreate(lpparam);               // 广播接收器 + 定时状态写入（双设备）
         hookAutoLaunch(lpparam);                      // 自动拉起标志 → Activity 后台化（双设备）
+        hookBackToBackground();                       // 返回退出 → 收进后台而非退出（双设备）
     }
 
     // ========== 各 Hook 分区实现 ==========
@@ -1172,11 +1173,47 @@ public class MainHook implements IXposedHookLoadPackage {
 
     /** 自动拉起：把当前任务切到后台（界面已就绪；连接由后台重连线程完成；事件触发时同步切，无固定延迟） */
     private static void backgroundActivity(final Activity act) {
+        backgroundActivity(act, "自动拉起");
+    }
+
+    /** 把当前任务切到后台；{@code reason} 只进日志，便于区分是自动拉起还是返回键触发。 */
+    private static void backgroundActivity(final Activity act, String reason) {
         try {
             act.moveTaskToBack(true);
-            XposedBridge.log(TAG + " 自动拉起模式：app 已切后台");
+            XposedBridge.log(TAG + " app 已切后台（" + reason + "）");
         } catch (Throwable t) {
-            XposedBridge.log(TAG + " auto_launch 后台化失败: " + t.getMessage());
+            XposedBridge.log(TAG + " 后台化失败（" + reason + "）：" + t.getMessage());
+        }
+    }
+
+    /**
+     * 返回键退出时把 app 收进后台，而不是真正退出（借鉴 Scene 的做法）。
+     *
+     * <p>只在"这一下返回会结束整个任务"时接管：{@code isTaskRoot()} 为真即表示当前 Activity 是
+     * 任务根、再返回就退出 app，此时阻断默认 finish 并切后台；子页面之间的正常返回不受影响。
+     * 宿主 app 未启用预测性返回，{@code onBackPressed} 就是框架默认返回路径的入口。
+     *
+     * <p>三包通用（不区分 B6X / B7X / farsef），故注册在通用分发处而非 {@code hookB6Activity}。
+     */
+    private static void hookBackToBackground() {
+        try {
+            XposedHelpers.findAndHookMethod(Activity.class, "onBackPressed", new XC_MethodHook() {
+                @Override
+                protected void beforeHookedMethod(MethodHookParam param) {
+                    try {
+                        Activity act = (Activity) param.thisObject;
+                        if (act.isTaskRoot() && !act.isFinishing()) {
+                            param.setResult(null);   // 阻断默认的 finish
+                            backgroundActivity(act, "返回键");
+                        }
+                    } catch (Throwable t) {
+                        XposedBridge.log(TAG + " 返回键后台化失败: " + t.getMessage());
+                    }
+                }
+            });
+            XposedBridge.log(TAG + " 已钩住 Activity.onBackPressed（返回退出改为隐藏后台）");
+        } catch (Throwable t) {
+            XposedBridge.log(TAG + " 钩 onBackPressed 失败: " + t.getMessage());
         }
     }
 

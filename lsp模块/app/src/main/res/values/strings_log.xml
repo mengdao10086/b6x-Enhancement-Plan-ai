@@ -8,20 +8,20 @@
     <string name="log_filter_hint">关键词（大小写不敏感）</string>
     <string name="log_loading">正在读取日志…</string>
 
-    <!-- 顶部信息条：路径 / 大小 / 修改时间 -->
-    <string name="log_info_fmt">路径：%1$s\n大小：%2$s\n修改时间：%3$s</string>
-    <string name="log_size_fmt">%1$d 字节</string>
-    <string name="log_size_unknown">未知（stat 失败）</string>
+    <!-- 顶部信息条：路径 / 修改时间（大小与行数统一在底部统计行，不重复展示） -->
+    <string name="log_info_fmt">路径：%1$s\n修改时间：%2$s</string>
     <string name="log_value_unknown">—</string>
 
-    <!-- 渲染量与截断说明（必须显式写出，不让用户以为看到了全部） -->
-    <string name="log_render_fmt">已渲染 %1$d 行；仅显示最近 %2$d 行（尾读共 %3$d 行）；尾读上限 %4$d 字节</string>
-    <string name="log_render_failed">读取失败：未渲染任何行</string>
+    <!--
+        底部统计行：行数（已读取 / 渲染上限 = LogTailReader.MAX_LINES）
+        与大小（文件字节数 / 尾读上限 = LogTailReader.TAIL_BYTES），k = 1024 字节。
+        截断必须显式写出，不让用户以为看到了全部。
+    -->
+    <string name="log_tail_fmt">已读取 %1$d / %2$d 行，%3$s / %4$s k</string>
+    <string name="log_tail_failed">读取失败：未渲染任何行</string>
 
-    <!-- 过滤命中计数 -->
-    <string name="log_count_all_fmt">最近 %1$d 行（渲染上限 %2$d 行）</string>
-    <string name="log_count_hit_fmt">命中 %1$d / 最近 %2$d 行</string>
-    <string name="log_count_failed">读取失败：未渲染任何行</string>
+    <!-- 过滤命中计数：只在有关键词时显示（无关键词时行数在底部统计行里） -->
+    <string name="log_count_hit_fmt">命中 %1$d 行</string>
 
     <string name="log_empty_no_lines">没有可显示的行（日志内容为空）</string>
     <string name="log_empty_no_hit">没有命中「%1$s」的行（仅在最近 %2$d 行内匹配）</string>

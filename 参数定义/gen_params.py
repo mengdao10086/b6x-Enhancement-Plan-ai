@@ -337,7 +337,7 @@ def build_c_header(definition):
     lines.append("")
 
     lines.append("/* 性能层单值键表（PERF_ENABLED=1）→ INT_CFG_KEYS[]：X(键名, C 变量, min, max) */")
-    lines.append("#define CFG_PERF_INT_KEYS(X) \\")
+    lines.append("#define %s(X) \\" % C_TABLE_MACRO["perf-int"])
     rows = []
     for e in perf_int:
         rows.append('    X("%s", %s, %d, %d)'
@@ -348,7 +348,7 @@ def build_c_header(definition):
     lines.append("/* sysfs 层键表（SYSFS_ENABLED=1）→ SYSFS_CFG_KEYS[]：")
     lines.append(" *   X(键名, kind, ivar, imin, imax, svar, ssize)")
     lines.append(" * kind/SK_INT 槽位钳制范围由本表给出；SK_ZONE/SK_RESCAN 的逐字段范围见 CFG_MIN/MAX_*。 */")
-    lines.append("#define CFG_SYSFS_KEYS(X) \\")
+    lines.append("#define %s(X) \\" % C_TABLE_MACRO["sysfs"])
     rows = []
     for e in sysfs:
         cvar = first_cvar(definition, e["key"])
@@ -506,6 +506,11 @@ def parse_gradle_application_id(gradle_text):
 
 C_TABLE_NAME = {"perf-int": "INT_CFG_KEYS", "sysfs": "SYSFS_CFG_KEYS"}
 
+# 各表在生成头里的 X 宏名（写出与检测共用这一份）。
+# 与 C_TABLE_NAME 的区别必须留意：那是 C 端的**数组名**，这是生成头里的**宏名**。
+# 原先检测用数组名去匹配、产物写的却是宏名，两者在接入前必然失配（故此前一直没暴露）。
+C_TABLE_MACRO = {"perf-int": "CFG_PERF_INT_KEYS", "sysfs": "CFG_SYSFS_KEYS"}
+
 INT_ROW_RE = re.compile(r'\{\s*"([A-Z0-9_]+)"\s*,\s*&(\w+)\s*,\s*'
                         r'([A-Za-z_0-9]+)\s*,\s*([A-Za-z_0-9]+)\s*\}')
 SYSFS_ROW_RE = re.compile(r'\{\s*"([A-Z0-9_]+)"\s*,\s*(SK_\w+)\s*,\s*([^,]+?)\s*,\s*'
@@ -516,14 +521,30 @@ def _c_table_block(c_text, table):
     return _block(c_text, r"%s\s*\[\s*\]\s*=\s*\{" % table, r"\n\};")
 
 
+def _adopted_tables(c_text):
+    """表体已被生成头接管的表 id 列表（C 源里只剩 `<宏名>(CFG_ROW)` 展开形态）。
+
+    判据是"表初始化处调用了生成头里的 X 宏"，`parse_c_tables` / `parse_c_ranges` /
+    `audit` 三处共用，避免各写一份正则而漏改其一。两种调用形式都认：生成头的宏名
+    （`CFG_PERF_INT_KEYS`），以及与 C 端数组同名的旧写法（`INT_CFG_KEYS`）。
+    """
+    adopted = []
+    for pid, table in C_TABLE_NAME.items():
+        if any(re.search(r"%s\s*\(\s*\w+\s*\)" % name, c_text)
+               for name in (table, C_TABLE_MACRO[pid])):
+            adopted.append(pid)
+    return adopted
+
+
 def parse_c_tables(c_text):
     """C 端两张键表的 (键, 变量/kind, min, max) 行集合。
 
     表体若已被生成头接管（`<表名>(CFG_ROW)` 形态）则返回空行集，交由调用方按产物口径处理。
     """
     rows = {"perf-int": [], "sysfs": []}
+    adopted = _adopted_tables(c_text)
     for pid, table in C_TABLE_NAME.items():
-        if re.search(r"%s\s*\(\s*\w+\s*\)" % table, c_text):
+        if pid in adopted:
             continue          # 表体由 params_generated.h 的 X 宏展开
         body = _c_table_block(c_text, table)
         if pid == "perf-int":
@@ -567,9 +588,49 @@ def parse_c_defaults(c_text):
     return defaults
 
 
-def parse_c_ranges(c_text, macros):
-    """C 端各变量的 clamp / 表内范围 → {var: set((lo, hi))}（宏名就地展开）。"""
+def parse_generated_ranges(gen_text):
+    """`params_generated.h` 的两张 X 宏键表 → {C 变量: set((lo, hi))}。
+
+    表体改由生成头承接后，C 源里不再有可抓的字面量行，范围的真源就是这里；
+    它是否最新由断言 A（重跑生成 + 逐字节比对）保证，两者合起来才是完整链路。
+    """
+    gen_macros = parse_c_macros(gen_text)
     ranges = {}
+
+    def resolve(tok):
+        tok = tok.strip()
+        if re.match(r"^-?\d+$", tok):
+            return int(tok)
+        if tok in gen_macros:
+            return int(gen_macros[tok])
+        return None
+
+    body = _block(gen_text, r"#define\s+%s\(X\)" % C_TABLE_MACRO["perf-int"], r"\n\n")
+    for m in re.finditer(r'X\(\s*"([A-Z0-9_]+)"\s*,\s*(\w+)\s*,\s*'
+                         r'([A-Za-z_0-9]+)\s*,\s*([A-Za-z_0-9]+)\s*\)', body):
+        lo, hi = resolve(m.group(3)), resolve(m.group(4))
+        if lo is not None and hi is not None:
+            ranges.setdefault(m.group(2), set()).add((lo, hi))
+
+    body = _block(gen_text, r"#define\s+%s\(X\)" % C_TABLE_MACRO["sysfs"], r"\n\n")
+    for m in re.finditer(r'X\(\s*"([A-Z0-9_]+)"\s*,\s*(SK_\w+)\s*,\s*([^,]+?)\s*,\s*'
+                         r'([A-Za-z_0-9]+)\s*,\s*([A-Za-z_0-9]+)\s*,', body):
+        if m.group(2) != "SK_INT":
+            continue          # SK_PATH 无范围；SK_ZONE / SK_RESCAN 的 clamp 在调用点收
+        lo, hi = resolve(m.group(4)), resolve(m.group(5))
+        if lo is not None and hi is not None:
+            ranges.setdefault(m.group(3).strip("& "), set()).add((lo, hi))
+    return ranges
+
+
+def parse_c_ranges(c_text, macros):
+    """C 端各变量的 clamp / 表内范围 → {var: set((lo, hi))}（宏名就地展开）。
+
+    表体已被生成头接管的表，其范围改从产物 `params_generated.h` 读（见
+    {@link parse_generated_ranges}）；仍手写在 C 源的表照旧抓字面量行。
+    """
+    ranges = {}
+    adopted = _adopted_tables(c_text)
 
     def resolve(tok):
         tok = tok.strip()
@@ -579,26 +640,45 @@ def parse_c_ranges(c_text, macros):
             return int(macros[tok])
         return None
 
-    table = _block(c_text, r"INT_CFG_KEYS\s*\[\s*\]\s*=\s*\{", r"\n\};")
-    for m in INT_ROW_RE.finditer(table):
-        lo, hi = resolve(m.group(3)), resolve(m.group(4))
-        if lo is not None and hi is not None:
-            ranges.setdefault(m.group(2), set()).add((lo, hi))
+    if "perf-int" not in adopted:
+        table = _block(c_text, r"INT_CFG_KEYS\s*\[\s*\]\s*=\s*\{", r"\n\};")
+        for m in INT_ROW_RE.finditer(table):
+            lo, hi = resolve(m.group(3)), resolve(m.group(4))
+            if lo is not None and hi is not None:
+                ranges.setdefault(m.group(2), set()).add((lo, hi))
 
-    sysfs_table = _block(c_text, r"SYSFS_CFG_KEYS\s*\[\s*\]\s*=\s*\{", r"\n\};")
-    for m in SYSFS_ROW_RE.finditer(sysfs_table):
-        if m.group(2) != "SK_INT":
-            continue          # SK_PATH 无范围；SK_ZONE / SK_RESCAN 的 clamp 在下方按调用点收
-        lo, hi = resolve(m.group(4)), resolve(m.group(5))
-        if lo is not None and hi is not None:
-            ranges.setdefault(m.group(3).strip("& "), set()).add((lo, hi))
+    if "sysfs" not in adopted:
+        sysfs_table = _block(c_text, r"SYSFS_CFG_KEYS\s*\[\s*\]\s*=\s*\{", r"\n\};")
+        for m in SYSFS_ROW_RE.finditer(sysfs_table):
+            if m.group(2) != "SK_INT":
+                continue      # SK_PATH 无范围；SK_ZONE / SK_RESCAN 的 clamp 在下方按调用点收
+            lo, hi = resolve(m.group(4)), resolve(m.group(5))
+            if lo is not None and hi is not None:
+                ranges.setdefault(m.group(3).strip("& "), set()).add((lo, hi))
 
     for m in re.finditer(r"(\w+)\s*=\s*clamp\(\s*[^,]+,\s*([A-Za-z_0-9]+)\s*,"
                          r"\s*([A-Za-z_0-9]+)\s*\)", c_text):
         lo, hi = resolve(m.group(2)), resolve(m.group(3))
         if lo is not None and hi is not None:
             ranges.setdefault(m.group(1), set()).add((lo, hi))
+
+    if adopted:
+        gen_path = product_path(product_by_id("c-header"))
+        if os.path.exists(gen_path):
+            for var, got in parse_generated_ranges(read_text(gen_path)).items():
+                ranges.setdefault(var, set()).update(got)
     return ranges
+
+
+def _range_expected(smin, smax):
+    """该取值位是否应当有可核对的 clamp 范围。
+
+    无范围（None）＝ 路径键等，没有数值语义；布尔域 (0,1) ＝ `type=switch` 或多值键的
+    使能位，C 端按非零判真、不存在可越界的中间态。两者之外都必须能在 C 端找到 clamp。
+    """
+    if smin is None or smax is None:
+        return False
+    return (smin, smax) != (0, 1)
 
 
 def parse_conf_keys(conf_text):
@@ -783,8 +863,7 @@ def audit(definition, verbose=True):
         c_tables = parse_c_tables(c_text)
         c_keys = parse_c_keys(c_text)
         table_keys = list(c_keys)
-        adopted = [pid for pid, table in C_TABLE_NAME.items()
-                   if re.search(r"%s\s*\(\s*\w+\s*\)" % table, c_text)]
+        adopted = _adopted_tables(c_text)
         for pid in adopted:
             table_keys.extend(e["key"] for e in entries if e.get("cTable") == pid)
         if adopted and '#include "params_generated.h"' not in c_text:
@@ -832,8 +911,8 @@ def audit(definition, verbose=True):
         skip_default = definition.get("audit", {}).get("skipDefault", {})
 
         tally = {"d_ok": 0, "d_exempt": 0, "d_novar": 0,
-                 "r_ok": 0, "r_noclamp": 0, "r_novar": 0, "r_multi": 0}
-        noclamp = []
+                 "r_ok": 0, "r_exempt": 0, "r_noclamp": 0, "r_novar": 0, "r_multi": 0}
+        novar = []
         for entry in entries:
             key = entry["key"]
             if not entry.get("daemonConsumes", True):
@@ -863,6 +942,7 @@ def audit(definition, verbose=True):
                 if slot_var is None:
                     tally["d_novar"] += 1
                     tally["r_novar"] += 1
+                    novar.append(label)
                     continue
                 if key in skip_default:
                     tally["d_exempt"] += 1
@@ -876,8 +956,16 @@ def audit(definition, verbose=True):
                     tally["d_ok"] += 1
 
                 if slot_var not in ranges:
-                    tally["r_noclamp"] += 1
-                    noclamp.append(label)
+                    if not _range_expected(smin, smax):
+                        # 定义本身没有数值范围（路径键）或只有布尔域（开关 / 多值键使能位）：
+                        # 前者无数值语义，后者 C 端按非零判真、无中间态可越界，都不该有 clamp
+                        tally["r_exempt"] += 1
+                    else:
+                        # 声明了数值范围、C 变量也真实存在，却找不到 clamp ——
+                        # 这不是"跳过"，是核对缺位：删掉 clamp 也不会红，必须报错
+                        tally["r_noclamp"] += 1
+                        err("范围无法核对 %s：定义 [%s,%s]，但 C 内未找到 %s 的 clamp"
+                            % (label, smin, smax, slot_var))
                 else:
                     got = ranges[slot_var]
                     if len(got) > 1:
@@ -890,11 +978,15 @@ def audit(definition, verbose=True):
                         else:
                             tally["r_ok"] += 1
         info("C 侧自动核对（取值位口径）：默认值 通过 %d / 豁免 %d / 无 C 变量 %d；"
-             "范围 通过 %d / 无 clamp %d / 无 C 变量 %d（其中多处 clamp 的变量 %d 个）"
+             "范围 通过 %d / 无范围豁免 %d / 声明了却未找到 clamp %d / 无 C 变量 %d"
+             "（其中多处 clamp 的变量 %d 个）"
              % (tally["d_ok"], tally["d_exempt"], tally["d_novar"],
-                tally["r_ok"], tally["r_noclamp"], tally["r_novar"], tally["r_multi"]))
-        if noclamp:
-            info("范围无法自动核对（C 端无 clamp，须人眼核对）：%s" % ", ".join(noclamp))
+                tally["r_ok"], tally["r_exempt"], tally["r_noclamp"],
+                tally["r_novar"], tally["r_multi"]))
+        if novar:
+            # 这些取值位在 audit.cVars 里显式写 null（多值键的使能位、内部结构体字段等），
+            # 无法按 C 变量名核对。列出它们，免得"豁免"变成看不见的洞。
+            info("C 端无对应变量、未核对（定义已显式声明为 null）：%s" % ", ".join(novar))
 
         # ---- 3. crossChecks：跨「默认值 ↔ C 宏 ↔ applicationId」的一致性 ----
         str_macros = parse_c_string_macros(c_text)

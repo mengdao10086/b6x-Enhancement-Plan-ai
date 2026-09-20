@@ -13,7 +13,7 @@ import java.util.Locale;
  * <p>取值分两种口径，<b>不可混用</b>：
  * <ul>
  *   <li>{@link #value} —— 绘图与标注用，风扇折算为百 rpm（{@code 逻辑说明.md} 的「曲线」一节〈双纵轴〉）。</li>
- *   <li>{@link #axisValue} —— 仅纵轴上下限计算用，低于 {@code WEBUI_RPM_AXIS_MIN} 的转速样本
+ *   <li>{@link #axisValue} —— 仅纵轴上下限计算用，低于 {@code UI_RPM_AXIS_MIN} 的转速样本
  *       返回无效（按原始整数 rpm 比较），故低速段允许画到图外（{@code 逻辑说明.md} 的「曲线」一节〈双纵轴〉）。</li>
  * </ul>
  */

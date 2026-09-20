@@ -1,4 +1,4 @@
-# LSPosed 模块 — 飞智 B6X 增强计划
+# b6x温控增强 — LSPosed 模块
 
 > 本目录是 git 子模块的一部分，非独立仓库。git 操作在父目录 `飞智b6x增强计划/` 中执行。
 
@@ -6,6 +6,8 @@
 
 ## 功能
 
+- **内置原生配置界面**：状态 / 配置 · 曲线 / 日志三页，取代原 WebUI；左右滑可切页
+- **一键部署守护进程**：C 守护程序（`daemon/tempctrl.c`）随 APK 打包，装好 APK 后在状态页一键部署，**无需刷 Magisk 模块**；配置与日志存 APK 私有目录，卸载即清
 - **BLE 修复**：修复 Android 16 上飞智散热器工具（B6X + B7X）无法连接的 4 层连环 Bug（[完整修复历程](../参考资料/完整修复历程.md)）
 - **双设备支持**：自动检测包名选择 B6X 老 app（`com.flydigi.waspwing.experimental`）、B6X 新 app（`com.flydigi.waspwing.experimentanliuliu`）或 B7X（`com.fdg.flashplay.farsef`）钩子集，B7X WaspWingManager 混淆名 `t9.j` 自动 fallback
 - **双广播接口**：接收 `com.flydigi.SET_TEMPERATURE`（B6X）或 `com.flydigi.SET_TEMPERATURE_B7`（B7X）广播，将参数转发到对应 SDK 的 `setRunMode()`

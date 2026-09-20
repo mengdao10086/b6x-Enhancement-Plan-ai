@@ -5,6 +5,12 @@
 -->
 <resources>
 
+    <!-- ===== 合并页（配置 · 曲线） ===== -->
+    <!-- 页签文案：曲线页已并入本页（页签由 4 个减为 3 个） -->
+    <string name="config_tab_title">配置 · 曲线</string>
+    <!-- 参数区区标题：行高与分组卡头一致（@dimen/row_min_height + @dimen/card_padding） -->
+    <string name="config_section_title">配置</string>
+
     <!-- ===== 定义加载失败的错误态 ===== -->
     <string name="config_error_title">参数定义加载失败</string>
     <string name="config_error_body">无法生成配置表单：应用内置的参数定义没有加载成功。以下为诊断信息。</string>
@@ -32,8 +38,9 @@
     <string name="config_diag_title">诊断信息</string>
     <string name="config_diag_mtime">配置 mtime：%1$s</string>
     <string name="config_diag_mtime_missing">配置 mtime：配置文件不存在</string>
-    <string name="config_diag_render_ok">键渲染自检：界面 %1$d 项 = 定义 %2$d 项</string>
-    <string name="config_diag_render_mismatch">键渲染自检：界面 %1$d 项 ≠ 定义 %2$d 项（键表可能已变更）</string>
+    <!-- 自检口径 = 每个定义键都要有可编辑入口：键行（role=setting）+ 组头开关（role=master） -->
+    <string name="config_diag_render_ok">键渲染自检：键行 %1$d + 组头开关 %2$d = 定义 %3$d 项</string>
+    <string name="config_diag_render_mismatch">键渲染自检：键行 %1$d + 组头开关 %2$d ≠ 定义 %3$d 项（键表可能已变更）</string>
     <string name="config_diag_action_refresh">刷新诊断</string>
     <string name="config_unknown_keys">配置含未定义键（界面不显示，写入时也不会改动）：%1$s</string>
 </resources>

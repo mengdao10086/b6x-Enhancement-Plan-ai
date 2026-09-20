@@ -20,10 +20,10 @@ import java.util.List;
  *
  * <p>两类来源：
  * <ol>
- *   <li>{@code WEBUI_GAP_SEC} / {@code WEBUI_LABEL_MERGE_PX} / {@code WEBUI_RPM_AXIS_MIN} /
- *       {@code WEBUI_CURVE_FILTER}，以及右轴上限口径所需的 {@code COLD_RPM_MAP} /
+ *   <li>{@code UI_GAP_SEC} / {@code UI_LABEL_MERGE_PX} / {@code UI_RPM_AXIS_MIN} /
+ *       {@code UI_CURVE_FILTER}，以及右轴上限口径所需的 {@code COLD_RPM_MAP} /
  *       {@code PID_COLD_RANGE} / {@code PERF_ENABLED} —— 一律经 {@link ConfigStore} 读
- *       （口径清单 §13）。字段缺项（如只写 {@code WEBUI_CURVE_FILTER=15}）回落该字段在
+ *       （口径清单 §13）。字段缺项（如只写 {@code UI_CURVE_FILTER=15}）回落该字段在
  *       {@code assets/params.json} 里声明的默认值。</li>
  *   <li>{@code params.json} 的 {@code chart} 块（窗口档位/默认档位/滚动行数上限）——
  *       {@link ConfigStore} 只暴露 {@code groups()/keys()/key()}，{@code chart} 不是键，
@@ -38,13 +38,13 @@ final class ChartConfig {
     static final int FALLBACK_WINDOW_DEFAULT = 360;
     static final int FALLBACK_ROLLING_MAX_LINES = 720;
 
-    /** 断联判定阈值（秒）——{@code WEBUI_GAP_SEC} 第 1 值。 */
+    /** 断联判定阈值（秒）——{@code UI_GAP_SEC} 第 1 值。 */
     int gapDetectSec = 5;
-    /** 空白封顶（秒）——{@code WEBUI_GAP_SEC} 第 2 值。 */
+    /** 空白封顶（秒）——{@code UI_GAP_SEC} 第 2 值。 */
     int gapMaxSec = 15;
-    /** 标注合并阈值（配置 px，使用时按 density 换算）——{@code WEBUI_LABEL_MERGE_PX}。 */
+    /** 标注合并阈值（配置 px，使用时按 density 换算）——{@code UI_LABEL_MERGE_PX}。 */
     int labelMergePx = 9;
-    /** 左轴转速下限（RPM）——{@code WEBUI_RPM_AXIS_MIN}；0 = 关闭。 */
+    /** 左轴转速下限（RPM）——{@code UI_RPM_AXIS_MIN}；0 = 关闭。 */
     int rpmAxisMin = 3000;
     /** 双向 EMA 每遍权重 α = 第 1 值/100。 */
     float alpha = 0.15f;
@@ -84,18 +84,18 @@ final class ChartConfig {
             return;
         }
         // 断联：两个字段都要求 > 0，否则各自回落 5 / 15（口径见 逻辑说明.md 的「曲线」一节〈断联空白〉）
-        int detect = field(store, snap, "WEBUI_GAP_SEC", 0, 5);
-        int maxSec = field(store, snap, "WEBUI_GAP_SEC", 1, 15);
+        int detect = field(store, snap, "UI_GAP_SEC", 0, 5);
+        int maxSec = field(store, snap, "UI_GAP_SEC", 1, 15);
         gapDetectSec = detect > 0 ? detect : 5;
         gapMaxSec = maxSec > 0 ? maxSec : 15;
-        // 合并阈值：≥ 0 合法（0 = 不合并以外全合并），负值回落 9（口径见 逻辑说明.md 的「可配置参数一览」WEBUI_LABEL_MERGE_PX）
-        int merge = field(store, snap, "WEBUI_LABEL_MERGE_PX", 0, 9);
+        // 合并阈值：≥ 0 合法（0 = 不合并以外全合并），负值回落 9（口径见 逻辑说明.md 的「可配置参数一览」UI_LABEL_MERGE_PX）
+        int merge = field(store, snap, "UI_LABEL_MERGE_PX", 0, 9);
         labelMergePx = merge >= 0 ? merge : 9;
         // 转速下限：负值一律归 0 = 关闭（口径见 逻辑说明.md 的「曲线」一节〈双纵轴〉）
-        rpmAxisMin = Math.max(0, field(store, snap, "WEBUI_RPM_AXIS_MIN", 0, 3000));
+        rpmAxisMin = Math.max(0, field(store, snap, "UI_RPM_AXIS_MIN", 0, 3000));
         // 滤波：两个子值 0 都合法（= 关闭该级），负值回落默认（口径见 逻辑说明.md 的「曲线」一节〈滤波关闭语义〉）
-        int a = field(store, snap, "WEBUI_CURVE_FILTER", 0, 15);
-        int s = field(store, snap, "WEBUI_CURVE_FILTER", 1, 5);
+        int a = field(store, snap, "UI_CURVE_FILTER", 0, 15);
+        int s = field(store, snap, "UI_CURVE_FILTER", 1, 5);
         alpha = a >= 0 ? a / 100f : 0.15f;
         quantStep = s >= 0 ? s / 100f : 0.05f;
         // 右轴口径：总开关未开启时两端都回落代码默认（口径见 逻辑说明.md 的「曲线」一节〈双纵轴〉）

@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!-- 界面外壳（SetupActivity / StatusFragment）的文案。三个界面子 agent 各自维护自己的 strings_*.xml。 -->
 <resources>
-    <string name="title_setup">飞智b6x增强模块</string>
+    <string name="title_setup">b6x温控增强</string>
 
     <string name="tab_status">状态</string>
     <string name="tab_config">配置</string>
@@ -27,4 +27,20 @@
     <string name="status_busy_uninstall">卸载部署中…</string>
     <string name="status_busy_start">拉起守护进程…</string>
     <string name="status_busy_diag">采集 su 诊断…</string>
+
+    <!-- 状态页：设备与版本（不显示本应用包名与 targetSdk） -->
+    <string name="status_info_version">模块版本: %1$s (%2$d)</string>
+    <string name="status_info_device">设备: %1$s %2$s</string>
+    <string name="status_info_android">Android: %1$s (SDK %2$d)</string>
+
+    <!-- 状态页：首次启动的 root 尝试 -->
+    <string name="status_root_ok_log">已获取 root 权限</string>
+    <string name="status_root_fail_log">未获取 root 权限（授权被拒或设备未 root），不再自动尝试；点「一键部署」会再试一次</string>
+    <string name="status_root_ok_title">已获取 root</string>
+    <string name="status_root_ok_message">是否立即一键部署守护进程？</string>
+    <string name="status_root_later">稍后</string>
+
+    <!-- 状态页：脚本哈希不一致时的自动重推 -->
+    <string name="status_script_autofixed">检测到 service.d 脚本与 APK 内不一致，已自动重推脚本（二进制未动）</string>
+    <string name="status_script_autofix_failed">检测到 service.d 脚本与 APK 内不一致，自动重推失败：</string>
 </resources>

@@ -49,8 +49,12 @@ jobs:
           else
             # core.quotePath=false 防止中文路径被转义为八进制导致 grep 匹配失败
             CHANGES=$(git -c core.quotePath=false diff --name-only "$BEFORE" "${{ github.sha }}")
-            # 排除文档类文件（*.md），改文档不触发构建
+            # 排除文档类文件（*.md），改文档不触发构建。
+            # 例外：逻辑说明.md 的参数表段是生成产物，手改它属于产物漂移，
+            # 必须让 CI 跑到参数校验步骤（否则漂移会延迟暴露并归因到无关提交）
+            DOC_PRODUCT=$(echo "$CHANGES" | grep -x '逻辑说明\.md' || true)
             CHANGES=$(echo "$CHANGES" | grep -v '\.md$' || true)
+            CHANGES=$(printf '%s\n%s' "$CHANGES" "$DOC_PRODUCT")
             # 单一信号，三类输入任一变更即重建（APK 内含 C 二进制，产物不可分割）：
             #   lsp模块/app/      —— APK 代码
             #   lsp模块/daemon/   —— C 守护程序源码与构建脚本
@@ -109,6 +113,35 @@ jobs:
           [ "$COLS" = "$N" ] \
             || { echo "曲线行格式漂移：转换符 $N 个 ≠ WEBUI_DATA_COLS $COLS（改一处须同步另一处）"; exit 1; }
           echo "OK：列数与格式串一致"
+
+      # 门4：上面只核对「格式串声明了几列」，与「fprintf 实际传了几个实参」是两件事
+      # —— 少传一个参数会读到栈上垃圾，多传一个则是无用值，两者都不会报错。
+      - name: 断言曲线行 fprintf 实参个数（门4）
+        run: |
+          COLS=$(sed -n 's/^#define *WEBUI_DATA_COLS *\([0-9]\+\).*/\1/p' lsp模块/daemon/tempctrl.c)
+          ARGS=$(python3 - <<'EOF'
+          import re, sys
+          t = open('lsp模块/daemon/tempctrl.c', encoding='utf-8').read()
+          m = re.search(r'fprintf\(\s*\w+\s*,\s*WEBUI_ROW_FMT\s*,(.*?)\);', t, re.S)
+          if not m:
+              sys.exit('未找到使用 WEBUI_ROW_FMT 的 fprintf 调用，断言失效')
+          depth, n = 0, 0
+          for ch in m.group(1):
+              if ch in '([':
+                  depth += 1
+              elif ch in ')]':
+                  depth -= 1
+              elif ch == ',' and depth == 0:
+                  n += 1
+          print(n + 1)
+          EOF
+          )
+          echo "WEBUI_DATA_COLS=$COLS  fprintf 实参个数=$ARGS"
+          [ -n "$COLS" ] && [ -n "$ARGS" ] \
+            || { echo "未解析到 WEBUI_DATA_COLS 或 fprintf 实参，断言失效"; exit 1; }
+          [ "$COLS" = "$ARGS" ] \
+            || { echo "曲线行格式漂移：fprintf 传了 $ARGS 个实参 ≠ WEBUI_DATA_COLS $COLS"; exit 1; }
+          echo "OK：实参个数与列数一致"
 
       # ── 工具链 ──
       - name: 设置 JDK 17

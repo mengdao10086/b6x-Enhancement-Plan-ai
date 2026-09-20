@@ -29,6 +29,8 @@
     <dimen name="text_label">13sp</dimen>
     <dimen name="text_caption">12sp</dimen>
     <dimen name="text_mono">12sp</dimen>
+    <!-- 展开/收起小三角字号：原为 Caption 继承的 12sp，按要求放大到 3 倍 -->
+    <dimen name="text_arrow">36sp</dimen>
 
     <!-- 控件 -->
     <dimen name="row_min_height">48dp</dimen>
@@ -42,4 +44,15 @@
 
     <!-- 日志页 -->
     <dimen name="log_line_spacing">2dp</dimen>
+
+    <!--
+        关键词搜索框高度：Material3 OutlinedBox 单行默认约 56dp（原布局未给高度，走的就是默认值），
+        压到 2/3 ≈ 37dp。必须显式给 TextInputLayout 定高，否则压不过它内部按内容算出的高度；
+        内层 EditText 的 minHeight 与垂直内边距同步收小，16sp 文字才放得下。
+    -->
+    <dimen name="log_filter_height">37dp</dimen>
+    <!-- 搜索框字号：12sp × 4/3 = 16sp。不复用 text_mono，避免波及日志行本身。 -->
+    <dimen name="log_filter_text_size">16sp</dimen>
+    <!-- 「回到底部」纯图标按钮的触控尺寸。宽高相同 + Material3 全圆角 → 正圆。 -->
+    <dimen name="log_follow_btn_size">48dp</dimen>
 </resources>

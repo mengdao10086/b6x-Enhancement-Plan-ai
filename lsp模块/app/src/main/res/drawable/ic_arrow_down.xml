@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    「回到底部」图标：Material keyboard_arrow_down 的 V 形下箭头（24dp 网格）。
+    填充色只是兜底，实际由 MaterialButton 的 iconTint（?attr/colorOnPrimary）着色。
+-->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp"
+    android:height="24dp"
+    android:viewportWidth="24"
+    android:viewportHeight="24">
+
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:pathData="M7.41,8.59 L12,13.17 L16.59,8.59 L18,10 L12,16 L6,10 Z" />
+</vector>

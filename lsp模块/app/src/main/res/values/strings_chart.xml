@@ -6,6 +6,9 @@
 <resources>
 
     <!-- ===== 区块标题 ===== -->
+    <!-- 曲线区区标题：合并页顶部（行高与配置页的分组卡头一致） -->
+    <string name="chart_section_curve">曲线</string>
+    <!-- 「数据文件」这行标题现在出现在配置页「诊断信息」头部（信息条已并入那里） -->
     <string name="chart_section_file">数据文件</string>
     <string name="chart_section_window">时间窗口与图例</string>
 
@@ -18,7 +21,7 @@
     <string name="chart_size_fmt">%1$d 字节</string>
     <string name="chart_size_unknown">未知</string>
     <string name="chart_value_unknown">—</string>
-    <string name="chart_render_failed">解析：失败（诊断见下方曲线区）</string>
+    <string name="chart_render_failed">解析：失败（失败原因见曲线区）</string>
 
     <!-- ===== 档位按钮 ===== -->
     <string name="chart_window_btn_fmt">%1$ds</string>

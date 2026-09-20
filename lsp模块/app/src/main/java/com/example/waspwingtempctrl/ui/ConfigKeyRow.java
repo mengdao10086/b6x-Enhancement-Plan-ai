@@ -178,6 +178,9 @@ final class ConfigKeyRow {
         int count = meta.isMulti() ? meta.fieldCount() : 1;
         for (int i = 0; i < count; i++) {
             View fieldView = inflater.inflate(R.layout.item_config_field, control, false);
+            // inflate 的第三参 false = 不挂到父容器，必须自己 addView：
+            // 否则控件被创建、绑好监听后就被丢掉，行内只剩标签没有输入框。
+            control.addView(fieldView);
             if (i > 0) {
                 LinearLayout.LayoutParams params = (LinearLayout.LayoutParams) fieldView.getLayoutParams();
                 params.topMargin = control.getResources().getDimensionPixelSize(R.dimen.space_s);

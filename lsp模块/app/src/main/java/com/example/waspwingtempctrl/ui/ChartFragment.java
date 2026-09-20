@@ -28,7 +28,16 @@ import java.util.Date;
 import java.util.Locale;
 
 /**
- * 曲线页（D2）：档位选择 + 图例 + 自绘画布 + 失败可诊断。
+ * 曲线区：档位选择 + 图例 + 自绘画布 + 失败可诊断。
+ *
+ * <p><b>现在是配置页（{@code ConfigFormFragment}）的子 Fragment</b>（合并成「配置 · 曲线」一页，
+ * 页签由 4 个减为 3 个），本类不再由 {@code SetupActivity} 直接挂载。因此：
+ * <ul>
+ *   <li>「数据文件信息」（路径/大小/修改时间/解析量/断联/回落说明）不再画在曲线卡里，
+ *       经 {@link Host#onChartInfo(String)} 交给配置页渲染到「诊断信息」头部，避免两处重复。</li>
+ *   <li>父页被隐藏时子 Fragment 收不到 {@code onHiddenChanged}（show/hide 只作用于父 Fragment），
+ *       故由父页显式调用 {@link #setPageHidden(boolean)}，与独立成页时的刷新节奏一致。</li>
+ * </ul>
  *
  * <p>绘制口径在 {@link ChartView}（自绘）与 {@link ChartAxis}/{@link ChartDataset}/
  * {@link ChartWindow} 内，逐条对齐 {@code 逻辑说明.md}（仓库根）的「曲线」一节。
@@ -38,11 +47,17 @@ import java.util.Locale;
  * 捕获进闭包，后台线程不再调 {@code requireContext()}。
  *
  * <p><b>刷新</b>：页面可见时每 {@link #REFRESH_INTERVAL_MS} 毫秒重读一次（C 端约 1 秒一行）。
- * 外壳用 add/hide/show 切页（见 {@code SetupActivity}），被隐藏的 Fragment 生命周期仍是
- * RESUMED，所以除 {@code onPause}/{@code onResume} 外 {@code onHiddenChanged} 也必须停/启刷新，
- * 三处都走幂等的 {@link #startRefresh()}/{@link #stopRefresh()}。
+ * 被隐藏的 Fragment 生命周期仍是 RESUMED，所以 {@code onPause}/{@code onResume}/
+ * {@code onHiddenChanged}/{@link #setPageHidden(boolean)} 四处都必须停/启刷新，
+ * 全部走幂等的 {@link #startRefresh()}/{@link #stopRefresh()}。
  */
 public class ChartFragment extends Fragment {
+
+    /** 合并页的宿主（由配置页实现）：曲线把「数据文件信息」交给它上屏。 */
+    interface Host {
+        /** 数据文件信息已重新生成（每次刷新都会来一次）。 */
+        void onChartInfo(@NonNull String text);
+    }
 
     /** 自动刷新间隔（C 端 write_webui_data 约 1s 一行）。 */
     private static final long REFRESH_INTERVAL_MS = 1000L;
@@ -54,7 +69,6 @@ public class ChartFragment extends Fragment {
     private static final float MIN_SCALE = 0.5f;
 
     private ChartView chartView;
-    private TextView infoView;
     private ScrollView failureScroll;
     private TextView failureText;
     private FrameLayout toolsClip;
@@ -68,6 +82,9 @@ public class ChartFragment extends Fragment {
     private boolean refreshing;
     /** 当前在跑的后台读取线程；存活时不再起新的。 */
     private Thread worker;
+
+    /** 合并页的宿主（配置页）；未接上时数据文件信息只是暂时没人显示，刷新照常。 */
+    private Host host;
 
     private File dataFile;
     private ChartConfig config;
@@ -108,7 +125,6 @@ public class ChartFragment extends Fragment {
         Context context = requireContext();
 
         chartView = view.findViewById(R.id.chart_view);
-        infoView = view.findViewById(R.id.chart_info_text);
         failureScroll = view.findViewById(R.id.chart_failure_scroll);
         failureText = view.findViewById(R.id.chart_failure_text);
         toolsClip = view.findViewById(R.id.chart_tools_clip);
@@ -117,7 +133,6 @@ public class ChartFragment extends Fragment {
         windowGroup = view.findViewById(R.id.chart_window_group);
 
         dataFile = AppFiles.dataFile(context);
-        infoView.setText(context.getString(R.string.chart_loading));
 
         buildLegend();
         // 档位切换监听只挂一次：按钮可能被整体重建（配置重读后档位集合变化），
@@ -154,10 +169,19 @@ public class ChartFragment extends Fragment {
         if (chartView != null) {
             chartView.refreshThemeColors();   // 主题色可能在页面之外变化过
         }
-        if (!isHidden()) {
+        if (!isHidden() && !isParentHidden()) {
             configStale = true;               // 页面可见即重读配置（用户可能刚在配置页改过）
             startRefresh();
         }
+    }
+
+    /**
+     * 父页（配置页）是否隐藏。子级自己的 {@code mHidden} 不受父页 {@code hide()} 影响，
+     * 故"本区是否可见"必须同时看父页——否则切到别的页签后 onResume 又会把刷新启起来。
+     */
+    private boolean isParentHidden() {
+        Fragment parent = getParentFragment();
+        return parent != null && parent.isHidden();
     }
 
     @Override
@@ -178,12 +202,37 @@ public class ChartFragment extends Fragment {
         }
     }
 
+    /**
+     * 接上宿主（合并页的配置页）。由宿主在挂载本 Fragment 时调用，可重复调用。
+     */
+    void setHost(@Nullable Host host) {
+        this.host = host;
+        if (lastProbe != null || config != null) {
+            // 已经有读盘结果（页面重建/换宿主）→ 立刻补发一次，宿主不必等下一次刷新；
+            // 还没有结果时不发：宁可在宿主那边继续显示"读取中…"，也不上一屏全是"未知"。
+            updateInfoText();
+        }
+    }
+
+    /**
+     * 合并页契约：本 Fragment 作为子 Fragment 时，父 Fragment 被 {@code hide()} 不会传播
+     * {@code onHiddenChanged} 到子级（hide/show 只作用于被操作的那个 Fragment），
+     * 故由父页显式转达，停/启刷新的口径与独立成页时完全一致。
+     */
+    void setPageHidden(boolean hidden) {
+        if (hidden) {
+            stopRefresh();
+        } else if (isResumed() && !isHidden() && !isParentHidden()) {
+            configStale = true;   // 回到本页：重读一次配置口径
+            startRefresh();
+        }
+    }
+
     @Override
     public void onDestroyView() {
         stopRefresh();
         mainHandler.removeCallbacksAndMessages(null);
         chartView = null;
-        infoView = null;
         failureScroll = null;
         failureText = null;
         toolsClip = null;
@@ -255,6 +304,8 @@ public class ChartFragment extends Fragment {
             buildWindowButtons();
         }
         if (snap.unchanged) {
+            // 内容没变也要补发一次信息：宿主（配置页）可能是刚接上的，或者刚重建过
+            updateInfoText();
             return;
         }
         lastProbe = snap.probe;
@@ -291,9 +342,13 @@ public class ChartFragment extends Fragment {
         updateInfoText();
     }
 
-    /** 顶部信息条：路径 / 大小 / 修改时间 / 解析量 / 档位与行数上限（+ 回落说明）。 */
+    /**
+     * 数据文件信息：路径 / 大小 / 修改时间 / 解析量 / 档位与行数上限（+ 断联与回落说明）。
+     *
+     * <p>本区不再画在曲线卡里，交给宿主渲染到配置页「诊断信息」头部（{@link Host#onChartInfo}）。
+     */
     private void updateInfoText() {
-        if (infoView == null) {
+        if (host == null || !isAdded()) {
             return;
         }
         StringBuilder sb = new StringBuilder();
@@ -322,7 +377,7 @@ public class ChartFragment extends Fragment {
                 sb.append('\n').append("⚠ ").append(note);
             }
         }
-        infoView.setText(sb.toString());
+        host.onChartInfo(sb.toString());
     }
 
     // ==================== 控件构建 ====================

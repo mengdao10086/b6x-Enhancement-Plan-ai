@@ -1,8 +1,12 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!--
-    应用外壳：工具栏 + 四个页签 + 页面容器。
+    应用外壳：工具栏 + 三个页签（状态 / 配置 · 曲线 / 日志）+ 页面容器。
     页签内容由 SetupActivity 挂载 Fragment；本文件不承载任何页面业务。
     子 agent 不要改本文件，各自的页面布局放 fragment_<页面>.xml。
+
+    页签数量与顺序必须与 SetupActivity.TAGS 严格一一对应（同为 3 个、同序）。
+    两者不一致会让「选中态页签」与「要挂的页面」错位：页签被 TabLayout 自动选中后，
+    对它再 select() 只会派发 onTabReselected（onTabSelected 不来），页面就可能一直不挂载。
 -->
 <LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:app="http://schemas.android.com/apk/res-auto"
@@ -30,9 +34,7 @@
 
         <com.google.android.material.tabs.TabItem android:text="@string/tab_status" />
 
-        <com.google.android.material.tabs.TabItem android:text="@string/tab_config" />
-
-        <com.google.android.material.tabs.TabItem android:text="@string/tab_chart" />
+        <com.google.android.material.tabs.TabItem android:text="@string/config_tab_title" />
 
         <com.google.android.material.tabs.TabItem android:text="@string/tab_log" />
     </com.google.android.material.tabs.TabLayout>
