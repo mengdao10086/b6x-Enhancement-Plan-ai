@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    展开/收起指示三角：指向右的实心三角（24dp 网格，墨迹 12×14dp）。
+    用矢量而不是「▸/▾」字符：36sp 的字形度量会把三角顶部裁掉（字符行高与墨迹不同框）。
+    展开态不另出一张图，由使用处旋转 90°（右 → 下），一个图标两种状态。
+    填充色只是兜底，实际由使用处的 tint（@color/app_on_surface_variant）着色，
+    故深浅色主题共用这一份，不在矢量图里写死主题色。
+-->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp"
+    android:height="24dp"
+    android:viewportWidth="24"
+    android:viewportHeight="24">
+
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:pathData="M6,5 L18,12 L6,19 Z" />
+</vector>

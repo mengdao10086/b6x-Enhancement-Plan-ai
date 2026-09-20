@@ -3,6 +3,7 @@ package com.example.waspwingtempctrl.ui;
 import android.view.LayoutInflater;
 import android.view.View;
 import android.view.ViewGroup;
+import android.widget.ImageView;
 import android.widget.LinearLayout;
 import android.widget.TextView;
 
@@ -34,11 +35,14 @@ import java.util.List;
  */
 final class ConfigGroupBinder {
 
+    /** 展开态的箭头旋转角：图标指向右，顺时针 90° 即指向下（收起态不转）。 */
+    private static final float ARROW_EXPANDED_ROTATION = 90f;
+
     private final View card;
     private final LinearLayout body;
     private final TextView titleView;
     private final TextView badgeView;
-    private final TextView arrowView;
+    private final ImageView arrowView;
     private final View divider;
     private final MaterialSwitch masterSwitch;
     private final KeyMeta masterMeta;
@@ -140,7 +144,8 @@ final class ConfigGroupBinder {
         expanded = value;
         body.setVisibility(value ? View.VISIBLE : View.GONE);
         divider.setVisibility(value ? View.VISIBLE : View.GONE);
-        arrowView.setText(value ? R.string.config_arrow_expanded : R.string.config_arrow_collapsed);
+        // 一副图标两种状态：图标本身指向右，展开时顺时针转 90° 指向下
+        arrowView.setRotation(value ? ARROW_EXPANDED_ROTATION : 0f);
         arrowView.setContentDescription(card.getContext().getString(
                 value ? R.string.config_action_collapse : R.string.config_action_expand));
     }

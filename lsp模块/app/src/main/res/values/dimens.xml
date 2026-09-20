@@ -29,8 +29,7 @@
     <dimen name="text_label">13sp</dimen>
     <dimen name="text_caption">12sp</dimen>
     <dimen name="text_mono">12sp</dimen>
-    <!-- 展开/收起小三角字号：原为 Caption 继承的 12sp，按要求放大到 3 倍 -->
-    <dimen name="text_arrow">36sp</dimen>
+    <!-- 展开/收起的三角已改用矢量图标（见 drawable/ic_triangle.xml），不再需要字号标尺 -->
 
     <!-- 控件 -->
     <dimen name="row_min_height">48dp</dimen>

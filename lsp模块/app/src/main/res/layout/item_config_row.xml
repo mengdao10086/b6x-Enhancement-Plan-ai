@@ -2,10 +2,11 @@
 <!--
     一个配置键的行。四种 type（switch / int / multi / path）共用本布局：
       第一行 = 参数名 + 输入框（或在右侧的开关），行内垂直居中；多值键的多个输入框放在
-      config_key_control（流式容器）里，一行放不下时在行内自行换行。
-      desc / 单位说明 / 状态文字放第一行下方，宽度 wrap_content：
-      它们短时本行的盒子就窄，能与其它键并排；长时自然占满一整行。
-      switch 键整行独占（由 ConfigKeyRow 向 FlowWrapLayout 声明），开关贴行尾。
+      config_key_control（流式容器）里，放不下时在键内自行换行。
+      每个键都整行独占（由 ConfigKeyRow 向 FlowWrapLayout 声明）：参数之间不再并排，
+      并排/换行只发生在键内部的字段之间（config_key_control）。
+      desc / 单位说明 / 状态文字放第一行下方，宽度 wrap_content：短时只有文字那么宽，长时自然折行。
+      switch 键的开关靠第一行末尾的 weight 贴到行尾。
       "未生效"的标注在分组卡头做一次（见 item_config_group），行内只压暗不重复标注。
 -->
 <LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"

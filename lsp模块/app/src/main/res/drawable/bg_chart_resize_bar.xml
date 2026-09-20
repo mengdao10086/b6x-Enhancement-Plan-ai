@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    画布下沿拖柄的短横条。颜色取主题的描边色（?attr/colorOutlineVariant），深浅色主题跟着变，
+    不写死色值；圆角 2dp 后 4dp 的条不会显出方角。
+-->
+<shape xmlns:android="http://schemas.android.com/apk/res/android"
+    android:shape="rectangle">
+    <solid android:color="?attr/colorOutlineVariant" />
+    <corners android:radius="@dimen/chart_resize_bar_radius" />
+</shape>

@@ -167,14 +167,16 @@
                         android:text="@string/status_section_actions"
                         android:textAppearance="@style/TextAppearance.B6XTempCtrl.SectionTitle" />
 
-                    <TextView
+                    <!-- 一副图标两种状态（同配置页分组卡头）：字符「▸/▾」的字形度量会把三角顶部裁掉 -->
+                    <ImageView
                         android:id="@+id/action_log_arrow"
-                        android:layout_width="wrap_content"
-                        android:layout_height="wrap_content"
+                        android:layout_width="@dimen/arrow_box"
+                        android:layout_height="@dimen/arrow_box"
                         android:layout_marginStart="@dimen/space_s"
-                        android:text="@string/config_arrow_collapsed"
-                        android:textAppearance="@style/TextAppearance.B6XTempCtrl.Caption"
-                        android:textSize="@dimen/text_arrow" />
+                        android:contentDescription="@string/config_action_expand"
+                        android:scaleType="fitCenter"
+                        android:src="@drawable/ic_triangle"
+                        app:tint="?attr/colorOnSurfaceVariant" />
                 </LinearLayout>
 
                 <TextView

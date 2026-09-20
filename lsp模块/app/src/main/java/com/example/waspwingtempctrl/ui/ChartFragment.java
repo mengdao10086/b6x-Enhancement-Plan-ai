@@ -6,6 +6,7 @@ import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
 import android.view.LayoutInflater;
+import android.view.MotionEvent;
 import android.view.View;
 import android.view.ViewGroup;
 import android.widget.CheckBox;
@@ -28,17 +29,19 @@ import java.util.Locale;
 /**
  * 曲线区：档位选择 + 图例 + 自绘画布 + 失败可诊断。
  *
- * <p><b>布局</b>：档位行、图例（3 列、放满一行向下换行）与画布同处一张卡内，全部按自然尺寸排布——
+ * <p><b>布局</b>：档位行、图例（按自然宽排布、放不下换行）与画布同处一张卡内，全部按自然尺寸排布——
  * 不整体缩放、也不改写容器高度（原「超宽时整块缩放到 0.5 并覆写裁切框高度」的做法会把图例裁掉、
- * 高度塌成一条）。画布高度由 {@code fragment_chart.xml} 的固定尺寸给出（本区在配置页的
- * {@code ScrollView} 里，{@code layout_weight} 会被量成 0，不能用）。
+ * 高度塌成一条）。画布高度初值由 {@code fragment_chart.xml} 给出（本区在配置页的
+ * {@code ScrollView} 里，{@code layout_weight} 会被量成 0，不能用），运行时可用画布下沿的
+ * 拖柄在 {@code chart_canvas_min_height}～{@code chart_canvas_max_height} 之间改。改的是运行时
+ * {@code LayoutParams}，不落盘：视图重建（重进页面/重启 App）后回到默认高。
  *
  * <p><b>现在是配置页（{@code ConfigFormFragment}）的子 Fragment</b>（合并成「配置 · 曲线」一页，
  * 页签由 4 个减为 3 个），本类不再由 {@code SetupActivity} 直接挂载。因此：
  * <ul>
  *   <li>「数据文件信息」（路径/大小/修改时间/解析量/断联/回落说明）不再画在曲线卡里，
  *       经 {@link Host#onChartInfo(String)} 交给配置页渲染到「诊断信息」头部，避免两处重复。</li>
- *   <li>父页被隐藏时子 Fragment 收不到 {@code onHiddenChanged}（show/hide 只作用于父 Fragment），
+ *   <li>外壳切页不再 hide/show（ViewPager2 只把非当前页压到 STARTED，不派发 {@code onPause}），
  *       故由父页显式调用 {@link #setPageHidden(boolean)}，与独立成页时的刷新节奏一致。</li>
  * </ul>
  *
@@ -50,9 +53,9 @@ import java.util.Locale;
  * 捕获进闭包，后台线程不再调 {@code requireContext()}。
  *
  * <p><b>刷新</b>：页面可见时每 {@link #REFRESH_INTERVAL_MS} 毫秒重读一次（C 端约 1 秒一行）。
- * 被隐藏的 Fragment 生命周期仍是 RESUMED，所以 {@code onPause}/{@code onResume}/
- * {@code onHiddenChanged}/{@link #setPageHidden(boolean)} 四处都必须停/启刷新，
- * 全部走幂等的 {@link #startRefresh()}/{@link #stopRefresh()}。
+ * 本区是子 Fragment，父页不可见不会让它暂停（见上），故停/启刷新有两个入口：
+ * {@code onPause}/{@code onResume}（本区生命周期变化）与 {@link #setPageHidden(boolean)}
+ * （父页转达可见性），全部走幂等的 {@link #startRefresh()}/{@link #stopRefresh()}。
  */
 public class ChartFragment extends Fragment {
 
@@ -68,9 +71,17 @@ public class ChartFragment extends Fragment {
     private ChartView chartView;
     private ScrollView failureScroll;
     private TextView failureText;
-    /** 图例容器（布局里是 3 列的 GridLayout）。 */
+    /** 图例容器（可换行的 FlowWrapLayout）。 */
     private ViewGroup legendRow;
     private MaterialButtonToggleGroup windowGroup;
+    /** 画布容器：拖柄改的只是它的 LayoutParams.height（画布自身 match_parent 跟随）。 */
+    private View canvasContainer;
+    private View resizeHandle;
+    /**
+     * 父页是否不可见（由 {@link #setPageHidden(boolean)} 维护）。本区是子 Fragment，父页被切走
+     * 时不派发 {@code onPause}，故 {@code onResume} 里靠它判断该不该起刷新。
+     */
+    private boolean pageHidden;
 
     private final Handler mainHandler = new Handler(Looper.getMainLooper());
 
@@ -78,6 +89,11 @@ public class ChartFragment extends Fragment {
     private boolean refreshing;
     /** 当前在跑的后台读取线程；存活时不再起新的。 */
     private Thread worker;
+
+    /** 画布拖动中为 true；起点在按下时记一次，移动一律按"起点 + 增量"算，不累积误差。 */
+    private boolean resizingCanvas;
+    private float dragStartRawY;
+    private int dragStartHeight;
 
     /** 合并页的宿主（配置页）；未接上时数据文件信息只是暂时没人显示，刷新照常。 */
     private Host host;
@@ -124,9 +140,12 @@ public class ChartFragment extends Fragment {
         failureText = view.findViewById(R.id.chart_failure_text);
         legendRow = view.findViewById(R.id.chart_legend_row);
         windowGroup = view.findViewById(R.id.chart_window_group);
+        canvasContainer = view.findViewById(R.id.chart_canvas_container);
+        resizeHandle = view.findViewById(R.id.chart_resize_handle);
 
         // 失败诊断可按住滚动条拖动（滚动条常显，见布局）
         ScrollbarDrag.attach(failureScroll);
+        resizeHandle.setOnTouchListener(this::onHandleTouch);
 
         dataFile = AppFiles.dataFile(context);
 
@@ -156,37 +175,16 @@ public class ChartFragment extends Fragment {
         if (chartView != null) {
             chartView.refreshThemeColors();   // 主题色可能在页面之外变化过
         }
-        if (!isHidden() && !isParentHidden()) {
+        if (!pageHidden) {
             configStale = true;               // 页面可见即重读配置（用户可能刚在配置页改过）
             startRefresh();
         }
-    }
-
-    /**
-     * 父页（配置页）是否隐藏。子级自己的 {@code mHidden} 不受父页 {@code hide()} 影响，
-     * 故"本区是否可见"必须同时看父页——否则切到别的页签后 onResume 又会把刷新启起来。
-     */
-    private boolean isParentHidden() {
-        Fragment parent = getParentFragment();
-        return parent != null && parent.isHidden();
     }
 
     @Override
     public void onPause() {
         stopRefresh();
         super.onPause();
-    }
-
-    @Override
-    public void onHiddenChanged(boolean hidden) {
-        super.onHiddenChanged(hidden);
-        // 隐藏时生命周期仍是 RESUMED，不在这里停就一直在后台刷
-        if (hidden) {
-            stopRefresh();
-        } else if (isResumed()) {
-            configStale = true;   // 从别的页切回来：重读一次配置口径
-            startRefresh();
-        }
     }
 
     /**
@@ -202,14 +200,14 @@ public class ChartFragment extends Fragment {
     }
 
     /**
-     * 合并页契约：本 Fragment 作为子 Fragment 时，父 Fragment 被 {@code hide()} 不会传播
-     * {@code onHiddenChanged} 到子级（hide/show 只作用于被操作的那个 Fragment），
-     * 故由父页显式转达，停/启刷新的口径与独立成页时完全一致。
+     * 合并页契约：本 Fragment 作为子 Fragment 时，父页被切走不会让它暂停（ViewPager2 只把非当前页
+     * 压到 STARTED），故由父页显式转达可见性，停/启刷新的口径与独立成页时完全一致。
      */
     void setPageHidden(boolean hidden) {
+        pageHidden = hidden;
         if (hidden) {
             stopRefresh();
-        } else if (isResumed() && !isHidden() && !isParentHidden()) {
+        } else if (isResumed()) {
             configStale = true;   // 回到本页：重读一次配置口径
             startRefresh();
         }
@@ -224,6 +222,9 @@ public class ChartFragment extends Fragment {
         failureText = null;
         legendRow = null;
         windowGroup = null;
+        canvasContainer = null;
+        resizeHandle = null;
+        resizingCanvas = false;
         super.onDestroyView();
     }
 
@@ -369,7 +370,7 @@ public class ChartFragment extends Fragment {
 
     /**
      * 图例：6 条曲线，默认开关照 {@code 逻辑说明.md} 的「曲线」一节〈系列开关〉；勾选框着色 = 该曲线的
-     * chart_series_* 色。容器是 3 列的 GridLayout：第 4 项起自动换到第二行，窄屏也不会被裁。
+     * chart_series_* 色。容器是可换行的 FlowWrapLayout：按自然宽依次排布，放不下自动换行，窄屏也不会被裁。
      */
     private void buildLegend() {
         LayoutInflater inflater = LayoutInflater.from(requireContext());
@@ -419,6 +420,54 @@ public class ChartFragment extends Fragment {
             }
         }
         return false;
+    }
+
+    // ==================== 画布拖动 ====================
+
+    /**
+     * 拖柄触摸：按下记起点，移动按增量改画布容器的高，抬起/取消结束。不写盘——视图重建即回默认高。
+     *
+     * <p>按下时必须 {@code requestDisallowInterceptTouchEvent(true)}：本区在配置页的
+     * {@code ScrollView} 里，少了这一步，纵向拖动一旦超过 touch slop 就被 ScrollView 当成
+     * 「用户在滚页面」把事件流拦走（本视图随后只收到一个 CANCEL），拖柄只能挪一小格就断。
+     */
+    private boolean onHandleTouch(View handle, MotionEvent e) {
+        switch (e.getActionMasked()) {
+            case MotionEvent.ACTION_DOWN:
+                // 记屏幕 y（getRawY）：画布变高时拖柄自己会往下走，用相对坐标会把这段位移算进增量
+                handle.getParent().requestDisallowInterceptTouchEvent(true);
+                dragStartRawY = e.getRawY();
+                dragStartHeight = canvasContainer.getHeight();
+                resizingCanvas = true;
+                return true;
+            case MotionEvent.ACTION_MOVE:
+                if (!resizingCanvas) {
+                    return false;
+                }
+                int target = clampedCanvasHeight(
+                        dragStartHeight + Math.round(e.getRawY() - dragStartRawY));
+                ViewGroup.LayoutParams lp = canvasContainer.getLayoutParams();
+                if (lp.height != target) {
+                    lp.height = target;
+                    canvasContainer.requestLayout();   // 就地改 height 不会自动触发布局
+                }
+                return true;
+            case MotionEvent.ACTION_UP:
+            case MotionEvent.ACTION_CANCEL:
+                resizingCanvas = false;
+                // 交还给 ScrollView，否则会一直禁到下一次按下
+                handle.getParent().requestDisallowInterceptTouchEvent(false);
+                return true;
+            default:
+                return false;
+        }
+    }
+
+    /** 画布高的钳位（纯计算，无副作用）：落在 [chart_canvas_min_height, chart_canvas_max_height] 内。 */
+    private int clampedCanvasHeight(int height) {
+        int min = getResources().getDimensionPixelSize(R.dimen.chart_canvas_min_height);
+        int max = getResources().getDimensionPixelSize(R.dimen.chart_canvas_max_height);
+        return Math.max(min, Math.min(max, height));
     }
 
     private static final SimpleDateFormat TIME_FMT =

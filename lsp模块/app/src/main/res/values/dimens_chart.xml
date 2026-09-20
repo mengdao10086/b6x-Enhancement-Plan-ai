@@ -9,14 +9,23 @@
     <!-- 档位按钮最小高度（MaterialButton 默认 48dp 太占高，档位行要紧凑成一行） -->
     <dimen name="chart_chip_min_height">32dp</dimen>
 
+    <!-- 图例行距 = 配置页键行行距 space_m 的一半：图例是"轻量开关"，两行之间不必留那么宽 -->
+    <dimen name="chart_legend_row_gap">6dp</dimen>
+
     <!--
-        曲线画布高。不再引用 dimens.xml 的 chart_height（本区不要那个值，也不必耦合）。
-        取值依据（360dp 宽机型的推算，真机需目测）：
-          画布宽 = 屏宽 − 配置页左右内边距 2×16 − 卡片左右内边距 2×8 = 312dp；
-          绘图区宽 = 画布宽 − ChartView 左右内边距各 36 = 240dp；
-          取绘图区近正方：画布高 = 240 + 上内边距 24 + 下内边距 8 = 272dp。
-        效果：绘图区 240×240，比原来（画布 260、上下各 16 → 绘图区 228 高）高约 12dp，
-        抵掉图例第二行占去的高度；整张卡约 430dp，在 640dp 以上的页面上不挤掉参数区。
+        曲线画布的默认高度，也是进页面时的初始高度；运行时可由画布下沿的拖柄在
+        [chart_canvas_min_height, chart_canvas_max_height] 内调整（ChartFragment），且不记忆。
+        204dp = 原 272dp 的 3/4（原值按"绘图区近正方"推算，占高过多）；缩小后
+        绘图区高 = 204 − 上内边距 24 − 下内边距 8 = 172dp，仍远高于 ChartView 的 8dp 保护下限（见 ChartView#rebuild）。
     -->
-    <dimen name="chart_canvas_height">272dp</dimen>
+    <dimen name="chart_canvas_height">204dp</dimen>
+
+    <!-- 拖柄能拖出的最小/最大画布高。下限 120dp 时绘图区仍有 88dp 高，上限 480dp 免得整卡撑爆一屏 -->
+    <dimen name="chart_canvas_min_height">120dp</dimen>
+    <dimen name="chart_canvas_max_height">480dp</dimen>
+
+    <!-- 画布下沿拖柄的横条：32×4dp、圆角 2dp（触控带尺寸用 space_xl，不在本文件另立一项） -->
+    <dimen name="chart_resize_bar_width">32dp</dimen>
+    <dimen name="chart_resize_bar_height">4dp</dimen>
+    <dimen name="chart_resize_bar_radius">2dp</dimen>
 </resources>

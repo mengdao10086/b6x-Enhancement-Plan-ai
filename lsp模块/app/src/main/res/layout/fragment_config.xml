@@ -1,17 +1,20 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!--
-    配置 + 曲线合并页（页签「配置 · 曲线」）。自上而下三段，对齐旧 WebUI 的形态：
-      ① 曲线区（区标题 + config_chart_container，ChartFragment 作为子 Fragment 挂进去）
-      ② 参数区（区标题 + config_group_container + 错误态）
+    配置 + 曲线合并页（页签「配置 · 曲线」）。自上而下三段，每段自带卡片，不再有区标题：
+      ① 曲线区（config_chart_container，ChartFragment 作为子 Fragment 挂进去）
+      ② 参数区（config_group_container + 错误态）
       ③ 诊断区（默认只有一行标题；展开后是数据文件信息 + 键渲染自检 + 配置诊断正文）
     分组卡片由 ConfigGroupBinder 动态加入 config_group_container，每个键的行由 ConfigKeyRow
     动态生成（数据源是 ConfigStore，背后即 assets/params.json）。「[4] 界面」组不在此渲染，它在
     顶栏设置按钮打开的独立设置页（UiSettingsFragment）。
     本文件不承载任何键定义，改动键表不需要动布局；曲线区自身的内容在 fragment_chart.xml。
-    区标题行高压到约 40dp（16sp 行高 24dp + 上下各 @dimen/space_s），不再跟随分组卡头的 48dp。
+    页面贴顶：本页顶部没有标题栏，上内边距取 0，曲线卡直接顶到页签下方；左右下仍为 @dimen/page_padding。
+    展开三角用 ImageView 承载矢量图标（drawable/ic_triangle.xml）——「▸/▾」字符的字形度量会把
+    三角顶部裁掉，同 item_config_group.xml 的处理。
     滚动条常显（fadeScrollbars=false）+ 加粗到 @dimen/scrollbar_size，配合 ui/ScrollbarDrag 才能按住拖动。
 -->
 <ScrollView xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
     android:id="@+id/config_scroll"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
@@ -25,38 +28,16 @@
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
         android:orientation="vertical"
-        android:padding="@dimen/page_padding">
-
-        <!-- ===== ① 曲线区区标题 ===== -->
-        <TextView
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:gravity="center_vertical"
-            android:paddingStart="@dimen/card_padding"
-            android:paddingTop="@dimen/space_s"
-            android:paddingEnd="@dimen/card_padding"
-            android:paddingBottom="@dimen/space_s"
-            android:text="@string/chart_section_curve"
-            android:textAppearance="@style/TextAppearance.B6XTempCtrl.SectionTitle" />
+        android:paddingStart="@dimen/page_padding"
+        android:paddingTop="0dp"
+        android:paddingEnd="@dimen/page_padding"
+        android:paddingBottom="@dimen/page_padding">
 
         <!-- ===== ① 曲线区容器：ChartFragment 由 ConfigFormFragment 挂进来 ===== -->
         <FrameLayout
             android:id="@+id/config_chart_container"
             android:layout_width="match_parent"
             android:layout_height="wrap_content" />
-
-        <!-- ===== ② 参数区区标题 ===== -->
-        <TextView
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:layout_marginTop="@dimen/space_m"
-            android:gravity="center_vertical"
-            android:paddingStart="@dimen/card_padding"
-            android:paddingTop="@dimen/space_s"
-            android:paddingEnd="@dimen/card_padding"
-            android:paddingBottom="@dimen/space_s"
-            android:text="@string/config_section_title"
-            android:textAppearance="@style/TextAppearance.B6XTempCtrl.SectionTitle" />
 
         <!-- ===== ② 错误态：参数定义没加载成功时，明确报错，不给空列表 ===== -->
         <com.google.android.material.card.MaterialCardView
@@ -133,18 +114,18 @@
                         android:text="@string/config_diag_title"
                         android:textAppearance="@style/TextAppearance.B6XTempCtrl.SectionTitle" />
 
-                    <!-- 三角锁高 @dimen/arrow_box：36sp 的行高不锁高会把这一行顶到约 68dp，
-                         与分组卡头（48dp）不一致（同 item_config_group.xml 的处理） -->
-                    <TextView
+                    <!-- 展开三角：矢量图标，收起态指右、展开态由 ConfigDiagnostics 旋转 90° 指下。
+                         图标盒锁 @dimen/arrow_box（24dp），本行才是 24 + 12×2 = 48dp，
+                         与分组卡头同高（同 item_config_group.xml 的处理） -->
+                    <ImageView
                         android:id="@+id/config_diag_arrow"
-                        android:layout_width="wrap_content"
+                        android:layout_width="@dimen/arrow_box"
                         android:layout_height="@dimen/arrow_box"
                         android:layout_marginStart="@dimen/space_s"
-                        android:gravity="center"
-                        android:includeFontPadding="false"
-                        android:text="@string/config_arrow_collapsed"
-                        android:textAppearance="@style/TextAppearance.B6XTempCtrl.Caption"
-                        android:textSize="@dimen/text_arrow" />
+                        android:contentDescription="@string/config_action_expand"
+                        android:scaleType="fitCenter"
+                        android:src="@drawable/ic_triangle"
+                        app:tint="?attr/colorOnSurfaceVariant" />
                 </LinearLayout>
 
                 <!--

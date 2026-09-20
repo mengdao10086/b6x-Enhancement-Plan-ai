@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    FlowWrapLayout 的自定义属性。单独成文件（不并进通用的 attrs.xml）：本仓库资源按用途分文件，
+    该控件的属性放在同名文件里，归属一眼可见。
+-->
+<resources>
+
+    <declare-styleable name="FlowWrapLayout">
+        <!--
+            行距（上下两行之间的间距）。缺省 = dimens.xml 的 space_m，即不写该属性时行为与从前一致。
+            存在的意义：图例要把两行之间的间距减半，而列距、行内边距都要保持不变，
+            没有这个属性就只能整块换掉容器或用空格凑间距。
+        -->
+        <attr name="flowRowGap" format="dimension" />
+    </declare-styleable>
+</resources>

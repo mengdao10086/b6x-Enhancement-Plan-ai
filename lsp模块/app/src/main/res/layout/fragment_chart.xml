@@ -1,14 +1,16 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!--
     曲线区（合并进配置页，挂在 fragment_config.xml 的 config_chart_container 下）。
-    按要求「曲线/时间/图例/数据展示在视觉上不要分窗口」：本区只用一张卡，卡内自上而下三段——
-      ① 时间窗口档位按钮 → ② 图例 6 项（3 列，装不下向下换行）→ ③ 曲线画布。
-    三段一律按自然尺寸排布：不做任何缩放，也不改写容器高度（原「整块缩放到 0.5 并覆写
+    按要求「曲线/时间/图例/数据展示在视觉上不要分窗口」：本区只用一张卡，卡内自上而下四段——
+      ① 时间窗口档位按钮 → ② 图例 6 项（按自然宽排布，装不下向下换行）→ ③ 曲线画布
+      → ④ 画布下沿拖柄（拖动改画布高）。
+    四段一律按自然尺寸排布：不做任何缩放，也不改写容器高度（原「整块缩放到 0.5 并覆写
     chart_tools_clip 高度」的做法已删，见 ChartFragment）。
     卡内不出现第二块底色/描边/圆角：画布自身不铺底色，与卡片底色连成一片（见 ChartView#onDraw）。
 
     高度一律不许用 weight（本区在配置页的 ScrollView 里，weight 会被量成 0），
-    故画布高度取固定值 @dimen/chart_canvas_height（取值依据见 dimens_chart.xml）。
+    故画布高度初值取 @dimen/chart_canvas_height；拖动只在运行时改容器 LayoutParams，
+    不落盘、不进 dimen（见 ChartFragment#onHandleTouch）。
 
     读取失败时不进画布，把 AppFiles.diagnose() 原文铺在曲线区，绝不静默留白。
     原独立成页时的顶部「数据文件」信息条与页面内边距已移走：信息条并入配置页「诊断信息」
@@ -46,22 +48,26 @@
                 ===== ② 图例：按自然尺寸排布，放不下自动换行（窄屏也全部可见，不缩放不裁切） =====
                 用配置页同一套可换行容器：项目里只保留一种换行实现，也不依赖 GridLayout 的
                 「columnCount 是否会自动另起一行」这一行为（该行为未在本机核实过）。
+                行距单给 chart_legend_row_gap（配置页仍是默认的 space_m），列距与图例项的
+                layout_marginEnd 都不动。
             -->
             <com.example.waspwingtempctrl.ui.FlowWrapLayout
                 android:id="@+id/chart_legend_row"
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:layout_marginTop="@dimen/space_s" />
+                android:layout_marginTop="@dimen/space_s"
+                app:flowRowGap="@dimen/chart_legend_row_gap" />
 
             <!--
                 ===== ③ 画布 / 读取失败诊断 =====
-                画布贴到卡片下沿（父容器 paddingBottom = 0），使「最低一条网格线 → 卡片下沿」
-                正好等于画布内的下内边距（ChartView 的 PAD_B_DP）。
+                容器高度就是画布高（拖柄改的正是它）。画布下沿不再贴卡片底——其下还有拖柄触控带，
+                故「最低一条网格线 → 卡片下沿」比 ChartView 的下内边距（PAD_B_DP）多出触控带的高度。
             -->
             <FrameLayout
+                android:id="@+id/chart_canvas_container"
                 android:layout_width="match_parent"
                 android:layout_height="@dimen/chart_canvas_height"
-                android:layout_marginTop="@dimen/space_s">
+                android:layout_marginTop="@dimen/space_xs">
 
                 <com.example.waspwingtempctrl.ui.ChartView
                     android:id="@+id/chart_view"
@@ -85,6 +91,27 @@
                         android:textAppearance="@style/TextAppearance.B6XTempCtrl.Mono"
                         android:textIsSelectable="true" />
                 </ScrollView>
+            </FrameLayout>
+
+            <!--
+                ===== ④ 画布下沿拖柄（拖动改画布高，由 ChartFragment 处理） =====
+                外层整条 24dp（space_xl）是触控带：横条只有 4dp 高，直接拿它当触控目标按不准；
+                内层横条在触控带内居中，上下各 10dp 余量，故不再加 marginTop。
+                横条不可点（View 默认即不可点，这里写明是为了别挡住触控带的事件）。
+            -->
+            <FrameLayout
+                android:id="@+id/chart_resize_handle"
+                android:layout_width="match_parent"
+                android:layout_height="@dimen/space_xl">
+
+                <View
+                    android:layout_width="@dimen/chart_resize_bar_width"
+                    android:layout_height="@dimen/chart_resize_bar_height"
+                    android:layout_gravity="center"
+                    android:background="@drawable/bg_chart_resize_bar"
+                    android:clickable="false"
+                    android:focusable="false"
+                    android:importantForAccessibility="no" />
             </FrameLayout>
         </LinearLayout>
     </com.google.android.material.card.MaterialCardView>

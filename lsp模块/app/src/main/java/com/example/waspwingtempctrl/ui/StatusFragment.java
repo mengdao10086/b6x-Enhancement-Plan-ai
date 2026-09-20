@@ -8,6 +8,7 @@ import android.os.Bundle;
 import android.view.LayoutInflater;
 import android.view.View;
 import android.view.ViewGroup;
+import android.widget.ImageView;
 import android.widget.TextView;
 
 import androidx.annotation.NonNull;
@@ -45,10 +46,13 @@ public class StatusFragment extends Fragment {
     private static final String PREFS_ROOT = "root_probe";
     private static final String KEY_ROOT_TRIED = "root_tried";
 
+    /** 一副图标两种状态：图标本身指向右，展开时顺时针转 90° 指向下（同配置页分组卡头）。 */
+    private static final float ARROW_EXPANDED_ROTATION = 90f;
+
     private TextView statusView;
     private TextView infoView;
     private TextView logView;
-    private TextView arrowView;
+    private ImageView arrowView;
     private View progress;
 
     /** 操作记录是否展开（默认收起）。 */
@@ -270,8 +274,7 @@ public class StatusFragment extends Fragment {
             logView.setVisibility(value ? View.VISIBLE : View.GONE);
         }
         if (arrowView != null) {
-            arrowView.setText(value
-                    ? R.string.config_arrow_expanded : R.string.config_arrow_collapsed);
+            arrowView.setRotation(value ? ARROW_EXPANDED_ROTATION : 0f);
             arrowView.setContentDescription(getString(value
                     ? R.string.config_action_collapse : R.string.config_action_expand));
         }

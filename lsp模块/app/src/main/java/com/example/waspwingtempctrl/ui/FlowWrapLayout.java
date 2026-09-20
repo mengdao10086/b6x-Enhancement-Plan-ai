@@ -1,6 +1,7 @@
 package com.example.waspwingtempctrl.ui;
 
 import android.content.Context;
+import android.content.res.TypedArray;
 import android.util.AttributeSet;
 import android.view.View;
 import android.view.ViewGroup;
@@ -31,8 +32,9 @@ import java.util.List;
  * {@link #setFullLine} 标记的子视图独占一行且铺满行宽（键行用它让"参数名 + 右侧开关"占满一行，
  * 开关才能贴到行尾）。放不下时的换行判定只看<b>外边距盒子</b>的宽度，不读子视图内部结构。
  *
- * <p>仅按 LTR 排布（界面无镜像语言需求）；行距与列距取同一个标尺 {@code space_m}——
- * 参数名到上下相邻行的距离与它到卡片左侧内边距（同为 12dp）一致。
+ * <p>仅按 LTR 排布（界面无镜像语言需求）。列距固定用标尺 {@code space_m}——参数名到卡片
+ * 左侧内边距（同为 12dp）一致；行距缺省同 {@code space_m}，可由调用方用 {@code app:flowRowGap}
+ * 单独指定（曲线页图例要把行距压到一半，又不动列距，见 fragment_chart.xml）。
  */
 public final class FlowWrapLayout extends LinearLayout {
 
@@ -40,6 +42,7 @@ public final class FlowWrapLayout extends LinearLayout {
     private final List<View> fullLine = new ArrayList<>();
 
     private final int hGap;
+    /** 行距（上下两行之间）。缺省 = 列距，可被 XML 属性 app:flowRowGap 覆盖。 */
     private final int vGap;
 
     public FlowWrapLayout(Context context) {
@@ -53,7 +56,11 @@ public final class FlowWrapLayout extends LinearLayout {
     public FlowWrapLayout(Context context, AttributeSet attrs, int defStyleAttr) {
         super(context, attrs, defStyleAttr);
         hGap = context.getResources().getDimensionPixelSize(R.dimen.space_m);
-        vGap = hGap;   // 行距 = 列距 = 参数名到卡片左侧的距离
+        // 行距缺省与列距相同（配置页不设 flowRowGap，行为与加该属性前一字不差）
+        TypedArray a = context.obtainStyledAttributes(
+                attrs, R.styleable.FlowWrapLayout, defStyleAttr, 0);
+        vGap = a.getDimensionPixelSize(R.styleable.FlowWrapLayout_flowRowGap, hGap);
+        a.recycle();
     }
 
     /** 标记子视图是否独占一行（铺满行宽）。须在子视图被测量前调用。 */
@@ -94,10 +101,16 @@ public final class FlowWrapLayout extends LinearLayout {
         contentWidth = Math.max(contentWidth, rowWidth);
         contentHeight += rowHeight;
 
+        // 并进 suggested minimum：本类自己算尺寸，不并的话 minHeight/minWidth 会被当成死配置
+        // （行高=内容高时，设了 minHeight 也不会撑开——"开关换行后那行要保底 49dp"就靠它）。
         setMeasuredDimension(
-                resolveSizeAndState(contentWidth + getPaddingLeft() + getPaddingRight(),
+                resolveSizeAndState(
+                        Math.max(contentWidth + getPaddingLeft() + getPaddingRight(),
+                                getSuggestedMinimumWidth()),
                         widthMeasureSpec, 0),
-                resolveSizeAndState(contentHeight + getPaddingTop() + getPaddingBottom(),
+                resolveSizeAndState(
+                        Math.max(contentHeight + getPaddingTop() + getPaddingBottom(),
+                                getSuggestedMinimumHeight()),
                         heightMeasureSpec, 0));
     }
 

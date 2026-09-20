@@ -5,10 +5,13 @@
     组头开关只在 role=master 的组出现；webui 组已搬到设置页（ConfigGroupBinder 仍支持 master 为 null）。
     徽标默认 gone：本组存在"依赖未满足"的键时由 ConfigGroupBinder 显示一次（行内不再逐键标注）。
 
-    卡头高度：箭头锁高 @dimen/arrow_box(24dp)，故卡头 = 24 + 12×2 = 48dp（与 @dimen/row_min_height 一致）；
-    带总开关的组因开关自身 32dp 略高（约 56dp），属取舍。
+    卡头高度写死 @dimen/row_min_height(48dp)：不带开关的诊断卡头也是 48dp，两者必须同高。
+    箭头是 24dp 图标盒、开关自身约 32dp，都小于 48dp，行内垂直居中即完整可见，不会被裁。
+    展开三角用 ImageView 承载矢量图标（drawable/ic_triangle.xml）——「▸/▾」字符的字形度量会把
+    三角顶部裁掉。
 -->
 <com.google.android.material.card.MaterialCardView xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
     android:id="@+id/config_group_card"
     android:layout_width="match_parent"
     android:layout_height="wrap_content"
@@ -22,12 +25,11 @@
         <LinearLayout
             android:id="@+id/config_group_header"
             android:layout_width="match_parent"
-            android:layout_height="wrap_content"
+            android:layout_height="@dimen/row_min_height"
             android:background="?attr/selectableItemBackground"
             android:clickable="true"
             android:focusable="true"
             android:gravity="center_vertical"
-            android:minHeight="@dimen/row_min_height"
             android:orientation="horizontal"
             android:padding="@dimen/card_padding">
 
@@ -57,16 +59,16 @@
                 android:scaleY="0.75"
                 android:visibility="gone" />
 
-            <TextView
+            <!-- 收起态指右；展开态由 ConfigGroupBinder 旋转 90° 指下 -->
+            <ImageView
                 android:id="@+id/config_group_arrow"
-                android:layout_width="wrap_content"
+                android:layout_width="@dimen/arrow_box"
                 android:layout_height="@dimen/arrow_box"
                 android:layout_marginStart="@dimen/space_xs"
-                android:gravity="center"
-                android:includeFontPadding="false"
-                android:text="@string/config_arrow_collapsed"
-                android:textAppearance="@style/TextAppearance.B6XTempCtrl.Caption"
-                android:textSize="@dimen/text_arrow" />
+                android:contentDescription="@string/config_action_expand"
+                android:scaleType="fitCenter"
+                android:src="@drawable/ic_triangle"
+                app:tint="?attr/colorOnSurfaceVariant" />
         </LinearLayout>
 
         <View
@@ -76,7 +78,8 @@
             android:background="@color/app_outline_variant"
             android:visibility="gone" />
 
-        <!-- 键行容器是流式布局：窄的键并排、放不下换行（见 FlowWrapLayout） -->
+        <!-- 键行容器是流式布局：每个键都整行独占（ConfigKeyRow 对每个键都声明 fullLine），
+             保留流式容器是为了让键内部的多个字段自行并排/换行（见 FlowWrapLayout） -->
         <com.example.waspwingtempctrl.ui.FlowWrapLayout
             android:id="@+id/config_group_body"
             android:layout_width="match_parent"

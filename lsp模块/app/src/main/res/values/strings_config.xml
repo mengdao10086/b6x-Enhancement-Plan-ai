@@ -8,18 +8,21 @@
     <!-- ===== 合并页（配置 · 曲线） ===== -->
     <!-- 页签文案：曲线页已并入本页（页签由 4 个减为 3 个） -->
     <string name="config_tab_title">配置 · 曲线</string>
-    <!-- 参数区区标题：行高压到约 40dp（16sp 行高 24dp + 上下各 @dimen/space_s） -->
-    <string name="config_section_title">配置</string>
 
     <!-- ===== 定义加载失败的错误态 ===== -->
     <string name="config_error_title">参数定义加载失败</string>
     <string name="config_error_body">无法生成配置表单：应用内置的参数定义没有加载成功。以下为诊断信息。</string>
 
     <!-- ===== 分组卡头 ===== -->
-    <string name="config_arrow_collapsed">▸</string>
-    <string name="config_arrow_expanded">▾</string>
+    <!-- 展开/收起的三角是 drawable/ic_triangle.xml（字符字形会把三角顶部裁掉），故只剩无障碍描述两条 -->
     <string name="config_action_expand">展开本组</string>
     <string name="config_action_collapse">折叠本组</string>
+    <!--
+        bool 子字段的占位标签：params.json 里 PID_TARGET_DIR[0] / PID_SPEED_RECALL[0] /
+        APP_LAUNCH_SCREEN_GATE[0] 的 label 字面就是它，与右边的开关控件本身重复，
+        界面不再渲染这个词（其余有意义的 label 照常显示）。
+    -->
+    <string name="config_bool_label_placeholder">开关</string>
     <string name="config_group_ungrouped">未分组</string>
     <string name="config_group_badge_desc">本组有 %1$d 项依赖未开启，暂不生效</string>
 

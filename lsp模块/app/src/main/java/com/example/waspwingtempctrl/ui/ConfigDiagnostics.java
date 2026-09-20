@@ -2,6 +2,7 @@ package com.example.waspwingtempctrl.ui;
 
 import android.os.Handler;
 import android.view.View;
+import android.widget.ImageView;
 import android.widget.TextView;
 
 import androidx.annotation.NonNull;
@@ -31,12 +32,15 @@ import java.util.concurrent.ExecutorService;
  */
 final class ConfigDiagnostics {
 
+    /** 展开态的箭头旋转角：图标指向右，顺时针 90° 即指向下（收起态不转，同分组卡头）。 */
+    private static final float ARROW_EXPANDED_ROTATION = 90f;
+
     private final ConfigStore store;
     private final ExecutorService io;
     private final Handler main;
 
     private final View body;
-    private final TextView arrowView;
+    private final ImageView arrowView;
     private final TextView mtimeView;
     private final TextView stateView;
 
@@ -63,7 +67,8 @@ final class ConfigDiagnostics {
     void setExpanded(boolean value) {
         expanded = value;
         body.setVisibility(value ? View.VISIBLE : View.GONE);
-        arrowView.setText(value ? R.string.config_arrow_expanded : R.string.config_arrow_collapsed);
+        // 一副图标两种状态：图标本身指向右，展开时顺时针转 90° 指向下（同分组卡头）
+        arrowView.setRotation(value ? ARROW_EXPANDED_ROTATION : 0f);
         arrowView.setContentDescription(body.getContext().getString(
                 value ? R.string.config_action_collapse : R.string.config_action_expand));
     }

@@ -5,10 +5,11 @@
       数值字段 → config_field_layout（label 作 hint、单位与范围作下方灰字）
     下方灰字整行折行，长单位（如"制冷强度档位（0~194 硬件原始档位值）"）不会被后缀挤压输入框。
 
-    宽度不写死：ConfigKeyRow 按内容实测出像素宽再回写 layout_width（见 measureFieldWidth），
-    使多个字段能在同一行内自适应排列；这里给 wrap_content 只是"未被回写时"的兜底。
+    宽度不写死：ConfigKeyRow 量出像素宽再回写 layout_width（见 measureFieldWidth），
+    多个字段才能在同一键内自行并排/换行；这里给 wrap_content 只是"未被回写时"的兜底。
     高度写死 @dimen/field_height：Material OutlinedBox 默认高约 56dp，不给死压不下来；
     内层 EditText 的 minHeight 与垂直内边距同步收小，16sp 文字才放得进压缩后的框（同日志搜索框）。
+    输入文本右对齐（hint 仍在左上）：数值右对齐后末位对齐，多字段并排时更好比长短。
 -->
 <LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:app="http://schemas.android.com/apk/res-auto"
@@ -16,12 +17,15 @@
     android:layout_height="wrap_content"
     android:orientation="vertical">
 
-    <!-- 高度取 @dimen/field_height：与同一键里的输入框等高，同一行内才对齐（开关自身居中） -->
-    <LinearLayout
+    <!-- 字段名 + 开关也用流式容器：本键行内放不下时开关换到下一行（不跨键合并）。
+         高度取 minHeight @dimen/field_height：单行时与同一键里的输入框等高、行内对齐；
+         换行后由内容撑高（定高会把这第二行裁掉；FlowWrapLayout 已支持 minHeight） -->
+    <com.example.waspwingtempctrl.ui.FlowWrapLayout
         android:id="@+id/config_field_switch_row"
         android:layout_width="wrap_content"
-        android:layout_height="@dimen/field_height"
+        android:layout_height="wrap_content"
         android:gravity="center_vertical"
+        android:minHeight="@dimen/field_height"
         android:orientation="horizontal"
         android:visibility="gone">
 
@@ -40,7 +44,7 @@
             android:layout_marginEnd="@dimen/switch_trim_end"
             android:scaleX="0.75"
             android:scaleY="0.75" />
-    </LinearLayout>
+    </com.example.waspwingtempctrl.ui.FlowWrapLayout>
 
     <com.google.android.material.textfield.TextInputLayout
         android:id="@+id/config_field_layout"
@@ -56,6 +60,7 @@
             android:id="@+id/config_field_input"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
+            android:gravity="end|center_vertical"
             android:imeOptions="actionDone"
             android:includeFontPadding="false"
             android:inputType="number"
