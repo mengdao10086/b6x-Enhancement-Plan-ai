@@ -45,13 +45,14 @@ import java.util.concurrent.Executors;
  * 自检与渲染同源，不会各写一份数字。
  *
  * <h3>布局</h3>
- * 页面本身只是「@dimen/page_padding 内边距 + 一张分组卡」，没有单独的布局文件：
- * 卡片由 {@link ConfigGroupBinder} 从 {@code item_config_group.xml} 生成，页面壳在
- * {@link #onCreateView} 里直接搭（一张卡不值得再开一个 xml）。
+ * 页面本身只是「@dimen/page_padding 内边距 + 重置栏 + 一张分组卡」，没有单独的布局文件：
+ * 分组卡由 {@link ConfigGroupBinder} 从 {@code item_config_group.xml} 生成，重置栏是
+ * {@link ConfigResetBar}（自带布局），页面壳在 {@link #onCreateView} 里直接搭。
+ * 重置栏按分组整体恢复出厂值，故放在参数卡之前——先能整体回退，再逐项微调。
  *
  * <p>边界同配置页（I3）：只经 {@link ConfigStore} 读写 {@code profile.conf}，不自己解析 assets。
  */
-public class UiSettingsFragment extends Fragment implements ConfigKeyRow.Host {
+public class UiSettingsFragment extends Fragment implements ConfigResetBar.Host {
 
     /** 本页承载的分组 id（对应 {@code params.json} 的 {@code groups[].id}）。 */
     private static final String SETTINGS_GROUP_ID = "webui";
@@ -75,13 +76,14 @@ public class UiSettingsFragment extends Fragment implements ConfigKeyRow.Host {
     }
 
     /**
-     * 卡头标题去掉段标编号（「[4] 界面」→「界面」）。
+     * 分组标题去掉段标编号（「[4] 界面」→「界面」）。
      *
      * <p>编号是给 {@code profile.conf} 的段标对齐用的，定义里必须留着
      * （{@code check_params.py} 断言分组标题带「[N]」，且 profile.conf 段标由它派生）；
-     * 但本页只有这一组，编号在这里只是噪音，显示时去掉。
+     * 但显示时它只是噪音，故剥掉。<b>本页卡头与重置栏按钮共用这一份实现</b>
+     * （见 {@link ConfigResetBar}），显示口径只有一处。
      */
-    private static String stripSectionNumber(@NonNull String title) {
+    static String stripSectionNumber(@NonNull String title) {
         return title.replaceFirst("^\\[\\d+\\]\\s*", "");
     }
 
@@ -146,6 +148,10 @@ public class UiSettingsFragment extends Fragment implements ConfigKeyRow.Host {
             content.addView(error);
             return scroll;
         }
+
+        // 重置栏在参数卡之前。它不放键行（只有按钮），故配置页的键渲染自检不受影响
+        //（自检数的是 ConfigKeyRow 与设置页键，见 ConfigFormFragment）。
+        content.addView(ConfigResetBar.create(inflater, content, this).view());
 
         buildForm(inflater, content);
         reloadAsync();
@@ -246,7 +252,7 @@ public class UiSettingsFragment extends Fragment implements ConfigKeyRow.Host {
         refreshAllBadges();
     }
 
-    // ==================== ConfigKeyRow.Host ====================
+    // ========== 键行与重置栏共用的服务面（ConfigResetBar.Host 继承 ConfigKeyRow.Host） ==========
 
     @NonNull
     @Override
@@ -284,6 +290,70 @@ public class UiSettingsFragment extends Fragment implements ConfigKeyRow.Host {
             return;
         }
         Snackbar.make(rootView, message, error ? Snackbar.LENGTH_LONG : Snackbar.LENGTH_SHORT).show();
+    }
+
+    // ==================== ConfigResetBar.Host：按分组重置 ====================
+
+    /**
+     * 用户已确认重置某组：先冲刷待写队列，再按出厂值一次原子写盘。
+     *
+     * <p><b>为什么必须先冲刷</b>：待写队列里若还压着同一页的改动，稍后它自己的冲刷会把重置值
+     * 覆盖回旧值——C 端 {@code st_mtime} 只有秒级精度，补写一次也未必触发重载（见
+     * {@link ConfigWriteQueue}）。冲刷与重置都排在<b>本页同一个单线程 executor</b> 上，
+     * 先冲刷后重置的顺序由它保证，不需要额外同步。
+     *
+     * <p>重置值走 {@link ConfigStore#setAll}：整组合成一次 rename；逐键 {@code set()} 会多次
+     * 触碰 mtime，可能换来一轮"部分生效"的重载。
+     */
+    @Override
+    public void onResetConfirmed(@NonNull String label, @NonNull Map<String, Value> factoryValues) {
+        if (!viewAlive || io.isShutdown()) {
+            return;
+        }
+        queue.flushNow();
+        io.execute(() -> {
+            final WriteResult result = store.setAll(factoryValues);
+            main.post(() -> {
+                if (viewAlive) {
+                    applyReset(label, factoryValues, result);
+                }
+            });
+        });
+    }
+
+    /**
+     * 重置结果落地（主线程）：把本页那些属于该组的键重刷成出厂值，并给出反馈。
+     *
+     * <p>本页只承载 {@code webui} 组，重置别的组时一个键都匹配不上——这是对的：别的组的键
+     * 不在本页显示，其显示是否陈旧由配置页自己重读时解决（它每次可见都重读）。
+     *
+     * <p>成功不必逐行标状态：控件里的值本身已经变了，同一句贴在每一行上是噪音；
+     * 失败要留在行上（Snackbar 一闪而过）。
+     */
+    private void applyReset(@NonNull String label, @NonNull Map<String, Value> factoryValues,
+                            @NonNull WriteResult result) {
+        if (result.ok) {
+            for (ConfigKeyRow row : rows) {
+                Value value = factoryValues.get(row.key());
+                if (value != null) {
+                    diskValues.put(row.key(), value);
+                    row.applyValue(value);
+                }
+            }
+            refreshAllBadges();
+        }
+        final String message = result.ok
+                ? (result.changed ? getString(R.string.config_reset_done, label)
+                        : getString(R.string.config_reset_no_change, label))
+                : getString(R.string.config_reset_failed, label, result.error);
+        if (!result.ok) {
+            for (ConfigKeyRow row : rows) {
+                if (factoryValues.containsKey(row.key())) {
+                    row.setResultStatus(message, false);
+                }
+            }
+        }
+        notifyUser(message, !result.ok);
     }
 
     // ==================== 生命周期：不丢改动 ====================

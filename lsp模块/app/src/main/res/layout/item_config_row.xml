@@ -12,9 +12,16 @@
       · 参数名装在一个定高 @dimen/field_height(49dp) 的盒子里、盒内垂直居中，盒子在行内贴顶——
         于是参数名的中心与「同一行第一个输入框」的中心重合。不能直接让行内居中：输入框下面还有
         说明行，按整行居中会把参数名一起压低（要求"不含说明内容的高度"）。
-      · 控制区（输入框 / 开关）用 Space + weight 顶到行尾：参数内容输入框右侧对齐，
-        参数名留在左边、宽度由内容决定。用 weight 而不是让参数名吃满行还有一层原因——
-        path 键的输入框是 MATCH_PARENT（吃掉本键行剩余宽），参数名一旦吃掉余量它就没宽度了。
+      · 控制区（输入框 / 开关）顶到行尾：参数内容输入框右侧对齐，参数名留在左边、宽度由内容决定。
+        控制区自己吃 weight（0dp + weight=1）——框架在按 weight 分配时会先把参数名与那 8dp 外边距
+        从行宽里扣掉，控制区拿到的就是"行宽 − 参数名 − 间距"这个真实可用宽，内部字段再宽也只会被
+        自己的宽度上限挡住，不会越出行右边界被裁。
+        不能沿用"占位 Space 带 weight 顶到行尾"的老办法：LinearLayout 只要行内存在带 weight 的子视图，
+        首轮测量其它子视图时传的 widthUsed 就是 0，控制区会拿到接近整行的宽（参数名那一段从未被扣掉）
+        → 数值框右半截、path 框大部分都落到屏幕外。path 键的输入框是 MATCH_PARENT（吃掉控制区剩余宽），
+        宽度算对了它才不会越界。
+      · config_key_spacer 的 weight 只服务开关键（把开关顶到行尾，与输入框键的右对齐观感一致）；
+        键内有控制区时由 ConfigKeyRow 把它的 weight 撤成 0，否则两者各分一半剩余宽、控制区只剩一半。
 -->
 <LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
     android:layout_width="wrap_content"
@@ -43,15 +50,17 @@
         </FrameLayout>
 
         <Space
+            android:id="@+id/config_key_spacer"
             android:layout_width="0dp"
             android:layout_height="1dp"
             android:layout_weight="1" />
 
         <com.example.waspwingtempctrl.ui.FlowWrapLayout
             android:id="@+id/config_key_control"
-            android:layout_width="wrap_content"
+            android:layout_width="0dp"
             android:layout_height="wrap_content"
             android:layout_marginStart="@dimen/space_s"
+            android:layout_weight="1"
             android:visibility="gone" />
 
         <com.google.android.material.materialswitch.MaterialSwitch

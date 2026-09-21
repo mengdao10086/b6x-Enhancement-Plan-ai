@@ -38,12 +38,15 @@
     <dimen name="badge_padding_v">2dp</dimen>
 
     <!--
-        标题栏：大标题到窗口顶端的距离（标题原在 ?attr/actionBarSize 里垂直居中，上下各约 14dp → 这里减半）；
-        到标题栏下边界的距离与到窗口左侧的距离一致，均为 space_l = 16dp。
-        标题行内容高度由标题文本行高决定（TitleLarge 约 28dp），故标题栏总高约 51dp（不再是 56dp）。
-        右侧设置按钮受同一行高约束，故取 28dp（图标 24dp）——比 48dp 触控规范小，是"标题上下留白相等"的必然取舍。
+        标题栏：大标题到窗口顶端的距离（标题原在 ?attr/actionBarSize 里垂直居中，上下各约 14dp → 这里减半取整）。
+        到标题栏下边界的距离单独由 title_pad_bottom 决定：不再与到窗口左侧的距离共用 space_l，
+        因为 space_l 同时是两页标题栏的左右内边距、还被日志页引用，改它会波及无关处。
+        标题行内容高度由标题文本行高决定（TitleLarge 约 28dp），故标题栏总高约 4 + 28 + 8 = 40dp（不再是 51dp）。
+        右侧设置按钮受同一行高约束，故取 28dp（图标 24dp）——比 48dp 触控规范小。
     -->
-    <dimen name="title_pad_top">7dp</dimen>
+    <dimen name="title_pad_top">4dp</dimen>
+    <!-- 标题栏下边界留白：8dp = 原 space_l(16dp) 的一半。左右内边距仍为 space_l。 -->
+    <dimen name="title_pad_bottom">8dp</dimen>
     <dimen name="title_action_size">28dp</dimen>
 
     <!--
@@ -53,13 +56,17 @@
     <dimen name="scrollbar_size">4dp</dimen>
 
     <!--
-        底部页签栏：高度与条目上下内边距都取 M3 默认值的 2/3（80dp → 53dp、12/16dp → 8/11dp）。
-        M3 的 80dp 是给活动指示器留的余量，本栏只有图标 + 标签，压低后更贴窗口下沿。
-        图标（24dp）与标签字号（12sp）不动；真机若标签贴底或与图标相挤，先抬 @dimen/bottom_nav_height。
+        底部页签栏：高度取 M3 默认 80dp 的 2/3 = 53dp（80dp 原是给活动指示器留的余量，本栏只有图标 + 标签）。
+        条目上内边距取 12dp 的 2/3 = 8dp，保持不动（改它等于把图标整体上移，方向与下面相反）。
+        条目下内边距：该值加在标签文字下方（文字 → 条目底边），原 11dp 时
+        53 − 8(上内边距) − 24(图标) − 16(LabelMedium 12sp 行高) − 11(下内边距) = −6dp，
+        即标签与图标本就重合 6dp；收到 3dp 等于把文字下移 8dp，重合变为留 2dp 间隙，
+        语义从此是"文字贴条目底边、靠此值消除图标-文字重合"，不再是"与图标保持间距"。
+        图标（24dp）与标签字号（12sp）不动；文字若再压到条目底边，只能抬 @dimen/bottom_nav_height。
     -->
     <dimen name="bottom_nav_height">53dp</dimen>
     <dimen name="bottom_nav_pad_top">8dp</dimen>
-    <dimen name="bottom_nav_pad_bottom">11dp</dimen>
+    <dimen name="bottom_nav_pad_bottom">3dp</dimen>
 
     <!-- 日志页 -->
     <dimen name="log_line_spacing">2dp</dimen>

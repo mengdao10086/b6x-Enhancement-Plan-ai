@@ -20,7 +20,7 @@
 
 手机内三进程协作：**B6X App / B7X App** 内由 LSPosed 模块钩住散热器 SDK（`setRunMode()` → BLE 下发指令）；Root 进程 **tempctrl** 通过双 status 文件心跳仲裁 active 设备，每 5s 周期决策并经 `am broadcast` 下发控制指令。
 
-C 守护程序（`tempctrl`）与 `service.d` 拉起脚本由 APK 内的部署功能落盘到 `/data/local/tmp/` 与 `/data/adb/service.d/`，不再单独发 Magisk 模块包。
+C 守护程序（`tempctrl`）与 `service.d` 拉起脚本由 APK 内的部署功能落盘到 `/data/local/tmp/` 与 `/data/adb/service.d/`，不再单独发 Magisk 模块包。**卸载 APK 后守护进程会自行清理这些落盘产物并停止运行**（含开机自启脚本），设备上不留残留；重装后需重新一键部署。
 
 > 详细架构图、进程协作与各文件落点见 [逻辑说明.md](逻辑说明.md)。
 
@@ -33,7 +33,7 @@ C 守护程序（`tempctrl`）与 `service.d` 拉起脚本由 APK 内的部署�
 - 修复蓝牙连接bug，死循环吃满一个核心bug → [完整修复历程](参考资料/完整修复历程.md)
 - 广播控制接口（完整 7 参数散热器控制），协议详见 [lsp模块 README](lsp模块/README.md)
 - 状态文件（tempctrl_b6x.status / tempctrl_b7x.status）向 C 守护程序回传散热器参数
-- **原生配置界面（Material）**：部署状态 / 一键部署 / su 诊断 / 参数表单 / 实时曲线 / 日志，共四页签
+- **原生配置界面（Material）**：部署状态 / 一键部署 / su 诊断 / 参数表单 / 实时曲线 / 日志，共三页签
 
 ### C 智能温控守护程序
 

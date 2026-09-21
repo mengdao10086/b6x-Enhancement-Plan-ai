@@ -18,6 +18,12 @@ SVC_LOG=/data/local/tmp/tempctrl_service.log
 WAIT_LOOPS=30           # 等旧进程退出：30 × 1s（C 端最长 sleep 5s 一轮）
 RESTART_INTERVAL=300    # 看门狗周期（秒）
 
+# 宿主 APK 包名与数据目录。判据用【父目录】而非 files/：app「清除数据」只清 files/ 内容，
+# 父目录由系统保留 → 可抗"清除数据"误判（代价记在 逻辑说明.md 的参数落点注记处）。
+HOST_PKG=com.example.waspwingtempctrl
+HOST_DIR=/data/data/$HOST_PKG
+PM_BIN=/system/bin/pm
+
 # 本脚本自身路径，用于看门狗自尽自检（见第 3 节）。
 # 取不到含 '/' 的 $0 时置空 → 只保留二进制自检，避免误判成"脚本已被删"而自杀。
 SELF=$0
@@ -85,6 +91,27 @@ start() {
     return 1
 }
 
+# 卸载兜底清理：清单与 C 端 cleanup_artifacts_on_uninstall() 严格一致，改一处必须同步另一处。
+# 覆盖 C 端做不到的三类：①daemon 已死但脚本还在 ②daemon 启动后 30s 延迟窗口内被卸载
+# ③C 端被 SELinux 拒删 /data/adb（本脚本自身就跑在该域内，能删自己）。
+# 私有目录产物交给系统卸载，不显式删（与 C 端一致，也不显式删 profile.conf）。
+cleanup_all() {
+    stop_old
+    rm -f /data/local/tmp/tempctrl \
+          /data/local/tmp/tempctrl_b6x.status \
+          /data/local/tmp/tempctrl_b7x.status \
+          /data/local/tmp/tempctrl_uiprefs \
+          /data/local/tmp/tempctrl_service.log \
+          /data/local/tmp/tempctrl.lock \
+          /data/local/tmp/tempctrl_last_dev \
+          /data/adb/service.d/b6x-tempctrl.sh \
+          /data/adb/ksu/service.d/b6x-tempctrl.sh \
+          /cache/tempctrl.log
+    if [ -n "$SELF" ]; then
+        rm -f "$SELF"
+    fi
+}
+
 # 1. 等亮屏（FBE 解锁后私有目录与 sysfs 才可靠可读）
 while ! screen_on; do
     sleep 5
@@ -98,6 +125,21 @@ fi
 # 3. 看门狗：每 5 分钟确认进程存活（C 端自身有看门狗，这里兜住进程级死亡）
 while true; do
     sleep $RESTART_INTERVAL
+    # --- 宿主 APK 卸载自清理（兜底）---
+    # 判据与 C 端 host_app_uninstalled() 同构：父目录 + pm path 二次确认。
+    # 必须排在最前：置前的 SELF 自检只退出不清理，会漏掉仍留在 /data/local/tmp 的二进制。
+    # 必须排在任何 start() 之前，否则守护进程会在 5 分钟内自己回来。
+    # 全程静默（包括 cleanup_all 内部的 stop_old 可能写的日志）——那点写入随后被 rm 删掉，
+    # 不能落在这里的任何一处 echo，否则日志文件会在卸载后被重新建出来。
+    # 隔 5s 复核一次才动手（对齐 C 端「连续 2 次命中才判真」）：本循环 300s 才跑一轮，
+    # 单次采样若撞上 /data/data 挂载抖动或 pm 未就绪就会误判，而误判的代价是自毁部署。
+    if [ ! -d "$HOST_DIR" ] && ! "$PM_BIN" path "$HOST_PKG" > /dev/null 2>&1; then
+        sleep 5
+        if [ ! -d "$HOST_DIR" ] && ! "$PM_BIN" path "$HOST_PKG" > /dev/null 2>&1; then
+            cleanup_all
+            exit 0
+        fi
+    fi
     # --- 自尽自检（纵深防御，比被卸载方 pkill 更可靠）---
     # 不同 root 方案下本 shell 的 cmdline 形态不一样，卸载方的匹配可能漏掉，故这里自愈：
     # 脚本文件或二进制任一不在 → 说明已被卸载/清掉，立即静默退出。
@@ -107,7 +149,7 @@ while true; do
         exit 0
     fi
     if ! [ -x "$BIN" ]; then
-        log "二进制已不存在（$BIN），看门狗退出"
+        # 静默（与上一分支同理，见其上注释）：此处写盘会把卸载时刚删掉的日志文件重建出来
         exit 0
     fi
     if ! running; then

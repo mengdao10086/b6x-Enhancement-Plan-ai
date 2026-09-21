@@ -40,8 +40,14 @@ public class ChartView extends View {
     // 左右内边距不是定值：按本次刻度文字实测宽 + TICK_GAP_DP 现算（见 applyAxisPads），
     // 两侧不留固定空白，绘图区能多宽就多宽
     private static final int TICK_GAP_DP = 4;        // 刻度数字与绘图区左沿 / 画布右沿之间的间隙
-    private static final int PAD_T_DP = 24;          // 上内边距 24：绘图区整体下移 8dp
-    private static final int PAD_B_DP = 8;           // 下内边距 8：与 PAD_T 之和仍是 32，绘图区高度不变、只整体下移
+    // 上内边距 17。17 是硬下限，不能再小：两个轴标题的 baseline 画在 fPadT − 7dp，
+    // 而 10dp 文字的 ascent ≈ 9.3dp（onDraw 末段画标题处），要保证标题整体留在画布内须
+    // fPadT − 7 ≥ 9.3 → fPadT ≥ 16.3，取整即 17dp；再低标题会被画到画布外裁掉。
+    private static final int PAD_T_DP = 17;
+    // 下内边距 4：与 PAD_T 合计 21（原为 24 + 8 = 32），省下的 11dp 全给绘图区。
+    // 再小则最低一条网格线几乎贴住画布下沿，且画布下沿的拖柄横条（fragment_chart.xml）紧贴下沿，
+    // 两者会挨到一起。绘图区高度的 8dp 保护下限见 rebuild。
+    private static final int PAD_B_DP = 4;
     private static final float LINE_WIDTH_DP = 1.6f; // 折线
     private static final float GRID_WIDTH_DP = 1f;   // 网格
     private static final float HALO_WIDTH_DP = 3f;   // 文字 halo
@@ -243,8 +249,10 @@ public class ChartView extends View {
         if (fH <= 8f * density) {
             return;
         }
-        // 接缝（转速圆点允许下越界的下限）：仍以绘图区下沿为基准外扩，但再被画布下沿收住，
-        // 否则圆点会画出画布（下内边距从 16 缩到 8 后，原来的 h−1 上限已不够）
+        // 接缝（转速圆点允许下越界的下限）：以绘图区下沿为基准外扩，但再被画布下沿收住，
+        // 否则圆点会画出画布（原来的 h−1 上限不够：圆点半径 3.2 + 外圈 0.5）。
+        // 注：PAD_B_DP 缩到 4 后上式第一项（fPadT + fH + 4dp = h）已高于第二项，实际恒取 h − 5dp，
+        // 故接缝位置不随 PAD_B 变化——圆点最低仍距画布下沿 5dp，不会被裁。
         fSeamY = Math.min(fPadT + fH + SEAM_EXTRA_DP * density, h - SEAM_BOTTOM_DP * density);
 
         titleLeft = getContext().getString(R.string.chart_axis_left);
@@ -511,8 +519,11 @@ public class ChartView extends View {
         Paint.FontMetrics fm = tickPaint.getFontMetrics();
         float labelH = fm.descent - fm.ascent;
         // 标注基线允许的最低位置：绘图区下沿 + 一行高（原口径）再被「画布下沿 − descent」收住，
-        // 否则最低那条标注的文字会越出画布被裁（下内边距从 16 缩到 8 后必然发生）。
-        // 上侧不用额外钳制：ly 下限是 fPadT（24dp），已大于 10sp 文字的 ascent
+        // 否则最低那条标注的文字会越出画布被裁。
+        // 注：PAD_B_DP 缩到 4 后上式第一项（fPadT + fH + 一行高 = h − 4 + 11.7) 已高于第二项，
+        // 实际恒取 h − descent，故这条上限位置不随 PAD_B 变化；但画布下沿的拖柄横条贴到了下沿，
+        // 最低那条标注现在与横条之间没有余量（原先隔着触控带居中留出的 4dp），真机需看是否打架。
+        // 上侧不用额外钳制：ly 下限是 fPadT（17dp），已大于 10dp 文字的 ascent(≈9.3dp)
         float labelMaxY = Math.min(fPadT + fH + labelH, getHeight() - fm.descent);
         List<ChartLabelOp> textOps = new ArrayList<>();
         List<ChartDotOp> dotOps = new ArrayList<>();

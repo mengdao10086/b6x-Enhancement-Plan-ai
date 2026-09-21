@@ -425,7 +425,7 @@ public class MainHook implements IXposedHookLoadPackage {
         if (appKind == 7) hookB7Obfuscated(lpparam);     // c0.s1 + 混淆适配（仅 B7X）
         hookApplicationCreate(lpparam);               // 广播接收器 + 定时状态写入（双设备）
         hookAutoLaunch(lpparam);                      // 自动拉起标志 → Activity 后台化（双设备）
-        hookBackToBackground();                       // 返回退出 → 收进后台而非退出（双设备）
+        hookBackToBackground(lpparam);                // 返回退出 → 收进后台而非退出（双设备）
     }
 
     // ========== 各 Hook 分区实现 ==========
@@ -1221,33 +1221,66 @@ public class MainHook implements IXposedHookLoadPackage {
      *
      * <p>只在"这一下返回会结束整个任务"时接管：{@code isTaskRoot()} 为真即表示当前 Activity 是
      * 任务根、再返回就退出 app，此时阻断默认 finish 并切后台；子页面之间的正常返回不受影响。
-     * 宿主 app 未启用预测性返回，{@code onBackPressed} 就是框架默认返回路径的入口。
      *
      * <p>受界面开关 {@code UI_BACK_HIDE} 约束：关闭时不设 result，直接走系统默认的 finish。
      * 开关值由守护进程转写成标志文件（见 {@link #readBackHideEnabled()}）。
      *
+     * <p><b>必须挂两处，但一次返回只生效其一</b>：宿主 Activity 全部继承 AppCompatActivity，而
+     * androidx 的 {@code ComponentActivity} 已经重写了 {@code onBackPressed}（转调
+     * OnBackPressedDispatcher），虚拟派发永远落到这个重写版 —— 只挂 {@code android.app.Activity}
+     * 自己那个方法时它从不被调用，钩子静默空挂。故：
+     * <ul>
+     *   <li>主钩子挂 {@code androidx.activity.ComponentActivity.onBackPressed}（宿主真实入口）；</li>
+     *   <li>{@code android.app.Activity} 那份保留作兜底，覆盖未走 androidx 的页面。</li>
+     * </ul>
+     * 两者是同一继承链上的重写关系，同一次返回只会走到其中一个，不会重复执行。
+     *
+     * <p><b>预测性返回不在本钩子覆盖范围</b>：宿主 targetSdk=33 且未声明
+     * {@code android:enableOnBackInvokedCallback}，走的是 legacy {@code onBackPressed}。
+     * 而 androidx activity 1.8+ 自带预测性返回实现，若宿主将来 targetSdk ≥ 35 或显式开启该属性，
+     * 上面两种挂法都会失效，届时须改挂 {@code OnBackPressedDispatcher} /
+     * {@code OnBackInvokedDispatcher}（当前不需要处理）。
+     *
      * <p>三包通用（不区分 B6X / B7X / farsef），故注册在通用分发处而非 {@code hookB6Activity}。
+     * 其中 B7X（farsef）包 targetSdk=29 且反编译产物已混淆，"是否同样是 AppCompatActivity" 尚未
+     * 验证；因此 androidx 类缺失（{@link ClassNotFoundException}）时只跳过主钩子、保留兜底，不崩。
      */
-    private static void hookBackToBackground() {
-        try {
-            XposedHelpers.findAndHookMethod(Activity.class, "onBackPressed", new XC_MethodHook() {
-                @Override
-                protected void beforeHookedMethod(MethodHookParam param) {
-                    try {
-                        Activity act = (Activity) param.thisObject;
-                        if (act.isTaskRoot() && !act.isFinishing()) {
-                            if (!readBackHideEnabled()) {
-                                return;   // 开关关闭：不接管，走系统默认退出
-                            }
-                            param.setResult(null);   // 阻断默认的 finish
-                            backgroundActivity(act, "返回键");
+    private static void hookBackToBackground(XC_LoadPackage.LoadPackageParam lpparam) {
+        // 回调体两处共用一份，判据与开关读取保持一致
+        final XC_MethodHook backHook = new XC_MethodHook() {
+            @Override
+            protected void beforeHookedMethod(MethodHookParam param) {
+                try {
+                    Activity act = (Activity) param.thisObject;
+                    if (act.isTaskRoot() && !act.isFinishing()) {
+                        if (!readBackHideEnabled()) {
+                            return;   // 开关关闭：不接管，走系统默认退出
                         }
-                    } catch (Throwable t) {
-                        XposedBridge.log(TAG + " 返回键后台化失败: " + t.getMessage());
+                        param.setResult(null);   // 阻断默认的 finish
+                        backgroundActivity(act, "返回键");
                     }
+                } catch (Throwable t) {
+                    XposedBridge.log(TAG + " 返回键后台化失败: " + t.getMessage());
                 }
-            });
-            XposedBridge.log(TAG + " 已钩住 Activity.onBackPressed（返回退出改为隐藏后台）");
+            }
+        };
+
+        // 主钩子：androidx ComponentActivity 重写的那份，宿主真实返回入口
+        try {
+            Class<?> componentActivity =
+                    lpparam.classLoader.loadClass("androidx.activity.ComponentActivity");
+            XposedHelpers.findAndHookMethod(componentActivity, "onBackPressed", backHook);
+            XposedBridge.log(TAG + " 已钩住 ComponentActivity.onBackPressed（返回退出改为隐藏后台）");
+        } catch (ClassNotFoundException e) {
+            XposedBridge.log(TAG + " 无 androidx.activity.ComponentActivity，仅用 Activity 兜底钩子");
+        } catch (Throwable t) {
+            XposedBridge.log(TAG + " 钩 ComponentActivity.onBackPressed 失败: " + t.getMessage());
+        }
+
+        // 兜底钩子：非 androidx 页面（与主钩子互斥，同一次返回只走一个）
+        try {
+            XposedHelpers.findAndHookMethod(Activity.class, "onBackPressed", backHook);
+            XposedBridge.log(TAG + " 已钩住 Activity.onBackPressed（兜底）");
         } catch (Throwable t) {
             XposedBridge.log(TAG + " 钩 onBackPressed 失败: " + t.getMessage());
         }

@@ -64,6 +64,8 @@ public final class Deployer {
 
     private static final long START_COOLDOWN_MS = 10_000L;
     private static final long KILL_WAIT_LOOPS = 30L;
+    /** 强杀（{@code kill -9}）后的等待轮数：-9 已不可被忽略，只需一小段收尾时间。 */
+    private static final long KILL9_WAIT_LOOPS = 5L;
     private static final long EXEC_TIMEOUT_MS = 120_000L;
 
     private static volatile Deployer instance;
@@ -498,46 +500,70 @@ public final class Deployer {
     // ==================== 拉起（界面手动入口） ====================
 
     /**
-     * 手动拉起守护进程（界面入口）。先判活、再冷却，然后直接执行启动命令，
-     * 由 C 端单实例锁兜底幂等（已有实例时新实例返回退出码 {@value #EXIT_ALREADY_RUNNING}）。
+     * 重启守护进程（界面入口）。<b>先停再起</b>：C 端用非阻塞 {@code flock} 做单实例锁，
+     * 旧实例还在时新实例会立刻以退出码 {@value #EXIT_ALREADY_RUNNING} 退出，
+     * 所以"已在运行"不能当作"无需拉起"——那正是"点了没反应"的原因。
+     *
+     * <p>停止序列照 {@link #uninstall()} 的口径：{@code pkill} → 轮询等 ≤{@value #KILL_WAIT_LOOPS} 秒
+     * → {@code pkill -9} → 再轮询 ≤{@value #KILL9_WAIT_LOOPS} 秒；仍未退出则<b>放弃启动</b>
+     * 并如实回吐（抢锁必然失败，静默失败比报错更难查）。
+     *
+     * <p><b>代价</b>：C 端启动延时 {@code BOOT_START_DELAY_SEC} 为 30 秒，一次点击约有
+     * 30~35 秒温控空窗，步骤里会写明。冷却 {@value #START_COOLDOWN_MS} ms 保留（防连点）。
      *
      * <p><b>阻塞</b>。注意：这条路起的进程仍在该 app 的 cgroup 内，
      * 常驻仍以 {@code service.d} 为主（见 {@link #deploy()}）。
      */
     public Result startDaemon() {
         List<String> steps = new ArrayList<>();
-        if (isRunning()) {
-            steps.add("守护进程已在运行，无需拉起");
-            return new Result(true, "拉起", steps, "", "", probe());
-        }
         long now = System.currentTimeMillis();
         if (now - lastStartAtMs < START_COOLDOWN_MS) {
             long remain = (START_COOLDOWN_MS - (now - lastStartAtMs)) / 1000;
             steps.add("冷却中，请 " + remain + " 秒后重试");
-            return new Result(false, "拉起", steps, "冷却中", "", null);
+            return new Result(false, "拉起daemon", steps, "冷却中", "", null);
         }
         lastStartAtMs = now;
-        RootShell.Result r = shell.exec(startScript(), EXEC_TIMEOUT_MS);
+        RootShell.Result r = shell.exec(restartScript(), EXEC_TIMEOUT_MS);
         Map<String, String> kv = parseKv(r.stdout);
         if (!r.isOk()) {
-            return new Result(false, "拉起", steps, "root 执行失败：" + r.describe(),
+            return new Result(false, "拉起daemon", steps, "root 执行失败：" + r.describe(),
                     r.stdout + r.stderr, null);
         }
+        String oldPid = nvl(kv.get("OLD_PID"));
+        if ("1".equals(kv.get("OLD_ALIVE"))) {
+            steps.add("检测到守护进程在运行（PID " + oldPid + "），先停止它");
+            steps.add("30 秒内未退出，kill -9 后仍未退出");
+            return new Result(false, "拉起daemon", steps,
+                    "旧实例未退出，已放弃启动（否则新实例抢单实例锁必然失败）",
+                    r.stdout, probe());
+        }
         if ("1".equals(kv.get("NOBIN"))) {
-            return new Result(false, "拉起", steps, "二进制不存在（需先部署）：" + BIN_DEST,
+            steps.add(oldPid.isEmpty() ? "未检测到运行中的守护进程" : "已停止旧实例（PID " + oldPid + "）");
+            return new Result(false, "拉起daemon", steps, "二进制不存在（需先部署）：" + BIN_DEST,
                     r.stdout, null);
         }
-        if ("1".equals(kv.get("ALREADY"))) {
-            steps.add("探测到已有实例在运行");
-            return new Result(true, "拉起", steps, "", r.stdout, probe());
+        steps.add(oldPid.isEmpty() ? "未检测到运行中的守护进程，直接启动"
+                : "已停止旧实例（PID " + oldPid + "）");
+        if ("1".equals(kv.get("KILLED"))) {
+            steps.add("旧实例未响应 pkill，已用 kill -9 结束");
         }
         boolean started = "1".equals(kv.get("STARTED"));
-        steps.add(started ? "已拉起并确认存活（已 renice -20）"
-                : "启动命令已执行但未探测到进程（退出码 2 = 已有实例在跑）");
-        return new Result(started, "拉起", steps, started ? "" : "未探测到进程", r.stdout, probe());
+        if (started) {
+            steps.add("已拉起新实例（PID " + nvl(kv.get("NEW_PID")) + "，已 renice -20）");
+            steps.add("温控空窗约 30~35 秒（C 端启动延时 30 秒）");
+        } else {
+            steps.add("启动命令已执行，但未探测到新进程（未起或起后立即退出）");
+        }
+        return new Result(started, "拉起daemon", steps,
+                started ? "" : "未启动", r.stdout, probe());
     }
 
-    /** 守护进程是否在运行（非缓存，阻塞；root 往返一次）。 */
+    /**
+     * 守护进程是否在运行（非缓存，阻塞；root 往返一次）。
+     *
+     * <p>仅用于状态展示，<b>不再是 {@link #startDaemon()} 的前置拦截</b>：拉起＝先停再起，
+     * "已在运行"不是跳过它的理由。
+     */
     public boolean isRunning() {
         RootShell.Result r = shell.exec("pgrep -f " + BIN_DEST + " > /dev/null 2>&1 && echo RUN=1 || echo RUN=0\n", 15_000L);
         return "1".equals(parseKv(r.stdout).get("RUN"));
@@ -785,6 +811,8 @@ public final class Deployer {
                 + "rm -f /data/local/tmp/tempctrl.lock\n"
                 + "rm -f /data/local/tmp/tempctrl_b6x.status\n"
                 + "rm -f /data/local/tmp/tempctrl_b7x.status\n"
+                + "# 守护进程转写给钩子的界面开关快照（钩子每次返回键读一次；删掉后钩子回退默认值）\n"
+                + "rm -f /data/local/tmp/tempctrl_uiprefs\n"
                 + "rm -f /data/local/tmp/tempctrl_service.log\n"
                 + "# 旧版迁移残留：老版本把 tempctrl_last_dev 放在这里（daemon 侧的预创建已删、现已无人读写），\n"
                 + "# 它不会自己消失，故卸载时一并清掉。\n"
@@ -794,22 +822,65 @@ public final class Deployer {
                 + "rm -f /cache/tempctrl.log\n";
     }
 
-    private String startScript() {
+    /**
+     * 「先停再起」的 shell。停止序列与 {@link #uninstallScript()} 同口径（pkill → 等 → pkill -9 → 等），
+     * 但<b>只杀 {@code $BIN}</b>：{@code service.d} 看门狗 shell 的 cmdline 里是本脚本名、
+     * 不含 {@code $BIN}，故抓不到它——这是有意的，杀了它常驻保障就没了。
+     *
+     * <p>不含 {@code exit}：{@link RootShell#exec} 靠脚本末尾的结束标记回传退出码，
+     * 脚本自己退出会让标记丢失、整次调用被判成通道失败（见 {@code RootShell} 的说明）。
+     */
+    private String restartScript() {
         return "BIN=" + BIN_DEST + "\n"
-                + "if pgrep -f \"$BIN\" > /dev/null 2>&1; then\n"
-                + "  echo ALREADY=1\n"
+                // 1) 记录旧实例（没有则为空串）
+                + "OLD_PID=$(pgrep -f \"$BIN\" | head -1)\n"
+                + "STOPPED=0\n"
+                + "KILLED=0\n"
+                + "OLD_ALIVE=0\n"
+                + "if [ -n \"$OLD_PID\" ]; then\n"
+                // 2) 先温和停：pkill 后轮询等它自己退出（flock 的持有者必须先消失）
+                + "  pkill -f \"$BIN\" 2>/dev/null\n"
+                + "  i=0\n"
+                + "  while [ $i -lt " + KILL_WAIT_LOOPS + " ]; do\n"
+                + "    pgrep -f \"$BIN\" > /dev/null 2>&1 || break\n"
+                + "    sleep 1\n"
+                + "    i=$((i + 1))\n"
+                + "  done\n"
+                // 3) 仍未退出才强杀，再等一小轮
+                + "  if pgrep -f \"$BIN\" > /dev/null 2>&1; then\n"
+                + "    pkill -9 -f \"$BIN\" 2>/dev/null\n"
+                + "    KILLED=1\n"
+                + "    i=0\n"
+                + "    while [ $i -lt " + KILL9_WAIT_LOOPS + " ]; do\n"
+                + "      pgrep -f \"$BIN\" > /dev/null 2>&1 || break\n"
+                + "      sleep 1\n"
+                + "      i=$((i + 1))\n"
+                + "    done\n"
+                + "  fi\n"
+                + "  if pgrep -f \"$BIN\" > /dev/null 2>&1; then OLD_ALIVE=1; else STOPPED=1; fi\n"
+                + "fi\n"
+                + "echo \"OLD_PID=$OLD_PID\"\n"
+                + "echo \"STOPPED=$STOPPED\"\n"
+                + "echo \"KILLED=$KILLED\"\n"
+                + "echo \"OLD_ALIVE=$OLD_ALIVE\"\n"
+                // 4) 旧实例没停稳就不启动：抢 flock 必失败，还要白等一次启动延时
+                + "if [ \"$OLD_ALIVE\" = \"1\" ]; then\n"
+                + "  echo STARTED=0\n"
                 + "elif [ ! -x \"$BIN\" ]; then\n"
                 + "  echo NOBIN=1\n"
+                + "  echo STARTED=0\n"
                 + "else\n"
                 + "  nohup \"$BIN\" >> /data/local/tmp/tempctrl_service.log 2>&1 < /dev/null &\n"
                 + "  sleep 2\n"
-                + "  if pgrep -f \"$BIN\" > /dev/null 2>&1; then\n"
-                + "    pid=$(pgrep -f \"$BIN\" | head -1)\n"
-                + "    renice -n -20 -p \"$pid\" > /dev/null 2>&1\n"
+                + "  NEW_PID=$(pgrep -f \"$BIN\" | head -1)\n"
+                // 5) 新 PID 必须与旧的不同，否则只是"读到了同一个残留进程"
+                + "  if [ -n \"$NEW_PID\" ] && [ \"$NEW_PID\" != \"$OLD_PID\" ]; then\n"
+                + "    renice -n -20 -p \"$NEW_PID\" > /dev/null 2>&1\n"
                 + "    echo STARTED=1\n"
                 + "  else\n"
                 + "    echo STARTED=0\n"
                 + "  fi\n"
+                + "  echo \"NEW_PID=$NEW_PID\"\n"
                 + "fi\n";
     }
 

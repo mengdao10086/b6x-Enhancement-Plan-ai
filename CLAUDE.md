@@ -64,7 +64,7 @@
 | `lsp模块/README.md` | LSPosed 模块说明；广播与 status 文件协议的唯一规范处 |
 | `逻辑说明.md` | 温控技术设计文档 |
 | `动态KI机制流程图.md` | 动态 KI 抑制机制的分支级流程图 |
-| `参数定义/params.def.json` | 53 个配置键的单一来源（唯一手写处） |
+| `参数定义/params.def.json` | 配置键的单一来源（唯一手写处；键数见 `check_params.py` 的 `EXPECTED_KEY_COUNT`） |
 | `参数定义/gen_params.py` | 生成 `lsp模块/app/src/main/assets/params.json` |
 | `参数定义/check_params.py` | 派生副本漂移校验（CI 已接入，EXIT=0 为通过） |
 | `参数定义/对齐报告.md` | 参数定义的对账与裁定记录 |

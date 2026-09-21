@@ -34,7 +34,7 @@ import java.util.List;
  *
  * <p>仅按 LTR 排布（界面无镜像语言需求）。列距固定用标尺 {@code space_m}——参数名到卡片
  * 左侧内边距（同为 12dp）一致；行距缺省同 {@code space_m}，可由调用方用 {@code app:flowRowGap}
- * 单独指定（曲线页图例要把行距压到 1/4，又不动列距，见 fragment_chart.xml）。
+ * 单独指定（曲线页图例要把行距压到远小于列距，又不动列距，见 fragment_chart.xml）。
  */
 public final class FlowWrapLayout extends LinearLayout {
 

@@ -7,10 +7,10 @@
     - 页签在底部：本文件只是菜单的承载处，顺序由 res/menu/menu_bottom.xml 决定，
       而那份顺序必须与 SetupActivity.MENU_IDS 严格一致（错位会静默显示错页）。
     - 页面容器是 ViewPager2：翻页由它接管（跟手滑动），故外壳不再有手势代码与手写转场。
-    - 标题栏几何：标题到窗口顶端的距离 = title_pad_top(7dp)（原为 ?attr/actionBarSize 里垂直居中的约 14dp 的一半）；
-      标题到标题栏下边界 = 到窗口左侧 = space_l(16dp)。因此标题栏高度不再取 ?attr/actionBarSize，
-      行高由标题文本行高决定；右侧设置按钮受同一行高约束，故取 title_action_size(28dp)。
-    - 子 agent 不要改本文件。
+    - 标题栏几何：标题到窗口顶端的距离 = title_pad_top(4dp)（原为 ?attr/actionBarSize 里垂直居中的约 14dp 的一半取整）；
+      标题到标题栏下边界 = title_pad_bottom(8dp)，到窗口左侧则仍为 space_l(16dp)（两者不再共用同一值）。
+      因此标题栏高度不再取 ?attr/actionBarSize，行高由标题文本行高决定；
+      右侧设置按钮受同一行高约束，故取 title_action_size(28dp)。
 -->
 <LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:app="http://schemas.android.com/apk/res-auto"
@@ -29,7 +29,7 @@
         android:paddingStart="@dimen/space_l"
         android:paddingTop="@dimen/title_pad_top"
         android:paddingEnd="@dimen/space_l"
-        android:paddingBottom="@dimen/space_l">
+        android:paddingBottom="@dimen/title_pad_bottom">
 
         <TextView
             android:layout_width="0dp"
@@ -64,10 +64,11 @@
 
     <!--
         ===== 底部页签栏 =====
-        高度与条目上下内边距一并取 M3 默认值的 2/3（80 → 53dp、12/16 → 8/11dp）：
-        M3 的 80dp 是为活动指示器留的余量，本栏只用图标 + 文字，压低后更贴窗口下沿。
-        图标 24dp 与标签 12sp 不动（要求只压高度）；若真机上标签贴到条底或与图标相挤，
-        先动 @dimen/bottom_nav_height（56dp 是"图标 + 标签"的经典高度）。
+        高度 53dp 取 M3 默认 80dp 的 2/3（80dp 是为活动指示器留的余量，本栏只用图标 + 文字）；
+        条目上内边距 @dimen/bottom_nav_pad_top 保持 M3 默认的 2/3 = 8dp 不动；
+        条目下内边距 @dimen/bottom_nav_pad_bottom 再收到 3dp，用于把标签文字下移、
+        消除它与图标之间原有的 6dp 重合（推算见 dimens.xml 该 dimen 的注释）。
+        图标 24dp 与标签 12sp 不动；若真机上标签仍贴到条底，再动 @dimen/bottom_nav_height。
     -->
     <com.google.android.material.bottomnavigation.BottomNavigationView
         android:id="@+id/bottom_nav"

@@ -96,7 +96,6 @@
         "UI_LABEL_MERGE_PX",
         "UI_RPM_AXIS_MIN",
         "UI_CURVE_FILTER",
-        "UI_AUTOSAVE",
         "UI_BACK_HIDE"
       ]
     }
@@ -1582,47 +1581,6 @@
           "min": 0,
           "max": 100,
           "default": 5
-        }
-      ]
-    },
-    "UI_AUTOSAVE": {
-      "key": "UI_AUTOSAVE",
-      "group": "webui",
-      "role": "setting",
-      "type": "multi",
-      "label": "保存",
-      "desc": "开关=0时只有手动点保存按钮才落盘；延迟为自动保存成功后等的秒数，期间再次自动保存则重新计时；手动保存与错误提示不受延迟影响",
-      "unit": "",
-      "unitNote": "多值键，各字段单位见 fields",
-      "default": [
-        1,
-        3
-      ],
-      "factory": [
-        1,
-        3
-      ],
-      "min": null,
-      "max": null,
-      "requires": [],
-      "daemonConsumes": false,
-      "rangeNote": "范围逐字段见 fields；本组为界面专用参数（守护进程不读取），范围取自界面实现，不来自 C 端 clamp",
-      "fields": [
-        {
-          "label": "自动保存",
-          "unit": "",
-          "unitNote": "布尔子开关，取值 0/1",
-          "bool": true,
-          "min": 0,
-          "max": 1,
-          "default": 1
-        },
-        {
-          "label": "提示延迟(秒)",
-          "unit": "秒",
-          "min": 0,
-          "max": 60,
-          "default": 3
         }
       ]
     },

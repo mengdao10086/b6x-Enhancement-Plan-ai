@@ -1,7 +1,9 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!--
-    日志页（D3）。两段式：日志文件卡（路径 / 修改时间 + 已读取统计 + 关键词过滤输入 ——
-    都属"这是哪份日志、看到多少、筛掉哪些"的一组信息，故同卡）→ 日志列表（占满剩余高度）。
+    日志页（D3）。两段式：日志文件卡（路径 / 修改时间 + 已读取统计 ——
+    都属"这是哪份日志、看到多少"的一组信息，故同卡）→ 日志区（关键词过滤 + 命中计数
+    固定在列表上方，与列表同卡：筛选控件须紧贴它作用的对象，命中计数即该筛选的反馈）
+    → 日志列表（占满剩余高度）。
     读取失败时不进列表，直接把 AppFiles.diagnose() 的原文铺在列表位置，绝不静默留白。
     上内边距单独归零让首卡贴顶：page_padding 三页共用，故在本页把四边拆开写，不动维度值。
 -->
@@ -16,7 +18,7 @@
     android:paddingRight="@dimen/page_padding"
     android:paddingBottom="@dimen/page_padding">
 
-    <!-- ===== 日志文件卡：路径 / 修改时间 + 已读取统计 + 关键词过滤 ===== -->
+    <!-- ===== 日志文件卡：路径 / 修改时间 + 已读取统计 ===== -->
     <com.google.android.material.card.MaterialCardView
         android:layout_width="match_parent"
         android:layout_height="wrap_content">
@@ -50,17 +52,40 @@
                 android:layout_marginTop="@dimen/space_xs"
                 android:text="@string/log_loading"
                 android:textAppearance="@style/TextAppearance.B6XTempCtrl.Caption" />
+        </LinearLayout>
+    </com.google.android.material.card.MaterialCardView>
+
+    <!-- ===== 日志区：关键词过滤 + 命中计数 / 列表 / 读取失败诊断 / 空态 / 回到底部 ===== -->
+    <com.google.android.material.card.MaterialCardView
+        android:layout_width="match_parent"
+        android:layout_height="0dp"
+        android:layout_marginTop="@dimen/space_m"
+        android:layout_weight="1">
+
+        <!--
+            搜索框与命中计数固定在列表之上，故用竖直 LinearLayout 把 FrameLayout 包一层。
+            不能把搜索框直接作为 FrameLayout 的子：那四个孩子（列表 / 诊断 / 空态 / 回到底部）
+            共用同一块 bounds、互为覆盖的四种状态，搜索框一旦平铺进来，诊断与空态会被挤到
+            搜索框下方，overlay 语义即被破坏。
+        -->
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="match_parent"
+            android:orientation="vertical">
 
             <!--
                 高度显式给死（@dimen/field_height，与配置页输入框等高）才能压过 OutlinedBox
-                按内容算出的默认高。与上方统计行的间距取 space_s：两者不同组，需比组内间距大。
+                按内容算出的默认高。顶部间距取 card_padding：搜索框是卡内首个元素，按卡内边距对齐；
+                左右取 space_s，与正下方日志行（RecyclerView 同用 space_s）左边缘对齐。
             -->
             <com.google.android.material.textfield.TextInputLayout
                 android:id="@+id/log_filter_layout"
                 style="@style/Widget.Material3.TextInputLayout.OutlinedBox"
                 android:layout_width="match_parent"
                 android:layout_height="@dimen/field_height"
-                android:layout_marginTop="@dimen/space_s"
+                android:layout_marginEnd="@dimen/space_s"
+                android:layout_marginStart="@dimen/space_s"
+                android:layout_marginTop="@dimen/card_padding"
                 android:hint="@string/log_filter_hint"
                 app:endIconMode="clear_text"
                 app:boxCornerRadiusBottomEnd="@dimen/field_radius"
@@ -88,95 +113,93 @@
                     android:textSize="@dimen/log_filter_text_size" />
             </com.google.android.material.textfield.TextInputLayout>
 
-            <!-- 命中计数：由 LogFragment 在有关键词时显示，其余情况置 GONE（无关键词时行数见上方统计行） -->
+            <!--
+                命中计数：由 LogFragment 在有关键词时显示，其余情况置 GONE（无关键词时行数见上方统计行）。
+                左右缩进与上方搜索框一致，二者同读一条 column。
+            -->
             <TextView
                 android:id="@+id/log_count_text"
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
+                android:layout_marginEnd="@dimen/space_s"
+                android:layout_marginStart="@dimen/space_s"
                 android:layout_marginTop="@dimen/space_xs"
                 android:textAppearance="@style/TextAppearance.B6XTempCtrl.Caption"
                 android:visibility="gone" />
-        </LinearLayout>
-    </com.google.android.material.card.MaterialCardView>
 
-    <!-- ===== 日志区：列表 / 读取失败诊断 / 空态 / 回到底部 ===== -->
-    <com.google.android.material.card.MaterialCardView
-        android:layout_width="match_parent"
-        android:layout_height="0dp"
-        android:layout_marginTop="@dimen/space_m"
-        android:layout_weight="1">
-
-        <FrameLayout
-            android:layout_width="match_parent"
-            android:layout_height="match_parent">
-
-            <!--
-                滚动条：常显（fadeScrollbars=false）并加粗（@dimen/scrollbar_size），
-                配合 ui/ScrollbarDrag 才能按住拖动。常显之后原先"跟随刷新时亮灭闪烁"的问题不复存在，
-                故那两条淡出延时属性一并去掉。
-            -->
-            <androidx.recyclerview.widget.RecyclerView
-                android:id="@+id/log_list"
+            <FrameLayout
                 android:layout_width="match_parent"
-                android:layout_height="match_parent"
-                android:clipToPadding="false"
-                android:fadeScrollbars="false"
-                android:padding="@dimen/space_s"
-                android:scrollbarSize="@dimen/scrollbar_size"
-                android:scrollbars="vertical" />
+                android:layout_height="0dp"
+                android:layout_weight="1">
 
-            <!-- 读取失败：原样展示 AppFiles.diagnose() 的多行诊断 -->
-            <ScrollView
-                android:id="@+id/log_failure_scroll"
-                android:layout_width="match_parent"
-                android:layout_height="match_parent"
-                android:padding="@dimen/card_padding"
-                android:visibility="gone">
+                <!--
+                    滚动条：常显（fadeScrollbars=false）并加粗（@dimen/scrollbar_size），
+                    配合 ui/ScrollbarDrag 才能按住拖动。常显之后原先"跟随刷新时亮灭闪烁"的问题不复存在，
+                    故那两条淡出延时属性一并去掉。
+                -->
+                <androidx.recyclerview.widget.RecyclerView
+                    android:id="@+id/log_list"
+                    android:layout_width="match_parent"
+                    android:layout_height="match_parent"
+                    android:clipToPadding="false"
+                    android:fadeScrollbars="false"
+                    android:padding="@dimen/space_s"
+                    android:scrollbarSize="@dimen/scrollbar_size"
+                    android:scrollbars="vertical" />
+
+                <!-- 读取失败：原样展示 AppFiles.diagnose() 的多行诊断 -->
+                <ScrollView
+                    android:id="@+id/log_failure_scroll"
+                    android:layout_width="match_parent"
+                    android:layout_height="match_parent"
+                    android:padding="@dimen/card_padding"
+                    android:visibility="gone">
+
+                    <TextView
+                        android:id="@+id/log_failure_text"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:textAppearance="@style/TextAppearance.B6XTempCtrl.Mono"
+                        android:textIsSelectable="true" />
+                </ScrollView>
 
                 <TextView
-                    android:id="@+id/log_failure_text"
+                    android:id="@+id/log_empty_text"
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
-                    android:textAppearance="@style/TextAppearance.B6XTempCtrl.Mono"
-                    android:textIsSelectable="true" />
-            </ScrollView>
+                    android:layout_gravity="center"
+                    android:padding="@dimen/space_l"
+                    android:gravity="center"
+                    android:textAppearance="@style/TextAppearance.B6XTempCtrl.Caption"
+                    android:visibility="gone" />
 
-            <TextView
-                android:id="@+id/log_empty_text"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:layout_gravity="center"
-                android:padding="@dimen/space_l"
-                android:gravity="center"
-                android:textAppearance="@style/TextAppearance.B6XTempCtrl.Caption"
-                android:visibility="gone" />
-
-            <!--
-                纯图标按钮（无 android:text）：正圆要四项一起写死 —— 宽高同为
-                @dimen/log_follow_btn_size、四边 inset 归零、iconPadding 归零、圆角显式 50%。
-                只把上下 inset 归零会画成椭圆：IconButton 样式左右各留 4dp inset，背景比控件窄，
-                这就是先前"理论上圆形、实测不是"的原因。圆角样式见 values/styles_log.xml。
-                contentDescription 保留「回到底部」语义，供读屏使用。
-            -->
-            <com.google.android.material.button.MaterialButton
-                android:id="@+id/log_follow_btn"
-                style="@style/Widget.B6XTempCtrl.Button.IconButton.Filled"
-                android:layout_width="@dimen/log_follow_btn_size"
-                android:layout_height="@dimen/log_follow_btn_size"
-                android:layout_gravity="bottom|end"
-                android:layout_margin="@dimen/space_s"
-                android:contentDescription="@string/log_action_follow_bottom"
-                android:insetLeft="0dp"
-                android:insetRight="0dp"
-                android:insetTop="0dp"
-                android:insetBottom="0dp"
-                android:visibility="gone"
-                app:icon="@drawable/ic_arrow_down"
-                app:iconGravity="textStart"
-                app:iconPadding="0dp"
-                app:iconTint="?attr/colorOnPrimary"
-                app:shapeAppearanceOverlay="@style/ShapeAppearance.B6XTempCtrl.Circle" />
-        </FrameLayout>
+                <!--
+                    纯图标按钮（无 android:text）：正圆要四项一起写死 —— 宽高同为
+                    @dimen/log_follow_btn_size、四边 inset 归零、iconPadding 归零、圆角显式 50%。
+                    只把上下 inset 归零会画成椭圆：IconButton 样式左右各留 4dp inset，背景比控件窄，
+                    这就是先前"理论上圆形、实测不是"的原因。圆角样式见 values/styles_log.xml。
+                    contentDescription 保留「回到底部」语义，供读屏使用。
+                -->
+                <com.google.android.material.button.MaterialButton
+                    android:id="@+id/log_follow_btn"
+                    style="@style/Widget.B6XTempCtrl.Button.IconButton.Filled"
+                    android:layout_width="@dimen/log_follow_btn_size"
+                    android:layout_height="@dimen/log_follow_btn_size"
+                    android:layout_gravity="bottom|end"
+                    android:layout_margin="@dimen/space_s"
+                    android:contentDescription="@string/log_action_follow_bottom"
+                    android:insetLeft="0dp"
+                    android:insetRight="0dp"
+                    android:insetTop="0dp"
+                    android:insetBottom="0dp"
+                    android:visibility="gone"
+                    app:icon="@drawable/ic_arrow_down"
+                    app:iconGravity="textStart"
+                    app:iconPadding="0dp"
+                    app:iconTint="?attr/colorOnPrimary"
+                    app:shapeAppearanceOverlay="@style/ShapeAppearance.B6XTempCtrl.Circle" />
+            </FrameLayout>
+        </LinearLayout>
     </com.google.android.material.card.MaterialCardView>
 
 </LinearLayout>

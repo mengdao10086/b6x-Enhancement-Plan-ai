@@ -6,18 +6,33 @@
 -->
 <resources>
 
-    <!-- 档位按钮最小高度（MaterialButton 默认 48dp 太占高，档位行要紧凑成一行） -->
-    <dimen name="chart_chip_min_height">32dp</dimen>
+    <!--
+        时间窗口档位按钮的最小高度（MaterialButton 默认 48dp 太占高，档位行要紧凑成一行）。
+        原为 32dp（与图例项共用同一个值），现压到 2/3 ≈ 21dp：档位行不该比图例项高出一头。
+        能压到 21dp 的前提是 item_chart_window_button.xml 显式覆盖了 paddingTop/paddingBottom = 2dp——
+        否则 Material3 按钮样式自带的 m3_btn_padding_top/bottom(6dp + 6dp) 加上 12sp 一行文字，
+        兜底高度约 29dp，minHeight 根本压不住（insetTop/insetBottom 已在同一处清零）。
+    -->
+    <dimen name="chart_window_button_height">21dp</dimen>
 
     <!--
-        图例行距：配置页键行行距 space_m(12dp) 的 1/4（12 → 6 → 3dp，两次各压一半）。
-        图例是"轻量开关"，两行之间不必留那么宽；列距（space_m）与图例项自身的高度都不动。
+        图例项最小高度：原来与档位按钮共用同一个 32dp，而文字行加勾选框的自然高约 24dp，
+        多出的约 8dp 全是行内空白、视觉发空。单给 24dp 只压掉这段空白，字号与勾选框尺寸都不动。
     -->
-    <dimen name="chart_legend_row_gap">3dp</dimen>
+    <dimen name="chart_legend_item_height">24dp</dimen>
+
+    <!--
+        图例行距：配置页键行行距 space_m(12dp) 的 1/12（12 → 6 → 3 → 1dp）。
+        图例是"轻量开关"，两行之间不必留那么宽；列距（space_m）与图例项的 layout_marginEnd 都不动。
+        行距压到 1dp 的前提是图例项自身高度已收到 chart_legend_item_height(24dp)，
+        行内空白不再是"隐性行距"，否则 1dp 会显得两行贴在一起。
+    -->
+    <dimen name="chart_legend_row_gap">1dp</dimen>
 
     <!--
         卡内纵向三段（档位行 → 图例 → 画布）之间的间距，两处共用同一个值（原为 space_s 与 space_xs）。
-        取 space_xs(4dp) 的一半：图例项自身还有约 8dp 的行内空白，再加 4dp 视觉上就散了。
+        取 space_xs(4dp) 的一半：图例项现在按 chart_legend_item_height(24dp) 贴内容排布，
+        自身不再留行内空白，再加 4dp 视觉上就散了。
     -->
     <dimen name="chart_row_gap">2dp</dimen>
 
@@ -25,7 +40,8 @@
         曲线画布的默认高度，也是进页面时的初始高度；运行时可由画布下沿的拖柄在
         [chart_canvas_min_height, chart_canvas_max_height] 内调整（ChartFragment），且不记忆。
         204dp = 原 272dp 的 3/4（原值按"绘图区近正方"推算，占高过多）；缩小后
-        绘图区高 = 204 − 上内边距 24 − 下内边距 8 = 172dp，仍远高于 ChartView 的 8dp 保护下限（见 ChartView#rebuild）。
+        绘图区高 = 204 − 上内边距 17 − 下内边距 4 = 183dp（两个内边距是 ChartView 的
+        PAD_T_DP / PAD_B_DP，不在本文件），仍远高于 ChartView 的 8dp 保护下限（见 ChartView#rebuild）。
     -->
     <dimen name="chart_canvas_height">204dp</dimen>
 
@@ -39,7 +55,8 @@
     <dimen name="chart_resize_bar_radius">2dp</dimen>
 
     <!--
-        拖柄触控带高：整条即触控区，横条在其中居中，上下各留 (12 − 4) / 2 = 4dp。
+        拖柄触控带高：整条即触控区。带内横条贴带顶（layout_gravity=top），横条距带底还有 12 − 4 = 8dp，
+        触控面积一点没减——触控与可见已解耦，可见的 4dp 条不必占掉这 12dp 的中间。
         原为 space_xl(24dp，上下各 10dp)——横条加长到 160dp 后不再需要那么厚的带子才按得住。
     -->
     <dimen name="chart_resize_band_height">12dp</dimen>

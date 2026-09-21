@@ -41,6 +41,21 @@
     <string name="config_back_desc">返回上一页</string>
     <string name="config_settings_empty">参数定义里没有「界面」分组，本页暂无可调项</string>
 
+    <!--
+        参数重置栏（设置页内容顶部）。按钮上的组名不在这里：它由 ConfigResetBar 从分组标题
+        去掉段标编号得到（与卡头同一口径），写死这 5 个组名就会与定义分家。
+        重置基准是定义里的 factory（出厂值），不是 default（代码内默认值），故文案一律说"出厂值"。
+    -->
+    <string name="config_reset_title">参数重置</string>
+    <string name="config_reset_hint">按分组恢复出厂值：组头总开关与组内全部参数一起恢复。</string>
+    <string name="config_reset_dialog_title">重置「%1$s」？</string>
+    <string name="config_reset_dialog_message">该组参数将恢复出厂值：组头总开关与组内全部参数一起回到出厂值，此操作不可撤销。</string>
+    <string name="config_reset_confirm">恢复出厂值</string>
+    <string name="config_reset_cancel">取消</string>
+    <string name="config_reset_done">「%1$s」已恢复出厂值</string>
+    <string name="config_reset_no_change">「%1$s」已经是出厂值，未写入</string>
+    <string name="config_reset_failed">重置「%1$s」失败：%2$s</string>
+
     <!-- ===== 诊断区 ===== -->
     <string name="config_diag_title">诊断信息</string>
     <string name="config_diag_mtime">配置 mtime：%1$s</string>

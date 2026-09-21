@@ -1,5 +1,10 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- 时间窗口档位按钮（在 MaterialButtonToggleGroup 里单选）。 -->
+<!--
+    时间窗口档位按钮（在 MaterialButtonToggleGroup 里单选）。
+    高度 = chart_window_button_height(21dp)：必须显式覆盖 paddingTop/Bottom = 2dp，
+    否则 Material3 按钮样式自带的 m3_btn_padding_top/bottom(6dp + 6dp) 与 12sp 文字兜底出约 29dp，
+    minHeight 压不下去；insetTop/Bottom 同时清零，否则按钮上下还会各留一条样式内缩的空白。
+-->
 <com.google.android.material.button.MaterialButton
     xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:app="http://schemas.android.com/apk/res-auto"
@@ -10,9 +15,11 @@
     android:checkable="true"
     android:insetBottom="0dp"
     android:insetTop="0dp"
-    android:minHeight="@dimen/chart_chip_min_height"
+    android:minHeight="@dimen/chart_window_button_height"
     android:minWidth="0dp"
     android:paddingStart="@dimen/space_s"
+    android:paddingTop="2dp"
     android:paddingEnd="@dimen/space_s"
+    android:paddingBottom="2dp"
     android:textSize="@dimen/text_caption"
     app:cornerRadius="@dimen/chip_radius" />

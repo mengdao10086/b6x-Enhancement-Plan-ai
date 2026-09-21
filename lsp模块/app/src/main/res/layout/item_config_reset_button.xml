@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    重置栏里的一个分组按钮（一组一个，由 ConfigResetBar 动态添加）。单独成文件是因为
+    「几个按钮、每个写什么」全由定义决定，布局里没有可写死的那一份。
+    用 OutlinedButton 而非填充按钮：本栏是危险动作，层级压在页面主操作之下，
+    也不与下方参数卡的组头开关抢注意力。
+-->
+<com.google.android.material.button.MaterialButton xmlns:android="http://schemas.android.com/apk/res/android"
+    style="@style/Widget.Material3.Button.OutlinedButton"
+    android:layout_width="wrap_content"
+    android:layout_height="wrap_content" />

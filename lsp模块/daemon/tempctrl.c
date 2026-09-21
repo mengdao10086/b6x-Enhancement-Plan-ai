@@ -2500,6 +2500,102 @@ static float pid_ratio_from_cold(int cold_ref, int cold_max) {
     return ratio;
 }
 
+// ======================== 宿主 APK 卸载自清理 ========================
+// 需求：本 APK 被卸载后，daemon 必须自己停止并把落盘产物删干净（连二进制与 service.d 脚本一起删）。
+// 代价（用户已拍板）：重装 APK 后必须重新「一键部署」——这是设计意图，不是缺陷。
+// 落点分工：C 端为主（5s 节拍、root、能删 /data/local/tmp · /data/adb · /cache），
+// service.d 脚本看门狗兜底（能删自己，覆盖「daemon 已死但脚本还在」「启动后 30s 延迟窗口」
+// 「C 端被 SELinux 拒删 /data/adb」三类）。判据与清理清单两侧必须保持一致，改一处同步另一处。
+
+#define HOST_PKG             "com.example.waspwingtempctrl"
+#define HOST_DATA_DIR        "/data/data/" HOST_PKG
+// 需与 PRIVATE_DIR 的包名一致（applicationId 决定数据目录名，改包名时两处连同 build.gradle.kts 一起改）
+#define HOST_PROBE_INTERVAL  60   // 二级 pm 探测最小间隔（秒）：fork+pm 约 100~300ms，不许每轮跑
+#define HOST_CONFIRM_HITS    2    // 连续一级命中次数阈值，避免瞬态误判误杀
+
+static int    host_miss_hits = 0;    // 一级（父目录不存在）连续命中次数
+static time_t host_probe_at  = 0;    // 上次二级（pm path）探测时间戳
+static int    host_probe_gone = 0;   // 上次二级探测结论：1=包已不注册（节流窗口内复用）
+
+/**
+ * 判断宿主 APK 是否已卸载。返回 1=确认已卸载（可清理），0=仍在 / 无法确认。
+ *
+ * 两级判据，必须都过：
+ *   一级 stat(HOST_DATA_DIR) —— 用【父目录】而非 files/：app「清除数据」只清 contents
+ *     （files/ 内容），父目录 /data/data/<包名> 由系统保留 → 可抗"清除数据"误判。
+ *     该代价已记录在 逻辑说明.md 的「参数落点」注记处（清除数据会清掉私有目录产物）。
+ *     每轮可跑、零成本。
+ *   二级 app_installed(HOST_PKG)（走 pm path）—— 一级命中后才跑，且按 HOST_PROBE_INTERVAL
+ *     节流（fork+exec pm 的开销不能进每轮热路径）。
+ * 再叠「连续 HOST_CONFIRM_HITS 次命中才判真」：单次 stat 失败可能来自瞬时挂载抖动、
+ * app 正在被 installd 重装（目录短暂消失）等瞬态，连续两次（间隔 ≥5s 一轮）可滤掉。
+ */
+static int host_app_uninstalled(void) {
+    struct stat st;
+    if (stat(HOST_DATA_DIR, &st) == 0) {
+        host_miss_hits = 0;   // 父目录在 → 未卸载，计数清零（下次命中重新从 1 数起）
+        return 0;
+    }
+
+    // 一级命中：父目录不存在。二级 pm 确认（节流窗口内复用上次结论）
+    time_t now = time(NULL);
+    if (now - host_probe_at >= HOST_PROBE_INTERVAL) {
+        host_probe_at = now;
+        host_probe_gone = app_installed(HOST_PKG) ? 0 : 1;
+    }
+    if (!host_probe_gone) {
+        // 目录不在但包仍注册（重装过程中、多用户数据目录尚未创建等）→ 不判真
+        host_miss_hits = 0;
+        return 0;
+    }
+
+    if (++host_miss_hits < HOST_CONFIRM_HITS) return 0;
+    return 1;
+}
+
+/**
+ * 检测到宿主 APK 已卸载 → 清理全部落盘产物并置 running=0（走既有 exit: 收尾）。
+ * 用 read_self_exe() 取自身实测路径再 unlink，防二进制被改名/换路径后按约定路径漏删。
+ *
+ * 清理范围与**已知局限**（如实记录，不假装清干净了）：
+ *   1) /data/local/tmp/tempctrl_b6x.status 与 tempctrl_b7x.status —— 只要飞智 app 进程还活着，
+ *      其 LSPosed 钩子会每秒重写这两个文件，本处 unlink 之后可能被立刻重建。
+ *      只有重启飞智 app 或重启设备，这两个文件才会彻底消失。**此处删不干净是已知局限。**
+ *   2) 私有目录（profile.conf / tempctrl.log / tempctrl_webui.data / tempctrl.lock）不显式删：
+ *      系统卸载会连带删掉整个 /data/data/<包名>，显式删只是多一条可能被 SELinux 拒的路径。
+ *      与工程既有「卸载部署 ≠ 删配置」口径一致（不显式删 profile.conf）。
+ *   3) /data/adb 下脚本能否 unlink 取决于 daemon 所在 SELinux 域：由 service.d 拉起时继承
+ *      magisk 域一般可写，app 内 nohup 拉起则可能被拒。被拒时由脚本看门狗自尽兜底，
+ *      故此处按"尽力而为"处理：失败不重试、不报错（用户已卸载，无人看 stderr）。
+ */
+static void cleanup_artifacts_on_uninstall(void) {
+    // 先留痕再删（日志文件本身随后可能被一起删掉，但这正是"清理"的预期结果）
+    write_log("检测到宿主 APK 已卸载，已清理产物并退出");
+
+    // 自身二进制：实测路径优先（read_self_exe 走 /proc/self/exe），约定路径兜底
+    char self[512];
+    if (read_self_exe(self, sizeof(self))) unlink(self);
+    unlink("/data/local/tmp/tempctrl");
+
+    static const char *artifacts[] = {
+        // /data/local/tmp 下的全部产物
+        "/data/local/tmp/tempctrl_b6x.status",
+        "/data/local/tmp/tempctrl_b7x.status",
+        "/data/local/tmp/tempctrl_uiprefs",
+        "/data/local/tmp/tempctrl_service.log",
+        "/data/local/tmp/tempctrl.lock",       // 旧版残留（现锁文件已移至私有目录）
+        "/data/local/tmp/tempctrl_last_dev",   // 旧版残留
+        // service.d 脚本两个候选路径（KSU 版本分界，见 Deployer）
+        "/data/adb/service.d/b6x-tempctrl.sh",
+        "/data/adb/ksu/service.d/b6x-tempctrl.sh",
+        // 私有目录不可用时的兜底日志
+        "/cache/tempctrl.log",
+    };
+    for (size_t i = 0; i < sizeof(artifacts) / sizeof(artifacts[0]); i++) unlink(artifacts[i]);
+
+    running = 0;   // 交给 main 的 exit: 收尾（关闭日志句柄后返回 0）
+}
+
 // ======================== 主循环 ========================
 
 /** 信号处理器：设置 running=0 退出主循环 */
@@ -2874,6 +2970,11 @@ int main(int argc, char *argv[]) {
     // --- 等待任一设备模块就绪 + BLE 连接（BLE 字段语义见 read_single_status） ---
     active_device = DEVICE_NONE;
     while (running) {
+        // 宿主 APK 卸载自清理：必须放在本循环内，否则无 BLE、停在等待设备循环时永远不检测
+        if (host_app_uninstalled()) {
+            cleanup_artifacts_on_uninstall();
+            break;   // running 已置 0，由下方 if (!running) goto exit 收尾
+        }
         read_status_ble_both();
         DeviceType dev = select_active_device();
         if (dev != DEVICE_NONE) {
@@ -2931,6 +3032,12 @@ int main(int argc, char *argv[]) {
 
         if (last_ctrl == 0 || time(NULL) - last_ctrl >= 5) {
             last_ctrl = time(NULL);
+
+            // -1. 宿主 APK 卸载自清理（走 5s 节拍：一级 stat 每轮可跑，二级 pm 自带 60s 节流）
+            if (host_app_uninstalled()) {
+                cleanup_artifacts_on_uninstall();
+                break;   // running 已置 0，跳出主循环走 exit: 收尾
+            }
 
             // 0. CPU thermal_zone 周期重扫（移入 5s 控制块：全量扫描 ~100 个 zone 阻塞近 1s，
             //    不在 1s 采集热路径 write_webui_data 内触发）

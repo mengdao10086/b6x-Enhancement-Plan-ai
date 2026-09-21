@@ -18,7 +18,7 @@
     <string name="status_action_refresh">刷新状态</string>
     <string name="status_action_deploy">一键部署</string>
     <string name="status_action_uninstall">卸载部署</string>
-    <string name="status_action_start">拉起守护进程</string>
+    <string name="status_action_start">拉起daemon</string>
     <string name="status_action_diag">su 诊断</string>
     <string name="status_busy_other">上一个动作还没结束，请稍候</string>
     <string name="status_dialog_diag">诊断</string>
@@ -27,7 +27,8 @@
     <string name="status_busy_probe">读取部署状态…</string>
     <string name="status_busy_deploy">部署中…（落盘 + root 就位 + 省电白名单）</string>
     <string name="status_busy_uninstall">卸载部署中…</string>
-    <string name="status_busy_start">拉起守护进程…</string>
+    <!-- 拉起＝停旧实例再起新实例，C 端启动延时 30s，故把代价写在忙态文案里（手动动作会进「操作记录」） -->
+    <string name="status_busy_start">拉起daemon…（停旧实例→起新实例，温控空窗约 30~35 秒）</string>
     <string name="status_busy_diag">采集 su 诊断…</string>
 
     <!-- 状态页：设备与版本（不显示本应用包名与 targetSdk） -->
@@ -45,4 +46,11 @@
     <!-- 状态页：脚本哈希不一致时的自动重推 -->
     <string name="status_script_autofixed">检测到 service.d 脚本与 APK 内不一致，已自动重推脚本（二进制未动）</string>
     <string name="status_script_autofix_failed">检测到 service.d 脚本与 APK 内不一致，自动重推失败：</string>
+
+    <!--
+        状态页：二进制哈希不一致时的部署请求（脚本不一致仍是静默自动重推，不走弹窗）。
+        同一个 APK 版本最多弹一次，去重见 StatusFragment.armHashMismatchPrompt。
+    -->
+    <string name="status_hash_title">守护进程二进制与 APK 不一致</string>
+    <string name="status_hash_message">设备上的守护进程二进制与当前 APK 内的不一致，需要重新部署才会生效。是否立即一键部署？\n\n部署会重启守护进程，期间温控空窗约 30~35 秒。</string>
 </resources>

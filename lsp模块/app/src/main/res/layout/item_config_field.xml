@@ -16,6 +16,9 @@
       · 左右内边距压到 @dimen/field_radius(8dp)：M3 默认 16dp，收掉的那 8dp 全给可用内容宽，
         圆角 8dp 之外不再留空白（说明的可用宽也跟着变宽，见 calculateCollapsedTextBounds）。
       · 上下内边距不对称：正文在「说明下沿 → 框底」里居中，理由与算式见 <dimen/config_field_pad_top>。
+      · scrollHorizontally：等于 setHorizontallyScrolling(true)——单行横向滚动的开关。不开时
+        Layout 宽 == 视图宽，scrollX 恒为 0，path 键放不下的右半段（文件名）永远看不见。
+        不用已废弃的 singleLine：它顺带改掉 maxLines 之外的行为，这里只需要横向可滚。
 -->
 <LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:app="http://schemas.android.com/apk/res-auto"
@@ -76,9 +79,14 @@
             android:paddingTop="@dimen/config_field_pad_top"
             android:paddingEnd="@dimen/field_radius"
             android:paddingBottom="@dimen/space_xs"
+            android:scrollHorizontally="true"
             android:textSize="@dimen/config_field_text_size" />
     </com.google.android.material.textfield.TextInputLayout>
 
+    <!-- 字段说明（单位 / 范围）。宽度取字段宽：多字段键里跟着自己的输入框，才看得出属于哪个字段。
+         单字段键（int / path / 单字段 multi）由 ConfigKeyRow 把它挂到行级，按整行宽折行——
+         框宽可能只有 @dimen/config_field_min_width(72dp)，长说明在那里要折 4~5 行，整块被顶高。
+         左内边距不再动：8dp 是"内容可用宽扩到圆角刚结束"的既有口径（见上面 EditText 那条）。 -->
     <TextView
         android:id="@+id/config_field_note"
         android:layout_width="match_parent"

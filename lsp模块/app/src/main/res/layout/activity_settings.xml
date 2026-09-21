@@ -2,7 +2,8 @@
 <!--
     设置页外壳（SettingsActivity）：标题栏 + 页面容器。
     标题栏几何与外壳（activity_setup.xml）逐项对齐：@dimen/title_pad_top + 标题行高（TitleLarge 约 28dp）
-    + @dimen/space_l ≈ 51dp；标题字号取同一主题属性，故两页标题逐像素同位同大。
+    + @dimen/title_pad_bottom ≈ 40dp；左右内边距仍为 @dimen/space_l。
+    标题字号取同一主题属性，故两页标题逐像素同位同大。
     返回按钮 28dp（@dimen/title_action_size）：与标题同一行的行高约束下的最大值。
     页面内容由 UiSettingsFragment 挂进 settings_container，本文件不承载任何页面业务。
     本页没有铺到屏幕底的栏，故底部内边距也归页面根：由 SettingsActivity 调 ui/EdgeToEdge 补，
@@ -26,7 +27,7 @@
         android:paddingStart="@dimen/space_l"
         android:paddingTop="@dimen/title_pad_top"
         android:paddingEnd="@dimen/space_l"
-        android:paddingBottom="@dimen/space_l">
+        android:paddingBottom="@dimen/title_pad_bottom">
 
         <ImageButton
             android:id="@+id/settings_back"

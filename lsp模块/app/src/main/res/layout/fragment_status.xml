@@ -1,6 +1,11 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!-- 状态页（外壳自带的初始页）。子 agent 不要改本文件。 -->
-<ScrollView xmlns:android="http://schemas.android.com/apk/res/android"
+<!--
+    根用 PageScrollView（ScrollView 子类，未指定 captor 时行为与普通 ScrollView 完全一致）：
+    「操作记录」展开后是个定高内部滚动区，纵向拖动落在它上面时必须让给它——
+    普通 ScrollView 在 ACTION_MOVE 一到 slop 就先把事件流截走，内层永远拿不到。见 StatusFragment。
+-->
+<com.example.waspwingtempctrl.ui.PageScrollView xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:app="http://schemas.android.com/apk/res-auto"
     android:id="@+id/status_scroll"
     android:layout_width="match_parent"
@@ -12,6 +17,7 @@
     android:scrollbars="vertical">
 
     <LinearLayout
+        android:id="@+id/status_content"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
         android:orientation="vertical"
@@ -46,14 +52,23 @@
                     android:textAppearance="@style/TextAppearance.B6XTempCtrl.Mono"
                     android:textIsSelectable="true" />
 
+                <!--
+                    进度条常占位：从首帧起就占住这块高度（invisible 不是 gone），
+                    显示/隐藏只有绘制差异、不动布局，故任何路径开关它都不会让下面两张卡上下跳。
+                    初值必须是 invisible：用 gone 的话首帧高度就少一截，第一次刷新又会补上。
+                -->
                 <com.google.android.material.progressindicator.LinearProgressIndicator
                     android:id="@+id/status_progress"
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
                     android:layout_marginTop="@dimen/space_s"
                     android:indeterminate="true"
-                    android:visibility="gone" />
+                    android:visibility="invisible" />
 
+                <!--
+                    按钮排布：行1 [一键部署][拉起daemon]、行2 [su诊断][刷新状态]、行3 [卸载部署]。
+                    「刷新状态」与「su 诊断」同为点一次即出一段文本的动作，故同用 TextButton 样式。
+                -->
                 <LinearLayout
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
@@ -67,12 +82,12 @@
                         android:text="@string/status_action_deploy" />
 
                     <com.google.android.material.button.MaterialButton
-                        android:id="@+id/btn_refresh"
+                        android:id="@+id/btn_start"
                         style="@style/Widget.Material3.Button.OutlinedButton"
                         android:layout_width="wrap_content"
                         android:layout_height="wrap_content"
                         android:layout_marginStart="@dimen/space_s"
-                        android:text="@string/status_action_refresh" />
+                        android:text="@string/status_action_start" />
                 </LinearLayout>
 
                 <LinearLayout
@@ -82,19 +97,19 @@
                     android:orientation="horizontal">
 
                     <com.google.android.material.button.MaterialButton
-                        android:id="@+id/btn_start"
-                        style="@style/Widget.Material3.Button.OutlinedButton"
-                        android:layout_width="wrap_content"
-                        android:layout_height="wrap_content"
-                        android:text="@string/status_action_start" />
-
-                    <com.google.android.material.button.MaterialButton
                         android:id="@+id/btn_diag"
                         style="@style/Widget.Material3.Button.TextButton"
                         android:layout_width="wrap_content"
                         android:layout_height="wrap_content"
-                        android:layout_marginStart="@dimen/space_s"
                         android:text="@string/status_action_diag" />
+
+                    <com.google.android.material.button.MaterialButton
+                        android:id="@+id/btn_refresh"
+                        style="@style/Widget.Material3.Button.TextButton"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:layout_marginStart="@dimen/space_s"
+                        android:text="@string/status_action_refresh" />
                 </LinearLayout>
 
                 <com.google.android.material.button.MaterialButton
@@ -179,16 +194,30 @@
                         app:tint="?attr/colorOnSurfaceVariant" />
                 </LinearLayout>
 
-                <TextView
-                    android:id="@+id/action_log_text"
+                <!--
+                    正文区限高 + 内部滚动：记录只增不减，不封顶就会把页面顶成一条长卷。
+                    定高（不随内容伸缩），展开与刷新时高度不变，不会有额外的跳动。
+                    纵向拖动落在本区上时由根 PageScrollView 让给它（见 StatusFragment 的 yieldVerticalDragTo）。
+                -->
+                <ScrollView
+                    android:id="@+id/action_log_scroll"
                     android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
+                    android:layout_height="@dimen/diag_body_max_height"
                     android:layout_marginTop="@dimen/space_s"
-                    android:textAppearance="@style/TextAppearance.B6XTempCtrl.Mono"
-                    android:textIsSelectable="true"
-                    android:visibility="gone" />
+                    android:fadeScrollbars="false"
+                    android:scrollbarSize="@dimen/scrollbar_size"
+                    android:scrollbars="vertical"
+                    android:visibility="gone">
+
+                    <TextView
+                        android:id="@+id/action_log_text"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:textAppearance="@style/TextAppearance.B6XTempCtrl.Mono"
+                        android:textIsSelectable="true" />
+                </ScrollView>
             </LinearLayout>
         </com.google.android.material.card.MaterialCardView>
 
     </LinearLayout>
-</ScrollView>
+</com.example.waspwingtempctrl.ui.PageScrollView>

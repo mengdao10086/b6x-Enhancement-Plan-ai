@@ -7,7 +7,7 @@
 
 /* 键数：守护进程消费 / 仅界面读取 */
 #define CFG_DAEMON_KEY_COUNT 48
-#define CFG_WEBUI_KEY_COUNT 5
+#define CFG_WEBUI_KEY_COUNT 4
 
 /* 性能层单值键表（PERF_ENABLED=1）→ INT_CFG_KEYS[]：X(键名, C 变量, min, max) */
 #define CFG_PERF_INT_KEYS(X) \
