@@ -80,8 +80,8 @@ public class StatusFragment extends Fragment implements PageAware {
     private TextView statusView;
     private TextView infoView;
     private TextView logView;
-    /** 操作记录的滚动区（限高容器）；展开/收起切的是它的可见性。 */
-    private View logScroll;
+    /** 操作记录的正文容器（自适应高、无内部滚动，同诊断卡）；展开/收起切的是它的可见性。 */
+    private View logBody;
     private ImageView arrowView;
     private View progress;
     /** 三张卡的共同父容器：文本行数变化时的高度补间在这个范围内做。 */
@@ -119,7 +119,7 @@ public class StatusFragment extends Fragment implements PageAware {
         statusView = view.findViewById(R.id.status_text);
         infoView = view.findViewById(R.id.info_text);
         logView = view.findViewById(R.id.action_log_text);
-        logScroll = view.findViewById(R.id.action_log_scroll);
+        logBody = view.findViewById(R.id.action_log_body);
         arrowView = view.findViewById(R.id.action_log_arrow);
         progress = view.findViewById(R.id.status_progress);
         contentRoot = view.findViewById(R.id.status_content);
@@ -139,11 +139,9 @@ public class StatusFragment extends Fragment implements PageAware {
 
         // 滚动条常显 + 加粗（见 fragment_status.xml），这里才接得上"按住滚动条拖动"
         ScrollbarDrag.attach(view.findViewById(R.id.status_scroll));
-
-        // 操作记录展开后是个定高内部滚动区：把「落在它上面的纵向拖动」从页面根让给它。
-        // 页面根是 PageScrollView，只让纵向——横向仍归外层 ViewPager2，翻页照旧。
-        // 收起时该区 GONE，PageScrollView 自己会判成"没落在 captor 上"，页面照常滚。
-        PageScrollView.yieldVerticalDragTo(logScroll);
+        // 操作记录已是自适应高、无内部滚动（同诊断卡），故不再需要
+        // PageScrollView.yieldVerticalDragTo：没有内层可滚动区，就不存在手势相争。
+        // 页面根保持 PageScrollView（配置页的曲线拖柄仍在用它）。
     }
 
     @Override
@@ -176,7 +174,7 @@ public class StatusFragment extends Fragment implements PageAware {
         statusView = null;
         infoView = null;
         logView = null;
-        logScroll = null;
+        logBody = null;
         arrowView = null;
         progress = null;
         contentRoot = null;
@@ -394,9 +392,9 @@ public class StatusFragment extends Fragment implements PageAware {
 
     private void setLogExpanded(boolean value) {
         logExpanded = value;
-        if (logScroll != null) {
-            // 切的是限高滚动区（正文的可见性）——展开与否决定这块高度占不占位
-            logScroll.setVisibility(value ? View.VISIBLE : View.GONE);
+        if (logBody != null) {
+            // 切的是正文容器（自适应高、无内部滚动）；展开与否决定这块高度占不占位
+            logBody.setVisibility(value ? View.VISIBLE : View.GONE);
         }
         if (arrowView != null) {
             arrowView.setRotation(value ? ARROW_EXPANDED_ROTATION : 0f);

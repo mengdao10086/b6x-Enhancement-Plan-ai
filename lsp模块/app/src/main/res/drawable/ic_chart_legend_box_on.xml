@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    图例勾选框·选中：18dp 实心方框 + 挖空的对勾（一条 path、两条子路径、evenOdd）。
+    外框几何与未选中态完全一致（18dp、外圆角 2dp），两态只差填充方式。
+    对勾走「挖空」而非异色线：勾选框的 buttonTint 会整张单色着色（SRC_IN），再画一条异色对勾
+    也会被染成同色而看不见；挖空后透出卡片底色，观感等同 M3 的「填充方框 + onPrimary 对勾」
+    （浅色主题透出近白、深色透出近黑，与 onPrimary 同向）。
+    对勾自绘：折线 (3.8,8.8)→(7.2,12.6)→(13.6,5.2)、半宽 1dp（厚 2dp，与描边同粗）、
+    内侧尖角 + 外侧圆角肘；墨迹 11.3×9.1dp，位置与 M3 原对勾基本重合。
+-->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="18dp"
+    android:height="18dp"
+    android:viewportWidth="18"
+    android:viewportHeight="18">
+
+    <path
+        android:fillColor="?attr/colorPrimary"
+        android:fillType="evenOdd"
+        android:pathData="M2.00,0.00 H16.00 A2.00,2.00 0 0 1 18.00,2.00 V16.00 A2.00,2.00 0 0 1 16.00,18.00 H2.00 A2.00,2.00 0 0 1 0.00,16.00 V2.00 A2.00,2.00 0 0 1 2.00,0.00 Z M4.55,8.13 L7.19,11.09 L12.84,4.55 L14.36,5.85 L7.74,13.44 L7.49,13.56 L7.21,13.60 L6.93,13.56 L6.67,13.45 L6.45,13.27 L3.05,9.47 Z" />
+</vector>

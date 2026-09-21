@@ -96,8 +96,9 @@
             <!--
                 ===== ④ 画布下沿拖柄（拖动改画布高，由 ChartFragment 处理） =====
                 外层整条 chart_resize_band_height(12dp) 是触控带：横条只有 4dp 高，直接拿它当触控目标按不准；
-                内层横条贴触控带顶部（layout_gravity=top），其上沿与画布下沿齐平，距带底还有 8dp 余量，
-                触控带高度不变、触控面积一点没减；贴顶是为了让横条紧挨画布，条内不再加 marginTop。
+                内层横条贴触控带顶部并水平居中（layout_gravity=top|center_horizontal）：只写 top 会连
+                水平居中一起丢掉（FrameLayout 的 center 同时管两个方向），横条会贴到左边去。
+                贴顶后横条上沿与画布下沿齐平，距带底还有 8dp 余量，触控带高度不变、触控面积一点没减。
                 横条不可点（View 默认即不可点，这里写明是为了别挡住触控带的事件）。
                 纵向拖动才回给本带（横向交给外层 ViewPager2 翻页）：由本页所在的 PageScrollView
                 在按下点落在本带上时不接管纵向拖动，见 PageScrollView#setVerticalDragCaptor。
@@ -110,7 +111,7 @@
                 <View
                     android:layout_width="@dimen/chart_resize_bar_width"
                     android:layout_height="@dimen/chart_resize_bar_height"
-                    android:layout_gravity="top"
+                    android:layout_gravity="top|center_horizontal"
                     android:background="@drawable/bg_chart_resize_bar"
                     android:clickable="false"
                     android:focusable="false"

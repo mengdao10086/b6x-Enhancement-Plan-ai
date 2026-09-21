@@ -30,7 +30,7 @@
 - 改完后跑 `detect_changes()` 检查影响范围
 - 风险 HIGH/CRITICAL → 先告知用户再继续
 - 普通日志降级为 debug 时，用**对应功能分区的子开关**（如配置加载→`debug_config`、传感器→`debug_sensor`、PID→`debug_pid`），不得用通用 `write_log` 或乱选分区。注意 C 宏按文本顺序生效，调用点位于宏定义之前时需把 `debug_log`/`pid_log` 宏上移
-- **加/改配置参数**：`参数定义/params.def.json` 是 52 个键的**唯一手写处**。改定义 → `python 参数定义/gen_params.py` 重新生成 4 个产物 → `python 参数定义/check_params.py` 必须 EXIT=0（已接入 CI，在 checkout 之后、Gradle 编译之前）
+- **加/改配置参数**：`参数定义/params.def.json` 是配置键的**唯一手写处**（键数见 `check_params.py` 的 `EXPECTED_KEY_COUNT`，不要在文档里写死数字）。改定义 → `python 参数定义/gen_params.py` 重新生成 4 个产物 → `python 参数定义/check_params.py` 必须 EXIT=0（已接入 CI，在 checkout 之后、Gradle 编译之前）
 - **不要再手工同步派生副本**：`lsp模块/daemon/profile.conf`、`逻辑说明.md` 参数表段、`lsp模块/daemon/params_generated.h`、`lsp模块/app/src/main/assets/params.json` 均由生成器写出并纳入版本控制，手改它们会被断言 A 判为漂移。界面表单读 `params.json` 动态生成，也不用改
 - **C 端键表由生成头承接**：`tempctrl.c` 的 `INT_CFG_KEYS[]` / `SYSFS_CFG_KEYS[]` 以 X 宏展开生成头（`CFG_PERF_INT_KEYS(CFG_ROW)` / `CFG_SYSFS_KEYS(CFG_ROW)`），clamp 边界不再在 C 里手抄。新增配置键只需改定义，C 端零改动
 
@@ -40,12 +40,14 @@
 - 编译命令见 `lsp模块/daemon/build_tempctrl.sh`（编译参数的唯一来源，勿在此处复制副本）
 - CI 只有一条构建链（`.github/workflows/build.yml` 的单一 `build` job）：编译 C → 注入 `app/src/main/assets/tempctrl-arm64` → `assembleRelease` 出**唯一交付物 APK**；不再有 Magisk 模块产物
 - 每轮新对话和压缩上下文后的**首次 push** → 跟踪 CI 检查是否报错
+- **CI 产物下载与留存**：工件统一下载到 `D:\下载\Edge`，不要放别处；同一版本**只保留最后一个**，其余**放回收站**（不永久删除，留一条后悔的退路）。仓库**不提交**编译产物二进制——CI 只把它作为工件上传，不回写仓库
 
 ## 6. 安全边界
 
 - 不得自动执行 git push、部署、发布、破坏性迁移
 - 修改 `.env` 前需说明用途，用户确认后再执行
 - **版本号不自动更新**：`build.gradle.kts` versionName、`CHANGELOG.md` 等版本号一律保持现状，不因审查/清理/重构主动修改；需要改版本号由用户明确要求
+- **要升版本号就升全**：`lsp模块/app/build.gradle.kts` 的 `versionName`/`versionCode` 是**唯一来源**（CI 由此解析产物名），必须与 `CHANGELOG.md` 的版本段同步改，只改文档会让设备上装的仍是旧版本。`versionCode` 沿用既有进位（`minor + 2`：v2.0=2 … v3.0=5），不自创格式
 
 ---
 

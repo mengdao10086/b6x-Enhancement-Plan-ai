@@ -69,6 +69,10 @@
         条目下内边距 @dimen/bottom_nav_pad_bottom 再收到 3dp，用于把标签文字下移、
         消除它与图标之间原有的 6dp 重合（推算见 dimens.xml 该 dimen 的注释）。
         图标 24dp 与标签 12sp 不动；若真机上标签仍贴到条底，再动 @dimen/bottom_nav_height。
+        下面两个 itemPadding 作用在菜单视图上，不是本控件自身的 paddingBottom；后者由 ui/EdgeToEdge
+        独占改写（= 系统条高），故两者互不叠加。
+        本处声明的 53dp 是 EdgeToEdge 的"基准内容高"：运行时 height 会变成 53dp + 系统条高，
+        背景铺到屏幕底、页签留在系统条之上；键盘弹起时回到 53dp。
     -->
     <com.google.android.material.bottomnavigation.BottomNavigationView
         android:id="@+id/bottom_nav"

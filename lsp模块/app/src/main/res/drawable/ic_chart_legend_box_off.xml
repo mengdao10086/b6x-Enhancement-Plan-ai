@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    图例勾选框·未选中：18dp 方框、2dp 描边、外圆角 2dp、内直角。
+    用「外框 + 内框」两条子路径 + evenOdd 做环，不用 stroke：两态共用同一套几何，
+    只差"描边环"与"实心 + 挖空对勾"（选中态见 ic_chart_legend_box_on）。
+    几何对齐 M3 勾选框：方框 18dp、描边 2dp、外圆角 2dp（尺寸/圆角是公开规格，非复制）。
+    整份 pathData 为自绘，未取 material 资源——那套是 Apache-2.0，本仓库没有 NOTICE 文件。
+    颜色只是兜底：勾选框的 buttonTint（M3 样式的 m3_checkbox_button_tint）会给整张图单色着色
+    （SRC_IN，未选中 = onSurfaceVariant 系），实际深浅色由主题决定，这里写主题属性即可。
+-->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="18dp"
+    android:height="18dp"
+    android:viewportWidth="18"
+    android:viewportHeight="18">
+
+    <path
+        android:fillColor="?attr/colorOnSurfaceVariant"
+        android:fillType="evenOdd"
+        android:pathData="M2.00,0.00 H16.00 A2.00,2.00 0 0 1 18.00,2.00 V16.00 A2.00,2.00 0 0 1 16.00,18.00 H2.00 A2.00,2.00 0 0 1 0.00,16.00 V2.00 A2.00,2.00 0 0 1 2.00,0.00 Z M2.00,2.00 H16.00 V16.00 H2.00 Z" />
+</vector>

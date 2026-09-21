@@ -17,6 +17,8 @@ import com.example.waspwingtempctrl.R;
 import com.google.android.material.button.MaterialButton;
 
 import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -37,6 +39,9 @@ import java.util.Map;
  * <h3>按钮文案去掉段标编号</h3>
  * 与设置页卡头同一口径（复用 {@link UiSettingsFragment#stripSectionNumber}）：编号是给
  * {@code profile.conf} 段标对齐用的，摆在按钮上只是噪音。
+ *
+ * <h3>按钮顺序</h3>
+ * 用本栏自己的展示顺序（{@link #DISPLAY_ORDER}），<b>与定义里的组顺序不同</b>——理由见该常量。
  */
 final class ConfigResetBar {
 
@@ -55,6 +60,20 @@ final class ConfigResetBar {
         void onResetConfirmed(@NonNull String label, @NonNull Map<String, Value> factoryValues);
     }
 
+    /**
+     * 本栏按钮的<b>展示顺序</b>（group id）。它与参数定义里的组顺序<b>不同</b>，是有意为之：
+     * 用户指定「界面」紧随「性能参数」（重置界面参数比重置 sysfs 路径更常用）；而定义里的组顺序
+     * 决定 {@code profile.conf} 的段标顺序，不能为了本栏的观感去动它。
+     *
+     * <p>写成显式表，而不是"照定义顺序排一遍"：这个顺序是需求本身，不是巧合，也不是排序结果。
+     * 表外的组由 {@link #orderedGroups} 追加到末尾；表里已失效的 id 静默跳过。
+     *
+     * <p>只列 id，不列组名：组标题正在被改（{@code [2] sysfs 路径与缩放} → {@code [2] 路径与缩放}
+     * 等），按钮文案一律从 {@link GroupMeta#title} 取并去段标，不在这里手抄一遍。
+     */
+    private static final List<String> DISPLAY_ORDER =
+            Collections.unmodifiableList(Arrays.asList("debug", "perf", "webui", "sysfs", "launch"));
+
     private final Host host;
     private final View card;
     private final LinearLayout buttons;
@@ -69,8 +88,9 @@ final class ConfigResetBar {
         this.card = card;
         this.host = host;
         buttons = card.findViewById(R.id.config_reset_buttons);
-        // 每个分组一个按钮：分组数量与组名都来自定义，本类不写死这 5 个
-        for (GroupMeta group : host.store().groups()) {
+        // 一个分组一个按钮：按钮数量与组名都来自定义，本类只定展示顺序（见 DISPLAY_ORDER），
+        // 不写死这 5 个分组，按钮文案也不写死（组标题正在被改，硬编码就会与定义分家）
+        for (GroupMeta group : orderedGroups(host.store().groups())) {
             buttons.addView(buildButton(group));
         }
     }
@@ -78,6 +98,31 @@ final class ConfigResetBar {
     @NonNull
     View view() {
         return card;
+    }
+
+    /**
+     * 取要出按钮的分组，按 {@link #DISPLAY_ORDER} 排；表外的一律追加到末尾。
+     *
+     * <p>两级降级都不报错、也不留空按钮：表里列了而定义里已删的 id 静默跳过；定义里有而表里
+     * 没列的组追加到末尾（顺序退化为定义顺序）——将来定义新增分组时按钮一定会出现，
+     * 不会因为忘了改这张表而少一个。
+     */
+    @NonNull
+    private static List<GroupMeta> orderedGroups(@NonNull List<GroupMeta> groups) {
+        Map<String, GroupMeta> remaining = new LinkedHashMap<>();
+        for (GroupMeta group : groups) {
+            remaining.put(group.id, group);
+        }
+        List<GroupMeta> ordered = new ArrayList<>(groups.size());
+        for (String id : DISPLAY_ORDER) {
+            // remove 一并覆盖"表里重复写了同一个 id"：第二次取到 null，不会出两个按钮
+            GroupMeta group = remaining.remove(id);
+            if (group != null) {
+                ordered.add(group);
+            }
+        }
+        ordered.addAll(remaining.values());
+        return ordered;
     }
 
     private MaterialButton buildButton(GroupMeta group) {

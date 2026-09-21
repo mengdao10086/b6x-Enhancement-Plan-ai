@@ -64,6 +64,7 @@
         语义从此是"文字贴条目底边、靠此值消除图标-文字重合"，不再是"与图标保持间距"。
         图标（24dp）与标签字号（12sp）不动；文字若再压到条目底边，只能抬 @dimen/bottom_nav_height。
     -->
+    <!-- 同时是 ui/EdgeToEdge 的"基准内容高"：运行时 height 会变成 53dp + 系统条高（键盘弹起时回到 53dp）。 -->
     <dimen name="bottom_nav_height">53dp</dimen>
     <dimen name="bottom_nav_pad_top">8dp</dimen>
     <dimen name="bottom_nav_pad_bottom">3dp</dimen>

@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    图例勾选框的两态拼装：按 state_checked 切到 ic_chart_legend_box_on / _off。
+    固有尺寸 18dp——这个值同时决定 CompoundButton 给勾选框下的最小高度（见
+    item_chart_legend.xml 的说明），故图例项能压到 chart_legend_item_height(22dp)。
+-->
+<selector xmlns:android="http://schemas.android.com/apk/res/android">
+    <item
+        android:drawable="@drawable/ic_chart_legend_box_on"
+        android:state_checked="true" />
+    <item android:drawable="@drawable/ic_chart_legend_box_off" />
+</selector>

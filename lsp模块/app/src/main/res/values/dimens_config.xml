@@ -30,17 +30,21 @@
     <dimen name="config_field_text_size">16sp</dimen>
 
     <!--
-        输入内容的上内边距（下内边距仍为 space_xs）。
-        内容不按整框居中：浮起说明（12sp 约 16dp 高）骑在框顶边上，其下沿约在框顶下 8dp 处，
-        按整框 49dp 居中时正文顶边离说明只有几个 dp（"内容和说明紧贴"）。
-        改为在「说明下沿 → 框底」这一段里居中：目标中心 = (8 + 49) / 2 = 28.5dp，
-        由 49dp 内 (padTop + 49 − padTop − padBottom) / 2 = 28.5 得 padTop − padBottom = 8dp，
-        故 padTop = 8 + space_xs = 12dp。
-        注意这个中心比框的几何中心（24.5dp）低 4dp：参数名盒走的是框的几何中心（见 item_config_row.xml），
-        两者因此相差 4dp。若要让正文与参数名严格同高，把本值改成 space_s(8dp)、下内边距同步改 8dp 即可
-        （代价是正文顶边离说明只剩 7dp）。
+        输入内容的上内边距（下内边距仍为 space_xs = 4dp）。
+        取值 8dp = space_s：与输入框的左右内边距（@dimen/field_radius 同为 8dp）齐平，正文左/右/上
+        三面从同一档留白起算（下面单独留 4dp 收口）。浮起说明（12sp 约 16dp 高）骑在框顶边上，
+        其下沿约在框顶下 8dp 处。
+        算式：内容区 = [padTop, 49 − padBottom] = [8, 45]，高 37dp；正文（16sp，行盒约 18.75dp）
+        在其中垂直居中 → 行盒中心 = (8 + 45) / 2 = 26.5dp。两个参照：
+          · 比「说明下沿(8) → 框底(49)」的中点 28.5dp 高 2dp（更贴说明、更远框底）；
+          · 比框的几何中心 24.5dp 低 2dp —— 参数名盒就在几何中心（见 item_config_row.xml），
+            故正文比参数名仍低约 2dp（12/4 时差 4dp，本次收窄一半）。
+        观感：说明下沿 → 正文顶边约 9.1dp，正文底边 → 框底约 13.1dp（12/4 时两者相等、均约 11.1dp，
+        即正文正好在「说明下沿 → 框底」的正中）。要让正文与参数名严格同高，把下内边距也改成 8dp
+        （item_config_field.xml 里那个 android:paddingBottom）→ 中心 24.5dp、与参数名齐平，
+        代价是正文离说明只剩约 7.1dp。
     -->
-    <dimen name="config_field_pad_top">12dp</dimen>
+    <dimen name="config_field_pad_top">8dp</dimen>
 
     <!--
         参数（键行）之间的纵向间隔 = 分组卡默认行距 space_m(12dp) 的一半。

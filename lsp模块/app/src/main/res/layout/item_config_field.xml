@@ -15,7 +15,8 @@
         故一处 gravity=center 同时让「值」与「说明」都居中，且宽度小于另一者时居中效果自然成立。
       · 左右内边距压到 @dimen/field_radius(8dp)：M3 默认 16dp，收掉的那 8dp 全给可用内容宽，
         圆角 8dp 之外不再留空白（说明的可用宽也跟着变宽，见 calculateCollapsedTextBounds）。
-      · 上下内边距不对称：正文在「说明下沿 → 框底」里居中，理由与算式见 <dimen/config_field_pad_top>。
+      · 上下内边距不对称（上 8dp / 下 4dp）：正文比「说明下沿 → 框底」的中点高 2dp、比框的几何中心
+        低 2dp，算式与观感见 <dimen/config_field_pad_top>。
       · scrollHorizontally：等于 setHorizontallyScrolling(true)——单行横向滚动的开关。不开时
         Layout 宽 == 视图宽，scrollX 恒为 0，path 键放不下的右半段（文件名）永远看不见。
         不用已废弃的 singleLine：它顺带改掉 maxLines 之外的行为，这里只需要横向可滚。

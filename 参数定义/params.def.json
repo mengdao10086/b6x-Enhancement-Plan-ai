@@ -49,13 +49,13 @@
     },
     {
       "id": "sysfs",
-      "title": "[2] sysfs 路径与缩放",
+      "title": "[2] 路径与缩放",
       "confTitleNote": "（独立大类：SYSFS_ENABLED=1 时加载，独立于性能总开关）",
       "master": "SYSFS_ENABLED"
     },
     {
       "id": "launch",
-      "title": "[3] 自动拉起散热器 app",
+      "title": "[3] 自动拉起 app",
       "confTitleNote": "（独立于性能总开关，任何模式都生效）",
       "master": "APP_LAUNCH_ENABLED"
     },
@@ -882,7 +882,7 @@
       "group": "sysfs",
       "role": "master",
       "type": "switch",
-      "label": "sysfs 路径与缩放开关",
+      "label": "路径与缩放开关",
       "desc": "sysfs 路径与缩放独立大类（=1 加载 BATT_TEMP_* / BATT_CURRENT_* / CPU_TEMP_* / CPU_ZONE* / LOG_* 路径与系数配置，=0 使用代码内默认路径）",
       "docOrder": 2,
       "docDesc": "sysfs 路径与缩放独立大类（1=加载 BATT_*/CPU_*/LOG_* 路径配置，0=使用代码默认路径）",
@@ -1145,11 +1145,11 @@
       "group": "launch",
       "role": "master",
       "type": "switch",
-      "label": "自动拉起散热器 app",
-      "desc": "自动拉起散热器 app 开关（独立于 PERF_ENABLED，任何模式生效）。无散热器 app 存活时自动拉起上次使用的 app（目标已运行/未安装则跳过；拉起后自动后台化，但依旧会闪烁一下界面）；是锁死自动重启（APP_WATCHDOG）的前置条件：本开关关闭时 C 端在运行时强制关闭 watchdog（不改配置文件）",
+      "label": "自动拉起 app",
+      "desc": "自动拉起 app 开关（独立于 PERF_ENABLED，任何模式生效）。无散热器 app 存活时自动拉起上次使用的 app（目标已运行/未安装则跳过；拉起后自动后台化，但依旧会闪烁一下界面）；是锁死自动重启（APP_WATCHDOG）的前置条件：本开关关闭时 C 端在运行时强制关闭 watchdog（不改配置文件）",
       "cTable": "pre",
       "docOrder": 34,
-      "docDesc": "自动拉起散热器 app 开关（独立于 PERF_ENABLED，任何模式生效）。无散热器 app 存活时按上次使用的 app 自动拉起（启动等待/运行中断连时，按 `APP_LAUNCH_COOLDOWN` 冷却，**默认关闭**，需在界面中开启）。**是锁死自动重启（APP_WATCHDOG）的前置条件**：C 端检测到本开关关闭时，无论 APP_WATCHDOG 配置如何都会在运行时强制关闭 watchdog",
+      "docDesc": "自动拉起 app 开关（独立于 PERF_ENABLED，任何模式生效）。无散热器 app 存活时按上次使用的 app 自动拉起（启动等待/运行中断连时，按 `APP_LAUNCH_COOLDOWN` 冷却，**默认关闭**，需在界面中开启）。**是锁死自动重启（APP_WATCHDOG）的前置条件**：C 端检测到本开关关闭时，无论 APP_WATCHDOG 配置如何都会在运行时强制关闭 watchdog",
       "confNote": ["=1：断联或无散热器 app 存活时，自动拉起上次使用的 app（目标已运行/未安装则跳过；拉起后自动后台化，但依旧会闪烁一下界面）；=0：关闭（默认，需在界面中开启）"],
       "unit": "",
       "unitNote": "布尔开关，取值 0/1，无单位",
@@ -1336,15 +1336,15 @@
       "group": "webui",
       "role": "setting",
       "type": "switch",
-      "label": "返回退出自动隐藏后台",
-      "desc": "开启后，返回键将结束整个任务时改为把散热器 app 收进后台而不结束进程；关闭则恢复系统默认退出",
+      "label": "返回隐藏后台",
+      "desc": "开启后，宿主内任意页面按返回都改为把散热器 app 收进后台、并从最近任务列表隐藏；关闭则恢复系统默认退出",
       "docOrder": 52,
-      "docDesc": "返回退出自动隐藏后台（0/1，默认 1）：开启后宿主 app 在「这一下返回会结束整个任务」时改为收进后台，子页面之间的正常返回不受影响；关闭则恢复系统默认退出。**本键是本组唯一被守护进程读取的键**——界面与钩子分属两个进程、不共享内存，故由守护进程把它写进 `/data/local/tmp/tempctrl_uiprefs`（BACK_HIDE=0/1）供 Xposed 钩子读取。",
+      "docDesc": "返回隐藏后台（0/1，默认 1）：开启后，宿主内任意页面按返回都收进后台（判据＝开关开 + Activity 未在结束中 + 属宿主包，透明转发页除外），并从最近任务列表隐藏；关闭则恢复系统默认退出。**本键是本组唯一被守护进程读取的键**——界面与钩子分属两个进程、不共享内存，故由守护进程把它写进 `/data/local/tmp/tempctrl_uiprefs`（BACK_HIDE=0/1）供 Xposed 钩子读取。",
       "confNote": [
-        "返回退出自动隐藏后台（0/1，默认 1）：关闭则返回键恢复系统默认退出",
+        "返回隐藏后台（0/1，默认 1）：关闭则返回键恢复系统默认退出",
         "  本组唯一被守护进程读取的键：写入 /data/local/tmp/tempctrl_uiprefs 供钩子读取"
       ],
-      "confInline": "返回退出自动隐藏后台",
+      "confInline": "返回隐藏后台",
       "unit": "",
       "unitNote": "布尔开关，取值 0/1，无单位",
       "default": 1,
@@ -1362,7 +1362,7 @@
       "格式：KEY=VALUE（等号两边不要空格），# 开头为注释，空行自动跳过",
       "修改后无需重启 daemon，下一轮 5 秒循环自动热重载",
       "本文件由 参数定义/gen_params.py 生成，勿手改（手改会被 check_params.py 判红）；设备上的副本可自由修改",
-      "段标编号与界面分组一致（分组定义见 参数定义/params.def.json）：[0]日志 [1]性能参数 [2]sysfs [3]自动拉起 [4]界面"
+      "段标编号与界面分组一致（分组定义见 参数定义/params.def.json）：[0]日志 [1]性能参数 [2]路径与缩放 [3]自动拉起 app [4]界面"
     ]
   },
   "doc": {

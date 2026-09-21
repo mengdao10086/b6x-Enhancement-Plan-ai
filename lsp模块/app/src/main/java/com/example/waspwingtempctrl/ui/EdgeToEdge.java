@@ -26,10 +26,19 @@ import androidx.core.view.WindowInsetsCompat;
  * <ul>
  *   <li>顶/左/右 → 页面根：与原来的 {@code android:fitsSystemWindows="true"} 等价（标题栏仍留在
  *       状态栏之下）。</li>
- *   <li>底 → 有底栏时给底栏（高度 = 自身内容高 + 系统条高，底部内边距同样取后者），
+ *   <li>底 → 有底栏时给底栏（高度 = 基准内容高 + 系统条高，底部内边距同样取后者），
  *       于是底栏背景铺到屏幕底、条目仍在系统条之上；没有底栏的页面（设置页）直接给页面根。</li>
- *   <li>键盘弹起时（键盘比系统手势条高）窗口整体上移：底部内边距给页面根、底栏不再垫那一条。</li>
+ *   <li>键盘弹起时（键盘比系统手势条高）窗口整体上移：底部内边距给页面根、底栏回到基准高，
+ *       于是底栏正好贴在键盘上沿之上，不会被键盘挡住。</li>
  * </ul>
+ *
+ * <h3>为什么要顶掉底栏自带的 inset 监听</h3>
+ * BottomNavigationView 在自己的构造函数里就注册了一个 inset 监听，它把
+ * {@code getSystemWindowInsetBottom()}（键盘弹起时就是键盘高度）无条件写进底栏自身的
+ * paddingBottom；而 material 是通过 {@link ViewCompat#setOnApplyWindowInsetsListener} 注册的，
+ * 属覆盖式注册。故本类在 {@link #apply} 里给底栏换上一个"原样返回 insets"的监听把它顶掉，
+ * 让底栏几何只由本类那套绝对赋值独占负责——否则底栏会被反复压低（成因见
+ * {@link BottomBarLayout} 的注释）。
  *
  * <h3>与键盘的关系</h3>
  * 关掉窗口自动让位后，系统不再替 app 为键盘缩窗口，故这里显式要求
@@ -45,14 +54,19 @@ public final class EdgeToEdge {
     /**
      * @param root      页面根（顶/左/右内边距归它）
      * @param bottomBar 要铺到屏幕底的那个栏（底栏），可为 null（没有这种栏时底部内边距归 root）。
-     *                  它的高度必须是定值（本类按"当前高 − 当前底部内边距"反推自身内容高，
-     *                  故要求它自己没有别的底部内边距）；wrap_content 的话本类不动它。
+     *                  它必须是定高（wrap_content/match_parent 时本类不动它）；XML 里声明的那个高度
+     *                  被当作基准内容高，只在首次调用时量一次，之后不再反推（见 {@link BottomBarLayout}）。
      */
     public static void apply(@NonNull Activity activity, @NonNull View root,
                              @Nullable View bottomBar) {
         WindowCompat.setDecorFitsSystemWindows(activity.getWindow(), false);
         // 键盘 inset 只在 adjustResize 下送达；adjustPan 会把它吞掉（见类注释）
         activity.getWindow().setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE);
+        final BottomBarLayout bottomBarLayout = new BottomBarLayout();
+        if (bottomBar != null) {
+            // 顶掉 material 自带的那个会改写 paddingBottom 的监听（见类注释）
+            ViewCompat.setOnApplyWindowInsetsListener(bottomBar, (view, windowInsets) -> windowInsets);
+        }
         ViewCompat.setOnApplyWindowInsetsListener(root, (view, windowInsets) -> {
             Insets bars = windowInsets.getInsets(WindowInsetsCompat.Type.systemBars());
             Insets ime = windowInsets.getInsets(WindowInsetsCompat.Type.ime());
@@ -62,7 +76,7 @@ public final class EdgeToEdge {
                 view.setPadding(bars.left, bars.top, bars.right, imeUp ? ime.bottom : bars.bottom);
             } else {
                 view.setPadding(bars.left, bars.top, bars.right, imeUp ? ime.bottom : 0);
-                applyBottomBarInset(bottomBar, imeUp ? 0 : bars.bottom);
+                bottomBarLayout.apply(bottomBar, imeUp ? 0 : bars.bottom);
             }
             return windowInsets;
         });
@@ -70,21 +84,43 @@ public final class EdgeToEdge {
     }
 
     /**
-     * 底栏：自身内容高恒定，底部再垫 {@code inset}。
+     * 底栏几何的持有者：{@code height = 基准内容高 + inset}、{@code paddingBottom = inset}，
+     * 两者都是绝对赋值，不是叠加。
      *
-     * <p>自身内容高由「当前 LayoutParams 高 − 当前底部内边距」反推，故本方法可重复调用
-     * （第二次进来算出的内容高与第一次相同，不会越垫越厚）。
+     * <p>幂等的关键在于：基准内容高只在首次调用时量一次（XML 定高 − 当时的底部内边距；底栏自身
+     * 没有别的底部内边距——{@code itemPaddingTop/Bottom} 是作用在菜单视图上的，故这里即 XML 定高），
+     * 之后恒用该值。旧写法每次都用「当前 height − 当前 paddingBottom」重新反推，等于把上一次写进去的
+     * inset 也当成了内容高的一部分；而 material 的 inset 监听又会在两次调用之间把键盘高度塞进
+     * paddingBottom，反推值随之逐次下漂甚至变负——这正是"每拉起一次输入法，底栏就被压低一次，
+     * 直到几乎看不见"的成因。
+     *
+     * <p>只量一次之后：连续调用 N 次算出的 height/paddingBottom 完全一致（值未变时还会直接返回，
+     * 不触发多余布局）；键盘弹起时 inset = 0 → 回到基准高，收起后又是 基准高 + 系统条高，
+     * 与初始状态逐值相同。
      */
-    private static void applyBottomBarInset(@NonNull View bottomBar, int inset) {
-        ViewGroup.LayoutParams params = bottomBar.getLayoutParams();
-        if (params == null || params.height <= 0) {
-            // 高度不是定值（wrap_content/match_parent）：留空，免得把比例算坏
-            return;
+    private static final class BottomBarLayout {
+
+        /** 基准内容高；负值表示还没量过。 */
+        private int baseContentHeight = -1;
+
+        void apply(@NonNull View bottomBar, int inset) {
+            ViewGroup.LayoutParams params = bottomBar.getLayoutParams();
+            if (params == null || params.height <= 0) {
+                // 高度不是定值（wrap_content/match_parent）：留空，免得把比例算坏
+                return;
+            }
+            if (baseContentHeight < 0) {
+                baseContentHeight = params.height - bottomBar.getPaddingBottom();
+            }
+            int height = baseContentHeight + inset;
+            if (params.height == height && bottomBar.getPaddingBottom() == inset) {
+                // 与现状一致：不写回，也不触发多余的布局
+                return;
+            }
+            bottomBar.setPadding(bottomBar.getPaddingLeft(), bottomBar.getPaddingTop(),
+                    bottomBar.getPaddingRight(), inset);
+            params.height = height;
+            bottomBar.setLayoutParams(params);
         }
-        int contentHeight = params.height - bottomBar.getPaddingBottom();
-        bottomBar.setPadding(bottomBar.getPaddingLeft(), bottomBar.getPaddingTop(),
-                bottomBar.getPaddingRight(), inset);
-        params.height = contentHeight + inset;
-        bottomBar.setLayoutParams(params);
     }
 }

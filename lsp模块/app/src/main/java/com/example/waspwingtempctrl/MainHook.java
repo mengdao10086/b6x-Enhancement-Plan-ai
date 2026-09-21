@@ -1,6 +1,7 @@
 package com.example.waspwingtempctrl;
 
 import android.app.Activity;
+import android.app.ActivityManager;
 import android.bluetooth.BluetoothAdapter;
 import android.bluetooth.BluetoothDevice;
 import android.bluetooth.BluetoothGatt;
@@ -1193,7 +1194,38 @@ public class MainHook implements IXposedHookLoadPackage {
     }
 
     /**
-     * 读界面上的「返回退出自动隐藏后台」开关（守护进程写的 {@code BACK_HIDE=0/1} 标志文件）。
+     * 把本任务从「最近任务」列表里摘掉（借鉴 Scene 的 excludeFromRecent 做法）。
+     *
+     * <p>只影响任务列表的显示，不改变进程存活，与 {@code moveTaskToBack} 各管一半：
+     * 前者保证进程活着（BLE 连接不断），后者保证不在最近任务里留痕。
+     * 定位本任务靠 {@code task.getId() == act.getTaskId()}；{@code getAppTasks()} 需 API 21+（宿主 minSdk 26）。
+     *
+     * <p>属附加动作：取不到 ActivityManager、或没匹配到本任务时只打一行日志，
+     * 绝不影响调用方（收后台）的结果。
+     */
+    private static void excludeFromRecents(final Activity act) {
+        try {
+            ActivityManager am = (ActivityManager) act.getSystemService(Context.ACTIVITY_SERVICE);
+            if (am == null) {
+                XposedBridge.log(TAG + " 从最近任务隐藏失败: 取不到 ActivityManager");
+                return;
+            }
+            for (ActivityManager.AppTask task : am.getAppTasks()) {
+                ActivityManager.RecentTaskInfo info = task.getTaskInfo();
+                if (info != null && info.id == act.getTaskId()) {
+                    task.setExcludeFromRecents(true);
+                    XposedBridge.log(TAG + " 已从最近任务隐藏（taskId=" + info.id + "）");
+                    return;
+                }
+            }
+            XposedBridge.log(TAG + " 从最近任务隐藏失败: 未匹配到本任务（taskId=" + act.getTaskId() + "）");
+        } catch (Throwable t) {
+            XposedBridge.log(TAG + " 从最近任务隐藏失败: " + t.getMessage());
+        }
+    }
+
+    /**
+     * 读界面上的「返回隐藏后台」开关（守护进程写的 {@code BACK_HIDE=0/1} 标志文件）。
      *
      * <p>每次返回键都读一次：返回键是低频事件，一次小文件读取代价可忽略，换来"改了立即生效"。
      * 读不到（文件不存在 / 无该行 / 值异常）时返回 true —— 与界面默认值一致，行为总是「默认开启」。
@@ -1216,11 +1248,44 @@ public class MainHook implements IXposedHookLoadPackage {
         return true;
     }
 
+    /** 返回键不接管的页面：宿主 APK 里借壳的透明转发页（不是用户可见页面） */
+    private static final String[] BACK_HIDE_SKIP_ACTIVITIES = {
+            "com.blankj.utilcode.util.UtilsTransActivity",   // 含 UtilsTransActivity4MainProcess
+            "rx_activity_result2.HolderActivity",
+    };
+
     /**
-     * 返回键退出时把 app 收进后台，而不是真正退出（借鉴 Scene 的做法）。
+     * 该 Activity 是否在返回键接管范围内。
      *
-     * <p>只在"这一下返回会结束整个任务"时接管：{@code isTaskRoot()} 为真即表示当前 Activity 是
-     * 任务根、再返回就退出 app，此时阻断默认 finish 并切后台；子页面之间的正常返回不受影响。
+     * <p>钩子只注册在宿主包进程内，故本进程里的 Activity 即宿主页面；但宿主 APK 内含若干
+     * <b>透明转发页</b>（借壳启动第三方界面、代替 startActivityForResult 取结果用），
+     * 它们不是用户可见页面，按返回不该收后台，故按类名前缀排除（见 {@link #BACK_HIDE_SKIP_ACTIVITIES}）。
+     */
+    private static boolean isBackHideTargetActivity(final Activity act) {
+        String cls = act.getClass().getName();
+        for (String skip : BACK_HIDE_SKIP_ACTIVITIES) {
+            if (cls.startsWith(skip)) return false;
+        }
+        return true;
+    }
+
+    /**
+     * 返回键退出时把 app 收进后台 + 从最近任务隐藏，而不是真正退出（借鉴 Scene 的做法）。
+     *
+     * <p><b>接管判据</b>（三者全成立）：开关开（见 {@link #readBackHideEnabled()}）、
+     * 未在结束中（{@code !isFinishing()}）、当前 Activity 在接管范围内。
+     * "在范围内" = {@code isTaskRoot()}（任务根）<b>或</b> {@link #isBackHideTargetActivity}
+     * （宿主进程内任意页面，见该方法说明）—— 两者并列，任一成立即在范围内。
+     *
+     * <p><b>为何不再硬要求 {@code isTaskRoot()}</b>：宿主只有引导页 MainActivity 与设置界面
+     * B6ExperimentalActivity，而<b>设置界面并非任务根</b> —— 宿主 launcher 是 MainActivity，
+     * 且模块的 {@code autoStartSetup()} 与宿主的跳转都不 finish 引导页。若硬要求任务根，
+     * 用户在设置界面按返回就完全不生效（这正是"开关无效"的主因）。
+     *
+     * <p>命中后做两件事：{@code moveTaskToBack(true)} 收后台（保进程、BLE 不断）
+     * + {@link #excludeFromRecents} 从最近任务隐藏。<b>两件事只在本路径（返回键）发生</b>：
+     * 自动拉起路径共用的 {@link #backgroundActivity} 保持"只收后台、不动最近任务"的原行为。
+     * 判据不成立时<b>必打一行日志</b>，便于真机区分"回调没进"与"进了但判据不成立"。
      *
      * <p>受界面开关 {@code UI_BACK_HIDE} 约束：关闭时不设 result，直接走系统默认的 finish。
      * 开关值由守护进程转写成标志文件（见 {@link #readBackHideEnabled()}）。
@@ -1252,13 +1317,22 @@ public class MainHook implements IXposedHookLoadPackage {
             protected void beforeHookedMethod(MethodHookParam param) {
                 try {
                     Activity act = (Activity) param.thisObject;
-                    if (act.isTaskRoot() && !act.isFinishing()) {
-                        if (!readBackHideEnabled()) {
-                            return;   // 开关关闭：不接管，走系统默认退出
-                        }
-                        param.setResult(null);   // 阻断默认的 finish
-                        backgroundActivity(act, "返回键");
+                    boolean switchOn = readBackHideEnabled();   // 返回键是低频事件，每次读一次以做到改即生效
+                    boolean taskRoot = act.isTaskRoot();
+                    boolean inScope = taskRoot || isBackHideTargetActivity(act);
+                    if (switchOn && !act.isFinishing() && inScope) {
+                        param.setResult(null);               // 阻断默认的 finish
+                        backgroundActivity(act, "返回键");   // 收后台（保进程、BLE 不断）
+                        excludeFromRecents(act);             // 从最近任务隐藏（仅返回键路径；失败不影响上面的收后台）
+                        return;
                     }
+                    // 判据不成立也要留痕：真机靠这行区分"回调没进"与"进了但判据不成立"
+                    XposedBridge.log(TAG + " 返回键未接管: isTaskRoot=" + taskRoot
+                            + " 在范围内=" + inScope
+                            + " pkg=" + act.getPackageName()
+                            + " cls=" + act.getClass().getName()
+                            + " finishing=" + act.isFinishing()
+                            + " 开关=" + switchOn);
                 } catch (Throwable t) {
                     XposedBridge.log(TAG + " 返回键后台化失败: " + t.getMessage());
                 }
