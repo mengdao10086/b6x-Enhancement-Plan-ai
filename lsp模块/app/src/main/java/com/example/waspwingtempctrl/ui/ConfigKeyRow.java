@@ -677,6 +677,16 @@ final class ConfigKeyRow {
                 Field field = fields.get(0);
                 String before = field.text();
                 field.setValue(value.text());
+                // 光标钉到末尾：setText 会把光标置 0（ArrowKeyMovementMethod.initialize → Selection.setSelection(text, 0)），
+                // 而框架随后在自己的 pre-draw 里按"把光标摆进可视区"（bringPointIntoView(getSelectionEnd())）摆一次——
+                // 光标留在 0 就摆到路径左段，与本类 applyPathScroll 摆的右段各摆一端（两处各写一次，谁后写谁赢）。
+                // 钉末尾后两处同值：路径放不下时一律显示右半段（文件名）。
+                // 聚焦中不钉：本方法在切页回来、静默刷新时都会被调，编辑中把光标拽到末尾会打断正在输入的人。
+                // 有 PATH_SCROLL_X 记忆值时仍以记忆值为准（见 applyPathScroll）——这里定的只是没有记忆值、
+                // 或框架自己兜底时的落点，不等于"忽略记忆值"。
+                if (!field.input.isFocused()) {
+                    field.input.setSelection(field.text().length());
+                }
                 remeasureIfTextChanged(field, before);
                 restorePathScroll();
             } else {
