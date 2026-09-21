@@ -5,13 +5,15 @@
     + @dimen/space_l ≈ 51dp；标题字号取同一主题属性，故两页标题逐像素同位同大。
     返回按钮 28dp（@dimen/title_action_size）：与标题同一行的行高约束下的最大值。
     页面内容由 UiSettingsFragment 挂进 settings_container，本文件不承载任何页面业务。
+    本页没有铺到屏幕底的栏，故底部内边距也归页面根：由 SettingsActivity 调 ui/EdgeToEdge 补，
+    本文件不写 fitsSystemWindows。
 -->
 <LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:app="http://schemas.android.com/apk/res-auto"
+    android:id="@+id/settings_root"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
     android:background="?attr/colorSurface"
-    android:fitsSystemWindows="true"
     android:orientation="vertical">
 
     <!-- ===== 标题栏（返回 + 标题） ===== -->

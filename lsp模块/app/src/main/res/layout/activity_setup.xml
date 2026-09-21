@@ -2,6 +2,8 @@
 <!--
     应用外壳：标题栏（标题 + 右侧设置按钮）+ 页面容器 + 底部页签栏（状态 / 配置 · 曲线 / 日志）。
 
+    - 系统栏让位不用 fitsSystemWindows：改由 SetupActivity 调 ui/EdgeToEdge（下侧沉浸式，
+      底栏背景铺到屏幕底、条目留在系统手势条之上），故本文件不写 fitsSystemWindows。
     - 页签在底部：本文件只是菜单的承载处，顺序由 res/menu/menu_bottom.xml 决定，
       而那份顺序必须与 SetupActivity.MENU_IDS 严格一致（错位会静默显示错页）。
     - 页面容器是 ViewPager2：翻页由它接管（跟手滑动），故外壳不再有手势代码与手写转场。
@@ -12,10 +14,10 @@
 -->
 <LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:app="http://schemas.android.com/apk/res-auto"
+    android:id="@+id/setup_root"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
     android:background="?attr/colorSurface"
-    android:fitsSystemWindows="true"
     android:orientation="vertical">
 
     <!-- ===== 标题栏 ===== -->

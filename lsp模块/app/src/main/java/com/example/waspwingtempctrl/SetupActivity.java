@@ -10,6 +10,7 @@ import androidx.viewpager2.adapter.FragmentStateAdapter;
 import androidx.viewpager2.widget.ViewPager2;
 
 import com.example.waspwingtempctrl.ui.ConfigFormFragment;
+import com.example.waspwingtempctrl.ui.EdgeToEdge;
 import com.example.waspwingtempctrl.ui.LogFragment;
 import com.example.waspwingtempctrl.ui.StatusFragment;
 import com.google.android.material.bottomnavigation.BottomNavigationView;
@@ -62,6 +63,8 @@ public class SetupActivity extends AppCompatActivity {
 
         pager = findViewById(R.id.page_pager);
         nav = findViewById(R.id.bottom_nav);
+        // 下侧沉浸式：底栏背景铺到屏幕底，条目留在系统手势条之上（见 ui/EdgeToEdge）
+        EdgeToEdge.apply(this, findViewById(R.id.setup_root), nav);
         pager.setAdapter(new PagesAdapter());
         pager.setOffscreenPageLimit(MENU_IDS.length - 1);
 

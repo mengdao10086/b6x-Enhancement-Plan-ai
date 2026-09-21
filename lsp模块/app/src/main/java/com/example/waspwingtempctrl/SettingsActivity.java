@@ -7,6 +7,7 @@ import androidx.annotation.Nullable;
 import androidx.appcompat.app.AppCompatActivity;
 import androidx.fragment.app.FragmentManager;
 
+import com.example.waspwingtempctrl.ui.EdgeToEdge;
 import com.example.waspwingtempctrl.ui.UiSettingsFragment;
 
 /**
@@ -32,6 +33,8 @@ public class SettingsActivity extends AppCompatActivity {
         setTheme(R.style.Theme_B6XTempCtrl);
         super.onCreate(savedInstanceState);
         setContentView(R.layout.activity_settings);
+        // 本页没有铺到屏幕底的栏，底部内边距归页面根（与外壳同一套让位算法，见 ui/EdgeToEdge）
+        EdgeToEdge.apply(this, findViewById(R.id.settings_root), null);
 
         View back = findViewById(R.id.settings_back);
         // 走返回派发链而不是 finish()：系统手势返回、预测性返回与按钮返回同一条路径

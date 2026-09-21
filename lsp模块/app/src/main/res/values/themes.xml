@@ -41,7 +41,14 @@
         <item name="android:colorBackgroundFloating">@color/app_surface_container</item>
         <item name="android:windowBackground">@color/app_surface</item>
         <item name="android:statusBarColor">@color/app_surface</item>
-        <item name="android:navigationBarColor">@color/app_surface</item>
+        <!--
+            下侧沉浸式（让位由 ui/EdgeToEdge 算）：手势条/导航栏那一条不再由系统铺色，
+            交给界面自己的背景（外壳是底栏、设置页是页面根）一直铺到屏幕底。
+            windowLightNavigationBar 保留，手势条在这层浅底上才是深色、看得见；
+            enforceNavigationBarContrast 关掉系统的自动对比遮罩，否则那条带子会被压出一层灰。
+        -->
+        <item name="android:navigationBarColor">@android:color/transparent</item>
+        <item name="android:enforceNavigationBarContrast" tools:targetApi="29">false</item>
         <item name="android:windowLightStatusBar">@bool/light_system_bars</item>
         <item name="android:windowLightNavigationBar" tools:targetApi="27">@bool/light_system_bars</item>
 
