@@ -8,6 +8,7 @@ import android.os.Looper;
 import android.view.LayoutInflater;
 import android.view.MotionEvent;
 import android.view.View;
+import android.view.ViewConfiguration;
 import android.view.ViewGroup;
 import android.widget.CheckBox;
 import android.widget.ScrollView;
@@ -92,8 +93,14 @@ public class ChartFragment extends Fragment {
 
     /** 画布拖动中为 true；起点在按下时记一次，移动一律按"起点 + 增量"算，不累积误差。 */
     private boolean resizingCanvas;
+    /** 手指还在拖柄上（按下到抬起之间）为 true：方向还没定之前也要继续收事件。 */
+    private boolean touchingHandle;
+    /** 按下点（屏幕坐标）：用来判"是不是纵向"，横向要让给 ViewPager2 翻页。 */
+    private float dragStartRawX;
     private float dragStartRawY;
     private int dragStartHeight;
+    /** 纵向判定的门槛，与页面纵向滚动同一套（同一个 ViewConfiguration）。 */
+    private float touchSlop;
 
     /** 合并页的宿主（配置页）；未接上时数据文件信息只是暂时没人显示，刷新照常。 */
     private Host host;
@@ -146,6 +153,11 @@ public class ChartFragment extends Fragment {
         // 失败诊断可按住滚动条拖动（滚动条常显，见布局）
         ScrollbarDrag.attach(failureScroll);
         resizeHandle.setOnTouchListener(this::onHandleTouch);
+        // 本带上开始的纵向拖动让给拖柄（页面容器不接管），横向仍归外层 ViewPager2 翻页。
+        // 延到下一帧再登记：onViewCreated 时本页视图还没挂进父页的视图树（父链走到本 Fragment 的
+        // 根就断了），那里找不到页面根 PageScrollView。post 在未挂载时会排队、挂上后再执行。
+        resizeHandle.post(() -> PageScrollView.yieldVerticalDragTo(resizeHandle));
+        touchSlop = ViewConfiguration.get(context).getScaledTouchSlop();
 
         dataFile = AppFiles.dataFile(context);
 
@@ -225,6 +237,7 @@ public class ChartFragment extends Fragment {
         canvasContainer = null;
         resizeHandle = null;
         resizingCanvas = false;
+        touchingHandle = false;
         super.onDestroyView();
     }
 
@@ -425,24 +438,43 @@ public class ChartFragment extends Fragment {
     // ==================== 画布拖动 ====================
 
     /**
-     * 拖柄触摸：按下记起点，移动按增量改画布容器的高，抬起/取消结束。不写盘——视图重建即回默认高。
+     * 拖柄触摸：<b>只有纵向拖动</b>才改画布高，横向一律不动（交给外层 ViewPager2 翻页）。
      *
-     * <p>按下时必须 {@code requestDisallowInterceptTouchEvent(true)}：本区在配置页的
-     * {@code ScrollView} 里，少了这一步，纵向拖动一旦超过 touch slop 就被 ScrollView 当成
-     * 「用户在滚页面」把事件流拦走（本视图随后只收到一个 CANCEL），拖柄只能挪一小格就断。
+     * <p>按下先只记起点，等手指走出 touch slop 再定方向——判据与页面纵向滚动同一套：同一个
+     * {@code ViewConfiguration} 的 touch slop，且纵向位移要压过横向。定为纵向时才把<b>当下</b>
+     * 的位置与画布高记成拖动起点，画布不会因为多走的这一小段 slop 先跳一下。
+     *
+     * <p>纵向拖动没被页面滚动抢走，靠的是页面根 {@link PageScrollView#yieldVerticalDragTo}：
+     * 本带子上开始的纵向拖动页面容器不接管。所以这里不再（也不能）按下就
+     * {@code requestDisallowInterceptTouchEvent(true)}——那个开关沿父链设上去，会把 ViewPager2
+     * 的横向拦截一并封掉，横向就再也翻不了页。
+     *
+     * <p>不写盘——视图重建即回默认高。
      */
     private boolean onHandleTouch(View handle, MotionEvent e) {
         switch (e.getActionMasked()) {
             case MotionEvent.ACTION_DOWN:
-                // 记屏幕 y（getRawY）：画布变高时拖柄自己会往下走，用相对坐标会把这段位移算进增量
-                handle.getParent().requestDisallowInterceptTouchEvent(true);
+                // 记屏幕坐标（getRawY）：画布变高时拖柄自己会往下走，用相对坐标会把这段位移算进增量
+                touchingHandle = true;
+                resizingCanvas = false;
+                dragStartRawX = e.getRawX();
                 dragStartRawY = e.getRawY();
                 dragStartHeight = canvasContainer.getHeight();
-                resizingCanvas = true;
                 return true;
             case MotionEvent.ACTION_MOVE:
-                if (!resizingCanvas) {
+                if (!touchingHandle) {
                     return false;
+                }
+                if (!resizingCanvas) {
+                    float dx = Math.abs(e.getRawX() - dragStartRawX);
+                    float dy = Math.abs(e.getRawY() - dragStartRawY);
+                    if (dy <= touchSlop || dy <= dx) {
+                        return true;   // 还没定性、或横向：什么都不改（横向由外层翻页）
+                    }
+                    resizingCanvas = true;
+                    dragStartRawX = e.getRawX();
+                    dragStartRawY = e.getRawY();
+                    dragStartHeight = canvasContainer.getHeight();
                 }
                 int target = clampedCanvasHeight(
                         dragStartHeight + Math.round(e.getRawY() - dragStartRawY));
@@ -454,9 +486,8 @@ public class ChartFragment extends Fragment {
                 return true;
             case MotionEvent.ACTION_UP:
             case MotionEvent.ACTION_CANCEL:
+                touchingHandle = false;
                 resizingCanvas = false;
-                // 交还给 ScrollView，否则会一直禁到下一次按下
-                handle.getParent().requestDisallowInterceptTouchEvent(false);
                 return true;
             default:
                 return false;

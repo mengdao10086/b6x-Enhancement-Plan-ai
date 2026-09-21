@@ -55,7 +55,7 @@
                 android:id="@+id/chart_legend_row"
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:layout_marginTop="@dimen/space_s"
+                android:layout_marginTop="@dimen/chart_row_gap"
                 app:flowRowGap="@dimen/chart_legend_row_gap" />
 
             <!--
@@ -67,7 +67,7 @@
                 android:id="@+id/chart_canvas_container"
                 android:layout_width="match_parent"
                 android:layout_height="@dimen/chart_canvas_height"
-                android:layout_marginTop="@dimen/space_xs">
+                android:layout_marginTop="@dimen/chart_row_gap">
 
                 <com.example.waspwingtempctrl.ui.ChartView
                     android:id="@+id/chart_view"
@@ -95,14 +95,16 @@
 
             <!--
                 ===== ④ 画布下沿拖柄（拖动改画布高，由 ChartFragment 处理） =====
-                外层整条 24dp（space_xl）是触控带：横条只有 4dp 高，直接拿它当触控目标按不准；
-                内层横条在触控带内居中，上下各 10dp 余量，故不再加 marginTop。
+                外层整条 chart_resize_band_height(12dp) 是触控带：横条只有 4dp 高，直接拿它当触控目标按不准；
+                内层横条在触控带内居中，上下各 4dp 余量，故不再加 marginTop。
                 横条不可点（View 默认即不可点，这里写明是为了别挡住触控带的事件）。
+                纵向拖动才回给本带（横向交给外层 ViewPager2 翻页）：由本页所在的 PageScrollView
+                在按下点落在本带上时不接管纵向拖动，见 PageScrollView#setVerticalDragCaptor。
             -->
             <FrameLayout
                 android:id="@+id/chart_resize_handle"
                 android:layout_width="match_parent"
-                android:layout_height="@dimen/space_xl">
+                android:layout_height="@dimen/chart_resize_band_height">
 
                 <View
                     android:layout_width="@dimen/chart_resize_bar_width"

@@ -75,6 +75,17 @@ public class UiSettingsFragment extends Fragment implements ConfigKeyRow.Host {
     }
 
     /**
+     * 卡头标题去掉段标编号（「[4] 界面」→「界面」）。
+     *
+     * <p>编号是给 {@code profile.conf} 的段标对齐用的，定义里必须留着
+     * （{@code check_params.py} 断言分组标题带「[N]」，且 profile.conf 段标由它派生）；
+     * 但本页只有这一组，编号在这里只是噪音，显示时去掉。
+     */
+    private static String stripSectionNumber(@NonNull String title) {
+        return title.replaceFirst("^\\[\\d+\\]\\s*", "");
+    }
+
+    /**
      * 本页要渲染的键（按定义顺序，不含 role=master 的键——{@code group.keys} 本就不含）。
      * 空列表表示定义里没有这个分组（定义被改坏或换版本），此时页面给出空态而不是静默留白。
      */
@@ -164,8 +175,8 @@ public class UiSettingsFragment extends Fragment implements ConfigKeyRow.Host {
                 continue;
             }
             KeyMeta master = group.master == null ? null : store.key(group.master);
-            ConfigGroupBinder binder = ConfigGroupBinder.create(inflater, content, group.title,
-                    master, keyMetas, this);
+            ConfigGroupBinder binder = ConfigGroupBinder.create(inflater, content,
+                    stripSectionNumber(group.title), master, keyMetas, this);
             content.addView(binder.card());
             groups.add(binder);
             rows.addAll(binder.rows());

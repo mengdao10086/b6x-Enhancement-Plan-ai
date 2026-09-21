@@ -24,6 +24,11 @@ import androidx.recyclerview.widget.RecyclerView;
  *
  * <p>不命中的触摸一律返回 false，正常滚动、点击、长按全部照旧。
  *
+ * <p><b>抓住滑块拖动期间禁用父容器拦截</b>（{@code requestDisallowInterceptTouchEvent}）：
+ * 页面根在外层 ViewPager2 的横向 RecyclerView 里，纵向拖动只要带一点横向位移，就可能被它当成
+ * "用户在翻页"把事件流拦走——表现为"按着滚动条拖，页面却横着翻了过去"。按下命中窄带时禁掉，
+ * 抬起/取消时恢复；不命中的触摸不动这个开关。
+ *
  * <p>代价（真机需确认）：右边缘窄带内的普通拖拽会被吃掉；系统手势导航若占用了最外侧边缘，
  * 实际可按住的区域会从窄带内侧开始。
  */
@@ -67,6 +72,10 @@ public final class ScrollbarDrag {
                         if (track.usable <= 0f) {
                             return false;   // 无滚动余量（内容不满一屏）：没有可拖的东西
                         }
+                        // 抓住滑块期间不让父容器（外层 ViewPager2 的横向 RecyclerView）插手中断
+                        if (v.getParent() != null) {
+                            v.getParent().requestDisallowInterceptTouchEvent(true);
+                        }
                         grabOffset = track.grabOffsetAt(event.getY());
                         dragging = true;
                         v.scrollBy(0, track.offsetAt(event.getY(), grabOffset) - track.offset);
@@ -84,6 +93,10 @@ public final class ScrollbarDrag {
                             return false;
                         }
                         dragging = false;
+                        // 交还给父容器，否则会一直禁到下一次按下
+                        if (v.getParent() != null) {
+                            v.getParent().requestDisallowInterceptTouchEvent(false);
+                        }
                         return true;
                     default:
                         return false;

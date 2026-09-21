@@ -6,8 +6,15 @@
       每个键都整行独占（由 ConfigKeyRow 向 FlowWrapLayout 声明）：参数之间不再并排，
       并排/换行只发生在键内部的字段之间（config_key_control）。
       desc / 单位说明 / 状态文字放第一行下方，宽度 wrap_content：短时只有文字那么宽，长时自然折行。
-      switch 键的开关靠第一行末尾的 weight 贴到行尾。
       "未生效"的标注在分组卡头做一次（见 item_config_group），行内只压暗不重复标注。
+
+    参数名的对齐（两种键型统一走一套）：
+      · 参数名装在一个定高 @dimen/field_height(49dp) 的盒子里、盒内垂直居中，盒子在行内贴顶——
+        于是参数名的中心与「同一行第一个输入框」的中心重合。不能直接让行内居中：输入框下面还有
+        说明行，按整行居中会把参数名一起压低（要求"不含说明内容的高度"）。
+      · 控制区（输入框 / 开关）用 Space + weight 顶到行尾：参数内容输入框右侧对齐，
+        参数名留在左边、宽度由内容决定。用 weight 而不是让参数名吃满行还有一层原因——
+        path 键的输入框是 MATCH_PARENT（吃掉本键行剩余宽），参数名一旦吃掉余量它就没宽度了。
 -->
 <LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
     android:layout_width="wrap_content"
@@ -21,12 +28,24 @@
         android:gravity="center_vertical"
         android:orientation="horizontal">
 
-        <TextView
-            android:id="@+id/config_key_label"
+        <FrameLayout
             android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
-            android:textColor="@color/app_on_surface"
-            android:textSize="@dimen/text_body" />
+            android:layout_height="@dimen/field_height"
+            android:layout_gravity="top">
+
+            <TextView
+                android:id="@+id/config_key_label"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_gravity="center_vertical"
+                android:textColor="@color/app_on_surface"
+                android:textSize="@dimen/text_body" />
+        </FrameLayout>
+
+        <Space
+            android:layout_width="0dp"
+            android:layout_height="1dp"
+            android:layout_weight="1" />
 
         <com.example.waspwingtempctrl.ui.FlowWrapLayout
             android:id="@+id/config_key_control"

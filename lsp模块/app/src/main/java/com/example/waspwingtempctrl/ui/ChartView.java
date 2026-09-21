@@ -37,7 +37,9 @@ import java.util.List;
 public class ChartView extends View {
 
     // ---- 口径常量（CSS px → dp，绘制时乘 density）----
-    private static final int PAD_H_DP = 36;          // padL = padR = 36
+    // 左右内边距不是定值：按本次刻度文字实测宽 + TICK_GAP_DP 现算（见 applyAxisPads），
+    // 两侧不留固定空白，绘图区能多宽就多宽
+    private static final int TICK_GAP_DP = 4;        // 刻度数字与绘图区左沿 / 画布右沿之间的间隙
     private static final int PAD_T_DP = 24;          // 上内边距 24：绘图区整体下移 8dp
     private static final int PAD_B_DP = 8;           // 下内边距 8：与 PAD_T 之和仍是 32，绘图区高度不变、只整体下移
     private static final float LINE_WIDTH_DP = 1.6f; // 折线
@@ -78,10 +80,14 @@ public class ChartView extends View {
     private String titleLeft;
     private String titleRight;
     private float fPadL;
+    private float fPadR;
     private float fPadT;
     private float fW;
     private float fH;
     private float fSeamY;
+    /** 两个轴标题的绘制 x：左标题左沿 = 最左那条刻度数字的左沿，右标题右沿 = 最右那条的右沿。 */
+    private float titleLeftX;
+    private float titleRightX;
     private float[] gridY;
     private String[] gridText;
     private String[] rightText;
@@ -230,14 +236,11 @@ public class ChartView extends View {
         if (w <= 0 || h <= 0) {
             return;
         }
-        float padH = PAD_H_DP * density;
         float padT = PAD_T_DP * density;
         float padB = PAD_B_DP * density;
-        fPadL = padH;
         fPadT = padT;
-        fW = w - 2f * padH;
         fH = h - padT - padB;
-        if (fW <= 8f * density || fH <= 8f * density) {
+        if (fH <= 8f * density) {
             return;
         }
         // 接缝（转速圆点允许下越界的下限）：仍以绘图区下沿为基准外扩，但再被画布下沿收住，
@@ -297,8 +300,50 @@ public class ChartView extends View {
         }
 
         buildGrid(lAxis, rAxis);
+        // 左右内边距要等刻度文字算好才能量（buildGrid 只依赖上下内边距，与它无关）
+        applyAxisPads(w);
+        if (fW <= 8f * density) {
+            gridY = null;   // 窄到画不了：连网格一起撤掉，别只留一堆横线
+            return;
+        }
         buildPaths(win, lAxis, rAxis);
         buildMarkers(win, lAxis, rAxis);
+    }
+
+    /**
+     * 定左右内边距与两个轴标题的绘制位置：<b>两侧只留刻度数字的宽度</b>。
+     *
+     * <p>padL = 最宽的那条左轴刻度数字 + {@value #TICK_GAP_DP}dp，padR 同理取右侧制冷数字；
+     * 没有右轴时不占宽。原来两侧各写死 36dp，比数字实际所需宽出一截，白占绘图区。
+     *
+     * <p>两个轴标题都收进"数字块"里：左标题左沿与最左那条数字的左沿平齐、右标题右沿与最右那条
+     * 数字的右沿平齐（纵向仍在绘图区上方，横向允许向右/左越进曲线区，口径见 逻辑说明.md 的
+     * 「曲线」一节〈双纵轴〉——标题不挤压曲线空间）。
+     *
+     * <p>量的都是绘制用字号（{@value #TICK_TEXT_DP}sp），故这里对两支画笔先设一次字号，
+     * 免得量到 onDraw 上一帧留下的字号（占位文字用的是 {@value #EMPTY_TEXT_DP}sp）。
+     */
+    private void applyAxisPads(int w) {
+        float gap = TICK_GAP_DP * density;
+        tickPaint.setTextSize(TICK_TEXT_DP * density);
+        axisTextPaint.setTextSize(TICK_TEXT_DP * density);
+        float leftMax = 0f;
+        if (gridText != null) {
+            for (String text : gridText) {
+                leftMax = Math.max(leftMax, tickPaint.measureText(text));
+            }
+        }
+        float rightMax = 0f;
+        if (rightText != null) {
+            for (String text : rightText) {
+                rightMax = Math.max(rightMax, axisTextPaint.measureText(text));
+            }
+        }
+        fPadL = leftMax + gap;
+        fPadR = rightMax > 0f ? rightMax + gap : gap;
+        fW = w - fPadL - fPadR;
+        titleLeftX = fPadL - gap - leftMax;
+        titleRightX = fPadL + fW + gap + rightMax;
     }
 
     /** 轴数据范围（未 padding）。{@code axisOnly} 决定是否叠加转速下限门槛。 */
@@ -560,16 +605,20 @@ public class ChartView extends View {
         axisTextPaint.setTextSize(TICK_TEXT_DP * density);
         for (int i = 0; i < gridY.length; i++) {
             canvas.drawLine(fPadL, gridY[i], fPadL + fW, gridY[i], gridPaint);
-            canvas.drawText(gridText[i], fPadL - 4f * density, gridY[i] + 3f * density, tickPaint);
+            canvas.drawText(gridText[i], fPadL - TICK_GAP_DP * density, gridY[i] + 3f * density, tickPaint);
         }
         if (rightText != null) {
+            float rightX = fPadL + fW + TICK_GAP_DP * density;
             for (int i = 0; i < rightText.length; i++) {
-                canvas.drawText(rightText[i], fPadL + fW + 4f * density,
-                        gridY[i] + 3f * density, axisTextPaint);
+                canvas.drawText(rightText[i], rightX, gridY[i] + 3f * density, axisTextPaint);
             }
-            canvas.drawText(titleRight, fPadL + fW + 4f * density, fPadT - 7f * density, axisTextPaint);
+            // 右轴标题右沿与右侧刻度数字的右沿平齐（数字是左对齐的，右沿要按数字宽算）
+            axisTextPaint.setTextAlign(Paint.Align.RIGHT);
+            canvas.drawText(titleRight, titleRightX, fPadT - 7f * density, axisTextPaint);
+            axisTextPaint.setTextAlign(Paint.Align.LEFT);
         }
-        canvas.drawText(titleLeft, 2f * density, fPadT - 7f * density, axisTextPaint);
+        // 左轴标题左沿与左侧刻度数字的左沿平齐（数字是右对齐的，左沿按最宽那条算）
+        canvas.drawText(titleLeft, titleLeftX, fPadT - 7f * density, axisTextPaint);
 
         // 2) 折线：先左轴系列，再右轴系列（后画者压先画者）
         if (paths != null) {

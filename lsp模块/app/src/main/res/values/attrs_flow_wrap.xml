@@ -8,7 +8,7 @@
     <declare-styleable name="FlowWrapLayout">
         <!--
             行距（上下两行之间的间距）。缺省 = dimens.xml 的 space_m，即不写该属性时行为与从前一致。
-            存在的意义：图例要把两行之间的间距减半，而列距、行内边距都要保持不变，
+            存在的意义：图例要把两行之间的间距压到 1/4，而列距、行内边距都要保持不变，
             没有这个属性就只能整块换掉容器或用空格凑间距。
         -->
         <attr name="flowRowGap" format="dimension" />

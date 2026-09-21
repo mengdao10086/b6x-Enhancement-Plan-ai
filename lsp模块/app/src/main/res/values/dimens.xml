@@ -46,8 +46,11 @@
     <dimen name="title_pad_top">7dp</dimen>
     <dimen name="title_action_size">28dp</dimen>
 
-    <!-- 滚动条：所有可滚动视图统一加粗并常显（取消自动淡出），配合 ui/ScrollbarDrag 才能按住拖动 -->
-    <dimen name="scrollbar_size">6dp</dimen>
+    <!--
+        滚动条：所有可滚动视图统一加粗并常显（取消自动淡出），配合 ui/ScrollbarDrag 才能按住拖动。
+        宽度取原 6dp 的 2/3 = 4dp：拖动命中区另有 8dp 余量（ScrollbarDrag），窄一点更好按准内容。
+    -->
+    <dimen name="scrollbar_size">4dp</dimen>
 
     <!-- 日志页 -->
     <dimen name="log_line_spacing">2dp</dimen>

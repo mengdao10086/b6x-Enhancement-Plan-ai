@@ -12,8 +12,10 @@
     展开三角用 ImageView 承载矢量图标（drawable/ic_triangle.xml）——「▸/▾」字符的字形度量会把
     三角顶部裁掉，同 item_config_group.xml 的处理。
     滚动条常显（fadeScrollbars=false）+ 加粗到 @dimen/scrollbar_size，配合 ui/ScrollbarDrag 才能按住拖动。
+    页面根是 ui/PageScrollView：曲线区把画布下沿拖柄登记为"纵向拖动让给它"的子视图，
+    该带子上的纵向拖动才不会先被本容器当成滚页面抢走（横向仍由外层 ViewPager2 翻页）。
 -->
-<ScrollView xmlns:android="http://schemas.android.com/apk/res/android"
+<com.example.waspwingtempctrl.ui.PageScrollView xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:app="http://schemas.android.com/apk/res-auto"
     android:id="@+id/config_scroll"
     android:layout_width="match_parent"
@@ -194,4 +196,4 @@
         </com.google.android.material.card.MaterialCardView>
 
     </LinearLayout>
-</ScrollView>
+</com.example.waspwingtempctrl.ui.PageScrollView>

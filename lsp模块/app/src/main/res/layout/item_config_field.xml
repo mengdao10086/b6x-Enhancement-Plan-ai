@@ -7,9 +7,15 @@
 
     宽度不写死：ConfigKeyRow 量出像素宽再回写 layout_width（见 measureFieldWidth），
     多个字段才能在同一键内自行并排/换行；这里给 wrap_content 只是"未被回写时"的兜底。
-    高度写死 @dimen/field_height：Material OutlinedBox 默认高约 56dp，不给死压不下来；
-    内层 EditText 的 minHeight 与垂直内边距同步收小，16sp 文字才放得进压缩后的框（同日志搜索框）。
-    输入文本右对齐（hint 仍在左上）：数值右对齐后末位对齐，多字段并排时更好比长短。
+    高度写死 @dimen/field_height：Material OutlinedBox 默认高约 56dp，不给死压不下来。
+
+    内层 EditText（宽度由 ConfigKeyRow 回写，高度撑满整框）：
+      · 文字水平居中：M3 把 EditText 的 gravity 原样用于占位说明，并把它的水平分量用于浮起说明
+        （TextInputLayout#setEditText 里 collapsedGravity = (gravity & ~VERTICAL) | CENTER_VERTICAL），
+        故一处 gravity=center 同时让「值」与「说明」都居中，且宽度小于另一者时居中效果自然成立。
+      · 左右内边距压到 @dimen/field_radius(8dp)：M3 默认 16dp，收掉的那 8dp 全给可用内容宽，
+        圆角 8dp 之外不再留空白（说明的可用宽也跟着变宽，见 calculateCollapsedTextBounds）。
+      · 上下内边距不对称：正文在「说明下沿 → 框底」里居中，理由与算式见 <dimen/config_field_pad_top>。
 -->
 <LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:app="http://schemas.android.com/apk/res-auto"
@@ -59,14 +65,16 @@
         <com.google.android.material.textfield.TextInputEditText
             android:id="@+id/config_field_input"
             android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:gravity="end|center_vertical"
+            android:layout_height="match_parent"
+            android:gravity="center"
             android:imeOptions="actionDone"
             android:includeFontPadding="false"
             android:inputType="number"
             android:maxLines="1"
             android:minHeight="0dp"
-            android:paddingTop="@dimen/space_xs"
+            android:paddingStart="@dimen/field_radius"
+            android:paddingTop="@dimen/config_field_pad_top"
+            android:paddingEnd="@dimen/field_radius"
             android:paddingBottom="@dimen/space_xs"
             android:textSize="@dimen/config_field_text_size" />
     </com.google.android.material.textfield.TextInputLayout>

@@ -9,8 +9,17 @@
     <!-- 档位按钮最小高度（MaterialButton 默认 48dp 太占高，档位行要紧凑成一行） -->
     <dimen name="chart_chip_min_height">32dp</dimen>
 
-    <!-- 图例行距 = 配置页键行行距 space_m 的一半：图例是"轻量开关"，两行之间不必留那么宽 -->
-    <dimen name="chart_legend_row_gap">6dp</dimen>
+    <!--
+        图例行距：配置页键行行距 space_m(12dp) 的 1/4（12 → 6 → 3dp，两次各压一半）。
+        图例是"轻量开关"，两行之间不必留那么宽；列距（space_m）与图例项自身的高度都不动。
+    -->
+    <dimen name="chart_legend_row_gap">3dp</dimen>
+
+    <!--
+        卡内纵向三段（档位行 → 图例 → 画布）之间的间距，两处共用同一个值（原为 space_s 与 space_xs）。
+        取 space_xs(4dp) 的一半：图例项自身还有约 8dp 的行内空白，再加 4dp 视觉上就散了。
+    -->
+    <dimen name="chart_row_gap">2dp</dimen>
 
     <!--
         曲线画布的默认高度，也是进页面时的初始高度；运行时可由画布下沿的拖柄在
@@ -24,8 +33,14 @@
     <dimen name="chart_canvas_min_height">120dp</dimen>
     <dimen name="chart_canvas_max_height">480dp</dimen>
 
-    <!-- 画布下沿拖柄的横条：32×4dp、圆角 2dp（触控带尺寸用 space_xl，不在本文件另立一项） -->
-    <dimen name="chart_resize_bar_width">32dp</dimen>
+    <!-- 画布下沿拖柄的横条：160×4dp、圆角 2dp（横条拉到 5 倍宽，长度一眼可见可抓） -->
+    <dimen name="chart_resize_bar_width">160dp</dimen>
     <dimen name="chart_resize_bar_height">4dp</dimen>
     <dimen name="chart_resize_bar_radius">2dp</dimen>
+
+    <!--
+        拖柄触控带高：整条即触控区，横条在其中居中，上下各留 (12 − 4) / 2 = 4dp。
+        原为 space_xl(24dp，上下各 10dp)——横条加长到 160dp 后不再需要那么厚的带子才按得住。
+    -->
+    <dimen name="chart_resize_band_height">12dp</dimen>
 </resources>

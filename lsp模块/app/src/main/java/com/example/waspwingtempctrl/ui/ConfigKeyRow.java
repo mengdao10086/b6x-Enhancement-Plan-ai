@@ -4,6 +4,8 @@ import android.content.Context;
 import android.content.res.Resources;
 import android.text.Editable;
 import android.text.InputType;
+import android.text.Layout;
+import android.text.TextPaint;
 import android.text.TextUtils;
 import android.text.TextWatcher;
 import android.util.TypedValue;
@@ -29,7 +31,9 @@ import com.google.android.material.textfield.TextInputEditText;
 import com.google.android.material.textfield.TextInputLayout;
 
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 
 /**
  * 一个配置键的行：switch / int / multi / path 四种 type 共用一份绑定逻辑。
@@ -40,10 +44,12 @@ import java.util.List;
  * <h3>形态（配合 {@link FlowWrapLayout}）</h3>
  * <ul>
  *   <li>每个键整行独占（向容器声明 fullLine）：参数之间不并排。</li>
- *   <li>第一行 = 参数名 + 输入框；键内多个字段的输入框宽度按内容实测
- *       （见 {@link #measureFieldWidth}），放不下由键内的 {@code config_key_control} 换行。</li>
- *   <li>switch 型键：参数名吃满整行（weight），开关才贴得到行尾。</li>
+ *   <li>第一行 = 参数名 + 输入框（输入框靠行尾，参数名留左，见 {@code item_config_row.xml}）；
+ *       键内多个字段的输入框宽度按内容实测（见 {@link #measureFieldWidth}），
+ *       放不下由键内的 {@code config_key_control} 换行。</li>
  *   <li>multi 键带 {@code fields[].bool} 的字段渲染成开关（值只有 0/1），其余字段仍是输入框。</li>
+ *   <li>path 型键：输入框吃掉本键行剩余宽，文本放不下时显示右半段，并在本次启动内记住
+ *       编辑时滚到的位置（见 {@link #PATH_SCROLL_X}）。</li>
  * </ul>
  *
  * <h3>什么时候落盘（三条规则）</h3>
@@ -66,6 +72,14 @@ final class ConfigKeyRow {
 
     /** 量输入框内容宽时多带的尾串：对应"两个小写字符"的余量（小写字母最宽也不过如此）。 */
     private static final String CONTENT_WIDTH_TAIL = "aa";
+
+    /**
+     * path 键的横向显示位置（键名 → {@code scrollX}），进程内存活。
+     *
+     * <p>为什么放在静态表里而不是行对象上：要求是"本次启动内保持"，而行对象随页面视图重建，
+     * 存字段上会被重建清掉。键数上限就是定义里的键数（53），不担心增长。
+     */
+    private static final Map<String, Integer> PATH_SCROLL_X = new HashMap<>();
 
     /** 行与外界的交互面（由 ConfigFormFragment / UiSettingsFragment 实现）。 */
     interface Host {
@@ -153,18 +167,24 @@ final class ConfigKeyRow {
     /** true 时忽略控件回调：程序化回填值不该被当成用户改动作业。 */
     private boolean suppressChange;
 
+    /**
+     * @param groupShowsUiOnly 本组卡头已经挂出「界面自用，守护进程不读取」时传 true：
+     *                         该标注整组只出现一次，行内不再重复
+     */
     static ConfigKeyRow create(@NonNull LayoutInflater inflater, @NonNull ViewGroup parent,
-                               @NonNull KeyMeta meta, @NonNull ConfigKeyRow.Host host) {
+                               @NonNull KeyMeta meta, @NonNull ConfigKeyRow.Host host,
+                               boolean groupShowsUiOnly) {
         View root = inflater.inflate(R.layout.item_config_row, parent, false);
         if (parent instanceof FlowWrapLayout) {
             // 每个键整行独占：参数之间不并排（并排只发生在键内部的字段之间）。
-            // 键行铺满行宽还有两个前提：switch 键的开关靠行尾、多字段键的内部换行有确定的可用宽。
+            // 键行铺满行宽还有两个前提：控制区靠行尾、多字段键的内部换行有确定的可用宽。
             ((FlowWrapLayout) parent).setFullLine(root, true);
         }
-        return new ConfigKeyRow(inflater, root, meta, host);
+        return new ConfigKeyRow(inflater, root, meta, host, groupShowsUiOnly);
     }
 
-    private ConfigKeyRow(LayoutInflater inflater, View root, KeyMeta meta, Host host) {
+    private ConfigKeyRow(LayoutInflater inflater, View root, KeyMeta meta, Host host,
+                         boolean groupShowsUiOnly) {
         this.root = root;
         this.meta = meta;
         this.host = host;
@@ -185,7 +205,8 @@ final class ConfigKeyRow {
         }
 
         List<String> rowNotes = new ArrayList<>();
-        if (!meta.daemonConsumes) {
+        if (!meta.daemonConsumes && !groupShowsUiOnly) {
+            // 组内所有键都不被守护进程读取时，这句在卡头标一次（见 ConfigGroupBinder），行内不再重复
             rowNotes.add(root.getContext().getString(R.string.config_ui_only));
         }
         if (meta.guardrail && !meta.rangeNote.isEmpty()) {
@@ -198,7 +219,6 @@ final class ConfigKeyRow {
         }
 
         if (meta.isSwitch()) {
-            makeLabelFillRow();
             toggle.setVisibility(View.VISIBLE);
             toggle.setOnCheckedChangeListener((button, checked) -> {
                 if (suppressChange) {
@@ -215,20 +235,6 @@ final class ConfigKeyRow {
     @NonNull
     View view() {
         return root;
-    }
-
-    /**
-     * 开关型键：参数名吃掉整行剩余宽度，把开关顶到行尾（像设置项那样）。
-     *
-     * <p>用 weight 而不是"夹一个占位 Space"：本行是整行独占（{@link FlowWrapLayout} 按行宽
-     * EXACTLY 测量），父容器一定有多余宽度可分，weight 的行为是确定的；wrap_content 的行
-     * 有没有富余则取决于父容器给的测量模式，结果不确定。
-     */
-    private void makeLabelFillRow() {
-        LinearLayout.LayoutParams params = (LinearLayout.LayoutParams) labelView.getLayoutParams();
-        params.width = 0;
-        params.weight = 1f;
-        labelView.setLayoutParams(params);
     }
 
     @NonNull
@@ -329,9 +335,15 @@ final class ConfigKeyRow {
 
         input.addTextChangedListener(new Watcher());
         input.setOnFocusChangeListener((v, hasFocus) -> {
-            if (!hasFocus) {
-                commit(true);
+            if (hasFocus) {
+                return;
             }
+            if (meta.isPath()) {
+                // 编辑结束：记下滚到的位置（本次启动内有效）。必须在 commit 之前取，
+                // commit 会回填值、把显示位置带回左边
+                PATH_SCROLL_X.put(meta.key, input.getScrollX());
+            }
+            commit(true);
         });
         input.setOnEditorActionListener((v, actionId, event) -> {
             v.clearFocus();
@@ -358,12 +370,17 @@ final class ConfigKeyRow {
     }
 
     /**
-     * 输入框的自适应宽度 = max(hint 宽, 内容宽 + {@value #CONTENT_WIDTH_TAIL} 的宽度)，
+     * 输入框的自适应宽度 = max(说明宽, 内容宽 + {@value #CONTENT_WIDTH_TAIL} 的宽度)，
      * 再钳进 [下限, 上限]。path 键不走这里（它按 MATCH_PARENT 吃掉本行剩余宽，见 {@link #applyFieldWidth}）。
      *
-     * <p><b>为什么要量两次</b>：hint 只在输入框为空时占位（贴在里面），内容宽要等 hint 浮起后
-     * 才算数 —— 同一份控件量不出这两个宽度，只能各写一次文本、各量一次，取大者。
-     * 内容里多带两个小写字符，是给"再多敲一位"留出可见余量。
+     * <p><b>为什么说明要单独量</b>：Material 的 TextInputLayout 不参与说明的测宽
+     * （{@code onMeasure} 就是 {@code LinearLayout.onMeasure}，框宽只由 EditText 自己撑出来），
+     * 说明只是"画"在框里/框顶，画不下就自己打省略号——量 {@code text=""} 的框量不到说明，
+     * 说明经常被截成"每周…"。故这里按说明文字自己算一次（见 {@link #measureHintWidth}），
+     * 与内容宽取大者。
+     *
+     * <p><b>为什么要量两次</b>：说明与内容不会同时占位，同一份控件量不出这两个宽度，
+     * 只能各量一次取大者。内容里多带两个小写字符，是给"再多敲一位"留出可见余量。
      *
      * <p><b>为什么不按当前值实时算</b>：值一变宽度就跟着变，边输边跳——旧 WebUI 的
      * "改参不被撑宽"就是这个意思。宽度只在建行与值回填（{@link #applyValue}）时定。
@@ -372,15 +389,16 @@ final class ConfigKeyRow {
         Resources res = field.layout.getResources();
         int min = res.getDimensionPixelSize(R.dimen.config_field_min_width);
         String text = field.text();
+        CharSequence hint = field.layout.getHint();
+        String hintText = hint == null ? "" : hint.toString();
 
         // 量宽要临时改写输入框文本，必须屏蔽回调（否则等于程序化了用户输入），量完恢复原文本。
         // suppressChange 存旧值再恢复：调用方（applyValue 的循环）可能已开着抑制，不能一把关掉。
         boolean previous = suppressChange;
         suppressChange = true;
-        int hintWidth;
+        int hintWidth = hintText.isEmpty() ? 0 : measureHintWidth(field, hintText);
         int contentWidth;
         try {
-            hintWidth = measureWithText(field, "");
             contentWidth = measureWithText(field, text + CONTENT_WIDTH_TAIL);
         } finally {
             field.input.setText(text);
@@ -393,6 +411,21 @@ final class ConfigKeyRow {
         }
         int max = res.getDimensionPixelSize(R.dimen.config_field_max_width);
         return Math.max(min, Math.min(width, max));
+    }
+
+    /**
+     * 说明文字所需的框宽 = 说明文字宽 + 输入框左右内边距。
+     *
+     * <p>用输入框自己的画笔量文字（占位说明用的就是它的字号与字重，见
+     * {@code TextInputLayout#setEditText}），而不是"把说明写进输入框再量框"——数字型输入框带
+     * 数字过滤器，程序化写进去的非数字文本未必留得住，量出来可能是个空框。
+     * 内边距取输入框当前值（就是 item_config_field.xml 里写的那两个），
+     * 因为说明的可用宽正是"框宽 − 内边距"。
+     */
+    private static int measureHintWidth(Field field, String hintText) {
+        TextPaint paint = field.input.getPaint();
+        return (int) Math.ceil(paint.measureText(hintText))
+                + field.input.getPaddingStart() + field.input.getPaddingEnd();
     }
 
     /** 把 {@code text} 临时写进输入框，让 OutlinedBox 自己量一次宽（内边距与浮起 hint 由它处理）。 */
@@ -410,6 +443,31 @@ final class ConfigKeyRow {
             return;
         }
         applyFieldWidth(field);
+    }
+
+    /**
+     * 把 path 输入框的横向显示位置摆到「上次编辑结束时滚到的位置」，没有记录时摆到最右
+     * （路径放不下时显示右半段——看得见文件名比看得见 <code>/storage/emulated/0/…</code> 有用）。
+     *
+     * <p>为什么要 {@code post} 一帧：能滚多远由新文本的 {@code Layout} 与视图宽决定，
+     * {@code setText} 当帧两者都还没算出来。摆的位置按"记得的位置"与"能滚的上限"取小，
+     * 换了更短的路径也不会滚过头留白。
+     */
+    private void restorePathScroll() {
+        if (!meta.isPath() || fields.isEmpty()) {
+            return;
+        }
+        final TextInputEditText input = fields.get(0).input;
+        final Integer remembered = PATH_SCROLL_X.get(meta.key);
+        input.post(() -> {
+            Layout layout = input.getLayout();
+            int viewWidth = input.getWidth();
+            if (layout == null || viewWidth <= 0) {
+                return;
+            }
+            int maxScroll = Math.max(0, layout.getWidth() - viewWidth);
+            input.scrollTo(remembered == null ? maxScroll : Math.min(remembered, maxScroll), 0);
+        });
     }
 
     /**
@@ -474,6 +532,7 @@ final class ConfigKeyRow {
                 String before = field.text();
                 field.setValue(value.text());
                 remeasureIfTextChanged(field, before);
+                restorePathScroll();
             } else {
                 for (int i = 0; i < fields.size(); i++) {
                     Field field = fields.get(i);

@@ -49,6 +49,20 @@
                 android:text="@string/config_badge_inactive"
                 android:visibility="gone" />
 
+            <!--
+                "界面自用，守护进程不读取"：与"未生效"同一位置、同一套样式，也是整组只标一次。
+                本组（全部键都不被守护进程读取，如设置页的界面组）由 ConfigGroupBinder 显示它，
+                组内各行不再各贴一遍。
+            -->
+            <TextView
+                android:id="@+id/config_group_ui_badge"
+                style="@style/Widget.B6XTempCtrl.Badge"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginStart="@dimen/space_s"
+                android:text="@string/config_ui_only"
+                android:visibility="gone" />
+
             <com.google.android.material.materialswitch.MaterialSwitch
                 android:id="@+id/config_group_master"
                 android:layout_width="wrap_content"
@@ -88,6 +102,7 @@
             android:paddingTop="@dimen/space_s"
             android:paddingEnd="@dimen/card_padding"
             android:paddingBottom="@dimen/card_padding"
-            android:visibility="gone" />
+            android:visibility="gone"
+            app:flowRowGap="@dimen/config_key_row_gap" />
     </LinearLayout>
 </com.google.android.material.card.MaterialCardView>

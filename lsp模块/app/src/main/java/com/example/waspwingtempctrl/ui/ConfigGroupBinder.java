@@ -29,6 +29,9 @@ import java.util.List;
  * <p>"未生效"徽标只在本组卡头显示一次（行内不再逐键标注）：本组只要有一个键的依赖未满足就显示，
  * 并在组内逐行压暗，指向关系靠"压暗的行 + 组头一个徽标"表达，避免每行都挂一枚徽标。
  *
+ * <p>"界面自用，守护进程不读取"同属"整组一句话"的标注，也只在卡头出现一次：本组只要有键的
+ * {@code daemonConsumes} 为 false（设置页的界面组即如此）就在卡头显示，行内这些键不再逐条重复。
+ *
  * <p>默认全部折叠：配置页 4 组 43 键（另加 4 个组头开关），全展开时长列表滚到目标键要翻很久；
  * 折叠态一屏能看清全部分组与总开关，先开总开关再进组的顺序也更贴合参数之间的依赖关系。
  * 「[4] 界面」那 6 个键在独立设置页（{@link UiSettingsFragment}），不在本页渲染。
@@ -42,6 +45,7 @@ final class ConfigGroupBinder {
     private final LinearLayout body;
     private final TextView titleView;
     private final TextView badgeView;
+    private final TextView uiBadgeView;
     private final ImageView arrowView;
     private final View divider;
     private final MaterialSwitch masterSwitch;
@@ -67,6 +71,7 @@ final class ConfigGroupBinder {
         body = card.findViewById(R.id.config_group_body);
         titleView = card.findViewById(R.id.config_group_title);
         badgeView = card.findViewById(R.id.config_group_badge);
+        uiBadgeView = card.findViewById(R.id.config_group_ui_badge);
         arrowView = card.findViewById(R.id.config_group_arrow);
         divider = card.findViewById(R.id.config_group_divider);
         masterSwitch = card.findViewById(R.id.config_group_master);
@@ -85,8 +90,20 @@ final class ConfigGroupBinder {
             });
         }
 
+        // 组里有"界面自用"的键（如设置页的界面组）→ 这句只在卡头标一次，行内不再重复。
+        // 判据是"有任何一个键不被守护进程读取"而不是"全部都不被读取"：界面组里
+        // UI_BACK_HIDE 是要被 C 端读的，按"全部"判就一次都标不出来。
+        boolean hasUiOnly = false;
         for (KeyMeta keyMeta : keyMetas) {
-            ConfigKeyRow row = ConfigKeyRow.create(inflater, body, keyMeta, host);
+            if (!keyMeta.daemonConsumes) {
+                hasUiOnly = true;
+                break;
+            }
+        }
+        uiBadgeView.setVisibility(hasUiOnly ? View.VISIBLE : View.GONE);
+
+        for (KeyMeta keyMeta : keyMetas) {
+            ConfigKeyRow row = ConfigKeyRow.create(inflater, body, keyMeta, host, hasUiOnly);
             body.addView(row.view());
             rows.add(row);
         }
