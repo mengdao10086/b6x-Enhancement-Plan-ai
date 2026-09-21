@@ -10,16 +10,25 @@
     高度写死 @dimen/field_height：Material OutlinedBox 默认高约 56dp，不给死压不下来。
 
     内层 EditText（宽度由 ConfigKeyRow 回写，高度撑满整框）：
-      · 文字水平居中：M3 把 EditText 的 gravity 原样用于占位说明，并把它的水平分量用于浮起说明
-        （TextInputLayout#setEditText 里 collapsedGravity = (gravity & ~VERTICAL) | CENTER_VERTICAL），
-        故一处 gravity=center 同时让「值」与「说明」都居中，且宽度小于另一者时居中效果自然成立。
+      · 说明（浮起提示）贴圆角、值仍居中：浮起说明的位置由 material 两处决定——
+        可用框 = [框左 + editText.getPaddingLeft(), 框右 − editText.getPaddingRight()]
+        （TextInputLayout.calculateCollapsedTextBounds 的 OUTLINED 分支），框内对齐取其水平分量
+        （setEditText / onLayout 里 setCollapsedTextGravity((gravity & ~VERTICAL) | CENTER_VERTICAL)，
+        水平分量原样带入）。所以取 gravity="start|center_vertical"：说明起笔落在框左 8dp =
+        圆角半径 @dimen/field_radius 刚结束处，不再像 gravity="center" 那样被居中、两头都留白
+        （框越宽留白越多）。「值」的水平居中改由 android:textAlignment="center" 承担
+        （只决定文本行对齐，不进 getGravity()），两者互不牵动。
+        说明可用宽 = 框宽 − 左右内边距，装不下时 material 打省略号——框宽下限由 ConfigKeyRow 的地板
+        保证（含说明宽），见 @dimen/config_field_min_width。
       · 左右内边距压到 @dimen/field_radius(8dp)：M3 默认 16dp，收掉的那 8dp 全给可用内容宽，
-        圆角 8dp 之外不再留空白（说明的可用宽也跟着变宽，见 calculateCollapsedTextBounds）。
-      · 上下内边距不对称（上 @dimen/config_field_pad_top 5dp / 下 @dimen/config_field_pad_bottom 3dp）：
-        EditText 高度 match_parent + gravity=center → 正文是在"去掉内边距后的内容区"（36 − 5 − 3 = 28dp）
-        里居中的，内边距只决定内容区的高与它的中心。行盒（16sp 约 18.75dp）中心 = (5 + 33) / 2 = 19dp：
-        比框的几何中心（18dp，参数名盒所在）低 1dp、比「说明下沿(8) → 框底(36)」的中点 22dp 高 3dp，
-        行盒顶 9.625dp / 底 28.375dp。算式与版面留白见 @dimen/config_field_pad_top。
+        圆角 8dp 之外不再留空白。它同时就是上面那个说明可用框的内缩量（8dp = 圆角半径），
+        所以这 8dp 再压就会让说明压到圆角上，不能动。
+      · 上下内边距不对称（上 @dimen/config_field_pad_top 6dp / 下 @dimen/config_field_pad_bottom 4dp）：
+        EditText 高度 match_parent + 垂直居中 → 正文是在"去掉内边距后的内容区"（36 − 6 − 4 = 26dp）
+        里居中的，内边距只决定内容区的高与它的中心。行盒（16sp 约 18.75dp）中心 = (6 + 32) / 2 = 19dp：
+        比框的几何中心（18dp，参数名盒所在）低 1dp = (6 − 4) / 2、比「说明下沿(9.375，说明行盒骑在框顶
+        边上的一半高) → 框底(36)」的中点 22.7dp 高 3.7dp，行盒顶 9.625dp / 底 28.375dp。
+        算式、留白与"余量最薄处"见 @dimen/config_field_pad_top。
       · scrollHorizontally：等于 setHorizontallyScrolling(true)——单行横向滚动的开关。不开时
         Layout 宽 == 视图宽，scrollX 恒为 0，path 键放不下的右半段（文件名）永远看不见。
         不用已废弃的 singleLine：它顺带改掉 maxLines 之外的行为，这里只需要横向可滚。
@@ -73,12 +82,13 @@
             android:id="@+id/config_field_input"
             android:layout_width="match_parent"
             android:layout_height="match_parent"
-            android:gravity="center"
+            android:gravity="start|center_vertical"
             android:imeOptions="actionDone"
             android:includeFontPadding="false"
             android:inputType="number"
             android:maxLines="1"
             android:minHeight="0dp"
+            android:textAlignment="center"
             android:paddingStart="@dimen/field_radius"
             android:paddingTop="@dimen/config_field_pad_top"
             android:paddingEnd="@dimen/field_radius"

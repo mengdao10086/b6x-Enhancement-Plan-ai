@@ -45,10 +45,11 @@ import java.util.concurrent.Executors;
  * 自检与渲染同源，不会各写一份数字。
  *
  * <h3>布局</h3>
- * 页面本身只是「@dimen/page_padding 内边距 + 重置栏 + 一张分组卡」，没有单独的布局文件：
+ * 页面本身只是「@dimen/page_padding 内边距 + 一张分组卡 + 重置栏」，没有单独的布局文件：
  * 分组卡由 {@link ConfigGroupBinder} 从 {@code item_config_group.xml} 生成，重置栏是
  * {@link ConfigResetBar}（自带布局），页面壳在 {@link #onCreateView} 里直接搭。
- * 重置栏按分组整体恢复出厂值，故放在参数卡之前——先能整体回退，再逐项微调。
+ * 重置栏按分组整体恢复出厂值，故放在参数卡之后——先调参数、再整组回退，
+ * 且表单的空态提示（无分组卡时）也在它上面。
  *
  * <p>边界同配置页（I3）：只经 {@link ConfigStore} 读写 {@code profile.conf}，不自己解析 assets。
  */
@@ -149,11 +150,15 @@ public class UiSettingsFragment extends Fragment implements ConfigResetBar.Host 
             return scroll;
         }
 
-        // 重置栏在参数卡之前。它不放键行（只有按钮），故配置页的键渲染自检不受影响
+        buildForm(inflater, content);
+
+        // 重置栏放在参数卡之后：进页面要看的是参数本身，整组回退是调完再退的收尾动作；
+        // 且 buildForm 的空态提示（定义里没有本组时没有分组卡）须留在它上面，故等表单铺完再追加。
+        // 与上方卡的间隙由该卡自带的上间距给出（view_config_reset_bar.xml，与分组卡同一标尺），此处不再补。
+        // 它不放键行（只有按钮），故配置页的键渲染自检不受影响
         //（自检数的是 ConfigKeyRow 与设置页键，见 ConfigFormFragment）。
         content.addView(ConfigResetBar.create(inflater, content, this).view());
 
-        buildForm(inflater, content);
         reloadAsync();
         return scroll;
     }

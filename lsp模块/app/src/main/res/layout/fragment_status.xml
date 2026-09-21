@@ -71,11 +71,12 @@
                     这 5 个按钮都是 M3 按钮样式，insetTop/insetBottom 各 4dp 会把可见圆角块上下各收 4dp，
                     故行间的可见空白 = margin + 8dp（调 margin 的观感与数值不成比例，细则见 dimens_status.xml）。
                     四处可见空白：
-                      · 部署状态文本 → 进度条：3dp，走 status_progress_gap（进度条无 inset，margin 即可见空白）
-                      · 进度条 → 行1：5dp，走 status_buttons_gap（上方不挨按钮，同理 margin 即可见空白，
-                        取 5dp 与行间对齐）
-                      · 行1 → 行2、行2 → 行3：各 5dp，走 status_button_row_gap
-                        （夹在两条按钮行之间，可见空白 = 值 + 8dp，故其取值为 -3dp，两行布局盒重叠 3dp）
+                      · 部署状态文本 → 进度条：0dp，走 status_progress_gap（进度条无 inset，margin 即所见）
+                      · 进度条 → 行1：5dp，走 status_buttons_gap（上方不挨按钮，同理 margin 即所见）
+                      · 行1 → 行2：3dp，走 status_button_row_gap（margin 取 -5dp）
+                      · 行2 → 行3：2dp，走 status_button_last_gap（margin 取 -6dp）
+                    后两处目标可见值不再相等，故各开一项；布局盒分别重叠 5dp / 6dp，
+                    均小于两侧内缩之和 8dp，两行圆角块之间仍留 3dp / 2dp，且上按钮圆角块的可点区不减少。
                 -->
                 <LinearLayout
                     android:layout_width="match_parent"
@@ -125,7 +126,7 @@
                     style="@style/Widget.Material3.Button.TextButton"
                     android:layout_width="wrap_content"
                     android:layout_height="wrap_content"
-                    android:layout_marginTop="@dimen/status_button_row_gap"
+                    android:layout_marginTop="@dimen/status_button_last_gap"
                     android:text="@string/status_action_uninstall"
                     android:textColor="@color/state_error" />
             </LinearLayout>

@@ -14,7 +14,9 @@
     <string name="chart_loading">读取中…</string>
     <string name="chart_info_path_fmt">路径：%1$s</string>
     <string name="chart_info_meta_fmt">大小：%1$s ｜ 修改时间：%2$s</string>
-    <string name="chart_info_parse_fmt">解析：%1$d 行 ｜ 跳过：%2$d 行 ｜ 窗口：%3$ds ｜ 行数上限：%4$d 行</string>
+    <!-- 「行数目标」= 环形覆盖保留的滚动行数 rollingMaxLines（同 ChartConfig 的回落提示口径）。
+         界面口径作「目标」，代码里它仍是硬上限（超出即丢行），两者只是说法不同。 -->
+    <string name="chart_info_parse_fmt">解析：%1$d 行 ｜ 跳过：%2$d 行 ｜ 窗口：%3$ds ｜ 行数目标：%4$d 行</string>
     <string name="chart_info_break_fmt">窗口内断联：%1$d 处 ｜ 真实断开合计 %2$d 秒（空白已按封顶值显示）</string>
     <string name="chart_size_fmt">%1$d 字节</string>
     <string name="chart_size_unknown">未知</string>

@@ -75,8 +75,9 @@
 
             <!--
                 高度显式给死（@dimen/field_height，与配置页输入框等高）才能压过 OutlinedBox
-                按内容算出的默认高。顶部间距取 space_s：压紧与上方日志文件卡之间的空白；
-                左右同样取 space_s，与正下方日志行（RecyclerView 同用 space_s）左边缘对齐。
+                按内容算出的默认高。顶部间距取 @dimen/log_filter_gap：压紧与上方日志文件卡之间的空白，
+                比值 6dp = space_s(8dp) 收 2dp（沿革见 dimens.xml 该值注释，单开以不动共用标尺）；
+                左右仍取 space_s，与正下方日志行（RecyclerView 同用 space_s）左边缘对齐。
             -->
             <com.google.android.material.textfield.TextInputLayout
                 android:id="@+id/log_filter_layout"
@@ -85,7 +86,7 @@
                 android:layout_height="@dimen/field_height"
                 android:layout_marginEnd="@dimen/space_s"
                 android:layout_marginStart="@dimen/space_s"
-                android:layout_marginTop="@dimen/space_s"
+                android:layout_marginTop="@dimen/log_filter_gap"
                 android:hint="@string/log_filter_hint"
                 app:endIconMode="clear_text"
                 app:boxCornerRadiusBottomEnd="@dimen/field_radius"

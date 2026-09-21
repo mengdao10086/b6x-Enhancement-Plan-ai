@@ -1,17 +1,22 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!--
-    参数重置栏（设置页内容顶部）。一张卡：标题 + 一行说明 + 一组「分组名」按钮。
+    参数重置栏（设置页内容末尾：在「界面」分组卡之后）。一张卡：标题 + 一行说明 + 一组「分组名」按钮。
     按钮由 ConfigResetBar 按 store.groups() 逐个生成（一个分组一个按钮），本文件只给容器：
     分组数量与组名都不在这里手抄，改定义不必改本文件。
     卡片样式来自主题 materialCardViewStyle（Widget.B6XTempCtrl.Card），本文件不写死颜色/圆角。
     按钮容器用 FlowWrapLayout：分组名在窄屏一行放不下，靠它自动换行（列距固定 @dimen/space_m，
     行距单独收到 @dimen/space_s —— 按钮之间的行距小于参数行之间的间距更紧凑）。
+
+    本卡自带 @dimen/space_m 上间距，与分组卡（item_config_group.xml 同用 space_m）同一标尺：
+    重置栏现在落在参数卡之后，卡与卡的间隙须由它自己给出。原在内容首位时无需此值——
+    那时与上方内容的间隙由紧邻分组卡的上间距代劳，本卡再加就是双份留白。
 -->
 <com.google.android.material.card.MaterialCardView xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:app="http://schemas.android.com/apk/res-auto"
     android:id="@+id/config_reset_card"
     android:layout_width="match_parent"
-    android:layout_height="wrap_content">
+    android:layout_height="wrap_content"
+    android:layout_marginTop="@dimen/space_m">
 
     <LinearLayout
         android:layout_width="match_parent"

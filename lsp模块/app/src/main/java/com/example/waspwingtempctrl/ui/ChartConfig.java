@@ -25,7 +25,8 @@ import java.util.List;
  *       {@code PID_COLD_RANGE} / {@code PERF_ENABLED} —— 一律经 {@link ConfigStore} 读
  *       （口径清单 §13）。字段缺项（如只写 {@code UI_CURVE_FILTER=15}）回落该字段在
  *       {@code assets/params.json} 里声明的默认值。</li>
- *   <li>{@code params.json} 的 {@code chart} 块（窗口档位/默认档位/滚动行数上限）——
+ *   <li>{@code params.json} 的 {@code chart} 块（窗口档位/默认档位/滚动行数目标——
+ *       文案作「目标」与 {@link #notes} 上屏的说法同源；代码里它仍是环形保留的硬上限）——
  *       {@link ConfigStore} 只暴露 {@code groups()/keys()/key()}，{@code chart} 不是键，
  *       故本类直接读该 asset（<b>本页唯一允许碰 assets 的地方，只读</b>）。
  *       读失败时回落已确认的常量，并把回落事实写进 {@link #notes}，不静默。</li>
@@ -168,7 +169,7 @@ final class ChartConfig {
             rollingMaxLines = FALLBACK_ROLLING_MAX_LINES;
             notes.add("params.json 的 chart 块读取失败（" + t.getClass().getSimpleName() + ": "
                     + t.getMessage() + "），已回落常量：档位 " + Arrays.toString(windowOptions)
-                    + "、默认 " + windowDefaultSec + "s、行数上限 " + rollingMaxLines);
+                    + "、默认 " + windowDefaultSec + "s、行数目标 " + rollingMaxLines);
         }
     }
 

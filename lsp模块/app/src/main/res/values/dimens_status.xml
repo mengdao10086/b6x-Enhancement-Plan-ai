@@ -3,20 +3,20 @@
 <resources>
 
     <!--
-        按钮行1 上方的间隔，只服务这一处：「进度条 → 按钮行1」。
+        按钮行1 上方的间隔，只服务这一处：「进度条 → 按钮行1」，目标可见空白 5dp。
         该处上下都不挨按钮：上方是文本与进度条，进度条只是一条 4dp 色带、不带 button inset，
-        所以本值就是该处的可见空白，可见空白 = 本值（与 status_button_row_gap 的口径差异见下一条）。
-        取 5dp 是刻意与行间对齐：行1→行2、行2→行3 的可见空白同样是 5dp（见 status_button_row_gap），
-        于是「内容 → 按钮」与「按钮之间」同节奏，三行按钮的疏密观感统一。
+        所以本值就是该处的可见空白，可见空白 = 本值（与下面两条行间项的口径差异见它们）。
+        取 5dp 而不随行间一起收紧：这是「内容 → 按钮」的过渡，留白比按钮之间略松，
+        上方才不至于与进度条粘成一块；行间两处（可见 3dp / 2dp）才是被压紧的节奏。
         沿革：space_m(12dp) → 7dp（3/5）→ 5dp（与第 2 行原引用的 space_s(8dp) 同收 2/3 时一并取整，
         原先分开的两个值合并成本项，space_s 的定义不能动、只换引用点）→ 一度取 2dp → 回到 5dp。
-        注意：按钮行1→行2、行2→行3 的间隔不走本项，见 status_button_row_gap；
+        注意：按钮行1→行2 走 status_button_row_gap、行2→行3 走 status_button_last_gap，都不走本项；
         同一行内相邻按钮之间的 marginStart 仍是 space_s，也不在本项口径内。
     -->
     <dimen name="status_buttons_gap">5dp</dimen>
 
     <!--
-        按钮行与行之间的间隔（行1→行2、行2→行3），三项按钮行节奏统一。
+        按钮行1 → 行2 的间隔，目标可见空白 3dp。行2 → 行3 的目标不同，见 status_button_last_gap。
         本项是 margin，不是可见空白——两者相差 8dp，换算见下。
         这几个按钮用的都是 material 的 M3 按钮样式（Widget.Material3.Button / .TextButton /
         .OutlinedButton，OutlinedButton 自身不设、经 parent=TextButton 继承），AAR 里三者都设了
@@ -24,32 +24,44 @@
         MaterialButtonHelper.wrapDrawableWithInset() 把背景 drawable 包成 InsetDrawable，
         于是按钮可见的圆角块比它的布局盒上下各小 4dp。所以：
             可见空白 = 4dp(上按钮 insetBottom) + margin(本值) + 4dp(下按钮 insetTop) = 本值 + 8dp
-        取 -3dp：可见空白 = 4 - 3 + 4 = 5dp（上一版 2dp → 10dp，更早 margin 7dp → 15dp、行3 margin 4dp → 12dp）。
+        取 -5dp：可见空白 = 4 - 5 + 4 = 3dp（上一版 -3dp → 5dp，更早 margin 7dp → 15dp）。
         为什么必须是负数：本值只是 margin，正数最小取 0 时可见空白仍有 8dp，压不下去；
         而按钮外观（圆角块尺寸、文字、内边距）要求完全不变，不能动按钮自身的 inset，
         唯一的自由度就是让两行的布局盒互相吃掉一点，即负 margin。
         负 margin 的副作用核对（结论：无害）：
-          ① 两行按钮的布局盒会重叠 3dp，但这 3dp 全落在上按钮的内缩空白区——上按钮圆角块的下沿
-             比它的布局盒下沿还高 4dp，重叠量 3dp < 4dp，故两行圆角块之间仍留 5dp，不会相碰。
+          ① 两行按钮的布局盒会重叠 5dp，重叠区全落在两侧按钮的内缩空白里——上按钮圆角块的下沿
+             比它的布局盒下沿高 4dp，下按钮圆角块的上沿比它的布局盒上沿低 4dp，
+             故只有重叠量达到 4 + 4 = 8dp 时两块才刚好相接。5dp < 8dp，两行圆角块之间仍留 3dp，不会相碰。
           ② 上按钮圆角块的可点区域一点没少：重叠区在它的布局盒内、却不在它的圆角块内，
              本来就不是它的可点区（inset 区域不接收这颗按钮的触摸）。
           ③ 重叠区归后绘制的下按钮接收触摸，而那里正是下按钮自己的内缩空白 → 也不会误触。
-        不宜再往下压：可见空白压到 0 需 margin = -8dp，那时重叠量正好等于内缩量，两行圆角块边缘相接；
-        再深则圆角块真的互相叠上，且上按钮布局盒的剩余高度逼近圆角块本身，字体放大或按钮
-        minHeight 变化时立刻出问题。
+        安全边界：可见空白压到 0 需 margin = -8dp，那才是重叠量等于两侧内缩之和、两行圆角块刚好相接的点；
+        再深则圆角块真的互相叠上，且上按钮布局盒的剩余高度逼近圆角块本身，字体放大或
+        minHeight 变化时立刻出问题。本项 -5dp 距该边界还有 3dp 余量。
     -->
-    <dimen name="status_button_row_gap">-3dp</dimen>
+    <dimen name="status_button_row_gap">-5dp</dimen>
 
     <!--
-        进度条与上方「部署状态」文本之间的间隔。
+        按钮行2 → 行3（「卸载部署」）的间隔，目标可见空白 2dp。
+        口径与 status_button_row_gap 完全相同（本值 = margin，可见空白 = 本值 + 8dp），
+        只是目标可见留白比它紧 1dp，一个 dimen 表达不了两个不同的可见值，故单独开一项而不共用。
+        取 -6dp：可见空白 = 4 - 6 + 4 = 2dp（上一版与行1→行2 共用 -3dp → 5dp）。
+        负 margin 无害的三条依据同 status_button_row_gap：布局盒重叠 6dp 仍小于两侧内缩之和 8dp，
+        两行圆角块之间留 2dp 不相碰；上按钮圆角块的可点区不减少；重叠区落在下按钮自己的内缩空白里、不误触。
+        安全边界同上：可见 0dp 需 -8dp，本项距边界还有 2dp 余量。
+    -->
+    <dimen name="status_button_last_gap">-6dp</dimen>
+
+    <!--
+        进度条与上方「部署状态」文本之间的间隔，目标可见空白 0dp。
         进度条是 LinearProgressIndicator，不带 MaterialButton 那套 inset，
-        故 margin 本身就是可见空白，可见空白 = 本值（此处不必再加 8dp，别与 status_button_row_gap 串口径）。
-        取 3dp = 5 × 2/3 ≈ 3.33 取整：本处不挨按钮、没有 inset 可抵，
-        想再紧只能压 margin 本身，故收紧幅度比行间克制。
-        沿革：原为共用标尺 space_s(8dp) → 5dp（收 2/3）→ 3dp（再收 2/3）。
+        故 margin 本身就是可见空白，可见空白 = 本值 = 0dp（此处不加减 8dp，别与 status_button_row_gap 串口径）。
+        取 0dp：本页唯一能把可见留白压到 0 的间隔——不挨按钮就没有 inset 可抵，margin 归零即所见为空；
+        再往下就是负值，那才是真的让两个布局盒重叠，而这里没有任何内缩区可以承接重叠。
+        沿革：原为共用标尺 space_s(8dp) → 5dp（收 2/3）→ 3dp（再收 2/3）→ 0dp。
         新开专用项而非改 space_s，因为后者被多页共用。
     -->
-    <dimen name="status_progress_gap">3dp</dimen>
+    <dimen name="status_progress_gap">0dp</dimen>
     <!--
         原 diag_body_max_height(200dp) 已删：它只服务"操作记录限高 + 内部滚动"，
         该方案本轮已按用户裁定改为与配置·曲线页诊断卡同款（自适应高、无内部滚动），

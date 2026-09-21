@@ -409,9 +409,9 @@ final class ConfigKeyRow {
      * 按控制区的实际可用宽重新分配所有字段的宽度（建行后、首次布局后、值回填后各算一次）。
      *
      * <p><b>数值字段</b>：目标宽 = {@link #naturalFieldWidth} 量出的自然宽（已钳进 [下限, 上限]）。
-     * 若「目标宽合计 + 布尔字段宽 + 字段间距」超过可用宽，就从最宽的开始往下削、削到下限为止：
-     * 宽框的 hint 被省略号截断，好过整个字段被挤到下一行（多字段键会退化成"每个字段独占一行"）。
-     * 削到下限仍放不下就不再硬挤，交给流式容器换行——那时一行的字段数已是它能容纳的上限。
+     * 若「目标宽合计 + 布尔字段宽 + 字段间距」超过可用宽，就从最宽的开始往下削，但每个字段都削不动
+     * 自己那道地板：{@code max(下限, 该字段说明的自然宽)}。地板必须把说明算进去——框够数字、说明被
+     * 省略号截断（"最高转…"）就是这么来的；削到地板仍放不下就交给流式容器换行，宁可多一行也不截断。
      *
      * <p><b>path 字段</b>：{@code MATCH_PARENT} 吃掉控制区剩余宽。路径长度不可控（默认日志路径 58 字符
      * 在 16sp 下约 570dp，而可用宽约 304dp），定宽会顶出屏幕——文字是居中的，被裁掉的是两端。
@@ -429,21 +429,29 @@ final class ConfigKeyRow {
         }
         int count = fields.size();
         int[] target = new int[count];
+        int[] floor = new int[count];
         int total = fieldGap * Math.max(0, count - 1) + fixedFieldWidth();
         for (int i = 0; i < count; i++) {
-            if (fields.get(i).layout == null) {
+            Field field = fields.get(i);
+            if (field.layout == null) {
                 continue;                       // 布尔字段：宽度由字段名与开关决定，不参与分配
             }
-            target[i] = naturalFieldWidth(fields.get(i));
+            int hintWidth = hintNaturalWidth(field);
+            target[i] = naturalFieldWidth(field, hintWidth);
+            // 地板取"数字放得下"与"说明装得下"的较大者；上限钳住，免得地板高过目标宽
+            floor[i] = Math.min(Math.max(fieldMinWidth, hintWidth), fieldMaxWidth);
+            if (controlAvail > 0) {
+                // 可用宽比地板还小时先服从可用宽：那种行极窄，硬保地板会让框越出行右边界
+                floor[i] = Math.min(floor[i], controlAvail);
+            }
             total += target[i];
         }
         // 削峰只在实际可用宽已知时做；未知（还没布局过）就用自然宽，布局回调里会重算
         int excess = controlAvail > 0 ? total - controlAvail : 0;
-        int floor = controlAvail > 0 ? Math.min(fieldMinWidth, controlAvail) : fieldMinWidth;
         while (excess > 0) {
             int widest = -1;
             for (int i = 0; i < count; i++) {
-                if (fields.get(i).layout == null || target[i] <= floor) {
+                if (fields.get(i).layout == null || target[i] <= floor[i]) {
                     continue;
                 }
                 if (widest < 0 || target[i] > target[widest]) {
@@ -451,9 +459,9 @@ final class ConfigKeyRow {
                 }
             }
             if (widest < 0) {
-                break;                          // 都到下限了：剩下的交给流式容器换行
+                break;                          // 都到自己地板了：不再硬挤，交给流式容器换行
             }
-            int cut = Math.min(excess, target[widest] - floor);
+            int cut = Math.min(excess, target[widest] - floor[widest]);
             target[widest] -= cut;
             excess -= cut;
         }
@@ -491,6 +499,12 @@ final class ConfigKeyRow {
         return total;
     }
 
+    /** 该字段说明（hint）的自然宽 = 说明文字宽 + 输入框左右内边距，见 {@link #measureHintWidth}。 */
+    private int hintNaturalWidth(Field field) {
+        CharSequence hint = field.layout.getHint();
+        return hint == null ? 0 : measureHintWidth(field, hint.toString());
+    }
+
     /**
      * 输入框的自然宽度 = max(说明宽, 内容宽 + {@value #CONTENT_WIDTH_TAIL} 的宽度)，再钳进 [下限, 上限]。
      * path 键不走这里（它按 MATCH_PARENT 吃掉控制区剩余宽，见 {@link #refitFieldWidths}）。
@@ -506,11 +520,11 @@ final class ConfigKeyRow {
      *
      * <p><b>为什么不按当前值实时算</b>：值一变宽度就跟着变，边输边跳——旧 WebUI 的
      * "改参不被撑宽"就是这个意思。宽度只在建行与值回填（{@link #applyValue}）时定。
+     *
+     * @param hintWidth 由 {@link #hintNaturalWidth} 提前量好传进来（同一个值还要当地板用，避免重量）
      */
-    private int naturalFieldWidth(Field field) {
+    private int naturalFieldWidth(Field field, int hintWidth) {
         String text = field.text();
-        CharSequence hint = field.layout.getHint();
-        String hintText = hint == null ? "" : hint.toString();
 
         // 量宽要临时改写输入框文本，必须屏蔽回调（否则等于程序化了用户输入），量完恢复原文本。
         // suppressChange 存旧值再恢复：调用方（applyValue 的循环）可能已开着抑制，不能一把关掉。
@@ -519,7 +533,6 @@ final class ConfigKeyRow {
         // 光标位置也要原样放回：重算宽度会在用户正打字时发生（控制区宽变），而 setText 会把光标带回开头
         int selectionStart = field.input.getSelectionStart();
         int selectionEnd = field.input.getSelectionEnd();
-        int hintWidth = hintText.isEmpty() ? 0 : measureHintWidth(field, hintText);
         int contentWidth;
         try {
             contentWidth = measureWithText(field, text + CONTENT_WIDTH_TAIL);
