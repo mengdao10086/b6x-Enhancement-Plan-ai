@@ -60,12 +60,20 @@
         android:layout_height="@dimen/divider_height"
         android:background="?attr/colorOutlineVariant" />
 
-    <!-- ===== 底部页签栏 ===== -->
+    <!--
+        ===== 底部页签栏 =====
+        高度与条目上下内边距一并取 M3 默认值的 2/3（80 → 53dp、12/16 → 8/11dp）：
+        M3 的 80dp 是为活动指示器留的余量，本栏只用图标 + 文字，压低后更贴窗口下沿。
+        图标 24dp 与标签 12sp 不动（要求只压高度）；若真机上标签贴到条底或与图标相挤，
+        先动 @dimen/bottom_nav_height（56dp 是"图标 + 标签"的经典高度）。
+    -->
     <com.google.android.material.bottomnavigation.BottomNavigationView
         android:id="@+id/bottom_nav"
         android:layout_width="match_parent"
-        android:layout_height="wrap_content"
+        android:layout_height="@dimen/bottom_nav_height"
         android:background="?attr/colorSurface"
+        app:itemPaddingTop="@dimen/bottom_nav_pad_top"
+        app:itemPaddingBottom="@dimen/bottom_nav_pad_bottom"
         app:labelVisibilityMode="labeled"
         app:menu="@menu/menu_bottom" />
 </LinearLayout>
