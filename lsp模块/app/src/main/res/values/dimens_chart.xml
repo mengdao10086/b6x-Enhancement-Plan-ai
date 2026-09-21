@@ -59,9 +59,13 @@
     <dimen name="chart_resize_bar_radius">2dp</dimen>
 
     <!--
-        拖柄触控带高：整条即触控区。带内横条贴带顶（layout_gravity=top），横条距带底还有 12 − 4 = 8dp，
-        触控面积一点没减——触控与可见已解耦，可见的 4dp 条不必占掉这 12dp 的中间。
-        原为 space_xl(24dp，上下各 10dp)——横条加长到 160dp 后不再需要那么厚的带子才按得住。
+        拖柄触控带高 8dp = 横条高 4dp（贴带顶，layout_gravity=top）+ 带底余量 4dp。
+        取 8dp 是为了让横条上下两侧的空白相等：横条上沿与画布下沿齐平，上侧到画布最下面那条
+        网格线只有 ChartView 的 PAD_B_DP(4dp，不在本文件)，下侧到卡片下边界（本带下沿，内层
+        paddingBottom=0）就是本值的余量，两处都为 4dp 时才几何相等。
+        原为 12dp（更早是 space_xl 24dp，上下各 10dp）——那个口径只把触控带当独立目标看，
+        没管横条到卡片底比到网格线多出一截。代价：触控带由 12dp 缩到 8dp，触控面积随之变矮，
+        换来的只是可见几何相等；按压力度的余量靠横条已加长到 160dp 兜着。
     -->
-    <dimen name="chart_resize_band_height">12dp</dimen>
+    <dimen name="chart_resize_band_height">8dp</dimen>
 </resources>

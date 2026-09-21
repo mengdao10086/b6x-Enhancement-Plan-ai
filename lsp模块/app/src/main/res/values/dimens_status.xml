@@ -3,13 +3,30 @@
 <resources>
 
     <!--
-        按钮行的上方间隔，两行共用同一个值：
-          「部署状态文本 → 按钮行1」与「按钮行1 → 按钮行2」，故两处高度节奏一致。
-        沿革：原为 space_m(12dp) → 7dp（3/5）；本轮按要求再收到 2/3，7dp/8dp 双双取整为 5dp，
-        于是原来分开的两个值合并成一个（第 2 行原引用共用标尺 space_s，故不能改其定义，只换引用点）。
-        注意：同一行内相邻按钮之间的 marginStart 仍是 space_s，不在本项口径内。
+        按钮行1 上方的间隔，只服务这一处：「部署状态文本/进度条 → 按钮行1」。
+        该处上方是文本与进度条、不是按钮，两者都不带 inset，故本值就是该处可见间距的全部。
+        沿革：原为 space_m(12dp) → 7dp（3/5）；随后再收 2/3 时与第 2 行原引用的 space_s(8dp)
+        双双取整为 5dp，于是原先分开的两个值合并成本项（space_s 的定义不能动，只换引用点）。
+        注意：按钮行1→行2、行2→行3 的间隔不走本项，见 status_button_row_gap（那里含 button inset 口径）；
+        同一行内相邻按钮之间的 marginStart 仍是 space_s，也不在本项口径内。
     -->
     <dimen name="status_buttons_gap">5dp</dimen>
+
+    <!--
+        按钮行与行之间的间隔（行1→行2、行2→行3），三项按钮行节奏统一。
+        这几个按钮用的都是 material 的 M3 按钮样式（Widget.Material3.Button / .TextButton / .OutlinedButton，
+        OutlinedButton 自身不设、经 parent=TextButton 继承），AAR 里三者都设了
+        android:insetTop = android:insetBottom = @dimen/m3_btn_inset = 4dp；
+        MaterialButtonHelper 会把背景 drawable 包成 InsetDrawable，于是按钮可见的圆角块
+        比它的布局盒上下各小 4dp。两行按钮之间真实的可见空白因此是：
+            4dp(上按钮 insetBottom) + layout_marginTop + 4dp(下按钮 insetTop)
+        取 2dp：可见空白 = 2 + 4 + 4 = 10dp，恰为原可见 15dp（margin 7dp 时 7+4+4）的 2/3。
+        这就是 margin 看起来小得离谱的原因——8dp 已被两侧 inset 吃掉，调 margin 的观感与数值不成比例
+        （上一轮 margin 7dp→5dp，可见空白只从 15dp 变 13dp，肉眼几乎无感）。
+        不宜再小：margin 归零后可见空白仍有 8dp，且相邻按钮的布局盒（连同触控热区）会直接贴住，
+        行间再无缓冲，误触风险上升。
+    -->
+    <dimen name="status_button_row_gap">2dp</dimen>
 
     <!--
         进度条与上方「部署状态」文本之间的间隔。原为共用标尺 space_s(8dp)，本轮按要求收到 2/3 = 5dp；

@@ -68,6 +68,10 @@
                 <!--
                     按钮排布：行1 [一键部署][拉起daemon]、行2 [su诊断][刷新状态]、行3 [卸载部署]。
                     「刷新状态」与「su 诊断」同为点一次即出一段文本的动作，故同用 TextButton 样式。
+                    行1 上方的间隔走 status_buttons_gap（上方是文本/进度条，无按钮、不含 inset）；
+                    行2 与行3 的间隔走 status_button_row_gap（含 inset 口径）。
+                    这 5 个按钮都是 M3 按钮样式，insetTop/insetBottom 各 4dp 会把可见圆角块上下各收 4dp，
+                    所以行间的可见空白 = margin + 8dp：调 margin 的观感与数值不成比例，细则见 dimens_status.xml。
                 -->
                 <LinearLayout
                     android:layout_width="match_parent"
@@ -93,7 +97,7 @@
                 <LinearLayout
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
-                    android:layout_marginTop="@dimen/status_buttons_gap"
+                    android:layout_marginTop="@dimen/status_button_row_gap"
                     android:orientation="horizontal">
 
                     <com.google.android.material.button.MaterialButton
@@ -117,7 +121,7 @@
                     style="@style/Widget.Material3.Button.TextButton"
                     android:layout_width="wrap_content"
                     android:layout_height="wrap_content"
-                    android:layout_marginTop="@dimen/space_xs"
+                    android:layout_marginTop="@dimen/status_button_row_gap"
                     android:text="@string/status_action_uninstall"
                     android:textColor="@color/state_error" />
             </LinearLayout>

@@ -68,6 +68,17 @@ final class ChartSeries {
         return "rpm".equals(s.id);
     }
 
+    /**
+     * 图例是否在该条之前另起一行（经 {@link FlowWrapLayout#setBreakBefore} 施加）。
+     *
+     * <p>{@code true} 的是「冷端℃ / CPU℃」这一行——两条<b>可选</b>温度传感器，与第一行的
+     * 电池/制冷/风扇/热端不是一类；默认关闭（见 {@link #createAll}），排到第二行后图例不再
+     * 随各项自然宽随机掉行。图例顺序即 {@link #createAll} 的数组顺序，故此处只需判定行首项。
+     */
+    static boolean startsLegendRow(ChartSeries s) {
+        return "cold".equals(s.id);
+    }
+
     /** 绘图与标注取值：热端/电池走滤波值，风扇 ÷100 与 ℃ 共轴。 */
     static float value(ChartSeries s, ChartSample d) {
         switch (s.id) {

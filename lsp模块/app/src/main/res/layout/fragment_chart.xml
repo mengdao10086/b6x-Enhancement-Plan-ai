@@ -50,6 +50,9 @@
                 「columnCount 是否会自动另起一行」这一行为（该行为未在本机核实过）。
                 行距单给 chart_legend_row_gap（配置页仍是默认的 space_m），列距与图例项的
                 layout_marginEnd 都不动。
+                行首不靠自然宽碰运气：前四条（电池/制冷/风扇/热端）排第一行，「冷端℃」「CPU℃」按
+                ChartSeries#startsLegendRow 经 FlowWrapLayout#setBreakBefore 固定另起第二行——
+                这两条是可选的温度传感器，与上面四条不是一类。
             -->
             <com.example.waspwingtempctrl.ui.FlowWrapLayout
                 android:id="@+id/chart_legend_row"
@@ -61,7 +64,8 @@
             <!--
                 ===== ③ 画布 / 读取失败诊断 =====
                 容器高度就是画布高（拖柄改的正是它）。画布下沿不再贴卡片底——其下还有拖柄触控带，
-                故「最低一条网格线 → 卡片下沿」比 ChartView 的下内边距（PAD_B_DP）多出触控带的高度。
+                故「最低一条网格线 → 卡片下沿」= PAD_B_DP(4dp) + chart_resize_band_height(8dp) = 12dp，
+                这 12dp 被拖柄横条一分为二，见 ④。
             -->
             <FrameLayout
                 android:id="@+id/chart_canvas_container"
@@ -95,10 +99,13 @@
 
             <!--
                 ===== ④ 画布下沿拖柄（拖动改画布高，由 ChartFragment 处理） =====
-                外层整条 chart_resize_band_height(12dp) 是触控带：横条只有 4dp 高，直接拿它当触控目标按不准；
+                外层整条 chart_resize_band_height(8dp) 是触控带：横条只有 4dp 高，直接拿它当触控目标按不准；
                 内层横条贴触控带顶部并水平居中（layout_gravity=top|center_horizontal）：只写 top 会连
                 水平居中一起丢掉（FrameLayout 的 center 同时管两个方向），横条会贴到左边去。
-                贴顶后横条上沿与画布下沿齐平，距带底还有 8dp 余量，触控带高度不变、触控面积一点没减。
+                贴顶后横条上沿与画布下沿齐平，横条上下两侧的空白因此相等：上侧到画布最下面那条网格线
+                = ChartView 的 PAD_B_DP(4dp)，下侧到卡片下边界（本带下沿，内层 paddingBottom=0）
+                = 8 − 4 = 4dp。代价是触控带由 12dp 缩到 8dp，触控面积随之变矮（原值一路是
+                space_xl 24dp → 12dp → 8dp，前两次压缩的理由见 dimens_chart.xml）。
                 横条不可点（View 默认即不可点，这里写明是为了别挡住触控带的事件）。
                 纵向拖动才回给本带（横向交给外层 ViewPager2 翻页）：由本页所在的 PageScrollView
                 在按下点落在本带上时不接管纵向拖动，见 PageScrollView#setVerticalDragCaptor。

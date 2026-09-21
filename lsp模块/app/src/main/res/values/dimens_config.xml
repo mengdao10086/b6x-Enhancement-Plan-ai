@@ -30,21 +30,32 @@
     <dimen name="config_field_text_size">16sp</dimen>
 
     <!--
-        输入内容的上内边距（下内边距仍为 space_xs = 4dp）。
-        取值 8dp = space_s：与输入框的左右内边距（@dimen/field_radius 同为 8dp）齐平，正文左/右/上
-        三面从同一档留白起算（下面单独留 4dp 收口）。浮起说明（12sp 约 16dp 高）骑在框顶边上，
-        其下沿约在框顶下 8dp 处。
-        算式：内容区 = [padTop, 49 − padBottom] = [8, 45]，高 37dp；正文（16sp，行盒约 18.75dp）
-        在其中垂直居中 → 行盒中心 = (8 + 45) / 2 = 26.5dp。两个参照：
-          · 比「说明下沿(8) → 框底(49)」的中点 28.5dp 高 2dp（更贴说明、更远框底）；
-          · 比框的几何中心 24.5dp 低 2dp —— 参数名盒就在几何中心（见 item_config_row.xml），
-            故正文比参数名仍低约 2dp（12/4 时差 4dp，本次收窄一半）。
-        观感：说明下沿 → 正文顶边约 9.1dp，正文底边 → 框底约 13.1dp（12/4 时两者相等、均约 11.1dp，
-        即正文正好在「说明下沿 → 框底」的正中）。要让正文与参数名严格同高，把下内边距也改成 8dp
-        （item_config_field.xml 里那个 android:paddingBottom）→ 中心 24.5dp、与参数名齐平，
-        代价是正文离说明只剩约 7.1dp。
+        输入内容的上内边距（下内边距见 @dimen/config_field_pad_bottom，3dp）。
+        内层 EditText 是 match_parent + gravity=center：正文在"去掉内边距后的内容区"里居中，
+        所以上下内边距不改变居中方式，只决定两件事——内容区可用高、以及内容区中心（= 正文落点）在框内的位置。
+        浮起说明（12sp 约 16dp 高）骑在框顶边上，其下沿约在框顶下 8dp 处。
+        算式（框高 @dimen/field_height 49dp、正文 16sp 行盒约 18.75dp）：
+          内容区 = [padTop, 49 − padBottom] = [5, 46]，可用高 41dp；
+          行盒在内容区内居中 → 上下各留 (41 − 18.75) / 2 ≈ 11.125dp；
+          行盒中心 = (5 + 46) / 2 = 25.5dp，行盒顶 16.125dp、行盒底 34.875dp。
+        几何含义：
+          · 比框的几何中心（49 / 2 = 24.5dp）低 1dp —— 参数名盒就装在几何中心上（见 item_config_row.xml），
+            故正文与参数名的中心只差 1dp，观感基本齐平（更早的 8/4 差 2dp、12/4 差 4dp）。
+          · 比「说明下沿(8) → 框底(49)」的中点 28.5dp 高 3dp，即正文略偏说明一侧。
+          · 版面留白：说明下沿 → 行盒顶 ≈ 8.125dp，行盒底 → 框底 ≈ 14.125dp。
+        上下合计 5 + 3 = 8dp，与左右内边距（@dimen/field_radius 8dp）同档；下内边距比上内边距更小，
+        等于把内容区中心整体上移（从 8/4 的 26.5dp 移到 25.5dp），同时把可用高从 37dp 提到 41dp。
+        注意上内边距(5dp)已小于说明下沿(8dp)：内容区顶边落在说明区域内 3dp，单行 + 居中下行盒顶仍在
+        16.125dp、不与说明相碰，但这已是"正文贴说明"一侧的余量下限。
     -->
-    <dimen name="config_field_pad_top">8dp</dimen>
+    <dimen name="config_field_pad_top">5dp</dimen>
+
+    <!--
+        输入内容的下内边距，只服务配置页这个输入框（item_config_field.xml 里 EditText 的 android:paddingBottom）。
+        不直接用共用标尺 @dimen/space_xs(4dp)：那是全局间距阶梯，本项收窄不动它，改用本键专属值。
+        与上内边距共同决定正文落点的算式见 @dimen/config_field_pad_top。
+    -->
+    <dimen name="config_field_pad_bottom">3dp</dimen>
 
     <!--
         参数（键行）之间的纵向间隔 = 分组卡默认行距 space_m(12dp) 的一半。

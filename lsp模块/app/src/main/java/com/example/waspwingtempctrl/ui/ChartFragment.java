@@ -72,8 +72,8 @@ public class ChartFragment extends Fragment {
     private ChartView chartView;
     private ScrollView failureScroll;
     private TextView failureText;
-    /** 图例容器（可换行的 FlowWrapLayout）。 */
-    private ViewGroup legendRow;
+    /** 图例容器（可换行的 FlowWrapLayout，冷端℃/CPU℃ 由 {@code setBreakBefore} 固定另起第二行）。 */
+    private FlowWrapLayout legendRow;
     private MaterialButtonToggleGroup windowGroup;
     /** 画布容器：拖柄改的只是它的 LayoutParams.height（画布自身 match_parent 跟随）。 */
     private View canvasContainer;
@@ -383,7 +383,8 @@ public class ChartFragment extends Fragment {
 
     /**
      * 图例：6 条曲线，默认开关照 {@code 逻辑说明.md} 的「曲线」一节〈系列开关〉；勾选框着色 = 该曲线的
-     * chart_series_* 色。容器是可换行的 FlowWrapLayout：按自然宽依次排布，放不下自动换行，窄屏也不会被裁。
+     * chart_series_* 色。容器是可换行的 FlowWrapLayout：按自然宽依次排布，放不下自动换行，窄屏也不会被裁；
+     * 行首由 {@link ChartSeries#startsLegendRow} 决定——「冷端℃」「CPU℃」两条可选温度传感器固定另起第二行。
      */
     private void buildLegend() {
         LayoutInflater inflater = LayoutInflater.from(requireContext());
@@ -397,6 +398,7 @@ public class ChartFragment extends Fragment {
             int color = requireContext().getResources().getColor(s.colorRes, requireContext().getTheme());
             box.setButtonTintList(ColorStateList.valueOf(color));
             box.setOnCheckedChangeListener((button, checked) -> chartView.setSeriesEnabled(index, checked));
+            legendRow.setBreakBefore(box, ChartSeries.startsLegendRow(s));
             legendRow.addView(box);
         }
     }

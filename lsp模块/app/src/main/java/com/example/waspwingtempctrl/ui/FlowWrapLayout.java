@@ -30,7 +30,10 @@ import java.util.List;
  *
  * <h3>整行子视图</h3>
  * {@link #setFullLine} 标记的子视图独占一行且铺满行宽（键行用它让"参数名 + 右侧开关"占满一行，
- * 开关才能贴到行尾）。放不下时的换行判定只看<b>外边距盒子</b>的宽度，不读子视图内部结构。
+ * 开关才能贴到行尾）；{@link #setBreakBefore} 标记的子视图只<b>另起一行</b>、宽度仍按自己的
+ * LayoutParams 量（曲线页图例用它把"冷端℃ / CPU℃"两条可选温度传感器固定排到第二行，
+ * 不让它们随各项自然宽随机掉行）。放不下时的换行判定只看<b>外边距盒子</b>的宽度，
+ * 不读子视图内部结构。
  *
  * <p>仅按 LTR 排布（界面无镜像语言需求）。列距固定用标尺 {@code space_m}——参数名到卡片
  * 左侧内边距（同为 12dp）一致；行距缺省同 {@code space_m}，可由调用方用 {@code app:flowRowGap}
@@ -40,6 +43,9 @@ public final class FlowWrapLayout extends LinearLayout {
 
     /** 独占一行且铺满行宽的子视图。 */
     private final List<View> fullLine = new ArrayList<>();
+
+    /** 之前强制换行、但不铺满行宽的子视图。 */
+    private final List<View> breakBefore = new ArrayList<>();
 
     private final int hGap;
     /** 行距（上下两行之间）。缺省 = 列距，可被 XML 属性 app:flowRowGap 覆盖。 */
@@ -68,6 +74,21 @@ public final class FlowWrapLayout extends LinearLayout {
         fullLine.remove(child);
         if (value) {
             fullLine.add(child);
+        }
+        requestLayout();
+    }
+
+    /**
+     * 标记子视图之前强制换行。与 {@link #setFullLine} 的区别：本方法<b>不</b>铺满行宽，
+     * 子视图宽度仍按自己的 LayoutParams 量。须在子视图被测量前调用。
+     *
+     * <p>换行只在"本行已有内容"时判定（{@code rowWidth > 0}），故给本容器第一个子视图标记
+     * 不产生任何效果——这正是要的语义：首项本来就在行首。
+     */
+    public void setBreakBefore(@NonNull View child, boolean value) {
+        breakBefore.remove(child);
+        if (value) {
+            breakBefore.add(child);
         }
         requestLayout();
     }
@@ -157,9 +178,10 @@ public final class FlowWrapLayout extends LinearLayout {
         return y + rowHeight + vGap;
     }
 
-    /** 本行已放 {@code rowWidth} 时，{@code childWidth} 是否放不下 —— 独占行的子视图一律另起一行。 */
+    /** 本行已放 {@code rowWidth} 时，{@code childWidth} 是否放不下 —— 独占行/另起行者一律另起一行。 */
     private boolean wraps(View child, int rowWidth, int childWidth, int rowLimit) {
-        return fullLine.contains(child) || rowWidth + hGap + childWidth > rowLimit;
+        return fullLine.contains(child) || breakBefore.contains(child)
+                || rowWidth + hGap + childWidth > rowLimit;
     }
 
     /** 单行的宽度上限（本容器的可用内容宽）。 */

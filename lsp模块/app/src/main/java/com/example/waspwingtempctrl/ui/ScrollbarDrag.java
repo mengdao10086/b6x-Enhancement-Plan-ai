@@ -3,6 +3,7 @@ package com.example.waspwingtempctrl.ui;
 import android.view.MotionEvent;
 import android.view.View;
 import android.view.ViewGroup;
+import android.widget.ScrollView;
 
 import androidx.recyclerview.widget.RecyclerView;
 
@@ -23,6 +24,13 @@ import androidx.recyclerview.widget.RecyclerView;
  * </ul>
  *
  * <p>不命中的触摸一律返回 false，正常滚动、点击、长按全部照旧。
+ *
+ * <p><b>抓住滑块前先结束正在进行的惯性滑动</b>：滚动中的 {@code ScrollView} 每帧都在
+ * {@code computeScroll} 里把 fling 自己算出的位置写回去（{@code RecyclerView} 同理，由
+ * {@code ViewFlinger} 每帧回写），本类同一帧里的 {@code scrollBy} 随即被覆盖——表现就是
+ * "按着滚动条不动，得等它自己滑完才跟手"。故按下的那一下先停掉在跑的滚动：
+ * {@code ScrollView} 用零速度 {@code fling} （位移为 0、动画当帧即结束，是公开 API 里唯一
+ * 能中止它的入口）、{@code RecyclerView} 用 {@code stopScroll}。
  *
  * <p><b>抓住滑块拖动期间禁用父容器拦截</b>（{@code requestDisallowInterceptTouchEvent}）：
  * 页面根在外层 ViewPager2 的横向 RecyclerView 里，纵向拖动只要带一点横向位移，就可能被它当成
@@ -73,6 +81,7 @@ public final class ScrollbarDrag {
                             return false;   // 无滚动余量（内容不满一屏）：没有可拖的东西
                         }
                         // 抓住滑块期间不让父容器（外层 ViewPager2 的横向 RecyclerView）插手中断
+                        stopOngoingScroll(v);
                         if (v.getParent() != null) {
                             v.getParent().requestDisallowInterceptTouchEvent(true);
                         }
@@ -103,6 +112,23 @@ public final class ScrollbarDrag {
                 }
             }
         });
+    }
+
+    /**
+     * 结束该视图正在进行的滚动（惯性滑动 / 平滑滚动），使其不再逐帧回写滚动位置。
+     *
+     * <p>两种类型各用各的公开入口：{@code RecyclerView#stopScroll} 一次停掉 fling 与平滑滚动；
+     * {@code ScrollView} 没有等效 API，用零速度 {@code fling(0)}——它同样走 {@code mScroller.fling}，
+     * 位移为 0 故动画在当帧就结束，效果等于中止上一个 fling（且当前滚动位置不动）。
+     *
+     * <p>本身不在滚动时调用也无害（零位移、无副作用）。
+     */
+    private static void stopOngoingScroll(View v) {
+        if (v instanceof RecyclerView) {
+            ((RecyclerView) v).stopScroll();
+        } else if (v instanceof ScrollView) {
+            ((ScrollView) v).fling(0);
+        }
     }
 
     /**
