@@ -23,11 +23,11 @@
       · 左右内边距压到 @dimen/field_radius(8dp)：M3 默认 16dp，收掉的那 8dp 全给可用内容宽，
         圆角 8dp 之外不再留空白。它同时就是上面那个说明可用框的内缩量（8dp = 圆角半径），
         所以这 8dp 再压就会让说明压到圆角上，不能动。
-      · 上下内边距不对称（上 @dimen/config_field_pad_top 6dp / 下 @dimen/config_field_pad_bottom 4dp）：
-        EditText 高度 match_parent + 垂直居中 → 正文是在"去掉内边距后的内容区"（36 − 6 − 4 = 26dp）
-        里居中的，内边距只决定内容区的高与它的中心。行盒（16sp 约 18.75dp）中心 = (6 + 32) / 2 = 19dp：
-        比框的几何中心（18dp，参数名盒所在）低 1dp = (6 − 4) / 2、比「说明下沿(9.375，说明行盒骑在框顶
-        边上的一半高) → 框底(36)」的中点 22.7dp 高 3.7dp，行盒顶 9.625dp / 底 28.375dp。
+      · 上下内边距不对称（上 @dimen/config_field_pad_top 5dp / 下 @dimen/config_field_pad_bottom 2dp）：
+        EditText 高度 match_parent + 垂直居中 → 正文是在"去掉内边距后的内容区"（36 − 5 − 2 = 29dp）
+        里居中的，内边距只决定内容区的高与它的中心。行盒（16sp 约 18.75dp）中心 = (5 + 34) / 2 = 19.5dp：
+        比框的几何中心（18dp，参数名盒所在）低 1.5dp = (5 − 2) / 2、比「说明下沿(9.375，说明行盒骑在框顶
+        边上的一半高) → 框底(36)」的中点 22.7dp 高 3.2dp，行盒顶 10.125dp / 底 28.875dp。
         算式、留白与"余量最薄处"见 @dimen/config_field_pad_top。
       · scrollHorizontally：等于 setHorizontallyScrolling(true)——单行横向滚动的开关。不开时
         Layout 宽 == 视图宽，scrollX 恒为 0，path 键放不下的右半段（文件名）永远看不见。

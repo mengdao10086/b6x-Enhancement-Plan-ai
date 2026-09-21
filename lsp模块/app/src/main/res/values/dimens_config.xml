@@ -32,7 +32,7 @@
     <dimen name="config_field_text_size">16sp</dimen>
 
     <!--
-        输入内容的上内边距（下内边距见 @dimen/config_field_pad_bottom，4dp）。
+        输入内容的上内边距（下内边距见 @dimen/config_field_pad_bottom，2dp）。
         内层 EditText 是 match_parent + 垂直居中：正文在"去掉内边距后的内容区"里居中，所以上下内边距
         不改变居中方式，只决定两件事——内容区可用高、以及内容区中心（= 正文落点）在框内的位置。
         落点相对框中心的偏移 = (padTop − padBottom) / 2：只与两者之差有关，与框高无关。
@@ -42,26 +42,28 @@
         说明与正文同字号（setEditText / onLayout 里 setExpandedTextSize(getTextSize())）——都是 16sp、
         行盒约 18.75dp，故说明下沿 ≈ 框顶下 9.375dp。
         算式（框高 @dimen/field_height 36dp、行盒约 18.75dp）：
-          内容区 = [padTop, 36 − padBottom] = [6, 32]，可用高 26dp；
-          行盒在内容区内居中 → 上下各留 (26 − 18.75) / 2 ≈ 3.625dp；
-          行盒中心 = (6 + 32) / 2 = 19dp，行盒顶 9.625dp、行盒底 28.375dp。
+          内容区 = [padTop, 36 − padBottom] = [5, 34]，可用高 29dp；
+          行盒在内容区内居中 → 上下各留 (29 − 18.75) / 2 ≈ 5.125dp；
+          行盒中心 = (5 + 34) / 2 = 19.5dp，行盒顶 10.125dp、行盒底 28.875dp。
         几何含义：
-          · 比框的几何中心（36 / 2 = 18dp）低 1dp = (6 − 4) / 2 —— 参数名盒就装在几何中心上
-            （见 item_config_row.xml），故正文与参数名的中心只差 1dp。5/3 也是 1dp（差值同为 2）：
-            上下和值不变、只改差值才会挪动落点，6/4 相对 5/3 的实际差别只是内容区可用高（28 → 26dp）。
-          · 比「说明下沿(9.375) → 框底(36)」的中点 22.7dp 高 3.7dp，即正文略偏说明一侧。
-          · 版面留白：说明下沿 → 行盒顶 ≈ 0.25dp（两个行盒几乎相接），行盒底 → 框底 ≈ 7.625dp。
-            墨迹层面仍有空隙：说明的 CJK 墨迹底 ≈ 框顶下 7.4dp，正文数字墨迹顶 ≈ 框顶下 13.1dp，
-            约 5.7dp 不相碰。但 36dp 框高下这一处余量最薄，框高再压或说明行盒变高就会真碰。
+          · 比框的几何中心（36 / 2 = 18dp）低 1.5dp = (5 − 2) / 2 —— 参数名盒就装在几何中心上
+            （见 item_config_row.xml），故正文与参数名的中心差 1.5dp。
+          · 与上一版对照：5/3 与 6/4 的差值都是 2dp，落点都是 +1dp（两者完全等价）；本次 5/2 差值 3dp，
+            落点真的下移 0.5dp 成 +1.5dp——改落点只能改差值，改上下和值只改内容区可用高。
+          · 比「说明下沿(9.375) → 框底(36)」的中点 22.7dp 高 3.2dp，即正文略偏说明一侧。
+          · 版面留白：说明下沿 → 行盒顶 ≈ 0.75dp，行盒底 → 框底 ≈ 7.125dp。
+            这处"说明与正文之间的余量"是 36dp 框高下最薄的一处：6/4 时只有 0.25dp，改 5/2 后放宽到
+            0.75dp（墨迹层面：说明 CJK 墨迹底 ≈ 框顶下 7.4dp，正文数字墨迹顶 ≈ 框顶下 13.6dp，约
+            6.2dp 不相碰）。框高再压或说明行盒变高仍会先在这里相碰。
     -->
-    <dimen name="config_field_pad_top">6dp</dimen>
+    <dimen name="config_field_pad_top">5dp</dimen>
 
     <!--
         输入内容的下内边距，只服务配置页这个输入框（item_config_field.xml 里 EditText 的 android:paddingBottom）。
         不直接用共用标尺 @dimen/space_xs：本项要能独立取值，就不与全局间距阶梯绑在一起（即使当前取值恰好相同）。
         与上内边距共同决定正文落点的算式见 @dimen/config_field_pad_top。
     -->
-    <dimen name="config_field_pad_bottom">4dp</dimen>
+    <dimen name="config_field_pad_bottom">2dp</dimen>
 
     <!--
         参数（键行）之间的纵向间隔 = 分组卡默认行距 space_m(12dp) 的一半。
