@@ -68,10 +68,14 @@
                 <!--
                     按钮排布：行1 [一键部署][拉起daemon]、行2 [su诊断][刷新状态]、行3 [卸载部署]。
                     「刷新状态」与「su 诊断」同为点一次即出一段文本的动作，故同用 TextButton 样式。
-                    行1 上方的间隔走 status_buttons_gap（上方是文本/进度条，无按钮、不含 inset）；
-                    行2 与行3 的间隔走 status_button_row_gap（含 inset 口径）。
                     这 5 个按钮都是 M3 按钮样式，insetTop/insetBottom 各 4dp 会把可见圆角块上下各收 4dp，
-                    所以行间的可见空白 = margin + 8dp：调 margin 的观感与数值不成比例，细则见 dimens_status.xml。
+                    故行间的可见空白 = margin + 8dp（调 margin 的观感与数值不成比例，细则见 dimens_status.xml）。
+                    四处可见空白：
+                      · 部署状态文本 → 进度条：3dp，走 status_progress_gap（进度条无 inset，margin 即可见空白）
+                      · 进度条 → 行1：5dp，走 status_buttons_gap（上方不挨按钮，同理 margin 即可见空白，
+                        取 5dp 与行间对齐）
+                      · 行1 → 行2、行2 → 行3：各 5dp，走 status_button_row_gap
+                        （夹在两条按钮行之间，可见空白 = 值 + 8dp，故其取值为 -3dp，两行布局盒重叠 3dp）
                 -->
                 <LinearLayout
                     android:layout_width="match_parent"

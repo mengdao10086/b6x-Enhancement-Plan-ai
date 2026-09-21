@@ -74,11 +74,15 @@
 
     <!--
         输入框高度：日志关键词搜索框与配置页各输入框共用同一个值（要求两者等高）。
-        Material3 OutlinedBox 单行默认约 56dp；给 49dp = 日志框原 37dp 的 4/3。
+        Material3 OutlinedBox 单行默认约 56dp；给 36dp 比日志框原 37dp 只少 1dp，
+        即回到压缩前那个量级（此前的 49dp 是把它按 4/3 放大出来的）。
         必须显式给 TextInputLayout 定高，否则压不过它内部按内容算出的高度；
         内层 EditText 的 minHeight 与垂直内边距同步收小，16sp 文字才放得下。
+        风险：浮起说明骑在框顶那条边上、需在框顶之上占约 8dp，其下沿约在框顶下 8dp；
+        框高压到 36dp 后正文行盒顶（见 @dimen/config_field_pad_top 的算式）离它只剩约 1.6dp，
+        是否相碰、或被上层容器裁切，本机无设备无法确认，待真机核对。
     -->
-    <dimen name="field_height">49dp</dimen>
+    <dimen name="field_height">36dp</dimen>
     <!-- 搜索框字号：12sp × 4/3 = 16sp。不复用 text_mono，避免波及日志行本身。 -->
     <dimen name="log_filter_text_size">16sp</dimen>
     <!-- 「回到底部」纯图标按钮的触控尺寸。宽高相同 + Material3 全圆角 → 正圆。 -->

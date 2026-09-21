@@ -123,7 +123,7 @@ public final class FlowWrapLayout extends LinearLayout {
         contentHeight += rowHeight;
 
         // 并进 suggested minimum：本类自己算尺寸，不并的话 minHeight/minWidth 会被当成死配置
-        // （行高=内容高时，设了 minHeight 也不会撑开——"开关换行后那行要保底 49dp"就靠它）。
+        // （行高=内容高时，设了 minHeight 也不会撑开——"开关换行后那行要保底 36dp"就靠它）。
         setMeasuredDimension(
                 resolveSizeAndState(
                         Math.max(contentWidth + getPaddingLeft() + getPaddingRight(),

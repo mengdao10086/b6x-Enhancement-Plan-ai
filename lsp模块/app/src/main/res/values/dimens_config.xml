@@ -24,7 +24,7 @@
     <dimen name="config_field_min_width">72dp</dimen>
     <dimen name="config_field_max_width">240dp</dimen>
     <!--
-        输入框字号：与 @dimen/log_filter_text_size 同为 16sp，对应 @dimen/field_height 的 49dp
+        输入框字号：与 @dimen/log_filter_text_size 同为 16sp，对应 @dimen/field_height 的 36dp
         （两处输入框要求等高，字号也必须同档，否则等高之下一个显空一个显挤）。
     -->
     <dimen name="config_field_text_size">16sp</dimen>
@@ -34,19 +34,20 @@
         内层 EditText 是 match_parent + gravity=center：正文在"去掉内边距后的内容区"里居中，
         所以上下内边距不改变居中方式，只决定两件事——内容区可用高、以及内容区中心（= 正文落点）在框内的位置。
         浮起说明（12sp 约 16dp 高）骑在框顶边上，其下沿约在框顶下 8dp 处。
-        算式（框高 @dimen/field_height 49dp、正文 16sp 行盒约 18.75dp）：
-          内容区 = [padTop, 49 − padBottom] = [5, 46]，可用高 41dp；
-          行盒在内容区内居中 → 上下各留 (41 − 18.75) / 2 ≈ 11.125dp；
-          行盒中心 = (5 + 46) / 2 = 25.5dp，行盒顶 16.125dp、行盒底 34.875dp。
+        算式（框高 @dimen/field_height 36dp、正文 16sp 行盒约 18.75dp）：
+          内容区 = [padTop, 36 − padBottom] = [5, 33]，可用高 28dp；
+          行盒在内容区内居中 → 上下各留 (28 − 18.75) / 2 ≈ 4.625dp；
+          行盒中心 = (5 + 33) / 2 = 19dp，行盒顶 9.625dp、行盒底 28.375dp。
         几何含义：
-          · 比框的几何中心（49 / 2 = 24.5dp）低 1dp —— 参数名盒就装在几何中心上（见 item_config_row.xml），
+          · 比框的几何中心（36 / 2 = 18dp）低 1dp —— 参数名盒就装在几何中心上（见 item_config_row.xml），
             故正文与参数名的中心只差 1dp，观感基本齐平（更早的 8/4 差 2dp、12/4 差 4dp）。
-          · 比「说明下沿(8) → 框底(49)」的中点 28.5dp 高 3dp，即正文略偏说明一侧。
-          · 版面留白：说明下沿 → 行盒顶 ≈ 8.125dp，行盒底 → 框底 ≈ 14.125dp。
+          · 比「说明下沿(8) → 框底(36)」的中点 22dp 高 3dp，即正文略偏说明一侧。
+          · 版面留白：说明下沿 → 行盒顶 ≈ 1.625dp，行盒底 → 框底 ≈ 7.625dp。
         上下合计 5 + 3 = 8dp，与左右内边距（@dimen/field_radius 8dp）同档；下内边距比上内边距更小，
-        等于把内容区中心整体上移（从 8/4 的 26.5dp 移到 25.5dp），同时把可用高从 37dp 提到 41dp。
+        等于把内容区中心整体上移（从 8/4 的 20dp 移到 19dp），同时把可用高从 24dp 提到 28dp。
         注意上内边距(5dp)已小于说明下沿(8dp)：内容区顶边落在说明区域内 3dp，单行 + 居中下行盒顶仍在
-        16.125dp、不与说明相碰，但这已是"正文贴说明"一侧的余量下限。
+        9.625dp、不与说明相碰，但这已是"正文贴说明"一侧的余量下限——框高降到 36dp 后这条余量只剩
+        1.625dp，浮起说明与正文到底会不会相碰，待真机核对。
     -->
     <dimen name="config_field_pad_top">5dp</dimen>
 

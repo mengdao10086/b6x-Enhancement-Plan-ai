@@ -583,11 +583,17 @@ final class ConfigKeyRow {
     }
 
     /**
-     * path 输入框非聚焦时把横向位置摆到目标位置：能滚多远由 {@code Layout} 与视图宽决定，
+     * path 输入框非聚焦时把横向位置摆到目标位置：能滚多远由 {@code Layout} 的首行右沿与视图宽决定，
      * 布局还没算出来（{@code mLayout} 为 null、视图宽为 0）就等下一次布局回调，摆到即停。
      *
      * <p>摆放位置按"记得的位置"与"能滚的上限"取小，换了更短的路径也不会滚过头留白。
      * 聚焦时不动：编辑中位置归用户与光标跟随，抢过来会看不见刚敲的字。
+     *
+     * <p><b>上限为什么不取 {@code Layout#getWidth()}</b>：开了 {@code scrollHorizontally} 的输入框，
+     * TextView 传给 Layout 的宽是"无上限"（{@code want = VERY_WIDE = 1MB}，见 {@code TextView#onMeasure}），
+     * Layout 的宽因此恒为 1MB、与文本多长无关，文本只占这个宽的中段——拿 1MB 算上限，摆出来的位置
+     * 落在文本右侧的大片空白里，框里一个字都画不出来（看着就是个空框）。故上限取 {@link Layout#getLineRight}
+     * （"该行横向滚动该露出的最右位置"，TextView 自己摆光标用的也是它）减视图宽：文本右端正好贴住框右沿。
      */
     private void applyPathScroll() {
         if (!meta.isPath() || fields.isEmpty()) {
@@ -603,7 +609,7 @@ final class ConfigKeyRow {
             return;
         }
         Integer remembered = PATH_SCROLL_X.get(meta.key);
-        int maxScroll = Math.max(0, layout.getWidth() - viewWidth);
+        int maxScroll = Math.max(0, (int) Math.ceil(layout.getLineRight(0)) - viewWidth);
         int target = remembered == null ? maxScroll : Math.min(remembered, maxScroll);
         if (input.getScrollX() != target) {
             input.scrollTo(target, 0);

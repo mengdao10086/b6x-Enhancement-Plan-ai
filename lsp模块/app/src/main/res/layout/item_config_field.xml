@@ -16,10 +16,10 @@
       · 左右内边距压到 @dimen/field_radius(8dp)：M3 默认 16dp，收掉的那 8dp 全给可用内容宽，
         圆角 8dp 之外不再留空白（说明的可用宽也跟着变宽，见 calculateCollapsedTextBounds）。
       · 上下内边距不对称（上 @dimen/config_field_pad_top 5dp / 下 @dimen/config_field_pad_bottom 3dp）：
-        EditText 高度 match_parent + gravity=center → 正文是在"去掉内边距后的内容区"（49 − 5 − 3 = 41dp）
-        里居中的，内边距只决定内容区的高与它的中心。行盒（16sp 约 18.75dp）中心 = (5 + 46) / 2 = 25.5dp：
-        比框的几何中心（24.5dp，参数名盒所在）低 1dp、比「说明下沿(8) → 框底(49)」的中点 28.5dp 高 3dp，
-        行盒顶 16.125dp / 底 34.875dp。算式与版面留白见 @dimen/config_field_pad_top。
+        EditText 高度 match_parent + gravity=center → 正文是在"去掉内边距后的内容区"（36 − 5 − 3 = 28dp）
+        里居中的，内边距只决定内容区的高与它的中心。行盒（16sp 约 18.75dp）中心 = (5 + 33) / 2 = 19dp：
+        比框的几何中心（18dp，参数名盒所在）低 1dp、比「说明下沿(8) → 框底(36)」的中点 22dp 高 3dp，
+        行盒顶 9.625dp / 底 28.375dp。算式与版面留白见 @dimen/config_field_pad_top。
       · scrollHorizontally：等于 setHorizontallyScrolling(true)——单行横向滚动的开关。不开时
         Layout 宽 == 视图宽，scrollX 恒为 0，path 键放不下的右半段（文件名）永远看不见。
         不用已废弃的 singleLine：它顺带改掉 maxLines 之外的行为，这里只需要横向可滚。
