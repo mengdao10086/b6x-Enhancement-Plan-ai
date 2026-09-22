@@ -1403,7 +1403,8 @@
       "skipDefault：C 内静态初值不直接等于 default 的键（附原因），只跳过默认值核对，范围仍核对。",
       "cTable：该键由 C 端哪张表驱动 —— perf-int = INT_CFG_KEYS[]（性能层单值，PERF_ENABLED=1）/ sysfs = SYSFS_CFG_KEYS[]（SYSFS_ENABLED=1，cKind 给出槽位类型）/ pre = load_config 第一遍预读（不受任何总开关约束）；无 cTable = 在 parse_* 分段函数内手写。",
       "crossChecks：跨「定义默认值 ↔ C 宏 ↔ applicationId ↔ 曲线档位」的自动核对。",
-      "packages / appPackage：R4/R6 的包名单一来源声明（非参数段，不进任何产物）。"
+      "packages / appPackage：R4/R6 的包名单一来源声明（非参数段，不进任何产物）。",
+      "门2 豁免（2026-09-22 裁定）：PID_KI_DYN_T / GATE / WIN 共 7 个取值位的 cVars 显式为 null，不写正则核对——它们是「全或无提交」的跨字段护栏（t1>t2、m<t1），clamp 形式的正则从原理上表达不了；核对改由 C 端边界测试承担。这 7 位每次运行都会具名列出「C 端无对应变量、未核对」，不会隐形。"
     ],
     "skipDefault": {
       "LOG_FILE": "C 内 log_file_path 静态初值为空串，运行期按二进制名派生 <PRIVATE_DIR>/<二进制名>.log，私有目录不可用时回落 /cache/<二进制名>.log。静态初值≠default 属预期，故豁免；其真实一致性由 crossChecks 第 1 条核对"
