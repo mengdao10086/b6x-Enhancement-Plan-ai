@@ -6,8 +6,9 @@
     下方灰字整行折行，长单位（如"制冷强度档位（0~194 硬件原始档位值）"）不会被后缀挤压输入框。
 
     宽度不写死：ConfigKeyRow 量出像素宽再回写 layout_width（见 ConfigKeyRow#refitFieldWidths），
-    多个字段才能在同一键内自行并排/换行；这里给 wrap_content 只是"未被回写时"的兜底。
-    高度写死 @dimen/field_height：Material OutlinedBox 默认高约 56dp，不给死压不下来。
+    宽只认说明与内容（无下限、无上限），装不下由 FlowWrapLayout 换行；这里给 wrap_content
+    只是"未被回写时"的兜底。高度写死 @dimen/field_height：Material OutlinedBox 默认高约 56dp，
+    不给死压不下来。
 
     内层 EditText（宽度由 ConfigKeyRow 回写，高度撑满整框）：
       · 说明（浮起提示）贴圆角、值仍居中：浮起说明的位置由 material 两处决定——
@@ -18,8 +19,9 @@
         圆角半径 @dimen/field_radius 刚结束处，不再像 gravity="center" 那样被居中、两头都留白
         （框越宽留白越多）。「值」的水平居中改由 android:textAlignment="center" 承担
         （只决定文本行对齐，不进 getGravity()），两者互不牵动。
-        说明可用宽 = 框宽 − 左右内边距，装不下时 material 打省略号——框宽下限由 ConfigKeyRow 的地板
-        保证（含说明宽），见 @dimen/config_field_min_width。
+        说明可用宽 = 框宽 − 左右内边距，装不下时 material 打省略号——框宽由 ConfigKeyRow 按
+        「说明宽 / 内容宽取大者」实测定下（见 ConfigKeyRow#naturalFieldWidth），说明那一侧另加
+        @dimen/config_hint_slack(1dp) 的防截断安全量。
       · 左右内边距压到 @dimen/field_radius(8dp)：M3 默认 16dp，收掉的那 8dp 全给可用内容宽，
         圆角 8dp 之外不再留空白。它同时就是上面那个说明可用框的内缩量（8dp = 圆角半径），
         所以这 8dp 再压就会让说明压到圆角上，不能动。
@@ -99,7 +101,7 @@
 
     <!-- 字段说明（单位 / 范围）。宽度取字段宽：多字段键里跟着自己的输入框，才看得出属于哪个字段。
          单字段键（int / path / 单字段 multi）由 ConfigKeyRow 把它挂到行级，按整行宽折行——
-         框宽可能只有 @dimen/config_field_min_width(72dp)，长说明在那里要折 4~5 行，整块被顶高。
+         框宽只由该字段的说明与内容决定（短说明的框很窄），长说明留在框里要折 4~5 行、整块被顶高。
          左内边距不再动：8dp 是"内容可用宽扩到圆角刚结束"的既有口径（见上面 EditText 那条）。 -->
     <TextView
         android:id="@+id/config_field_note"

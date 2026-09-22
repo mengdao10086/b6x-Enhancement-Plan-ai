@@ -86,11 +86,12 @@
     <!-- 搜索框字号：12sp × 4/3 = 16sp。不复用 text_mono，避免波及日志行本身。 -->
     <dimen name="log_filter_text_size">16sp</dimen>
     <!--
-        搜索框到上方日志文件卡的上间距：6dp = space_s(8dp) 再收 2dp。
-        原用共用标尺 space_s，为单独收紧这 2dp 而单开此值——space_s 同时是搜索框左右缩进、
+        搜索框到上方日志文件卡的上间距：4dp = space_s(8dp) 再收 4dp（原 6dp 再上移 2dp）。
+        原用共用标尺 space_s，为单独收紧这段而单开此值——space_s 同时是搜索框左右缩进、
         命中计数行缩进、日志列表内边距与「回到底部」按钮边距，改它会牵动整页。
+        该值只压搜索框上沿这一段：搜索框左右缩进仍走 space_s，不随此值变化。
     -->
-    <dimen name="log_filter_gap">6dp</dimen>
+    <dimen name="log_filter_gap">4dp</dimen>
     <!-- 「回到底部」纯图标按钮的触控尺寸。宽高相同 + Material3 全圆角 → 正圆。 -->
     <dimen name="log_follow_btn_size">48dp</dimen>
 </resources>

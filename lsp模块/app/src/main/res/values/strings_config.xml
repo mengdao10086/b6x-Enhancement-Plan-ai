@@ -47,7 +47,6 @@
         重置基准是定义里的 factory（出厂值），不是 default（代码内默认值），故文案一律说"出厂值"。
     -->
     <string name="config_reset_title">参数重置</string>
-    <string name="config_reset_hint">按分组恢复出厂值：组头总开关与组内全部参数一起恢复。</string>
     <string name="config_reset_dialog_title">重置「%1$s」？</string>
     <string name="config_reset_dialog_message">该组参数将恢复出厂值：组头总开关与组内全部参数一起回到出厂值，此操作不可撤销。</string>
     <string name="config_reset_confirm">恢复出厂值</string>

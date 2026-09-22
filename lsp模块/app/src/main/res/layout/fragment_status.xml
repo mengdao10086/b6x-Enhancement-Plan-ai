@@ -74,9 +74,10 @@
                       · 部署状态文本 → 进度条：0dp，走 status_progress_gap（进度条无 inset，margin 即所见）
                       · 进度条 → 行1：5dp，走 status_buttons_gap（上方不挨按钮，同理 margin 即所见）
                       · 行1 → 行2：3dp，走 status_button_row_gap（margin 取 -5dp）
-                      · 行2 → 行3：2dp，走 status_button_last_gap（margin 取 -6dp）
-                    后两处目标可见值不再相等，故各开一项；布局盒分别重叠 5dp / 6dp，
-                    均小于两侧内缩之和 8dp，两行圆角块之间仍留 3dp / 2dp，且上按钮圆角块的可点区不减少。
+                      · 行2 → 行3：0dp，走 status_button_last_gap（margin 取 -8dp）
+                    后两处目标可见值不再相等，故各开一项；布局盒分别重叠 5dp / 8dp，
+                    前一处的重叠小于两侧内缩之和 8dp、后一处正好等于，两行圆角块之间仍留 3dp / 0dp
+                    （后一处圆角块刚好相接、仍不相碰），且上按钮圆角块的可点区不减少。
                 -->
                 <LinearLayout
                     android:layout_width="match_parent"

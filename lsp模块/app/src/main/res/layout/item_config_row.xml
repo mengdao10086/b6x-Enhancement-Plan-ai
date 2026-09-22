@@ -9,17 +9,24 @@
       "未生效"的标注在分组卡头做一次（见 item_config_group），行内只压暗不重复标注。
 
     参数名的对齐（两种键型统一走一套）：
-      · 参数名装在一个定高 @dimen/field_height(36dp) 的盒子里、盒内垂直居中，盒子在行内贴顶——
+      · 参数名装在 @dimen/field_height(36dp) 的盒子里、盒内垂直居中，盒子在行内贴顶——
         于是参数名的中心与「同一行第一个输入框」的中心重合。不能直接让行内居中：输入框下面还有
         说明行，按整行居中会把参数名一起压低（要求"不含说明内容的高度"）。
-      · 控制区（输入框 / 开关）顶到行尾：参数内容输入框右侧对齐，参数名留在左边、宽度由内容决定。
-        控制区自己吃 weight（0dp + weight=1）——框架在按 weight 分配时会先把参数名与那 8dp 外边距
-        从行宽里扣掉，控制区拿到的就是"行宽 − 参数名 − 间距"这个真实可用宽，内部字段再宽也只会被
-        自己的宽度上限挡住，不会越出行右边界被裁。
+        盒高不是死值：ConfigKeyRow#syncLabelBox 会在布局后按"与参数名对齐的那个控件"回写——
+        开关键与「控制区第一个字段是布尔字段」的键对齐的是开关（48dp），盒高改成它的实测高
+        （盒高仍是 36dp 而盒又贴顶时，参数名中心比开关中心高 (48−36)/2 = 6dp）；
+        输入框行的盒高保持 36dp，改由 @dimen/config_label_ink_shift 给参数名一个纯渲染的下移量。
+      · 控制区（输入框）的内容盒覆盖整行宽、内容从行首起排，参数名留在左边、宽度由内容决定。
+        起点本来在参数名右沿 + @dimen/space_s，ConfigKeyRow#syncControlGeometry 把
+        layout_marginStart 改成 −参数名盒实测宽（左边界回到行首）、layout_width 写成行宽，
+        再给容器 setFirstRowIndent(参数名宽 + 间距)：首行的字段仍落在"参数名右沿 + 间距"，
+        换行后的行才拿得到整行宽（换行判定与"开关字段独占一行"也都按这个可用宽算）。
         不能沿用"占位 Space 带 weight 顶到行尾"的老办法：LinearLayout 只要行内存在带 weight 的子视图，
         首轮测量其它子视图时传的 widthUsed 就是 0，控制区会拿到接近整行的宽（参数名那一段从未被扣掉）
         → 数值框右半截、path 框大部分都落到屏幕外。path 键的输入框是 MATCH_PARENT（吃掉控制区剩余宽），
         宽度算对了它才不会越界。
+        控制区自己吃 weight（0dp + weight=1）是首帧兜底：宽写到行宽后超额空间归零、份额也是 0，
+        宽度不再随内容变（内容比整行窄时 weight 只会把自身宽收敛到内容宽，控制区就只拿到内容那么宽）。
       · config_key_spacer 的 weight 只服务开关键（把开关顶到行尾，与输入框键的右对齐观感一致）；
         键内有控制区时由 ConfigKeyRow 把它的 weight 撤成 0，否则两者各分一半剩余宽、控制区只剩一半。
 -->
@@ -36,6 +43,7 @@
         android:orientation="horizontal">
 
         <FrameLayout
+            android:id="@+id/config_key_label_box"
             android:layout_width="wrap_content"
             android:layout_height="@dimen/field_height"
             android:layout_gravity="top">
