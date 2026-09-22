@@ -10,7 +10,7 @@
 - **返回键收后台**：宿主内任意页面按返回都把散热器 app 收进后台而不退出，并从最近任务列表隐藏（可在设置页关闭）
 - **一键部署守护进程**：C 守护程序（`daemon/tempctrl.c`）随 APK 打包，装好 APK 后在状态页一键部署，**无需刷 Magisk 模块**；配置与日志存 APK 私有目录，卸载即清
 - **BLE 修复**：修复 Android 16 上飞智散热器工具（B6X + B7X）无法连接的 4 层连环 Bug（[完整修复历程](../参考资料/完整修复历程.md)）
-- **双设备支持**：自动检测包名选择 B6X 老 app（`com.flydigi.waspwing.experimental`）、B6X 新 app（`com.flydigi.waspwing.experimentanliuliu`）或 B7X（`com.fdg.flashplay.farsef`）钩子集，B7X WaspWingManager 混淆名 `t9.j` 自动 fallback
+- **双设备支持**：自动检测包名选择开发者工具（`com.flydigi.waspwing.experimental`）、开发者工具 V2（`com.flydigi.waspwing.experimentanliuliu`）或 B7X 游戏厅 farsef（`com.fdg.flashplay.farsef`）钩子集，B7X WaspWingManager 混淆名 `t9.j` 自动 fallback
 - **双广播接口**：接收 `com.flydigi.SET_TEMPERATURE`（B6X）或 `com.flydigi.SET_TEMPERATURE_B7`（B7X）广播，将参数转发到对应 SDK 的 `setRunMode()`
 - **双 status 文件心跳**：每 1 秒写入 BLE 状态及散热器运行参数到 `/data/local/tmp/tempctrl_b6x.status` / `tempctrl_b7x.status`，含 `CONNECTED_AT` 时间戳供仲裁
 - **CPU 占用修复**：修复 DefaultDispatcher 线程空队列忙等导致的 100% CPU 占用
@@ -23,7 +23,7 @@
 
 1. 编译或下载 APK
 2. 安装到手机（允许未知来源应用）
-3. 在 LSPosed 中**启用模块**，作用域勾选 `com.flydigi.waspwing.experimental` 和 `com.flydigi.waspwing.experimentanliuliu`（B6X 两个 app）以及 `com.fdg.flashplay.farsef`（B7X）
+3. 在 LSPosed 中**启用模块**，作用域勾选 `com.flydigi.waspwing.experimental` 和 `com.flydigi.waspwing.experimentanliuliu`（开发者工具 / 开发者工具 V2）以及 `com.fdg.flashplay.farsef`（B7X）
 4. **强制停止**目标 App 或重启手机
 
 > 需要 LSPosed ≥ 1.8。
@@ -119,6 +119,15 @@ TARGET_TEMP=180     ← 18.0°C
 - `lastWaspWingInfo` 为 `null` 时只输出 `BLE=` + `CONNECTED_AT=` + `BLE_OWNER_LAST=` 行（模块启动初期或 WaspWingInfo 未就绪）
 - 文件名区分设备；文件内部 `BLE=` 按设备编码：B6X 文件 1/2（区分两个 app），B7X 文件 6/7（实际散热器型号），断连统一为 0
 
+### 生命周期与消费端
+
+| 项 | 说明 |
+|----|------|
+| 创建者 | tempctrl 启动时 `fopen("a")` 预创建两个文件 + `chmod 0666`（路径与预创建逻辑硬编码在 C 端与 `MainHook` 两侧） |
+| 写入节奏 | LSPosed 模块每 1 秒覆写 + 连接/断连事件即时覆写（`BOOT_AT` 已删除） |
+| 心跳判死 | daemon 侧 `STATUS_TIMEOUT` **硬编码 3 秒**（LSP 每 1s 写，mtime 超 3s 判死），与 `BLE≠0` 组成双重检查，任一不过即算断联 |
+| 读取端 | daemon 主循环开头 `read_status_ble_both()` 逐行解析双文件；`select_active_device()` 按 `CONNECTED_AT` 做「先连者优先」的设备仲裁；`update_active_limits()` 按回传型号切制冷/风扇上限，非按包名猜测 |
+
 ---
 
 ## 界面开关文件协议（daemon → 钩子）
@@ -134,6 +143,26 @@ TARGET_TEMP=180     ← 18.0°C
 | 读取方 | `MainHook.readBackHideEnabled()`（宿主 app 进程），**读不到按 1（开启）处理** |
 
 > 方向与 status 文件相反：status 是「钩子写、daemon 读」，本文件是「daemon 写、钩子读」。
+
+---
+
+## 文件落点
+
+部署产物与运行文件落在三处：APK 私有目录、`/data/local/tmp/`（KSU noexec 规避）、`/data/adb/service.d/`。
+
+| 文件 | 落点 | 谁写 |
+|---|---|---|
+| `profile.conf` | `/data/data/com.example.waspwingtempctrl/files/` | 界面（部署时**仅当不存在**才按 `params.json` 的 `factory` 写入，已存在一律不覆盖） |
+| `tempctrl.log` | 同上（`LOG_FILE`） | daemon（root）；部署时由 app 以自身 uid 预创建空文件，**仅不存在时建** |
+| `tempctrl_webui.data` | 同上（曲线时序数据） | daemon（root）；同上预创建 |
+| `tempctrl.lock` | 同上（daemon 单实例锁） | daemon（`flock` 非阻塞；第二个实例以**退出码 2** 自行退出） |
+| `tempctrl_b6x.status` / `tempctrl_b7x.status` | `/data/local/tmp/`（**原样未动**） | daemon 预创建 + `chmod 0666`；LSPosed 侧每秒覆写（详见上文 status 文件协议） |
+| `tempctrl_uiprefs` | `/data/local/tmp/` | daemon（按需转写，详见上文界面开关文件协议） |
+| `tempctrl_last_dev` | `/data/data/<飞智包名>/files/`（**各包各记**） | LSPosed 侧（`MainHook`）自建自用，daemon 不参与 |
+| `tempctrl`（二进制） | `/data/local/tmp/tempctrl`（沿用 noexec 规避） | 部署时由 root 从 APK assets 落盘 + `chmod 0755` |
+| `b6x-tempctrl.sh` | `/data/adb/service.d/`（KSU <10683 为 `/data/adb/ksu/service.d/`） | 同上 |
+
+> 卸载自清的清理清单与「清除数据」的已知代价见仓库根 [逻辑说明.md](../逻辑说明.md)「参数落点」注记。
 
 ---
 

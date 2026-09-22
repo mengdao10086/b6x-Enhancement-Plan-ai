@@ -12,7 +12,7 @@
 |------|------|------|------|
 | **APK（唯一交付物）** | [lsp模块/](lsp模块/) | LSPosed 模块 + 原生配置界面；内置 C 守护程序（CI 编译后注入 `assets/tempctrl-arm64`） | ✅ 版本见 [lsp模块/app/build.gradle.kts](lsp模块/app/build.gradle.kts) |
 | C 守护程序源码 | [lsp模块/daemon/](lsp模块/daemon/) | 智能温控，由 CI 编译后打进上面的 APK | 已并入 APK |
-| 参数定义 | [参数定义/](参数定义/) | 52 个配置键的单一来源，生成 APK 内的 `assets/params.json` | — |
+| 参数定义 | [参数定义/](参数定义/) | 配置键的单一来源（键数见 `参数定义/check_params.py` 的 `EXPECTED_KEY_COUNT`），生成 APK 内的 `assets/params.json` | — |
 
 ---
 
@@ -54,12 +54,13 @@ C 守护程序（`tempctrl`）与 `service.d` 拉起脚本由 APK 内的部署�
 ├── lsp模块/             ← LSPosed 模块 + 原生界面（Android 项目，唯一交付物）
 │   ├── app/             ← Android 源码与资源
 │   └── daemon/          ← C 守护程序源码、编译工具与 profile.conf
-├── 参数定义/             ← 52 个配置键的单一来源 + 生成/校验脚本
-├── 反编译分析/           ← 各 app 反编译分析文档
-├── 参考资料/             ← BLE 修复历程、反编译产物（decompile/ 等不进 git）
+├── 参数定义/             ← 配置键的单一来源 + 生成/校验脚本
+├── 参考资料/             ← BLE 修复历程、反编译分析与路线记录
+│   ├── decompile/       ← 各 app 反编译产物 + 逐 app 反编译分析（索引 `总览.md`；**不进 git**）
+│   ├── 路线记录/         ← 原 `.claude/路线A-*` 8 份原件
+│   └── magisk-lsp合并路线.md ← 由 Magisk 模块改为 LSPosed 模块路线的来龙去脉
 ├── .github/workflows/   ← CI 自动构建
 ├── 逻辑说明.md           ← 温控技术设计文档
-├── 动态KI机制流程图.md    ← 动态 KI 抑制机制的分支级流程图
 ├── CHANGELOG.md         ← 版本更新日志
 ├── TECH_DEBT.md         ← 技术债记录
 └── 待办.md              ← 项目待办清单

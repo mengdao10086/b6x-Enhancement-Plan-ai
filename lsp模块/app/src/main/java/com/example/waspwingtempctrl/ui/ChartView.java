@@ -20,7 +20,7 @@ import java.util.List;
 
 /**
  * 曲线自绘控件（D2）。口径逐条对齐 {@code 逻辑说明.md}（仓库根）的「曲线」一节，
- * 依据与行号见 {@code .claude/路线A-线D-曲线口径.md}（历史记录）。
+ * 依据与行号见 {@code 参考资料/路线记录/路线A-线D-曲线口径.md}（历史记录）。
  *
  * <p><b>性能硬约束</b>：{@code onDraw} 只做 drawLine / drawPath / drawCircle / drawText。全部几何量（轴与刻度、每系列 {@link Path}、标注位置与文本宽度、
  * 断联空白）都在 {@link #rebuild()} 里算好并缓存；rebuild 只在数据/窗口/系列开关/尺寸/配色

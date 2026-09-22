@@ -65,7 +65,6 @@
 | `lsp模块/app/src/main/java/.../MainHook.java` | LSPosed 模块核心 |
 | `lsp模块/README.md` | LSPosed 模块说明；广播与 status 文件协议的唯一规范处 |
 | `逻辑说明.md` | 温控技术设计文档 |
-| `动态KI机制流程图.md` | 动态 KI 抑制机制的分支级流程图 |
 | `参数定义/params.def.json` | 配置键的单一来源（唯一手写处；键数见 `check_params.py` 的 `EXPECTED_KEY_COUNT`） |
 | `参数定义/gen_params.py` | 生成 `lsp模块/app/src/main/assets/params.json` |
 | `参数定义/check_params.py` | 派生副本漂移校验（CI 已接入，EXIT=0 为通过） |
@@ -74,10 +73,12 @@
 | `TECH_DEBT.md` | 技术债与未解决问题记录 |
 | `待办.md` | 项目待办清单 |
 | `diagnose_status.sh` | 散热器无反应诊断脚本（设备端一键排查） |
-| `反编译分析/总览.md` | 反编译技术文档总览（所有 app 分析索引） |
-| `反编译分析/飞智散热器开发者工具运行逻辑.md` | App 内部运行逻辑分析 |
 | `参考资料/完整修复历程.md` | BLE 4 层 Bug 修复全记录 + B8X 分析 |
-| `参考资料/decompile/` | 各工具反编译产物（`b6_devtool/`、`b6_overclock_v2/`、`b7_overclock_v3/`、`b8x/`；不进 git，分析文档在 `反编译分析/`） |
+| `参考资料/路线记录/` | 路线 A 各线进展与验收原件（原 `.claude/路线A-*.md` 8 份，已移入版本控制） |
+| `参考资料/magisk-lsp合并路线.md` | 由「Magisk 模块 + 直接改 APK」转为 LSPosed 模块路线的思想与实现 |
+| `参考资料/decompile/总览.md` | 反编译技术文档总览（所有 app 分析索引）；**不进 git** |
+| `参考资料/decompile/b6_devtool/反编译分析.md` | 开发者工具 App 内部运行逻辑分析；**不进 git** |
+| `参考资料/decompile/` | 各工具反编译产物与逐 app 分析（`b6_devtool/`、`b6_overclock_v2/`、`b7_overclock_v3/`、`b8x/`；**不进 git**，索引见 `总览.md`） |
 | `参考资料/c_historical_sources/` | tempctrl 历史版本源码（单独追踪） |
 | `参考资料/smali_patching_attempts/` | smali 工具链产物（失败尝试，工具 jar 已并入集中 `工具/`；不进 git） |
 | `.github/workflows/build.yml` | CI 单一构建链：编译 C → 注入 APK assets → 出唯一交付物 APK |
@@ -95,16 +96,13 @@
 ---
 
 ## 文件组织规则
-- 每个项目必须有独立文件夹，不要在根目录直接操作。
 - 项目根目录只保留：入口文件（main.*）、配置文件（package.json、Cargo.toml等）、README。
 - 旧版产出物移入子文件夹，子文件夹按功能或目标命名，最好使用中文。
-- 工具链文件夹（`.git/`、`.claude/`、`.gitnexus/`、`node_modules/` 等）不受上述规则限制。
 - 二级子文件夹按时间或版本号命名。
-- 同一项目下的命名风格保持一致。
 - 技术债记录文件 `TECH_DEBT.md` 放在项目根目录。
+- 独立文件夹、工具链文件夹豁免、命名风格一致三条通用规则见 [父 CLAUDE.md](../CLAUDE.md#文件组织规则)。
 
 ### 文档内容规范
 - 同类信息只在**一个** md 中写全，其他 md 引用链接，不得复制内容
 - 版本变更统一放到 `CHANGELOG.md`。其他 md 提到版本变化时最多一句话，加 `详见 CHANGELOG.md`
-- 发现重复内容 → 删掉多余的那份，换成 `详见 [目标文件](path)`
-- 跨文件链接必须用相对路径，从引用文件所在位置出发计算
+- 重复内容处理与跨文件链接相对路径两条通用规则见 [父 CLAUDE.md](../CLAUDE.md#文档内容规范)。
