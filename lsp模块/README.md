@@ -10,7 +10,7 @@
 - **返回键收后台**：宿主内任意页面按返回都把散热器 app 收进后台而不退出，并从最近任务列表隐藏（可在设置页关闭）
 - **一键部署守护进程**：C 守护程序（`daemon/tempctrl.c`）随 APK 打包，装好 APK 后在状态页一键部署，**无需刷 Magisk 模块**；配置与日志存 APK 私有目录，卸载即清
 - **BLE 修复**：修复 Android 16 上飞智散热器工具（B6X + B7X）无法连接的 4 层连环 Bug（[完整修复历程](../参考资料/完整修复历程.md)）
-- **双设备支持**：自动检测包名选择开发者工具（`com.flydigi.waspwing.experimental`）、开发者工具 V2（`com.flydigi.waspwing.experimentanliuliu`）或 B7X 游戏厅 farsef（`com.fdg.flashplay.farsef`）钩子集，B7X WaspWingManager 混淆名 `t9.j` 自动 fallback
+- **双设备支持**：自动检测包名选择飞智散热器开发者工具（别名：老 app，`com.flydigi.waspwing.experimental`，键名沿用 `B6X_OLD`）、B6 B6X 超频工具 V2（别名：新 app，`com.flydigi.waspwing.experimentanliuliu`，键名沿用 `B6X_NEW`）或 B7X 游戏厅 farsef（`com.fdg.flashplay.farsef`）钩子集，B7X WaspWingManager 混淆名 `t9.j` 自动 fallback
 - **双广播接口**：接收 `com.flydigi.SET_TEMPERATURE`（B6X）或 `com.flydigi.SET_TEMPERATURE_B7`（B7X）广播，将参数转发到对应 SDK 的 `setRunMode()`
 - **双 status 文件心跳**：每 1 秒写入 BLE 状态及散热器运行参数到 `/data/local/tmp/tempctrl_b6x.status` / `tempctrl_b7x.status`，含 `CONNECTED_AT` 时间戳供仲裁
 - **CPU 占用修复**：修复 DefaultDispatcher 线程空队列忙等导致的 100% CPU 占用
@@ -23,7 +23,7 @@
 
 1. 编译或下载 APK
 2. 安装到手机（允许未知来源应用）
-3. 在 LSPosed 中**启用模块**，作用域勾选 `com.flydigi.waspwing.experimental` 和 `com.flydigi.waspwing.experimentanliuliu`（开发者工具 / 开发者工具 V2）以及 `com.fdg.flashplay.farsef`（B7X）
+3. 在 LSPosed 中**启用模块**，作用域勾选 `com.flydigi.waspwing.experimental` 和 `com.flydigi.waspwing.experimentanliuliu`（飞智散热器开发者工具 / B6 B6X 超频工具 V2）以及 `com.fdg.flashplay.farsef`（B7X）
 4. **强制停止**目标 App 或重启手机
 
 > 需要 LSPosed ≥ 1.8。
@@ -72,7 +72,7 @@ am broadcast -a com.flydigi.SET_TEMPERATURE_B7 \
 本模块分两部分：`app/`（Android 工程：Xposed 钩子 + 原生配置界面）与 `daemon/`（C 守护程序源码与构建脚本，CI 编译后注入 `app/src/main/assets/tempctrl-arm64`）。
 
 > 目录与文件的权威清单见仓库根 [CLAUDE.md](../CLAUDE.md) 的「关键文件索引」表（全仓库以该表为准）；
-> 架构、进程协作与各文件落点见仓库根 [逻辑说明.md](../逻辑说明.md)。
+> 架构、进程协作与各文件落点见 [daemon/逻辑说明.md](daemon/逻辑说明.md)。
 
 ---
 
@@ -162,7 +162,7 @@ TARGET_TEMP=180     ← 18.0°C
 | `tempctrl`（二进制） | `/data/local/tmp/tempctrl`（沿用 noexec 规避） | 部署时由 root 从 APK assets 落盘 + `chmod 0755` |
 | `b6x-tempctrl.sh` | `/data/adb/service.d/`（KSU <10683 为 `/data/adb/ksu/service.d/`） | 同上 |
 
-> 卸载自清的清理清单与「清除数据」的已知代价见仓库根 [逻辑说明.md](../逻辑说明.md)「参数落点」注记。
+> 卸载自清的清理清单与「清除数据」的已知代价见 [daemon/逻辑说明.md](daemon/逻辑说明.md)「参数落点」注记。
 
 ---
 

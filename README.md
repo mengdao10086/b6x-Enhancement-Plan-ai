@@ -22,7 +22,7 @@
 
 C 守护程序（`tempctrl`）与 `service.d` 拉起脚本由 APK 内的部署功能落盘到 `/data/local/tmp/` 与 `/data/adb/service.d/`，不再单独发 Magisk 模块包。**卸载 APK 后守护进程会自行清理这些落盘产物并停止运行**（含开机自启脚本），设备上不留残留；重装后需重新一键部署。
 
-> 详细架构图、进程协作与各文件落点见 [逻辑说明.md](逻辑说明.md)。
+> 详细架构图、进程协作与各文件落点见 [lsp模块/daemon/逻辑说明.md](lsp模块/daemon/逻辑说明.md)。
 
 ---
 
@@ -44,7 +44,7 @@ C 守护程序（`tempctrl`）与 `service.d` 拉起脚本由 APK 内的部署�
 - **界面内直接查看实时曲线与日志**：参数改即存，daemon 每 5s 热重载
 - **配置热重载**：界面或 profile.conf 修改参数后无需重启即生效
 
-> 详细策略设计 → [逻辑说明.md](逻辑说明.md) · 版本变更 → [CHANGELOG.md](CHANGELOG.md)
+> 详细策略设计 → [lsp模块/daemon/逻辑说明.md](lsp模块/daemon/逻辑说明.md) · 版本变更 → [CHANGELOG.md](CHANGELOG.md)
 
 ---
 
@@ -54,13 +54,12 @@ C 守护程序（`tempctrl`）与 `service.d` 拉起脚本由 APK 内的部署�
 ├── lsp模块/             ← LSPosed 模块 + 原生界面（Android 项目，唯一交付物）
 │   ├── app/             ← Android 源码与资源
 │   └── daemon/          ← C 守护程序源码、编译工具与 profile.conf
+│       └── 逻辑说明.md   ← C 源码设计与逻辑的唯一权威文档
 ├── 参数定义/             ← 配置键的单一来源 + 生成/校验脚本
-├── 参考资料/             ← BLE 修复历程、反编译分析与路线记录
-│   ├── decompile/       ← 各 app 反编译产物 + 逐 app 反编译分析（索引 `总览.md`；**不进 git**）
-│   ├── 路线记录/         ← 原 `.claude/路线A-*` 8 份原件
+├── 参考资料/             ← BLE 修复历程与反编译分析
+│   ├── decompile/       ← 各 app 反编译产物 + 逐 app 反编译分析（索引 `通用.md`；**不进 git**）
 │   └── magisk-lsp合并路线.md ← 由 Magisk 模块改为 LSPosed 模块路线的来龙去脉
 ├── .github/workflows/   ← CI 自动构建
-├── 逻辑说明.md           ← 温控技术设计文档
 ├── CHANGELOG.md         ← 版本更新日志
 ├── TECH_DEBT.md         ← 技术债记录
 └── 待办.md              ← 项目待办清单

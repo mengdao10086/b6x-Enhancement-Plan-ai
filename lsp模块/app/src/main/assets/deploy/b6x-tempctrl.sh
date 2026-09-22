@@ -19,7 +19,7 @@ WAIT_LOOPS=30           # 等旧进程退出：30 × 1s（C 端最长 sleep 5s �
 RESTART_INTERVAL=300    # 看门狗周期（秒）
 
 # 宿主 APK 包名与数据目录。判据用【父目录】而非 files/：app「清除数据」只清 files/ 内容，
-# 父目录由系统保留 → 可抗"清除数据"误判（代价记在 逻辑说明.md 的参数落点注记处）。
+# 父目录由系统保留 → 可抗"清除数据"误判（代价记在 lsp模块/daemon/逻辑说明.md 的「参数落点」注记处）。
 HOST_PKG=com.example.waspwingtempctrl
 HOST_DIR=/data/data/$HOST_PKG
 PM_BIN=/system/bin/pm

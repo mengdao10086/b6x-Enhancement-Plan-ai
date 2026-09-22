@@ -64,7 +64,7 @@
 | `lsp模块/app/build.gradle.kts` | 版本号 `versionName` / `versionCode` 的唯一来源（CI 由此解析） |
 | `lsp模块/app/src/main/java/.../MainHook.java` | LSPosed 模块核心 |
 | `lsp模块/README.md` | LSPosed 模块说明；广播与 status 文件协议的唯一规范处 |
-| `逻辑说明.md` | 温控技术设计文档 |
+| `lsp模块/daemon/逻辑说明.md` | C 源码设计与逻辑的唯一权威文档 |
 | `参数定义/params.def.json` | 配置键的单一来源（唯一手写处；键数见 `check_params.py` 的 `EXPECTED_KEY_COUNT`） |
 | `参数定义/gen_params.py` | 生成 `lsp模块/app/src/main/assets/params.json` |
 | `参数定义/check_params.py` | 派生副本漂移校验（CI 已接入，EXIT=0 为通过） |
@@ -74,11 +74,10 @@
 | `待办.md` | 项目待办清单 |
 | `diagnose_status.sh` | 散热器无反应诊断脚本（设备端一键排查） |
 | `参考资料/完整修复历程.md` | BLE 4 层 Bug 修复全记录 + B8X 分析 |
-| `参考资料/路线记录/` | 路线 A 各线进展与验收原件（原 `.claude/路线A-*.md` 8 份，已移入版本控制） |
 | `参考资料/magisk-lsp合并路线.md` | 由「Magisk 模块 + 直接改 APK」转为 LSPosed 模块路线的思想与实现 |
-| `参考资料/decompile/总览.md` | 反编译技术文档总览（所有 app 分析索引）；**不进 git** |
+| `参考资料/decompile/通用.md` | 反编译技术文档索引 + 跨 app 通用内容（所有 app 分析索引）；**不进 git** |
 | `参考资料/decompile/b6_devtool/反编译分析.md` | 开发者工具 App 内部运行逻辑分析；**不进 git** |
-| `参考资料/decompile/` | 各工具反编译产物与逐 app 分析（`b6_devtool/`、`b6_overclock_v2/`、`b7_overclock_v3/`、`b8x/`；**不进 git**，索引见 `总览.md`） |
+| `参考资料/decompile/` | 各工具反编译产物与逐 app 分析（`b6_devtool/`、`b6_overclock_v2/`、`b7_overclock_v3/`、`b8x/`；**不进 git**，索引见 `通用.md`） |
 | `参考资料/c_historical_sources/` | tempctrl 历史版本源码（单独追踪） |
 | `参考资料/smali_patching_attempts/` | smali 工具链产物（失败尝试，工具 jar 已并入集中 `工具/`；不进 git） |
 | `.github/workflows/build.yml` | CI 单一构建链：编译 C → 注入 APK assets → 出唯一交付物 APK |

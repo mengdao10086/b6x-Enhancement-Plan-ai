@@ -38,8 +38,8 @@ Source = namedtuple("Source", "id path desc")
 SOURCES = (
     Source("conf", "lsp模块/daemon/profile.conf",
            "配置文件出厂模板（部署到设备，C 端热重载）"),
-    Source("doc", "逻辑说明.md",
-           "设计说明的参数表段（仓库根；其余章节不由本工具维护）"),
+    Source("doc", "lsp模块/daemon/逻辑说明.md",
+           "设计说明的参数表段（lsp模块/daemon/；其余章节不由本工具维护）"),
     Source("c", "lsp模块/daemon/tempctrl.c",
            "守护进程源码：解析的键、clamp 边界、护栏"),
 )
@@ -62,7 +62,7 @@ PRODUCTS = (
             "界面消费的键/范围/默认值（APK assets）"),
     Product("profile.conf", "lsp模块/daemon/profile.conf", "full",
             "配置文件出厂模板（含注释）"),
-    Product("doc-table", "逻辑说明.md", "region",
+    Product("doc-table", "lsp模块/daemon/逻辑说明.md", "region",
             "逻辑说明.md 的参数表段（标记区间内）"),
     Product("c-header", "lsp模块/daemon/params_generated.h", "full",
             "C 端键表与 clamp 边界（供 tempctrl.c 包含）"),

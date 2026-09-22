@@ -1384,7 +1384,7 @@
       {"file": "lsp模块/app/src/main/java/com/example/waspwingtempctrl/MainHook.java", "check": "javaConstSet", "expect": ["B6X_OLD", "B6X_NEW", "B7X"]},
       {"file": "lsp模块/app/src/main/res/values/arrays.xml", "check": "xmlItemSet", "expect": ["B6X_OLD", "B6X_NEW", "B7X"]},
       {"file": "lsp模块/README.md", "check": "literalsPresent", "expect": ["B6X_OLD", "B6X_NEW", "B7X"]},
-      {"file": "逻辑说明.md", "check": "literalsPresent", "expect": ["B6X_OLD", "B6X_NEW", "B7X"]}
+      {"file": "lsp模块/daemon/逻辑说明.md", "check": "literalsPresent", "expect": ["B6X_OLD", "B6X_NEW", "B7X"]}
     ]
   },
   "appPackage": {

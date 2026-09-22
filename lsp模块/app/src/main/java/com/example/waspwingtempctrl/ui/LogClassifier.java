@@ -29,7 +29,7 @@ import java.util.regex.Pattern;
  * <p><b>四类判定规则（按此优先级短路）</b>：
  * <ol>
  *   <li><b>ERROR</b>：正文含 {@code 失败|错误|无法|异常|error|fail}（不区分大小写）。
- *       关键词口径见 {@code 逻辑说明.md}（仓库根）的「日志页」一节。
+ *       关键词口径见 {@code lsp模块/daemon/逻辑说明.md} 的「日志页」一节。
  *       C 端实例：{@code send_am_broadcast()} 的 fork 失败分支、
  *       {@code create_status_files()} 的状态文件创建失败分支、
  *       {@code load_config()} 的配置打开失败分支。</li>

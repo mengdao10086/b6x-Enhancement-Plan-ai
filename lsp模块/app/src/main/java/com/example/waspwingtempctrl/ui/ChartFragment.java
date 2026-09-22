@@ -47,7 +47,7 @@ import java.util.Locale;
  * </ul>
  *
  * <p>绘制口径在 {@link ChartView}（自绘）与 {@link ChartAxis}/{@link ChartDataset}/
- * {@link ChartWindow} 内，逐条对齐 {@code 逻辑说明.md}（仓库根）的「曲线」一节。
+ * {@link ChartWindow} 内，逐条对齐 {@code lsp模块/daemon/逻辑说明.md} 的「曲线」一节。
  *
  * <p><b>线程</b>：文件读取、{@code profile.conf} 与 {@code params.json} 的读取全部在后台线程
  * （{@link ChartLoader}/{@link ChartConfig}）；主线程只做渲染。Context 一律在主线程取出后

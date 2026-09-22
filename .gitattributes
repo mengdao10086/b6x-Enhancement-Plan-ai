@@ -8,4 +8,4 @@ lsp模块/daemon/*.h text eol=lf
 # 不加此规则则本机（autocrlf）会把它们签出成 CRLF，之后生成段一改就是"改 1 行、diff 全文件"
 lsp模块/daemon/profile.conf text eol=lf
 lsp模块/app/src/main/assets/params.json text eol=lf
-逻辑说明.md text eol=lf
+lsp模块/daemon/逻辑说明.md text eol=lf

@@ -1,7 +1,7 @@
 # Magisk 模块 → LSPosed 模块：路线合并记录
 
-> 由原 `.claude/路线A-*.md` 8 份（现已移入 [路线记录/](路线记录/)）提炼，只保留**思想与实现方式**：具体进展流水、逐条验收结果、各线自述与验收报告之间的冲突记录与整改流水均已删除。
-> **协议规范的唯一来源是 [lsp模块/README.md](../lsp模块/README.md)**（广播协议、status 文件协议），本文不复制协议表；温控策略设计见 [逻辑说明.md](../逻辑说明.md)。
+> 由原 `.claude/路线A-*.md` 8 份提炼，只保留**思想与实现方式**：具体进展流水、逐条验收结果、各线自述与验收报告之间的冲突记录与整改流水均已删除。
+> **协议规范的唯一来源是 [lsp模块/README.md](../lsp模块/README.md)**（广播协议、status 文件协议），本文不复制协议表；温控策略设计见 [lsp模块/daemon/逻辑说明.md](../lsp模块/daemon/逻辑说明.md)。
 
 ---
 
@@ -105,7 +105,7 @@
 
 ## 7. 未决事项
 
-1. **选型表与文档口径不一致**：`待办.md` 第 111 行「SDK≥30 其他 → `magisk su -mm`」，而 Scene 源码（`scene相关/decompiled/sources/a/a70.java` 的 `f()`）MAGISK 是单独一支 → `su`，只有 APATCH 才落到 `magisk su -mm`。本实现照源码；若要按文档改，只需改 `getRecommendedSuCommand()` 一处。
+1. **su 选型口径有两种记载，本实现以源码为准**：Scene 源码（`scene相关/decompiled/sources/a/a70.java` 的 `f()`）里 MAGISK 是单独一支 → `su`，只有 APATCH 才落到 `magisk su -mm`；另有一种旧口径记为「SDK≥30 其他 → `magisk su -mm`」。本实现照源码；若要改按旧口径，只需改 `getRecommendedSuCommand()` 一处。
 2. **`magisk` 不在 app 的 PATH**：`magisk su -mm` 由 app 进程 `Runtime.exec` 启动，用的是 app 的 PATH 而非 su 的；APATCH 设备上可能起不来。已用 `checkAlive()` 的「退回裸 `su`」+ 手动切换兜底。
 3. 权限（`POST_NOTIFICATIONS` 等）留到后续批次；线 D 换 AppCompatActivity 时需在 `res/values/themes.xml` 加 AppCompat/Material 主题（`res/**` 属线 D）。
 
@@ -113,8 +113,7 @@
 
 ## 相关文档
 
-- [路线记录/](路线记录/) —— 路线 A 的 8 份进展 / 验收原件（`.claude/` → 版本控制）
 - [lsp模块/README.md](../lsp模块/README.md) —— 广播协议与 status 文件协议的**唯一规范处**
-- [逻辑说明.md](../逻辑说明.md) —— 温控策略设计、参数表、落点说明
+- [lsp模块/daemon/逻辑说明.md](../lsp模块/daemon/逻辑说明.md) —— 温控策略设计、参数表、落点说明
 - [完整修复历程.md](完整修复历程.md) —— BLE 4 层 Bug 修复全记录
 - [../参数定义/对齐报告.md](../参数定义/对齐报告.md) —— 参数定义的对账与裁定记录

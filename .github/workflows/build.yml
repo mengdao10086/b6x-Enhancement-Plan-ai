@@ -50,9 +50,9 @@ jobs:
             # core.quotePath=false 防止中文路径被转义为八进制导致 grep 匹配失败
             CHANGES=$(git -c core.quotePath=false diff --name-only "$BEFORE" "${{ github.sha }}")
             # 排除文档类文件（*.md），改文档不触发构建。
-            # 例外：逻辑说明.md 的参数表段是生成产物，手改它属于产物漂移，
+            # 例外：lsp模块/daemon/逻辑说明.md 的参数表段是生成产物，手改它属于产物漂移，
             # 必须让 CI 跑到参数校验步骤（否则漂移会延迟暴露并归因到无关提交）
-            DOC_PRODUCT=$(echo "$CHANGES" | grep -x '逻辑说明\.md' || true)
+            DOC_PRODUCT=$(echo "$CHANGES" | grep -x 'lsp模块/daemon/逻辑说明\.md' || true)
             CHANGES=$(echo "$CHANGES" | grep -v '\.md$' || true)
             CHANGES=$(printf '%s\n%s' "$CHANGES" "$DOC_PRODUCT")
             # 单一信号，三类输入任一变更即重建（APK 内含 C 二进制，产物不可分割）：
