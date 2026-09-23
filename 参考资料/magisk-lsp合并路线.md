@@ -50,7 +50,7 @@
   - 部署时由 app 以自身 uid **预创建**空 `tempctrl.log` 与 `tempctrl_webui.data`（仅不存在时建、失败不阻断部署），因为 root 创建的文件 SELinux 标签未必是 `app_data_file`——**此假设未真机验证**，按防御性处理、不作依赖项，界面读失败仍按原样报错。C 端日志轮转是原地截断（不 rename 不重建），故预创建不会被轮转打回 root 创建。
 - **`status` 双文件原样不动**：路径、字段、预创建、`chmod 0666` 一字未改，仍在 `/data/local/tmp/`；daemon 不写 status，只 `fopen(...,"a")` 预创建，写入端只有 `MainHook`。
 - **卸载先杀看门狗 shell、再杀守护进程**：`service.d` 脚本自身的 `while true` 看门狗，其 cmdline 不含二进制路径，只 `pkill -f "$BIN"` 抓不到它——脚本文件删了 shell 还在，下一轮 tick 会把刚删的日志重建、把守护进程拉回来。做法：`pkill -f b6x-tempctrl.sh` + 轮询等真退出，**先于**守护进程杀；脚本侧另加纵深防御——每轮 tick 先查脚本文件（`$0` 含 `/` 时）与二进制是否还在，任一不在就**静默** `exit 0`（一旦写盘就又把它删掉的日志建了回来），且该检查排在任何 `log()` / `start()` 之前。
-- **护栏键语义**：`PID_KI_DYN_T` / `PID_KI_DYN_GATE` / `PID_KI_DYN_WIN` 在 C 端是**越界整组拒绝（不是钳位）**、保留旧值；界面按 min/max 钳制会让用户触发不到该分支。界面问「会不会生效」必须用 `ConfigStore.daemonAccepts()`，不得声称界面钳制等同 C 端。
+- **护栏键语义（已失效，2026-09-23）**：下列三个键与 `ConfigStore.daemonAccepts()` 已随「冷值动态倍率」落地一并删除，现存参数一律走 C 端钳位、界面钳制即 C 端语义。以下为当时的约定，保留作记录：`PID_KI_DYN_T` / `PID_KI_DYN_GATE` / `PID_KI_DYN_WIN` 在 C 端是**越界整组拒绝（不是钳位）**、保留旧值；界面按 min/max 钳制会让用户触发不到该分支。界面问「会不会生效」必须用 `ConfigStore.daemonAccepts()`，不得声称界面钳制等同 C 端。
 
 ---
 
