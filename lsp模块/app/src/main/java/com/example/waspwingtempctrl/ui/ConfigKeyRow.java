@@ -1012,21 +1012,14 @@ final class ConfigKeyRow {
     /**
      * 依 {@code requires} 压暗本行。
      *
-     * <p>依赖键名取自 {@link KeyMeta#requires}，本类不硬编码任何键名；任一依赖键当前值
-     * （取整数值，文件缺失时用定义默认值）为 0 即视为未生效。
+     * <p>依赖键名取自 {@link KeyMeta#requires}，本类不硬编码任何键名；判据见
+     * {@link #isDependencyUnsatisfied}。
      * "未生效"的徽标由 {@link ConfigGroupBinder} 在分组卡头显示一次，故本方法只压暗并回报状态。
      *
      * @return true 表示本行当前未生效（供分组卡头汇总）
      */
     boolean refreshDependencyState() {
-        boolean unsatisfied = false;
-        for (String dependency : meta.requires) {
-            Value value = host.effectiveValue(dependency);
-            if (value == null || value.intAt(0) == 0) {
-                unsatisfied = true;
-                break;
-            }
-        }
+        boolean unsatisfied = isDependencyUnsatisfied(meta, host);
         float alpha = unsatisfied ? dimAlpha : 1f;
         labelView.setAlpha(alpha);
         descView.setAlpha(alpha);
@@ -1037,6 +1030,23 @@ final class ConfigKeyRow {
             caption.setAlpha(alpha);
         }
         return unsatisfied;
+    }
+
+    /**
+     * 一个键的依赖是否未满足：{@code requires} 里任一键的当前值（取整数值，文件缺失时用定义
+     * 默认值）为 0 或取不到值，即为未满足。
+     *
+     * <p>与行本身无关，故分组卡头的徽标在<b>键行还没建</b>（折叠组）时能用同一判据，
+     * 「未生效」的口径只有这一处。
+     */
+    static boolean isDependencyUnsatisfied(@NonNull KeyMeta meta, @NonNull Host host) {
+        for (String dependency : meta.requires) {
+            Value value = host.effectiveValue(dependency);
+            if (value == null || value.intAt(0) == 0) {
+                return true;
+            }
+        }
+        return false;
     }
 
     // ==================== 状态文字 ====================

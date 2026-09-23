@@ -2,9 +2,7 @@ package com.example.waspwingtempctrl;
 
 import android.content.Context;
 
-import java.io.ByteArrayOutputStream;
 import java.io.File;
-import java.io.FileInputStream;
 import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
@@ -34,8 +32,7 @@ import java.util.Map;
  * 配置存在、守护进程在跑<b>不算</b>完成判据（配置允许缺失、进程允许未起），只作状态展示。
  *
  * <h3>root 调用一律走 {@link RootShell}（I2）</h3>
- * 本类不拼 {@code Runtime.exec("su ...")}。除 {@link #isRunning()} 之外全部方法阻塞，
- * <b>禁止在主线程调用</b>。
+ * 本类不拼 {@code Runtime.exec("su ...")}。全部方法阻塞，<b>禁止在主线程调用</b>。
  *
  * <h3>为什么二进制/脚本要经过私有目录中转</h3>
  * {@code /data/local/tmp} 与 {@code /data/adb} 都不是 app 能写的目录，
@@ -67,6 +64,14 @@ public final class Deployer {
     /** 强杀（{@code kill -9}）后的等待轮数：-9 已不可被忽略，只需一小段收尾时间。 */
     private static final long KILL9_WAIT_LOOPS = 5L;
     private static final long EXEC_TIMEOUT_MS = 120_000L;
+    /**
+     * {@link #probe()} 那一趟 su 往返的超时。
+     *
+     * <p>probe 只跑只读脚本（存在性 / md5sum / pgrep），不等任何进程退出，故远短于
+     * {@link #EXEC_TIMEOUT_MS} —— 那个长度是 deploy / uninstall 轮询等进程退出才需要的。
+     * 取 15 秒：给慢设备上 su 冷启动与首次授权框留余量，又不再让状态区干等两分钟。
+     */
+    private static final long PROBE_EXEC_TIMEOUT_MS = 15_000L;
 
     private static volatile Deployer instance;
 
@@ -225,7 +230,7 @@ public final class Deployer {
             notes.add("APK 内资源不完整：" + e.getMessage());
         }
 
-        RootShell.Result r = shell.exec(probeScript(), EXEC_TIMEOUT_MS);
+        RootShell.Result r = shell.exec(probeScript(), PROBE_EXEC_TIMEOUT_MS);
         Map<String, String> kv = parseKv(r.stdout);
         boolean suOk = r.isOk();
         if (!suOk) {
@@ -556,17 +561,6 @@ public final class Deployer {
         }
         return new Result(started, "拉起daemon", steps,
                 started ? "" : "未启动", r.stdout, probe());
-    }
-
-    /**
-     * 守护进程是否在运行（非缓存，阻塞；root 往返一次）。
-     *
-     * <p>仅用于状态展示，<b>不再是 {@link #startDaemon()} 的前置拦截</b>：拉起＝先停再起，
-     * "已在运行"不是跳过它的理由。
-     */
-    public boolean isRunning() {
-        RootShell.Result r = shell.exec("pgrep -f " + BIN_DEST + " > /dev/null 2>&1 && echo RUN=1 || echo RUN=0\n", 15_000L);
-        return "1".equals(parseKv(r.stdout).get("RUN"));
     }
 
     /** 诊断串：部署状态 + 配置状态 + root 诊断。阻塞。部署段与状态区同一份文本（describe）。 */
@@ -951,22 +945,6 @@ public final class Deployer {
             c.close();
         } catch (IOException ignored) {
             // 只读/只写流关闭失败无影响
-        }
-    }
-
-    /** 只读探针：读 {@link #BIN_DEST} 内容需要 root，界面侧不要用。 */
-    static byte[] readAll(File file) throws IOException {
-        InputStream in = new FileInputStream(file);
-        try {
-            ByteArrayOutputStream out = new ByteArrayOutputStream(8192);
-            byte[] buf = new byte[8192];
-            int n;
-            while ((n = in.read(buf)) > 0) {
-                out.write(buf, 0, n);
-            }
-            return out.toByteArray();
-        } finally {
-            closeQuietly(in);
         }
     }
 }

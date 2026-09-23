@@ -1,5 +1,6 @@
 package com.example.waspwingtempctrl.ui;
 
+import android.content.Context;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
@@ -64,6 +65,20 @@ import java.util.concurrent.RejectedExecutionException;
  * 不派发 {@code onPause}，也没有 hide/show 的 {@code onHiddenChanged}）：
  * 故 {@link #onPageVisible(boolean)} 在离开本页时冲刷待写项、停掉曲线区刷新，回到本页时重新读盘；
  * {@link #onPause()} 与 {@link #onDestroyView()} 也各自冲刷一次，不丢改动。
+ *
+ * <h3>懒建（冷启动不在本页时一次都不建）</h3>
+ * 表单与参数定义都不在 {@code onCreate} / {@code onCreateView} 里做：外壳 {@code offscreenPageLimit}
+ * 让三页的视图都会建，若在 {@code onCreateView} 里无条件建表单，冷启动（落在别的页）也要付
+ * 4 张分组卡 + 44 个键行 + 64 个字段框，外加 {@code assets/params.json}（45KB / 1634 行）的主线程读取。
+ * 现在两件事都推迟到<b>真正用得上</b>时：
+ * <ul>
+ *   <li>定义：{@link #prewarmStoreAsync()} 在后台线程先调 {@link ConfigStore#get}（预热），
+ *       主线程只收回调（{@link #onStoreReady}）；</li>
+ *   <li>表单：{@link #buildFormIfNeeded()} 在「视图已建 + 本页可见 + 定义已就绪」三个条件齐了
+ *       才建（首次可见），组内键行再由 {@link ConfigGroupBinder} 在<b>本组展开时</b>建。</li>
+ * </ul>
+ * 预热失败不静默：{@code definitionsLoaded()==false} 走 {@link #showErrorCard}（诊断串），
+ * 预热本身抛异常（如 OOM）也照样上屏说明，不停在空表单上。
  */
 public class ConfigFormFragment extends Fragment
         implements ConfigKeyRow.Host, ChartFragment.Host, PageAware {
@@ -71,15 +86,17 @@ public class ConfigFormFragment extends Fragment
     /** 曲线区（子 Fragment）的 tag。 */
     private static final String TAG_CHART = "config_chart";
 
+    /** 参数定义单例；预热完成后（主线程回调）才非空，见 {@link #prewarmStoreAsync()}。 */
     private ConfigStore store;
+    /** 防抖写队列；与 store 同时就位（队列要持有 store）。 */
     private ConfigWriteQueue queue;
+    /** 诊断区；需要 store 与页面根视图都在，故定义就绪后补建（见 {@link #ensureDiagnostics()}）。 */
     private ConfigDiagnostics diagnostics;
     private ExecutorService io;
     private Handler main;
 
     /** 磁盘上（或最近一次读取时）的值："值未变不写"的判定基准。仅主线程访问。 */
     private final Map<String, Value> diskValues = new LinkedHashMap<>();
-    private final List<ConfigKeyRow> rows = new ArrayList<>();
     private final List<ConfigGroupBinder> groups = new ArrayList<>();
 
     private ScrollView scroll;
@@ -89,10 +106,18 @@ public class ConfigFormFragment extends Fragment
     private TextView selfCheckView;
     /** 诊断信息头部：数据文件信息（由曲线区回调填充）。 */
     private TextView dataFileView;
+    /** 页面根视图：建诊断区要用（视图销毁后置空）。 */
+    private View pageRoot;
     /** 曲线区（子 Fragment）；页面视图销毁后置空。 */
     private ChartFragment chart;
 
     private boolean viewAlive;
+    /** 本页是否是当前页（外壳广播，见 {@link #onPageVisible}）。 */
+    private boolean pageVisible;
+    /** 表单是否已建（懒建标记；视图重建后复位）。 */
+    private boolean formBuilt;
+    /** 预热抛异常的原因（非空表示定义加载阶段就抛了，界面须如实说明而不是停在空表单）。 */
+    private String loadFailure;
     /** 键渲染自检的三个分项（口径见 renderSelfCheck）。 */
     private int renderedRowCount;
     private int renderedSettingsCount;
@@ -101,10 +126,9 @@ public class ConfigFormFragment extends Fragment
     @Override
     public void onCreate(@Nullable Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
-        store = ConfigStore.get(requireContext());
         io = Executors.newSingleThreadExecutor();
         main = new Handler(Looper.getMainLooper());
-        queue = new ConfigWriteQueue(store, io, main, this::onWriteResult);
+        prewarmStoreAsync();
     }
 
     @Nullable
@@ -118,14 +142,87 @@ public class ConfigFormFragment extends Fragment
         groupContainer = root.findViewById(R.id.config_group_container);
         selfCheckView = root.findViewById(R.id.config_diag_selfcheck);
         dataFileView = root.findViewById(R.id.config_diag_datafile_text);
-        diagnostics = new ConfigDiagnostics(root, store, io, main);
+        pageRoot = root;
         viewAlive = true;
         // 滚动条常显（fadeScrollbars=false）+ 加粗到 scrollbar_size，按住即可拖动
         ScrollbarDrag.attach(scroll);
         ensureChartFragment();
-        buildForm(inflater);
-        reloadAsync();
+        ensureDiagnostics();
+        if (loadFailure != null) {
+            // 预热就抛了：视图建好后第一件事就是如实说明（见 prewarmStoreAsync 的失败路径）
+            showErrorCard(loadFailure);
+        } else if (pageVisible) {
+            // 本页就是当前页（视图建得比可见性广播晚）：此刻就能建，不必等下一次广播
+            buildFormIfNeeded();
+        }
         return root;
+    }
+
+    // ==================== 参数定义：后台预热 ====================
+
+    /**
+     * 预热参数定义：{@code assets/params.json} 的读 + 解析 + 建 53 个 KeyMeta 全在后台线程做完，
+     * 主线程随后的 {@link ConfigStore#get} 立即拿到单例（冷启动首帧不再付这份开销）。
+     *
+     * <p>单例是双检锁的：这里先跑，别处（曲线区的后台线程等）再调就只剩一次 volatile 读。
+     * 失败不吞：读/解析失败由 {@link ConfigStore} 记进 loadError，走
+     * {@code definitionsLoaded()==false} 的错误卡；真正的异常（如 OOM）在这里兜底上报。
+     */
+    private void prewarmStoreAsync() {
+        final Context app = requireContext().getApplicationContext();
+        io.execute(() -> {
+            try {
+                final ConfigStore loaded = ConfigStore.get(app);
+                main.post(() -> onStoreReady(loaded));
+            } catch (Throwable t) {
+                main.post(() -> onStoreFailed(t));
+            }
+        });
+    }
+
+    /** 定义就绪（主线程）：建写队列与诊断区，条件齐了就建表单。 */
+    private void onStoreReady(@NonNull ConfigStore loaded) {
+        if (io.isShutdown()) {
+            return;   // 页面已销毁：结果丢弃（单例仍已就位，别的页面直接受益）
+        }
+        store = loaded;
+        queue = new ConfigWriteQueue(store, io, main, this::onWriteResult);
+        ensureDiagnostics();
+        buildFormIfNeeded();
+    }
+
+    /** 预热抛异常（主线程）：如实上屏，不停在空表单。 */
+    private void onStoreFailed(@NonNull Throwable t) {
+        loadFailure = "参数定义加载失败：" + t;
+        if (viewAlive) {
+            showErrorCard(loadFailure);
+        }
+    }
+
+    /** 诊断区（它要 store 与页面根视图都在）：定义就绪后补建，视图重建后再补一次。 */
+    private void ensureDiagnostics() {
+        if (diagnostics == null && pageRoot != null && store != null) {
+            diagnostics = new ConfigDiagnostics(pageRoot, store, io, main);
+        }
+    }
+
+    // ==================== 表单：首次真正可见时才建 ====================
+
+    /**
+     * 首次真正可见时建表单（懒建）：三个前置条件缺一不可——视图已建、本页可见、定义已就绪；
+     * 任一不满足就什么都不做，由 {@link #onCreateView} / {@link #onStoreReady} /
+     * {@link #onPageVisible} 三处各自补齐。建完随即读一次盘（见 {@link #reloadAsync()}）。
+     *
+     * @return true = 本次调用真的建了表单（调用方不必再读一次盘）
+     */
+    private boolean buildFormIfNeeded() {
+        if (formBuilt || !viewAlive || !pageVisible || store == null) {
+            return false;
+        }
+        formBuilt = true;
+        buildForm(getLayoutInflater());
+        reloadAsync();
+        return true;
     }
 
     /**
@@ -153,15 +250,11 @@ public class ConfigFormFragment extends Fragment
     // ==================== 构建表单（结构来自 ConfigStore） ====================
 
     private void buildForm(LayoutInflater inflater) {
-        rows.clear();
         groups.clear();
 
         if (!store.definitionsLoaded()) {
             // 不给静默空列表：明确说明定义加载失败，并把诊断串（含失败原因）摆出来
-            errorCard.setVisibility(View.VISIBLE);
-            errorText.setText(store.describeState());
-            groupContainer.setVisibility(View.GONE);
-            selfCheckView.setVisibility(View.GONE);
+            showErrorCard(store.describeState());
             return;
         }
         errorCard.setVisibility(View.GONE);
@@ -199,7 +292,6 @@ public class ConfigFormFragment extends Fragment
                     group.title, master, keyMetas, this);
             groupContainer.addView(binder.card());
             groups.add(binder);
-            rows.addAll(binder.rows());
         }
 
         // 兜底：params.json 里没被任何分组列到的键也要能编辑（否则界面比定义少键还看不出来）
@@ -214,16 +306,17 @@ public class ConfigFormFragment extends Fragment
                     getString(R.string.config_group_ungrouped), null, orphans, this);
             groupContainer.addView(binder.card());
             groups.add(binder);
-            rows.addAll(binder.rows());
         }
 
         // 自检口径：一个定义键算"有可编辑入口"，当且仅当它是本页键行、设置页的键，或某个分组的
         // 组头开关（role=master 的键不由键行承载，由 ConfigGroupBinder 渲染成组头开关）。
         // 用去重集合计数：同名键被两个分组重复列出时也不虚增。
+        // 键行按分组懒建（展开才建），故这里数的是各分组"将要建"的键（ConfigGroupBinder#rowKeys），
+        // 不是已建的行——折叠态下列全建好才数得对，同时又不失去"每个键都有入口"的检查意义。
         // 设置页键数取自 UiSettingsFragment.webuiKeys()——那是设置页真正渲染的那一份，不另写数字。
         Set<String> rowKeys = new LinkedHashSet<>();
-        for (ConfigKeyRow row : rows) {
-            rowKeys.add(row.key());
+        for (ConfigGroupBinder group : groups) {
+            rowKeys.addAll(group.rowKeys());
         }
         Set<String> masterKeys = new LinkedHashSet<>();
         for (ConfigGroupBinder group : groups) {
@@ -236,9 +329,8 @@ public class ConfigFormFragment extends Fragment
         renderedSettingsCount = UiSettingsFragment.webuiKeys(store).size();
         renderedMasterCount = masterKeys.size();
 
-        for (ConfigKeyRow row : rows) {
-            row.applyValue(diskValues.get(row.key()));
-        }
+        // 键行的值不在这里铺：行由分组懒建，建起来时各自用 host.diskValue() 回填（见
+        // ConfigGroupBinder#buildRows）。组头开关属于卡头，此刻已建，故这里回填。
         for (ConfigGroupBinder group : groups) {
             String masterKey = group.masterKey();
             if (masterKey != null) {
@@ -248,9 +340,30 @@ public class ConfigFormFragment extends Fragment
         refreshAllBadges();
     }
 
+    /** 当前已建的键行（懒建：折叠组的行还没建，故每次现取，不缓存）。 */
+    @NonNull
+    private List<ConfigKeyRow> builtRows() {
+        List<ConfigKeyRow> all = new ArrayList<>();
+        for (ConfigGroupBinder group : groups) {
+            all.addAll(group.rows());
+        }
+        return all;
+    }
+
+    /** 错误卡：把原因摆出来，参数区与自检区让位（定义没到位就没有可编辑的键）。 */
+    private void showErrorCard(@NonNull String text) {
+        errorCard.setVisibility(View.VISIBLE);
+        errorText.setText(text);
+        groupContainer.setVisibility(View.GONE);
+        selfCheckView.setVisibility(View.GONE);
+    }
+
     // ==================== 读盘 ====================
 
     private void reloadAsync() {
+        if (!viewAlive || store == null) {
+            return;   // 视图不在或定义还没就绪：此刻读了也没处上屏
+        }
         if (!store.definitionsLoaded()) {
             diagnostics.refresh();
             return;
@@ -268,7 +381,7 @@ public class ConfigFormFragment extends Fragment
     private void applySnapshot(Snapshot snapshot) {
         diskValues.clear();
         diskValues.putAll(snapshot.values);
-        for (ConfigKeyRow row : rows) {
+        for (ConfigKeyRow row : builtRows()) {
             row.applyValue(snapshot.get(row.key()));
         }
         for (ConfigGroupBinder group : groups) {
@@ -279,7 +392,15 @@ public class ConfigFormFragment extends Fragment
         }
         refreshAllBadges();
         renderSelfCheck(snapshot);
-        diagnostics.refresh();
+        // 复用刚读到的快照：诊断串里的"未定义键/提示"与 mtime 同源，不再多读一次 profile.conf
+        diagnostics.refresh(snapshot);
+    }
+
+    /** 冲刷待写队列（定义还没就绪时队列尚未建，无待写项可冲）。 */
+    private void flushQueue() {
+        if (queue != null) {
+            queue.flushNow();
+        }
     }
 
     /**
@@ -288,7 +409,10 @@ public class ConfigFormFragment extends Fragment
      *
      * <p>口径说明：{@code params.json} 里 role=master 的键（总开关）不出现在任何
      * {@code group.keys} 里，它们是分组卡头上的开关；{@code webui} 组的键在本页不渲染，
-     * 故只数本页键行会恒少于定义数。自检文本渲染在诊断区（折叠体内），默认不可见。
+     * 故只数本页键行会恒少于定义数。键行按分组懒建，三个分项都在建表单时一次算定
+     * （键行数取各分组"将要建"的键，见 {@link ConfigGroupBinder#rowKeys()}），
+     * 故未展开的组也计得进、且不会因展开先后而变。
+     * 自检文本渲染在诊断区（折叠体内），默认不可见。
      */
     private void renderSelfCheck(Snapshot snapshot) {
         int defined = store.keyCount();
@@ -343,7 +467,7 @@ public class ConfigFormFragment extends Fragment
             labels.add(meta == null ? key : meta.label);
         }
         String message = TextUtils.join("、", labels) + "：" + result.describe();
-        for (ConfigKeyRow row : rows) {
+        for (ConfigKeyRow row : builtRows()) {
             if (written.containsKey(row.key())) {
                 row.setResultStatus(message, result.ok);
             }
@@ -356,6 +480,8 @@ public class ConfigFormFragment extends Fragment
     }
 
     // ==================== ConfigKeyRow.Host ====================
+    // store/queue 在"定义就绪"（onStoreReady）时一起就位，而键行只在定义就绪后才建
+    // （buildFormIfNeeded 的前置条件），故下面两个 getter 被调用时必非 null。
 
     @NonNull
     @Override
@@ -413,7 +539,7 @@ public class ConfigFormFragment extends Fragment
     @Override
     public void onPause() {
         super.onPause();
-        queue.flushNow();
+        flushQueue();
     }
 
     @Override
@@ -422,39 +548,47 @@ public class ConfigFormFragment extends Fragment
         if (chart != null) {
             chart.setPageHidden(!visible);
         }
+        pageVisible = visible;
         if (visible) {
-            // 回到本页：配置可能被 C 端或部署流程改过，重新读盘
-            reloadAsync();
+            if (!buildFormIfNeeded()) {
+                // 已建：回到本页重读盘（配置可能被 C 端或部署流程改过）。
+                // 本次刚建的话，上面那次已含首读，不必再读一次。
+                reloadAsync();
+            }
         } else {
             // 生命周期不随切页暂停（onPause 不会来），故在这里也冲刷一次
-            queue.flushNow();
+            flushQueue();
         }
     }
 
     @Override
     public void onDestroyView() {
         viewAlive = false;
-        queue.flushNow();
-        queue.detach();
+        if (queue != null) {
+            queue.flushNow();
+            queue.detach();
+        }
         if (diagnostics != null) {
             diagnostics.release();
         }
         diagnostics = null;
-        rows.clear();
         groups.clear();
+        // 视图没了：表单要等下次可见重建（懒建标记与页面根视图一并复位）
+        formBuilt = false;
         scroll = null;
         groupContainer = null;
         errorCard = null;
         errorText = null;
         selfCheckView = null;
         dataFileView = null;
+        pageRoot = null;
         chart = null;   // 子 Fragment 实例仍在（视图随本页一起销毁），只是不再从这里驱动它
         super.onDestroyView();
     }
 
     @Override
     public void onDestroy() {
-        queue.flushNow();
+        flushQueue();
         io.shutdown();
         super.onDestroy();
     }

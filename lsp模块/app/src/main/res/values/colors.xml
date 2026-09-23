@@ -34,11 +34,7 @@
     <color name="state_ok">#2E6B33</color>
     <color name="state_warn">#8A5200</color>
     <color name="state_error">#B3261E</color>
-    <color name="state_idle">#6B7275</color>
-    <color name="state_ok_container">#D7F0D9</color>
-    <color name="state_warn_container">#FFE0B3</color>
     <color name="state_error_container">#F9DEDC</color>
-    <color name="state_idle_container">#E4E9EA</color>
 
     <!-- ===== 徽标（"未生效" / "已生效"） ===== -->
     <color name="badge_muted_bg">#E4E9EA</color>

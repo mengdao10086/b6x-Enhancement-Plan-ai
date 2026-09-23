@@ -35,6 +35,12 @@ import java.util.List;
  * <p>默认全部折叠：配置页 4 组 43 键（另加 4 个组头开关），全展开时长列表滚到目标键要翻很久；
  * 折叠态一屏能看清全部分组与总开关，先开总开关再进组的顺序也更贴合参数之间的依赖关系。
  * 「[4] 界面」那 6 个键在独立设置页（{@link UiSettingsFragment}），不在本页渲染。
+ *
+ * <h3>键行懒建</h3>
+ * 卡头（标题、徽标、总开关、箭头）在构造时建，<b>键行等本组首次展开时才建</b>
+ * （见 {@link #setExpanded}）：冷启动落在别的页时，44 个键行 / 64 个字段框一次都不建。
+ * 因此「未生效」徽标不能只看行——折叠期间没有行，判据改用定义
+ * （{@link ConfigKeyRow#isDependencyUnsatisfied}），收起态卡头照样是对的。
  */
 final class ConfigGroupBinder {
 
@@ -50,7 +56,16 @@ final class ConfigGroupBinder {
     private final View divider;
     private final MaterialSwitch masterSwitch;
     private final KeyMeta masterMeta;
+    /** 懒建键行所需：首次展开时才用它们建行（见 {@link #buildRows()}）。 */
+    private final LayoutInflater inflater;
+    private final ConfigKeyRow.Host host;
+    private final List<KeyMeta> keyMetas;
+    /** 本组的键行：未展开时为空，展开后一次建满（见 {@link #rowsBuilt}）。 */
     private final List<ConfigKeyRow> rows = new ArrayList<>();
+    /** 键行是否已建（懒建标记，只建一次）。 */
+    private boolean rowsBuilt;
+    /** 组内有键「界面自用」（daemonConsumes=false）：卡头标一次，行内不再逐条重复。 */
+    private final boolean uiOnly;
 
     private boolean expanded;
 
@@ -68,6 +83,9 @@ final class ConfigGroupBinder {
                               List<KeyMeta> keyMetas, ConfigKeyRow.Host host) {
         this.card = card;
         this.masterMeta = masterMeta;
+        this.inflater = inflater;
+        this.host = host;
+        this.keyMetas = keyMetas;
         body = card.findViewById(R.id.config_group_body);
         titleView = card.findViewById(R.id.config_group_title);
         badgeView = card.findViewById(R.id.config_group_badge);
@@ -100,13 +118,8 @@ final class ConfigGroupBinder {
                 break;
             }
         }
+        uiOnly = hasUiOnly;
         uiBadgeView.setVisibility(hasUiOnly ? View.VISIBLE : View.GONE);
-
-        for (KeyMeta keyMeta : keyMetas) {
-            ConfigKeyRow row = ConfigKeyRow.create(inflater, body, keyMeta, host, hasUiOnly);
-            body.addView(row.view());
-            rows.add(row);
-        }
 
         card.findViewById(R.id.config_group_header).setOnClickListener(v -> setExpanded(!expanded));
         setExpanded(false);
@@ -120,6 +133,19 @@ final class ConfigGroupBinder {
     @NonNull
     List<ConfigKeyRow> rows() {
         return Collections.unmodifiableList(rows);
+    }
+
+    /**
+     * 本组键行的键名，<b>不依赖行是否已建</b>：折叠组还没建行时，配置页的键渲染自检
+     * （见 {@code ConfigFormFragment#renderSelfCheck}）也数得出本组的可编辑入口。
+     */
+    @NonNull
+    List<String> rowKeys() {
+        List<String> keys = new ArrayList<>(keyMetas.size());
+        for (KeyMeta meta : keyMetas) {
+            keys.add(meta.key);
+        }
+        return keys;
     }
 
     /** 组头开关的键名；本组没有总开关时为 null。 */
@@ -141,11 +167,21 @@ final class ConfigGroupBinder {
         }
     }
 
-    /** 刷新组内各行的压暗，并把"有键未生效"汇总成卡头上的一枚徽标。 */
+    /**
+     * 刷新组内各行的压暗，并把"有键未生效"汇总成卡头上的一枚徽标。
+     *
+     * <p>行还没建（本组折叠着）时按定义判依赖：徽标在收起态也要是对的，不能因为懒建而消失。
+     * 已建行时行与定义一一对应，仍按行判（行会顺带把压暗落到自己的控件上）。
+     */
     void refreshBadges() {
         int unsatisfied = 0;
         for (ConfigKeyRow row : rows) {
             if (row.refreshDependencyState()) {
+                unsatisfied++;
+            }
+        }
+        for (KeyMeta meta : unbuiltKeyMetas()) {
+            if (ConfigKeyRow.isDependencyUnsatisfied(meta, host)) {
                 unsatisfied++;
             }
         }
@@ -156,8 +192,17 @@ final class ConfigGroupBinder {
         }
     }
 
+    /** 还没建行的键：行是全建或全不建（见 {@link #buildRows()}），故一个都没建时就是全部。 */
+    @NonNull
+    private List<KeyMeta> unbuiltKeyMetas() {
+        return rowsBuilt ? Collections.emptyList() : keyMetas;
+    }
+
     /** 展开/折叠本组。构造时默认折叠（长列表先看分组名），设置页只此一组故由调用方改为默认展开。 */
     void setExpanded(boolean value) {
+        if (value) {
+            buildRows();   // 首次展开才建本组键行（懒建）
+        }
         expanded = value;
         body.setVisibility(value ? View.VISIBLE : View.GONE);
         divider.setVisibility(value ? View.VISIBLE : View.GONE);
@@ -165,5 +210,24 @@ final class ConfigGroupBinder {
         arrowView.setRotation(value ? ARROW_EXPANDED_ROTATION : 0f);
         arrowView.setContentDescription(card.getContext().getString(
                 value ? R.string.config_action_collapse : R.string.config_action_expand));
+    }
+
+    /**
+     * 建本组键行（只建一次）。行建起来时用 {@link ConfigKeyRow.Host#diskValue} 回填当前值——
+     * 懒建下这是行取值的唯一入口（建表单时行还不存在，宿主的值循环覆盖不到它们）；
+     * 回填后刷新徽标，让压暗与卡头汇总一并对齐。
+     */
+    private void buildRows() {
+        if (rowsBuilt) {
+            return;
+        }
+        rowsBuilt = true;
+        for (KeyMeta meta : keyMetas) {
+            ConfigKeyRow row = ConfigKeyRow.create(inflater, body, meta, host, uiOnly);
+            body.addView(row.view());
+            row.applyValue(host.diskValue(meta.key));
+            rows.add(row);
+        }
+        refreshBadges();
     }
 }

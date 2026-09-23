@@ -12,6 +12,12 @@ android {
         targetSdk = 34
         versionCode = 5
         versionName = "3.0"
+
+        // 只保留中英：库自带 ja/ru/de/fr/ko/es 全套译文，而 resources.arsc 是 STORED 未压缩，
+        // 删掉的字节 1:1 落到 APK 体积。只过滤 locale 维度，密度等维度不受影响。
+        // AGP 8.2.0 无 androidResources.localeFilters（该 DSL 自 8.8 起才有），
+        // 故用 resourceConfigurations——resConfigs 的现行名，8.2 尚未标记废弃。
+        resourceConfigurations += listOf("zh", "en")
     }
 
     signingConfigs {
@@ -26,7 +32,9 @@ android {
     buildTypes {
         release {
             signingConfig = signingConfigs.getByName("b6x")
-            isMinifyEnabled = false
+            // 代码与资源必须同时裁剪：只开 isShrinkResources 而 isMinifyEnabled=false 时 AGP 直接报错
+            isMinifyEnabled = true
+            isShrinkResources = true
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
@@ -37,6 +45,17 @@ android {
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_11
         targetCompatibility = JavaVersion.VERSION_11
+    }
+
+    // 本工程是纯 Java（无 .kt 源），以下三类是 kotlin-stdlib / coroutines 传递进来的零引用资产
+    packaging {
+        resources {
+            excludes += listOf(
+                "DebugProbesKt.bin",
+                "kotlin/**/*.kotlin_builtins",
+                "META-INF/*.version"
+            )
+        }
     }
 }
 

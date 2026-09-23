@@ -6,7 +6,6 @@ import android.os.Build;
 
 import java.io.BufferedReader;
 import java.io.BufferedWriter;
-import java.io.Closeable;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.InputStreamReader;
@@ -22,12 +21,11 @@ import java.util.concurrent.atomic.AtomicInteger;
 /**
  * root 通道封装。零第三方依赖，只用 {@link Runtime#exec(String[])}。
  *
- * <p>做法照 Scene（`a/a70.java`）：`su -v` 嗅探 → 命令行选型 → 持久化 + 手动切换 →
- * 判活看通道连通性（不看进程）→ 退避重连。改进项：真常驻会话带结束标记、读超时与退出码回传。
+ * <p>做法照 Scene（`a/a70.java`）：`su -v` 嗅探 → 命令行选型 → 持久化 →
+ * 判活看通道连通性（不看进程）→ 退避重连。改进项：结束标记 + 读超时 + 退出码回传。
  *
- * <p><b>线程模型</b>：除 {@link #getSuType()}、{@link #getSuCommand()}、
- * {@link #getRecommendedSuCommand()}、{@link #isSuCommandManual()}、{@link #isAlive()}、
- * {@link Session#isAlive()} 这六个纯读缓存的方法外，其余公开方法都会阻塞 I/O，
+ * <p><b>线程模型</b>：除 {@link #getSuCommand()}、{@link #getRecommendedSuCommand()}、
+ * {@link #isSuCommandManual()}、{@link #isAlive()} 这四个纯读缓存的方法外，其余公开方法都会阻塞 I/O，
  * <b>禁止在主线程调用</b>。
  */
 public final class RootShell {
@@ -99,11 +97,6 @@ public final class RootShell {
 
     // ==================== 嗅探 / 选型 ====================
 
-    /** 缓存值，不阻塞、不探测。未探测时为 {@link SuType#UNKNOWN}。 */
-    public SuType getSuType() {
-        return suType;
-    }
-
     /**
      * 执行 `su -v` 嗅探 root 类型并持久化。
      *
@@ -152,23 +145,6 @@ public final class RootShell {
     /** 是否被用户手动覆盖过。不阻塞。 */
     public boolean isSuCommandManual() {
         return manualSuCommand() != null;
-    }
-
-    /** 手动切换命令行并持久化；传入空白串等同于 {@link #resetSuCommand()}。 */
-    public void setSuCommand(String command) {
-        String trimmed = command == null ? "" : command.trim();
-        if (trimmed.isEmpty()) {
-            resetSuCommand();
-            return;
-        }
-        prefs.edit().putString(KEY_SU_CMD, trimmed).apply();
-        resetChannelState();
-    }
-
-    /** 清除手动值，回到自动选型。 */
-    public void resetSuCommand() {
-        prefs.edit().remove(KEY_SU_CMD).apply();
-        resetChannelState();
     }
 
     private String manualSuCommand() {
@@ -245,19 +221,6 @@ public final class RootShell {
             lastError = command + " → " + r.describe();
         }
         return r;
-    }
-
-    /** 打开常驻会话（多条命令复用同一个 su 进程，省去重复授权与启动开销）。 */
-    public Session openSession() {
-        detectSuType(false);
-        String command = workingCommand != null ? workingCommand : getSuCommand();
-        try {
-            return new Session(command, openChannel(command));
-        } catch (IOException e) {
-            markDead();
-            lastError = command + " → 无法启动 su 进程: " + e.getMessage();
-            return new Session(command, null, "无法启动 su 进程: " + e.getMessage());
-        }
     }
 
     // ==================== 诊断 ====================
@@ -382,13 +345,6 @@ public final class RootShell {
         nextProbeAtMs = System.currentTimeMillis() + Math.min(delay, BACKOFF_MAX_MS);
     }
 
-    private void resetChannelState() {
-        workingCommand = null;
-        alive = false;
-        failures = 0;
-        nextProbeAtMs = 0L;
-    }
-
     // ==================== 内部：执行结果 ====================
 
     /** 一次执行的结果。{@code channelFailed} 为 true 表示 su 未授权 / 进程起不来 / 通道断 / 超时。 */
@@ -428,66 +384,6 @@ public final class RootShell {
             String head = timedOut ? "超时" : "退出码 " + exitCode;
             String tail = stderr.trim();
             return head + "（" + elapsedMs + "ms）" + (tail.isEmpty() ? "" : " " + tail);
-        }
-    }
-
-    // ==================== 常驻会话 ====================
-
-    /**
-     * 真常驻 su 会话：一个 su 进程承载多条命令，用结束标记 + 读超时 + 退出码回传，
-     * 不做「存了 Process 却只用一次」的半常驻。
-     *
-     * <p>注意：命令在同一个 shell 内执行，`cd` / `export` 会跨命令保留；
-     * 命令脚本不得包含 `exit`，否则会话直接断开。
-     */
-    public static final class Session implements Closeable {
-
-        private final String command;
-        private final Channel channel;
-        private final String openError;
-        private boolean lastOk;
-
-        Session(String command, Channel channel) {
-            this(command, channel, null);
-        }
-
-        Session(String command, Channel channel, String openError) {
-            this.command = command;
-            this.channel = channel;
-            this.openError = openError;
-        }
-
-        /** 通道是否还活着（看通道，不看进程）。不阻塞。 */
-        public boolean isAlive() {
-            return channel != null && !channel.isDead();
-        }
-
-        /** 打开失败时的原因，成功时为 null。 */
-        public String getOpenError() {
-            return openError;
-        }
-
-        /** 上一条命令是否通道正常且退出码为 0。 */
-        public boolean lastCommandOk() {
-            return lastOk;
-        }
-
-        /** 执行一条命令并等结束标记，返回退出码与输出。会阻塞至多 {@code timeoutMs}。 */
-        public synchronized Result write(String script, long timeoutMs) {
-            if (channel == null) {
-                return Result.channelFailure(command,
-                        openError == null ? "会话不可用" : openError, 0L);
-            }
-            Result r = channel.run(script, timeoutMs);
-            lastOk = r.isOk();
-            return r;
-        }
-
-        @Override
-        public synchronized void close() {
-            if (channel != null) {
-                channel.close();
-            }
         }
     }
 

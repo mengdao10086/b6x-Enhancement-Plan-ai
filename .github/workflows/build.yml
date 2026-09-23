@@ -304,6 +304,14 @@ jobs:
           unzip -l "$APK" | grep -q 'assets/tempctrl-arm64' \
             || { echo "APK 内缺少 assets/tempctrl-arm64"; exit 1; }
 
+      # 体积只记录、不设阈值门禁（正常波动不应挂 CI）
+      - name: 记录 APK 体积
+        run: |
+          APK=$(ls CI记录/b6x-EP-v*.apk | head -1)
+          SIZE=$(stat -c%s "$APK")
+          echo "APK 字节数: $SIZE ($((SIZE / 1024)) KB) <- $APK"
+          echo "APK 字节数: $SIZE ($((SIZE / 1024)) KB)" >> "$GITHUB_STEP_SUMMARY"
+
       - name: 上传 APK 构建产物
         uses: actions/upload-artifact@v7
         with:

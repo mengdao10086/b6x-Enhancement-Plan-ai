@@ -1,5 +1,6 @@
 package com.example.waspwingtempctrl.ui;
 
+import android.content.Context;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
@@ -52,6 +53,11 @@ import java.util.concurrent.Executors;
  * 且表单的空态提示（无分组卡时）也在它上面。
  *
  * <p>边界同配置页（I3）：只经 {@link ConfigStore} 读写 {@code profile.conf}，不自己解析 assets。
+ *
+ * <h3>定义在后台预热</h3>
+ * 本页在 {@link #onCreate} 里用后台线程先调一次 {@link ConfigStore#get}（读 {@code assets/params.json}
+ * + 解析 + 建 KeyMeta 都在那边做），主线程拿到回调后才铺页面（{@link #buildPageIfReady()}）——
+ * 页面壳与重置栏都要读定义，定义没到位就没有可铺的内容。
  */
 public class UiSettingsFragment extends Fragment implements ConfigResetBar.Host {
 
@@ -65,11 +71,16 @@ public class UiSettingsFragment extends Fragment implements ConfigResetBar.Host 
 
     /** 磁盘上（或最近一次读取时）的值："值未变不写"的判定基准。仅主线程访问。 */
     private final Map<String, Value> diskValues = new LinkedHashMap<>();
-    private final List<ConfigKeyRow> rows = new ArrayList<>();
     private final List<ConfigGroupBinder> groups = new ArrayList<>();
 
     private View rootView;
+    /** 页面内容容器：表单与重置栏都挂这里（视图销毁后置空）。 */
+    private LinearLayout contentBox;
     private boolean viewAlive;
+    /** 页面内容是否已铺（定义就绪后才铺，见 buildPageIfReady）。 */
+    private boolean pageBuilt;
+    /** 预热抛异常的原因（非空表示定义加载阶段就抛了，界面须如实说明而不是停在空白页）。 */
+    private String loadFailure;
 
     /** 该分组是否由本页承载（配置页据此跳过它，并把它的键算进键渲染自检）。 */
     static boolean isSettingsGroup(@NonNull GroupMeta group) {
@@ -113,10 +124,9 @@ public class UiSettingsFragment extends Fragment implements ConfigResetBar.Host 
     @Override
     public void onCreate(@Nullable Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
-        store = ConfigStore.get(requireContext());
         io = Executors.newSingleThreadExecutor();
         main = new Handler(Looper.getMainLooper());
-        queue = new ConfigWriteQueue(store, io, main, this::onWriteResult);
+        prewarmStoreAsync();
     }
 
     @Nullable
@@ -137,36 +147,100 @@ public class UiSettingsFragment extends Fragment implements ConfigResetBar.Host 
         content.setPadding(padding, padding, padding, padding);
         scroll.addView(content);
         rootView = scroll;
+        contentBox = content;
         viewAlive = true;
 
+        buildPageIfReady();
+        return scroll;
+    }
+
+    // ==================== 参数定义：后台预热 ====================
+
+    /**
+     * 预热参数定义：{@code assets/params.json} 的读 + 解析 + 建 KeyMeta 全在后台线程做完
+     * （同配置页，见 {@code ConfigFormFragment#prewarmStoreAsync}）。
+     *
+     * <p>失败不吞：读/解析失败由 {@link ConfigStore} 记进 loadError，走
+     * {@code definitionsLoaded()==false} 的错误串；真正的异常在这里兜底上报。
+     */
+    private void prewarmStoreAsync() {
+        final Context app = requireContext().getApplicationContext();
+        io.execute(() -> {
+            try {
+                final ConfigStore loaded = ConfigStore.get(app);
+                main.post(() -> onStoreReady(loaded));
+            } catch (Throwable t) {
+                main.post(() -> onStoreFailed(t));
+            }
+        });
+    }
+
+    /** 定义就绪（主线程）：建写队列，再铺页面。 */
+    private void onStoreReady(@NonNull ConfigStore loaded) {
+        if (io.isShutdown()) {
+            return;   // 页面已销毁：结果丢弃（单例仍已就位，别的页面直接受益）
+        }
+        store = loaded;
+        queue = new ConfigWriteQueue(store, io, main, this::onWriteResult);
+        buildPageIfReady();
+    }
+
+    /** 预热抛异常（主线程）：如实上屏，不停在空白页。 */
+    private void onStoreFailed(@NonNull Throwable t) {
+        loadFailure = "参数定义加载失败：" + t;
+        buildPageIfReady();
+    }
+
+    /**
+     * 铺页面内容：定义就绪前什么都不铺——表单与重置栏都要读定义（{@link #webuiKeys} /
+     * {@link ConfigResetBar} 的按钮清单），没定义就没有可铺的内容。
+     * 定义失败或预热抛异常时只铺一段错误串（与配置页同口径：不给静默空白）。
+     */
+    private void buildPageIfReady() {
+        if (pageBuilt || !viewAlive || contentBox == null) {
+            return;
+        }
+        if (loadFailure != null) {
+            pageBuilt = true;
+            showError(loadFailure);
+            return;
+        }
+        if (store == null) {
+            return;   // 预热还没回来：等 onStoreReady
+        }
+        pageBuilt = true;
+        LayoutInflater inflater = getLayoutInflater();
         if (!store.definitionsLoaded()) {
             // 与配置页同口径：不给静默空白，直接把诊断串摆出来
-            TextView error = new TextView(inflater.getContext());
-            error.setText(store.describeState());
-            error.setTextAppearance(inflater.getContext(),
-                    R.style.TextAppearance_B6XTempCtrl_Mono);
-            error.setTextIsSelectable(true);
-            content.addView(error);
-            return scroll;
+            showError(store.describeState());
+            return;
         }
 
-        buildForm(inflater, content);
+        buildForm(inflater, contentBox);
 
         // 重置栏放在参数卡之后：进页面要看的是参数本身，整组回退是调完再退的收尾动作；
         // 且 buildForm 的空态提示（定义里没有本组时没有分组卡）须留在它上面，故等表单铺完再追加。
         // 与上方卡的间隙由该卡自带的上间距给出（view_config_reset_bar.xml，与分组卡同一标尺），此处不再补。
         // 它不放键行（只有按钮），故配置页的键渲染自检不受影响
         //（自检数的是 ConfigKeyRow 与设置页键，见 ConfigFormFragment）。
-        content.addView(ConfigResetBar.create(inflater, content, this).view());
+        contentBox.addView(ConfigResetBar.create(inflater, contentBox, this).view());
 
         reloadAsync();
-        return scroll;
+    }
+
+    /** 错误串上屏（与配置页同口径：不给静默空白）。 */
+    private void showError(@NonNull String text) {
+        Context context = requireContext();
+        TextView error = new TextView(context);
+        error.setText(text);
+        error.setTextAppearance(context, R.style.TextAppearance_B6XTempCtrl_Mono);
+        error.setTextIsSelectable(true);
+        contentBox.addView(error);
     }
 
     // ==================== 构建表单（结构来自 ConfigStore） ====================
 
     private void buildForm(LayoutInflater inflater, LinearLayout content) {
-        rows.clear();
         groups.clear();
 
         List<KeyMeta> keyMetas = webuiKeys(store);
@@ -190,20 +264,27 @@ public class UiSettingsFragment extends Fragment implements ConfigResetBar.Host 
                     stripSectionNumber(group.title), master, keyMetas, this);
             content.addView(binder.card());
             groups.add(binder);
-            rows.addAll(binder.rows());
-            // 本页只有这一组：默认展开，否则进页面先看到一张折叠的卡
+            // 本页只有这一组：默认展开，否则进页面先看到一张折叠的卡。
+            // 键行也是在这一步建的（懒建：展开才建），建起来时各自用 host.diskValue() 回填值。
             binder.setExpanded(true);
         }
-        for (ConfigKeyRow row : rows) {
-            row.applyValue(diskValues.get(row.key()));
-        }
         refreshAllBadges();
+    }
+
+    /** 当前已建的键行（懒建：折叠组的行还没建，故每次现取，不缓存）。 */
+    @NonNull
+    private List<ConfigKeyRow> builtRows() {
+        List<ConfigKeyRow> all = new ArrayList<>();
+        for (ConfigGroupBinder group : groups) {
+            all.addAll(group.rows());
+        }
+        return all;
     }
 
     // ==================== 读盘 ====================
 
     private void reloadAsync() {
-        if (!store.definitionsLoaded() || io.isShutdown()) {
+        if (!viewAlive || store == null || !store.definitionsLoaded() || io.isShutdown()) {
             return;
         }
         io.execute(() -> {
@@ -219,7 +300,7 @@ public class UiSettingsFragment extends Fragment implements ConfigResetBar.Host 
     private void applySnapshot(Snapshot snapshot) {
         diskValues.clear();
         diskValues.putAll(snapshot.values);
-        for (ConfigKeyRow row : rows) {
+        for (ConfigKeyRow row : builtRows()) {
             row.applyValue(snapshot.get(row.key()));
         }
         refreshAllBadges();
@@ -228,6 +309,13 @@ public class UiSettingsFragment extends Fragment implements ConfigResetBar.Host 
     private void refreshAllBadges() {
         for (ConfigGroupBinder group : groups) {
             group.refreshBadges();
+        }
+    }
+
+    /** 冲刷待写队列（定义还没就绪时队列尚未建，无待写项可冲）。 */
+    private void flushQueue() {
+        if (queue != null) {
+            queue.flushNow();
         }
     }
 
@@ -246,7 +334,7 @@ public class UiSettingsFragment extends Fragment implements ConfigResetBar.Host 
             labels.add(meta == null ? key : meta.label);
         }
         String message = TextUtils.join("、", labels) + "：" + result.describe();
-        for (ConfigKeyRow row : rows) {
+        for (ConfigKeyRow row : builtRows()) {
             if (written.containsKey(row.key())) {
                 row.setResultStatus(message, result.ok);
             }
@@ -258,6 +346,8 @@ public class UiSettingsFragment extends Fragment implements ConfigResetBar.Host 
     }
 
     // ========== 键行与重置栏共用的服务面（ConfigResetBar.Host 继承 ConfigKeyRow.Host） ==========
+    // store/queue 在"定义就绪"（onStoreReady）时一起就位，而键行与重置栏都只在定义就绪后才铺
+    // （buildPageIfReady 的前置条件），故下面两个 getter 被调用时必非 null。
 
     @NonNull
     @Override
@@ -315,7 +405,7 @@ public class UiSettingsFragment extends Fragment implements ConfigResetBar.Host 
         if (!viewAlive || io.isShutdown()) {
             return;
         }
-        queue.flushNow();
+        flushQueue();
         io.execute(() -> {
             final WriteResult result = store.setAll(factoryValues);
             main.post(() -> {
@@ -338,7 +428,7 @@ public class UiSettingsFragment extends Fragment implements ConfigResetBar.Host 
     private void applyReset(@NonNull String label, @NonNull Map<String, Value> factoryValues,
                             @NonNull WriteResult result) {
         if (result.ok) {
-            for (ConfigKeyRow row : rows) {
+            for (ConfigKeyRow row : builtRows()) {
                 Value value = factoryValues.get(row.key());
                 if (value != null) {
                     diskValues.put(row.key(), value);
@@ -352,7 +442,7 @@ public class UiSettingsFragment extends Fragment implements ConfigResetBar.Host 
                         : getString(R.string.config_reset_no_change, label))
                 : getString(R.string.config_reset_failed, label, result.error);
         if (!result.ok) {
-            for (ConfigKeyRow row : rows) {
+            for (ConfigKeyRow row : builtRows()) {
                 if (factoryValues.containsKey(row.key())) {
                     row.setResultStatus(message, false);
                 }
@@ -366,23 +456,27 @@ public class UiSettingsFragment extends Fragment implements ConfigResetBar.Host 
     @Override
     public void onPause() {
         super.onPause();
-        queue.flushNow();
+        flushQueue();
     }
 
     @Override
     public void onDestroyView() {
         viewAlive = false;
-        queue.flushNow();
-        queue.detach();
-        rows.clear();
+        if (queue != null) {
+            queue.flushNow();
+            queue.detach();
+        }
         groups.clear();
+        // 视图没了：内容要等下次重建（见 buildPageIfReady）
+        pageBuilt = false;
+        contentBox = null;
         rootView = null;
         super.onDestroyView();
     }
 
     @Override
     public void onDestroy() {
-        queue.flushNow();
+        flushQueue();
         io.shutdown();
         super.onDestroy();
     }

@@ -6,8 +6,6 @@
     <string name="action_settings">设置</string>
 
     <string name="tab_status">状态</string>
-    <string name="tab_config">配置</string>
-    <string name="tab_chart">曲线</string>
     <string name="tab_log">日志</string>
 
     <!-- 状态页 -->

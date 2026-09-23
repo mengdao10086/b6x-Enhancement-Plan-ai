@@ -77,6 +77,12 @@ public class StatusFragment extends Fragment implements PageAware {
     /** 手动刷新时文本淡出 / 淡入各自的时长。 */
     private static final long FADE_MS = 150L;
 
+    /**
+     * 版本行的成品文案（`status_info_version` 已格式化）；null = 尚未从 PMS 读到。
+     * 进程内版本不会变，故读一次就够——读它要 binder IPC（`getPackageInfo`），只在后台做。
+     */
+    private static volatile String versionLine;
+
     private TextView statusView;
     private TextView infoView;
     private TextView logView;
@@ -129,6 +135,7 @@ public class StatusFragment extends Fragment implements PageAware {
         setLogExpanded(false);
 
         infoView.setText(buildInfo());
+        loadVersionLineAsync();
 
         // 手动路径：写操作记录 + 结果文本淡入淡出（静默路径不走这两处；进度条两条路径都走）
         view.findViewById(R.id.btn_refresh).setOnClickListener(v -> refreshStatus(true));
@@ -188,15 +195,14 @@ public class StatusFragment extends Fragment implements PageAware {
     /** 首次探测：先试一次 root（只此一次），再探部署状态。静默路径（不写记录、不做动画）。 */
     private void firstProbe() {
         final Context app = requireContext().getApplicationContext();
-        final SharedPreferences prefs = app.getSharedPreferences(PREFS_ROOT, Context.MODE_PRIVATE);
-        final boolean needRoot = !prefs.getBoolean(KEY_ROOT_TRIED, false);
-        if (needRoot) {
-            // 先落标记再尝试：被拒/失败都不再自动重试
-            prefs.edit().putBoolean(KEY_ROOT_TRIED, true).apply();
-        }
         runAsync(getString(R.string.status_busy_probe), () -> {
+            // prefs 首读要走磁盘（首次加载 XML），与 root 尝试一并放后台线程
+            SharedPreferences prefs = app.getSharedPreferences(PREFS_ROOT, Context.MODE_PRIVATE);
+            boolean needRoot = !prefs.getBoolean(KEY_ROOT_TRIED, false);
             StringBuilder sb = new StringBuilder();
             if (needRoot) {
+                // 先落标记再尝试：被拒/失败都不再自动重试
+                prefs.edit().putBoolean(KEY_ROOT_TRIED, true).apply();
                 rootJustGranted = Deployer.get(app).ensureRoot();
                 sb.append(app.getString(rootJustGranted
                         ? R.string.status_root_ok_log : R.string.status_root_fail_log)).append("\n\n");
@@ -507,19 +513,56 @@ public class StatusFragment extends Fragment implements PageAware {
 
     /** 设备与版本：不显示本应用包名，版本按「模块版本」标注，不显示 targetSdk。 */
     private String buildInfo() {
-        String versionName = "?";
-        long versionCode = -1;
-        try {
-            PackageInfo info = requireContext().getPackageManager()
-                    .getPackageInfo(requireContext().getPackageName(), 0);
-            versionName = info.versionName;
-            versionCode = Build.VERSION.SDK_INT >= 28 ? info.getLongVersionCode() : info.versionCode;
-        } catch (Exception ignored) {
-            // 保持占位符
-        }
-        return getString(R.string.status_info_version, versionName, versionCode)
+        String cached = versionLine;
+        return (cached != null ? cached : placeholderVersionLine(requireContext()))
                 + "\n" + getString(R.string.status_info_device, Build.MANUFACTURER, Build.MODEL)
                 + "\n" + getString(R.string.status_info_android, Build.VERSION.RELEASE,
                 Build.VERSION.SDK_INT);
+    }
+
+    /**
+     * 后台读一次版本行并缓存，读完回主线程补上。
+     *
+     * <p>{@code getPackageInfo} 是 binder IPC，主线程不碰；已有缓存则直接返回。补上的是同一行
+     * 文本（占位符 → 真实版本号），行数不变，故不会引起卡片高度变化。
+     */
+    private void loadVersionLineAsync() {
+        if (versionLine != null) {
+            return;
+        }
+        final Context app = requireContext().getApplicationContext();
+        Thread thread = new Thread(() -> {
+            versionLine = readVersionLine(app);
+            android.app.Activity activity = getActivity();
+            if (activity == null) {
+                return;
+            }
+            activity.runOnUiThread(() -> {
+                if (!isAdded() || infoView == null) {
+                    return;
+                }
+                infoView.setText(buildInfo());
+            });
+        }, "ww-version");
+        thread.setDaemon(true);
+        thread.start();
+    }
+
+    /** 读 versionName / versionCode 并格式化；读不到时给占位行。阻塞（binder IPC），只在后台调。 */
+    private static String readVersionLine(Context app) {
+        try {
+            PackageInfo info = app.getPackageManager().getPackageInfo(app.getPackageName(), 0);
+            String versionName = info.versionName;
+            long versionCode = Build.VERSION.SDK_INT >= 28
+                    ? info.getLongVersionCode() : info.versionCode;
+            return app.getString(R.string.status_info_version, versionName, versionCode);
+        } catch (Exception ignored) {
+            return placeholderVersionLine(app);
+        }
+    }
+
+    /** 版本行的占位形态（PMS 读不到 / 尚未读到）；与真实行同形，故补上真实值不改行数。 */
+    private static String placeholderVersionLine(Context context) {
+        return context.getString(R.string.status_info_version, "?", -1L);
     }
 }

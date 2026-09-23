@@ -8,7 +8,6 @@
     <!-- ===== 区块标题 ===== -->
     <!-- 「数据文件」这行标题现在出现在配置页「诊断信息」头部（信息条已并入那里） -->
     <string name="chart_section_file">数据文件</string>
-    <string name="chart_section_window">时间窗口与图例</string>
 
     <!-- ===== 信息条 ===== -->
     <string name="chart_loading">读取中…</string>

@@ -326,23 +326,12 @@ public final class ConfigStore {
     }
 
     /**
-     * 改单键：<b>保留全文（注释 / 空行 / 行序 / 行内注释）</b>，只替换目标行的值片段，
-     * 然后写同目录临时文件并 {@code renameTo} 原子替换。
-     *
-     * <p>同键出现多行时全部替换（C 端按行顺序覆盖，只改第一行会不生效）。
-     * 文件中没有该键时追加到文件尾部。<b>未知键（params.json 未定义）拒绝写入</b>，
-     * 避免拼错键名写出一个永远不生效的配置项。
-     *
-     * <p>值未变化时直接跳过，不触碰 mtime。
-     */
-    public WriteResult set(String key, Value value) {
-        LinkedHashMap<String, Value> one = new LinkedHashMap<>();
-        one.put(key, value);
-        return setAll(one);
-    }
-
-    /**
      * 批量改键：全部改动合并为<b>一次</b> rename，避免多次 mtime 触发多轮 C 端重载。
+     *
+     * <p>保留全文（注释 / 空行 / 行序 / 行内注释），只替换目标行的值片段，然后写同目录临时文件
+     * 并 {@code renameTo} 原子替换。同键出现多行时全部替换（C 端按行顺序覆盖，只改第一行会不生效）；
+     * 文件中没有该键时追加到文件尾部。<b>未知键（params.json 未定义）拒绝写入</b>，
+     * 避免拼错键名写出一个永远不生效的配置项。值未变化时直接跳过，不触碰 mtime。
      */
     public WriteResult setAll(Map<String, Value> changes) {
         if (!definitionsLoaded()) {
@@ -524,6 +513,18 @@ public final class ConfigStore {
 
     /** 诊断串（路径 / 定义 / 一致性 / 出厂值冲突）。 */
     public String describeState() {
+        return describeState(read());
+    }
+
+    /**
+     * 诊断串（路径 / 定义 / 一致性），复用调用方刚读到的快照。
+     *
+     * <p>给"已经读过一次盘"的调用方用：配置页每次刷新都是「读一次 → 上屏值 → 上屏诊断」，
+     * 让它再读一次只为拿"未定义键/提示"是白读一遍整个配置文件。
+     *
+     * @param snap 已读到的快照（调用方负责它确实是最近一次读取的结果）
+     */
+    public String describeState(Snapshot snap) {
         StringBuilder sb = new StringBuilder();
         sb.append("配置文件: ").append(configFile.getAbsolutePath())
                 .append(exists() ? "（存在，" + configFile.length() + " B）" : "（不存在）").append('\n');
@@ -531,7 +532,6 @@ public final class ConfigStore {
                 .append(isPathAlignedWithDaemon() ? "（一致）" : "（不一致！守护进程读不到 app 写的配置）").append('\n');
         sb.append("参数定义: ").append(PARAMS_ASSET).append(" · ")
                 .append(loadError.isEmpty() ? keyCount() + " 键" : loadError).append('\n');
-        Snapshot snap = read();
         if (!snap.unknownKeys.isEmpty()) {
             sb.append("未定义键: ").append(join(snap.unknownKeys, ", ")).append('\n');
         }
@@ -643,10 +643,6 @@ public final class ConfigStore {
             return "switch".equals(type);
         }
 
-        public boolean isInt() {
-            return "int".equals(type);
-        }
-
         public boolean isPath() {
             return "path".equals(type);
         }
@@ -654,13 +650,6 @@ public final class ConfigStore {
         /** 值的字段个数（path 视为 1）。 */
         public int fieldCount() {
             return fields != null ? fields.size() : 1;
-        }
-
-        public String fieldLabel(int i) {
-            if (fields != null && i < fields.size()) {
-                return fields.get(i).label;
-            }
-            return label;
         }
 
         /** 第 i 个字段的下界；null = 无下界。 */
@@ -772,10 +761,6 @@ public final class ConfigStore {
 
         public static Value ofText(String t) {
             return new Value(null, t == null ? "" : t);
-        }
-
-        public boolean isText() {
-            return text != null;
         }
 
         public int size() {
@@ -1184,24 +1169,6 @@ public final class ConfigStore {
                 // 只读流关闭失败无影响
             }
         }
-    }
-
-    /** 值 → 元数据里的范围描述（诊断用）。 */
-    static String rangeOf(KeyMeta meta) {
-        if (meta == null) {
-            return "—";
-        }
-        if (meta.isPath()) {
-            return "路径";
-        }
-        StringBuilder sb = new StringBuilder();
-        for (int i = 0; i < Math.max(1, meta.fieldCount()); i++) {
-            if (i > 0) {
-                sb.append(" · ");
-            }
-            sb.append(meta.min(i)).append('~').append(meta.max(i));
-        }
-        return sb.toString();
     }
 
     /** 供 Deployer 复用：把值数组格式化为配置字面量。 */

@@ -30,11 +30,7 @@
     <color name="state_ok">#7ED494</color>
     <color name="state_warn">#F2B457</color>
     <color name="state_error">#FFB4AB</color>
-    <color name="state_idle">#9AA2A5</color>
-    <color name="state_ok_container">#14401F</color>
-    <color name="state_warn_container">#432C00</color>
     <color name="state_error_container">#5C1510</color>
-    <color name="state_idle_container">#2A3133</color>
 
     <!-- ===== 徽标 ===== -->
     <color name="badge_muted_bg">#2A3133</color>
