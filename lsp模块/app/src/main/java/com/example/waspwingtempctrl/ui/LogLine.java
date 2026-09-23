@@ -14,7 +14,7 @@ final class LogLine {
     enum Level {
         /** 错误：C 端「失败 / 无法 / 异常」类。 */
         ERROR,
-        /** 警告：C 端「拒绝 / 超时 / 未就绪 / 断联」类（降级但继续运行）。 */
+        /** 警告：C 端「超时 / 未就绪 / 断联」类（降级但继续运行）。 */
         WARN,
         /** 调试：C 端 {@code [DEBUG]} / {@code [PID]} 分区调试行。 */
         DEBUG,

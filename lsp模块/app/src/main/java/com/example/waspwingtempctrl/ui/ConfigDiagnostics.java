@@ -17,8 +17,9 @@ import java.util.Locale;
 import java.util.concurrent.ExecutorService;
 
 /**
- * 配置页的诊断区（<b>只读展示</b>）：{@link ConfigStore#describeState()}（含落点是否与守护进程一致、
- * 护栏键自检、键数）与配置 mtime。
+ * 配置页的诊断区（<b>只读展示</b>）：{@link ConfigStore#describeState()}（含配置文件路径与大小、
+ * 落点是否与守护进程一致、参数定义加载情况（键数或失败原因）、文件里的未定义键与读取提示）
+ * 与配置 mtime。
  *
  * <p>本区整块默认折叠（{@code config_diag_body} 初始 gone）：数据文件信息、键渲染自检
  * （由 {@link ConfigFormFragment} 写进 {@code config_diag_selfcheck}）与本节正文都在折叠体内，
@@ -73,7 +74,7 @@ final class ConfigDiagnostics {
                 value ? R.string.config_action_collapse : R.string.config_action_expand));
     }
 
-    /** 后台重读诊断信息（落点一致性 / 护栏自检 / 未知键 / mtime）。 */
+    /** 后台重读诊断信息（落点一致性 / 参数定义 / 未定义键 / mtime）。 */
     void refresh() {
         if (released || refreshQueued || io.isShutdown()) {
             return;

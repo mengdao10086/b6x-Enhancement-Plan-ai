@@ -232,19 +232,20 @@ static int pid_cpu_comp_offset = 100;           // PID_CPU_COMP 第三值：偏�
 static int pid_cold_min = 1;              // PID_COLD_RANGE 第一值：制冷强度下限
 static int pid_cold_max = 190;            // PID_COLD_RANGE 第二值：制冷强度上限（B6X）
 
-// --- 动态 KI 抑制机制参数（配置值为整数，×100 换算进内部；θ 例外，单位即码）---
-// PID_KI_DYN_T    = T1 T2 M（各自 ×100，单位 码²；默认 470 120 75 → 4.70 / 1.20 / 0.75）
-// PID_KI_DYN_GATE = θ 削减下限（θ 单位码 = 0.1°C、零换算；下限 ×100；默认 5 50 → 0.5°C / 0.50）
-// PID_KI_DYN_WIN  = N α（N 零换算为样本个数；α ×100；默认 36 30 → 36 / 0.30）
-#define KI_DYN_P100(v)  ((v) * 0.01f)     // 配置整数（×100）→ 内部浮点
-static struct {
-    float t1, t2;      // T1 / T2 抖动阈值（码²）
-    float m;           // M 方向系数（码²）
-    int   theta;       // θ 门控半宽（码）
-    float floor;       // 削减下限（无量纲）
-    int   n;           // N 窗口样本容量（个）
-    float alpha;       // α EMA 系数（无量纲）
-} ki_dyn_cfg = { 4.70f, 1.20f, 0.75f, 5, 0.50f, 36, 0.30f };
+// --- 逻辑2「冷值动态倍率」参数（配置值为整数；冷值三点零换算，其余 ×100 换算进内部）---
+// PID_COLD_DYN_IN  = 输入轴 下界 拐点 上界（冷值，零换算；默认 40 100 190）
+// PID_COLD_DYN_OUT = 输出轴拐点值（正数 ×100；默认 50 → 抽象值 −0.50，两端固定 0 与 −1）
+// PID_COLD_DYN_W   = KDP / KI升 / KI降 三作用点权重（各自 ×100；默认 100 100 100 = 1.00）
+// PID_COLD_DYN_MAP = 倍率上界 U / 形状指数 γ（各自 ×100；默认 200 100 = 2.00 / 1.00）
+static int cold_dyn_in_lo = 40;           // 输入轴下界（冷值；≤ 此处不干预）
+static int cold_dyn_in_mid = 100;         // 输入轴拐点（冷值；过此点转第二段）
+static int cold_dyn_in_hi = 190;          // 输入轴上界（冷值；≥ 此处最大降幅）
+static int cold_dyn_out_mid_p100 = 50;    // 输出轴拐点值（正数 ×100；C 内取负成抽象值）
+static int cold_dyn_w_kdp_p100 = 100;     // KDP 作用点权重（×100；0 = 该处不受影响）
+static int cold_dyn_w_up_p100  = 100;     // KI 升速率作用点权重（×100）
+static int cold_dyn_w_dn_p100  = 100;     // KI 降速率作用点权重（×100）
+static int cold_dyn_u_p100     = 200;     // 倍率上界 U（×100）；下界自动 = 1/U
+static int cold_dyn_gamma_p100 = 100;     // 形状指数 γ（×100）
 
 // --- PID 运行时状态（单累积器）---
 static float pid_ki = 0.0f;               // 积分累积值（acc；float：限幅赋小数需保留）
@@ -276,16 +277,11 @@ static int pid_batt_snap_done = 0;        // 停机后是否已做一次"恢复�
 static int pid_align_rpm = 2000;          // PID 目标 RPM（仅初始化对齐与日志使用；风扇下发已由 compute_fan_target 独立计算）
 static int pid_align_cold = 1;            // PID 目标制冷强度
 
-// --- 动态 KI 抑制机制运行状态 ---
-#define KI_DYN_WIN_MAX 128        // 环形缓冲容量（= N 的上限）；取模恒用此固定值，改 N 不越界
-#define KI_DYN_SAMPLE_MIN 6       // 样本数门槛（个）：窗口样本少于此值时机制不干预
-static struct {
-    int   win[KI_DYN_WIN_MAX];  // 电池温度样本（原始值，0.1°C）
-    int   head;                 // 下次写入位置
-    int   count;                // 已推入样本数（上限 N）
-    float scale_up;             // 升侧 EMA 平滑值（初值 1.0 = 不削减）
-    float scale_down;           // 降侧 EMA 平滑值
-} ki_dyn = { {0}, 0, 0, 1.0f, 1.0f };
+// --- 逻辑2「冷值动态倍率」运行状态（复位值 = 不干预：抽象值 0、三倍率 1.0）---
+static float cold_dyn_s         = 0.0f;   // 抽象值 s ∈ [−1,0]（未加权；0 = 不干预）
+static float cold_dyn_mult_kdp  = 1.0f;   // KDP 作用点最终倍率（∈ [1/U, 1]）
+static float cold_dyn_mult_up   = 1.0f;   // KI 升速率作用点最终倍率
+static float cold_dyn_mult_dn   = 1.0f;   // KI 降速率作用点最终倍率
 
 // ======================== 散热器回传参数 ========================
 static int cooler_hot_temp = -1;          // 热端温度（0.1°C）
@@ -545,7 +541,8 @@ struct IntCfgKey { const char *key; int *var; int min; int max; };
 
 static const struct IntCfgKey INT_CFG_KEYS[] = {
     // 表行由 params_generated.h 的 CFG_PERF_INT_KEYS 展开，键序与 clamp 边界随定义，勿在此手抄。
-    // 多值键（PID_KI_RATE / PID_TARGET / PID_TARGET_DIR / PID_COLD_RANGE / PID_CPU_COMP / PID_SPEED_RECALL）在 parse_pid_cfg 分段解析
+    // 多值键（PID_KI_RATE / PID_TARGET / PID_TARGET_DIR / PID_COLD_RANGE / PID_CPU_COMP / PID_SPEED_RECALL）
+    // 与冷值动态倍率四键（PID_COLD_DYN_IN/_OUT/_W/_MAP，含单值键 _OUT）均在 parse_pid_cfg 分段解析，不进本表
 #define CFG_ROW(k, var, lo, hi) { k, &var, lo, hi },
     CFG_PERF_INT_KEYS(CFG_ROW)
 #undef CFG_ROW
@@ -655,62 +652,37 @@ static int parse_pid_cfg(const char *key, int val, const char *val_str) {
         if (n >= 2) pid_spd_recall_weight = clamp(w, 100, 1000);
         return 1;
     }
-    // PID_KI_DYN_T = T1 T2 M（各自 ×100，单位 码²；默认 470 120 75）
-    // 护栏：各值 ∈ [1,10000]，T1 > T2，M < T1；M > T2 仅提示"效果打折"不拦。校验完整候选、全或无提交。
-    if (strcmp(key, "PID_KI_DYN_T") == 0) {
-        int t1 = (int)(ki_dyn_cfg.t1 * 100.0f + 0.5f);
-        int t2 = (int)(ki_dyn_cfg.t2 * 100.0f + 0.5f);
-        int m  = (int)(ki_dyn_cfg.m  * 100.0f + 0.5f);
-        if (sscanf(val_str, "%d %d %d", &t1, &t2, &m) < 1) return 1;
-        const char *bad = NULL;
-        if      (t1 < 1 || t1 > 10000) bad = "T1 超 [1,10000]";
-        else if (t2 < 1 || t2 > 10000) bad = "T2 超 [1,10000]";
-        else if (m  < 1 || m  > 10000) bad = "M 超 [1,10000]";
-        else if (t1 <= t2)             bad = "T1<=T2";
-        else if (m >= t1)              bad = "M>=T1";
-        if (bad) {
-            write_log("配置 PID_KI_DYN_T 拒绝（%s）：T1=%d T2=%d M=%d 未生效", bad, t1, t2, m);
-            return 1;
-        }
-        ki_dyn_cfg.t1 = KI_DYN_P100(t1);
-        ki_dyn_cfg.t2 = KI_DYN_P100(t2);
-        ki_dyn_cfg.m  = KI_DYN_P100(m);
-        if (m > t2)
-            write_log("配置 PID_KI_DYN_T M=%d > T2=%d，方向机制效果打折（不拦）", m, t2);
+    // PID_COLD_DYN_IN = 输入轴 下界 拐点 上界（冷值，零换算；默认 40 100 190）
+    // 纯钳位：乱序配置不拦，除零保护放在 cold_dyn_t()（保证输出恒落 [−1,0]）
+    if (strcmp(key, "PID_COLD_DYN_IN") == 0) {
+        int a = cold_dyn_in_lo, b = cold_dyn_in_mid, c = cold_dyn_in_hi;
+        int n = sscanf(val_str, "%d %d %d", &a, &b, &c);
+        if (n >= 1) cold_dyn_in_lo  = clamp(a, 0, 255);
+        if (n >= 2) cold_dyn_in_mid = clamp(b, 0, 255);
+        if (n >= 3) cold_dyn_in_hi  = clamp(c, 0, 255);
         return 1;
     }
-    // PID_KI_DYN_GATE = θ 削减下限（θ 单位码 = 0.1°C、零换算；下限 ×100；默认 5 50）
-    // 护栏：θ ∈ [3,10] 码、下限 ∈ [10,100]（内部 0.10~1.00）。全或无提交。
-    if (strcmp(key, "PID_KI_DYN_GATE") == 0) {
-        int th = ki_dyn_cfg.theta;
-        int fl = (int)(ki_dyn_cfg.floor * 100.0f + 0.5f);
-        if (sscanf(val_str, "%d %d", &th, &fl) < 1) return 1;
-        const char *bad = NULL;
-        if      (th < 3  || th > 10)  bad = "theta 超 [3,10] 码";
-        else if (fl < 10 || fl > 100) bad = "削减下限超 [10,100]";
-        if (bad) {
-            write_log("配置 PID_KI_DYN_GATE 拒绝（%s）：theta=%d 下限=%d 未生效", bad, th, fl);
-            return 1;
-        }
-        ki_dyn_cfg.theta = th;
-        ki_dyn_cfg.floor = KI_DYN_P100(fl);
+    // PID_COLD_DYN_OUT = 输出轴拐点值（正数 ×100；默认 50 = 拐点处降幅 0.50）
+    if (strcmp(key, "PID_COLD_DYN_OUT") == 0) {
+        int a = cold_dyn_out_mid_p100;
+        if (sscanf(val_str, "%d", &a) >= 1) cold_dyn_out_mid_p100 = clamp(a, 0, 100);
         return 1;
     }
-    // PID_KI_DYN_WIN = N α（N 零换算；α ×100；默认 36 30）
-    // 护栏：N ∈ [6,128]（上限 = KI_DYN_WIN_MAX）、α ∈ [1,100]（内部 (0,1]）。全或无提交。
-    if (strcmp(key, "PID_KI_DYN_WIN") == 0) {
-        int nn = ki_dyn_cfg.n;
-        int al = (int)(ki_dyn_cfg.alpha * 100.0f + 0.5f);
-        if (sscanf(val_str, "%d %d", &nn, &al) < 1) return 1;
-        const char *bad = NULL;
-        if      (nn < KI_DYN_SAMPLE_MIN || nn > KI_DYN_WIN_MAX) bad = "N 超 [6,128]";
-        else if (al < 1 || al > 100)                            bad = "alpha 超 [1,100]";
-        if (bad) {
-            write_log("配置 PID_KI_DYN_WIN 拒绝（%s）：N=%d alpha=%d 未生效", bad, nn, al);
-            return 1;
-        }
-        ki_dyn_cfg.n = nn;
-        ki_dyn_cfg.alpha = KI_DYN_P100(al);
+    // PID_COLD_DYN_W = KDP / KI升 / KI降 三作用点权重（各自 ×100；默认 100 100 100 = 1.00）
+    if (strcmp(key, "PID_COLD_DYN_W") == 0) {
+        int a = cold_dyn_w_kdp_p100, b = cold_dyn_w_up_p100, c = cold_dyn_w_dn_p100;
+        int n = sscanf(val_str, "%d %d %d", &a, &b, &c);
+        if (n >= 1) cold_dyn_w_kdp_p100 = clamp(a, 0, 200);
+        if (n >= 2) cold_dyn_w_up_p100  = clamp(b, 0, 200);
+        if (n >= 3) cold_dyn_w_dn_p100  = clamp(c, 0, 200);
+        return 1;
+    }
+    // PID_COLD_DYN_MAP = 倍率上界 U / 形状指数 γ（各自 ×100；默认 200 100 = 2.00 / 1.00）
+    if (strcmp(key, "PID_COLD_DYN_MAP") == 0) {
+        int a = cold_dyn_u_p100, b = cold_dyn_gamma_p100;
+        int n = sscanf(val_str, "%d %d", &a, &b);
+        if (n >= 1) cold_dyn_u_p100     = clamp(a, 100, 400);
+        if (n >= 2) cold_dyn_gamma_p100 = clamp(b, 10, 400);
         return 1;
     }
     return 0;
@@ -2075,143 +2047,61 @@ static int cpu_comp_now(int batt) {
     return (int)(pid_cpu_comp_smooth * 10 + 0.5f);
 }
 
-// ======================== 动态 KI 抑制机制 ========================
-// 电池温度窗口散布 → 压低积分升/降速率：温度越稳、越贴基线，削减越深。
-// 单位：样本 / 窗口均值 / θ 为码（0.1°C）；P / Q / T1 / T2 / M 为 码²；r / g / scale / 下限 / N / α 无量纲。
-// 窗口推入用原始值 batt_raw；PID 输入用的是滤波值 pid_batt_filtered（两序列不同源）。
+// ======================== 逻辑2：冷值动态倍率 ========================
+// 冷值（上次 PID 重算算出的目标制冷强度 pid_align_cold）→ 抽象值 s ∈ [−1,0]（两段线性 + 两端平台）
+// → 统一指数映射得倍率（只降不升）→ 三个作用点各乘权重：KDP / KI 升速率 / KI 降速率。
+// 更新门控与 pid_kdp 一致（温度窗口变化才重算）；两次重算之间沿用同一取样值。
+// 单位：冷值三点为码；输出轴拐点值 / 权重 / U / γ 为配置整数（×100），内部按浮点算。
 
-/** 求值结果：正常时 8 个体检字段有效；退化时 reason 非空、数值不用 */
-typedef struct {
-    const char *reason;   // NULL = 正常；否则为退化原因（静态串）
-    int   sample_count;   // 参与求值的样本数（个）
-    float r_mean;         // 窗口均值 R（码）
-    float pq;             // P+Q（码²）
-    float pq_d;           // P−Q（码²）
-    float g_up;           // 升侧方向系数
-    float g_down;         // 降侧方向系数
-    float scale_up;       // 升侧钳制后、EMA 前的目标值
-    float scale_dn;       // 降侧钳制后、EMA 前的目标值
-    float r;              // 削减量
-} KiDynOut;
-
-/** 清空窗口与 EMA 状态（启动 / 长断连复位） */
-static void ki_dyn_reset(void) {
-    ki_dyn.head = 0;
-    ki_dyn.count = 0;
-    ki_dyn.scale_up = 1.0f;
-    ki_dyn.scale_down = 1.0f;
+/**
+ * 归一化辅助：v ≤ base → 0；den ≤ 0（配置乱序，纯钳位不拦）→ 1。
+ * den ≤ 0 分支即除零保护，保证任何配置下 s 都落在 [−1,0]、不产生 NaN/Inf。
+ */
+static inline float cold_dyn_t(int v, int base, int den) {
+    if (v <= base) return 0.0f;
+    if (den <= 0)  return 1.0f;
+    return clampf((float)(v - base) / (float)den, 0.0f, 1.0f);
 }
 
-/** 推入一个原始电池温度样本（码）；容量满后覆盖最旧 */
-static void ki_dyn_push(int sample) {
-    ki_dyn.win[ki_dyn.head] = sample;
-    ki_dyn.head = (ki_dyn.head + 1) % KI_DYN_WIN_MAX;   // 取模用固定容量，改 N 不越界
-    if (ki_dyn.count < ki_dyn_cfg.n) ki_dyn.count++;
+/** 冷值（码）→ 抽象值 s ∈ [−1,0]：两段线性 + 两端平台（下界以下 0、上界以上 −1） */
+static float cold_dyn_abs(int cold) {
+    float om = cold_dyn_out_mid_p100 * 0.01f;   // 输出轴拐点值（正数）→ 拐点处降幅
+    float s;
+    if (cold <= cold_dyn_in_mid)
+        s = -om * cold_dyn_t(cold, cold_dyn_in_lo, cold_dyn_in_mid - cold_dyn_in_lo);
+    else
+        s = -om - (1.0f - om) * cold_dyn_t(cold, cold_dyn_in_mid, cold_dyn_in_hi - cold_dyn_in_mid);
+    return clampf(s, -1.0f, 0.0f);
 }
 
-/** 三角数 pow_k(d) = d × (|d| + 1) / 2（码²） */
-static inline float ki_dyn_powk(float d) {
-    return d * (d > 0.0f ? d + 1.0f : 1.0f - d) / 2.0f;
+/** 抽象值 → 倍率 U^(−(−s)^γ)，取整三位小数（s = 0 → 1.0；s = −1 → 1/U） */
+static float cold_dyn_map(float s) {
+    if (s >= 0.0f) return 1.0f;                 // 不干预
+    float u = cold_dyn_u_p100 * 0.01f;
+    float g = cold_dyn_gamma_p100 * 0.01f;
+    return roundf(powf(u, -powf(-s, g)) * 1000.0f) / 1000.0f;
 }
 
-/** 求值：填 8 个体检字段；任一门未过则填 reason 并返回 */
-static void ki_dyn_eval(KiDynOut *o) {
-    o->reason = NULL;
-    o->sample_count = 0;
-    o->r_mean = 0.0f;
-    o->pq = 0.0f;
-    o->pq_d = 0.0f;
-    o->g_up = 1.0f;
-    o->g_down = 1.0f;
-    o->scale_up = 1.0f;
-    o->scale_dn = 1.0f;
-    o->r = 0.0f;
-
-    // 参数护栏按内部值域（配置层是整数口径，拦不住换算/赋值事故）
-    const char *bad = NULL;
-    if      (ki_dyn_cfg.m <= 0.0f)                        bad = "M<=0";
-    else if (ki_dyn_cfg.m >= ki_dyn_cfg.t1)               bad = "M>=T1";
-    else if (ki_dyn_cfg.t1 <= ki_dyn_cfg.t2)              bad = "T1<=T2";
-    else if (ki_dyn_cfg.t2 <= 0.0f)                       bad = "T2<=0";
-    else if (!(ki_dyn_cfg.alpha > 0.0f && ki_dyn_cfg.alpha <= 1.0f)) bad = "alpha 不在 (0,1]";
-    else if (!(ki_dyn_cfg.floor > 0.0f && ki_dyn_cfg.floor <= 1.0f)) bad = "floor 不在 (0,1]";
-    else if (ki_dyn_cfg.n < KI_DYN_SAMPLE_MIN || ki_dyn_cfg.n > KI_DYN_WIN_MAX) bad = "N 超范围";
-    if (bad) { o->reason = bad; return; }
-
-    int sample_count = (ki_dyn.count < ki_dyn_cfg.n) ? ki_dyn.count : ki_dyn_cfg.n;
-    o->sample_count = sample_count;
-    if (sample_count < KI_DYN_SAMPLE_MIN) { o->reason = "count_low"; return; }
-
-    // 窗口均值 R（码），取最近 sample_count 个样本
-    int sum = 0;
-    for (int i = 0; i < sample_count; i++)
-        sum += ki_dyn.win[(ki_dyn.head - sample_count + i + KI_DYN_WIN_MAX) % KI_DYN_WIN_MAX];
-    float r_mean = (float)sum / (float)sample_count;
-    o->r_mean = r_mean;
-
-    // 门控：窗口均值偏离基线的幅度超过 θ（码）则整机制不干预
-    float dev = r_mean - (float)BATT_BASELINE;
-    if (dev > (float)ki_dyn_cfg.theta || -dev > (float)ki_dyn_cfg.theta) {
-        o->reason = "gate_off";
-        return;
-    }
-
-    // 正偏 / 负偏半方差（码²）
-    float sum_pos_dev = 0.0f, sum_neg_dev = 0.0f;
-    for (int i = 0; i < sample_count; i++) {
-        float d = ki_dyn.win[(ki_dyn.head - sample_count + i + KI_DYN_WIN_MAX) % KI_DYN_WIN_MAX] - r_mean;
-        if (d > 0.0f) sum_pos_dev += ki_dyn_powk(d);
-        else          sum_neg_dev += ki_dyn_powk(-d);
-    }
-    float p = sum_pos_dev / (float)sample_count;
-    float q = sum_neg_dev / (float)sample_count;
-    o->pq = p + q;
-    o->pq_d = p - q;
-
-    // 削减量 r：P+Q ≥ T1 不削减，P+Q < T1 按 (T1−T2) 线性内插，下限钳 0
-    float cut_ratio = 0.0f;
-    if (o->pq < ki_dyn_cfg.t1)
-        cut_ratio = 0.5f * (ki_dyn_cfg.t1 - o->pq) / (ki_dyn_cfg.t1 - ki_dyn_cfg.t2);
-    if (cut_ratio < 0.0f) cut_ratio = 0.0f;
-    o->r = cut_ratio;
-
-    // 方向系数：偏向侧少削、另一侧满额（无分支双式写法，两侧都算）
-    float pos_excess = (o->pq_d > 0.0f) ? o->pq_d : 0.0f;
-    float neg_excess = (o->pq_d < 0.0f) ? -o->pq_d : 0.0f;
-    float gate_up   = 1.0f - clampf(pos_excess / ki_dyn_cfg.m, 0.0f, 1.0f);
-    float gate_down = 1.0f - clampf(neg_excess / ki_dyn_cfg.m, 0.0f, 1.0f);
-    o->g_up = gate_up;
-    o->g_down = gate_down;
-
-    // 两侧各自钳到削减下限
-    o->scale_up = clampf(1.0f - cut_ratio * gate_up,   ki_dyn_cfg.floor, 1.0f);
-    o->scale_dn = clampf(1.0f - cut_ratio * gate_down, ki_dyn_cfg.floor, 1.0f);
+/** 重算：取样冷值 → 抽象值 → 三作用点（各乘权重、钳 [−1,0]、映射），并打诊断日志 */
+static void cold_dyn_update(int cold) {
+    cold_dyn_s = cold_dyn_abs(cold);
+    float sk = clampf(cold_dyn_s * (cold_dyn_w_kdp_p100 * 0.01f), -1.0f, 0.0f);
+    float su = clampf(cold_dyn_s * (cold_dyn_w_up_p100  * 0.01f), -1.0f, 0.0f);
+    float sd = clampf(cold_dyn_s * (cold_dyn_w_dn_p100  * 0.01f), -1.0f, 0.0f);
+    cold_dyn_mult_kdp = cold_dyn_map(sk);
+    cold_dyn_mult_up  = cold_dyn_map(su);
+    cold_dyn_mult_dn  = cold_dyn_map(sd);
+    pid_log("冷值动态 in=%d om=%.2f s=%.3f | 加权 sk=%.3f su=%.3f sd=%.3f | 倍率 rkdp=%.3f rup=%.3f rdn=%.3f",
+            cold, cold_dyn_out_mid_p100 * 0.01f, cold_dyn_s, sk, su, sd,
+            cold_dyn_mult_kdp, cold_dyn_mult_up, cold_dyn_mult_dn);
 }
 
-/** EMA 平滑：s += α × (target − s)；窗口无新样本时不调用，s 原样保持 */
-static void ki_dyn_ema(float target_up, float target_down, float *out_up, float *out_down) {
-    ki_dyn.scale_up   += ki_dyn_cfg.alpha * (target_up   - ki_dyn.scale_up);
-    ki_dyn.scale_down += ki_dyn_cfg.alpha * (target_down - ki_dyn.scale_down);
-    *out_up = ki_dyn.scale_up;
-    *out_down = ki_dyn.scale_down;
-}
-
-/** 诊断日志：正常周期打 8 个体检字段，退化周期打一行原因（每周期只出一行） */
-static void ki_dyn_log(const KiDynOut *o) {
-    if (!o->reason) {
-        pid_log("KI动态 R=%.1f PQ=%.3f PQd=%.3f gup=%.3f gdn=%.3f sup=%.3f sdn=%.3f r=%.4f",
-                o->r_mean, o->pq, o->pq_d, o->g_up, o->g_down, o->scale_up, o->scale_dn, o->r);
-        return;
-    }
-    if (strcmp(o->reason, "count_low") == 0) {
-        pid_log("KI动态 退化 count_low m=%d/%d", o->sample_count, KI_DYN_SAMPLE_MIN);
-    } else if (strcmp(o->reason, "gate_off") == 0) {
-        float devf = o->r_mean - (float)BATT_BASELINE;
-        if (devf < 0.0f) devf = -devf;
-        pid_log("KI动态 退化 gate_off |R-B|=%d > theta=%d", (int)(devf + 0.5f), ki_dyn_cfg.theta);
-    } else {
-        pid_log("KI动态 退化 guard_fail %s", o->reason);
-    }
+/** 复位为「不干预」：抽象值 0、三倍率 1.0（启动 / 长断连复位） */
+static void cold_dyn_reset(void) {
+    cold_dyn_s = 0.0f;
+    cold_dyn_mult_kdp = 1.0f;
+    cold_dyn_mult_up  = 1.0f;
+    cold_dyn_mult_dn  = 1.0f;
 }
 
 // ======================== PID 控制函数 ========================
@@ -2224,17 +2114,15 @@ static void ki_dyn_log(const KiDynOut *o) {
  *   回溯注入的 v（recall_on）与常规 v 同样适用，去噪后的 v 共用给 ch 与 ch_kdp。
  * - ch 用于积分（acc += ki_rate×(ch − target_f)，ki_rate 按被积项符号取升/降速率），ch_kdp 用于 KDP（速度按 0.33 衰减，无记忆）。
  * - 动态目标 target_f（EMA 平滑），使积分逼近"误差×目标系数"包络，防静态过冲。
+ * - 逻辑2 冷值动态倍率（cold_dyn_*）：重算门控与 kdp 同处（温度窗口变化），三倍率分别作用于 kdp / KI 升 / KI 降。
  * - 温度未变（batt_window_changed=0）时 kdp 沿用上次值（跳过①），避免补偿突变带动 KDP 跳变。
  * @param batt_10  原始电池温度（0.1°C，纯电池，不含补偿）
  * @param dt       距上次重算以来的 5 秒周期数（钳位 0.6~6，1 = 5s）
  * @param cpu_comp CPU 补偿（°C，已 EMA 平滑）
  * @param batt_window_changed 本周期温度窗口是否变化（0=温度未变，kdp 沿用）
- * @param ki_scale_up   动态 KI 升侧缩放（0~1，1.0=不削减）
- * @param ki_scale_down 动态 KI 降侧缩放（0~1，1.0=不削减）
  * @return 归一化输出 0.0~1.0
  */
-static float pid_compute(int batt_10, float dt, float cpu_comp, int batt_window_changed, int recall_on, float recall_v,
-                         float ki_scale_up, float ki_scale_down) {
+static float pid_compute(int batt_10, float dt, float cpu_comp, int batt_window_changed, int recall_on, float recall_v) {
     // 输入误差（纯电池）
     float error = (batt_10 - BATT_BASELINE) / 10.0f;
 
@@ -2272,17 +2160,22 @@ static float pid_compute(int batt_10, float dt, float cpu_comp, int batt_window_
         pid_target_f += ta * (raw_target - pid_target_f);
     }
 
-    // 积分累积（acc；不乘 dt）：被积项为正走升速率、为负走降速率，各自乘动态 KI 缩放
+    // 逻辑2 冷值动态倍率重算：门控与下面的 KDP 一致（温度窗口变化），
+    // 取样 = 上次重算算出的目标冷值 pid_align_cold；本轮三倍率同时供 KI 与 KDP 使用。
+    if (batt_window_changed)
+        cold_dyn_update(pid_align_cold);
+
+    // 积分累积（acc；不乘 dt）：被积项为正走升速率、为负走降速率，各自乘逻辑2 对应倍率
     {
         float integrand = ch - pid_target_f;
-        float ki_rate = (integrand >= 0.0f) ? pid_ki_up_coef * ki_scale_up
-                                            : pid_ki_down_coef * ki_scale_down;
+        float ki_rate = (integrand >= 0.0f) ? pid_ki_up_coef * cold_dyn_mult_up
+                                            : pid_ki_down_coef * cold_dyn_mult_dn;
         pid_ki += (ki_rate / 1000.0f) * integrand;
     }
 
     // KDP（融合 P+D）：温度变了才更新；温度未变沿用上次值（跳过①）
     if (batt_window_changed)
-        pid_kdp = (pid_kdp_coef / 1000.0f) * chkdp;
+        pid_kdp = (pid_kdp_coef / 1000.0f) * chkdp * cold_dyn_mult_kdp;
 
     // 预算钳制：acc ≥0 且 ≤ max(0, 1−kdp)（防 acc+kdp 超 1 被末端硬截断，即抗 windup）
     float budget = 1.0f - pid_kdp;
@@ -2477,7 +2370,7 @@ static void pid_reset_core(void) {
     recall_anchor = 0;
     recall_prev_batt = 0;
     recall_cycles = 0;
-    ki_dyn_reset();
+    cold_dyn_reset();
 }
 
 // Gear 模式切换对齐（pid_align_from_gear）已随 Gear 删除
@@ -2782,20 +2675,8 @@ static void pid_cycle(void) {
                    * (pid_spd_recall_weight / 1000.0f);
     }
 
-    // --- 动态 KI 抑制：推送窗口 + 求值 + 步进 EMA（三者同受本守卫，温度未变则 s 原样保持）---
-    // 窗口推入用原始值 batt_raw；PID 进的是滤波值 pid_batt_filtered（两序列不同源）
-    float ki_scale_up = 1.0f, ki_scale_down = 1.0f;
-    if (batt_window_changed) {
-        ki_dyn_push(batt_raw);
-        KiDynOut dyn_out;
-        ki_dyn_eval(&dyn_out);
-        ki_dyn_ema(dyn_out.scale_up, dyn_out.scale_dn, &ki_scale_up, &ki_scale_down);
-        ki_dyn_log(&dyn_out);
-    }
-
     // --- PID 计算（电池 error 用滤波值 pid_batt_filtered + cpu_comp；snap 后==batt_raw 故恢复原始值；温度未变时 kdp 沿用）---
-    float pid_out = pid_compute(pid_batt_filtered, dt, cpu_comp, batt_window_changed, recall_on, recall_v,
-                                ki_scale_up, ki_scale_down);
+    float pid_out = pid_compute(pid_batt_filtered, dt, cpu_comp, batt_window_changed, recall_on, recall_v);
 
     // 直接映射到物理值（无输出平滑）：PID 输出 → 制冷强度（风扇目标由 compute_fan_target 独立计算）
     int cmax = active_cold_eff_max;

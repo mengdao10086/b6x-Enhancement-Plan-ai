@@ -20,7 +20,6 @@ import androidx.annotation.Nullable;
 import androidx.core.content.ContextCompat;
 
 import com.example.waspwingtempctrl.ConfigStore;
-import com.example.waspwingtempctrl.ConfigStore.Accept;
 import com.example.waspwingtempctrl.ConfigStore.Assessment;
 import com.example.waspwingtempctrl.ConfigStore.FieldMeta;
 import com.example.waspwingtempctrl.ConfigStore.KeyMeta;
@@ -63,14 +62,9 @@ import java.util.Map;
  *   <li><b>switch</b>：值只有 0/1，切换即完整 → 立即排入防抖队列。</li>
  *   <li><b>int / multi</b>：每次输入都排入防抖队列（写入前先 {@link ConfigStore#assess} 钳制，
  *       所以磁盘上不会出现越界值）；失焦时把钳制后的值回写控件并提示"原值 → 钳制后"。</li>
- *   <li><b>path / 护栏键</b>：<b>只在失焦/提交时落盘</b>。半截路径会被 C 端当成真路径去 open()；
- *       护栏键的中间态越界会让 C 端整组拒绝。这两类写坏值的代价都高于"少一次即时保存"。</li>
+ *   <li><b>path</b>：<b>只在失焦/提交时落盘</b>。半截路径会被 C 端当成真路径去 open()，
+ *       写坏值的代价高于"少一次即时保存"。</li>
  * </ul>
- *
- * <h3>护栏键（PID_KI_DYN_*）不写坏值</h3>
- * {@link ConfigStore#isGuardrailValidated} 为 true 的键，若 {@link ConfigStore#daemonAccepts}
- * 判定 C 端不接受，则<b>不落盘</b>，行内显示拒绝原因，控件保留用户输入以便其修改。
- * 理由：写进去 C 端也不认，只会造成"界面显示 X、守护进程用 Y"的假象。
  *
  * <p>"未生效"的标注只做在分组卡头一次（见 {@link ConfigGroupBinder}），行内只压暗不重复标注。
  */
@@ -239,10 +233,6 @@ final class ConfigKeyRow {
         if (!meta.daemonConsumes && !groupShowsUiOnly) {
             // 组内所有键都不被守护进程读取时，这句在卡头标一次（见 ConfigGroupBinder），行内不再重复
             rowNotes.add(root.getContext().getString(R.string.config_ui_only));
-        }
-        if (meta.guardrail && !meta.rangeNote.isEmpty()) {
-            // 护栏键的跨字段约束与"整组拒绝"语义来自定义本身（rangeNote），不是界面编的
-            rowNotes.add(meta.rangeNote);
         }
         if (!rowNotes.isEmpty()) {
             noteView.setText(TextUtils.join(" ｜ ", rowNotes));
@@ -930,9 +920,8 @@ final class ConfigKeyRow {
         if (suppressChange || meta.isSwitch()) {
             return;
         }
-        if (!fromBlur && (meta.isPath() || meta.guardrail)) {
-            // 输入过程中不落盘：半截路径会被 C 端当真路径去 open()，
-            // 护栏键的中间态越界会让 C 端整组拒绝并保留旧值
+        if (!fromBlur && meta.isPath()) {
+            // 输入过程中不落盘：半截路径会被 C 端当真路径去 open()
             return;
         }
 
@@ -949,23 +938,6 @@ final class ConfigKeyRow {
         Assessment assessment = host.store().assess(meta.key, raw);
         Value ui = assessment.uiValue;
 
-        if (meta.guardrail) {
-            Accept accept = host.store().daemonAccepts(meta.key, ui);
-            if (!accept.accepted) {
-                // 不落盘：写进去 C 端也不认，只会造成"界面显示 X、守护进程用 Y"的假象
-                if (fromBlur) {
-                    String message = control.getContext()
-                            .getString(R.string.config_guardrail_rejected, accept.describe());
-                    setStatus(message, R.color.state_error);
-                    host.notifyUser(message, true);
-                }
-                return;
-            }
-            if (fromBlur && accept.degraded) {
-                setStatus(accept.describe(), R.color.state_warn);
-            }
-        }
-
         if (fromBlur) {
             applyValue(ui);
             if (assessment.changedByClamp && !ui.format().equals(raw.format())) {
@@ -976,7 +948,7 @@ final class ConfigKeyRow {
             } else if (meta.isPath() && !assessment.notes.isEmpty()) {
                 setStatus(control.getContext().getString(R.string.config_path_note,
                         TextUtils.join("；", assessment.notes)), R.color.state_warn);
-            } else if (!meta.guardrail) {
+            } else {
                 hideStatus();
             }
         }

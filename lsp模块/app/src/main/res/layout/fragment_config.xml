@@ -133,7 +133,7 @@
                 <!--
                     折叠体：默认整块隐藏（诊断信息与键渲染自检都属排障内容，不该常驻参数区上方）。
                     自上而下：数据文件信息（原曲线页信息条，由 ChartFragment 经 ChartFragment.Host
-                    回调提供，曲线卡内不再重复）→ 键渲染自检 → 配置诊断正文（落点/护栏/未知键/mtime）。
+                    回调提供，曲线卡内不再重复）→ 键渲染自检 → 配置诊断正文（落点/未知键/mtime）。
                     自检单独一个 TextView：config_diag_text 每次刷新都被 ConfigDiagnostics 整段覆盖。
                 -->
                 <LinearLayout

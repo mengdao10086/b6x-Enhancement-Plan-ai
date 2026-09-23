@@ -43,11 +43,6 @@ import java.util.Set;
  *       （防抖窗口建议 ≥ 1 秒）。</li>
  *   <li>多值键在文件里给出的字段数少于定义时，C 端只应用给出的前几个字段，
  *       其余字段保持<b>代码默认值</b>（不是文件里的值）。</li>
- *   <li>{@code PID_KI_DYN_*} 三键在 C 端是<b>护栏式校验</b>（越界整组拒绝、保留旧值），
- *       不是 clamp。界面按 min/max 钳制会让用户<b>触发不到</b>那个分支，
- *       因此界面<b>不得声称自己的钳制等同 C 端</b>：
- *       本类把「界面能接受的值」({@link #assess}) 与「C 端会接受的值」({@link #daemonAccepts})
- *       分成两个方法，界面需要用后者回答"这值真的会生效吗"。</li>
  * </ul>
  *
  * <p>键的元数据（类型 / min / max / 默认值 / 分组 / label）全部来自
@@ -73,14 +68,6 @@ public final class ConfigStore {
      */
     public static final String DAEMON_PRIVATE_DIR = "/data/data/com.example.waspwingtempctrl/files";
 
-    /**
-     * 护栏式校验键：C 端越界<b>整组拒绝并保留旧值</b>，不是 clamp。
-     * 依据 {@code tempctrl.c} 的 {@code parse_pid_cfg()} 三个护栏分支（线 A 未改动这三处）。
-     * {@link #assertGuardrailSetConsistent()} 用 params.json 的 rangeNote 自检该集合是否仍然成立。
-     */
-    private static final Set<String> GUARDRAIL_KEYS = Collections.unmodifiableSet(
-            new HashSet<>(Arrays.asList("PID_KI_DYN_T", "PID_KI_DYN_GATE", "PID_KI_DYN_WIN")));
-
     private static volatile ConfigStore instance;
 
     private final File filesDir;
@@ -91,8 +78,6 @@ public final class ConfigStore {
     private final List<GroupMeta> groups = new ArrayList<>();
     private final String configFileNameFromDef;
     private String loadError = "";
-    private boolean guardrailChecked;
-    private String guardrailNote = "";
 
     private ConfigStore(Context context) {
         Context app = context.getApplicationContext();
@@ -476,36 +461,30 @@ public final class ConfigStore {
 
     // ==================== 校验语义（P0 告警落地处） ====================
 
-    /** 界面侧评估结果：「界面能接受的值」+ 是否被钳制 + 是否碰到护栏键。 */
+    /** 界面侧评估结果：「界面能接受的值」+ 是否被钳制。 */
     public static final class Assessment {
         /** 界面可接受并写出的值（已按 min/max 逐字段钳制）。 */
         public final Value uiValue;
         public final boolean changedByClamp;
-        /** 该键在 C 端是护栏式校验（越界整组拒绝），界面的钳制不等同 C 端。 */
-        public final boolean guardrail;
-        /** 人话说明（含"界面钳制 ≠ C 端语义"的显式提示）。 */
+        /** 人话说明。 */
         public final List<String> notes;
 
-        Assessment(Value uiValue, boolean changedByClamp, boolean guardrail, List<String> notes) {
+        Assessment(Value uiValue, boolean changedByClamp, List<String> notes) {
             this.uiValue = uiValue;
             this.changedByClamp = changedByClamp;
-            this.guardrail = guardrail;
             this.notes = Collections.unmodifiableList(notes);
         }
     }
 
     /**
      * 把用户输入折算成「界面能接受的值」：按 {@code params.json} 的 min/max 逐字段钳制。
-     *
-     * <p><b>这不是 C 端的语义</b>：护栏键在 C 端越界会整组拒绝并保留旧值。
-     * 界面要回答"这值会生效吗"必须再用 {@link #daemonAccepts}。
      */
     public Assessment assess(String key, Value raw) {
         KeyMeta meta = key(key);
         List<String> notes = new ArrayList<>();
         if (meta == null) {
             notes.add("未知键，params.json 未定义，不会写入");
-            return new Assessment(raw, false, false, notes);
+            return new Assessment(raw, false, notes);
         }
         if (meta.isPath()) {
             if (raw.text().trim().isEmpty()) {
@@ -515,7 +494,7 @@ public final class ConfigStore {
                 notes.add("路径含 '#'：C 端不剥离行内注释，'#' 之后会被当成路径的一部分");
             }
             return new Assessment(Value.ofText(raw.text().trim()), !raw.text().equals(raw.text().trim()),
-                    false, notes);
+                    notes);
         }
         int n = Math.max(1, meta.fieldCount());
         List<Integer> nums = new ArrayList<>();
@@ -537,117 +516,8 @@ public final class ConfigStore {
         if (clamped) {
             notes.add("已按定义 min/max 钳制（界面能接受的值）");
         }
-        boolean guardrail = meta.guardrail;
-        if (guardrail) {
-            notes.add("护栏键：C 端越界整组拒绝并保留旧值；界面钳制后不会触发该分支，"
-                    + "但这不代表 C 端行为等同界面钳制（用 daemonAccepts() 判断是否真会生效）");
-        }
         Value ui = nums.size() == 1 ? Value.ofInt(nums.get(0)) : Value.ofNumbers(toIntArray(nums));
-        return new Assessment(ui, clamped, guardrail, notes);
-    }
-
-    /** C 端是否会接受这个值（「C 端会接受的值」）。 */
-    public static final class Accept {
-        public final boolean accepted;
-        /** 若被拒，这里是依据（人话）。 */
-        public final List<String> reasons;
-        /** C 端会接受但效果打折（如 PID_KI_DYN_T 的 M > T2 只提示不拦）。 */
-        public final boolean degraded;
-
-        Accept(boolean accepted, List<String> reasons, boolean degraded) {
-            this.accepted = accepted;
-            this.reasons = Collections.unmodifiableList(reasons);
-            this.degraded = degraded;
-        }
-
-        public String describe() {
-            if (!accepted) {
-                return "C 端会拒绝：" + join(reasons, "；");
-            }
-            return degraded ? "C 端会接受（有打折提示）：" + join(reasons, "；") : "C 端会接受";
-        }
-    }
-
-    /**
-     * 判定「C 端会接受的值」：逐字段范围 + 护栏键的跨字段约束
-     * （{@code T1 > T2}、{@code M < T1}；{@code M > T2} 只提示不拦）。
-     *
-     * <p>范围来自 params.json 的 fields；跨字段约束来自 {@code tempctrl.c} 的护栏分支（线 A 未改）。
-     */
-    public Accept daemonAccepts(String key, Value value) {
-        KeyMeta meta = key(key);
-        List<String> reasons = new ArrayList<>();
-        boolean degraded = false;
-        if (meta == null) {
-            reasons.add("未知键，C 端忽略");
-            return new Accept(false, reasons, false);
-        }
-        if (meta.isPath()) {
-            if (value.text().trim().isEmpty()) {
-                reasons.add("空路径：C 端跳过该键（不报错）");
-                return new Accept(false, reasons, false);
-            }
-        } else {
-            // 只判值里实际给出的字段：C 端对缺失的后续字段保留旧值（不是补 0），
-            // 多判会凭空报"C 端会拒绝"
-            int n = Math.min(Math.max(1, meta.fieldCount()), Math.max(1, value.size()));
-            for (int i = 0; i < n; i++) {
-                int v = value.intAt(i);
-                Integer min = meta.min(i);
-                Integer max = meta.max(i);
-                if (min != null && v < min) {
-                    reasons.add(meta.fieldLabel(i) + "=" + v + " < " + min);
-                }
-                if (max != null && v > max) {
-                    reasons.add(meta.fieldLabel(i) + "=" + v + " > " + max);
-                }
-            }
-            if (!reasons.isEmpty()) {
-                return new Accept(false, reasons, false);
-            }
-            if ("PID_KI_DYN_T".equals(key)) {
-                int t1 = value.intAt(0);
-                int t2 = value.intAt(1);
-                int m = value.intAt(2);
-                if (t1 <= t2) {
-                    reasons.add("护栏 T1 > T2 不成立（T1=" + t1 + " T2=" + t2 + "）");
-                } else if (m >= t1) {
-                    reasons.add("护栏 M < T1 不成立（M=" + m + " T1=" + t1 + "）");
-                } else if (m > t2) {
-                    degraded = true;
-                    reasons.add("M > T2（M=" + m + " T2=" + t2 + "）：方向机制效果打折，不拦");
-                }
-            }
-        }
-        return new Accept(true, reasons, degraded);
-    }
-
-    /** 该键在 C 端是否护栏式校验。 */
-    public boolean isGuardrailValidated(String key) {
-        return GUARDRAIL_KEYS.contains(key);
-    }
-
-    /** 护栏键集合与 params.json 的 rangeNote 是否自洽（I1 重新生成后可能失效，界面可据此告警）。 */
-    public String guardrailConsistency() {
-        if (!guardrailChecked) {
-            guardrailChecked = true;
-            runGuardrailConsistencyCheck();
-        }
-        return guardrailNote;
-    }
-
-    private void runGuardrailConsistencyCheck() {
-        List<String> mismatch = new ArrayList<>();
-        for (KeyMeta meta : keys.values()) {
-            boolean saysReject = meta.rangeNote != null && meta.rangeNote.contains("拒绝");
-            if (saysReject && !GUARDRAIL_KEYS.contains(meta.key)) {
-                mismatch.add("params.json 声称 " + meta.key + " 越界拒绝，但代码未按护栏处理");
-            }
-            if (!saysReject && GUARDRAIL_KEYS.contains(meta.key)) {
-                mismatch.add("代码按护栏处理 " + meta.key + "，但 params.json 的 rangeNote 未声明");
-            }
-        }
-        guardrailNote = mismatch.isEmpty() ? "" : join(mismatch, "；");
+        return new Assessment(ui, clamped, notes);
     }
 
     // ==================== 诊断 ====================
@@ -661,8 +531,6 @@ public final class ConfigStore {
                 .append(isPathAlignedWithDaemon() ? "（一致）" : "（不一致！守护进程读不到 app 写的配置）").append('\n');
         sb.append("参数定义: ").append(PARAMS_ASSET).append(" · ")
                 .append(loadError.isEmpty() ? keyCount() + " 键" : loadError).append('\n');
-        String guard = guardrailConsistency();
-        sb.append("护栏键自检: ").append(guard.isEmpty() ? "通过（" + GUARDRAIL_KEYS.size() + " 键）" : guard).append('\n');
         Snapshot snap = read();
         if (!snap.unknownKeys.isEmpty()) {
             sb.append("未定义键: ").append(join(snap.unknownKeys, ", ")).append('\n');
@@ -721,14 +589,12 @@ public final class ConfigStore {
         public final String desc;
         public final String unit;
         public final String unitNote;
-        public final String rangeNote;
         public final Value defaultValue;
         public final Value factoryValue;
         public final List<String> requires;
         public final boolean daemonConsumes;
         /** 多值键的字段定义；单值键为 null。 */
         public final List<FieldMeta> fields;
-        public final boolean guardrail;
 
         /** 单值键的范围（多值键见 {@link #fields}）；null = 无界。 */
         private final Integer rawMin;
@@ -743,7 +609,6 @@ public final class ConfigStore {
             this.desc = o.optString("desc", "");
             this.unit = o.optString("unit", "");
             this.unitNote = o.optString("unitNote", "");
-            this.rangeNote = o.optString("rangeNote", "");
             this.requires = jsonStringList(o.optJSONArray("requires"));
             this.daemonConsumes = o.optBoolean("daemonConsumes", true);
             // 字段表与范围必须先就位：下面的 parseValue() 依赖 fieldCount()/min()/max()
@@ -768,7 +633,6 @@ public final class ConfigStore {
             this.rawMax = o.isNull("max") ? null : Integer.valueOf(o.optInt("max"));
             this.defaultValue = parseValue(this, jsonValue(o, "default"));
             this.factoryValue = parseValue(this, jsonValue(o, "factory"));
-            this.guardrail = GUARDRAIL_KEYS.contains(key);
         }
 
         public boolean isMulti() {
@@ -814,7 +678,7 @@ public final class ConfigStore {
             return rawMax;
         }
 
-        /** 生成配置文件注释行用（label + 单位 + 范围 + 依赖 + 护栏提示）。 */
+        /** 生成配置文件注释行用（label + 单位 + 范围 + 依赖）。 */
         String commentLine() {
             StringBuilder sb = new StringBuilder(label);
             if (!unit.isEmpty()) {
@@ -833,9 +697,6 @@ public final class ConfigStore {
                 }
             } else if (rawMin != null && rawMax != null) {
                 sb.append("：范围 ").append(rawMin).append('~').append(rawMax);
-            }
-            if (guardrail) {
-                sb.append("；护栏校验，越界整组拒绝并保留旧值（不是钳位）");
             }
             if (!requires.isEmpty()) {
                 sb.append("；仅 ").append(joinEach(requires, "=1、")).append("=1 时生效");

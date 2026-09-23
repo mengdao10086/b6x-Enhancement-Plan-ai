@@ -33,11 +33,9 @@ import java.util.regex.Pattern;
  *       C 端实例：{@code send_am_broadcast()} 的 fork 失败分支、
  *       {@code create_status_files()} 的状态文件创建失败分支、
  *       {@code load_config()} 的配置打开失败分支。</li>
- *   <li><b>WARN</b>：正文含 {@code 拒绝|未生效|打折|超时|未就绪|断联|断开|丢失|停滞|强制}
+ *   <li><b>WARN</b>：正文含 {@code 未生效|超时|未就绪|断联|断开|丢失|停滞|强制}
  *       —— 均为 C 端「降级/异常但继续运行」的措辞。
- *       C 端实例：{@code parse_pid_cfg()} 中三个护栏键各自的拒绝分支（{@code PID_KI_DYN_T} /
- *       {@code GATE} / {@code WIN}，拒绝原因由局部变量 {@code bad} 给出）、同函数
- *       {@code M > T2} 的「打折（不拦）」分支、{@code send_am_broadcast()} 的 am broadcast 超时、
+ *       C 端实例：{@code send_am_broadcast()} 的 am broadcast 超时、
  *       {@code try_align_actual()} 的回传超时用保守值起步分支、
  *       {@code reconnect_align()} 的两条断联分支（回传冷/RPM 汇总行、短断联保留 PID 状态行）、
  *       {@code watchdog_check()} 的锁死自动重启（实际制冷停滞）分支、
@@ -65,7 +63,7 @@ final class LogClassifier {
 
     /** 警告关键词（C 端「降级但继续」措辞）。 */
     private static final String[] WARN_WORDS = {
-            "拒绝", "未生效", "打折", "超时", "未就绪", "断联", "断开", "丢失", "停滞", "强制"
+            "未生效", "超时", "未就绪", "断联", "断开", "丢失", "停滞", "强制"
     };
 
     /** C 端调试分区前缀（tempctrl.c 中 debug_log / pid_log 两条宏写入的固定前缀）。 */

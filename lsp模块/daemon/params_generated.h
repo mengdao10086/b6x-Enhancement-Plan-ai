@@ -6,7 +6,7 @@
 #define PARAMS_GENERATED_H
 
 /* 键数：守护进程消费 / 仅界面读取 */
-#define CFG_DAEMON_KEY_COUNT 48
+#define CFG_DAEMON_KEY_COUNT 49
 #define CFG_WEBUI_KEY_COUNT 4
 
 /* 性能层单值键表（PERF_ENABLED=1）→ INT_CFG_KEYS[]：X(键名, C 变量, min, max) */
@@ -83,20 +83,6 @@
 #define CFG_MAX_PID_KI_RATE_1 1000
 #define CFG_MIN_PID_KI_RATE_2 1  /* C 变量 pid_ki_down_coef */
 #define CFG_MAX_PID_KI_RATE_2 1000
-#define CFG_MIN_PID_KI_DYN_T_1 1
-#define CFG_MAX_PID_KI_DYN_T_1 10000
-#define CFG_MIN_PID_KI_DYN_T_2 1
-#define CFG_MAX_PID_KI_DYN_T_2 10000
-#define CFG_MIN_PID_KI_DYN_T_3 1
-#define CFG_MAX_PID_KI_DYN_T_3 10000
-#define CFG_MIN_PID_KI_DYN_GATE_1 3
-#define CFG_MAX_PID_KI_DYN_GATE_1 10
-#define CFG_MIN_PID_KI_DYN_GATE_2 10
-#define CFG_MAX_PID_KI_DYN_GATE_2 100
-#define CFG_MIN_PID_KI_DYN_WIN_1 6
-#define CFG_MAX_PID_KI_DYN_WIN_1 128
-#define CFG_MIN_PID_KI_DYN_WIN_2 1
-#define CFG_MAX_PID_KI_DYN_WIN_2 100
 #define CFG_MIN_PID_SPEED 0  /* C 变量 pid_speed_coef */
 #define CFG_MAX_PID_SPEED 1000
 #define CFG_MIN_PID_TARGET_1 1  /* C 变量 pid_target_coef */
@@ -125,6 +111,24 @@
 #define CFG_MAX_PID_COLD_RANGE_2 194
 #define CFG_MIN_PID_COLD_RANGE_3 1  /* C 变量 b7_pid_cold_max */
 #define CFG_MAX_PID_COLD_RANGE_3 255
+#define CFG_MIN_PID_COLD_DYN_IN_1 0  /* C 变量 cold_dyn_in_lo */
+#define CFG_MAX_PID_COLD_DYN_IN_1 255
+#define CFG_MIN_PID_COLD_DYN_IN_2 0  /* C 变量 cold_dyn_in_mid */
+#define CFG_MAX_PID_COLD_DYN_IN_2 255
+#define CFG_MIN_PID_COLD_DYN_IN_3 0  /* C 变量 cold_dyn_in_hi */
+#define CFG_MAX_PID_COLD_DYN_IN_3 255
+#define CFG_MIN_PID_COLD_DYN_OUT 0  /* C 变量 cold_dyn_out_mid_p100 */
+#define CFG_MAX_PID_COLD_DYN_OUT 100
+#define CFG_MIN_PID_COLD_DYN_W_1 0  /* C 变量 cold_dyn_w_kdp_p100 */
+#define CFG_MAX_PID_COLD_DYN_W_1 200
+#define CFG_MIN_PID_COLD_DYN_W_2 0  /* C 变量 cold_dyn_w_up_p100 */
+#define CFG_MAX_PID_COLD_DYN_W_2 200
+#define CFG_MIN_PID_COLD_DYN_W_3 0  /* C 变量 cold_dyn_w_dn_p100 */
+#define CFG_MAX_PID_COLD_DYN_W_3 200
+#define CFG_MIN_PID_COLD_DYN_MAP_1 100  /* C 变量 cold_dyn_u_p100 */
+#define CFG_MAX_PID_COLD_DYN_MAP_1 400
+#define CFG_MIN_PID_COLD_DYN_MAP_2 10  /* C 变量 cold_dyn_gamma_p100 */
+#define CFG_MAX_PID_COLD_DYN_MAP_2 400
 #define CFG_MIN_BATT_TEMP_DIVISOR 1  /* C 变量 BATT_TEMP_DIVISOR */
 #define CFG_MAX_BATT_TEMP_DIVISOR 10000
 #define CFG_MIN_BATT_CURRENT_DIVISOR 1  /* C 变量 BATT_CURRENT_DIVISOR */

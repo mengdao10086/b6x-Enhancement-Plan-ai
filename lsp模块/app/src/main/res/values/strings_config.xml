@@ -32,8 +32,7 @@
     <string name="config_hint_value">数值</string>
     <string name="config_hint_path">路径</string>
     <string name="config_range">范围 %1$s~%2$s</string>
-    <string name="config_clamped">原值 %1$s → 已按定义范围钳制为 %2$s（界面钳制，不等于 C 端语义）</string>
-    <string name="config_guardrail_rejected">未写入：%1$s。C 端会整组拒绝并保留旧值，请调整后再提交</string>
+    <string name="config_clamped">原值 %1$s → 已按定义范围钳制为 %2$s</string>
     <string name="config_input_restored">输入为空或不可解析，已恢复为上一次的值</string>
     <string name="config_path_note">路径提示：%1$s</string>
 

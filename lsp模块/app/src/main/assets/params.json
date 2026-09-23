@@ -48,16 +48,17 @@
         "HOT_DERATE",
         "PID_KDP",
         "PID_KI_RATE",
-        "PID_KI_DYN_T",
-        "PID_KI_DYN_GATE",
-        "PID_KI_DYN_WIN",
         "PID_SPEED",
         "PID_TARGET",
         "PID_CH_THRESHOLD",
         "PID_CPU_COMP",
         "PID_TARGET_DIR",
         "PID_SPEED_RECALL",
-        "PID_COLD_RANGE"
+        "PID_COLD_RANGE",
+        "PID_COLD_DYN_IN",
+        "PID_COLD_DYN_OUT",
+        "PID_COLD_DYN_W",
+        "PID_COLD_DYN_MAP"
       ]
     },
     {
@@ -700,138 +701,6 @@
         }
       ]
     },
-    "PID_KI_DYN_T": {
-      "key": "PID_KI_DYN_T",
-      "group": "perf",
-      "role": "setting",
-      "type": "multi",
-      "label": "动态 KI 阈值/方向系数",
-      "desc": "三值均 ×100 存值（默认 470 120 75 = 4.70 / 1.20 / 0.75 码²）；护栏 T1 > T2 与 M < T1，越界拒绝并保留旧值；M > T2 仅提示效果打折；P+Q ≥ T1 不削减、P+Q ≤ T2 削减到下限",
-      "unit": "",
-      "unitNote": "多值键，各字段单位见 fields",
-      "default": [
-        470,
-        120,
-        75
-      ],
-      "factory": [
-        470,
-        120,
-        75
-      ],
-      "min": null,
-      "max": null,
-      "requires": [
-        "PERF_ENABLED"
-      ],
-      "daemonConsumes": true,
-      "rangeNote": "范围逐字段见 fields；三值另有跨字段护栏 T1 > T2 且 M < T1，越界整组拒绝（不是钳位）",
-      "fields": [
-        {
-          "label": "T1 抖动上限(码²×100)",
-          "unit": "码²×100",
-          "min": 1,
-          "max": 10000,
-          "default": 470
-        },
-        {
-          "label": "T2 满削减阈值(码²×100)",
-          "unit": "码²×100",
-          "min": 1,
-          "max": 10000,
-          "default": 120
-        },
-        {
-          "label": "M 方向系数(码²×100)",
-          "unit": "码²×100",
-          "min": 1,
-          "max": 10000,
-          "default": 75
-        }
-      ]
-    },
-    "PID_KI_DYN_GATE": {
-      "key": "PID_KI_DYN_GATE",
-      "group": "perf",
-      "role": "setting",
-      "type": "multi",
-      "label": "动态 KI 门控/削减下限",
-      "desc": "θ 单位码（1 码 = 0.1°C，默认 5 = 0.5°C），窗口均值偏离基准超过 θ 时整机制不干预；削减下限 ×100（默认 50 = 0.50），scale 触底钳到该值",
-      "unit": "",
-      "unitNote": "多值键，各字段单位见 fields",
-      "default": [
-        5,
-        50
-      ],
-      "factory": [
-        5,
-        50
-      ],
-      "min": null,
-      "max": null,
-      "requires": [
-        "PERF_ENABLED"
-      ],
-      "daemonConsumes": true,
-      "rangeNote": "范围逐字段见 fields；越界整组拒绝（不是钳位）",
-      "fields": [
-        {
-          "label": "θ 门控半宽(码)",
-          "unit": "码（1 码 = 0.1°C，零换算）",
-          "min": 3,
-          "max": 10,
-          "default": 5
-        },
-        {
-          "label": "削减下限(×100)",
-          "unit": "×100",
-          "min": 10,
-          "max": 100,
-          "default": 50
-        }
-      ]
-    },
-    "PID_KI_DYN_WIN": {
-      "key": "PID_KI_DYN_WIN",
-      "group": "perf",
-      "role": "setting",
-      "type": "multi",
-      "label": "动态 KI 窗口/平滑",
-      "desc": "N 为窗口样本容量（记温度变化次数非时间，默认 36，少于 6 个样本时机制不干预）；α ×100（默认 30 = 0.30），有求值结果时步进一次，温度未变不步进",
-      "unit": "",
-      "unitNote": "多值键，各字段单位见 fields",
-      "default": [
-        36,
-        30
-      ],
-      "factory": [
-        36,
-        30
-      ],
-      "min": null,
-      "max": null,
-      "requires": [
-        "PERF_ENABLED"
-      ],
-      "daemonConsumes": true,
-      "rangeNote": "范围逐字段见 fields；N 的上限 = 128（窗口环形缓冲容量），越界整组拒绝（不是钳位）",
-      "fields": [
-        {
-          "label": "N 窗口样本数",
-          "unit": "样本个数（零换算）",
-          "min": 6,
-          "max": 128,
-          "default": 36
-        },
-        {
-          "label": "α EMA 系数(×100)",
-          "unit": "×100",
-          "min": 1,
-          "max": 100,
-          "default": 30
-        }
-      ]
-    },
     "PID_SPEED": {
       "key": "PID_SPEED",
       "group": "perf",
@@ -1113,6 +982,166 @@
           "min": 1,
           "max": 255,
           "default": 190
+        }
+      ]
+    },
+    "PID_COLD_DYN_IN": {
+      "key": "PID_COLD_DYN_IN",
+      "group": "perf",
+      "role": "setting",
+      "type": "multi",
+      "label": "冷值动态倍率 输入轴",
+      "desc": "三值为冷值三点（下界 拐点 上界，冷值码，零换算，默认 40 100 190，各 0~255）：低于下界不干预，下界→拐点→上界两段线性，上界处取到最大降幅",
+      "unit": "",
+      "unitNote": "多值键，各字段单位见 fields",
+      "default": [
+        40,
+        100,
+        190
+      ],
+      "factory": [
+        40,
+        100,
+        190
+      ],
+      "min": null,
+      "max": null,
+      "requires": [
+        "PERF_ENABLED"
+      ],
+      "daemonConsumes": true,
+      "rangeNote": "范围逐字段见 fields（各 0~255）；低于下界不干预，上界及以上维持最大降幅",
+      "fields": [
+        {
+          "label": "下界(冷值码)",
+          "unit": "冷值码（零换算）",
+          "min": 0,
+          "max": 255,
+          "default": 40
+        },
+        {
+          "label": "拐点(冷值码)",
+          "unit": "冷值码（零换算）",
+          "min": 0,
+          "max": 255,
+          "default": 100
+        },
+        {
+          "label": "上界(冷值码)",
+          "unit": "冷值码（零换算）",
+          "min": 0,
+          "max": 255,
+          "default": 190
+        }
+      ]
+    },
+    "PID_COLD_DYN_OUT": {
+      "key": "PID_COLD_DYN_OUT",
+      "group": "perf",
+      "role": "setting",
+      "type": "int",
+      "label": "冷值动态倍率 拐点降幅",
+      "desc": "输出轴拐点值，配置里存正数（默认 50 = 降幅 0.50）；两端固定：下界处 0（不干预）、上界处 1.00",
+      "unit": "×100（存储值 50 = 降幅 0.50）",
+      "unitNote": "",
+      "default": 50,
+      "factory": 50,
+      "min": 0,
+      "max": 100,
+      "requires": [
+        "PERF_ENABLED"
+      ],
+      "daemonConsumes": true,
+      "fields": null
+    },
+    "PID_COLD_DYN_W": {
+      "key": "PID_COLD_DYN_W",
+      "group": "perf",
+      "role": "setting",
+      "type": "multi",
+      "label": "冷值动态倍率 权重",
+      "desc": "三值为 KDP / KI 升 / KI 降 的权重（各 ×100，默认 100 100 100 = 1.00，各 0~200）：0 = 该处不受本机制影响",
+      "unit": "",
+      "unitNote": "多值键，各字段单位见 fields",
+      "default": [
+        100,
+        100,
+        100
+      ],
+      "factory": [
+        100,
+        100,
+        100
+      ],
+      "min": null,
+      "max": null,
+      "requires": [
+        "PERF_ENABLED"
+      ],
+      "daemonConsumes": true,
+      "rangeNote": "范围逐字段见 fields（各 0~200）；权重 0 即该作用点不受本机制影响",
+      "fields": [
+        {
+          "label": "KDP 权重(×100)",
+          "unit": "×100",
+          "min": 0,
+          "max": 200,
+          "default": 100
+        },
+        {
+          "label": "KI 升权重(×100)",
+          "unit": "×100",
+          "min": 0,
+          "max": 200,
+          "default": 100
+        },
+        {
+          "label": "KI 降权重(×100)",
+          "unit": "×100",
+          "min": 0,
+          "max": 200,
+          "default": 100
+        }
+      ]
+    },
+    "PID_COLD_DYN_MAP": {
+      "key": "PID_COLD_DYN_MAP",
+      "group": "perf",
+      "role": "setting",
+      "type": "multi",
+      "label": "冷值动态倍率 映射",
+      "desc": "两值为倍率上界 U（×100，默认 200 = 2.00，范围 100~400）与形状指数 γ（×100，默认 100 = 1.00，范围 10~400）；倍率为 U 的 sign(s)×abs(s)^γ 次幂，上下界互为倒数",
+      "unit": "",
+      "unitNote": "多值键，各字段单位见 fields",
+      "default": [
+        200,
+        100
+      ],
+      "factory": [
+        200,
+        100
+      ],
+      "min": null,
+      "max": null,
+      "requires": [
+        "PERF_ENABLED"
+      ],
+      "daemonConsumes": true,
+      "rangeNote": "范围逐字段见 fields（U 100~400、γ 10~400）；上下界互为倒数（下界 = 1/上界）",
+      "fields": [
+        {
+          "label": "倍率上界 U(×100)",
+          "unit": "×100",
+          "min": 100,
+          "max": 400,
+          "default": 200
+        },
+        {
+          "label": "形状指数 γ(×100)",
+          "unit": "×100",
+          "min": 10,
+          "max": 400,
+          "default": 100
         }
       ]
     },
