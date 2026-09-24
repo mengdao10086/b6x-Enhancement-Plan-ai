@@ -2,9 +2,6 @@ package com.example.waspwingtempctrl.ui;
 
 import android.content.Context;
 import android.os.Bundle;
-import android.os.Handler;
-import android.os.Looper;
-import android.text.TextUtils;
 import android.view.LayoutInflater;
 import android.view.View;
 import android.view.ViewGroup;
@@ -21,17 +18,13 @@ import com.example.waspwingtempctrl.ConfigStore.GroupMeta;
 import com.example.waspwingtempctrl.ConfigStore.KeyMeta;
 import com.example.waspwingtempctrl.ConfigStore.Snapshot;
 import com.example.waspwingtempctrl.ConfigStore.Value;
-import com.example.waspwingtempctrl.ConfigStore.WriteResult;
 import com.example.waspwingtempctrl.R;
 import com.google.android.material.snackbar.Snackbar;
 
 import java.util.ArrayList;
 import java.util.Collections;
-import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
 
 /**
  * 设置页（顶栏设置按钮 → {@code SettingsActivity} 挂载）：只渲染 {@code params.json} 里
@@ -40,8 +33,9 @@ import java.util.concurrent.Executors;
  * <h3>为什么单独一页</h3>
  * 这几个键是"曲线怎么画、界面怎么显示"的自用参数（{@code daemonConsumes=false}），
  * 与配置页那些会被守护进程读取的运维参数不是一类东西；搬到设置页后配置页只剩要调的参数。
- * 本页不重复实现表单：键行、开关、落盘规则全部复用 {@link ConfigKeyRow} /
- * {@link ConfigGroupBinder} / {@link ConfigWriteQueue}，只是宿主换成这里（{@link ConfigKeyRow.Host}）。
+ * 本页不重复实现表单：键行、开关、落盘规则全在本页与配置页共用的
+ * {@link ConfigFormController} 与 {@link ConfigKeyRow} / {@link ConfigGroupBinder} /
+ * {@link ConfigWriteQueue} 里，本页只提供自己的壳、错误位与重置栏。
  * <b>本页的键数也是配置页键渲染自检的一个分项</b>，故键清单只由 {@link #webuiKeys} 给出，
  * 自检与渲染同源，不会各写一份数字。
  *
@@ -54,33 +48,24 @@ import java.util.concurrent.Executors;
  *
  * <p>边界同配置页（I3）：只经 {@link ConfigStore} 读写 {@code profile.conf}，不自己解析 assets。
  *
- * <h3>定义在后台预热</h3>
- * 本页在 {@link #onCreate} 里用后台线程先调一次 {@link ConfigStore#get}（读 {@code assets/params.json}
- * + 解析 + 建 KeyMeta 都在那边做），主线程拿到回调后才铺页面（{@link #buildPageIfReady()}）——
- * 页面壳与重置栏都要读定义，定义没到位就没有可铺的内容。
+ * <h3>加载：与预读并行，建完才出现</h3>
+ * 定义与首份快照在后台读（{@link ConfigFormController#start()}，{@code onCreate} 即起），读完
+ * 主线程一次把卡与键行建满、值也上屏，{@link #onFormBuilt} 里再追加重置栏，最后才让内容露面；
+ * 在那之前内容容器一直是 {@code GONE}，故打开本页不会看到"先空、再逐段冒出来"的一闪。
  */
-public class UiSettingsFragment extends Fragment implements ConfigResetBar.Host {
+public class UiSettingsFragment extends Fragment
+        implements ConfigResetBar.Host, ConfigFormController.Page {
 
     /** 本页承载的分组 id（对应 {@code params.json} 的 {@code groups[].id}）。 */
     private static final String SETTINGS_GROUP_ID = "webui";
 
-    private ConfigStore store;
-    private ConfigWriteQueue queue;
-    private ExecutorService io;
-    private Handler main;
+    /** 表单数据流（与配置页共用的一份实现）。 */
+    private ConfigFormController form;
 
-    /** 磁盘上（或最近一次读取时）的值："值未变不写"的判定基准。仅主线程访问。 */
-    private final Map<String, Value> diskValues = new LinkedHashMap<>();
-    private final List<ConfigGroupBinder> groups = new ArrayList<>();
-
+    /** 页面根视图（Snackbar 落点）；视图销毁后置空。 */
     private View rootView;
-    /** 页面内容容器：表单与重置栏都挂这里（视图销毁后置空）。 */
+    /** 页面内容容器：表单与重置栏都挂这里，建满前藏着（视图销毁后置空）。 */
     private LinearLayout contentBox;
-    private boolean viewAlive;
-    /** 页面内容是否已铺（定义就绪后才铺，见 buildPageIfReady）。 */
-    private boolean pageBuilt;
-    /** 预热抛异常的原因（非空表示定义加载阶段就抛了，界面须如实说明而不是停在空白页）。 */
-    private String loadFailure;
 
     /** 该分组是否由本页承载（配置页据此跳过它，并把它的键算进键渲染自检）。 */
     static boolean isSettingsGroup(@NonNull GroupMeta group) {
@@ -124,9 +109,9 @@ public class UiSettingsFragment extends Fragment implements ConfigResetBar.Host 
     @Override
     public void onCreate(@Nullable Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
-        io = Executors.newSingleThreadExecutor();
-        main = new Handler(Looper.getMainLooper());
-        prewarmStoreAsync();
+        form = new ConfigFormController(this, requireContext().getApplicationContext());
+        // 与首帧并行：定义与首份快照在后台读，读完主线程一次建满（建满之前内容不露面）
+        form.start();
     }
 
     @Nullable
@@ -145,243 +130,52 @@ public class UiSettingsFragment extends Fragment implements ConfigResetBar.Host 
         content.setOrientation(LinearLayout.VERTICAL);
         int padding = getResources().getDimensionPixelSize(R.dimen.page_padding);
         content.setPadding(padding, padding, padding, padding);
+        // 建完才出现：内容（参数卡 + 重置栏）由控制器建满并上屏后才露；错误串自己会把它露出来
+        content.setVisibility(View.GONE);
         scroll.addView(content);
         rootView = scroll;
         contentBox = content;
-        viewAlive = true;
 
-        buildPageIfReady();
+        form.attachView(scroll);
         return scroll;
     }
 
-    // ==================== 参数定义：后台预热 ====================
-
-    /**
-     * 预热参数定义：{@code assets/params.json} 的读 + 解析 + 建 KeyMeta 全在后台线程做完
-     * （同配置页，见 {@code ConfigFormFragment#prewarmStoreAsync}）。
-     *
-     * <p>失败不吞：读/解析失败由 {@link ConfigStore} 记进 loadError，走
-     * {@code definitionsLoaded()==false} 的错误串；真正的异常在这里兜底上报。
-     */
-    private void prewarmStoreAsync() {
-        final Context app = requireContext().getApplicationContext();
-        io.execute(() -> {
-            try {
-                final ConfigStore loaded = ConfigStore.get(app);
-                main.post(() -> onStoreReady(loaded));
-            } catch (Throwable t) {
-                main.post(() -> onStoreFailed(t));
-            }
-        });
-    }
-
-    /** 定义就绪（主线程）：建写队列，再铺页面。 */
-    private void onStoreReady(@NonNull ConfigStore loaded) {
-        if (io.isShutdown()) {
-            return;   // 页面已销毁：结果丢弃（单例仍已就位，别的页面直接受益）
-        }
-        store = loaded;
-        queue = new ConfigWriteQueue(store, io, main, this::onWriteResult);
-        buildPageIfReady();
-    }
-
-    /** 预热抛异常（主线程）：如实上屏，不停在空白页。 */
-    private void onStoreFailed(@NonNull Throwable t) {
-        loadFailure = "参数定义加载失败：" + t;
-        buildPageIfReady();
-    }
-
-    /**
-     * 铺页面内容：定义就绪前什么都不铺——表单与重置栏都要读定义（{@link #webuiKeys} /
-     * {@link ConfigResetBar} 的按钮清单），没定义就没有可铺的内容。
-     * 定义失败或预热抛异常时只铺一段错误串（与配置页同口径：不给静默空白）。
-     */
-    private void buildPageIfReady() {
-        if (pageBuilt || !viewAlive || contentBox == null) {
-            return;
-        }
-        if (loadFailure != null) {
-            pageBuilt = true;
-            showError(loadFailure);
-            return;
-        }
-        if (store == null) {
-            return;   // 预热还没回来：等 onStoreReady
-        }
-        pageBuilt = true;
-        LayoutInflater inflater = getLayoutInflater();
-        if (!store.definitionsLoaded()) {
-            // 与配置页同口径：不给静默空白，直接把诊断串摆出来
-            showError(store.describeState());
-            return;
-        }
-
-        buildForm(inflater, contentBox);
-
-        // 重置栏放在参数卡之后：进页面要看的是参数本身，整组回退是调完再退的收尾动作；
-        // 且 buildForm 的空态提示（定义里没有本组时没有分组卡）须留在它上面，故等表单铺完再追加。
-        // 与上方卡的间隙由该卡自带的上间距给出（view_config_reset_bar.xml，与分组卡同一标尺），此处不再补。
-        // 它不放键行（只有按钮），故配置页的键渲染自检不受影响
-        //（自检数的是 ConfigKeyRow 与设置页键，见 ConfigFormFragment）。
-        contentBox.addView(ConfigResetBar.create(inflater, contentBox, this).view());
-
-        reloadAsync();
-    }
-
-    /** 错误串上屏（与配置页同口径：不给静默空白）。 */
-    private void showError(@NonNull String text) {
-        Context context = requireContext();
-        TextView error = new TextView(context);
-        error.setText(text);
-        error.setTextAppearance(context, R.style.TextAppearance_B6XTempCtrl_Mono);
-        error.setTextIsSelectable(true);
-        contentBox.addView(error);
-    }
-
-    // ==================== 构建表单（结构来自 ConfigStore） ====================
-
-    private void buildForm(LayoutInflater inflater, LinearLayout content) {
-        groups.clear();
-
-        List<KeyMeta> keyMetas = webuiKeys(store);
-        if (keyMetas.isEmpty()) {
-            TextView empty = new TextView(inflater.getContext());
-            empty.setText(R.string.config_settings_empty);
-            empty.setTextAppearance(inflater.getContext(), R.style.TextAppearance_B6XTempCtrl_Caption);
-            content.addView(empty);
-            return;
-        }
-        // 先用定义默认值铺底：读取完成前不出现空控件（文件缺失时 C 端与界面都用默认值）
-        for (KeyMeta meta : keyMetas) {
-            diskValues.put(meta.key, meta.defaultValue);
-        }
-        for (GroupMeta group : store.groups()) {
-            if (!isSettingsGroup(group)) {
-                continue;
-            }
-            KeyMeta master = group.master == null ? null : store.key(group.master);
-            ConfigGroupBinder binder = ConfigGroupBinder.create(inflater, content,
-                    stripSectionNumber(group.title), master, keyMetas, this);
-            content.addView(binder.card());
-            groups.add(binder);
-            // 本页只有这一组：默认展开，否则进页面先看到一张折叠的卡。
-            // 键行也是在这一步建的（懒建：展开才建），建起来时各自用 host.diskValue() 回填值。
-            binder.setExpanded(true);
-        }
-        refreshAllBadges();
-    }
-
-    /** 当前已建的键行（懒建：折叠组的行还没建，故每次现取，不缓存）。 */
-    @NonNull
-    private List<ConfigKeyRow> builtRows() {
-        List<ConfigKeyRow> all = new ArrayList<>();
-        for (ConfigGroupBinder group : groups) {
-            all.addAll(group.rows());
-        }
-        return all;
-    }
-
-    // ==================== 读盘 ====================
-
-    private void reloadAsync() {
-        if (!viewAlive || store == null || !store.definitionsLoaded() || io.isShutdown()) {
-            return;
-        }
-        io.execute(() -> {
-            final Snapshot snapshot = store.read();
-            main.post(() -> {
-                if (viewAlive) {
-                    applySnapshot(snapshot);
-                }
-            });
-        });
-    }
-
-    private void applySnapshot(Snapshot snapshot) {
-        diskValues.clear();
-        diskValues.putAll(snapshot.values);
-        for (ConfigKeyRow row : builtRows()) {
-            row.applyValue(snapshot.get(row.key()));
-        }
-        refreshAllBadges();
-    }
-
-    private void refreshAllBadges() {
-        for (ConfigGroupBinder group : groups) {
-            group.refreshBadges();
-        }
-    }
-
-    /** 冲刷待写队列（定义还没就绪时队列尚未建，无待写项可冲）。 */
-    private void flushQueue() {
-        if (queue != null) {
-            queue.flushNow();
-        }
-    }
-
-    // ==================== 写盘结果 ====================
-
-    private void onWriteResult(WriteResult result, Map<String, Value> written) {
-        if (!viewAlive) {
-            return;
-        }
-        if (result.ok) {
-            diskValues.putAll(written);
-        }
-        List<String> labels = new ArrayList<>();
-        for (String key : written.keySet()) {
-            KeyMeta meta = store.key(key);
-            labels.add(meta == null ? key : meta.label);
-        }
-        String message = TextUtils.join("、", labels) + "：" + result.describe();
-        for (ConfigKeyRow row : builtRows()) {
-            if (written.containsKey(row.key())) {
-                row.setResultStatus(message, result.ok);
-            }
-        }
-        if (!result.ok) {
-            notifyUser(message, true);
-        }
-        refreshAllBadges();
-    }
-
     // ========== 键行与重置栏共用的服务面（ConfigResetBar.Host 继承 ConfigKeyRow.Host） ==========
-    // store/queue 在"定义就绪"（onStoreReady）时一起就位，而键行与重置栏都只在定义就绪后才铺
-    // （buildPageIfReady 的前置条件），故下面两个 getter 被调用时必非 null。
+    // 数据全在控制器手上，这里只把契约转发过去；notifyUser 同时满足 ConfigKeyRow.Host 与
+    // ConfigFormController.Page 两处要求（同一个语义：本页的人话反馈），故只有这一份实现。
 
     @NonNull
     @Override
     public ConfigStore store() {
-        return store;
+        return form.store();
     }
 
     @NonNull
     @Override
     public ConfigWriteQueue queue() {
-        return queue;
+        return form.queue();
     }
 
     @Nullable
     @Override
     public Value diskValue(String key) {
-        return diskValues.get(key);
+        return form.diskValue(key);
     }
 
     @Nullable
     @Override
     public Value effectiveValue(String key) {
-        Value pending = queue.pendingValue(key);
-        return pending != null ? pending : diskValues.get(key);
+        return form.effectiveValue(key);
     }
 
     @Override
     public void onPendingChange() {
-        refreshAllBadges();
+        form.onPendingChange();
     }
 
     @Override
-    public void notifyUser(String message, boolean error) {
-        if (!viewAlive || rootView == null) {
+    public void notifyUser(@NonNull String message, boolean error) {
+        if (rootView == null) {
             return;
         }
         Snackbar.make(rootView, message, error ? Snackbar.LENGTH_LONG : Snackbar.LENGTH_SHORT).show();
@@ -390,65 +184,89 @@ public class UiSettingsFragment extends Fragment implements ConfigResetBar.Host 
     // ==================== ConfigResetBar.Host：按分组重置 ====================
 
     /**
-     * 用户已确认重置某组：先冲刷待写队列，再按出厂值一次原子写盘。
-     *
-     * <p><b>为什么必须先冲刷</b>：待写队列里若还压着同一页的改动，稍后它自己的冲刷会把重置值
-     * 覆盖回旧值——C 端 {@code st_mtime} 只有秒级精度，补写一次也未必触发重载（见
-     * {@link ConfigWriteQueue}）。冲刷与重置都排在<b>本页同一个单线程 executor</b> 上，
-     * 先冲刷后重置的顺序由它保证，不需要额外同步。
-     *
-     * <p>重置值走 {@link ConfigStore#setAll}：整组合成一次 rename；逐键 {@code set()} 会多次
-     * 触碰 mtime，可能换来一轮"部分生效"的重载。
+     * 用户已确认重置某组：冲刷待写、按出厂值一次原子写盘、回写本页值，全在控制器里
+     * （见 {@link ConfigFormController#resetGroup}，那里的注释说明为什么必须先冲刷待写队列）。
      */
     @Override
     public void onResetConfirmed(@NonNull String label, @NonNull Map<String, Value> factoryValues) {
-        if (!viewAlive || io.isShutdown()) {
-            return;
-        }
-        flushQueue();
-        io.execute(() -> {
-            final WriteResult result = store.setAll(factoryValues);
-            main.post(() -> {
-                if (viewAlive) {
-                    applyReset(label, factoryValues, result);
-                }
-            });
-        });
+        form.resetGroup(label, factoryValues);
+    }
+
+    // ========== 页面（ConfigFormController.Page）：本页独有的部分 ==========
+
+    @NonNull
+    @Override
+    public LayoutInflater formInflater() {
+        return getLayoutInflater();
+    }
+
+    @NonNull
+    @Override
+    public ViewGroup cardContainer() {
+        return contentBox;
+    }
+
+    @Override
+    public boolean rendersGroup(@NonNull GroupMeta group) {
+        return isSettingsGroup(group);
+    }
+
+    @NonNull
+    @Override
+    public String groupTitle(@NonNull GroupMeta group) {
+        return stripSectionNumber(group.title);
+    }
+
+    @Override
+    public boolean expandsByDefault() {
+        return true;   // 本页只有这一组：默认展开，否则进页面先看到一张折叠的卡
+    }
+
+    @Override
+    public boolean showsUngroupedGroup() {
+        return false;   // 未归组的键由配置页的兜底卡承载，本页不重复给入口
+    }
+
+    @Override
+    public boolean hasDiagnostics() {
+        return false;   // 诊断折叠体只在配置页的布局里
+    }
+
+    /** 定义没到位（加载失败或预热抛异常）：与配置页同口径，不给静默空白。 */
+    @Override
+    public void showDefinitionError(@NonNull String message) {
+        Context context = requireContext();
+        TextView error = new TextView(context);
+        error.setText(message);
+        error.setTextAppearance(context, R.style.TextAppearance_B6XTempCtrl_Mono);
+        error.setTextIsSelectable(true);
+        contentBox.addView(error);
+        contentBox.setVisibility(View.VISIBLE);
     }
 
     /**
-     * 重置结果落地（主线程）：把本页那些属于该组的键重刷成出厂值，并给出反馈。
-     *
-     * <p>本页只承载 {@code webui} 组，重置别的组时一个键都匹配不上——这是对的：别的组的键
-     * 不在本页显示，其显示是否陈旧由配置页自己重读时解决（它每次可见都重读）。
-     *
-     * <p>成功不必逐行标状态：控件里的值本身已经变了，同一句贴在每一行上是噪音；
-     * 失败要留在行上（Snackbar 一闪而过）。
+     * 建满之后的收尾：定义里没有本组（或本组的键一个都对不上）时给空态提示，
+     * 然后把重置栏追加到参数卡之后——进页面要看的是参数本身，整组回退是调完再退的收尾动作；
+     * 且空态提示须留在它上面，故等表单铺完再追加。它与上方卡的间隙由该卡自带的上间距给出
+     * （{@code view_config_reset_bar.xml}，与分组卡同一标尺），此处不再补。
+     * 它不放键行（只有按钮），故配置页的键渲染自检不受影响。
      */
-    private void applyReset(@NonNull String label, @NonNull Map<String, Value> factoryValues,
-                            @NonNull WriteResult result) {
-        if (result.ok) {
-            for (ConfigKeyRow row : builtRows()) {
-                Value value = factoryValues.get(row.key());
-                if (value != null) {
-                    diskValues.put(row.key(), value);
-                    row.applyValue(value);
-                }
-            }
-            refreshAllBadges();
+    @Override
+    public void onFormBuilt(int groupCount) {
+        LayoutInflater inflater = getLayoutInflater();
+        if (groupCount == 0) {
+            TextView empty = new TextView(inflater.getContext());
+            empty.setText(R.string.config_settings_empty);
+            empty.setTextAppearance(inflater.getContext(),
+                    R.style.TextAppearance_B6XTempCtrl_Caption);
+            contentBox.addView(empty);
         }
-        final String message = result.ok
-                ? (result.changed ? getString(R.string.config_reset_done, label)
-                        : getString(R.string.config_reset_no_change, label))
-                : getString(R.string.config_reset_failed, label, result.error);
-        if (!result.ok) {
-            for (ConfigKeyRow row : builtRows()) {
-                if (factoryValues.containsKey(row.key())) {
-                    row.setResultStatus(message, false);
-                }
-            }
-        }
-        notifyUser(message, !result.ok);
+        contentBox.addView(ConfigResetBar.create(inflater, contentBox, this).view());
+    }
+
+    /** 本页没有随快照变的自检/诊断块（曲线上屏在配置页）。 */
+    @Override
+    public void onValuesApplied(@NonNull Snapshot snapshot) {
     }
 
     // ==================== 生命周期：不丢改动 ====================
@@ -456,19 +274,12 @@ public class UiSettingsFragment extends Fragment implements ConfigResetBar.Host 
     @Override
     public void onPause() {
         super.onPause();
-        flushQueue();
+        form.flush();
     }
 
     @Override
     public void onDestroyView() {
-        viewAlive = false;
-        if (queue != null) {
-            queue.flushNow();
-            queue.detach();
-        }
-        groups.clear();
-        // 视图没了：内容要等下次重建（见 buildPageIfReady）
-        pageBuilt = false;
+        form.detachView();
         contentBox = null;
         rootView = null;
         super.onDestroyView();
@@ -476,8 +287,7 @@ public class UiSettingsFragment extends Fragment implements ConfigResetBar.Host 
 
     @Override
     public void onDestroy() {
-        flushQueue();
-        io.shutdown();
+        form.shutdown();
         super.onDestroy();
     }
 }

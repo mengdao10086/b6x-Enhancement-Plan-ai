@@ -2,17 +2,16 @@ package com.example.waspwingtempctrl.ui;
 
 import android.content.Context;
 import android.content.res.Resources;
+import android.graphics.Paint;
 import android.text.Editable;
 import android.text.InputType;
 import android.text.Layout;
-import android.text.TextPaint;
 import android.text.TextUtils;
 import android.text.TextWatcher;
 import android.util.TypedValue;
 import android.view.LayoutInflater;
 import android.view.View;
 import android.view.ViewGroup;
-import android.widget.LinearLayout;
 import android.widget.TextView;
 
 import androidx.annotation.NonNull;
@@ -30,32 +29,33 @@ import com.google.android.material.textfield.TextInputEditText;
 import com.google.android.material.textfield.TextInputLayout;
 
 import java.util.ArrayList;
-import java.util.HashMap;
+import java.util.Collections;
 import java.util.List;
-import java.util.Map;
 
 /**
- * 一个配置键的行：switch / int / multi / path 四种 type 共用一份绑定逻辑。
+ * 一个配置键的行：switch / int / multi / path 四种 type 各由一个 {@link Renderer} 渲染，
+ * 行骨架（参数名 + 键内控件 + 行级文本）与落盘规则四型共用。
  *
  * <p>键的 label / desc / 单位 / 范围 / 依赖全部来自 {@link KeyMeta}（背后是 assets/params.json），
  * 本类不手抄任何键定义，也不自己解析 params.json。
  *
- * <h3>形态（配合 {@link FlowWrapLayout}）</h3>
+ * <h3>形态（配合 {@link WrapRowLayout}）</h3>
+ * <p>行根是 {@link WrapRowLayout}，子视图分三类，换行全部由容器按这三类标记排（本类不自己算行宽、
+ * 不自己判换行）：
  * <ul>
- *   <li>每个键整行独占（向容器声明 fullLine）：参数之间不并排。</li>
- *   <li>第一行 = 参数名 + 输入框（输入框靠行尾，参数名留左，见 {@code item_config_row.xml}）；
- *       键内多个字段的输入框宽度按「说明宽 / 内容宽」实测取大者（见 {@link #naturalFieldWidth}），
- *       放不下由键内的 {@code config_key_control} 换行。控制区的内容盒覆盖整行宽、内容从行首起排
- *       （见 {@link #syncControlGeometry}），首行用缩进把字段摆回"参数名右沿 + 间距"，
- *       换行后的行才拿得到整行宽。</li>
- *   <li>multi 键带 {@code fields[].bool} 的字段渲染成开关（值只有 0/1），其余字段仍是输入框；
- *       本键字段会换行时，开关字段独占一行（见 {@link #setBoolFieldsAlone}）。</li>
- *   <li>参数名的竖直对齐：参数名盒默认与同一行第一个输入框同中心；对齐的是开关时（整键 switch、
- *       或控制区第一个字段是布尔字段）盒高改成该控件的实测高，输入框行则给参数名一个纯渲染的
- *       下移量（见 {@link #syncLabelBox}）。</li>
- *   <li>path 型键：输入框吃掉控制区剩余宽，文本放不下时显示右半段（布局就绪后由
- *       {@link #applyPathScroll} 摆放），并在本次启动内记住编辑时滚到的位置（见 {@link #PATH_SCROLL_X}）。</li>
+ *   <li><b>参数名</b>（leading）：左起第一段，宽由内容定。</li>
+ *   <li><b>键内控件</b>（trailing）：输入框（int / path）、各字段（multi）、开关（switch）——
+ *       整段贴行尾，本行剩余宽放不下时整段移到下一行，整行还放不下才在段内折行。</li>
+ *   <li><b>行级文本</b>（fullLine）：说明 / 备注 / 状态，以及单值键从字段里挪出来的单位-范围说明，
+ *       各自独占一行、按整行宽折行。</li>
  * </ul>
+ * 行内垂直居中由容器给（参数名与同一行最高的控件对齐），本类不再自己算盒高与墨迹位移。
+ *
+ * <h3>字段宽</h3>
+ * <p>数值字段的宽 = max(说明文字宽, 当前值文字宽, 最小宽)，三者都用输入框自己的画笔量文本
+ * （见 {@link #measuredFieldWidth}），只在建行与值回填/提交时算，不随每次按键重排——
+ * 边输边撑宽会让整行跳（值长了框自己横向滚）。
+ * path 字段不按内容定宽：它吃满行尾，路径长度不可控，定宽会顶出屏幕。
  *
  * <h3>什么时候落盘（三条规则）</h3>
  * <ul>
@@ -69,14 +69,6 @@ import java.util.Map;
  * <p>"未生效"的标注只做在分组卡头一次（见 {@link ConfigGroupBinder}），行内只压暗不重复标注。
  */
 final class ConfigKeyRow {
-
-    /**
-     * path 键的横向显示位置（键名 → {@code scrollX}），进程内存活。
-     *
-     * <p>为什么放在静态表里而不是行对象上：要求是"本次启动内保持"，而行对象随页面视图重建，
-     * 存字段上会被重建清掉。键数上限就是定义里的键数（53），不担心增长。
-     */
-    private static final Map<String, Integer> PATH_SCROLL_X = new HashMap<>();
 
     /** 行与外界的交互面（由 ConfigFormFragment / UiSettingsFragment 实现）。 */
     interface Host {
@@ -109,7 +101,7 @@ final class ConfigKeyRow {
         /** 字段布局的根（item_config_field）：宽度回写要同时改它与其内的输入框。 */
         final View root;
         final TextInputEditText input;
-        /** 承载 {@link #input} 的 OutlinedBox；宽度实测后回写到它的 LayoutParams。布尔字段为 null。 */
+        /** 承载 {@link #input} 的 OutlinedBox；宽度回写也要改它的 LayoutParams。布尔字段为 null。 */
         final TextInputLayout layout;
         final MaterialSwitch toggle;
 
@@ -119,6 +111,11 @@ final class ConfigKeyRow {
             this.input = input;
             this.layout = layout;
             this.toggle = toggle;
+        }
+
+        /** 布尔字段：只有开关、没有输入框，宽度与说明都不适用。 */
+        boolean isBool() {
+            return layout == null;
         }
 
         /** 该字段当前值；输入框"还没输完"时返回 null（开关永远有完整值）。 */
@@ -151,35 +148,23 @@ final class ConfigKeyRow {
 
     private final KeyMeta meta;
     private final Host host;
-    private final View root;
-    /** 参数名盒（item_config_row.xml 里那个 FrameLayout）：高度与参数名的墨迹位置按它调，见 {@link #syncLabelBox}。 */
-    private final View labelBox;
-    /** 输入框容器（item_config_row.xml 里的 config_key_control）。类型就是 {@link FlowWrapLayout}：几何按它的能力调。 */
-    private final FlowWrapLayout control;
+    private final WrapRowLayout root;
     private final TextView labelView;
     private final TextView descView;
     private final TextView noteView;
     private final TextView statusView;
-    private final MaterialSwitch toggle;
-    private final List<Field> fields = new ArrayList<>();
-    /** 挂到行级的字段说明行（单字段键才有，见 {@link #buildNumberField}）：它不在控制区里，压暗要单独处理。 */
-    private final List<TextView> rowLevelCaptions = new ArrayList<>();
+    /** 整键开关（switch 型键用；其它类型不显示）。 */
+    private final MaterialSwitch switchView;
+    private final Renderer renderer;
+    /** 挂到行级的字段说明行（单值键才有）：它不在尾段里，压暗要单独处理。 */
+    private final List<TextView> rowCaptions = new ArrayList<>();
+    /** 键内控件的插入位（下标 0 恒是参数名，尾段依次排在它后面、行级文本之前）。 */
+    private int tailCount;
     private final float dimAlpha;
-
-    /** 控制区内字段之间的间距 = FlowWrapLayout 的列距（固定 @dimen/space_m），只用来做换行模拟。 */
-    private final int fieldGap;
-    /** 说明宽末端的防截断安全量（@dimen/config_hint_slack），见 {@link #measureHintWidth}。 */
-    private final int hintSlack;
-    /** 参数名墨迹的下移量（@dimen/config_label_ink_shift），见 {@link #syncLabelBox}。 */
-    private final int labelInkShift;
-    /** 参数名盒到控制区的间距：读自 item_config_row.xml 的 layout_marginStart（@dimen/space_s）。 */
-    private final int controlGap;
-
-    /** 控制区的首行缩进 = 参数名盒实测宽 + {@link #controlGap}，同时写给容器（见 {@link #syncControlGeometry}）。 */
-    private int firstRowIndent;
-
-    /** 控制区内容盒的实际可用宽（= 整行宽）；0 = 还没量到（此时字段宽只按内容定）。 */
-    private int controlAvail;
+    /** 说明的防截断安全量（@dimen/config_hint_slack）：见 {@link #measuredFieldWidth}。 */
+    private final int hintFitGuard;
+    /** 数值字段的最小宽：见 {@link #measuredFieldWidth}。 */
+    private final int minFieldWidth;
 
     /** true 时忽略控件回调：程序化回填值不该被当成用户改动作业。 */
     private boolean suppressChange;
@@ -191,36 +176,27 @@ final class ConfigKeyRow {
     static ConfigKeyRow create(@NonNull LayoutInflater inflater, @NonNull ViewGroup parent,
                                @NonNull KeyMeta meta, @NonNull ConfigKeyRow.Host host,
                                boolean groupShowsUiOnly) {
-        View root = inflater.inflate(R.layout.item_config_row, parent, false);
-        if (parent instanceof FlowWrapLayout) {
-            // 每个键整行独占：参数之间不并排（并排只发生在键内部的字段之间）。
-            // 键行铺满行宽是控制区几何的前提——控制区的宽要等于整行宽（见 syncControlGeometry），
-            // 多字段键的内部换行也才有确定的可用宽。
-            ((FlowWrapLayout) parent).setFullLine(root, true);
-        }
+        // 行"整行独占"由 item_config_row.xml 根标签上的 app:wrapFullLine 声明（父容器读它当标记），
+        // 键内换行交给同一个容器，本类不再向容器声明任何几何。
+        WrapRowLayout root = (WrapRowLayout) inflater.inflate(R.layout.item_config_row, parent, false);
         return new ConfigKeyRow(inflater, root, meta, host, groupShowsUiOnly);
     }
 
-    private ConfigKeyRow(LayoutInflater inflater, View root, KeyMeta meta, Host host,
+    private ConfigKeyRow(LayoutInflater inflater, WrapRowLayout root, KeyMeta meta, Host host,
                          boolean groupShowsUiOnly) {
         this.root = root;
         this.meta = meta;
         this.host = host;
-        this.dimAlpha = readDimAlpha(root.getResources());
         Resources res = root.getResources();
-        fieldGap = res.getDimensionPixelSize(R.dimen.space_m);
-        hintSlack = res.getDimensionPixelSize(R.dimen.config_hint_slack);
-        labelInkShift = res.getDimensionPixelSize(R.dimen.config_label_ink_shift);
+        dimAlpha = readDimAlpha(res);
+        hintFitGuard = res.getDimensionPixelSize(R.dimen.config_hint_slack);
+        minFieldWidth = res.getDimensionPixelSize(R.dimen.row_min_height);
 
-        control = root.findViewById(R.id.config_key_control);
-        labelBox = root.findViewById(R.id.config_key_label_box);
-        // 控制区到参数名的间距在任何改写前抓一次：syncControlGeometry 会把 marginStart 改成负值
-        controlGap = ((ViewGroup.MarginLayoutParams) control.getLayoutParams()).getMarginStart();
         labelView = root.findViewById(R.id.config_key_label);
         descView = root.findViewById(R.id.config_key_desc);
         noteView = root.findViewById(R.id.config_key_note);
         statusView = root.findViewById(R.id.config_key_status);
-        toggle = root.findViewById(R.id.config_key_switch);
+        switchView = root.findViewById(R.id.config_key_switch);
 
         labelView.setText(meta.label);
         if (meta.desc.isEmpty()) {
@@ -239,151 +215,40 @@ final class ConfigKeyRow {
             noteView.setVisibility(View.VISIBLE);
         }
 
+        renderer = createRenderer();
+        renderer.build(inflater);
+        alignLabelToInputBox();
+    }
+
+    /**
+     * 多值键参数名的竖直对齐：字段根比输入框高（下方挂着单位/范围说明行）时，按整行居中会把参数名
+     * 带到说明行那一带；改为把它的垂直中心钉在行顶之下"输入框半高"处——行顶即首个字段根顶、
+     * 输入框就在字段根顶部，于是参数名中心与首个输入框的框心重合。
+     *
+     * <p><b>只标多值键</b>，且首个字段必须是输入框型：单值键的说明已挂到行级（见 {@link #placeCaption}），
+     * 行高就是输入框高，行内居中本来就对；开关键那行只有开关，居中即对齐开关中心；
+     * 首个字段是布尔字段的多值键同理（布尔字段根只有开关、没有输入框与说明行），居中才是对的。
+     */
+    private void alignLabelToInputBox() {
+        if (!meta.isMulti() || meta.fields.get(0).bool) {
+            return;
+        }
+        int boxHalfHeight = root.getResources().getDimensionPixelSize(R.dimen.field_height) / 2;
+        root.setVerticalCenterAt(labelView, boxHalfHeight);
+    }
+
+    /** 按定义里的 type 选渲染器：一处判断，四种 type 各一份实现（定义里只有这四种，int 是其余情况）。 */
+    private Renderer createRenderer() {
         if (meta.isSwitch()) {
-            toggle.setVisibility(View.VISIBLE);
-            toggle.setOnCheckedChangeListener((button, checked) -> {
-                if (suppressChange) {
-                    return;
-                }
-                commitSwitch(toggle, meta, host);
-            });
-        } else {
-            prepareControlArea(inflater);
+            return new SwitchRenderer();
         }
-        // 参数名盒的高与墨迹位置要读对齐控件的实测高（开关 48dp、输入框 36dp），只有布局后才知道
-        root.addOnLayoutChangeListener((v, left, top, right, bottom,
-                                        oldLeft, oldTop, oldRight, oldBottom) -> syncLabelBox());
-        syncLabelBox();
-    }
-
-    /**
-     * 控制区（输入框容器）的准备：撤掉占位 Space 的 weight、建字段、挂"几何与字段宽重算"的回调。
-     *
-     * <p>控制区自己带 {@code 0dp + weight=1}（见 item_config_row.xml）只作首帧兜底，
-     * 真正定下宽度与起点的是 {@link #syncControlGeometry}。占位 Space 的 weight 不撤，
-     * 两者在首帧会各分一半剩余宽。
-     *
-     * <p>行内靠右对齐也在建字段时定下（见 {@link FlowWrapLayout#setRowAlign}）：数字框整组贴行右界，
-     * 与开关键里开关贴行尾的观感一致。只有本键的控制区这么设，容器的缺省仍是贴左界。
-     */
-    private void prepareControlArea(LayoutInflater inflater) {
-        View spacer = root.findViewById(R.id.config_key_spacer);
-        ((LinearLayout.LayoutParams) spacer.getLayoutParams()).weight = 0;
-        spacer.requestLayout();
-
-        buildFields(inflater);
-        control.setVisibility(View.VISIBLE);
-        control.setRowAlign(FlowWrapLayout.ROW_ALIGN_END);
-        // 控制区的宽与起点由 syncControlGeometry 在首次布局后定下来，字段宽此时要按可用宽重算一次
-        control.addOnLayoutChangeListener((v, left, top, right, bottom,
-                                           oldLeft, oldTop, oldRight, oldBottom) -> {
-            boolean indentChanged = syncControlGeometry();
-            int avail = control.getWidth() - control.getPaddingStart() - control.getPaddingEnd();
-            if (avail <= 0 || (avail == controlAvail && !indentChanged)) {
-                return;
-            }
-            controlAvail = avail;
-            refitFieldWidths();
-        });
-    }
-
-    /**
-     * 让控制区的内容盒覆盖整行宽、内容从行首起排。
-     *
-     * <p>行内结构是 [参数名盒][0 宽占位 Space][控制区(0dp + weight=1)][开关]，
-     * 控制区按 weight 拿到的是「行宽 − 参数名 − {@link #controlGap}」，起点在参数名右沿 + 间距；
-     * 这段宽在"本键字段要换行"时不够用（换行后的行只能用同一段窄宽）。做法两条：
-     * <ul>
-     *   <li>{@code layout_marginStart = −参数名盒实测宽}：LinearLayout 在按 weight 分配前会把
-     *       {@code mTotalLength} 加上这个（负的）外边距，摆放时又 {@code childLeft += leftMargin}，
-     *       一减一加之后控制区的左边界回到行首（参数名右沿 + 间距 − 参数名宽 = 行首）。</li>
-     *   <li>{@code layout_width = 行宽}（= 键行根的实测宽）：只靠负外边距不够——父行是 AT_MOST 测量，
-     *       LinearLayout 会把自身宽收敛到内容宽，于是控制区内容比整行窄时就只拿到内容那么宽，
-     *       换行后的行仍然只有内容宽。把宽写成行宽后超额空间归零，weight 分到的份额为 0，
-     *       控制区的宽就是行宽。</li>
-     * </ul>
-     *
-     * <p><b>首行落点与从前一致</b>：控制区内容盒的起点从「参数名右沿 + 间距」左移到行首，
-     * 同时给容器 {@code setFirstRowIndent(参数名宽 + 间距)}，首行的第一个字段仍落在
-     * 「参数名右沿 + 间距」上；第二行起才用上整行宽。
-     *
-     * <p><b>负外边距不是官方支持的用法</b>，风险边界是"首行缩进正好抵消它"：首行的内容从缩进处起排，
-     * 不会压到参数名；控制区自己的盒子是透明的（只有它的子视图会画），越过参数名那一段不产生绘制。
-     * 本方法每次布局后跑一遍，参数名宽（随字号 / 语言变）一变就跟着更新；算出来的值没变就什么都不做，
-     * 免得布局回调自己触发自己。
-     *
-     * @return 首行缩进是否变了（变了要重算字段宽：首行可用宽随之变）
-     */
-    private boolean syncControlGeometry() {
-        int labelWidth = labelBox.getMeasuredWidth();
-        int rowWidth = root.getWidth();
-        if (labelWidth <= 0 || rowWidth <= 0) {
-            return false;
+        if (meta.isPath()) {
+            return new PathRenderer();
         }
-        ViewGroup.MarginLayoutParams lp = (ViewGroup.MarginLayoutParams) control.getLayoutParams();
-        if (lp.width != rowWidth || lp.getMarginStart() != -labelWidth) {
-            lp.width = rowWidth;
-            lp.setMarginStart(-labelWidth);
-            // setMarginStart 只记下相对外边距、把结算推给下一次布局前的方向解析，而 LinearLayout
-            // 摆放时读的是解析后的 leftMargin。本容器按 LTR 排（见 FlowWrapLayout），这里就把结算结果
-            // 写实，免得解析没跟上时控制区还停在参数名右沿、首行又被缩进推 参数名宽 + 间距。
-            // 后续解析（setMarginStart 置了待解析标志）算出的仍是这个值，重复无害。
-            lp.leftMargin = -labelWidth;
-            control.requestLayout();
+        if (meta.isMulti()) {
+            return new MultiRenderer();
         }
-        int indent = labelWidth + controlGap;
-        if (indent == firstRowIndent) {
-            return false;
-        }
-        firstRowIndent = indent;
-        control.setFirstRowIndent(indent);
-        return true;
-    }
-
-    /**
-     * 参数名盒的高度与参数名墨迹的位置（每次行布局后跑一遍，值没变就什么都不做）。
-     *
-     * <p><b>高度</b>：参数名盒缺省 @dimen/field_height(36dp)、盒内垂直居中、盒在行内贴顶，
-     * 于是参数名的中心与「同一行第一个输入框」的中心重合（见 item_config_row.xml）。
-     * 开关型键没有输入框，与参数名对齐的是开关本身，而开关的实测高是 48dp（M3 最小高）：
-     * 盒高仍是 36dp、盒又贴顶时，参数名中心比开关中心高 (48 − 36) / 2 = 6dp。故：
-     * <ul>
-     *   <li>整键 switch：盒高 = 开关实测高；</li>
-     *   <li>控制区第一个字段是布尔字段：盒高 = 该字段根的实测高（布尔字段根只有开关单元格、
-     *       没有下方说明行）；</li>
-     *   <li>其余（含 path）：盒高保持 36dp，改用下面的渲染位移。</li>
-     * </ul>
-     *
-     * <p><b>墨迹位置</b>：其余键与参数名对齐的是输入框（OutlinedBox 36dp），但输入框的正文落点
-     * 比框的几何中心低 1.5dp（上下内边距不对称，算式见 @dimen/config_field_pad_top），
-     * 参数名盒的中心却仍在几何中心上，实测差 3dp 上下（去掉说明后量 36dp 框的上下边框之间 101px，
-     * 参数名墨迹中心比其正中间高 11px；用开关墨迹定标——scale 0.75 后 24dp = 84px——得
-     * 1dp ≈ 3.5px，11px ≈ 3.1dp，两行分别量得 11.0px / 10.5px）。用 {@code setTranslationY} 补：
-     * 纯渲染位移，不改盒高、不参与测量，免得把行高撑大 3dp（改内边距或外边距都会）。
-     *
-     * <p>盒高改的是 LayoutParams，不 {@code requestLayout} 不会重排；两处都只在值真的变了才写，
-     * 否则布局回调里的回写会无限触发自己。
-     */
-    private void syncLabelBox() {
-        View anchor = null;
-        if (meta.isSwitch()) {
-            // 开关键：与参数名对齐的就是开关本身
-            anchor = toggle;
-        } else if (!fields.isEmpty() && fields.get(0).layout == null) {
-            // 控制区第一个字段是布尔字段：对齐的是那个字段根（只有开关单元格，没有说明行）
-            anchor = fields.get(0).root;
-        }
-        int height = anchor == null ? 0 : anchor.getMeasuredHeight();
-        ViewGroup.LayoutParams lp = labelBox.getLayoutParams();
-        if (height > 0 && lp.height != height) {
-            lp.height = height;
-            labelBox.requestLayout();
-        }
-        // 盒高跟着对齐控件走时，盒中心已与控件中心重合，不再需要位移
-        float shift = anchor == null ? labelInkShift : 0f;
-        if (labelView.getTranslationY() != shift) {
-            labelView.setTranslationY(shift);
-        }
+        return new IntRenderer();
     }
 
     @NonNull
@@ -396,44 +261,315 @@ final class ConfigKeyRow {
         return meta.key;
     }
 
-    // ==================== 控件构建 ====================
+    // ==================== 四型渲染器 ====================
 
-    private void buildFields(LayoutInflater inflater) {
-        int count = meta.isMulti() ? meta.fieldCount() : 1;
-        for (int i = 0; i < count; i++) {
-            View fieldView = inflater.inflate(R.layout.item_config_field, control, false);
-            // inflate 的第三参 false = 不挂到父容器，必须自己 addView：
-            // 否则控件被创建、绑好监听后就被丢掉，行内只剩标签没有输入框。
-            control.addView(fieldView);
-            // 字段之间的间距由外层流式容器的行距/列距给，本行不再各加一截 topMargin
+    /** 键内的渲染面：四种 type 各一份实现，行骨架只按它要控件与值。 */
+    private interface Renderer {
 
-            if (isBoolField(i)) {
-                buildBoolField(fieldView, i);
-            } else {
-                buildNumberField(fieldView, i);
+        /** 建键内控件并挂到行骨架上（键内控件标 trailing，行级文本标 fullLine）。 */
+        void build(@NonNull LayoutInflater inflater);
+
+        /** 程序化回填（不触发写入），并按新值重算一次字段宽。 */
+        void applyValue(@NonNull Value value);
+
+        /** 读控件当前值；{@code null} 表示"还没输完"，此时一律不写盘。 */
+        @Nullable
+        Value read(boolean fallbackForUnparsed);
+
+        /** 边输边落盘？false = 只在失焦/提交时落盘（path：半截路径不写）。 */
+        boolean writesWhileTyping();
+
+        /** 跟随依赖压暗的键内控件。 */
+        @NonNull
+        List<View> dimTargets();
+    }
+
+    /** switch 型键：0/1 只有两个完整状态，切换即排入防抖队列（见 {@link #commitSwitch}）。 */
+    private final class SwitchRenderer implements Renderer {
+
+        @Override
+        public void build(@NonNull LayoutInflater inflater) {
+            // 开关是尾段成员：标记写在 item_config_row.xml 的 app:wrapTrailing 上（它与键行同属 XML，
+            // 由容器在 inflate 时读出）。动态建出来的字段才需要 setTrailing（见 #addToTail）。
+            switchView.setVisibility(View.VISIBLE);
+            switchView.setOnCheckedChangeListener((button, checked) -> {
+                if (suppressChange) {
+                    return;
+                }
+                commitSwitch(switchView, meta, host);
+            });
+        }
+
+        @Override
+        public void applyValue(@NonNull Value value) {
+            suppressChange = true;
+            try {
+                switchView.setChecked(value.intAt(0) != 0);
+            } finally {
+                suppressChange = false;
             }
         }
-        // 宽度必须在首次测量前定下来：外层流式容器按子视图的 LayoutParams 宽排布，早于首次测量
-        // （此时控件已 inflate、hint 已设，量出来的才是最终宽度）
-        refitFieldWidths();
+
+        @Override
+        @Nullable
+        public Value read(boolean fallbackForUnparsed) {
+            // 开关键没有输入框，值由开关本身给、切换即整体提交：不走"读控件"这条路径
+            return null;
+        }
+
+        @Override
+        public boolean writesWhileTyping() {
+            return false;
+        }
+
+        @Override
+        @NonNull
+        public List<View> dimTargets() {
+            return Collections.singletonList(switchView);
+        }
     }
 
-    /** 定义里 {@code fields[i].bool} 为 true 的字段用开关渲染（值只有 0/1）。 */
-    private boolean isBoolField(int index) {
-        return meta.isMulti() && meta.fields.get(index).bool;
+    /** int 型键：一个数值字段；单位 / 范围 / 单位说明挂到行级，按整行宽折行。 */
+    private final class IntRenderer implements Renderer {
+
+        private final List<Field> fields = new ArrayList<>();
+
+        @Override
+        public void build(@NonNull LayoutInflater inflater) {
+            String caption = joinParts(joinParts(meta.unit, rangeText(0)), meta.unitNote);
+            fields.add(addNumberField(inflater,
+                    root.getContext().getString(R.string.config_hint_value), caption, true));
+        }
+
+        @Override
+        public void applyValue(@NonNull Value value) {
+            applyFieldValues(fields, value);
+        }
+
+        @Override
+        @Nullable
+        public Value read(boolean fallbackForUnparsed) {
+            return readFieldValues(fields, fallbackForUnparsed);
+        }
+
+        @Override
+        public boolean writesWhileTyping() {
+            return true;
+        }
+
+        @Override
+        @NonNull
+        public List<View> dimTargets() {
+            return fieldDimTargets(fields);
+        }
     }
 
-    /** 布尔字段：字段名 + 开关。宽度同样自适应（字段名宽度决定），高度与输入框同一行居中。 */
-    private void buildBoolField(View fieldView, int index) {
-        FieldMeta fieldMeta = meta.fields.get(index);
-        View row = fieldView.findViewById(R.id.config_field_switch_row);
-        row.setVisibility(View.VISIBLE);
-        TextView label = fieldView.findViewById(R.id.config_field_switch_label);
-        if (isPlaceholderLabel(fieldView.getContext(), fieldMeta.label)) {
+    /** multi 型键：每个字段一个控件（定义里 bool 的字段渲染成开关），说明留在各自字段里跟着自己的框。 */
+    private final class MultiRenderer implements Renderer {
+
+        private final List<Field> fields = new ArrayList<>();
+
+        @Override
+        public void build(@NonNull LayoutInflater inflater) {
+            for (int i = 0; i < meta.fieldCount(); i++) {
+                FieldMeta fieldMeta = meta.fields.get(i);
+                if (fieldMeta.bool) {
+                    fields.add(addBoolField(inflater, fieldMeta));
+                    continue;
+                }
+                // ConfigStore.FieldMeta 没有解析 params.json 的字段级 unitNote，界面不自行读 assets
+                // （I1/I3 边界），故多值字段只显示 unit 能拿到的部分。
+                fields.add(addNumberField(inflater, fieldMeta.label,
+                        joinParts(fieldMeta.unit, rangeText(i)), false));
+            }
+        }
+
+        @Override
+        public void applyValue(@NonNull Value value) {
+            applyFieldValues(fields, value);
+        }
+
+        @Override
+        @Nullable
+        public Value read(boolean fallbackForUnparsed) {
+            return readFieldValues(fields, fallbackForUnparsed);
+        }
+
+        @Override
+        public boolean writesWhileTyping() {
+            return true;
+        }
+
+        @Override
+        @NonNull
+        public List<View> dimTargets() {
+            return fieldDimTargets(fields);
+        }
+    }
+
+    // ==================== int / multi 共用的字段逻辑 ====================
+
+    /**
+     * 把值写进各字段（屏蔽回调，程序化回填不该被当成用户改动），并按新值重算一次字段宽：
+     * 值比说明长时框要跟着变宽、比说明短时收回来——只在回填/提交时算，不随每次按键重排。
+     */
+    private void applyFieldValues(@NonNull List<Field> fields, @NonNull Value value) {
+        suppressChange = true;
+        try {
+            for (int i = 0; i < fields.size(); i++) {
+                fields.get(i).setValue(value.intAt(i));
+            }
+        } finally {
+            suppressChange = false;
+        }
+        for (Field field : fields) {
+            if (!field.isBool()) {
+                writeWidth(field, measuredFieldWidth(field));
+            }
+        }
+    }
+
+    /**
+     * 读各字段的当前值。
+     *
+     * @param fallbackForUnparsed true 时把"还没输完"的输入框退回当前有效值（再退一步是定义默认值），
+     *                            使布尔开关单独切换也能写出整键；false 时一个字段没输完就整键不写
+     * @return {@code null} 表示"还没输完"，此时一律不写盘（空串 / 不可解析）
+     */
+    @Nullable
+    private Value readFieldValues(@NonNull List<Field> fields, boolean fallbackForUnparsed) {
+        Value current = fallbackForUnparsed ? host.effectiveValue(meta.key) : null;
+        int[] numbers = new int[fields.size()];
+        for (int i = 0; i < fields.size(); i++) {
+            Integer parsed = fields.get(i).value();
+            if (parsed == null && !fallbackForUnparsed) {
+                return null;
+            }
+            numbers[i] = parsed != null ? parsed
+                    : (current != null && current.size() > i
+                            ? current.intAt(i) : meta.fields.get(i).defaultValue);
+        }
+        return Value.ofNumbers(numbers);
+    }
+
+    /** 跟随依赖压暗的字段控件（布尔字段的开关也在内）。 */
+    @NonNull
+    private static List<View> fieldDimTargets(@NonNull List<Field> fields) {
+        List<View> targets = new ArrayList<>(fields.size());
+        for (Field field : fields) {
+            targets.add(field.root);
+        }
+        return targets;
+    }
+
+    /** path 型键：单行文本输入框吃满行尾，编辑中不落盘、失焦才排入队列。 */
+    private final class PathRenderer implements Renderer {
+
+        private Field field;
+
+        @Override
+        public void build(@NonNull LayoutInflater inflater) {
+            field = addField(inflater, root.getContext().getString(R.string.config_hint_path),
+                    "", false, true);
+            // 不按说明/内容定宽：路径长度不可控（默认日志路径 58 字符在 16sp 下约 570dp），
+            // 定宽会顶出屏幕，而文字在框里居中、被裁掉的是两端。吃满行尾，放不下由输入框自己横向滚。
+            writeWidth(field, ViewGroup.LayoutParams.MATCH_PARENT);
+        }
+
+        @Override
+        public void applyValue(@NonNull Value value) {
+            String path = value.text();
+            suppressChange = true;
+            try {
+                field.setValue(path);
+                if (!field.input.isFocused()) {
+                    // 光标钉到末尾：setText 会把光标置 0（ArrowKeyMovementMethod.initialize →
+                    // Selection.setSelection(text, 0)），而框架随后在自己的 pre-draw 里按"把光标摆进
+                    // 可视区"（bringPointIntoView(getSelectionEnd())）摆一次——光标留在 0 就摆到路径左段。
+                    // 钉末尾后与下面的 applyPathScroll 同值：路径放不下时一律显示右半段（文件名）。
+                    // 聚焦中不钉：本方法在切页回来、静默刷新时都会被调，编辑中拽光标会打断正在输入的人。
+                    field.input.setSelection(path.length());
+                }
+            } finally {
+                suppressChange = false;
+            }
+            field.input.post(this::applyPathScroll);
+        }
+
+        @Override
+        @Nullable
+        public Value read(boolean fallbackForUnparsed) {
+            String text = textOf(field.input).trim();
+            return text.isEmpty() ? null : Value.ofText(text);
+        }
+
+        @Override
+        public boolean writesWhileTyping() {
+            return false;
+        }
+
+        @Override
+        @NonNull
+        public List<View> dimTargets() {
+            return Collections.singletonList(field.root);
+        }
+
+        /**
+         * 把输入框的横向位置摆到最右端（路径放不下时显示右半段——看得见文件名比看得见
+         * {@code /storage/emulated/0/…} 有用）。
+         *
+         * <p><b>上限为什么不取 {@link Layout#getWidth()}</b>：开了 {@code scrollHorizontally} 的输入框，
+         * TextView 传给 Layout 的宽是"无上限"（{@code want = VERY_WIDE = 1MB}，见 {@code TextView#onMeasure}），
+         * Layout 的宽因此恒为 1MB、与文本多长无关，文本只占这个宽的中段——拿 1MB 算上限，摆出来的位置
+         * 落在文本右侧的大片空白里，框里一个字都画不出来（看着就是个空框）。故上限取
+         * {@link Layout#getLineRight}（"该行横向滚动该露出的最右位置"，TextView 自己摆光标用的也是它）
+         * 减视图宽：文本右端正好贴住框右沿。
+         *
+         * <p>摆放时机：值回填后 post 一次。布局还没算出来（{@code mLayout} 为 null、视图宽为 0）就等下一次
+         * 回填（切页回来、落盘后的静默刷新都会再来）——新结构不再挂 layout 回调反复重试，故首帧这一次
+         * 可能落空、输入框停在路径左段，此时靠上面"光标钉末尾"让框架自己把可视区摆到右段。
+         * 聚焦时不动：编辑中位置归用户与光标跟随。
+         */
+        private void applyPathScroll() {
+            TextInputEditText input = field.input;
+            if (input.isFocused()) {
+                return;
+            }
+            Layout layout = input.getLayout();
+            int viewWidth = input.getWidth();
+            if (layout == null || viewWidth <= 0) {
+                return;
+            }
+            int target = Math.max(0, (int) Math.ceil(layout.getLineRight(0)) - viewWidth);
+            if (input.getScrollX() != target) {
+                input.scrollTo(target, 0);
+            }
+        }
+    }
+
+    // ==================== 键内控件：建、说明落位、量宽 ====================
+
+    /** int / multi 的数值字段：说明 + 单位/范围说明，每次输入都排入防抖队列（失焦时钳制回写）。 */
+    private Field addNumberField(@NonNull LayoutInflater inflater, @NonNull String hint,
+                                 @NonNull String caption, boolean hoistCaption) {
+        Field field = addField(inflater, hint, caption, hoistCaption, false);
+        field.input.addTextChangedListener(new Watcher());
+        return field;
+    }
+
+    /** 布尔字段（multi 键里值为 0/1 的字段）：字段名 + 开关。 */
+    private Field addBoolField(@NonNull LayoutInflater inflater, @NonNull FieldMeta fieldMeta) {
+        View fieldView = inflater.inflate(R.layout.item_config_field, root, false);
+        addToTail(fieldView);
+
+        View switchRow = fieldView.findViewById(R.id.config_field_switch_row);
+        switchRow.setVisibility(View.VISIBLE);
+        TextView fieldLabel = fieldView.findViewById(R.id.config_field_switch_label);
+        if (isPlaceholderLabel(fieldLabel.getContext(), fieldMeta.label)) {
             // 定义里的占位词（见 strings_config.xml）与右边的开关控件本身重复，不再渲染
-            label.setVisibility(View.GONE);
+            fieldLabel.setVisibility(View.GONE);
         } else {
-            label.setText(fieldMeta.label);
+            fieldLabel.setText(fieldMeta.label);
         }
         MaterialSwitch boolSwitch = fieldView.findViewById(R.id.config_field_switch);
         boolSwitch.setOnCheckedChangeListener((button, checked) -> {
@@ -444,168 +580,120 @@ final class ConfigKeyRow {
         });
         // 数值字段的输入框与范围说明都不适用：0/1 的"范围 0~1"是噪音
         fieldView.findViewById(R.id.config_field_layout).setVisibility(View.GONE);
-        fields.add(new Field(fieldView, null, null, boolSwitch));
+        return new Field(fieldView, null, null, boolSwitch);
     }
 
-    /** bool 字段的 label 是占位词时不显示标签：它只说"这里是个开关"，而右边就是开关。 */
-    private static boolean isPlaceholderLabel(@NonNull Context context, @NonNull String label) {
-        return label.equals(context.getString(R.string.config_bool_label_placeholder));
-    }
+    /**
+     * 建一个输入型字段并挂进尾段。
+     *
+     * @param hint         输入框的说明（浮起提示），也是字段宽的下限之一
+     * @param caption      输入框下方的单位/范围说明；空串 = 不挂
+     * @param hoistCaption true = 说明行挂到行级（单值键：框宽只由说明与内容定，可能只有 50dp 宽，
+     *                     长说明留在框里要折四五行的独立一列，挂行级后同样内容一两行）
+     * @param path         true = 路径输入框（单行文本；失焦才落盘）
+     */
+    private Field addField(@NonNull LayoutInflater inflater, @NonNull String hint,
+                           @NonNull String caption, boolean hoistCaption, boolean path) {
+        View fieldView = inflater.inflate(R.layout.item_config_field, root, false);
+        addToTail(fieldView);
 
-    /** 数值/路径字段：宽度由 {@link #refitFieldWidths} 按说明与内容实测，高度统一 @dimen/field_height。 */
-    private void buildNumberField(View fieldView, int index) {
         TextInputLayout layout = fieldView.findViewById(R.id.config_field_layout);
         TextInputEditText input = fieldView.findViewById(R.id.config_field_input);
-        TextView note = fieldView.findViewById(R.id.config_field_note);
-
-        String hint;
-        String unit;
-        String unitNote;
-        if (meta.isMulti()) {
-            FieldMeta fieldMeta = meta.fields.get(index);
-            hint = fieldMeta.label;
-            unit = fieldMeta.unit == null ? "" : fieldMeta.unit;
-            // ConfigStore.FieldMeta 没有解析 params.json 的字段级 unitNote，
-            // 界面不自行读 assets（I1/I3 边界），故多值字段只显示 unit 能拿到的部分。
-            unitNote = "";
-        } else {
-            hint = control.getContext().getString(
-                    meta.isPath() ? R.string.config_hint_path : R.string.config_hint_value);
-            unit = meta.unit;
-            unitNote = meta.unitNote;
-        }
+        TextView captionView = fieldView.findViewById(R.id.config_field_note);
         layout.setHint(hint);
-        if (meta.isPath()) {
+        if (path) {
             input.setInputType(InputType.TYPE_CLASS_TEXT);
         }
-        String caption = joinParts(joinParts(unit, rangeText(index)), unitNote);
-        if (caption.isEmpty()) {
-            note.setVisibility(View.GONE);
-        } else {
-            note.setText(caption);
-            if (!meta.isMulti()) {
-                // 单字段键：说明行挂到行级、按整行宽折行。留在字段里只能按框宽折——框宽可能只有 72dp，
-                // 长说明折 4~5 行把整块顶高（挂行级后同样内容 1~2 行）。多字段键不能这么挂：
-                // 说明一旦离开自己的输入框，就分不清属于哪个字段。
-                ((ViewGroup) fieldView).removeView(note);
-                ((ViewGroup) root).addView(note, 1);
-                rowLevelCaptions.add(note);
-            }
-        }
+        placeCaption(fieldView, captionView, caption, hoistCaption);
 
-        Field field = new Field(fieldView, input, layout, null);
-
-        input.addTextChangedListener(new Watcher());
-        if (meta.isPath()) {
-            // 布局驱动重试摆放横向位置：只 post 一次会撞上"setText 当帧 mLayout 仍为 null"
-            // （启动/重进页面时必现），这里每次布局后再试，布局就绪即摆好
-            input.addOnLayoutChangeListener((v, left, top, right, bottom,
-                                             oldLeft, oldTop, oldRight, oldBottom) -> applyPathScroll());
-        }
+        // 失焦即提交：钳制后的值回写控件并落盘（path 的落盘时机也只有这一处）
         input.setOnFocusChangeListener((v, hasFocus) -> {
-            if (hasFocus) {
-                return;
+            if (!hasFocus) {
+                commit(true);
             }
-            if (meta.isPath()) {
-                // 编辑结束：记下滚到的位置（本次启动内有效）。必须在 commit 之前取，
-                // commit 会回填值、把显示位置带回左边
-                PATH_SCROLL_X.put(meta.key, input.getScrollX());
-            }
-            commit(true);
         });
         input.setOnEditorActionListener((v, actionId, event) -> {
             v.clearFocus();
             return true;
         });
-        fields.add(field);
+        return new Field(fieldView, input, layout, null);
+    }
+
+    /** 把键内控件挂到行骨架上：参数名之后、行级文本之前，并标 trailing（与参数名同行的尾段）。 */
+    private void addToTail(@NonNull View child) {
+        root.addView(child, ++tailCount);
+        root.setTrailing(child, true);
     }
 
     /**
-     * 按最终宽度重算所有字段的宽度（建行后、首次布局后、值回填后各算一次），
-     * 并据此判定布尔字段要不要独占一行（见 {@link #setBoolFieldsAlone}）。
+     * 字段说明（单位 / 范围）的落位。
      *
-     * <p><b>数值字段</b>：宽 = {@link #naturalFieldWidth}（说明宽与内容宽的较大者）。
-     * 宽度不再与可用宽相关——从前那套"超额就从最宽的往下削、每个字段守住自己那道地板"已去掉：
-     * 框宽只由说明与内容决定，一行装不下就交给流式容器换行，不会为了塞进一行把说明截成省略号。
-     * 唯一与可用宽有关的是下面那道安全钳制。
-     *
-     * <p><b>安全钳制</b>：说明或值特别长时框会越出行右边界被父容器裁掉，故把每段宽度钳到
-     * {@link #firstRowAvail}（首行可用宽）。首行是各行里最窄的一条（缩进占掉参数名宽 + 间距），
-     * 钳到它即可保证任何一行都不越界。
-     *
-     * <p><b>path 字段</b>：{@code MATCH_PARENT} 吃掉控制区剩余宽。路径长度不可控（默认日志路径 58 字符
-     * 在 16sp 下约 570dp，而可用宽约 304dp），定宽会顶出屏幕——文字是居中的，被裁掉的是两端。
-     *
-     * <p>字段根与输入框写同一个值：根是 wrap_content 容器，只改框会让根按旧宽测量；流式容器的
-     * 换行判据读的也正是字段根的实测宽。
+     * <p>多值键：留在自己的字段里，跟着自己的输入框——说明一旦离开框就分不清属于哪个字段。
+     * 单值键：挂到行级并按整行宽折行（理由见 {@link #addField} 的 hoistCaption）。
      */
-    private void refitFieldWidths() {
-        if (fields.isEmpty()) {
+    private void placeCaption(@NonNull View fieldView, @NonNull TextView captionView,
+                              @NonNull String caption, boolean hoist) {
+        if (caption.isEmpty()) {
+            captionView.setVisibility(View.GONE);
             return;
         }
-        if (meta.isPath()) {
-            writeWidth(fields.get(0), ViewGroup.LayoutParams.MATCH_PARENT);
-            return;                             // path 键只有一个字段、没有布尔字段，不涉及独占行
+        captionView.setText(caption);
+        if (!hoist) {
+            return;
         }
-        int limit = firstRowAvail();
-        // 第一行装填模拟：数值字段用它刚写下的宽，布尔字段只能取实测宽（wrap_content）
-        int used = 0;
-        boolean first = true;
-        for (Field field : fields) {
-            int width;
-            if (field.layout == null) {
-                width = field.root.getMeasuredWidth();      // 布尔字段：不参与分配
-            } else {
-                width = naturalFieldWidth(field);
-                if (limit > 0) {
-                    width = Math.min(width, limit);
-                }
-                writeWidth(field, width);
-            }
-            used += (first ? 0 : fieldGap) + width;
-            first = false;
+        ((ViewGroup) fieldView).removeView(captionView);
+        // 插在行级文本的最前面（其后是说明 / 备注 / 状态）：段中插一个非 trailing 的视图会把尾段断成两截
+        root.addView(captionView, root.indexOfChild(descView));
+        root.setFullLine(captionView, true);
+        // 行距由容器的行距给：item_config_field 里那个 topMargin 是"留在字段里"那一路要的
+        ViewGroup.LayoutParams lp = captionView.getLayoutParams();
+        if (lp instanceof ViewGroup.MarginLayoutParams) {
+            ((ViewGroup.MarginLayoutParams) lp).topMargin = 0;
         }
-        setBoolFieldsAlone(controlAvail > 0 && firstRowIndent + used > controlAvail);
+        rowCaptions.add(captionView);
     }
 
     /**
-     * 首行可用宽 = 控制区内容宽 − 首行缩进。
+     * 数值字段的宽 = max(说明文字宽, 当前值文字宽, 最小宽)，三者都已含输入框的左右内边距。
      *
-     * <p>控制区的宽等于整行宽（见 {@link #syncControlGeometry}），故它同时也是"换行后各行能用到的宽"；
-     * 首行被缩进吃掉一段，是各行里最窄的。
+     * <p><b>说明为什么按画笔量</b>：Material 的 TextInputLayout 不参与说明测宽
+     * （{@code onMeasure} 就是 {@code LinearLayout.onMeasure}，框宽只由 EditText 自己撑出来），
+     * 说明只是"画"在框里，画不下就自己打省略号——量一个空框量不到说明，说明经常被截成"每周…"。
+     * 用输入框自己的画笔量（占位说明用的就是它的字号与字重，见 {@code TextInputLayout#setEditText}），
+     * 而不是"把说明临时写进输入框再量框"：数字型输入框带数字过滤器，非数字文本未必留得住。
+     * <b>值</b>同样只量文本，不再"临时改写控件文本再量一次"——那会打断正在输入的人（文本暂改、光标回跳）。
      *
-     * @return 0 表示可用宽还不知道（控制区还没布局过），此时不钳
+     * <p><b>末尾那 {@link #hintFitGuard}（1dp）不是余量而是安全量</b>：material 判"说明装不装得下"
+     * 用的是「说明可用宽 &lt; 文字实测宽」（拿 {@code paint.measureText} 的浮点值和整数宽比），
+     * 框宽贴到 0 余量时一个像素的误差（字距取整、量宽取不取 ceil、字号缩放）就会判成装不下并打上省略号。
+     * 留 1dp 把这条临界推开：宁可宽 1dp，也不要说明变成"最高转…"。
+     *
+     * <p><b>最小宽</b>取最小可点目标 @dimen/row_min_height(48dp)：说明与值都很短的键（如 hint "数值" +
+     * 值 "0"）不至于缩成一条点不准的窄框。只与说明和内容有关的"无上限"一侧不设钳制：
+     * 装不下由容器换行，不为了塞进一行把说明截断。
      */
-    private int firstRowAvail() {
-        if (controlAvail <= 0) {
-            return 0;
-        }
-        return Math.max(0, controlAvail - firstRowIndent);
+    private int measuredFieldWidth(@NonNull Field field) {
+        Paint paint = field.input.getPaint();
+        CharSequence hint = field.layout.getHint();
+        int hintWidth = hint == null ? 0 : textWidth(paint, hint.toString());
+        String value = field.text();
+        int valueWidth = value == null ? 0 : textWidth(paint, value);
+        int content = Math.max(hintWidth, valueWidth) + hintFitGuard
+                + field.input.getPaddingStart() + field.input.getPaddingEnd();
+        return Math.max(content, minFieldWidth);
+    }
+
+    /** 文本实测宽（向上取整：不足一个像素的余量在中间被吃掉，说明就会打上省略号）。 */
+    private static int textWidth(@NonNull Paint paint, @NonNull String text) {
+        return (int) Math.ceil(paint.measureText(text));
     }
 
     /**
-     * 多值键的开关（布尔字段）在本键字段会换行时独占一行。
-     *
-     * <p>判定见 {@link #refitFieldWidths}：首行缩进 + Σ字段宽 + 字段间距 &gt; 控制区内容宽，
-     * 就是流式容器会把字段挤到第二行（与 {@link FlowWrapLayout} 的换行判据同一口径）。
-     * 理由：开关与数字框同行时，数字框被挤走后那一行只剩开关，独占一行则本键的开关一律落在行首、
-     * 数字框整组从下一行起排，与"参数名 + 右侧开关"的其它键观感一致。
-     */
-    private void setBoolFieldsAlone(boolean alone) {
-        for (Field field : fields) {
-            if (field.layout == null) {
-                control.setAloneInRow(field.root, alone);
-            }
-        }
-    }
-
-    /**
-     * 回写字段宽。宽没变就什么都不做：{@link #applyValue} 回填会走到这里，
+     * 回写字段宽：字段根与输入框写同一个值（根是 wrap_content 容器，只改框会让根按旧宽测量，
+     * 容器的换行判据读的正是整个字段根的宽）。宽没变就什么都不做——值回填会走到这里，
      * 否则形成"回填 → 重写宽 → 再布局 → 再回填"的空转。
-     *
-     * <p>直接改 LayoutParams 不会自己触发重测，故宽真的变了要显式请求。
      */
-    private static void writeWidth(Field field, int width) {
+    private static void writeWidth(@NonNull Field field, int width) {
         if (field.root.getLayoutParams().width == width
                 && field.layout.getLayoutParams().width == width) {
             return;
@@ -613,137 +701,6 @@ final class ConfigKeyRow {
         field.root.getLayoutParams().width = width;
         field.layout.getLayoutParams().width = width;
         field.layout.requestLayout();
-    }
-
-    /**
-     * 输入框的自然宽度 = max(说明宽, 内容宽)。两者都已含输入框的左右内边距，故这里既不再加余量，
-     * 也不再有下限与上限（{@code config_field_min_width} / {@code config_field_max_width} 已删）。
-     * path 键不走这里（它按 MATCH_PARENT 吃掉控制区剩余宽，见 {@link #refitFieldWidths}）。
-     *
-     * <p><b>为什么说明要单独量</b>：Material 的 TextInputLayout 不参与说明的测宽
-     * （{@code onMeasure} 就是 {@code LinearLayout.onMeasure}，框宽只由 EditText 自己撑出来），
-     * 说明只是"画"在框里/框顶，画不下就自己打省略号——量 {@code text=""} 的框量不到说明，
-     * 说明经常被截成"每周…"。故这里按说明文字自己算一次（见 {@link #measureHintWidth}），
-     * 与内容宽取大者。
-     *
-     * <p><b>为什么要量两次</b>：说明与内容不会同时占位，同一份控件量不出这两个宽度，
-     * 只能各量一次取大者。内容宽不再多带尾串（从前带 "aa" 是给"再多敲一位"留可见余量，
-     * 但那让每个框都白宽一截）：宽度只认说明与内容本身，说明那一侧另有 {@link #hintSlack}
-     * 的防截断安全量。
-     *
-     * <p><b>为什么不按当前值实时算</b>：值一变宽度就跟着变，边输边跳——旧 WebUI 的
-     * "改参不被撑宽"就是这个意思。宽度只在建行与值回填（{@link #applyValue}）时定。
-     */
-    private int naturalFieldWidth(Field field) {
-        CharSequence hint = field.layout.getHint();
-        int hintWidth = hint == null ? 0 : measureHintWidth(field, hint.toString());
-        String text = field.text();
-
-        // 量宽要临时改写输入框文本，必须屏蔽回调（否则等于程序化了用户输入），量完恢复原文本。
-        // suppressChange 存旧值再恢复：调用方（applyValue 的循环）可能已开着抑制，不能一把关掉。
-        boolean previous = suppressChange;
-        suppressChange = true;
-        // 光标位置也要原样放回：重算宽度会在用户正打字时发生（控制区宽变），而 setText 会把光标带回开头
-        int selectionStart = field.input.getSelectionStart();
-        int selectionEnd = field.input.getSelectionEnd();
-        int contentWidth;
-        try {
-            contentWidth = measureWithText(field, text);
-        } finally {
-            field.input.setText(text);
-            if (selectionStart >= 0) {
-                field.input.setSelection(Math.min(selectionStart, text.length()),
-                        Math.min(Math.max(selectionEnd, selectionStart), text.length()));
-            }
-            suppressChange = previous;
-        }
-        return Math.max(hintWidth, contentWidth);
-    }
-
-    /**
-     * 说明文字所需的框宽 = 说明文字宽 + {@link #hintSlack} + 输入框左右内边距。
-     *
-     * <p>用输入框自己的画笔量文字（占位说明用的就是它的字号与字重，见
-     * {@code TextInputLayout#setEditText}），而不是"把说明写进输入框再量框"——数字型输入框带
-     * 数字过滤器，程序化写进去的非数字文本未必留得住，量出来可能是个空框。
-     * 内边距取输入框当前值（就是 item_config_field.xml 里写的那两个），
-     * 因为说明的可用宽正是"框宽 − 内边距"。
-     *
-     * <p><b>末尾那 {@link #hintSlack}（1dp）不是余量而是安全量</b>：material 判"说明装不装得下"
-     * 用的是「说明可用宽 &lt; 文字实测宽」（拿 {@code paint.measureText} 的浮点值和整数宽比），
-     * 框宽贴到 0 余量时一个像素的误差（字距取整、这里取不取 {@code ceil}、字号缩放）就会判成装不下
-     * 并打上省略号。留 1dp 把这条临界推开：宁可宽 1dp，也不要说明变成"最高转…"。
-     */
-    private int measureHintWidth(Field field, String hintText) {
-        TextPaint paint = field.input.getPaint();
-        return (int) Math.ceil(paint.measureText(hintText)) + hintSlack
-                + field.input.getPaddingStart() + field.input.getPaddingEnd();
-    }
-
-    /** 把 {@code text} 临时写进输入框，让 OutlinedBox 自己量一次宽（内边距与浮起 hint 由它处理）。 */
-    private static int measureWithText(Field field, String text) {
-        field.input.setText(text);
-        field.layout.measure(
-                View.MeasureSpec.makeMeasureSpec(0, View.MeasureSpec.UNSPECIFIED),
-                View.MeasureSpec.makeMeasureSpec(0, View.MeasureSpec.UNSPECIFIED));
-        return field.layout.getMeasuredWidth();
-    }
-
-    /** 值回填后重算一次宽：值比 hint 长时框要跟着变宽。文本真的变了才重算，免得无谓重排。 */
-    private void remeasureIfTextChanged(Field field, @Nullable String before) {
-        if (field.layout == null || TextUtils.equals(before, field.text())) {
-            return;
-        }
-        // 一个字段变宽会改整键的排布（是否换行、布尔字段要不要独占一行），故整键重算，不是只算这一个
-        refitFieldWidths();
-    }
-
-    /**
-     * 把 path 输入框的横向显示位置摆到「上次编辑结束时滚到的位置」，没有记录时摆到最右
-     * （路径放不下时显示右半段——看得见文件名比看得见 <code>/storage/emulated/0/…</code> 有用）。
-     *
-     * <p>摆放时机由 {@link #buildNumberField} 注册的布局回调负责（每次布局后都会再来一次）；
-     * 这里补一次 post，兜住"布局已经好了、不会再变"的情形。
-     */
-    private void restorePathScroll() {
-        if (!meta.isPath() || fields.isEmpty()) {
-            return;
-        }
-        fields.get(0).input.post(this::applyPathScroll);
-    }
-
-    /**
-     * path 输入框非聚焦时把横向位置摆到目标位置：能滚多远由 {@code Layout} 的首行右沿与视图宽决定，
-     * 布局还没算出来（{@code mLayout} 为 null、视图宽为 0）就等下一次布局回调，摆到即停。
-     *
-     * <p>摆放位置按"记得的位置"与"能滚的上限"取小，换了更短的路径也不会滚过头留白。
-     * 聚焦时不动：编辑中位置归用户与光标跟随，抢过来会看不见刚敲的字。
-     *
-     * <p><b>上限为什么不取 {@code Layout#getWidth()}</b>：开了 {@code scrollHorizontally} 的输入框，
-     * TextView 传给 Layout 的宽是"无上限"（{@code want = VERY_WIDE = 1MB}，见 {@code TextView#onMeasure}），
-     * Layout 的宽因此恒为 1MB、与文本多长无关，文本只占这个宽的中段——拿 1MB 算上限，摆出来的位置
-     * 落在文本右侧的大片空白里，框里一个字都画不出来（看着就是个空框）。故上限取 {@link Layout#getLineRight}
-     * （"该行横向滚动该露出的最右位置"，TextView 自己摆光标用的也是它）减视图宽：文本右端正好贴住框右沿。
-     */
-    private void applyPathScroll() {
-        if (!meta.isPath() || fields.isEmpty()) {
-            return;
-        }
-        TextInputEditText input = fields.get(0).input;
-        if (input.isFocused()) {
-            return;
-        }
-        Layout layout = input.getLayout();
-        int viewWidth = input.getWidth();
-        if (layout == null || viewWidth <= 0) {
-            return;
-        }
-        Integer remembered = PATH_SCROLL_X.get(meta.key);
-        int maxScroll = Math.max(0, (int) Math.ceil(layout.getLineRight(0)) - viewWidth);
-        int target = remembered == null ? maxScroll : Math.min(remembered, maxScroll);
-        if (input.getScrollX() != target) {
-            input.scrollTo(target, 0);
-        }
     }
 
     /**
@@ -764,15 +721,12 @@ final class ConfigKeyRow {
 
     /** 第 {@code index} 个字段的取值范围文案（来自 {@link KeyMeta#min(int)}/{@link KeyMeta#max(int)}）。 */
     private String rangeText(int index) {
-        if (meta.isPath()) {
-            return "";
-        }
         Integer min = meta.min(index);
         Integer max = meta.max(index);
         if (min == null || max == null) {
             return "";
         }
-        return control.getContext().getString(R.string.config_range,
+        return root.getContext().getString(R.string.config_range,
                 String.valueOf(min), String.valueOf(max));
     }
 
@@ -789,84 +743,19 @@ final class ConfigKeyRow {
         return a + " ｜ " + b;
     }
 
+    /** bool 字段的 label 是占位词时不显示标签：它只说"这里是个开关"，而右边就是开关。 */
+    private static boolean isPlaceholderLabel(@NonNull Context context, @NonNull String label) {
+        return label.equals(context.getString(R.string.config_bool_label_placeholder));
+    }
+
     // ==================== 值 ⇄ 控件 ====================
 
-    /**
-     * 把值写进控件。程序化回填不该触发写入，故屏蔽回调；
-     * 文本真的变了才重算输入框宽度（值比 hint 长时框要跟着变宽）。
-     */
+    /** 把值写进控件。程序化回填不触发写入；各型渲染器顺带按新值重算字段宽（见 {@link Renderer}）。 */
     void applyValue(@Nullable Value value) {
         if (value == null) {
             return;
         }
-        suppressChange = true;
-        try {
-            if (meta.isSwitch()) {
-                toggle.setChecked(value.intAt(0) != 0);
-            } else if (meta.isPath()) {
-                Field field = fields.get(0);
-                String before = field.text();
-                field.setValue(value.text());
-                // 光标钉到末尾：setText 会把光标置 0（ArrowKeyMovementMethod.initialize → Selection.setSelection(text, 0)），
-                // 而框架随后在自己的 pre-draw 里按"把光标摆进可视区"（bringPointIntoView(getSelectionEnd())）摆一次——
-                // 光标留在 0 就摆到路径左段，与本类 applyPathScroll 摆的右段各摆一端（两处各写一次，谁后写谁赢）。
-                // 钉末尾后两处同值：路径放不下时一律显示右半段（文件名）。
-                // 聚焦中不钉：本方法在切页回来、静默刷新时都会被调，编辑中把光标拽到末尾会打断正在输入的人。
-                // 有 PATH_SCROLL_X 记忆值时仍以记忆值为准（见 applyPathScroll）——这里定的只是没有记忆值、
-                // 或框架自己兜底时的落点，不等于"忽略记忆值"。
-                if (!field.input.isFocused()) {
-                    field.input.setSelection(field.text().length());
-                }
-                remeasureIfTextChanged(field, before);
-                restorePathScroll();
-            } else {
-                for (int i = 0; i < fields.size(); i++) {
-                    Field field = fields.get(i);
-                    String before = field.text();
-                    field.setValue(value.intAt(i));
-                    remeasureIfTextChanged(field, before);
-                }
-            }
-        } finally {
-            suppressChange = false;
-        }
-    }
-
-    /**
-     * 读控件当前值。
-     *
-     * @return {@code null} 表示"还没输完"，此时一律不写盘（空串/不可解析/空路径）
-     */
-    @Nullable
-    private Value readInputs() {
-        return readInputs(false);
-    }
-
-    /**
-     * 读控件当前值。
-     *
-     * @param fallbackForUnparsed true 时把"还没输完"的输入框退回当前有效值（再退一步是定义默认值），
-     *                            使布尔开关单独切换也能写出整键；false 时一个字段没输完就整键不写
-     */
-    @Nullable
-    private Value readInputs(boolean fallbackForUnparsed) {
-        if (meta.isPath()) {
-            String text = textOf(fields.get(0).input).trim();
-            return text.isEmpty() ? null : Value.ofText(text);
-        }
-        Value current = fallbackForUnparsed ? host.effectiveValue(meta.key) : null;
-        int count = fields.size();
-        int[] numbers = new int[count];
-        for (int i = 0; i < count; i++) {
-            Integer parsed = fields.get(i).value();
-            if (parsed == null && !fallbackForUnparsed) {
-                return null;
-            }
-            numbers[i] = parsed != null ? parsed
-                    : (current != null && current.size() > i
-                            ? current.intAt(i) : meta.fields.get(i).defaultValue);
-        }
-        return Value.ofNumbers(numbers);
+        renderer.applyValue(value);
     }
 
     private void restoreInputs() {
@@ -899,6 +788,7 @@ final class ConfigKeyRow {
         }
     }
 
+    /** int / multi 的输入框每变一次就排入防抖队列（失焦才是"提交"，见 {@link #commit}）。 */
     private final class Watcher implements TextWatcher {
         @Override
         public void beforeTextChanged(CharSequence s, int start, int count, int after) {
@@ -917,19 +807,19 @@ final class ConfigKeyRow {
     // ==================== 提交 ====================
 
     private void commit(boolean fromBlur) {
-        if (suppressChange || meta.isSwitch()) {
+        if (suppressChange) {
             return;
         }
-        if (!fromBlur && meta.isPath()) {
+        if (!fromBlur && !renderer.writesWhileTyping()) {
             // 输入过程中不落盘：半截路径会被 C 端当真路径去 open()
             return;
         }
 
-        Value raw = readInputs();
+        Value raw = renderer.read(false);
         if (raw == null) {
             if (fromBlur) {
                 restoreInputs();
-                setStatus(control.getContext().getString(R.string.config_input_restored),
+                setStatus(root.getContext().getString(R.string.config_input_restored),
                         R.color.state_warn);
             }
             return;
@@ -941,12 +831,12 @@ final class ConfigKeyRow {
         if (fromBlur) {
             applyValue(ui);
             if (assessment.changedByClamp && !ui.format().equals(raw.format())) {
-                String message = control.getContext().getString(
+                String message = root.getContext().getString(
                         R.string.config_clamped, raw.format(), ui.format());
                 setStatus(message, R.color.state_warn);
                 host.notifyUser(message, false);
             } else if (meta.isPath() && !assessment.notes.isEmpty()) {
-                setStatus(control.getContext().getString(R.string.config_path_note,
+                setStatus(root.getContext().getString(R.string.config_path_note,
                         TextUtils.join("；", assessment.notes)), R.color.state_warn);
             } else {
                 hideStatus();
@@ -971,10 +861,10 @@ final class ConfigKeyRow {
      * 绝不把"没输完"当成 0 写下去。
      */
     private void commitBoolField() {
-        if (suppressChange || meta.isPath()) {
+        if (suppressChange) {
             return;
         }
-        Value raw = readInputs(true);
+        Value raw = renderer.read(true);
         if (raw == null) {
             return;
         }
@@ -1010,36 +900,35 @@ final class ConfigKeyRow {
     // ==================== 依赖状态 ====================
 
     /**
-     * 依 {@code requires} 压暗本行。
+     * 依 {@code requires} 压暗本行（参数名、键内控件、行级文本，含从字段里挪出来的说明行）。
      *
      * <p>依赖键名取自 {@link KeyMeta#requires}，本类不硬编码任何键名；判据见
-     * {@link #isDependencyUnsatisfied}。
+     * {@link #dependencyUnsatisfied()}。
      * "未生效"的徽标由 {@link ConfigGroupBinder} 在分组卡头显示一次，故本方法只压暗并回报状态。
      *
      * @return true 表示本行当前未生效（供分组卡头汇总）
      */
     boolean refreshDependencyState() {
-        boolean unsatisfied = isDependencyUnsatisfied(meta, host);
+        boolean unsatisfied = dependencyUnsatisfied();
         float alpha = unsatisfied ? dimAlpha : 1f;
         labelView.setAlpha(alpha);
         descView.setAlpha(alpha);
-        control.setAlpha(alpha);
         noteView.setAlpha(alpha);
-        // 挂到行级的字段说明行不在控制区里，压暗要单独来一遍（否则它比周围亮）
-        for (TextView caption : rowLevelCaptions) {
+        for (View target : renderer.dimTargets()) {
+            target.setAlpha(alpha);
+        }
+        // 挂到行级的字段说明行不在尾段里，压暗要单独来一遍（否则它比周围亮）
+        for (TextView caption : rowCaptions) {
             caption.setAlpha(alpha);
         }
         return unsatisfied;
     }
 
     /**
-     * 一个键的依赖是否未满足：{@code requires} 里任一键的当前值（取整数值，文件缺失时用定义
-     * 默认值）为 0 或取不到值，即为未满足。
-     *
-     * <p>与行本身无关，故分组卡头的徽标在<b>键行还没建</b>（折叠组）时能用同一判据，
-     * 「未生效」的口径只有这一处。
+     * 本键的依赖是否未满足：{@code requires} 里任一键的当前值（取整数值，文件缺失时用定义默认值）
+     * 为 0 或取不到值，即为未满足。
      */
-    static boolean isDependencyUnsatisfied(@NonNull KeyMeta meta, @NonNull Host host) {
+    private boolean dependencyUnsatisfied() {
         for (String dependency : meta.requires) {
             Value value = host.effectiveValue(dependency);
             if (value == null || value.intAt(0) == 0) {
@@ -1058,7 +947,7 @@ final class ConfigKeyRow {
 
     private void setStatus(String message, int colorRes) {
         statusView.setText(message);
-        statusView.setTextColor(ContextCompat.getColor(control.getContext(), colorRes));
+        statusView.setTextColor(ContextCompat.getColor(root.getContext(), colorRes));
         statusView.setVisibility(View.VISIBLE);
     }
 

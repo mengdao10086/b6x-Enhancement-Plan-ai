@@ -79,12 +79,16 @@
             </LinearLayout>
         </com.google.android.material.card.MaterialCardView>
 
-        <!-- ===== ② 分组容器 ===== -->
+        <!-- ===== ② 分组容器 =====
+             初始藏着（建完才出现）：卡与键行由 ConfigFormController 在后台预读（定义 + 首份快照）
+             回来之后一次建满、值也上屏，最后才把它置为可见，故这里定成 gone——打开页面不会先看到
+             一块空的参数区再逐组冒出来。页面重建时同样从 gone 起，见 ConfigFormController。 -->
         <LinearLayout
             android:id="@+id/config_group_container"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:orientation="vertical" />
+            android:orientation="vertical"
+            android:visibility="gone" />
 
         <!-- ===== ③ 诊断区（可展开，默认折叠） ===== -->
         <com.google.android.material.card.MaterialCardView

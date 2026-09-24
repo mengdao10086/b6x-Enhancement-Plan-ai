@@ -51,15 +51,15 @@
                 行距单给 chart_legend_row_gap（配置页仍是默认的 space_m），列距与图例项的
                 layout_marginEnd 都不动。
                 行首不靠自然宽碰运气：前四条（电池/制冷/风扇/热端）排第一行，「冷端℃」「CPU℃」按
-                ChartSeries#startsLegendRow 经 FlowWrapLayout#setBreakBefore 固定另起第二行——
+                ChartSeries#startsLegendRow 经 WrapRowLayout#setBreakBefore 固定另起第二行——
                 这两条是可选的温度传感器，与上面四条不是一类。
             -->
-            <com.example.waspwingtempctrl.ui.FlowWrapLayout
+            <com.example.waspwingtempctrl.ui.WrapRowLayout
                 android:id="@+id/chart_legend_row"
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
                 android:layout_marginTop="@dimen/chart_row_gap"
-                app:flowRowGap="@dimen/chart_legend_row_gap" />
+                app:wrapRowGap="@dimen/chart_legend_row_gap" />
 
             <!--
                 ===== ③ 画布 / 读取失败诊断 =====

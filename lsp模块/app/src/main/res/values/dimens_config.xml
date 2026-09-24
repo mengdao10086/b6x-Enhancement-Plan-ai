@@ -2,8 +2,8 @@
 <!--
     配置页专属尺寸。能用 values/dimens.xml 的共用标尺就不要在这里新增
     （间距一律 @dimen/space_*、圆角 @dimen/field_radius/card_radius）。
-    宽度相关的口径：输入框宽只由「说明宽 / 内容宽」实测决定（无下限、无上限），
-    说明一侧留 @dimen/config_hint_slack 防截断；参数名的竖直对齐另见 @dimen/config_label_ink_shift。
+    宽度相关的口径：输入框宽由「说明宽 / 内容宽取大者」决定，下限 @dimen/row_min_height(48dp)、
+    无上限（装不下由流式容器换行）；说明一侧留 @dimen/config_hint_slack 防截断。
 -->
 <resources>
 
@@ -14,28 +14,12 @@
     <item name="config_dim_alpha" format="float" type="dimen">0.55</item>
 
     <!--
-        输入框说明的防截断安全量（ConfigKeyRow#measureHintWidth 加在说明文字宽后面）。
-        输入框的宽由 ConfigKeyRow 按「说明宽 / 内容宽取大者」实测定下，两边都贴着实测值——
+        输入框说明的防截断安全量（ConfigKeyRow 按「说明宽 / 内容宽取大者」量出框宽时加在说明一侧）。
         material 判"说明装不装得下"用的是「说明可用宽 < 文字实测宽」（浮点与整数宽相比），
         贴到 0 余量时一个像素的误差（字距取整、量宽取不取 ceil、字号缩放）就会判成装不下、
         给说明打上省略号（"最高转…"）。1dp 正好把这条临界推开，又不至于让每个框都白宽一截。
-        从前那套 config_field_min_width(72dp) / config_field_max_width(240dp) 的下限与上限已删：
-        宽只认说明与内容，装不下交给流式容器换行，不再为了塞进一行把框压窄、把说明截断。
     -->
     <dimen name="config_hint_slack">1dp</dimen>
-    <!--
-        参数名墨迹的下移量（ConfigKeyRow#syncLabelBox 用 setTranslationY 施加，纯渲染位移）。
-        参数名装在 @dimen/field_height(36dp) 的盒子里、盒内垂直居中，与它对齐的是同一行第一个输入框
-        （OutlinedBox 36dp）——但框内正文的落点比框的几何中心低 1.5dp（上下内边距不对称，
-        算式见 @dimen/config_field_pad_top），参数名盒的中心却仍在几何中心上，于是参数名偏高。
-        实测（去掉说明后量 36dp 框的上下边框之间 101px，参数名墨迹中心比其正中间高 11px；
-        用开关墨迹定标——scale 0.75 后 24dp = 84px——得 1dp ≈ 3.5px，故 11px ≈ 3.1dp；
-        两行分别量得 11.0px / 10.5px），取 3dp 把参数名压回输入框正文的视觉中线上。
-        用渲染位移而不是内边距/外边距：后者都要参与测量，会把行高撑大 3dp。
-        开关型的键（含"控制区第一个字段是布尔字段"的键）不用本值：那时参数名盒的高度直接
-        取对齐控件的实测高，盒中心与控件中心本来就重合。
-    -->
-    <dimen name="config_label_ink_shift">3dp</dimen>
     <!--
         输入框字号：与 @dimen/log_filter_text_size 同为 16sp，对应 @dimen/field_height 的 36dp
         （两处输入框要求等高，字号也必须同档，否则等高之下一个显空一个显挤）。
@@ -79,6 +63,7 @@
     <!--
         参数（键行）之间的纵向间隔 = 分组卡默认行距 space_m(12dp) 的一半。
         卡内上下内边距仍是 space_s，只压键与键之间这一段。
+        键行内部（同一个键的几行之间）的行距另由键行自己取 @dimen/space_xs(4dp)，须小于本值。
     -->
     <dimen name="config_key_row_gap">6dp</dimen>
 
@@ -91,8 +76,8 @@
 
     <!--
         开关缩放 0.75 后墨迹左右各内缩约 6dp（track 52dp → 39dp）。取负的 end 外边距把这圈
-        空白还给布局：有 weight 的兄弟（键行里的占位 Space）会多分到这 6dp，开关贴到行尾；
-        无 weight 的兄弟（卡头里的展开箭头）会左移 6dp，正好落进开关的空白里。
+        空白还给布局：开关因此贴到行尾（键行里由 app:wrapTrailing 定位），卡头里的展开箭头则
+        左移 6dp，正好落进开关的空白里。
     -->
     <dimen name="switch_trim_end">-6dp</dimen>
 </resources>

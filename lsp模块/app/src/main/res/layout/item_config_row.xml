@@ -1,109 +1,70 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!--
-    一个配置键的行。四种 type（switch / int / multi / path）共用本布局：
-      第一行 = 参数名 + 输入框（或在右侧的开关），行内垂直居中；多值键的多个输入框放在
-      config_key_control（流式容器）里，放不下时在键内自行换行。
-      每个键都整行独占（由 ConfigKeyRow 向 FlowWrapLayout 声明）：参数之间不再并排，
-      并排/换行只发生在键内部的字段之间（config_key_control）。
-      desc / 单位说明 / 状态文字放第一行下方，宽度 wrap_content：短时只有文字那么宽，长时自然折行。
-      "未生效"的标注在分组卡头做一次（见 item_config_group），行内只压暗不重复标注。
+    一个配置键的行。四种 type（switch / int / multi / path）共用本布局，行根就是全项目唯一的换行容器
+    WrapRowLayout：换行判据、行距、行内垂直居中全在容器里，本行不再自己算几何。
+    子视图分三类（标记写在子标签的 app: 属性上，由容器在 inflate 时读出）：
+      · 参数名（leading，缺省）：左起第一段。
+      · 键内控件（trailing）：各输入框 / 各字段 / 开关——由 ConfigKeyRow 建好后 addView + setTrailing
+        （switch 型的开关就是下面这个 config_key_switch，标记直接写在标签上）。
+      · 说明 / 备注 / 状态（fullLine）：各占一行、按整行宽折行；不可见者容器会跳过，不留空行。
+    本行在分组卡 body 里也整行独占：app:wrapFullLine 由 body 读出（参数之间不并排，并排/换行
+    只发生在键内部的字段之间）。
 
-    参数名的对齐（两种键型统一走一套）：
-      · 参数名装在 @dimen/field_height(36dp) 的盒子里、盒内垂直居中，盒子在行内贴顶——
-        于是参数名的中心与「同一行第一个输入框」的中心重合。不能直接让行内居中：输入框下面还有
-        说明行，按整行居中会把参数名一起压低（要求"不含说明内容的高度"）。
-        盒高不是死值：ConfigKeyRow#syncLabelBox 会在布局后按"与参数名对齐的那个控件"回写——
-        开关键与「控制区第一个字段是布尔字段」的键对齐的是开关（48dp），盒高改成它的实测高
-        （盒高仍是 36dp 而盒又贴顶时，参数名中心比开关中心高 (48−36)/2 = 6dp）；
-        输入框行的盒高保持 36dp，改由 @dimen/config_label_ink_shift 给参数名一个纯渲染的下移量。
-      · 控制区（输入框）的内容盒覆盖整行宽、内容从行首起排，参数名留在左边、宽度由内容决定。
-        起点本来在参数名右沿 + @dimen/space_s，ConfigKeyRow#syncControlGeometry 把
-        layout_marginStart 改成 −参数名盒实测宽（左边界回到行首）、layout_width 写成行宽，
-        再给容器 setFirstRowIndent(参数名宽 + 间距)：首行的字段仍落在"参数名右沿 + 间距"，
-        换行后的行才拿得到整行宽（换行判定与"开关字段独占一行"也都按这个可用宽算）。
-        不能沿用"占位 Space 带 weight 顶到行尾"的老办法：LinearLayout 只要行内存在带 weight 的子视图，
-        首轮测量其它子视图时传的 widthUsed 就是 0，控制区会拿到接近整行的宽（参数名那一段从未被扣掉）
-        → 数值框右半截、path 框大部分都落到屏幕外。path 键的输入框是 MATCH_PARENT（吃掉控制区剩余宽），
-        宽度算对了它才不会越界。
-        控制区自己吃 weight（0dp + weight=1）是首帧兜底：宽写到行宽后超额空间归零、份额也是 0，
-        宽度不再随内容变（内容比整行窄时 weight 只会把自身宽收敛到内容宽，控制区就只拿到内容那么宽）。
-      · config_key_spacer 的 weight 只服务开关键（把开关顶到行尾，与输入框键的右对齐观感一致）；
-        键内有控制区时由 ConfigKeyRow 把它的 weight 撤成 0，否则两者各分一半剩余宽、控制区只剩一半。
+    行距 wrapRowGap 取 @dimen/space_xs(4dp)：说明 / 备注 / 状态三行原本各带 space_xs 的 topMargin，
+    现在这段间距由容器按行距给。行距必须小于 body 的行距 @dimen/config_key_row_gap(6dp)，
+    "同一个键的几行"与"键与键之间"才分得开——故容器缺省的行距（= 列距 space_m）在这里要显式压低。
+
+    开关的负 end 外边距是"把缩放 0.75 后墨迹两侧的空白还出去"（见 @dimen/switch_trim_end）：
+    尾段右对齐算的是含外边距的宽，负的 end 外边距让开关的墨迹正好贴行尾。
 -->
-<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
-    android:layout_width="wrap_content"
+<com.example.waspwingtempctrl.ui.WrapRowLayout
+    xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
+    android:layout_width="match_parent"
     android:layout_height="wrap_content"
-    android:orientation="vertical">
+    app:wrapFullLine="true"
+    app:wrapRowGap="@dimen/space_xs">
 
-    <LinearLayout
-        android:id="@+id/config_key_line"
+    <TextView
+        android:id="@+id/config_key_label"
         android:layout_width="wrap_content"
         android:layout_height="wrap_content"
-        android:gravity="center_vertical"
-        android:orientation="horizontal">
+        android:textColor="@color/app_on_surface"
+        android:textSize="@dimen/text_body" />
 
-        <FrameLayout
-            android:id="@+id/config_key_label_box"
-            android:layout_width="wrap_content"
-            android:layout_height="@dimen/field_height"
-            android:layout_gravity="top">
-
-            <TextView
-                android:id="@+id/config_key_label"
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:layout_gravity="center_vertical"
-                android:textColor="@color/app_on_surface"
-                android:textSize="@dimen/text_body" />
-        </FrameLayout>
-
-        <Space
-            android:id="@+id/config_key_spacer"
-            android:layout_width="0dp"
-            android:layout_height="1dp"
-            android:layout_weight="1" />
-
-        <com.example.waspwingtempctrl.ui.FlowWrapLayout
-            android:id="@+id/config_key_control"
-            android:layout_width="0dp"
-            android:layout_height="wrap_content"
-            android:layout_marginStart="@dimen/space_s"
-            android:layout_weight="1"
-            android:visibility="gone" />
-
-        <com.google.android.material.materialswitch.MaterialSwitch
-            android:id="@+id/config_key_switch"
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
-            android:layout_marginStart="@dimen/space_xs"
-            android:layout_marginEnd="@dimen/switch_trim_end"
-            android:scaleX="0.75"
-            android:scaleY="0.75"
-            android:visibility="gone" />
-    </LinearLayout>
+    <com.google.android.material.materialswitch.MaterialSwitch
+        android:id="@+id/config_key_switch"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_marginStart="@dimen/space_xs"
+        android:layout_marginEnd="@dimen/switch_trim_end"
+        android:scaleX="0.75"
+        android:scaleY="0.75"
+        android:visibility="gone"
+        app:wrapTrailing="true" />
 
     <TextView
         android:id="@+id/config_key_desc"
         android:layout_width="wrap_content"
         android:layout_height="wrap_content"
-        android:layout_marginTop="@dimen/space_xs"
         android:textAppearance="@style/TextAppearance.B6XTempCtrl.Caption"
-        android:visibility="gone" />
+        android:visibility="gone"
+        app:wrapFullLine="true" />
 
     <TextView
         android:id="@+id/config_key_note"
         android:layout_width="wrap_content"
         android:layout_height="wrap_content"
-        android:layout_marginTop="@dimen/space_xs"
         android:textAppearance="@style/TextAppearance.B6XTempCtrl.Caption"
-        android:visibility="gone" />
+        android:visibility="gone"
+        app:wrapFullLine="true" />
 
     <TextView
         android:id="@+id/config_key_status"
         android:layout_width="wrap_content"
         android:layout_height="wrap_content"
-        android:layout_marginTop="@dimen/space_xs"
         android:layout_marginBottom="@dimen/space_xs"
         android:textAppearance="@style/TextAppearance.B6XTempCtrl.Caption"
-        android:visibility="gone" />
-</LinearLayout>
+        android:visibility="gone"
+        app:wrapFullLine="true" />
+</com.example.waspwingtempctrl.ui.WrapRowLayout>

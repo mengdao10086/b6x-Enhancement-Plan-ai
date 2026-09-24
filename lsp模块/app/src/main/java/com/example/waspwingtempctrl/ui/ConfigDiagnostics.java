@@ -16,6 +16,7 @@ import java.text.SimpleDateFormat;
 import java.util.Date;
 import java.util.Locale;
 import java.util.concurrent.ExecutorService;
+import java.util.concurrent.RejectedExecutionException;
 
 /**
  * 配置页的诊断区（<b>只读展示</b>）：{@link ConfigStore#describeState(ConfigStore.Snapshot)}
@@ -48,7 +49,14 @@ final class ConfigDiagnostics {
     private final TextView stateView;
 
     private boolean expanded;
+    /** 在途标记：一次刷新（后台取数 + 主线程上屏）没跑完就不再起第二个。 */
+    private boolean refreshInFlight;
+    /** 在途期间到达的请求：作废不得，等本轮结束再刷一次（见 {@link #refresh(Snapshot)}）。 */
     private boolean refreshQueued;
+    /** 排队请求里"自读盘"那一路（磁盘可能刚被写过，比任何快照都新）。 */
+    private boolean queuedSelfRead;
+    /** 排队请求里最近一次带来的快照（有"自读盘"的请求时以自读盘为准）。 */
+    private Snapshot queuedKnown;
     private boolean released;
 
     ConfigDiagnostics(@NonNull View pageRoot, @NonNull ConfigStore store, @NonNull ExecutorService io,
@@ -88,30 +96,65 @@ final class ConfigDiagnostics {
      * 本类与 {@link ConfigStore#describeState(Snapshot)} 都不再各读一次 {@code profile.conf}。
      * mtime 也取快照自己的字段。
      *
+     * <p><b>在途期间到达的请求排队重跑，不丢</b>：一次刷新要跑一趟后台（自读盘时还要读文件），
+     * 期间的请求若直接丢掉，写盘刚触发的刷新就可能被吞掉，诊断区一直停在改盘之前的状态。
+     * 故在途时只登记"还欠一次刷新"（{@link #queuedKnown} 记下最新的快照），本轮上屏后立刻再刷一次。
+     * 两路请求合一时以"自读盘"为准：它读的是磁盘当下状态，而快照可能正是写盘之前的那一份。
+     *
      * @param known 调用方刚读到的快照；null = 本类自己读一次
      */
     void refresh(@Nullable Snapshot known) {
-        if (released || refreshQueued || io.isShutdown()) {
+        if (released || io.isShutdown()) {
             return;
         }
-        refreshQueued = true;
-        io.execute(new Runnable() {
-            @Override
-            public void run() {
-                final Snapshot snapshot = known != null ? known : store.read();
-                final String state = store.describeState(snapshot);
-                main.post(new Runnable() {
-                    @Override
-                    public void run() {
-                        apply(snapshot, state);
-                    }
-                });
+        if (refreshInFlight) {
+            refreshQueued = true;
+            if (known == null) {
+                queuedSelfRead = true;
+            } else {
+                queuedKnown = known;
             }
-        });
+            return;
+        }
+        start(known);
+    }
+
+    /** 起一次刷新（主线程调；{@link #refreshInFlight} 由本方法与 {@link #apply} 一进一出地持有）。 */
+    private void start(@Nullable Snapshot known) {
+        refreshInFlight = true;
+        try {
+            io.execute(new Runnable() {
+                @Override
+                public void run() {
+                    try {
+                        final Snapshot snapshot = known != null ? known : store.read();
+                        final String state = store.describeState(snapshot);
+                        main.post(new Runnable() {
+                            @Override
+                            public void run() {
+                                apply(snapshot, state);
+                            }
+                        });
+                    } catch (RuntimeException e) {
+                        // 读盘抛了：本轮作废，但在途标记必须清掉——留着会把后面的请求一起吞掉
+                        main.post(new Runnable() {
+                            @Override
+                            public void run() {
+                                refreshInFlight = false;
+                                runQueued();
+                            }
+                        });
+                    }
+                }
+            });
+        } catch (RejectedExecutionException e) {
+            // 页面已销毁：这一轮不成立，同样别把在途标记留在 true 上
+            refreshInFlight = false;
+        }
     }
 
     private void apply(Snapshot snapshot, String state) {
-        refreshQueued = false;
+        refreshInFlight = false;
         if (released) {
             return;
         }
@@ -123,6 +166,19 @@ final class ConfigDiagnostics {
         } else {
             mtimeView.setText(mtimeView.getContext().getString(R.string.config_diag_mtime_missing));
         }
+        runQueued();
+    }
+
+    /** 本轮结束后：在途期间来的请求立刻补一轮（一个都不丢），没有就歇着。 */
+    private void runQueued() {
+        if (!refreshQueued) {
+            return;
+        }
+        final Snapshot next = queuedSelfRead ? null : queuedKnown;
+        refreshQueued = false;
+        queuedSelfRead = false;
+        queuedKnown = null;
+        refresh(next);
     }
 
     /** 页面视图销毁时调：断开视图引用，避免后台回调打到已销毁的视图上。 */

@@ -93,8 +93,8 @@
             android:visibility="gone" />
 
         <!-- 键行容器是流式布局：每个键都整行独占（ConfigKeyRow 对每个键都声明 fullLine），
-             保留流式容器是为了让键内部的多个字段自行并排/换行（见 FlowWrapLayout） -->
-        <com.example.waspwingtempctrl.ui.FlowWrapLayout
+             保留流式容器是为了让键内部的多个字段自行并排/换行（见 WrapRowLayout） -->
+        <com.example.waspwingtempctrl.ui.WrapRowLayout
             android:id="@+id/config_group_body"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
@@ -103,6 +103,6 @@
             android:paddingEnd="@dimen/card_padding"
             android:paddingBottom="@dimen/card_padding"
             android:visibility="gone"
-            app:flowRowGap="@dimen/config_key_row_gap" />
+            app:wrapRowGap="@dimen/config_key_row_gap" />
     </LinearLayout>
 </com.google.android.material.card.MaterialCardView>

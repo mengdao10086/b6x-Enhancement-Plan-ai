@@ -4,7 +4,6 @@ import android.view.LayoutInflater;
 import android.view.View;
 import android.view.ViewGroup;
 import android.widget.ImageView;
-import android.widget.LinearLayout;
 import android.widget.TextView;
 
 import androidx.annotation.NonNull;
@@ -36,11 +35,10 @@ import java.util.List;
  * 折叠态一屏能看清全部分组与总开关，先开总开关再进组的顺序也更贴合参数之间的依赖关系。
  * 「[4] 界面」那 6 个键在独立设置页（{@link UiSettingsFragment}），不在本页渲染。
  *
- * <h3>键行懒建</h3>
- * 卡头（标题、徽标、总开关、箭头）在构造时建，<b>键行等本组首次展开时才建</b>
- * （见 {@link #setExpanded}）：冷启动落在别的页时，44 个键行 / 64 个字段框一次都不建。
- * 因此「未生效」徽标不能只看行——折叠期间没有行，判据改用定义
- * （{@link ConfigKeyRow#isDependencyUnsatisfied}），收起态卡头照样是对的。
+ * <h3>键行全建、展开只切可见性</h3>
+ * 卡头（标题、徽标、总开关、箭头）与<b>本组全部键行</b>都在构造时建好
+ * （见 {@link #buildRows}）；{@link #setExpanded} 只切 {@code config_group_body} 的可见性。
+ * 行的存在不再依赖展开状态，故徽标、压暗、静默刷新与"值未变不写"的判定都只看行（键行与定义一一对应）。
  */
 final class ConfigGroupBinder {
 
@@ -48,7 +46,8 @@ final class ConfigGroupBinder {
     private static final float ARROW_EXPANDED_ROTATION = 90f;
 
     private final View card;
-    private final LinearLayout body;
+    /** 键行容器（item_config_group.xml）：本类只用它的 addView 与 setVisibility。 */
+    private final WrapRowLayout body;
     private final TextView titleView;
     private final TextView badgeView;
     private final TextView uiBadgeView;
@@ -56,14 +55,12 @@ final class ConfigGroupBinder {
     private final View divider;
     private final MaterialSwitch masterSwitch;
     private final KeyMeta masterMeta;
-    /** 懒建键行所需：首次展开时才用它们建行（见 {@link #buildRows()}）。 */
+    /** 建本组键行所需（构造时一次建满，见 {@link #buildRows()}）。 */
     private final LayoutInflater inflater;
     private final ConfigKeyRow.Host host;
     private final List<KeyMeta> keyMetas;
-    /** 本组的键行：未展开时为空，展开后一次建满（见 {@link #rowsBuilt}）。 */
+    /** 本组的键行，与 {@link #keyMetas} 一一对应（构造时建满）。 */
     private final List<ConfigKeyRow> rows = new ArrayList<>();
-    /** 键行是否已建（懒建标记，只建一次）。 */
-    private boolean rowsBuilt;
     /** 组内有键「界面自用」（daemonConsumes=false）：卡头标一次，行内不再逐条重复。 */
     private final boolean uiOnly;
 
@@ -122,6 +119,7 @@ final class ConfigGroupBinder {
         uiBadgeView.setVisibility(hasUiOnly ? View.VISIBLE : View.GONE);
 
         card.findViewById(R.id.config_group_header).setOnClickListener(v -> setExpanded(!expanded));
+        buildRows();
         setExpanded(false);
     }
 
@@ -136,8 +134,8 @@ final class ConfigGroupBinder {
     }
 
     /**
-     * 本组键行的键名，<b>不依赖行是否已建</b>：折叠组还没建行时，配置页的键渲染自检
-     * （见 {@code ConfigFormFragment#renderSelfCheck}）也数得出本组的可编辑入口。
+     * 本组键行的键名（= 定义里本组的键，逐个对应）：配置页的键渲染自检
+     * （见 {@code ConfigFormFragment#renderSelfCheck}）用它数可编辑入口。
      */
     @NonNull
     List<String> rowKeys() {
@@ -170,18 +168,13 @@ final class ConfigGroupBinder {
     /**
      * 刷新组内各行的压暗，并把"有键未生效"汇总成卡头上的一枚徽标。
      *
-     * <p>行还没建（本组折叠着）时按定义判依赖：徽标在收起态也要是对的，不能因为懒建而消失。
-     * 已建行时行与定义一一对应，仍按行判（行会顺带把压暗落到自己的控件上）。
+     * <p>行与定义里的键一一对应（见 {@link #buildRows}），故收起态与展开态用的是同一份判据、
+     * 同一批行：徽标在收起态照样是对的（行会顺带把压暗落到自己的控件上）。
      */
     void refreshBadges() {
         int unsatisfied = 0;
         for (ConfigKeyRow row : rows) {
             if (row.refreshDependencyState()) {
-                unsatisfied++;
-            }
-        }
-        for (KeyMeta meta : unbuiltKeyMetas()) {
-            if (ConfigKeyRow.isDependencyUnsatisfied(meta, host)) {
                 unsatisfied++;
             }
         }
@@ -192,17 +185,12 @@ final class ConfigGroupBinder {
         }
     }
 
-    /** 还没建行的键：行是全建或全不建（见 {@link #buildRows()}），故一个都没建时就是全部。 */
-    @NonNull
-    private List<KeyMeta> unbuiltKeyMetas() {
-        return rowsBuilt ? Collections.emptyList() : keyMetas;
-    }
-
-    /** 展开/折叠本组。构造时默认折叠（长列表先看分组名），设置页只此一组故由调用方改为默认展开。 */
+    /**
+     * 展开/折叠本组：只切可见性（行在构造时已建满，见 {@link #buildRows}）。
+     *
+     * <p>构造时默认折叠（长列表先看分组名），设置页只此一组故由调用方改为默认展开。
+     */
     void setExpanded(boolean value) {
-        if (value) {
-            buildRows();   // 首次展开才建本组键行（懒建）
-        }
         expanded = value;
         body.setVisibility(value ? View.VISIBLE : View.GONE);
         divider.setVisibility(value ? View.VISIBLE : View.GONE);
@@ -213,15 +201,11 @@ final class ConfigGroupBinder {
     }
 
     /**
-     * 建本组键行（只建一次）。行建起来时用 {@link ConfigKeyRow.Host#diskValue} 回填当前值——
-     * 懒建下这是行取值的唯一入口（建表单时行还不存在，宿主的值循环覆盖不到它们）；
-     * 回填后刷新徽标，让压暗与卡头汇总一并对齐。
+     * 建本组键行（构造时一次建满，收起态也留着）。建起来时用 {@link ConfigKeyRow.Host#diskValue}
+     * 回填当前值——建表单时宿主的值循环还没跑，行要先拿到自己的值；回填后刷新徽标，
+     * 让压暗与卡头汇总一并对齐。
      */
     private void buildRows() {
-        if (rowsBuilt) {
-            return;
-        }
-        rowsBuilt = true;
         for (KeyMeta meta : keyMetas) {
             ConfigKeyRow row = ConfigKeyRow.create(inflater, body, meta, host, uiOnly);
             body.addView(row.view());

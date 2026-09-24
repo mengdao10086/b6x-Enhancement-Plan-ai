@@ -1,16 +1,17 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!--
     一个输入字段（int 键一个，multi 键每个字段一个）。两种形态按定义里的 fields[].bool 二选一：
-      布尔字段 → config_field_switch_row（字段名 + 开关，与其它输入框同高感、行内垂直居中）
+      布尔字段 → config_field_switch_row（字段名 leading + 开关 trailing，与其它输入框同高感）
       数值字段 → config_field_layout（label 作 hint、单位与范围作下方灰字）
-    下方灰字整行折行，长单位（如"制冷强度档位（0~194 硬件原始档位值）"）不会被后缀挤压输入框。
+    下方灰字整行折行：多值键里它跟着自己的输入框，长单位（如"制冷强度档位（0~194 硬件原始档位值）"）
+    不会被后缀挤压输入框；单值键的这份说明由 ConfigKeyRow 移到行级、按整行宽折行。
 
-    宽度不写死：ConfigKeyRow 量出像素宽再回写 layout_width（见 ConfigKeyRow#refitFieldWidths），
-    宽只认说明与内容（无下限、无上限），装不下由 FlowWrapLayout 换行；这里给 wrap_content
-    只是"未被回写时"的兜底。高度写死 @dimen/field_height：Material OutlinedBox 默认高约 56dp，
-    不给死压不下来。
+    宽度不写死：ConfigKeyRow 用输入框自己的画笔量出像素宽再回写 layout_width
+    （见 ConfigKeyRow#measuredFieldWidth），宽只认说明与内容，装不下由外层容器换行；
+    这里给 wrap_content 只是"未被回写时"的兜底。path 键的字段由 ConfigKeyRow 回写成吃满行尾。
+    高度写死 @dimen/field_height：Material OutlinedBox 默认高约 56dp，不给死压不下来。
 
-    内层 EditText（宽度由 ConfigKeyRow 回写，高度撑满整框）：
+    内层 EditText（宽度跟随框）：
       · 说明（浮起提示）贴圆角、值仍居中：浮起说明的位置由 material 两处决定——
         可用框 = [框左 + editText.getPaddingLeft(), 框右 − editText.getPaddingRight()]
         （TextInputLayout.calculateCollapsedTextBounds 的 OUTLINED 分支），框内对齐取其水平分量
@@ -19,18 +20,16 @@
         圆角半径 @dimen/field_radius 刚结束处，不再像 gravity="center" 那样被居中、两头都留白
         （框越宽留白越多）。「值」的水平居中改由 android:textAlignment="center" 承担
         （只决定文本行对齐，不进 getGravity()），两者互不牵动。
-        说明可用宽 = 框宽 − 左右内边距，装不下时 material 打省略号——框宽由 ConfigKeyRow 按
-        「说明宽 / 内容宽取大者」实测定下（见 ConfigKeyRow#naturalFieldWidth），说明那一侧另加
-        @dimen/config_hint_slack(1dp) 的防截断安全量。
+        说明可用宽 = 框宽 − 左右内边距，装不下时 material 打省略号——故 ConfigKeyRow 按
+        「说明文字宽 / 内容文字宽取大者」量出框宽，说明那一侧另加 @dimen/config_hint_slack(1dp)
+        的防截断安全量。
       · 左右内边距压到 @dimen/field_radius(8dp)：M3 默认 16dp，收掉的那 8dp 全给可用内容宽，
         圆角 8dp 之外不再留空白。它同时就是上面那个说明可用框的内缩量（8dp = 圆角半径），
         所以这 8dp 再压就会让说明压到圆角上，不能动。
       · 上下内边距不对称（上 @dimen/config_field_pad_top 5dp / 下 @dimen/config_field_pad_bottom 2dp）：
         EditText 高度 match_parent + 垂直居中 → 正文是在"去掉内边距后的内容区"（36 − 5 − 2 = 29dp）
         里居中的，内边距只决定内容区的高与它的中心。行盒（16sp 约 18.75dp）中心 = (5 + 34) / 2 = 19.5dp：
-        比框的几何中心（18dp，参数名盒所在）低 1.5dp = (5 − 2) / 2、比「说明下沿(9.375，说明行盒骑在框顶
-        边上的一半高) → 框底(36)」的中点 22.7dp 高 3.2dp，行盒顶 10.125dp / 底 28.875dp。
-        算式、留白与"余量最薄处"见 @dimen/config_field_pad_top。
+        比框的几何中心（18dp）低 1.5dp = (5 − 2) / 2。算式、留白与"余量最薄处"见 @dimen/config_field_pad_top。
       · scrollHorizontally：等于 setHorizontallyScrolling(true)——单行横向滚动的开关。不开时
         Layout 宽 == 视图宽，scrollX 恒为 0，path 键放不下的右半段（文件名）永远看不见。
         不用已废弃的 singleLine：它顺带改掉 maxLines 之外的行为，这里只需要横向可滚。
@@ -41,16 +40,14 @@
     android:layout_height="wrap_content"
     android:orientation="vertical">
 
-    <!-- 字段名 + 开关也用流式容器：本键行内放不下时开关换到下一行（不跨键合并）。
-         高度取 minHeight @dimen/field_height：单行时与同一键里的输入框等高、行内对齐；
-         换行后由内容撑高（定高会把这第二行裁掉；FlowWrapLayout 已支持 minHeight） -->
-    <com.example.waspwingtempctrl.ui.FlowWrapLayout
+    <!-- 字段名 + 开关也走换行容器：字段名 leading、开关 trailing（贴字段右界）。
+         高度取 minHeight @dimen/field_height：与同一键里的输入框等高；
+         换行后由内容撑高（定高会把第二行裁掉，WrapRowLayout 已把 minHeight 并进测量） -->
+    <com.example.waspwingtempctrl.ui.WrapRowLayout
         android:id="@+id/config_field_switch_row"
         android:layout_width="wrap_content"
         android:layout_height="wrap_content"
-        android:gravity="center_vertical"
         android:minHeight="@dimen/field_height"
-        android:orientation="horizontal"
         android:visibility="gone">
 
         <TextView
@@ -67,8 +64,9 @@
             android:layout_marginStart="@dimen/space_xs"
             android:layout_marginEnd="@dimen/switch_trim_end"
             android:scaleX="0.75"
-            android:scaleY="0.75" />
-    </com.example.waspwingtempctrl.ui.FlowWrapLayout>
+            android:scaleY="0.75"
+            app:wrapTrailing="true" />
+    </com.example.waspwingtempctrl.ui.WrapRowLayout>
 
     <com.google.android.material.textfield.TextInputLayout
         android:id="@+id/config_field_layout"
@@ -99,9 +97,9 @@
             android:textSize="@dimen/config_field_text_size" />
     </com.google.android.material.textfield.TextInputLayout>
 
-    <!-- 字段说明（单位 / 范围）。宽度取字段宽：多字段键里跟着自己的输入框，才看得出属于哪个字段。
-         单字段键（int / path / 单字段 multi）由 ConfigKeyRow 把它挂到行级，按整行宽折行——
-         框宽只由该字段的说明与内容决定（短说明的框很窄），长说明留在框里要折 4~5 行、整块被顶高。
+    <!-- 字段说明（单位 / 范围）。多值键里跟着自己的输入框，才看得出属于哪个字段；宽度取字段宽。
+         单值键（int / path / 单字段 multi）由 ConfigKeyRow 把它挂到行级、按整行宽折行——
+         框宽只由该字段的说明与内容决定（短说明的框很窄），长说明留在框里要折四五行的独立一列。
          左内边距不再动：8dp 是"内容可用宽扩到圆角刚结束"的既有口径（见上面 EditText 那条）。 -->
     <TextView
         android:id="@+id/config_field_note"

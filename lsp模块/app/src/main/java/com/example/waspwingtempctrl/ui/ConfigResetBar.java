@@ -4,7 +4,6 @@ import android.content.Context;
 import android.view.LayoutInflater;
 import android.view.View;
 import android.view.ViewGroup;
-import android.widget.LinearLayout;
 
 import androidx.annotation.NonNull;
 import androidx.appcompat.app.AlertDialog;
@@ -76,7 +75,8 @@ final class ConfigResetBar {
 
     private final Host host;
     private final View card;
-    private final LinearLayout buttons;
+    /** 按钮容器（view_config_reset_bar.xml 的 config_reset_buttons）：按钮都是普通子视图，不必声明任何换行标记。 */
+    private final WrapRowLayout buttons;
 
     static ConfigResetBar create(@NonNull LayoutInflater inflater, @NonNull ViewGroup parent,
                                  @NonNull Host host) {

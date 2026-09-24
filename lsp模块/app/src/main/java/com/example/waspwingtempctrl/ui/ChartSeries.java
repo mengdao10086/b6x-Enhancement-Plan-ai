@@ -69,7 +69,7 @@ final class ChartSeries {
     }
 
     /**
-     * 图例是否在该条之前另起一行（经 {@link FlowWrapLayout#setBreakBefore} 施加）。
+     * 图例是否在该条之前另起一行（经 {@link WrapRowLayout#setBreakBefore} 施加）。
      *
      * <p>{@code true} 的是「冷端℃ / CPU℃」这一行——两条<b>可选</b>温度传感器，与第一行的
      * 电池/制冷/风扇/热端不是一类；默认关闭（见 {@link #createAll}），排到第二行后图例不再

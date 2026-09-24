@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    WrapRowLayout 的自定义属性。单独成文件（不并进通用的 attrs.xml）：本仓库资源按用途分文件，
+    该控件的属性放在同名文件里，归属一眼可见。
+    容器自己的属性（列距/行距）在 WrapRowLayout 下；子视图的换行标记在 WrapRowLayout_Layout 下
+    （按 Android 惯例，"_Layout" 后缀的那份正是 generateLayoutParams(attrs) 读的那组）。
+-->
+<resources>
+
+    <declare-styleable name="WrapRowLayout">
+        <!--
+            行距（上下两行之间的间距）。缺省 = 列距，即不写该属性时行为与从前一致。
+            存在的意义：图例要把两行之间的间距压到远小于列距，而列距、行内边距都要保持不变，
+            没有这个属性就只能整块换掉容器或用空格凑间距。
+        -->
+        <attr name="wrapRowGap" format="dimension" />
+        <!-- 列距（同一行内相邻子视图之间，含尾段内部）。缺省 = 标尺 space_m（12dp）。 -->
+        <attr name="wrapColGap" format="dimension" />
+    </declare-styleable>
+
+    <declare-styleable name="WrapRowLayout_Layout">
+        <!-- 尾段：与相邻的尾段成员一起整体贴行右界。 -->
+        <attr name="wrapTrailing" format="boolean" />
+        <!-- 独占一行且铺满可用宽。 -->
+        <attr name="wrapFullLine" format="boolean" />
+        <!-- 其之前强制换行。 -->
+        <attr name="wrapBreakBefore" format="boolean" />
+    </declare-styleable>
+</resources>

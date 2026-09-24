@@ -4,7 +4,7 @@
     按钮由 ConfigResetBar 按 store.groups() 逐个生成（一个分组一个按钮），本文件只给容器：
     分组数量与组名都不在这里手抄，改定义不必改本文件。
     卡片样式来自主题 materialCardViewStyle（Widget.B6XTempCtrl.Card），本文件不写死颜色/圆角。
-    按钮容器用 FlowWrapLayout：分组名在窄屏一行放不下，靠它自动换行（列距固定 @dimen/space_m，
+    按钮容器用 WrapRowLayout：分组名在窄屏一行放不下，靠它自动换行（列距固定 @dimen/space_m，
     行距单独收到 @dimen/space_s —— 按钮之间的行距小于参数行之间的间距更紧凑）。
     标题到按钮组只有这一段间距，由按钮组的 marginTop 独自承担，取 space_s(8dp)：
     原先中间夹着一行说明时，说明的 marginTop(space_xs 4dp) 与按钮组的 marginTop 各管一段，
@@ -34,11 +34,11 @@
             android:text="@string/config_reset_title"
             android:textAppearance="@style/TextAppearance.B6XTempCtrl.SectionTitle" />
 
-        <com.example.waspwingtempctrl.ui.FlowWrapLayout
+        <com.example.waspwingtempctrl.ui.WrapRowLayout
             android:id="@+id/config_reset_buttons"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:layout_marginTop="@dimen/space_s"
-            app:flowRowGap="@dimen/space_s" />
+            app:wrapRowGap="@dimen/space_s" />
     </LinearLayout>
 </com.google.android.material.card.MaterialCardView>

@@ -43,15 +43,7 @@
 
 **状态**：**根因已定位（仓库名），漏报问题未解决**（2026-09-22）。
 
-### 3. `FlowWrapLayout` 的换行标记持强引用，容器清空后不清理（2026-09-21 记录）
-
-**背景**：`setFullLine` / `setBreakBefore` 把子视图存进两个 `List<View>`（独占行、另起一行），只在显式传 `false` 时才移除。调用方若先 `removeAllViews()` 再重建（曲线页图例 `buildLegend()` 就是这种写法），被移除的旧视图仍被列表持有。
-
-**影响**：曲线图例当前每页只构建一次，不构成实际累积；一旦出现「同一容器重复重建」的调用，旧视图不会被回收，判定里也会留下无关键。
-
-**状态**：**未解决**（已知小账。最小改法：覆写 `removeAllViews()` 或利用 `ViewGroup#onViewRemoved`，两处列表一并清理）。
-
-### 4. 四项已知缺陷与有意取舍（2026-09-20 记录；原 `待办.md` §已知未修，按归口迁入）
+### 3. 四项已知缺陷与有意取舍（2026-09-20 记录；原 `待办.md` §已知未修，按归口迁入）
 
 - **`profile.conf.tmp` 卸载残留** — **已裁定不做**：`ConfigStore.writeAtomic()` 的同目录临时文件，仅在写配置途中被强杀或掉电时残留（约 2KB），卸载不清。修法是在 `Deployer.cleanPrivateRuntime()` 的清单里加一项，但该函数 `impact` 为 **HIGH**（从 `StatusFragment` 的卸载按钮可达），收益近零。
 - **`tempctrl_last_dev` 在卸载时无法清理** — **设计约束，非遗漏**：它写在**宿主 app 自己的私有目录**里，而 `MainHook` 运行在飞智 app 的 uid 下，我们的 APK 无权限去删别的 app 的私有文件。
@@ -172,5 +164,13 @@ Caused by: java.lang.NullPointerException: Attempt to read from field 'android.o
 **原因**：「拉起daemon」改为**先停再起**后，"已在运行"不再是跳过拉起的理由，`isRunning()` 作为前置拦截的唯一调用点随之删除；此后它一直是零调用者的公开 API，「状态展示将来可能复用」的保留理由未成立。
 
 **解决思路**：删前做三重确证——全仓 grep（含无点前缀的调用形式）0 命中、两版索引交叉、GitNexus `impact` 报 0 受影响符号。同批还删掉同类的 `Deployer.readAll(File)`（`ui/ChartConfig.java:185` 的 `readAll(InputStream)` 是**同名活方法**，未碰）。
+
+**状态**：**已解决（2026-09-24）**。
+
+### 7. `FlowWrapLayout` 的换行标记持强引用，容器清空后不清理（2026-09-21 记录，2026-09-24 随容器重写消除）
+
+**原因**：`setFullLine` / `setBreakBefore` 把子视图存进两个 `List<View>`（独占行、另起一行），只在显式传 `false` 时才移除；调用方若先 `removeAllViews()` 再重建（曲线页图例正是这种写法），被移除的旧视图仍被列表持有。
+
+**解决思路**：不修旧类而是**整体替换**——配置页与曲线图例改用新容器 `ui/WrapRowLayout`，换行标记改存在**子视图自己的 `LayoutParams`** 上（`trailing` / `fullLine` / `breakBefore` / 垂直对齐偏移），实例字段只剩两个间距值，不再持有任何子视图引用，标记随视图一起被回收。旧容器与配套的 `attrs_flow_wrap.xml` 已删除；配置行不再靠负外边距与 layout 回调修正几何，换行判据全项目只剩容器里一份。
 
 **状态**：**已解决（2026-09-24）**。

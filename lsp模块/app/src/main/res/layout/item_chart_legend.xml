@@ -9,7 +9,7 @@
     setButtonDrawable 并跳过 android:button，且它在框架构造函数之后执行，最后落地的就是这份 drawable。
     默认走 Material 复选行的 48dp 触控高，6 项在窄屏会摊成三行、占掉一大块曲线区；
     这里与图例的"轻量开关"定位一致。本项不决定自己落在哪一行：图例的行首（冷端℃/CPU℃ 固定
-    另起第二行）由 ChartSeries#startsLegendRow 经 FlowWrapLayout#setBreakBefore 施加，
+    另起第二行）由 ChartSeries#startsLegendRow 经 WrapRowLayout#setBreakBefore 施加，
     见 fragment_chart.xml 的 ② 段。不再与档位按钮共用尺寸：档位按钮另有
     chart_window_button_height(21dp)，两者已解耦。
     颜色由勾选框自己的 buttonTint（M3 样式的 m3_checkbox_button_tint）着色，两态自动跟深浅色主题；
