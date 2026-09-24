@@ -372,6 +372,16 @@ static time_t last_arbitrate = 0;       // 上次 app 存活仲裁时间（ARBIT
 static int app_launch_cooldown = 60;    // APP_LAUNCH_COOLDOWN：两次拉起最小间隔（秒，默认 60）
 static int app_launch_screen_gate_enabled = 1;  // APP_LAUNCH_SCREEN_GATE 第一值：屏幕门禁开关
 static int app_launch_screen_dozing_on  = 0;    // 第二值：Dozing 是否算亮屏（默认 0）
+static time_t last_probe_off_at = 0;     // 上次确认息屏（并完成屏检）的时刻：息屏退避锚点，见 APP_LAUNCH_PROBE_OFF_INTERVAL
+static int last_screen_off = 0;          // 上次观察到的屏幕状态：1=息屏（含按配置算灭的 Dozing），0=亮屏/未知。初值=亮屏
+
+// 息屏时整条探测链的最小间隔（秒，硬编码常量，不是配置键）。
+// 用户拍板值 10s：屏灭时探测链注定下发不了（屏幕门禁会拦），却每轮仍要付 pm 冷启动 + 全量 /proc 扫描，
+// 外加一次 is_screen_awake()（popen 一次起 sh+dumpsys+awk 三个进程，dumpsys power 的活还在 system_server
+// 里干）—— 屏检本身就在整条链最贵之列，故退避必须连屏检一起节流，否则最贵的一环一次没省。
+// 亮屏节奏不变（仍由调用方 5s 一轮驱动）。
+// 不做成配置键：新增键要连带动 params.def.json → 生成头文件 → profile.conf → 界面，超出本次修改范围。
+#define APP_LAUNCH_PROBE_OFF_INTERVAL 10
 
 // --- 界面开关转写（UI_BACK_HIDE）---
 // 界面与 Xposed 钩子分属两个进程、不共享内存：本机不消费该值，只把它写进一个双方都能访问的文件，
@@ -1819,9 +1829,53 @@ static int run_cmd_silent(const char *fmt, const char *arg) {
     return system(cmd);
 }
 
-/** 判断指定包名是否已安装（pm path 有输出即已安装） */
+/**
+ * 包安装状态实时探测（走 pm path）。
+ * 返回：1=已安装、0=未安装（pm 明确报包不存在）、-1=无法判定（命令没跑起来）。
+ * 每次调用都要 fork+exec 一次 pm（ART 冷启动，约 100~300ms，同 is_foreground_pkg 处 dumpsys 量级），
+ * 故探测链上不要直接调用本函数，一律走带缓存的 app_installed()；只有需要实时结论的宿主卸载探测才直接用它。
+ */
+static int app_installed_probe(const char *pkg) {
+    int st = run_cmd_silent(PM_BIN " path %s > /dev/null 2>&1", pkg);
+    if (st == 0) return 1;
+    // system() 返回的是 wait 状态而不是退出码：-1=fork/exec 失败；WIFEXITED 假=进程被信号杀死（pm 没跑完）；
+    // 退出码 126=无执行权限、127=shell 找不到 pm。这三类都是「命令跑不起来」的环境故障，不是「未安装」。
+    if (st == -1 || !WIFEXITED(st) || WEXITSTATUS(st) == 126 || WEXITSTATUS(st) == 127) return -1;
+    return 0;   // pm 正常退出且非 0 → 包确实不存在
+}
+
+// —— 包安装状态缓存 ——
+// 生命周期：进程启动时为空，随本进程（≈一次开机周期）一直有效，不设过期、不做失效机制。
+//   理由：包安装状态在一次开机周期内极少变化 —— 用户重装 APK 时包名不变、结论依旧成立；
+//   卸载（罕见）最多让缓存多留一条过期结论，也不会导致误拉起（拉起前还有「已安装」与「未运行」两道门）。
+//   可清理性：无落盘、无配置项，不需要清理；重启 daemon 或重启设备即回到实时探测。
+// 不缓存的情形：无法判定（probe 返回 -1）—— 那是环境故障，缓存住会把故障固化到下次开机。
+#define INSTALL_CACHE_SLOTS 3   // 探测链只会问这三个包（老/新 B6X app、farsef），容量取 3
+static const char *install_cache_pkg[INSTALL_CACHE_SLOTS];   // 缓存键：包名指针（调用方传入的都是 #define 字面量，静态存储期；若将来传栈上缓冲须改为拷贝）
+static int install_cache_val[INSTALL_CACHE_SLOTS];           // 缓存值：1=已确认安装，0=已确认未安装
+static time_t install_cache_at[INSTALL_CACHE_SLOTS];         // 结论写入时间（唯一用途：表满时挑最旧一条淘汰）
+static int install_cache_used = 0;                           // 已用槽数（0..INSTALL_CACHE_SLOTS）
+
+/** 判断指定包名是否已安装（带缓存：同一包名在一次开机周期内只 fork 一次 pm） */
 static int app_installed(const char *pkg) {
-    return (run_cmd_silent(PM_BIN " path %s > /dev/null 2>&1", pkg) == 0);
+    for (int i = 0; i < install_cache_used; i++)
+        if (strcmp(install_cache_pkg[i], pkg) == 0) return install_cache_val[i];
+
+    int r = app_installed_probe(pkg);
+    if (r < 0) return 0;   // 无法判定：沿用加缓存前的语义按「未安装」返回（由调用方日志暴露），但不写缓存
+
+    int slot = install_cache_used;
+    if (slot >= INSTALL_CACHE_SLOTS) {   // 表满：淘汰最旧一条，保证表长有界
+        slot = 0;
+        for (int i = 1; i < INSTALL_CACHE_SLOTS; i++)
+            if (install_cache_at[i] < install_cache_at[slot]) slot = i;
+    } else {
+        install_cache_used++;
+    }
+    install_cache_pkg[slot] = pkg;
+    install_cache_val[slot] = r;
+    install_cache_at[slot]  = time(NULL);
+    return r;
 }
 
 /**
@@ -1869,13 +1923,44 @@ static int am_start_app(const char *pkg) {
  * 目标 B6X app 未安装时回退另一个 B6X app。
  * 拉起用 am start（显式 launcher 组件 -n）+ b6x_auto_launch 标志（LSP 读到后连接完成自动后台化，几乎无感）。
  * 仅在 APP_LAUNCH_ENABLED=1 且目标 app 已安装、未运行时执行。
+ *
+ * @param pkg_known_dead 调用方是否已确认「本轮候选目标进程必定不存在」：
+ *   1 = 已确认 —— arbitrate_apps 刚在同一轮用三包合并扫描确认三方 app 全灭，而候选目标必是这三者之一
+ *       （resolve_launch_pkg 只会返回 APP_PKG_B6X_OLD/NEW/B7X）。此时内部不再重复一次全量 /proc 扫描。
+ *   0 = 无此已知信息（断连分支）→ 内部自行单包扫描。
  */
-static void launch_last_app(void) {
+static void launch_last_app(int pkg_known_dead) {
     time_t now = time(NULL);
     if (now - last_launch_attempt < app_launch_cooldown) return;   // 冷却节流（仅在真正 am start 前记录尝试）
     if (!APP_LAUNCH_ENABLED) {
         debug_log(debug_launch, "自动拉起 开关关闭，跳过");
         return;
+    }
+
+    // —— 屏幕门禁 + 息屏退避（APP_LAUNCH_SCREEN_GATE）——
+    // 位置前移到最贵的一环（pm 冷启动、全量 /proc 扫描）之前：屏灭时本链注定下发不了（门禁会拦），
+    // 却每轮仍要付 1~3 次 pm + 一次全量扫描 + 日志，是断联期探测风暴的主因。
+    // 屏幕状态只取一次，退避与门禁共用 —— 屏检一次起 3 个进程，是本链最贵的一环之一，不可为退避再取一次。
+    // 门禁关闭时不进本块：那时屏灭也允许下发，退避只会把真实下发推迟最多 10s，且要多付一次屏检。
+    if (app_launch_screen_gate_enabled) {
+        // 息屏退避闸门（用户拍板 10s）：上次已判定息屏且未到间隔 → 本次连屏检都不做，
+        // 不打日志、什么都不做。否则 10s 只能砍掉一行 debug，最贵的屏检照旧每 5s 一次。
+        if (last_screen_off && now - last_probe_off_at < APP_LAUNCH_PROBE_OFF_INTERVAL) return;
+
+        int sc = is_screen_awake();
+        if (sc == 2) sc = app_launch_screen_dozing_on ? 1 : 0;   // Dozing 按配置是否算亮屏（默认 0=算灭）
+        if (sc < 0) sc = 1;                                      // 读取失败一律按可拉起兜底（防探测坏掉后永久不拉起）
+        if (sc != 1) {
+            // 息屏：记下锚点与「上次已知息屏」，此后每 APP_LAUNCH_PROBE_OFF_INTERVAL 秒只留一次屏检复核
+            //（不屏检就永远发现不了屏幕已变亮），中间各轮全部在上一道闸门被挡掉 —— 省掉的是整条链，含屏检。
+            // 代价（必须知道，不绕开）：息屏→亮屏最长滞后 APP_LAUNCH_PROBE_OFF_INTERVAL 秒（从前 ≤5s），
+            // 故息屏期间若散热器 app 被系统回收，自动拉起最晚 10s 后才开始 —— 这是「息屏 10s」的必然代价。
+            last_screen_off = 1;
+            last_probe_off_at = now;
+            debug_log(debug_launch, "自动拉起 屏幕未亮（mWakefulness 非 Awake），本周期跳过");
+            return;
+        }
+        last_screen_off = 0;   // 屏检确认亮屏（含 -1 兜底）→ 恢复每轮一次屏检，节奏与改动前完全一致
     }
 
     const char *pkg = resolve_launch_pkg();
@@ -1884,20 +1969,11 @@ static void launch_last_app(void) {
         write_log("自动拉起 目标 app 未安装 %s", pkg);
         return;
     }
-    int pkg_alive = 0;
-    app_process_scan(&pkg, &pkg_alive, 1);   // 单包扫描（复用合并遍历逻辑）
-    if (pkg_alive) {
-        debug_log(debug_launch, "自动拉起 目标已在运行 %s，跳过", pkg);
-        return;
-    }
-
-    // 屏幕状态门禁（APP_LAUNCH_SCREEN_GATE）：仅 mWakefulness=Awake 才拉起；屏灭跳过本周期（下一 5s 重试）
-    if (app_launch_screen_gate_enabled) {
-        int sc = is_screen_awake();
-        if (sc == 2) sc = app_launch_screen_dozing_on ? 1 : 0;   // Dozing 按配置是否算亮屏（默认 0=算灭）
-        if (sc < 0) sc = 1;                                      // 读取失败一律按可拉起兜底（防探测坏掉后永久不拉起）
-        if (sc != 1) {
-            debug_log(debug_launch, "自动拉起 屏幕未亮（mWakefulness 非 Awake），本周期跳过");
+    if (!pkg_known_dead) {   // 有已知「已全灭」结论时跳过本次单包扫描
+        int pkg_alive = 0;
+        app_process_scan(&pkg, &pkg_alive, 1);   // 单包扫描（复用合并遍历逻辑）
+        if (pkg_alive) {
+            debug_log(debug_launch, "自动拉起 目标已在运行 %s，跳过", pkg);
             return;
         }
     }
@@ -2010,7 +2086,8 @@ static void arbitrate_apps(void) {
 
     // 无任何散热器 app 存活 → 自动拉起上次使用的 app（复用下方 keep 的选择逻辑，冷却节流）
     if (old_alive + new_alive + far_alive == 0) {
-        launch_last_app();
+        // 传 1：上面那次三包合并扫描刚确认三方 app 全灭，候选目标必是这三者之一 → 内部免去重复的全量 /proc 扫描
+        launch_last_app(1);
         return;
     }
 
@@ -2491,7 +2568,7 @@ static int    host_probe_gone = 0;   // 上次二级探测结论：1=包已不�
  *     （files/ 内容），父目录 /data/data/<包名> 由系统保留 → 可抗"清除数据"误判。
  *     该代价已记录在 逻辑说明.md 的「参数落点」注记处（清除数据会清掉私有目录产物）。
  *     每轮可跑、零成本。
- *   二级 app_installed(HOST_PKG)（走 pm path）—— 一级命中后才跑，且按 HOST_PROBE_INTERVAL
+ *   二级 app_installed_probe(HOST_PKG)（走 pm path，实时不缓存）—— 一级命中后才跑，且按 HOST_PROBE_INTERVAL
  *     节流（fork+exec pm 的开销不能进每轮热路径）。
  * 再叠「连续 HOST_CONFIRM_HITS 次命中才判真」：单次 stat 失败可能来自瞬时挂载抖动、
  * app 正在被 installd 重装（目录短暂消失）等瞬态，连续两次（间隔 ≥5s 一轮）可滤掉。
@@ -2507,7 +2584,10 @@ static int host_app_uninstalled(void) {
     time_t now = time(NULL);
     if (now - host_probe_at >= HOST_PROBE_INTERVAL) {
         host_probe_at = now;
-        host_probe_gone = app_installed(HOST_PKG) ? 0 : 1;
+        // 走实时探测而非缓存版：卸载自清理需要在同一次开机内看到安装状态变化，缓存对它只有风险没有收益
+        // （本处自带 HOST_PROBE_INTERVAL 节流，不在热路径上）。「== 1」与加缓存前的 app_installed() 真值等价：
+        // 无法判定（命令跑不起来）时同样按「已不注册」处理，由连续 HOST_CONFIRM_HITS 次命中叠加过滤瞬态。
+        host_probe_gone = (app_installed_probe(HOST_PKG) == 1) ? 0 : 1;
     }
     if (!host_probe_gone) {
         // 目录不在但包仍注册（重装过程中、多用户数据目录尚未创建等）→ 不判真
@@ -3050,7 +3130,8 @@ int main(int argc, char *argv[]) {
                     last_disconnect_time = time(NULL);   // 断联起点（重连汇总行用）
                     write_log("%s 连接丢失", device_tag_of(active_device));
                 }
-                launch_last_app();   // 断联时也尝试拉起散热器 app（无 app 存活时真正拉起；存活时 debug 提示）
+                launch_last_app(0);   // 断联时也尝试拉起散热器 app（无 app 存活时真正拉起；存活时 debug 提示）
+                                      // 传 0：本处无「已确认全灭」的已知结论，由内部自行单包扫描
                 app_was_alive = 0;  // 复活后走 reconnect_align 重新对齐实际值
                 continue;
             }

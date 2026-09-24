@@ -5,3 +5,5 @@
 local.properties
 *.iml
 .idea/
+# 侦察/审查结论的落盘目录（只给 agent 之间传结论用，不进版本库）
+.claude/scratch/

@@ -1,0 +1,47 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    布尔字段（multi 键里 fields[].bool 为真的字段）。定义里的字段按 bool 二选一，本文件是其中一路，
+    数值字段那一份在 item_config_field.xml（由 ConfigKeyRow#addBoolField / #addField 各取一份）：
+    两份只差"字段里放什么控件"，字段宽与说明的口径则各管各的——
+    布尔字段没有输入框，ConfigKeyRow 不为它回写宽度、也不挂单位-范围说明（见 ConfigKeyRow#addBoolField）。
+
+    字段名 leading + 开关 trailing（贴字段右界）。
+    高度取 minHeight @dimen/field_height：与同一键里的输入框等高；
+    换行后由内容撑高（定高会把第二行裁掉，WrapRowLayout 已把 minHeight 并进测量）。
+    开关自己也必须定高：库样式里的 minHeight 是触控尺寸 48dp，光靠容器 minHeight 挡不住，
+    开关会把本行撑到 48dp——理由与键行开关同一份，见 item_config_key_switch.xml 头部注释。
+
+    容器上的 visibility="gone" 由 ConfigKeyRow 挂上后置 VISIBLE。
+-->
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
+    android:layout_width="wrap_content"
+    android:layout_height="wrap_content"
+    android:orientation="vertical">
+
+    <com.example.waspwingtempctrl.ui.WrapRowLayout
+        android:id="@+id/config_field_switch_row"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:minHeight="@dimen/field_height"
+        android:visibility="gone">
+
+        <TextView
+            android:id="@+id/config_field_switch_label"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:textColor="@color/app_on_surface"
+            android:textSize="@dimen/text_body" />
+
+        <com.google.android.material.materialswitch.MaterialSwitch
+            android:id="@+id/config_field_switch"
+            android:layout_width="wrap_content"
+            android:layout_height="@dimen/field_height"
+            android:layout_marginStart="@dimen/space_xs"
+            android:layout_marginEnd="@dimen/switch_trim_end"
+            android:gravity="center_vertical"
+            android:scaleX="0.75"
+            android:scaleY="0.75"
+            app:wrapTrailing="true" />
+    </com.example.waspwingtempctrl.ui.WrapRowLayout>
+</LinearLayout>

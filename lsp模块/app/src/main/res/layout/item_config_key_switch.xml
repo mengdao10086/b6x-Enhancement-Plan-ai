@@ -1,0 +1,34 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    switch 型键的键内开关，也是这一类键行尾段里唯一的成员。与输入框 / 字段同属"键内控件"：
+    由 ConfigKeyRow 建好后挂到行尾段上（addToTail + setTrailing，见 ConfigKeyRow.SwitchRenderer），
+    不常驻 item_config_row.xml —— 非开关键行（int / multi / path / enum）因此不再白建一个 MaterialSwitch。
+
+    开关的负 end 外边距是"把缩放 0.75 后墨迹两侧的空白还出去"（见 @dimen/switch_trim_end）：
+    尾段右对齐算的是含外边距的宽，负的 end 外边距让开关的墨迹正好贴行尾。
+
+    开关的高度不写 wrap_content：M3 的 MaterialSwitch 样式里 android:minHeight=?attr/minTouchTargetSize
+    （48dp）是"触控尺寸"，会把开关键行撑到 48dp——比只有输入框的行（@dimen/field_height 36dp）高出一截。
+    定高 @dimen/field_height 与输入框同高；轨道本体 32dp、缩放 0.75 后墨迹 24dp，定高不裁切。
+    android:gravity="center_vertical" 是同一件事的另一半：SwitchCompat 按 gravity 落轨，缺省（TOP）
+    会把轨道停在盒顶，缩放后墨迹落到盒中心上方约 1.5dp；写了才与行中心同心（也与参数名同轴）。
+    这条"MaterialSwitch 定高 @dimen/field_height + gravity 居中"的口径对全项目的开关都成立，
+    字段里的布尔开关同此（见 item_config_field_switch.xml 头部注释）。
+
+    app:wrapTrailing="true" 是尾段标记（标记的读出机制见 WrapRowLayout 类注释；本文件是独立布局，
+    没有"行 XML 的子标签"这一层，故标记写在这里与写在行里等价）。
+    visibility 缺省 GONE，由 ConfigKeyRow 挂上后置 VISIBLE。
+-->
+<com.google.android.material.materialswitch.MaterialSwitch
+    xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
+    android:id="@+id/config_key_switch"
+    android:layout_width="wrap_content"
+    android:layout_height="@dimen/field_height"
+    android:layout_marginStart="@dimen/space_xs"
+    android:layout_marginEnd="@dimen/switch_trim_end"
+    android:gravity="center_vertical"
+    android:scaleX="0.75"
+    android:scaleY="0.75"
+    android:visibility="gone"
+    app:wrapTrailing="true" />

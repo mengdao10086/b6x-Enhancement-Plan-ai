@@ -70,6 +70,14 @@ final class LogClassifier {
     private static final String DEBUG_PREFIX = "[DEBUG]";
     private static final String PID_PREFIX = "[PID]";
 
+    /**
+     * 上面两个前缀的小写形：{@link #classify} 拿的是整行小写后的串来比对，故这里只留小写形。
+     * 类初始化时算一次即可 —— 写成字段而不是在方法里调 {@code toLowerCase}，是为了不让每行都
+     * 现造两个 String（{@code String.toLowerCase} 不是编译期常量表达式，JIT 也不会替你折叠）。
+     */
+    private static final String DEBUG_PREFIX_LOWER = DEBUG_PREFIX.toLowerCase(Locale.ROOT);
+    private static final String PID_PREFIX_LOWER = PID_PREFIX.toLowerCase(Locale.ROOT);
+
     /** C 端时间戳行首格式（tempctrl.c 的 write_log() 所拼）：{@code [DD HH:MM:SS] }。 */
     private static final Pattern TIMESTAMP = Pattern.compile("^\\[\\d\\d \\d\\d:\\d\\d:\\d\\d\\] ");
 
@@ -85,8 +93,7 @@ final class LogClassifier {
         if (containsAny(lower, WARN_WORDS)) {
             return LogLine.Level.WARN;
         }
-        if (lower.contains(DEBUG_PREFIX.toLowerCase(Locale.ROOT))
-                || lower.contains(PID_PREFIX.toLowerCase(Locale.ROOT))) {
+        if (lower.contains(DEBUG_PREFIX_LOWER) || lower.contains(PID_PREFIX_LOWER)) {
             return LogLine.Level.DEBUG;
         }
         if (TIMESTAMP.matcher(line).find()) {

@@ -594,8 +594,6 @@ public final class ConfigStore {
     /** 一个键的元数据（全部来自 params.json）。 */
     public static final class KeyMeta {
         public final String key;
-        public final String groupId;
-        public final String role;
         public final String type;
         public final String label;
         public final String desc;
@@ -616,8 +614,6 @@ public final class ConfigStore {
 
         KeyMeta(String key, JSONObject o) {
             this.key = key;
-            this.groupId = o.optString("group", "");
-            this.role = o.optString("role", "");
             this.type = o.optString("type", "");
             this.label = o.optString("label", key);
             this.desc = o.optString("desc", "");
@@ -845,10 +841,6 @@ public final class ConfigStore {
                 return 0;
             }
             return i >= 0 && i < numbers.length ? numbers[i] : 0;
-        }
-
-        public int[] numbers() {
-            return numbers == null ? new int[0] : numbers.clone();
         }
 
         public String text() {

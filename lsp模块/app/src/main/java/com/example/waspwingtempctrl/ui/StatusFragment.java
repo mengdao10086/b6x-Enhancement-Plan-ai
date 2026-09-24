@@ -274,8 +274,11 @@ public class StatusFragment extends Fragment implements PageAware {
     }
 
     /**
-     * 部署：跑完部署动作后<b>重新探测</b>，把探测结果上屏——不再把部署动作日志（含步骤列表）
-     * 灌进状态区：部署成没成看状态文本就够，步骤细节在「诊断信息」里。
+     * 部署：直接上屏 {@link Deployer#deploy()} 自己带回的状态——<b>不再补一次 probe</b>：
+     * deploy 末尾已经探过一次并把结果放进 {@link Deployer.Result#status}，再探一次就是整整一轮
+     * 多余的 su 往返 + 2 份资产 MD5（probe 的开销见 {@code Deployer}）。也不把部署动作日志
+     * （含步骤列表）灌进状态区：部署成没成看状态文本就够，步骤细节在「诊断信息」里。
+     * 早退失败（{@code status} 为 null）时退回动作描述——那里有失败原因与已走过的步骤。
      *
      * <p><b>随后自动「点」一次拉起daemon</b>（{@link #startDaemon()}）：{@link Deployer#deploy()}
      * 只把新二进制换到盘上，不重启进程它就一直跑旧映像。这一段是<b>独立的一份</b>——自己的忙态文案、
@@ -286,9 +289,9 @@ public class StatusFragment extends Fragment implements PageAware {
     private void deploy() {
         final Context app = requireContext().getApplicationContext();
         runAsync(getString(R.string.status_busy_deploy), () -> {
-            Deployer deployer = Deployer.get(app);
-            deployOk = deployer.deploy().ok;
-            return deployer.probe().describe();
+            Deployer.Result result = Deployer.get(app).deploy();
+            deployOk = result.ok;
+            return result.status != null ? result.status.describe() : result.describe();
         }, false, true, () -> {
             if (deployOk) {
                 startDaemon();

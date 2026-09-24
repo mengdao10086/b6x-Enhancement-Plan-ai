@@ -115,12 +115,56 @@ final class ChartLoader {
                     String.valueOf(t.getMessage())) + "\n\n" + AppFiles.diagnose(file));
         }
 
-        ChartDataset ds = ChartDataset.parse(text, cfg, cfg.rollingMaxLines);
+        ChartDataset ds = ChartDataset.parse(tailForParse(text, cfg.rollingMaxLines), cfg,
+                cfg.rollingMaxLines);
         if (ds.parsedLines == 0) {
             return failure(probe, appContext.getString(R.string.chart_fail_parse_empty, probe.size)
                     + "\n\n" + AppFiles.diagnose(file));
         }
         return new Snapshot(probe, true, null, ds, fingerprint, false);
+    }
+
+    /**
+     * 交给解析器的文本：窗口行数明显超出保留量时只取尾部，否则原样返回。
+     *
+     * <p>环形缓冲只留 {@code rollingMaxLines} 行（口径见 {@code 逻辑说明.md} 的「状态页数据源」
+     * 一节），文件被撑大时再多行也留不下，却要在每秒的循环里逐行切分/解析一遍——所以解析量的
+     * 上界必须跟着保留量走。
+     *
+     * <p>截断只在窗口行数超过 {@code 2 × 保留量} 时发生，因为界面「解析 / 跳过」
+     * （见 {@code chart_info_parse_fmt}）报的是解析器实际扫过的行数，是给用户看数据文件的诊断；
+     * 而 C 端文件最多膨胀到 780 行（{@code tempctrl.c} 的 {@code WEBUI_DATA_MAX_LINES} 720
+     * 加 {@code WEBUI_COMPACT_EVERY} 60），远不到这个上界，故常规文件的诊断数字与截断前逐字
+     * 一致，只有别的写入方撑大文件时才截尾。
+     *
+     * <p>按行边界切割，只动交给解析器的那段文本；{@link #TAIL_BYTES} 的读取上界（「绝不整文件
+     * 无界读」的护栏）与文件的读取方式都不变。
+     */
+    private static String tailForParse(String text, int maxLines) {
+        int cap = Math.max(1, maxLines);
+        int limit = cap * 2;
+        int contentEnd = text.length();
+        while (contentEnd > 0 && text.charAt(contentEnd - 1) == '\n') {
+            contentEnd--;   // 尾部换行不构成行（解析器本来就跳过空行）
+        }
+        if (contentEnd == 0) {
+            return text;
+        }
+        int lines = 0;
+        int bound = 0;
+        for (int i = contentEnd - 1; i >= 0; i--) {
+            if (text.charAt(i) != '\n') {
+                continue;
+            }
+            lines++;
+            if (lines == cap) {
+                bound = i + 1;   // 自尾数第 cap 行的起点
+            }
+            if (lines >= limit) {
+                return text.substring(bound);
+            }
+        }
+        return text;
     }
 
     private static Snapshot failure(AppFiles.Probe probe, String text) {

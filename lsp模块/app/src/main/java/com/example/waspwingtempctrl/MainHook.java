@@ -12,6 +12,7 @@ import android.content.IntentFilter;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
+import android.os.PowerManager;
 
 import java.io.BufferedReader;
 import java.io.File;
@@ -125,6 +126,15 @@ public class MainHook implements IXposedHookLoadPackage {
     private static volatile Object capturedB7Controller = null;     // B7X 混淆控制器（com.flydigi.sdk.waspwing.a）实例，重连用 T0()
     private static ClassLoader appClassLoader = null;      // App 类加载器（后台线程反射用）
     private static volatile boolean loggedReconnectSkip = false;    // 后台重连被跳过（控制器/类加载器未就绪）仅记一次
+    // 息屏退避用的屏幕状态（取法与缓存策略见 reconnectIntervalTicks）：
+    // appContext 由 Application.onCreate 钩子（主线程）写、tick 线程读 → volatile；
+    // 另两个字段只有 tick 线程读写、不与任何线程共享，故不加 volatile。
+    private static volatile Context appContext = null;   // 宿主 Application Context（进程内常驻，仅用于取系统服务）
+    private static int screenProbedAtTick = 0;           // 上次探测的 tick（tick 自 1 起；首个可能触发重连的 tick 必已探测）
+    private static boolean screenInteractive = true;     // 缓存值：初值与"取不到"一律按亮屏
+    private static final int SCREEN_PROBE_TICKS = 5;     // 探测间隔（秒）：isInteractive() 是一次到 system_server 的调用，不每秒问
+    private static final int RECONNECT_INTERVAL_SCREEN_ON_TICKS = 5;    // 亮屏重连间隔（原节奏，秒）
+    private static final int RECONNECT_INTERVAL_SCREEN_OFF_TICKS = 10;  // 息屏重连间隔（用户拍板值，秒）
 
     // ========== 广播接收诊断（每次连接最多 3 对日志） ==========
     private static final int DIAG_LOG_MAX_PER_CONN = 3;   // 每次连接最多记录的对数
@@ -324,16 +334,20 @@ public class MainHook implements IXposedHookLoadPackage {
 
     private static void startPeriodicStatusWrite() {
         Thread t = new Thread(() -> {
-            int tick = 0;   // 状态写 1s，后台重连保持 5s 节奏
+            int tick = 0;   // 状态写 1s；后台重连亮屏 5s、息屏 10s（见 reconnectIntervalTicks）
             while (true) {
                 try {
                     tick++;
                     writeStatusFile();   // 每 1 秒写一次 status（供 daemon 3s 判死 + 曲线页）
 
                     // ═══ 后台自动重连 ═══
-                    // 保持 5 秒节奏（tick%5==0）
+                    // 亮屏保持 5 秒节奏（tick%5==0）；息屏拉到 10 秒（tick%10==0，用户拍板值）——
+                    // 屏灭＝宿主不在前台＝没有实时控温需求，此时重连只是"等散热器开机"，
+                    // 没必要每 5 秒打一次射频（connectGattWith / B7X 的 t9.j.E 都是真实蓝牙连接尝试）。
+                    // 屏幕若取不到一律按亮屏处理，见 reconnectIntervalTicks。
                     // 设备锁死（多次重连无回传）时停止自动重连，等用户强制重启 App
-                    if (tick % 5 == 0 && !bleConnected && lastDevice != null && !deviceLockedAlerted) {
+                    if (!bleConnected && lastDevice != null && !deviceLockedAlerted
+                            && tick % reconnectIntervalTicks(tick) == 0) {
                         try {
                             if (appKind == 7) {
                                 // B7X 无 connectGattWith（仅 B6X 有）；它的等价入口是 t9.j.E(device)
@@ -388,6 +402,43 @@ public class MainHook implements IXposedHookLoadPackage {
         });
         t.setDaemon(true);
         t.start();
+    }
+
+    /**
+     * 后台重连节奏：亮屏 5 秒（原行为），息屏 10 秒（用户拍板值）。
+     *
+     * <p><b>为什么息屏可以拉长</b>：屏灭＝宿主不在前台＝没有实时控温需求，断连时的重连只是
+     * "等散热器开机"，5 秒一次纯属浪费射频（每次都是真实蓝牙连接尝试）。
+     *
+     * <p><b>取法与缓存</b>：用 Application.onCreate 钩子拿到的宿主 Context 取 PowerManager，
+     * {@code isInteractive()} 是一次到 system_server 的调用、不便宜，故按 tick 缓存，最多
+     * {@link #SCREEN_PROBE_TICKS} 秒探一次；且只在本方法被调用时探（调用点在三个重连条件之后，
+     * 连接正常时一次都不问）。缓存最坏过期 5 秒：早探到息屏＝多试一次、晚探到＝晚一轮，两个方向都无害。
+     *
+     * <p><b>失败兜底</b>：Context/PowerManager 取不到、或调用抛异常，一律按<b>亮屏</b>——
+     * 宁可维持原来的 5 秒节奏，也不许因为探测坏掉而把重连拉长甚至变成永不重连。
+     *
+     * <p><b>线程</b>：只在 tick 线程内被调用与读写（screenProbedAtTick / screenInteractive 因此无需 volatile）。
+     *
+     * @param tick 1Hz tick 计数（等价秒数）
+     * @return 本次 tick 的重连间隔（秒）
+     */
+    private static int reconnectIntervalTicks(int tick) {
+        if (tick - screenProbedAtTick >= SCREEN_PROBE_TICKS) {
+            screenProbedAtTick = tick;
+            Boolean interactive = null;   // null = 未取到 → 兜底亮屏
+            try {
+                Context ctx = appContext;
+                PowerManager pm = (ctx == null) ? null
+                        : (PowerManager) ctx.getSystemService(Context.POWER_SERVICE);
+                if (pm != null) interactive = pm.isInteractive();
+            } catch (Throwable t) {
+                // 探测异常按亮屏兜底，不冒泡打断 tick 循环
+            }
+            screenInteractive = (interactive != null) ? interactive : true;   // 取不到 → 亮屏
+        }
+        return screenInteractive ? RECONNECT_INTERVAL_SCREEN_ON_TICKS
+                : RECONNECT_INTERVAL_SCREEN_OFF_TICKS;
     }
 
     @Override
@@ -1074,6 +1125,7 @@ public class MainHook implements IXposedHookLoadPackage {
                     @Override
                     protected void afterHookedMethod(MethodHookParam param) {
                         Context ctx = (Context) param.thisObject;
+                        appContext = ctx;      // 存下宿主 Context，供 tick 线程取 PowerManager（息屏退避用）
                         registerTemperatureReceiver(ctx);
                         restoreLastDevice();   // 冷启动恢复上次设备引用，后台重连自动接管
                         startPeriodicStatusWrite();
@@ -1722,7 +1774,10 @@ public class MainHook implements IXposedHookLoadPackage {
                                 }
                             }
                         }
-                        Thread.sleep(50);
+                        // 250ms（原 50ms）：接管判据 QUEUE_TAKEOVER_MS 是 5 秒级阈值，而 20Hz 轮询
+                        // 比它密两个数量级；粒度放粗只让最坏接管晚 200ms（5s 阈值下不可感知），
+                        // 换来唤醒次数与反射读字段开销降到 1/5。语义不变：仍是"同一队首停留超阈值才接管"。
+                        Thread.sleep(250);
                     } catch (InterruptedException e) {
                         break;
                     } catch (Throwable t2) {

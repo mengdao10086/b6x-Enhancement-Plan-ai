@@ -47,12 +47,14 @@ android {
         targetCompatibility = JavaVersion.VERSION_11
     }
 
-    // 本工程是纯 Java（无 .kt 源），以下三类是 kotlin-stdlib / coroutines 传递进来的零引用资产
+    // 本工程是纯 Java（无 .kt 源），以下三类是 kotlin-stdlib / coroutines 传递进来的零引用资产。
+    // kotlin_builtins 用 ** 开头：实测 kotlin/**/*.kotlin_builtins 匹配不到顶层
+    // kotlin/kotlin.kotlin_builtins（5,004 字节，会 1:1 进包）。
     packaging {
         resources {
             excludes += listOf(
                 "DebugProbesKt.bin",
-                "kotlin/**/*.kotlin_builtins",
+                "**/*.kotlin_builtins",
                 "META-INF/*.version"
             )
         }

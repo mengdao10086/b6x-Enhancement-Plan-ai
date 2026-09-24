@@ -18,6 +18,9 @@ final class ChartAxis {
     private static final int SEG_MAX = 5;
     private static final float PREF = 4f;
 
+    /** 刻度数组容量：{@link #ticksOf} 与 {@link #segmentsOf} 共用同一上界（两处必须同步）。 */
+    private static final int TICK_CAP = 256;
+
     final float min;
     final float max;
     final float step;
@@ -64,7 +67,7 @@ final class ChartAxis {
         for (float st : cands) {
             float lo = (float) Math.floor(dmin / st) * st;
             float hi = (float) Math.ceil(dmax / st) * st;
-            int segments = ticksOf(lo, hi, st).length - 1;
+            int segments = segmentsOf(lo, hi, st);
             if (segments < SEG_MIN || segments > SEG_MAX) {
                 continue;
             }
@@ -116,22 +119,50 @@ final class ChartAxis {
         return (t - a) <= (b - t) ? Math.max(1f, a) : b;
     }
 
+    /**
+     * 按 step 分出的段数 = {@code ticksOf(lo, hi, step).length - 1}，<b>但只计数、不落数组</b>。
+     * {@link #pickStep} 要对每个候选档位问一次，走 {@code ticksOf} 每次都要造一个 float[256]
+     * 加一份拷贝（一次 rebuild 十几个），而这里只要一个数。
+     *
+     * <p>逐项沿用 {@link #ticksOf} 的算式与容量护栏（先补原点刻度、再逐档累加、末档回补）：
+     * 浮点累加的舍入、{@code 1e-9} 与 {@code 1e-6} 两个容差、{@link #TICK_CAP} 截断都靠这层
+     * 同构才与画出来的刻度一致，故 <b>改 ticksOf 必须同步改这里</b>。
+     */
+    private static int segmentsOf(float lo, float hi, float step) {
+        if (!(step > 0f)) {
+            return 1;   // 同 ticksOf 的退化分支：{lo, hi} 两点一段
+        }
+        float firstMult = (float) Math.ceil(lo / step - 1e-9) * step;
+        int n = 0;
+        if (Math.abs(lo - firstMult) > step * 1e-6f) {
+            n++;
+        }
+        for (float v = firstMult; v <= hi + 1e-9f && n < TICK_CAP - 1; v += step) {
+            n++;
+        }
+        float lastMult = (float) Math.floor(hi / step + 1e-9) * step;
+        if (hi - lastMult > step * 1e-6f && n < TICK_CAP) {
+            n++;
+        }
+        return n - 1;
+    }
+
     /** 轴按 step 渲染出的刻度值数组（非整档对齐补原点刻度，末档补 max）。 */
     static float[] ticksOf(float lo, float hi, float step) {
         if (!(step > 0f)) {
             return new float[]{lo, hi};
         }
-        float[] tmp = new float[256];
+        float[] tmp = new float[TICK_CAP];
         int n = 0;
         float firstMult = (float) Math.ceil(lo / step - 1e-9) * step;
         if (Math.abs(lo - firstMult) > step * 1e-6f) {
             tmp[n++] = lo;
         }
-        for (float v = firstMult; v <= hi + 1e-9f && n < tmp.length - 1; v += step) {
+        for (float v = firstMult; v <= hi + 1e-9f && n < TICK_CAP - 1; v += step) {
             tmp[n++] = v;
         }
         float lastMult = (float) Math.floor(hi / step + 1e-9) * step;
-        if (hi - lastMult > step * 1e-6f && n < tmp.length) {
+        if (hi - lastMult > step * 1e-6f && n < TICK_CAP) {
             tmp[n++] = hi;
         }
         return Arrays.copyOf(tmp, n);

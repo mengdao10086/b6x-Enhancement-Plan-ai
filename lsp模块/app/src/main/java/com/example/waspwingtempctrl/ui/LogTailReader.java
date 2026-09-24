@@ -24,7 +24,7 @@ import java.util.Locale;
  *   <li>读取一律走 {@link AppFiles}（{@link AppFiles#readTailText(File, int)}），
  *       不自己开 {@code FileInputStream}，失败信息才不会丢。</li>
  *   <li>渲染行数上限 {@link #MAX_LINES}：400KB 全量上屏会卡死，只保留尾部这么多行，
- *       界面必须显式写出这个截断。</li>
+ *       界面必须显式写出这个截断；<b>只切/只解析尾部这一段</b>，不把整个窗口切成数组。</li>
  * </ol>
  *
  * <p><b>过滤顺序</b>：先按 {@link #MAX_LINES} 截出「最近 N 行」，再在其中做关键词匹配。
@@ -127,18 +127,31 @@ final class LogTailReader {
             return failure(probe, String.valueOf(t.getMessage()) + "\n\n" + AppFiles.diagnose(file));
         }
 
-        String[] all = text.split("\n", -1);
-        int end = all.length;
-        while (end > 0 && all[end - 1].isEmpty()) {
-            end--;
+        // 先不分配地定出「内容末尾」与「最近 MAX_LINES 行的起点」，只对这一小段 split：
+        // 把 400KB 窗口整个切成数组会白造几千个永远不上屏的 String。
+        int contentEnd = text.length();
+        while (contentEnd > 0 && text.charAt(contentEnd - 1) == '\n') {
+            contentEnd--;   // 与 split("\n", -1) 后剥掉尾部空串同义
         }
-        int start = Math.max(0, end - MAX_LINES);
-        int candidate = end - start;
+        int nls = 0;
+        int windowNl = -1;
+        for (int i = contentEnd - 1; i >= 0; i--) {
+            if (text.charAt(i) == '\n') {
+                nls++;
+                if (nls == MAX_LINES) {
+                    windowNl = i;   // 自尾数第 MAX_LINES 个换行 = 窗口起点的前一个字符
+                }
+            }
+        }
+        int end = contentEnd == 0 ? 0 : nls + 1;
+        int candidate = Math.min(end, MAX_LINES);
+        String[] tail = text.substring(end > MAX_LINES ? windowNl + 1 : 0, contentEnd)
+                .split("\n", -1);
 
         String kwLower = kw.toLowerCase(Locale.ROOT);
         List<LogLine> out = new ArrayList<>();
-        for (int i = start; i < end; i++) {
-            String line = stripCr(all[i]);
+        for (int i = 0; i < candidate; i++) {
+            String line = stripCr(tail[i]);
             if (!kwLower.isEmpty() && !line.toLowerCase(Locale.ROOT).contains(kwLower)) {
                 continue;
             }

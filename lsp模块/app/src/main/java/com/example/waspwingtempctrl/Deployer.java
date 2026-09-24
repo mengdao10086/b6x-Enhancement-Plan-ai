@@ -14,6 +14,7 @@ import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
 
 /**
  * <b>I4（已冻结）：部署完成判定</b> + <b>I5 的一半：界面 ↔ 部署的调用边界</b>。
@@ -97,13 +98,36 @@ public final class Deployer {
      */
     private static final long PROBE_EXEC_TIMEOUT_MS = 15_000L;
 
+    /**
+     * asset 哈希的进程级 memo（key = asset 路径）。
+     *
+     * <p>APK 内的 asset 在进程存活期间不可能变，故一次算过的哈希可以一直用；而两处调用点的代价都不轻：
+     * {@link #needsRedeploy} 落在 {@code SetupActivity.onCreate} 的主线程链上，{@link #probe()} 每次要算
+     * 两份、而 probe 是每个动作的收尾（一次部署要跑好几次）。asset 无 {@code noCompress}，
+     * 每次都要实时解压再哈希，memo 于是把「每动作数份」降成「每进程各一份」。
+     *
+     * <p>用 {@link ConcurrentHashMap} 而非 HashMap：probe 在后台线程、needsRedeploy 在主线程，两侧都会写。
+     * 并发撞上同一路径时只是重复算一次（结果幂等），故不加锁互斥。
+     *
+     * <p><b>只在成功时写</b>：asset 缺失/读错误照旧抛 {@link IOException}、不进表 ——
+     * 否则一次瞬时失败会被永久记住，此后连重试的机会都没有。
+     *
+     * <p>不随 APK 更新失效：覆盖安装会杀掉本进程，新进程自然是空表。
+     */
+    private static final Map<String, String> ASSET_MD5_MEMO = new ConcurrentHashMap<>();
+
     private static volatile Deployer instance;
 
     private final Context appContext;
     private final RootShell shell;
     private final ConfigStore configStore;
 
-    /** 拉起冷却（内存态，进程重启即失效）。 */
+    /**
+     * 拉起冷却（内存态，进程重启即失效）。
+     *
+     * <p>只由 {@link #startDaemon()} 写入（成功失败都写，防连点）；{@link #deploy()} 成功时清零 ——
+     * 那时候盘上刚换过二进制，紧随其后的自动拉起必须能起（见 {@link #deploy()}）。
+     */
     private volatile long lastStartAtMs;
 
     private Deployer(Context context) {
@@ -192,8 +216,6 @@ public final class Deployer {
         public final boolean daemonRunning;
         /** I4 判据的结果。 */
         public final boolean deployed;
-        /** 各步骤的原始输出（诊断用）。 */
-        public final String rawOutput;
         /** 配置文件绝对路径（app 侧）。 */
         public final String configPath;
         public final List<String> notes;
@@ -202,7 +224,7 @@ public final class Deployer {
                String binMd5, String binExpectedMd5, String scriptPath, boolean scriptPresent,
                boolean scriptHashOk, String scriptMd5, String scriptExpectedMd5,
                boolean configPresent, boolean configPathAligned, boolean daemonRunning,
-               boolean deployed, String rawOutput, String configPath, List<String> notes) {
+               boolean deployed, String configPath, List<String> notes) {
             this.suOk = suOk;
             this.binExists = binExists;
             this.binExecutable = binExecutable;
@@ -218,7 +240,6 @@ public final class Deployer {
             this.configPathAligned = configPathAligned;
             this.daemonRunning = daemonRunning;
             this.deployed = deployed;
-            this.rawOutput = rawOutput;
             this.configPath = configPath;
             this.notes = Collections.unmodifiableList(notes);
         }
@@ -329,7 +350,7 @@ public final class Deployer {
         return new Status(suOk, binExists, binExec, binHashOk, binMd5, expectedBin,
                 scriptPath, scriptPresent, scriptHashOk, scriptMd5, expectedScript,
                 configStore.exists(), aligned, "1".equals(kv.get("RUNNING")),
-                deployed, r.stdout, configStore.getConfigFile().getAbsolutePath(), notes);
+                deployed, configStore.getConfigFile().getAbsolutePath(), notes);
     }
 
     /**
@@ -352,16 +373,20 @@ public final class Deployer {
         public final String action;
         public final List<String> steps;
         public final String error;
-        public final String rawOutput;
+        /**
+         * 动作收尾时的那次探测结果，供调用方直接上屏（免掉自己再探一次 su 往返）。
+         *
+         * <p><b>为 null 的两种情形</b>：早退失败（连 root 都没跑成，没有任何现状可探）、
+         * 以及本就不探测的动作（如 {@link Deployer#updateScript()}）。调用方据此退回
+         * {@link #describe()}——那里有失败原因与已走过的步骤。
+         */
         public final Status status;
 
-        Result(boolean ok, String action, List<String> steps, String error,
-               String rawOutput, Status status) {
+        Result(boolean ok, String action, List<String> steps, String error, Status status) {
             this.ok = ok;
             this.action = action;
             this.steps = Collections.unmodifiableList(steps);
             this.error = error;
-            this.rawOutput = rawOutput;
             this.status = status;
         }
 
@@ -387,7 +412,8 @@ public final class Deployer {
     }
 
     /**
-     * 一次性部署：资源落盘与授权 → 二进制就位 → service.d 脚本 → 配置保留写入 → 省电白名单。
+     * 一次性部署：资源落盘与授权 → 二进制就位 → service.d 脚本 → 配置保留写入 →
+     * 省电白名单（下发给已安装的散热器控制 app，见 {@link #powerAllowlistScript()}）。
      *
      * <p><b>配置保留</b>：{@code profile.conf} 不存在时才写出厂值（取自 params.json 的
      * {@code factory}），已存在则一个字都不覆盖。
@@ -401,7 +427,6 @@ public final class Deployer {
      */
     public Result deploy() {
         List<String> steps = new ArrayList<>();
-        StringBuilder raw = new StringBuilder();
 
         File stagedBin;
         File stagedScript;
@@ -410,7 +435,7 @@ public final class Deployer {
         try {
             File staging = new File(configStore.getPrivateDir(), "deploy");
             if (!staging.isDirectory() && !staging.mkdirs()) {
-                return new Result(false, "部署", steps, "私有目录中转目录创建失败：" + staging, "", null);
+                return new Result(false, "部署", steps, "私有目录中转目录创建失败：" + staging, null);
             }
             stagedBin = new File(staging, "tempctrl");
             stagedScript = new File(staging, SCRIPT_NAME);
@@ -419,29 +444,28 @@ public final class Deployer {
             scriptMd5 = stageAsset(SCRIPT_ASSET, stagedScript, true);
             steps.add("脚本已落到私有目录并授权：" + stagedScript + "（md5=" + scriptMd5 + "）");
         } catch (IOException e) {
-            return new Result(false, "部署", steps, e.getMessage(), "", null);
+            return new Result(false, "部署", steps, e.getMessage(), null);
         }
 
         RootShell.Result r = shell.exec(deployScript(stagedBin, stagedScript), EXEC_TIMEOUT_MS);
-        raw.append(r.stdout);
         Map<String, String> kv = parseKv(r.stdout);
         if (!r.isOk()) {
-            return new Result(false, "部署", steps, "root 执行失败：" + r.describe(), raw.toString(), null);
+            return new Result(false, "部署", steps, "root 执行失败：" + r.describe(), null);
         }
         String svcd = nvl(kv.get("SVCD"));
         String ksuVer = nvl(kv.get("KSU_VER"));
         steps.add("service.d 目录：" + svcd + (ksuVer.isEmpty() ? "" : "（KernelSU verCode=" + ksuVer + "）"));
         if (svcd.isEmpty()) {
-            return new Result(false, "部署", steps, "未能确定 service.d 目录", raw.toString(), null);
+            return new Result(false, "部署", steps, "未能确定 service.d 目录", null);
         }
         if (!"1".equals(kv.get("BIN_OK"))) {
             return new Result(false, "部署", steps,
-                    "二进制就位失败（" + BIN_DEST + "），root 侧输出见原始输出", raw.toString(), null);
+                    "二进制就位失败（" + BIN_DEST + "）", null);
         }
         steps.add("二进制就位：" + BIN_DEST);
         if (!"1".equals(kv.get("SCRIPT_OK"))) {
             return new Result(false, "部署", steps,
-                    "service.d 脚本写入失败（" + svcd + "）", raw.toString(), null);
+                    "service.d 脚本写入失败（" + svcd + "）", null);
         }
         steps.add("service.d 脚本就位：" + svcd + "/" + SCRIPT_NAME);
         String deployedBinMd5 = nvl(kv.get("BIN_MD5"));
@@ -450,7 +474,7 @@ public final class Deployer {
             return new Result(false, "部署", steps,
                     "落盘内容与 APK 内资源不一致（apk=" + binMd5 + "/" + scriptMd5
                             + "，设备=" + deployedBinMd5 + "/" + deployedScriptMd5 + "）",
-                    raw.toString(), null);
+                    null);
         }
         steps.add("内容哈希核对通过（二进制与脚本均与 APK 内一致）");
         // 设备侧哈希已读回且核对通过：此刻的缓存就是设备上真实内容（供下次启动落页判定）
@@ -461,14 +485,20 @@ public final class Deployer {
         steps.add(preCreateRuntimeFiles());
 
         RootShell.Result pr = shell.exec(powerAllowlistScript(), EXEC_TIMEOUT_MS);
-        raw.append("\n[省电白名单]\n").append(pr.stdout).append(pr.stderr);
-        steps.add(pr.isOk() ? "省电白名单批处理已下发（输出见原始输出）"
+        // 文案不写"已下发"：没装散热器控制 app 时脚本整段跳过、什么也没下发，退出码同样是 0。
+        steps.add(pr.isOk() ? "省电白名单批处理已执行（仅对已安装的散热器控制 app 生效）"
                 : "省电白名单下发失败（不影响部署）：" + pr.describe());
 
         // 到位即止：拉起daemon 不在本方法里做（见 javadoc）——界面在部署上屏后再自动调一次
         // startDaemon()，那是独立的一段（自己的忙态、操作记录与进度条）。
         Status st = probe();
-        return new Result(st.deployed, "部署", steps, st.deployed ? "" : "部署后自检未通过", raw.toString(), st);
+        if (st.deployed) {
+            // 盘上确实换了新二进制：清掉拉起冷却，让紧随其后的自动拉起不被「防连点」挡下 ——
+            // 挡下的后果是旧进程继续跑旧映像，正是本方法 javadoc 警告的「等于没更新」，
+            // 且没有任何自动补偿。防连点的语义只对「手动点拉起daemon」成立，那条路径一个字不动。
+            lastStartAtMs = 0L;
+        }
+        return new Result(st.deployed, "部署", steps, st.deployed ? "" : "部署后自检未通过", st);
     }
 
     /**
@@ -482,38 +512,38 @@ public final class Deployer {
         List<String> steps = new ArrayList<>();
         File staging = new File(configStore.getPrivateDir(), "deploy");
         if (!staging.isDirectory() && !staging.mkdirs()) {
-            return new Result(false, "更新脚本", steps, "私有目录中转目录创建失败：" + staging, "", null);
+            return new Result(false, "更新脚本", steps, "私有目录中转目录创建失败：" + staging, null);
         }
         File stagedScript = new File(staging, SCRIPT_NAME);
         String scriptMd5;
         try {
             scriptMd5 = stageAsset(SCRIPT_ASSET, stagedScript, true);
         } catch (IOException e) {
-            return new Result(false, "更新脚本", steps, e.getMessage(), "", null);
+            return new Result(false, "更新脚本", steps, e.getMessage(), null);
         }
         steps.add("脚本已落到私有目录并授权：" + stagedScript + "（md5=" + scriptMd5 + "）");
 
         RootShell.Result r = shell.exec(updateScriptScript(stagedScript), EXEC_TIMEOUT_MS);
         Map<String, String> kv = parseKv(r.stdout);
         if (!r.isOk()) {
-            return new Result(false, "更新脚本", steps, "root 执行失败：" + r.describe(), r.stdout, null);
+            return new Result(false, "更新脚本", steps, "root 执行失败：" + r.describe(), null);
         }
         String svcd = nvl(kv.get("SVCD"));
         if (svcd.isEmpty()) {
-            return new Result(false, "更新脚本", steps, "未能确定 service.d 目录", r.stdout, null);
+            return new Result(false, "更新脚本", steps, "未能确定 service.d 目录", null);
         }
         steps.add("service.d 目录：" + svcd);
         if (!"1".equals(kv.get("SCRIPT_OK"))) {
-            return new Result(false, "更新脚本", steps, "脚本写入失败（" + svcd + "）", r.stdout, null);
+            return new Result(false, "更新脚本", steps, "脚本写入失败（" + svcd + "）", null);
         }
         String onDevice = nvl(kv.get("SCRIPT_MD5"));
         if (!scriptMd5.equals(onDevice)) {
             return new Result(false, "更新脚本", steps,
                     "落盘脚本与 APK 内资源不一致（apk=" + scriptMd5 + "，设备=" + onDevice + "）",
-                    r.stdout, null);
+                    null);
         }
         steps.add("脚本哈希核对通过：" + svcd + "/" + SCRIPT_NAME);
-        return new Result(true, "更新脚本", steps, "", r.stdout, null);
+        return new Result(true, "更新脚本", steps, "", null);
     }
 
     /**
@@ -525,8 +555,9 @@ public final class Deployer {
      * <p><b>故意不清的东西</b>（每条都有理由）：
      * <ul>
      *   <li>私有目录的 {@code profile.conf} —— 用户配置，卸载部署≠删配置；重装后仍在。</li>
-     *   <li>省电白名单（deviceidle / appops / standby bucket）—— 对仍装着的 LSPosed 模块同样有益，
-     *       且用户可在系统设置里自行撤销。</li>
+     *   <li>省电白名单（deviceidle / appops / standby bucket）—— 下发对象是<b>散热器控制 app</b>
+     *       （见 {@link #powerAllowlistScript()}，不是本界面 app）。对它仍然有益：钩子跑在散热器
+     *       app 进程里，那个进程被冻结/回收即断链；且用户可在系统设置里自行撤销。</li>
      *   <li>{@code tempctrl_last_dev} 的<b>新落点</b>（飞智 app 自己的私有目录
      *       {@code /data/data/<飞智包名>/files/}，各包各记）—— 既不属本次部署的产物，
      *       也不在我们有权清理的目录里，<b>本类不碰</b>。</li>
@@ -543,8 +574,7 @@ public final class Deployer {
         RootShell.Result r = shell.exec(uninstallScript(), EXEC_TIMEOUT_MS);
         Map<String, String> kv = parseKv(r.stdout);
         if (!r.isOk()) {
-            return new Result(false, "卸载部署", steps, "root 执行失败：" + r.describe(),
-                    r.stdout + r.stderr, null);
+            return new Result(false, "卸载部署", steps, "root 执行失败：" + r.describe(), null);
         }
         boolean watchdogStopped = "1".equals(kv.get("WATCHDOG_STOPPED"));
         boolean daemonStopped = "1".equals(kv.get("DAEMON_STOPPED"));
@@ -575,7 +605,7 @@ public final class Deployer {
         }
 
         Status st = probe();
-        return new Result(!st.deployed, "卸载部署", steps, "", r.stdout + r.stderr, st);
+        return new Result(!st.deployed, "卸载部署", steps, "", st);
     }
 
     // ==================== 拉起（界面手动入口） ====================
@@ -595,7 +625,8 @@ public final class Deployer {
      *
      * <p><b>代价</b>：只等旧实例退出的最多 {@value #KILL_WAIT_LOOPS} + {@value #KILL9_WAIT_LOOPS} 秒
      * （C 端已无启动延时），即一次点击约 0~8 秒温控空窗；失败重试会再叠一次，步骤里都会写明。
-     * 冷却 {@value #START_COOLDOWN_MS} ms 保留（防连点）。
+     * 冷却 {@value #START_COOLDOWN_MS} ms 保留（防连点）；但 {@link #deploy()} 成功后会把它清零
+     * ——那时候盘上刚换过二进制，这条自动拉起必须能起（见 {@link #deploy()}）。
      *
      * <p><b>阻塞</b>。注意：这条路起的进程仍在该 app 的 cgroup 内，
      * 常驻仍以 {@code service.d} 为主（见 {@link #deploy()}）。
@@ -606,29 +637,27 @@ public final class Deployer {
         if (now - lastStartAtMs < START_COOLDOWN_MS) {
             long remain = (START_COOLDOWN_MS - (now - lastStartAtMs)) / 1000;
             steps.add("冷却中，请 " + remain + " 秒后重试");
-            return new Result(false, "拉起daemon", steps, "冷却中", "", null);
+            return new Result(false, "拉起daemon", steps, "冷却中", null);
         }
         lastStartAtMs = now;
 
-        StringBuilder raw = new StringBuilder();
-        Attempt a = restartOnce(steps, raw);
+        Attempt a = restartOnce(steps);
         if (a.retryable && pauseBeforeRetry()) {
             steps.add("拉起未成功（" + a.error + "），自动重试一次");
-            a = restartOnce(steps, raw);
+            a = restartOnce(steps);
         }
-        return new Result(a.ok, "拉起daemon", steps, a.ok ? "" : a.error, raw.toString(), probe());
+        return new Result(a.ok, "拉起daemon", steps, a.ok ? "" : a.error, probe());
     }
 
     /**
-     * 跑一次完整的「先停再起」，把可读步骤追加进 {@code steps}、原始输出追加进 {@code raw}。
+     * 跑一次完整的「先停再起」，把可读步骤追加进 {@code steps}。
      *
      * <p>不判冷却（由调用方管），只回吐这一次的成败、失败原因、以及是否值得再试一次——
      * 可重试＝root 通道失败 / 旧实例未退出 / 未探测到新进程；不可重试＝二进制不存在
      * （重试必然同样失败）。
      */
-    private Attempt restartOnce(List<String> steps, StringBuilder raw) {
+    private Attempt restartOnce(List<String> steps) {
         RootShell.Result r = shell.exec(restartScript(), EXEC_TIMEOUT_MS);
-        raw.append("\n[拉起daemon]\n").append(r.stdout).append(r.stderr);
         if (!r.isOk()) {
             return new Attempt(false, true, "root 执行失败：" + r.describe());
         }
@@ -709,8 +738,7 @@ public final class Deployer {
         RootShell.Result r = shell.exec(stopDaemonScript(), EXEC_TIMEOUT_MS);
         Map<String, String> kv = parseKv(r.stdout);
         if (!r.isOk()) {
-            return new Result(false, "停止daemon", steps, "root 执行失败：" + r.describe(),
-                    r.stdout + r.stderr, null);
+            return new Result(false, "停止daemon", steps, "root 执行失败：" + r.describe(), null);
         }
         boolean watchdogStopped = "1".equals(kv.get("WATCHDOG_STOPPED"));
         boolean daemonStopped = "1".equals(kv.get("DAEMON_STOPPED"));
@@ -725,8 +753,7 @@ public final class Deployer {
                         : "已停止运行中的 tempctrl（PID " + daemonPid + "）")
                 : "警告：" + KILL_WAIT_LOOPS + " 秒内未能确认 tempctrl 已退出");
         boolean ok = watchdogStopped && daemonStopped;
-        return new Result(ok, "停止daemon", steps, ok ? "" : "有进程未确认退出，见步骤",
-                r.stdout, probe());
+        return new Result(ok, "停止daemon", steps, ok ? "" : "有进程未确认退出，见步骤", probe());
     }
 
     /** 诊断串：部署状态 + 配置状态 + root 诊断。阻塞。部署段与状态区同一份文本（describe）。 */
@@ -789,8 +816,24 @@ public final class Deployer {
         return md5OfAsset(appContext, assetPath);
     }
 
-    /** {@link #md5OfAsset(String)} 的静态入口：{@link #needsRedeploy} 无实例也须能算期望哈希。 */
+    /**
+     * {@link #md5OfAsset(String)} 的静态入口：{@link #needsRedeploy} 无实例也须能算期望哈希。
+     *
+     * <p>带 {@link #ASSET_MD5_MEMO}：命中就直接回吐。失败不缓存（异常原样往外传），调用方
+     * 该退化的退化（{@link #md5OfAssetOrEmpty}）。
+     */
     private static String md5OfAsset(Context appContext, String assetPath) throws IOException {
+        String memoized = ASSET_MD5_MEMO.get(assetPath);
+        if (memoized != null) {
+            return memoized;
+        }
+        String md5 = computeAssetMd5(appContext, assetPath);
+        ASSET_MD5_MEMO.put(assetPath, md5);
+        return md5;
+    }
+
+    /** 真正读 asset 并哈希（不带 memo，故失败照旧抛 IOException）。 */
+    private static String computeAssetMd5(Context appContext, String assetPath) throws IOException {
         MessageDigest digest = newDigest();
         InputStream in = null;
         try {
@@ -946,13 +989,39 @@ public final class Deployer {
                 + "echo \"SCRIPT_MD5=$(md5sum \"$svcd/" + SCRIPT_NAME + "\" 2>/dev/null | cut -d' ' -f1)\"\n";
     }
 
+    /**
+     * 省电白名单批处理：<b>逐包</b>下发给已安装的散热器控制 app，四段命令共处同一个 su 会话。
+     *
+     * <p><b>为什么目标不是本 app</b>：本 app 是纯界面（manifest 里零 service / receiver / provider），
+     * 没有任何后台职责；控制链路两端是守护进程与<b>跑在散热器 app 进程里的钩子</b>，
+     * 那个进程被冻结/回收才是真会断链的事。故目标改为散热器控制 app，且不再包含本 app。
+     *
+     * <p><b>包名从哪来</b>：{@code R.array.xposed_scope}（老 B6X / 新 B6X / B7X-farsef）。
+     * Java 侧就这一份：{@code MainHook} 里的同名常量是 private，且那个类只由 LSPosed 在宿主进程里
+     * 加载（本进程引用它会 NoClassDefFoundError）；C 端另有自己的 {@code APP_PKG_*} 宏。
+     * 故复用作用域数组而不另写字面量 —— 作用域增删与此处目标同步，正是想要的对应关系。
+     *
+     * <p><b>只对装了的下发</b>：未安装的包跑这 4 条会白起两个 {@code app_process} 并往输出里灌报错。
+     * 判据取 {@code [ -d /data/data/$PKG ]}（零 fork 的廉价判据，与守护进程自己判「已安装」的一级
+     * stat 判据同源，见 {@code tempctrl.c} 的 {@code HOST_DATA_DIR}）；为此起一次 {@code pm} 不划算。
+     *
+     * <p><b>每次部署照旧无条件下发</b>（不做"先判后发"）：用户撤销白名单后再部署会重新加回，
+     * 这与 {@link #uninstall()} 不清理白名单的口径一致。
+     */
     private String powerAllowlistScript() {
-        String pkg = appContext.getPackageName();
-        return "PKG=" + pkg + "\n"
-                + "echo \"-- deviceidle --\"; dumpsys deviceidle whitelist +$PKG 2>&1\n"
-                + "echo \"-- appops --\"; appops set $PKG RUN_IN_BACKGROUND allow 2>&1\n"
-                + "echo \"-- standby --\"; am set-standby-bucket $PKG active 2>&1\n"
-                + "echo \"-- unfreeze --\"; am unfreeze --sticky $PKG 2>&1 || am unfreeze $PKG 2>&1\n";
+        StringBuilder sb = new StringBuilder();
+        for (String pkg : appContext.getResources().getStringArray(R.array.xposed_scope)) {
+            // 每包一段 if：$PKG 逐段重设，四段仍在同一个脚本里跑完（不拆成多次 su exec）
+            sb.append("PKG=").append(pkg).append('\n')
+                    .append("if [ -d \"/data/data/$PKG\" ]; then\n")
+                    .append("  echo \"-- $PKG --\"\n")
+                    .append("  echo \"-- deviceidle --\"; dumpsys deviceidle whitelist +$PKG 2>&1\n")
+                    .append("  echo \"-- appops --\"; appops set $PKG RUN_IN_BACKGROUND allow 2>&1\n")
+                    .append("  echo \"-- standby --\"; am set-standby-bucket $PKG active 2>&1\n")
+                    .append("  echo \"-- unfreeze --\"; am unfreeze --sticky $PKG 2>&1 || am unfreeze $PKG 2>&1\n")
+                    .append("fi\n");
+        }
+        return sb.toString();
     }
 
     private String uninstallScript() {

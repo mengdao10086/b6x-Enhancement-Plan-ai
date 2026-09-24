@@ -107,7 +107,8 @@ final class ConfigKeyRow {
      * 由定义里的 {@code fields[].bool} 决定（见 {@link ConfigStore.FieldMeta#bool}）。
      */
     private static final class Field {
-        /** 字段布局的根（item_config_field）：宽度回写要同时改它与其内的输入框。 */
+        /** 字段布局的根（数值 / 路径字段 item_config_field，布尔字段 item_config_field_switch）：
+         *  宽度回写要同时改它与其内的输入框。 */
         final View root;
         final TextInputEditText input;
         /** 承载 {@link #input} 的 OutlinedBox；宽度回写也要改它的 LayoutParams。布尔字段为 null。 */
@@ -162,8 +163,12 @@ final class ConfigKeyRow {
     private final TextView descView;
     private final TextView noteView;
     private final TextView statusView;
-    /** 整键开关（switch 型键用；其它类型不显示）。 */
-    private final MaterialSwitch switchView;
+    /**
+     * 整键开关（switch 型键用）：由 {@link SwitchRenderer#build} 建出后挂上尾段
+     * （见 item_config_key_switch.xml），非 switch 型键恒 null——它们的行不白建这个控件。
+     */
+    @Nullable
+    private MaterialSwitch switchView;
     private final Renderer renderer;
     /** 挂到行级的字段说明行（单值键才有）：它不在尾段里，压暗要单独处理。 */
     private final List<TextView> rowCaptions = new ArrayList<>();
@@ -205,7 +210,7 @@ final class ConfigKeyRow {
         descView = root.findViewById(R.id.config_key_desc);
         noteView = root.findViewById(R.id.config_key_note);
         statusView = root.findViewById(R.id.config_key_status);
-        switchView = root.findViewById(R.id.config_key_switch);
+        // switchView 不在这里取：它由 SwitchRenderer 按需建出（见该类 build）
 
         labelView.setText(meta.label);
         if (meta.desc.isEmpty()) {
@@ -320,8 +325,11 @@ final class ConfigKeyRow {
 
         @Override
         public void build(@NonNull LayoutInflater inflater) {
-            // 开关是尾段成员：标记写在 item_config_row.xml 的 app:wrapTrailing 上（它与键行同属 XML，
-            // 由容器在 inflate 时读出）。动态建出来的字段才需要 setTrailing（见 #addToTail）。
+            // 开关是尾段成员，与输入框 / 字段走同一条路：按需建出（item_config_key_switch.xml）后
+            // 挂上并标 trailing（见 #addToTail）——非 switch 型的键行因此不再白建一个 MaterialSwitch
+            View switchRoot = inflater.inflate(R.layout.item_config_key_switch, root, false);
+            addToTail(switchRoot);
+            switchView = switchRoot.findViewById(R.id.config_key_switch);
             switchView.setVisibility(View.VISIBLE);
             switchView.setOnCheckedChangeListener((button, checked) -> {
                 if (suppressChange) {
@@ -674,9 +682,9 @@ final class ConfigKeyRow {
         return field;
     }
 
-    /** 布尔字段（multi 键里值为 0/1 的字段）：字段名 + 开关。 */
+    /** 布尔字段（multi 键里值为 0/1 的字段）：字段名 + 开关，取布尔那份字段布局。 */
     private Field addBoolField(@NonNull LayoutInflater inflater, @NonNull FieldMeta fieldMeta) {
-        View fieldView = inflater.inflate(R.layout.item_config_field, root, false);
+        View fieldView = inflater.inflate(R.layout.item_config_field_switch, root, false);
         addToTail(fieldView);
 
         View switchRow = fieldView.findViewById(R.id.config_field_switch_row);
@@ -695,8 +703,7 @@ final class ConfigKeyRow {
             }
             commitBoolField();
         });
-        // 数值字段的输入框与范围说明都不适用：0/1 的"范围 0~1"是噪音
-        fieldView.findViewById(R.id.config_field_layout).setVisibility(View.GONE);
+        // 字段根里只有字段名与开关：没有输入框，宽度回写与单位-范围说明都不适用（input / layout 传 null）
         return new Field(fieldView, null, null, boolSwitch);
     }
 
@@ -711,6 +718,7 @@ final class ConfigKeyRow {
      */
     private Field addField(@NonNull LayoutInflater inflater, @NonNull String hint,
                            @NonNull String caption, boolean hoistCaption, boolean path) {
+        // 数值 / 路径字段取数值那一份字段布局，布尔字段走 addBoolField（两份见 item_config_field*.xml）
         View fieldView = inflater.inflate(R.layout.item_config_field, root, false);
         addToTail(fieldView);
 
