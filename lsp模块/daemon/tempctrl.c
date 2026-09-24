@@ -377,7 +377,7 @@ static int last_screen_off = 0;          // 上次观察到的屏幕状态：1=�
 
 // 息屏时整条探测链的最小间隔（秒，硬编码常量，不是配置键）。
 // 用户拍板值 10s：屏灭时探测链注定下发不了（屏幕门禁会拦），却每轮仍要付 pm 冷启动 + 全量 /proc 扫描，
-// 外加一次 is_screen_awake()（popen 一次起 sh+dumpsys+awk 三个进程，dumpsys power 的活还在 system_server
+// 外加一次 is_screen_awake()（一次 fork 一个 dumpsys，dumpsys power 的活还在 system_server
 // 里干）—— 屏检本身就在整条链最贵之列，故退避必须连屏检一起节流，否则最贵的一环一次没省。
 // 亮屏节奏不变（仍由调用方 5s 一轮驱动）。
 // 不做成配置键：新增键要连带动 params.def.json → 生成头文件 → profile.conf → 界面，超出本次修改范围。
@@ -1781,26 +1781,107 @@ static void app_process_scan(const char *pkgs[], int alive[], int count) {
 }
 
 /**
- * 屏幕状态（dumpsys power 读 mWakefulness）：仅 Awake 算亮屏。
+ * 从一行 dumpsys 输出里取出 mWakefulness 的值。命中返回 1 并写入 out（out 恒以 '\0' 结尾）。
+ *
+ * 与旧 awk（-F'=' 取 $2、排除含 Override 的行）核对为等价的点：作用于整行、含 "mWakefulness=" 且不含
+ * "Override" 才入选、Override 行继续往下扫、超 31 字符的截断、以及 1/2/0/-1 的取值映射。
+ *
+ * 两处**有意**偏离（都只在 dumpsys 输出非标准格式时显形：AOSP 每字段独占一行、且用 println 拼接，
+ * 故实际不可达）：
+ *   1. 取值起点以 "mWakefulness=" 之后为界；旧 awk 取全行第 1、2 个 '=' 之间 —— 仅当该行在标记之前
+ *      还有 '=' 时不同，而那种情况下旧实现取到的是别人的值。
+ *   2. 首尾空白（空格/制表符/\r）一并裁掉；旧 awk 只裁行尾的 \n —— 仅当值两侧带空白时不同，
+ *      裁掉更贴近字段真实值（旧实现会把 " Awake" 判成灭屏，白跳过一轮拉起）。
+ */
+static int wakefulness_value(const char *line, char *out, size_t outSize) {
+    if (outSize == 0) return 0;   // 防下面 outSize-1 下溢（当前调用点不会传 0，留着免以后踩）
+    const char *hit = strstr(line, "mWakefulness=");
+    if (hit == NULL || strstr(line, "Override") != NULL) return 0;
+    hit += strlen("mWakefulness=");
+    size_t n = 0;
+    while (hit[n] != '\0' && hit[n] != '=' && n < outSize - 1) {
+        out[n] = hit[n];
+        n++;
+    }
+    out[n] = '\0';
+    size_t s = 0;
+    while (s < n && (out[s] == ' ' || out[s] == '\t' || out[s] == '\r')) s++;
+    while (n > s && (out[n-1] == ' ' || out[n-1] == '\t' || out[n-1] == '\r')) n--;
+    memmove(out, out + s, n - s);
+    out[n - s] = '\0';
+    return 1;
+}
+
+/**
+ * 屏幕状态（读 dumpsys power 的 mWakefulness）：仅 Awake 算亮屏。
  * 返回：1=Awake(亮屏)、2=Dozing(息屏常显)、0=Asleep/其余(灭屏)、-1=读取失败。
- * 精确匹配 "mWakefulness=" 并排除 "mWakefulnessOverride="（跨版本行序不定，勿用 grep -m1 直接截断）。
+ *
+ * 不走 shell 管线：只 fork 一个 dumpsys 子进程，父进程边读边解析、命中即关管道 ——
+ * 子进程随即因 SIGPIPE 提前退出（等效旧写法里 awk 的 exit；本文件未忽略 SIGPIPE，
+ * 故 execv 出来的 dumpsys 保持默认处置，会真的死）。旧写法 sh -c 'dumpsys | awk …'
+ * 一次探测起 3 个进程、两段管道，现在 1 个进程、一段。
+ * 一分没省的是 dumpsys 的 binder 往返与 system_server 侧那次 dump —— 那才是真正的成本。
+ *
+ * 行缓冲 512 字节：dumpsys 里 mWakefulness 行只有几十字节，超长行会被截断（只可能丢本行后半段）。
  */
 static int is_screen_awake(void) {
-    char cmd[256];
-    snprintf(cmd, sizeof(cmd),
-             DUMPSYS_BIN " power 2>/dev/null | awk -F'=' '/mWakefulness=/{ if ($0 !~ /Override/) { print $2; exit } }'");
-    FILE *fp = popen(cmd, "r");
-    if (!fp) return -1;
-    char val[32] = {0};
-    if (fgets(val, sizeof(val), fp)) {
-        size_t n = strlen(val);
-        while (n > 0 && (val[n-1] == '\n' || val[n-1] == '\r')) val[--n] = 0;
+    int fds[2];
+    if (pipe(fds) != 0) return -1;
+
+    pid_t pid = fork();
+    if (pid < 0) {
+        close(fds[0]);
+        close(fds[1]);
+        return -1;
     }
-    pclose(fp);
+    if (pid == 0) {
+        close(fds[0]);
+        dup2(fds[1], STDOUT_FILENO);   // 子进程 stdout → 管道写端
+        close(fds[1]);
+        int devnull = open("/dev/null", O_WRONLY);   // 等价旧写法的 2>/dev/null
+        if (devnull >= 0) {
+            dup2(devnull, STDERR_FILENO);
+            close(devnull);
+        }
+        char *argv[] = { (char *)"dumpsys", (char *)"power", NULL };
+        execv(DUMPSYS_BIN, argv);   // 绝对路径，不依赖 PATH（同 am 广播那条的做法）
+        _exit(127);
+    }
+
+    close(fds[1]);
+    char val[32] = {0};
+    char line[512];
+    size_t lineLen = 0;
+    int matched = 0;
+    char buf[4096];
+    while (!matched) {
+        ssize_t n = read(fds[0], buf, sizeof(buf));
+        if (n <= 0) break;   // 0=EOF、<0=读失败 → 都按"没匹配到"处理
+        for (ssize_t i = 0; i < n; i++) {
+            if (buf[i] != '\n') {
+                if (lineLen < sizeof(line) - 1) line[lineLen++] = buf[i];
+                continue;
+            }
+            line[lineLen] = '\0';
+            matched = wakefulness_value(line, val, sizeof(val));
+            if (matched) break;
+            lineLen = 0;   // 本行不含目标：丢掉，接着拼下一行
+        }
+    }
+    if (!matched && lineLen > 0) {   // 末尾无换行的残行也判一次
+        line[lineLen] = '\0';
+        matched = wakefulness_value(line, val, sizeof(val));
+    }
+    close(fds[0]);   // 必须先关：否则子进程可能卡在写端，下面 waitpid 就永不返回
+    // 不处理 EINTR：本文件的 signal() 是 BSD 语义（带 SA_RESTART），waitpid 会被自动重启；
+    // 真要被打断也只多留一个僵尸，不影响功能。
+    waitpid(pid, NULL, 0);   // 回收子进程，避免僵尸（它已退出、或即将因 SIGPIPE 退出）
+
+    if (!matched) return -1;                    // 没读到目标行 → 失败，调用方按兜底处理
     if (strcmp(val, "Awake") == 0) return 1;
     if (strcmp(val, "Dozing") == 0) return 2;
-    if (strlen(val) == 0) return -1;   // 解析到空 → 失败，调用方按兜底处理
-    return 0;                          // Asleep / 其余 → 灭屏
+    if (strlen(val) == 0) return -1;            // 解析到空 → 失败
+    return 0;                                   // Asleep / 其余 → 灭屏
 }
 
 /** 判断指定包名是否为当前前台/top Activity（dumpsys 开销约 100~300ms，仅在要 kill 时调用） */
@@ -1940,7 +2021,7 @@ static void launch_last_app(int pkg_known_dead) {
     // —— 屏幕门禁 + 息屏退避（APP_LAUNCH_SCREEN_GATE）——
     // 位置前移到最贵的一环（pm 冷启动、全量 /proc 扫描）之前：屏灭时本链注定下发不了（门禁会拦），
     // 却每轮仍要付 1~3 次 pm + 一次全量扫描 + 日志，是断联期探测风暴的主因。
-    // 屏幕状态只取一次，退避与门禁共用 —— 屏检一次起 3 个进程，是本链最贵的一环之一，不可为退避再取一次。
+    // 屏幕状态只取一次，退避与门禁共用 —— 屏检要 fork 一个 dumpsys、活还在 system_server 里干，是本链最贵的一环之一，不可为退避再取一次。
     // 门禁关闭时不进本块：那时屏灭也允许下发，退避只会把真实下发推迟最多 10s，且要多付一次屏检。
     if (app_launch_screen_gate_enabled) {
         // 息屏退避闸门（用户拍板 10s）：上次已判定息屏且未到间隔 → 本次连屏检都不做，
