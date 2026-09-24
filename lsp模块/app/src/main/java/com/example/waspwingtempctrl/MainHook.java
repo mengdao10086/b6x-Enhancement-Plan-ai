@@ -1169,7 +1169,7 @@ public class MainHook implements IXposedHookLoadPackage {
                     // 已离开引导页（B6X=进入设置界面；farsef 无引导页概念，首个 Activity 即退）
                     autoLaunchPending = false;
                     cancelAutoLaunchTimeout();
-                    backgroundActivity(act);
+                    backgroundForAutoLaunch(act);
                 }
             });
             XposedBridge.log(TAG + " 已钩住 Activity.onCreate/onResume（b6x_auto_launch 后台化）");
@@ -1178,12 +1178,16 @@ public class MainHook implements IXposedHookLoadPackage {
         }
     }
 
-    /** 自动拉起：把当前任务切到后台（界面已就绪；连接由后台重连线程完成；事件触发时同步切，无固定延迟） */
-    private static void backgroundActivity(final Activity act) {
+    /**
+     * 自动拉起（守护进程拉起）：把当前任务切到后台（界面已就绪；连接由后台重连线程完成；事件触发时同步切，无固定延迟）。
+     * 与返回键路径同源：开关开启时一并从最近任务隐藏（见 {@link #excludeFromRecents}）。
+     */
+    private static void backgroundForAutoLaunch(final Activity act) {
         backgroundActivity(act, "自动拉起");
+        if (readBackHideEnabled()) excludeFromRecents(act);   // 与返回键路径一致：开关开则隐藏，失败不影响上面的收后台
     }
 
-    /** 把当前任务切到后台；{@code reason} 只进日志，便于区分是自动拉起还是返回键触发。 */
+    /** 把当前任务切到后台，不动最近任务（是否隐藏由调用方自行决定）；{@code reason} 只进日志。 */
     private static void backgroundActivity(final Activity act, String reason) {
         try {
             act.moveTaskToBack(true);
@@ -1283,8 +1287,8 @@ public class MainHook implements IXposedHookLoadPackage {
      * 用户在设置界面按返回就完全不生效（这正是"开关无效"的主因）。
      *
      * <p>命中后做两件事：{@code moveTaskToBack(true)} 收后台（保进程、BLE 不断）
-     * + {@link #excludeFromRecents} 从最近任务隐藏。<b>两件事只在本路径（返回键）发生</b>：
-     * 自动拉起路径共用的 {@link #backgroundActivity} 保持"只收后台、不动最近任务"的原行为。
+     * + {@link #excludeFromRecents} 从最近任务隐藏；自动拉起路径（{@link #backgroundForAutoLaunch}）在开关开启时做同样两件事：
+     * 开关关闭则两条路径都只收后台、不动最近任务。
      * 判据不成立时<b>必打一行日志</b>，便于真机区分"回调没进"与"进了但判据不成立"。
      *
      * <p>受界面开关 {@code UI_BACK_HIDE} 约束：关闭时不设 result，直接走系统默认的 finish。
@@ -1371,7 +1375,7 @@ public class MainHook implements IXposedHookLoadPackage {
                 autoLaunchTimeoutRunnable = null;
                 if (!autoLaunchPending) return;
                 autoLaunchPending = false;
-                backgroundActivity(act);
+                backgroundForAutoLaunch(act);
             }
         };
         mainHandler().postDelayed(autoLaunchTimeoutRunnable, AUTO_LAUNCH_TIMEOUT_MS);
