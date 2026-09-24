@@ -322,12 +322,17 @@ public final class WrapRowLayout extends ViewGroup {
         }
         // 能与本行参数名同行的最大前缀（段首 breakBefore 者一项都不与之同行）
         int fit = first.breakBefore ? 0 : tailPrefixFit(pass, pass.rowWidth, start, end);
-        if (fit == end - start) {                        // ① 全部字段与参数名同行
+        // 判"放几项"一律用可见项数：区间内夹着的 GONE 兄弟不占宽、不落位，
+        // 而 collectTail 会把它们收进区间，用下标差（end - start）会恒大于 fit，第①档于是永不命中
+        int visible = visibleCount(start, end);
+        if (fit == visible) {                            // ① 全部字段与参数名同行
             placeTailOnRow(pass, start, end);
             pass.rowClosed = true;
             return end;
         }
-        for (int lines = 1; lines <= end - start; lines++) {
+        // 同行那一段的边界 = 第 fit 个可见项之后的下标（口径同 visibleCount；GONE 不进这一段）
+        int beside = fit > 0 ? endOfVisiblePrefix(start, end, fit) : start;
+        for (int lines = 1; lines <= visible; lines++) {
             if (tailLineEnds(pass, start, end).length <= lines) {
                 // ②④⑥…：参数名独占一行，全部字段切成 ≤ lines 整行（能用整行解决就不混排）
                 flushRow(pass);
@@ -335,10 +340,10 @@ public final class WrapRowLayout extends ViewGroup {
                 pass.rowClosed = true;
                 return end;
             }
-            if (fit > 0 && tailLineEnds(pass, start + fit, end).length <= lines) {
+            if (beside > start && tailLineEnds(pass, beside, end).length <= lines) {
                 // ③⑤⑦…：同行放得下的先放，其余切成 ≤ lines 整行
-                placeTailOnRow(pass, start, start + fit);
-                placeTailLines(pass, start + fit, end);
+                placeTailOnRow(pass, start, beside);
+                placeTailLines(pass, beside, end);
                 pass.rowClosed = true;
                 return end;
             }
@@ -388,6 +393,40 @@ public final class WrapRowLayout extends ViewGroup {
             end++;
         }
         return end;
+    }
+
+    /**
+     * 区间 {@code [from,to)} 内可见子视图（{@code getVisibility() != GONE}）的个数。
+     *
+     * <p>尾段区间由 {@link #collectTail} 收集，而它<b>会把 GONE 的子视图也收进区间</b>（GONE 分支
+     * 在标记判定之前），因此下标差 {@code to - from} 并不等于"区间里有几项要摆"。凡是要与
+     * {@link #tailPrefixFit}（逐项前缀累加，只数可见项）比大小的地方，都走这一个数。
+     */
+    private int visibleCount(int from, int to) {
+        int n = 0;
+        for (int i = from; i < to; i++) {
+            if (getChildAt(i).getVisibility() != GONE) {
+                n++;
+            }
+        }
+        return n;
+    }
+
+    /**
+     * 区间 {@code [from,to)} 内<b>第 {@code count} 个可见子视图之后</b>的下标（{@code count == 0}
+     * 时为 {@code from}）。即"前 {@code count} 个可见项"这一段的右侧边界，口径与
+     * {@link #visibleCount} 同源；GONE 不进这一段（它既不占宽也不落位，留在后一段里被跳过）。
+     */
+    private int endOfVisiblePrefix(int from, int to, int count) {
+        int seen = 0;
+        int i = from;
+        while (i < to && seen < count) {
+            if (getChildAt(i).getVisibility() != GONE) {
+                seen++;
+            }
+            i++;
+        }
+        return i;
     }
 
     /**
