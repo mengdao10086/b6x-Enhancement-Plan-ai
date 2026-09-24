@@ -27,7 +27,7 @@
 **状态**：**未解决**——`ensureUsableController()` 与 `checkCommandStall()` **均未根治**；锁 125/4500 仍偶发。
 
 
-### 2. GitNexus 对本仓库的 `detect_changes` 曾恒返回 0 条（2026-09-21 记录；2026-09-22 定位根因）
+### 2. GitNexus 对本仓库的 `detect_changes` 曾恒返回 0 条（2026-09-21 记录；2026-09-22 定位根因；2026-09-24 漏报问题已解决）
 
 **现象**：在本仓库（`D:\下载\Claude Code\飞智b6x增强计划`）对工作区改动跑 GitNexus `detect_changes()`，无论改动多少源码，恒返回 0 条受影响符号／流程。
 
@@ -35,13 +35,21 @@
 
 **证据**：改用 `repo=b6x-Enhancement-Plan-ai`（索引 2026-09-22 重建，3977 节点）后 —— `impact(pid_compute)` 立即返回 5 个候选，含真正那处 `lsp模块/daemon/tempctrl.c:2235`（3 受影响 / 1 直接调用者 / LOW）；`detect_changes(scope=compare, base_ref=d962bf0)` 返回 36 个变更符号 / 6 个文件。
 
-**仍未吃透（2026-09-22 实测）**：同一区间（`d962bf0..HEAD`，含 12 个提交）`git diff` 实际改动 **74 个文件：17 java / 1 c / 22 xml / 24 md**；而 `detect_changes(scope=compare, base_ref=d962bf0)` 只报出 **6 个文件、36 个变更符号，且全部是 markdown 的 Section** —— **17 个 Java 文件与 `tempctrl.c` 的改动全部漏报**。故"CJK 路径导致恒 0"不成立，但**"空结果 ≠ 改动安全"依然成立**——原因在映射/校验范围。候选机制（**未验证**）：git 对非 ASCII 路径的引号转义导致 diff→索引路径匹配失败，或它只映射部分节点类型。复现：`git -c core.quotePath=false diff --name-only d962bf0..HEAD` 与 `detect_changes(scope=compare, base_ref=d962bf0, repo=b6x-Enhancement-Plan-ai)` 对比。
+**真相（2026-09-24 实测定位）**：不是"只映射部分节点类型"，而是**路径含非 ASCII 的文件被整份丢弃**。git 默认 `core.quotePath=true`，把这类路径的 diff 头写成 `+++ "b/lsp\346\250\241\345\235\227/..."`（引号 + 八进制转义），而 gitnexus 1.6.9 的 `parseDiffHunks`（`dist/storage/git.js`）判据是字面 `line.startsWith('+++ b/')` → **整行被跳过**。本仓库 123 个受控文件里 **114 个（93%）路径含中文**，索引 116 个文件里 112 个（97%）→ 对该工具几乎全瞎；上一段"17 个 java + `tempctrl.c` 全部漏报"由此解释。
+
+**叠加的第二处缺陷（同版本）**：跳过文件头时**不重置"当前文件"**，被跳过文件的 hunk 会挂到上一份文件名下（实测 `README.md` 的 hunk 列表里出现 `(1634,1681)`、`(1041,1065)`、`(1382,1426)` 等它不可能有的行号）；再撞上符号查询用**裸 `ENDS WITH`**（`README.md` 会同时命中 `lsp模块/README.md`），就产出"报出根本没改过的文件"这种怪结果。
+
+**复现**：`git diff <ref> -U0 | grep '^+++'` 看被引号包裹的行；或对比解析结果 —— `git diff <ref> -U0` 与 `git -c core.quotePath=false diff <ref> -U0` 各自按上述判据解析，文件数 **2 → 15**。
+
+**修复（2026-09-24）**：升级 `gitnexus` 1.6.9 → **1.6.12**（`npm i -g gitnexus@1.6.12`）。其解析器已重写：新增 `unquoteCStyleGitToken` 解引号路径、遇 `diff --git` 头先 `current = null`、支持 `+++ /dev/null`（删除的文件改用旧侧行号，旧版整份丢弃）、hunk 行号换算到索引的 0-based 空间、路径匹配改为按 `/` 锚定、未解析的 `diff --git` 头会把结果标 `partial`（不再静默假装干净）。**实证**：同一条 diff 由 `2 files / 24 symbols / 0 processes / low` 变为 **`15 files / 65 symbols / 61 processes / critical`**，CLI 与 MCP 两侧一致。
+
+**回退到旧版时的兜底**：`git config core.quotePath false`（仓库或全局）—— 实测能让 1.6.9 的解析器看到全部文件，但它只治主因，不治第二处缺陷与"纯删除文件"盲点。
 
 **附带发现**：`参考资料/c_historical_sources/*.c` 也在索引内，与 `tempctrl.c` 存在同名符号（`pid_compute` 有 5 个候选）→ 用 `impact` / `context` 时须以 `file_path` 或 `uid` 消歧。
 
-**影响（部分缓解）**：CLAUDE.md 的「commit 前 MUST 先跑 `detect_changes()`」在本仓库曾恒为绿灯。现改为：**必须带对仓库名 `b6x-Enhancement-Plan-ai`**，并且**不能把它当"改动已审完"的依据**（它会漏报代码符号，见上）。代码改动仍以逐函数 `impact`（带 `file_path` 消歧）+ 逐 hunk 人工复核为准；纯文档改动（只删/改 md）返回 0 条属正常。
+**影响**：CLAUDE.md 的「commit 前 MUST 先跑 `detect_changes()`」在本仓库曾长期是**假绿灯**（返回 `risk_level: low` 而实际漏报全部代码改动）。升级后（≥1.6.12）该门禁已可信，但仍须：①**带对仓库名 `b6x-Enhancement-Plan-ai`**；②索引按 commit 快照建、不感知未提交改动，故复核前先 `analyze --force`（见根 `CLAUDE.md` 的 GitNexus 索引维护规则）。纯文档改动返回 0 条属正常。
 
-**状态**：**根因已定位（仓库名），漏报问题未解决**（2026-09-22）。
+**状态**：**已解决**（2026-09-24：升级 gitnexus 1.6.12 并以本次真实改动实证，见上）。
 
 ### 3. 四项已知缺陷与有意取舍（2026-09-20 记录；原 `待办.md` §已知未修，按归口迁入）
 
