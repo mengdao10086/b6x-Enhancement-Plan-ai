@@ -1262,13 +1262,13 @@
       "role": "setting",
       "type": "multi",
       "label": "屏幕状态门禁",
-      "desc": "仅 mWakefulness=Awake 才拉起，灭屏/息屏跳过并每 5 秒重试；第 2 值 = 1 时 Dozing 也算亮屏",
+      "desc": "仅 mWakefulness=Awake 才拉起，灭屏/息屏跳过（息屏时 10 秒复核一次）；第 2 值 = 1 时 Dozing 也算亮屏",
       "cTable": "pre",
       "docOrder": 39,
       "docDesc": "屏幕状态门禁（二值：开关 · Dozing是否算亮屏）。仅 `dumpsys power` 的 `mWakefulness=Awake` 才拉起；Asleep/Dozing 算灭屏跳过——**息屏期间整条探测链停跑，仅每 10 秒复核一次屏幕**（间隔是代码内常量、非配置键，详见〈自动拉起〉节）；屏幕状态读取失败一律按「可拉起」兜底（防探测失败死锁，不可配置）。Dozing 默认=0（算灭屏，AOD 期间不拉起）",
       "confNote": [
         "屏幕状态门禁（二值）：开关 · Dozing 是否算亮屏",
-        "  仅 mWakefulness=Awake 才拉起，灭屏/息屏跳过并每 5 秒重试",
+        "  仅 mWakefulness=Awake 才拉起，灭屏/息屏跳过（息屏时 10 秒复核一次）",
         "  默认 1 0 = 开启、Dozing 不算亮屏；屏幕状态读取失败一律按「可拉起」兜底（防探测失败死锁）"
       ],
       "unit": "",

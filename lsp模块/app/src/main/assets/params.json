@@ -1485,7 +1485,7 @@
       "role": "setting",
       "type": "multi",
       "label": "屏幕状态门禁",
-      "desc": "仅 mWakefulness=Awake 才拉起，灭屏/息屏跳过并每 5 秒重试；第 2 值 = 1 时 Dozing 也算亮屏",
+      "desc": "仅 mWakefulness=Awake 才拉起，灭屏/息屏跳过（息屏时 10 秒复核一次）；第 2 值 = 1 时 Dozing 也算亮屏",
       "unit": "",
       "unitNote": "多值键，各字段单位见 fields",
       "default": [
