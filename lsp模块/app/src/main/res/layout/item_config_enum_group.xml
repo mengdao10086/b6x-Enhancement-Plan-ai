@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    enum 型键的分段开关容器（底槽）：单选 + 必选，子按钮由 ConfigKeyRow.EnumRenderer 按定义里的
+    options 逐项 inflate 进来（复用曲线页的 item_chart_window_button，不复制第二份按钮口径）。
+    形态与曲线页顶部的窗口档位同源（见 fragment_chart.xml 的 chart_window_group）：
+    容器只管"单选 + 必选"，选中态的高亮由 material 按钮样式自己给，没有独立滑块。
+
+    宽不写死：整段按按钮的自然宽，本行放不下时由外层换行容器（WrapRowLayout）整段移到下一行；
+    行内间距与圆角由 MaterialButtonToggleGroup 自己接管（它会把子按钮的左右外边距归零、
+    按位置削角，与曲线页那一处是同一份行为）。
+-->
+<com.google.android.material.button.MaterialButtonToggleGroup
+    xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
+    android:layout_width="wrap_content"
+    android:layout_height="wrap_content"
+    app:selectionRequired="true"
+    app:singleSelection="true" />

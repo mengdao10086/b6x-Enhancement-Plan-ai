@@ -58,16 +58,11 @@ import java.util.Locale;
 public class StatusFragment extends Fragment implements PageAware {
 
     /**
-     * 本 Fragment 的一次性落盘标记（两个键同放一个 prefs 文件，避免为每个标记各开一份）。
-     * <ul>
-     *   <li>{@link #KEY_ROOT_TRIED}：首次启动的 root 尝试；</li>
-     *   <li>{@link #KEY_HASH_PROMPTED_MD5}：二进制哈希不一致提示的去重。</li>
-     * </ul>
+     * 一次性落盘标记的 prefs 文件名与键都定义在 {@link Deployer}（跨包收口，键名只有一处）：
+     * {@link Deployer#PREFS_ROOT_PROBE} 文件里放首次 root 尝试（{@link Deployer#KEY_ROOT_TRIED}）、
+     * 哈希提示去重（{@link Deployer#KEY_HASH_PROMPTED_MD5}）与设备侧二进制 md5
+     * （{@link Deployer#KEY_BIN_DEPLOYED_MD5}，本页只写不读）。
      */
-    private static final String PREFS_ROOT = "root_probe";
-    private static final String KEY_ROOT_TRIED = "root_tried";
-    /** 已提示过「二进制哈希不一致」的 APK 侧 expected md5；变了才重新提示（装了新 APK）。 */
-    private static final String KEY_HASH_PROMPTED_MD5 = "bin_hash_prompted_md5";
 
     /** 一副图标两种状态：图标本身指向右，展开时顺时针转 90° 指向下（同配置页分组卡头）。 */
     private static final float ARROW_EXPANDED_ROTATION = 90f;
@@ -197,12 +192,13 @@ public class StatusFragment extends Fragment implements PageAware {
         final Context app = requireContext().getApplicationContext();
         runAsync(getString(R.string.status_busy_probe), () -> {
             // prefs 首读要走磁盘（首次加载 XML），与 root 尝试一并放后台线程
-            SharedPreferences prefs = app.getSharedPreferences(PREFS_ROOT, Context.MODE_PRIVATE);
-            boolean needRoot = !prefs.getBoolean(KEY_ROOT_TRIED, false);
+            SharedPreferences prefs =
+                    app.getSharedPreferences(Deployer.PREFS_ROOT_PROBE, Context.MODE_PRIVATE);
+            boolean needRoot = !prefs.getBoolean(Deployer.KEY_ROOT_TRIED, false);
             StringBuilder sb = new StringBuilder();
             if (needRoot) {
                 // 先落标记再尝试：被拒/失败都不再自动重试
-                prefs.edit().putBoolean(KEY_ROOT_TRIED, true).apply();
+                prefs.edit().putBoolean(Deployer.KEY_ROOT_TRIED, true).apply();
                 rootJustGranted = Deployer.get(app).ensureRoot();
                 sb.append(app.getString(rootJustGranted
                         ? R.string.status_root_ok_log : R.string.status_root_fail_log)).append("\n\n");
@@ -251,7 +247,21 @@ public class StatusFragment extends Fragment implements PageAware {
             head = "";
         }
         armHashMismatchPrompt(app, status);
+        rememberDeployedBinMd5(app, status);
         return head + status.describe();
+    }
+
+    /**
+     * 探测确认设备上二进制与 APK 内一致时，把设备侧 md5 落盘 —— 这是「需要重新部署」判定的缓存，
+     * 供下次冷启动落页用（见 {@link Deployer#needsRedeploy}）。
+     *
+     * <p>判据与提示判据互补、互不重叠：一致才记，不一致留给 {@link #armHashMismatchPrompt} 的部署请求；
+     * 没部署过（二进制不存在）时探测到的 md5 为空，{@link Deployer#rememberDeployedBinMd5} 会拒写。
+     */
+    private static void rememberDeployedBinMd5(Context app, Deployer.Status status) {
+        if (status.binExists && status.binHashOk) {
+            Deployer.rememberDeployedBinMd5(app, status.binMd5);
+        }
     }
 
     /**
@@ -386,11 +396,12 @@ public class StatusFragment extends Fragment implements PageAware {
         if (!status.binExists || status.binHashOk || status.binExpectedMd5.isEmpty()) {
             return;
         }
-        final SharedPreferences prefs = app.getSharedPreferences(PREFS_ROOT, Context.MODE_PRIVATE);
-        if (status.binExpectedMd5.equals(prefs.getString(KEY_HASH_PROMPTED_MD5, null))) {
+        final SharedPreferences prefs =
+                app.getSharedPreferences(Deployer.PREFS_ROOT_PROBE, Context.MODE_PRIVATE);
+        if (status.binExpectedMd5.equals(prefs.getString(Deployer.KEY_HASH_PROMPTED_MD5, null))) {
             return;
         }
-        prefs.edit().putString(KEY_HASH_PROMPTED_MD5, status.binExpectedMd5).apply();
+        prefs.edit().putString(Deployer.KEY_HASH_PROMPTED_MD5, status.binExpectedMd5).apply();
         hashMismatchPending = true;
     }
 

@@ -23,21 +23,26 @@ import com.example.waspwingtempctrl.ConfigStore;
 import com.example.waspwingtempctrl.ConfigStore.Assessment;
 import com.example.waspwingtempctrl.ConfigStore.FieldMeta;
 import com.example.waspwingtempctrl.ConfigStore.KeyMeta;
+import com.example.waspwingtempctrl.ConfigStore.OptionMeta;
 import com.example.waspwingtempctrl.ConfigStore.Value;
 import com.example.waspwingtempctrl.R;
+import com.google.android.material.button.MaterialButton;
+import com.google.android.material.button.MaterialButtonToggleGroup;
 import com.google.android.material.materialswitch.MaterialSwitch;
 import com.google.android.material.textfield.TextInputEditText;
 import com.google.android.material.textfield.TextInputLayout;
 
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 
 /**
- * 一个配置键的行：switch / int / multi / path 四种 type 各由一个 {@link Renderer} 渲染，
- * 行骨架（参数名 + 键内控件 + 行级文本）与落盘规则四型共用。
+ * 一个配置键的行：switch / int / multi / path / enum 五种 type 各由一个 {@link Renderer} 渲染，
+ * 行骨架（参数名 + 键内控件 + 行级文本）与落盘规则五型共用。
  *
- * <p>键的 label / desc / 单位 / 范围 / 依赖全部来自 {@link KeyMeta}（背后是 assets/params.json），
+ * <p>键的 label / desc / 单位 / 范围 / 依赖 / 取值域全部来自 {@link KeyMeta}（背后是 assets/params.json），
  * 本类不手抄任何键定义，也不自己解析 params.json。
  *
  * <h3>形态（配合 {@link WrapRowLayout}）</h3>
@@ -45,8 +50,8 @@ import java.util.List;
  * 不自己判换行）：
  * <ul>
  *   <li><b>参数名</b>（leading）：左起第一段，宽由内容定。</li>
- *   <li><b>键内控件</b>（trailing）：输入框（int / path）、各字段（multi）、开关（switch）——
- *       整段贴行尾，本行剩余宽放不下时整段移到下一行，整行还放不下才在段内折行。</li>
+ *   <li><b>键内控件</b>（trailing）：输入框（int / path）、各字段（multi）、开关（switch）、
+ *       分段开关（enum）——整段贴行尾，本行剩余宽放不下时整段移到下一行，整行还放不下才在段内折行。</li>
  *   <li><b>行级文本</b>（fullLine）：说明 / 备注 / 状态，以及单值键从字段里挪出来的单位-范围说明，
  *       各自独占一行、按整行宽折行。</li>
  * </ul>
@@ -58,10 +63,12 @@ import java.util.List;
  * 只在建行与值回填/提交时算，不随每次按键重排——
  * 边输边撑宽会让整行跳（值长了框自己横向滚）。
  * path 字段不按内容定宽：它吃满行尾，路径长度不可控，定宽会顶出屏幕。
+ * enum 的分段开关同样不写死宽度：按钮按文案自然宽，整段由容器换行。
  *
- * <h3>什么时候落盘（三条规则）</h3>
+ * <h3>什么时候落盘（四条规则）</h3>
  * <ul>
  *   <li><b>switch</b>：值只有 0/1，切换即完整 → 立即排入防抖队列。</li>
+ *   <li><b>enum</b>：选中项即完整取值（文本），点选即立即排入防抖队列（与 switch 同）。</li>
  *   <li><b>int / multi</b>：每次输入都排入防抖队列（写入前先 {@link ConfigStore#assess} 钳制，
  *       所以磁盘上不会出现越界值）；失焦时把钳制后的值回写控件并提示"原值 → 钳制后"。</li>
  *   <li><b>path</b>：<b>只在失焦/提交时落盘</b>。半截路径会被 C 端当成真路径去 open()，
@@ -239,10 +246,13 @@ final class ConfigKeyRow {
         root.setVerticalCenterAt(labelView, boxHalfHeight);
     }
 
-    /** 按定义里的 type 选渲染器：一处判断，四种 type 各一份实现（定义里只有这四种，int 是其余情况）。 */
+    /** 按定义里的 type 选渲染器：一处判断，五种 type 各一份实现（定义里只有这五种，int 是其余情况）。 */
     private Renderer createRenderer() {
         if (meta.isSwitch()) {
             return new SwitchRenderer();
+        }
+        if (meta.isEnum()) {
+            return new EnumRenderer();
         }
         if (meta.isPath()) {
             return new PathRenderer();
@@ -263,9 +273,9 @@ final class ConfigKeyRow {
         return meta.key;
     }
 
-    // ==================== 四型渲染器 ====================
+    // ==================== 五型渲染器 ====================
 
-    /** 键内的渲染面：四种 type 各一份实现，行骨架只按它要控件与值。 */
+    /** 键内的渲染面：五种 type 各一份实现，行骨架只按它要控件与值。 */
     private interface Renderer {
 
         /** 建键内控件并挂到行骨架上（键内控件标 trailing，行级文本标 fullLine）。 */
@@ -328,6 +338,92 @@ final class ConfigKeyRow {
         @NonNull
         public List<View> dimTargets() {
             return Collections.singletonList(switchView);
+        }
+    }
+
+    /**
+     * enum 型键：取值域是定义里的 {@code options}（文本的闭合集合），渲染成<b>多选一的分段开关</b>
+     * ——形态与曲线页顶部的窗口档位同源：{@link MaterialButtonToggleGroup}（单选 + 必选）
+     * 里逐项 inflate 的 {@link MaterialButton}，按钮自己带 {@code checkable}，选中态由 material
+     * 的按钮样式高亮，没有独立滑块。按钮布局直接复用曲线页那一份
+     * （{@code item_chart_window_button.xml}）：单一实现，不复制第二份口径。
+     *
+     * <p>选项文案取 {@link OptionMeta#label}（按钮上看人话），取值取 {@link OptionMeta#value}
+     * （写进配置的字面量），两者不混用。
+     *
+     * <p>点选即完整取值（与整键 switch 同语义，见 {@link #commitOption}），故不走"读控件"那条
+     * 边输边写的路：{@link #read} 只是接口实现（无输入框可读）。
+     * 磁盘值不在可选项内时（定义换过取值域）<b>一项都不选中</b>：界面不假装成某一项，用户点选即写入合法值。
+     */
+    private final class EnumRenderer implements Renderer {
+
+        private MaterialButtonToggleGroup group;
+        /** 按钮 id → 该按钮代表的取值；单选下它就是"当前选中项"的取值表。 */
+        private final Map<Integer, String> valueOfButton = new LinkedHashMap<>();
+
+        @Override
+        public void build(@NonNull LayoutInflater inflater) {
+            group = (MaterialButtonToggleGroup) inflater.inflate(
+                    R.layout.item_config_enum_group, root, false);
+            addToTail(group);
+            for (OptionMeta option : meta.options) {
+                MaterialButton button = (MaterialButton) inflater.inflate(
+                        R.layout.item_chart_window_button, group, false);
+                // 按钮的 id 是"取值 ↔ 控件"的唯一纽带（组按 id 报选中项）
+                button.setId(View.generateViewId());
+                button.setText(option.label);
+                valueOfButton.put(button.getId(), option.value);
+                group.addView(button);
+            }
+            group.addOnButtonCheckedListener((toggleGroup, checkedId, isChecked) -> {
+                if (suppressChange || !isChecked) {
+                    return;
+                }
+                commitOption(valueOfButton.get(checkedId));
+            });
+        }
+
+        @Override
+        public void applyValue(@NonNull Value value) {
+            int id = buttonIdOf(value.text());
+            if (id == View.NO_ID) {
+                // 取值不在表里：一项都不选中（见类注释），等用户点选
+                return;
+            }
+            suppressChange = true;
+            try {
+                group.check(id);
+            } finally {
+                suppressChange = false;
+            }
+        }
+
+        @Override
+        @Nullable
+        public Value read(boolean fallbackForUnparsed) {
+            String option = valueOfButton.get(group.getCheckedButtonId());
+            return option == null ? null : Value.ofText(option);
+        }
+
+        @Override
+        public boolean writesWhileTyping() {
+            return false;
+        }
+
+        @Override
+        @NonNull
+        public List<View> dimTargets() {
+            return Collections.singletonList(group);
+        }
+
+        /** 取值 → 按钮 id；取值不在定义的可选项内时返回 {@link View#NO_ID}。 */
+        private int buttonIdOf(@NonNull String value) {
+            for (Map.Entry<Integer, String> entry : valueOfButton.entrySet()) {
+                if (entry.getValue().equals(value)) {
+                    return entry.getKey();
+                }
+            }
+            return View.NO_ID;
         }
     }
 
@@ -940,6 +1036,31 @@ final class ConfigKeyRow {
             host.queue().cancel(meta.key);
         } else {
             host.queue().schedule(meta.key, ui);
+        }
+        host.onPendingChange();
+    }
+
+    /**
+     * 分段开关的提交：选中项即完整取值，点选即排入防抖队列（与整键 switch 同语义）。
+     *
+     * <p>选中值由定义里的 {@code options} 给出，恒在取值域内，故不再过 {@link ConfigStore#assess}
+     * （assess 的 enum 支路是给"别的调用方递进来的值"兜底的，见 {@link ConfigStore#assess}）。
+     */
+    private void commitOption(@Nullable String value) {
+        if (suppressChange || value == null) {
+            return;
+        }
+        Value effective = host.effectiveValue(meta.key);
+        if (effective != null && value.equals(effective.text())) {
+            // 程序化回填/重复选中同一项 → 不写
+            return;
+        }
+        Value next = Value.ofText(value);
+        Value onDisk = host.diskValue(meta.key);
+        if (onDisk != null && next.equals(onDisk)) {
+            host.queue().cancel(meta.key);
+        } else {
+            host.queue().schedule(meta.key, next);
         }
         host.onPendingChange();
     }

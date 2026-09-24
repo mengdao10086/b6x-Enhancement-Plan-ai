@@ -7,7 +7,7 @@
 
 断言（任一不过即非 0 退出）：
   A 产物可复现：重跑生成逻辑，与落盘的 4 个产物必须一致（比较按换行归一化） → 退出 1
-  B 产物自洽：53 键齐全、必需字段完整、min ≤ default/factory ≤ max、分组可解析 → 退出 1
+  B 产物自洽：55 键齐全、必需字段完整、min ≤ default/factory ≤ max、分组可解析 → 退出 1
   C 三源无漂移：与 profile.conf / 逻辑说明.md 参数表 / tempctrl.c 对账（含包名） → 退出 2
   D 产物形态自检：C 头括号配平、X 宏实参个数、tempctrl.c 格式串转换符 vs 实参 → 退出 1
     （本机与 CI 均无 C 编译器，D 是编译期错误的替代检查）
@@ -37,8 +37,8 @@ sys.dont_write_bytecode = True   # 不在 参数定义/ 里留 __pycache__（.gi
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import gen_params  # noqa: E402  同目录模块，标准库路径规则即可导入
 
-EXPECTED_KEY_COUNT = 53
-VALID_TYPES = ("switch", "int", "multi", "path")
+EXPECTED_KEY_COUNT = 55
+VALID_TYPES = ("switch", "int", "multi", "path", "enum")
 
 
 class Failure(Exception):
@@ -157,6 +157,31 @@ def fail_check_b(definition):
                 problems.append("%s 的默认值应为非空字符串" % name)
             if not k.get("rangeNote"):
                 problems.append("%s 为路径键但缺 rangeNote" % name)
+        elif k["type"] == "enum":
+            # 文本枚举：值域由 options 给出（不是数值 range），default/factory 必须落在值域内。
+            if k["min"] is not None or k["max"] is not None:
+                problems.append("%s 为枚举键，min/max 应为 null（值域见 options）" % name)
+            options = k.get("options") or []
+            if not options:
+                problems.append("%s 为枚举键但 options 为空" % name)
+            values = []
+            for i, opt in enumerate(options):
+                if not isinstance(opt, dict):
+                    problems.append("%s 第 %d 个选项不是对象" % (name, i + 1))
+                    continue
+                if not isinstance(opt.get("value"), str) or not opt["value"].strip():
+                    problems.append("%s 第 %d 个选项缺 value" % (name, i + 1))
+                    continue
+                if not isinstance(opt.get("label"), str) or not opt["label"].strip():
+                    problems.append("%s 第 %d 个选项缺 label" % (name, i + 1))
+                if opt["value"] in values:
+                    problems.append("%s 的 options 取值域重复：%r" % (name, opt["value"]))
+                values.append(opt["value"])
+            if values:
+                for f in ("default", "factory"):
+                    if k[f] not in values:
+                        problems.append("%s 的 %s=%r 不在 options 取值域 %s 内"
+                                        % (name, f, k[f], values))
 
     if problems:
         raise Failure("产物字段问题 %d 条：\n  - %s"

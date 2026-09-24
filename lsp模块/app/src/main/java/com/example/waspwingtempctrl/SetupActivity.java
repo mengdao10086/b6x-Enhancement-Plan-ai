@@ -42,6 +42,11 @@ public class SetupActivity extends AppCompatActivity {
 
     private static final String KEY_TAB = "ww_selected_tab";
 
+    /** 起始页设定（界面参数键，type=enum）：文本值 {@code status|config|log}，出厂 {@code config}。 */
+    private static final String KEY_UI_START_PAGE = "UI_START_PAGE";
+    /** 「需要重新部署时先落状态页」开关（界面参数键，type=switch）：出厂 1（开）。 */
+    private static final String KEY_UI_DEPLOY_ENTRY = "UI_DEPLOY_ENTRY";
+
     /** 页序号参数名（写进各页 Fragment 的 arguments，可见性广播时反查用）。 */
     static final String ARG_PAGE = "ww_page";
 
@@ -88,10 +93,10 @@ public class SetupActivity extends AppCompatActivity {
         findViewById(R.id.action_settings).setOnClickListener(v ->
                 startActivity(new Intent(this, SettingsActivity.class)));
 
-        int index = savedInstanceState == null ? 0 : savedInstanceState.getInt(KEY_TAB, 0);
+        int index = initialPageIndex(savedInstanceState);
         int initial = index < 0 || index >= MENU_IDS.length ? 0 : index;
         syncing = true;
-        pager.setCurrentItem(initial, false);   // 不播放入场动画：冷启动直接落在上次那一页
+        pager.setCurrentItem(initial, false);   // 不播放入场动画：冷启动直接落在判定的那一页（见 initialPageIndex）
         nav.setSelectedItemId(MENU_IDS[initial]);
         syncing = false;
         // 首帧之后再广播一次：此刻页面视图才建好（ViewPager2 在布局中创建页面）
@@ -111,6 +116,51 @@ public class SetupActivity extends AppCompatActivity {
         if (pager != null) {
             outState.putInt(KEY_TAB, pager.getCurrentItem());
         }
+    }
+
+    // ==================== 启动落页 ====================
+
+    /**
+     * 启动落第几页。<b>只在 onCreate 判定一次</b>，三级优先：
+     * <ol>
+     *   <li>{@code savedInstanceState} 非空（进程重建）→ 回到上次那一页，行为与之前一致；</li>
+     *   <li>部署入口开关为开、且 {@link Deployer#needsRedeploy} 为真 → 落状态页
+     *       （首次部署与 root 授权的入口都在那里）；</li>
+     *   <li>{@link #KEY_UI_START_PAGE} 设定的起始页（读不到或值非法即出厂 {@code config}）。</li>
+     * </ol>
+     * <b>不跑 su 真探测、不自动跳页</b>：第 2 级只看缓存比对，且切页只发生在这一处。
+     */
+    private int initialPageIndex(Bundle savedInstanceState) {
+        if (savedInstanceState != null) {
+            return savedInstanceState.getInt(KEY_TAB, 0);
+        }
+        if (isDeployEntryEnabled() && Deployer.needsRedeploy(this)) {
+            return indexOf(R.id.tab_status);
+        }
+        return indexOf(startPageTabId());
+    }
+
+    /**
+     * {@link #KEY_UI_START_PAGE} 的文本值 → 页签 id。<b>显式映射</b>而非复用页序下标：
+     * {@link #MENU_IDS} 的顺序将来若有变动，这里不会静默错位。未读到或不认识的值 → 出厂 {@code config}。
+     */
+    private int startPageTabId() {
+        ConfigStore.Value value = ConfigStore.get(this).get(KEY_UI_START_PAGE);
+        String text = value == null ? "" : value.text().trim();
+        switch (text) {
+            case "status":
+                return R.id.tab_status;
+            case "log":
+                return R.id.tab_log;
+            default:
+                return R.id.tab_config;
+        }
+    }
+
+    /** {@link #KEY_UI_DEPLOY_ENTRY} 是否开：switch 型在定义里是 0/1 数值（见 params.json）。读不到 → 出厂 1。 */
+    private boolean isDeployEntryEnabled() {
+        ConfigStore.Value value = ConfigStore.get(this).get(KEY_UI_DEPLOY_ENTRY);
+        return value == null || value.intAt(0) != 0;
     }
 
     // ==================== 页签与翻页 ====================

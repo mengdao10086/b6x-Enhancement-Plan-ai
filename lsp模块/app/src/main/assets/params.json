@@ -97,7 +97,9 @@
         "UI_LABEL_MERGE_PX",
         "UI_RPM_AXIS_MIN",
         "UI_CURVE_FILTER",
-        "UI_BACK_HIDE"
+        "UI_BACK_HIDE",
+        "UI_START_PAGE",
+        "UI_DEPLOY_ENTRY"
       ]
     }
   ],
@@ -1628,6 +1630,54 @@
       "max": 1,
       "requires": [],
       "daemonConsumes": true,
+      "fields": null
+    },
+    "UI_START_PAGE": {
+      "key": "UI_START_PAGE",
+      "group": "webui",
+      "role": "setting",
+      "type": "enum",
+      "label": "默认页面",
+      "desc": "进入界面时默认显示的页面：状态页 / 配置·曲线 / 日志",
+      "unit": "",
+      "unitNote": "枚举文本，取值 status / config / log，无单位",
+      "default": "config",
+      "factory": "config",
+      "min": null,
+      "max": null,
+      "requires": [],
+      "daemonConsumes": false,
+      "fields": null,
+      "options": [
+        {
+          "value": "status",
+          "label": "状态"
+        },
+        {
+          "value": "config",
+          "label": "配置 · 曲线"
+        },
+        {
+          "value": "log",
+          "label": "日志"
+        }
+      ]
+    },
+    "UI_DEPLOY_ENTRY": {
+      "key": "UI_DEPLOY_ENTRY",
+      "group": "webui",
+      "role": "setting",
+      "type": "switch",
+      "label": "需重新部署时进状态页",
+      "desc": "需重新部署时先进入状态页并给出提示；关闭则照常进入默认页面",
+      "unit": "",
+      "unitNote": "布尔开关，取值 0/1，无单位",
+      "default": 1,
+      "factory": 1,
+      "min": 0,
+      "max": 1,
+      "requires": [],
+      "daemonConsumes": false,
       "fields": null
     }
   }

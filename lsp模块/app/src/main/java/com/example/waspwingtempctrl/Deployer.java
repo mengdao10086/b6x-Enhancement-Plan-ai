@@ -1,6 +1,7 @@
 package com.example.waspwingtempctrl;
 
 import android.content.Context;
+import android.content.SharedPreferences;
 
 import java.io.File;
 import java.io.FileOutputStream;
@@ -59,6 +60,20 @@ public final class Deployer {
     /** C 端单实例锁退出码：已有实例在运行。 */
     public static final int EXIT_ALREADY_RUNNING = 2;
 
+    /**
+     * root 探测的一次性落盘标记所在的 prefs 文件名与键。
+     *
+     * <p><b>为什么集中在 {@code Deployer}</b>：写读这两处的类分处两个包（{@code Deployer} 在根包、
+     * {@code ui/StatusFragment} 在 ui 包），键名与文件名只在根包收口，避免同一字面量写两份。
+     */
+    public static final String PREFS_ROOT_PROBE = "root_probe";
+    /** 首次启动的 root 尝试标记（只试一次，被拒/失败都不再重试）。 */
+    public static final String KEY_ROOT_TRIED = "root_tried";
+    /** 已提示过「二进制哈希不一致」的 APK 侧 expected md5。 */
+    public static final String KEY_HASH_PROMPTED_MD5 = "bin_hash_prompted_md5";
+    /** 设备侧上次已知的二进制 md5（部署成功或探测确认一致时写入）。 */
+    public static final String KEY_BIN_DEPLOYED_MD5 = "bin_deployed_md5";
+
     private static final long START_COOLDOWN_MS = 10_000L;
     private static final long KILL_WAIT_LOOPS = 30L;
     /** 强杀（{@code kill -9}）后的等待轮数：-9 已不可被忽略，只需一小段收尾时间。 */
@@ -100,6 +115,49 @@ public final class Deployer {
             }
         }
         return local;
+    }
+
+    /**
+     * 是否需要重新部署 —— <b>只读缓存，不跑 su</b>，供启动落页判定调用（可在主线程调）。
+     *
+     * <p>判据：设备上上次已知的二进制 md5（{@link #KEY_BIN_DEPLOYED_MD5}）与 APK 内
+     * {@code assets/tempctrl-arm64} 的 md5 不一致。缓存来自「部署成功」或「探测确认一致」两条路径
+     * （见 {@link #rememberDeployedBinMd5}），因此它表达的是"上次看到的设备侧内容"，
+     * 不保证此刻设备上仍是这个值 —— 实时状态仍以 {@link #probe()} 为准。
+     *
+     * <p>无缓存时退化为「首启判据」{@code !root_tried}：从没部署过（也没试过 root）＝需要去状态页，
+     * 让首次授权/部署入口仍可达；已经试过 root 却仍无缓存（被拒、或部署从未成功）
+     * ＝不再自动引导，落回用户设定的起始页。
+     *
+     * <p>APK 内取不到二进制（本地构建没有 CI 注入的 asset）→ 无从比对，一律 false。
+     */
+    public static boolean needsRedeploy(Context context) {
+        Context app = context.getApplicationContext();
+        String expected = md5OfAssetOrEmpty(app, BIN_ASSET);
+        if (expected.isEmpty()) {
+            return false;
+        }
+        SharedPreferences prefs = app.getSharedPreferences(PREFS_ROOT_PROBE, Context.MODE_PRIVATE);
+        String cached = prefs.getString(KEY_BIN_DEPLOYED_MD5, null);
+        if (cached == null || cached.isEmpty()) {
+            return !prefs.getBoolean(KEY_ROOT_TRIED, false);
+        }
+        return !cached.equals(expected);
+    }
+
+    /**
+     * 记下设备侧当前已知的二进制 md5（{@link #needsRedeploy} 的唯一数据来源）。
+     *
+     * <p>两处调用：{@link #deploy()} 成功就位并读回设备侧哈希之后；状态页探测到
+     * {@link Status#binHashOk} 为真时。空值不写（宁可保留旧值，也不把缓存清成"从没部署过"）。
+     */
+    public static void rememberDeployedBinMd5(Context context, String deviceBinMd5) {
+        if (deviceBinMd5 == null || deviceBinMd5.isEmpty()) {
+            return;
+        }
+        context.getApplicationContext()
+                .getSharedPreferences(PREFS_ROOT_PROBE, Context.MODE_PRIVATE)
+                .edit().putString(KEY_BIN_DEPLOYED_MD5, deviceBinMd5).apply();
     }
 
     // ==================== 状态 / 判定 ====================
@@ -382,6 +440,8 @@ public final class Deployer {
                     raw.toString(), null);
         }
         steps.add("内容哈希核对通过（二进制与脚本均与 APK 内一致）");
+        // 设备侧哈希已读回且核对通过：此刻的缓存就是设备上真实内容（供下次启动落页判定）
+        rememberDeployedBinMd5(appContext, deployedBinMd5);
 
         ConfigStore.WriteResult cfg = configStore.writeFactoryIfAbsent();
         steps.add(cfg.describe());
@@ -620,6 +680,11 @@ public final class Deployer {
     }
 
     private String md5OfAsset(String assetPath) throws IOException {
+        return md5OfAsset(appContext, assetPath);
+    }
+
+    /** {@link #md5OfAsset(String)} 的静态入口：{@link #needsRedeploy} 无实例也须能算期望哈希。 */
+    private static String md5OfAsset(Context appContext, String assetPath) throws IOException {
         MessageDigest digest = newDigest();
         InputStream in = null;
         try {
@@ -636,6 +701,15 @@ public final class Deployer {
             closeQuietly(in);
         }
         return toHex(digest.digest());
+    }
+
+    /** 期望哈希的"取不到就当没有"形态：缺失/读失败一律空串（判定方据此退化）。 */
+    private static String md5OfAssetOrEmpty(Context appContext, String assetPath) {
+        try {
+            return md5OfAsset(appContext, assetPath);
+        } catch (IOException e) {
+            return "";
+        }
     }
 
     /**

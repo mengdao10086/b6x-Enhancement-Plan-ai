@@ -45,7 +45,7 @@ import java.util.Set;
  *       其余字段保持<b>代码默认值</b>（不是文件里的值）。</li>
  * </ul>
  *
- * <p>键的元数据（类型 / min / max / 默认值 / 分组 / label）全部来自
+ * <p>键的元数据（类型 / min / max / 默认值 / 分组 / label / enum 取值域）全部来自
  * {@code assets/params.json}（I1，单一来源），本类不手抄任何键定义。
  *
  * <p><b>线程模型</b>：全部方法都是本地磁盘 I/O，会阻塞（毫秒级）。可在主线程调用，
@@ -450,9 +450,9 @@ public final class ConfigStore {
 
     // ==================== 校验语义（P0 告警落地处） ====================
 
-    /** 界面侧评估结果：「界面能接受的值」+ 是否被钳制。 */
+    /** 界面侧评估结果：「界面能接受的值」+ 是否被改动过（数值钳制 / enum 回落出厂值）。 */
     public static final class Assessment {
-        /** 界面可接受并写出的值（已按 min/max 逐字段钳制）。 */
+        /** 界面可接受并写出的值（数值按 min/max 逐字段钳制；enum 表外回落出厂值）。 */
         public final Value uiValue;
         public final boolean changedByClamp;
         /** 人话说明。 */
@@ -466,7 +466,8 @@ public final class ConfigStore {
     }
 
     /**
-     * 把用户输入折算成「界面能接受的值」：按 {@code params.json} 的 min/max 逐字段钳制。
+     * 把用户输入折算成「界面能接受的值」：数值键按 {@code params.json} 的 min/max 逐字段钳制，
+     * 文本键按自己的值域收敛（path 只 trim，enum 只认 {@code options} 里的字面量、表外回落出厂值）。
      */
     public Assessment assess(String key, Value raw) {
         KeyMeta meta = key(key);
@@ -484,6 +485,17 @@ public final class ConfigStore {
             }
             return new Assessment(Value.ofText(raw.text().trim()), !raw.text().equals(raw.text().trim()),
                     notes);
+        }
+        if (meta.isEnum()) {
+            // 取值域是文本的闭合集合，没有"区间可钳制"一说：只认表里的字面量，
+            // 表外的值一律回落出厂值（出厂值由定义保证在取值域内），并记一条 note
+            String text = raw.text().trim();
+            if (meta.hasOption(text)) {
+                return new Assessment(Value.ofText(text), !text.equals(raw.text()), notes);
+            }
+            notes.add("取值「" + text + "」不在定义的可选项内，已回落到出厂值「"
+                    + meta.factoryValue.text() + "」");
+            return new Assessment(meta.factoryValue, true, notes);
         }
         int n = Math.max(1, meta.fieldCount());
         List<Integer> nums = new ArrayList<>();
@@ -595,6 +607,8 @@ public final class ConfigStore {
         public final boolean daemonConsumes;
         /** 多值键的字段定义；单值键为 null。 */
         public final List<FieldMeta> fields;
+        /** enum 键的取值域（{@code options[]}）；无选项时为空表，恒不为 null。 */
+        public final List<OptionMeta> options;
 
         /** 单值键的范围（多值键见 {@link #fields}）；null = 无界。 */
         private final Integer rawMin;
@@ -629,6 +643,25 @@ public final class ConfigStore {
                 }
             }
             this.fields = f.isEmpty() ? null : Collections.unmodifiableList(f);
+            // 取值域与 fieldCount/min/max 无关，但要先于 defaultValue/factoryValue 就位：
+            // 那两个值的解析口径由 type 决定（见 parseValue），出现顺序不影响结果，放一起便于阅读
+            List<OptionMeta> opts = new ArrayList<>();
+            JSONArray oa = o.optJSONArray("options");
+            if (oa != null) {
+                for (int i = 0; i < oa.length(); i++) {
+                    JSONObject oo = oa.optJSONObject(i);
+                    if (oo == null) {
+                        continue;
+                    }
+                    String value = oo.optString("value", "");
+                    if (value.isEmpty()) {
+                        // 空值不是合法取值：放进来等于"选中它会写出空行"，直接跳过
+                        continue;
+                    }
+                    opts.add(new OptionMeta(value, oo.optString("label", value)));
+                }
+            }
+            this.options = Collections.unmodifiableList(opts);
             this.rawMin = o.isNull("min") ? null : Integer.valueOf(o.optInt("min"));
             this.rawMax = o.isNull("max") ? null : Integer.valueOf(o.optInt("max"));
             this.defaultValue = parseValue(this, jsonValue(o, "default"));
@@ -647,7 +680,30 @@ public final class ConfigStore {
             return "path".equals(type);
         }
 
-        /** 值的字段个数（path 视为 1）。 */
+        /** enum 型：值是<b>文本</b>，取值域是 {@link #options}（不是数值区间）。 */
+        public boolean isEnum() {
+            return "enum".equals(type);
+        }
+
+        /**
+         * 值是文本（path / enum）：解析与校验都走"文本"这条路，不做数值切分
+         * （见 {@link ConfigStore#parseValue} 与 {@link ConfigStore#assess}）。
+         */
+        public boolean isText() {
+            return isPath() || isEnum();
+        }
+
+        /** {@code value} 是否落在本键的取值域内（enum 键用；其它类型的 {@link #options} 为空表）。 */
+        public boolean hasOption(String value) {
+            for (OptionMeta option : options) {
+                if (option.value.equals(value)) {
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        /** 值的字段个数（path / enum 视为 1）。 */
         public int fieldCount() {
             return fields != null ? fields.size() : 1;
         }
@@ -716,6 +772,23 @@ public final class ConfigStore {
             this.max = max;
             this.defaultValue = defaultValue;
             this.bool = bool;
+        }
+    }
+
+    /**
+     * enum 键的一个可选值（{@code options[]} 的一项）。
+     *
+     * <p>{@link #value} 是写进配置的<b>字面量</b>（文本，原样落盘）；{@link #label} 是界面上的
+     * 文案。取值域是闭合的：不在表里的值界面不接受（见 {@link ConfigStore#assess}）。
+     * 界面的渲染落在 {@code ui.ConfigKeyRow} 的分段开关上，本类只提供数据。
+     */
+    public static final class OptionMeta {
+        public final String value;
+        public final String label;
+
+        OptionMeta(String value, String label) {
+            this.value = value;
+            this.label = label;
         }
     }
 
@@ -1017,9 +1090,12 @@ public final class ConfigStore {
 
     // ==================== 内部：解析辅助 ====================
 
-    /** 按类型解析文件里的一行值（口径同 C 端：数值取前 N 个整数 token，路径取 trim 后原文）。 */
+    /**
+     * 按类型解析文件里的一行值（口径同 C 端：数值取前 N 个整数 token，文本型（path / enum）
+     * 取 trim 后原文）。
+     */
     private static Value parseValue(KeyMeta meta, String raw) {
-        if (meta.isPath()) {
+        if (meta.isText()) {
             return Value.ofText(trimValue(raw));
         }
         int n = Math.max(1, meta.fieldCount());
@@ -1053,7 +1129,8 @@ public final class ConfigStore {
     }
 
     private static Value parseValue(KeyMeta meta, Object jsonValue) {
-        if (meta.isPath()) {
+        if (meta.isText()) {
+            // enum 的 default / factory 在定义里就是文本（如 "config"），与 path 同一条路
             return Value.ofText(jsonValue == null ? "" : String.valueOf(jsonValue));
         }
         if (jsonValue instanceof JSONArray) {

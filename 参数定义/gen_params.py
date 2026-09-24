@@ -146,6 +146,11 @@ def build_params_json(definition):
                 item[opt] = entry[opt]
         fields = entry.get("fields")
         item["fields"] = [_field_product(f) for f in fields] if fields else None
+        # enum 的取值域（value = 落盘文本，label = 界面文案）与 fields 平级；
+        # 只有 enum 键输出它，其余类型不带这个键。取值域的合法性由 check_params.py 校验。
+        if entry["type"] == "enum":
+            item["options"] = [{"value": opt["value"], "label": opt["label"]}
+                               for opt in entry.get("options") or []]
         keys_out[entry["key"]] = item
 
     groups_out = []
