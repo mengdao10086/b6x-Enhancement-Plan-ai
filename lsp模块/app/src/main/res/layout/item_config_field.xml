@@ -23,12 +23,19 @@
         说明可用宽 = 框宽 − 左右内边距，装不下时 material 打省略号——故 ConfigKeyRow 按
         「说明文字宽 / 内容文字宽取大者」量出框宽，说明那一侧另加 @dimen/config_hint_slack(1dp)
         的防截断安全量。
+        说明的字号与正文不是同一档：material 画说明用的是 hintTextAppearance
+        （M3 的 OutlinedBox 样式 = ?attr/textAppearanceBodySmall，12sp + letterSpacing 0.0333），
+        正文才是 @dimen/config_field_text_size(16sp)。ConfigKeyRow 量说明取的就是这份 12sp 口径
+        （见 ConfigKeyRow#hintPaint）——量宽与渲染同档，框才不会比说明宽出约 1/3。
+        属性里的 app:expandedHintEnabled="false" 是这"同档"的另一半：不关的话，"空且未聚焦"时
+        说明会在框内按正文 16sp 展开，同一份说明就有两种字号。本项目字段建行即回填，
+        说明恒处于浮起的 12sp 档，关掉只是去掉那一瞬的另一种渲染。
       · 左右内边距压到 @dimen/field_radius(8dp)：M3 默认 16dp，收掉的那 8dp 全给可用内容宽，
         圆角 8dp 之外不再留空白。它同时就是上面那个说明可用框的内缩量（8dp = 圆角半径），
         所以这 8dp 再压就会让说明压到圆角上，不能动。
       · 上下内边距不对称（上 @dimen/config_field_pad_top 5dp / 下 @dimen/config_field_pad_bottom 2dp）：
         EditText 高度 match_parent + 垂直居中 → 正文是在"去掉内边距后的内容区"（36 − 5 − 2 = 29dp）
-        里居中的，内边距只决定内容区的高与它的中心。行盒（16sp 约 18.75dp）中心 = (5 + 34) / 2 = 19.5dp：
+        里居中的，内边距只决定内容区的高与它的中心。正文行盒（16sp 约 18.75dp）中心 = (5 + 34) / 2 = 19.5dp：
         比框的几何中心（18dp）低 1.5dp = (5 − 2) / 2。算式、留白与"余量最薄处"见 @dimen/config_field_pad_top。
       · scrollHorizontally：等于 setHorizontallyScrolling(true)——单行横向滚动的开关。不开时
         Layout 宽 == 视图宽，scrollX 恒为 0，path 键放不下的右半段（文件名）永远看不见。
@@ -73,6 +80,7 @@
         style="@style/Widget.Material3.TextInputLayout.OutlinedBox"
         android:layout_width="wrap_content"
         android:layout_height="@dimen/field_height"
+        app:expandedHintEnabled="false"
         app:boxCornerRadiusBottomEnd="@dimen/field_radius"
         app:boxCornerRadiusBottomStart="@dimen/field_radius"
         app:boxCornerRadiusTopEnd="@dimen/field_radius"

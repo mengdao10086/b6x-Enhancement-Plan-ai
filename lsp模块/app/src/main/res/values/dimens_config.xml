@@ -33,10 +33,11 @@
         落点相对框中心的偏移 = (padTop − padBottom) / 2：只与两者之差有关，与框高无关。
         浮起说明的纵向位置是 material 的定式（TextInputLayout，OUTLINED 分支）：说明可用框顶 =
         框顶 − 说明行盒高 / 2（calculateCollapsedTextBounds 配 calculateLabelMarginTop），即说明行盒
-        正好骑在框顶那条边上，下沿落在框顶下 说明行盒高/2 处。我们没设 app:hintTextAppearance，
-        说明与正文同字号（setEditText / onLayout 里 setExpandedTextSize(getTextSize())）——都是 16sp、
-        行盒约 18.75dp，故说明下沿 ≈ 框顶下 9.375dp。
-        算式（框高 @dimen/field_height 36dp、行盒约 18.75dp）：
+        正好骑在框顶那条边上，下沿落在框顶下 说明行盒高/2 处。说明的字号来自 hintTextAppearance
+        （M3 的 OutlinedBox 样式 = ?attr/textAppearanceBodySmall）——12sp、行盒约 14.06dp，
+        故说明下沿 ≈ 框顶下 7.03dp；那一档 16sp 的"说明展开"（空且未聚焦时）已由
+        item_config_field.xml 里的 app:expandedHintEnabled="false" 关掉，浮起说明恒是 12sp 这一档。
+        算式（框高 @dimen/field_height 36dp、正文行盒 16sp 约 18.75dp）：
           内容区 = [padTop, 36 − padBottom] = [5, 34]，可用高 29dp；
           行盒在内容区内居中 → 上下各留 (29 − 18.75) / 2 ≈ 5.125dp；
           行盒中心 = (5 + 34) / 2 = 19.5dp，行盒顶 10.125dp、行盒底 28.875dp。
@@ -45,11 +46,11 @@
             （见 item_config_row.xml），故正文与参数名的中心差 1.5dp。
           · 与上一版对照：5/3 与 6/4 的差值都是 2dp，落点都是 +1dp（两者完全等价）；本次 5/2 差值 3dp，
             落点真的下移 0.5dp 成 +1.5dp——改落点只能改差值，改上下和值只改内容区可用高。
-          · 比「说明下沿(9.375) → 框底(36)」的中点 22.7dp 高 3.2dp，即正文略偏说明一侧。
-          · 版面留白：说明下沿 → 行盒顶 ≈ 0.75dp，行盒底 → 框底 ≈ 7.125dp。
-            这处"说明与正文之间的余量"是 36dp 框高下最薄的一处：6/4 时只有 0.25dp，改 5/2 后放宽到
-            0.75dp（墨迹层面：说明 CJK 墨迹底 ≈ 框顶下 7.4dp，正文数字墨迹顶 ≈ 框顶下 13.6dp，约
-            6.2dp 不相碰）。框高再压或说明行盒变高仍会先在这里相碰。
+          · 比「说明下沿(7.03) → 框底(36)」的中点 21.5dp 高 2.0dp，即正文略偏说明一侧。
+          · 版面留白：说明下沿 → 正文行盒顶 ≈ 3.09dp，正文行盒底 → 框底 ≈ 7.125dp。
+            这处"说明与正文之间的余量"是 36dp 框高下最薄的一处：6/4 时 2.59dp，改 5/2 后放宽到
+            3.09dp（墨迹层面：说明 CJK 墨迹底 ≈ 框顶下 5.5dp，正文数字墨迹顶 ≈ 框顶下 13.6dp，约
+            8.1dp 不相碰）。框高再压、或说明那档字号变大，仍会先在这里相碰。
     -->
     <dimen name="config_field_pad_top">5dp</dimen>
 

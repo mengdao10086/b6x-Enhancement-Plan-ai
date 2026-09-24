@@ -2,6 +2,7 @@ package com.example.waspwingtempctrl.ui;
 
 import android.content.Context;
 import android.content.res.Resources;
+import android.content.res.TypedArray;
 import android.graphics.Paint;
 import android.text.Editable;
 import android.text.InputType;
@@ -52,8 +53,9 @@ import java.util.List;
  * 行内垂直居中由容器给（参数名与同一行最高的控件对齐），本类不再自己算盒高与墨迹位移。
  *
  * <h3>字段宽</h3>
- * <p>数值字段的宽 = max(说明文字宽, 当前值文字宽, 最小宽)，三者都用输入框自己的画笔量文本
- * （见 {@link #measuredFieldWidth}），只在建行与值回填/提交时算，不随每次按键重排——
+ * <p>数值字段的宽 = max(说明文字宽, 当前值文字宽, 最小宽)：值用输入框正文的画笔量，说明用
+ * material 渲染它的那档字号量（见 {@link #hintPaint}、{@link #measuredFieldWidth}），
+ * 只在建行与值回填/提交时算，不随每次按键重排——
  * 边输边撑宽会让整行跳（值长了框自己横向滚）。
  * path 字段不按内容定宽：它吃满行尾，路径长度不可控，定宽会顶出屏幕。
  *
@@ -659,25 +661,29 @@ final class ConfigKeyRow {
      * <p><b>说明为什么按画笔量</b>：Material 的 TextInputLayout 不参与说明测宽
      * （{@code onMeasure} 就是 {@code LinearLayout.onMeasure}，框宽只由 EditText 自己撑出来），
      * 说明只是"画"在框里，画不下就自己打省略号——量一个空框量不到说明，说明经常被截成"每周…"。
-     * 用输入框自己的画笔量（占位说明用的就是它的字号与字重，见 {@code TextInputLayout#setEditText}），
-     * 而不是"把说明临时写进输入框再量框"：数字型输入框带数字过滤器，非数字文本未必留得住。
-     * <b>值</b>同样只量文本，不再"临时改写控件文本再量一次"——那会打断正在输入的人（文本暂改、光标回跳）。
+     * 量用的是<b>渲染说明的那档字号</b>（见 {@link #hintPaint}：说明是 12sp，
+     * 不是输入框正文的 16sp），而不是"把说明临时写进输入框再量框"：
+     * 数字型输入框带数字过滤器，非数字文本未必留得住。
+     * <b>值</b>用输入框正文的画笔量，同样只量文本，不再"临时改写控件文本再量一次"
+     * ——那会打断正在输入的人（文本暂改、光标回跳）。
      *
      * <p><b>末尾那 {@link #hintFitGuard}（1dp）不是余量而是安全量</b>：material 判"说明装不装得下"
      * 用的是「说明可用宽 &lt; 文字实测宽」（拿 {@code paint.measureText} 的浮点值和整数宽比），
      * 框宽贴到 0 余量时一个像素的误差（字距取整、量宽取不取 ceil、字号缩放）就会判成装不下并打上省略号。
      * 留 1dp 把这条临界推开：宁可宽 1dp，也不要说明变成"最高转…"。
+     * 这条临界与字号无关（两侧随字号等比缩），且 material 量说明用的是同一个 {@code measureText}
+     * （同样的字距、同样的取整规则）——故把字号改小只会更宽裕，不会把这条临界推到不利的一侧。
      *
      * <p><b>最小宽</b>取最小可点目标 @dimen/row_min_height(48dp)：说明与值都很短的键（如 hint "数值" +
      * 值 "0"）不至于缩成一条点不准的窄框。只与说明和内容有关的"无上限"一侧不设钳制：
      * 装不下由容器换行，不为了塞进一行把说明截断。
      */
     private int measuredFieldWidth(@NonNull Field field) {
-        Paint paint = field.input.getPaint();
+        Paint valuePaint = field.input.getPaint();
         CharSequence hint = field.layout.getHint();
-        int hintWidth = hint == null ? 0 : textWidth(paint, hint.toString());
+        int hintWidth = hint == null ? 0 : textWidth(hintPaint(field), hint.toString());
         String value = field.text();
-        int valueWidth = value == null ? 0 : textWidth(paint, value);
+        int valueWidth = value == null ? 0 : textWidth(valuePaint, value);
         int content = Math.max(hintWidth, valueWidth) + hintFitGuard
                 + field.input.getPaddingStart() + field.input.getPaddingEnd();
         return Math.max(content, minFieldWidth);
@@ -686,6 +692,66 @@ final class ConfigKeyRow {
     /** 文本实测宽（向上取整：不足一个像素的余量在中间被吃掉，说明就会打上省略号）。 */
     private static int textWidth(@NonNull Paint paint, @NonNull String text) {
         return (int) Math.ceil(paint.measureText(text));
+    }
+
+    /**
+     * material 渲染浮起说明用的样式：与 item_config_field.xml 里 TextInputLayout 的 style 必须同源
+     * ——说明的字号/字距只挂在这条样式链上（它把 {@code hintTextAppearance} 指到
+     * {@code ?attr/textAppearanceBodySmall}），主题上并没有这个项；换样式要两处一起换。
+     */
+    private static final int HINT_TEXT_STYLE =
+            com.google.android.material.R.style.Widget_Material3_TextInputLayout_OutlinedBox;
+    /** 从 {@link #HINT_TEXT_STYLE} 里找说明外观的资源 id（{@code hintTextAppearance}）。 */
+    private static final int[] HINT_APPEARANCE_ATTR =
+            {com.google.android.material.R.attr.hintTextAppearance};
+    /** 从说明外观里找的两项：字号、字距（下标 0 / 1，见 {@link #hintPaint}）。 */
+    private static final int[] HINT_APPEARANCE_VALUES =
+            {android.R.attr.textSize, android.R.attr.letterSpacing};
+
+    /**
+     * 量说明文字用的画笔：把输入框自己的画笔（正文 @dimen/config_field_text_size 16sp）复制一份，
+     * 再按 material 实际渲染浮起说明用的那档字号与字距改过来——控件自己的 Paint 不动。
+     *
+     * <p><b>为什么要换字号</b>：说明由 material 的 {@code CollapsingTextHelper} 画，用的是
+     * {@code hintTextAppearance}（M3 的 OutlinedBox 样式 = {@code ?attr/textAppearanceBodySmall}，
+     * 12sp + letterSpacing 0.0333），与输入框正文的 16sp 不是同一档。拿正文画笔量说明，框会恒比
+     * 说明宽出约 1/3，多出来的余量整片堆在右侧（说明在框内左对齐、只有"值"居中，见
+     * item_config_field.xml）；字段建行即回填，说明恒处于浮起档，这 1/3 从来没有被用上过。
+     *
+     * <p><b>为什么字距要一并施加</b>：material 量/画说明的那份 TextPaint 带着说明外观的
+     * letterSpacing（{@code CollapsingTextHelper} 的 collapsedLetterSpacing），说明够长时这 0.0333em
+     * 约值 3% 的宽度；漏掉它就是把说明量窄，那才是新的截断隐患。
+     * 字体不用管：外观里的 fontFamily 就是 sans-serif（m3_ref_typeface_plain_regular），
+     * 与输入框的默认字体同一种。
+     *
+     * <p><b>兜底</b>：样式上取不到 {@code hintTextAppearance}（material 改了这套样式）或读不出字号时，
+     * 原样返回那份拷贝——按正文画笔量，即改前的口径，不比改前差（框偏宽，但不会截断说明）。
+     */
+    private static Paint hintPaint(@NonNull Field field) {
+        Paint paint = new Paint(field.input.getPaint());
+        Context context = field.layout.getContext();
+        TypedArray style = context.obtainStyledAttributes(HINT_TEXT_STYLE, HINT_APPEARANCE_ATTR);
+        int appearanceRes;
+        try {
+            appearanceRes = style.getResourceId(0, 0);
+        } finally {
+            style.recycle();
+        }
+        if (appearanceRes == 0) {
+            return paint;
+        }
+        TypedArray appearance = context.obtainStyledAttributes(appearanceRes, HINT_APPEARANCE_VALUES);
+        try {
+            float textSize = appearance.getDimension(0, 0f);
+            if (textSize <= 0f) {
+                return paint;
+            }
+            paint.setTextSize(textSize);
+            paint.setLetterSpacing(appearance.getFloat(1, 0f));
+        } finally {
+            appearance.recycle();
+        }
+        return paint;
     }
 
     /**
