@@ -227,6 +227,7 @@ final class ConfigKeyRow {
         renderer = createRenderer();
         renderer.build(inflater);
         alignLabelToInputBox();
+        shiftLabelInNonSwitchRow();
     }
 
     /**
@@ -244,6 +245,24 @@ final class ConfigKeyRow {
         }
         int boxHalfHeight = root.getResources().getDimensionPixelSize(R.dimen.field_height) / 2;
         root.setVerticalCenterAt(labelView, boxHalfHeight);
+    }
+
+    /**
+     * 参数名的下移：控件<b>不是开关</b>的行（int / path / enum / 首字段非布尔的 multi）里，
+     * 参数名整体下移 @dimen/config_label_shift；开关行的名字不动（开关墨迹经 0.75 缩放后与行中心同心，
+     * 名字居中即与它同轴）。见 @dimen/config_label_shift。
+     *
+     * <p><b>是渲染位移，不是 {@link #alignLabelToInputBox} 那种"钉垂直中心"</b>：这些行的行高各不相同
+     * （enum 行只有档位按钮高 21dp，带长说明的多值键整行更高），钉死偏移量只在行高恰为
+     * @dimen/field_height 时才对；位移量与行高无关，且不进测量、不进排布，
+     * 行高与换行几何一个字都不变。
+     */
+    private void shiftLabelInNonSwitchRow() {
+        if (meta.isSwitch() || (meta.isMulti() && meta.fields.get(0).bool)) {
+            return;
+        }
+        labelView.setTranslationY(
+                root.getResources().getDimensionPixelSize(R.dimen.config_label_shift));
     }
 
     /** 按定义里的 type 选渲染器：一处判断，五种 type 各一份实现（定义里只有这五种，int 是其余情况）。 */

@@ -387,16 +387,16 @@ public final class Deployer {
     }
 
     /**
-     * 一次性部署：资源落盘与授权 → 二进制就位 → service.d 脚本 → 配置保留写入 → 省电白名单
-     * → 自动拉起daemon。
+     * 一次性部署：资源落盘与授权 → 二进制就位 → service.d 脚本 → 配置保留写入 → 省电白名单。
      *
      * <p><b>配置保留</b>：{@code profile.conf} 不存在时才写出厂值（取自 params.json 的
      * {@code factory}），已存在则一个字都不覆盖。
      *
-     * <p><b>末步自动拉起一次</b>（委托 {@link #startDaemon()}）：盘上换了新二进制，不重启进程
-     * 它就一直在跑旧映像、等于没更新。拉起失败只记进 steps，<b>不影响部署结论</b>。
+     * <p><b>本方法只动盘、不重启守护进程</b>：盘上换了新二进制，不重启进程它就一直在跑旧映像、
+     * 等于没更新。"换完盘立刻拉起一次"接在部署之后，由调用方负责——状态页在部署结果上屏后
+     * 自动调一次 {@link #startDaemon()}，与手动点「拉起daemon」走的是同一条路径。
      *
-     * <p>任一硬步骤失败即返回 {@code ok=false}（配置、白名单与拉起失败不算硬失败，记在 steps 里）。
+     * <p>任一硬步骤失败即返回 {@code ok=false}（配置与白名单失败不算硬失败，记在 steps 里）。
      * <b>阻塞</b>（root 往返 3 次 + 落盘 + 若干次 probe）。
      */
     public Result deploy() {
@@ -465,18 +465,8 @@ public final class Deployer {
         steps.add(pr.isOk() ? "省电白名单批处理已下发（输出见原始输出）"
                 : "省电白名单下发失败（不影响部署）：" + pr.describe());
 
-        // 末步自动拉起一次：盘上已换成新二进制，不重启进程它不会生效（旧进程跑的是旧映像）。
-        // 复用 startDaemon()：停止序列、单实例锁代价、失败重试与手动入口完全一致，也共用冷却计时。
-        // 失败不算硬失败——文件已就位并核对过哈希，只记进 steps 供排查。
-        steps.add("部署后自动拉起daemon");
-        Result rs = startDaemon();
-        steps.addAll(rs.steps);
-        raw.append("\n[拉起daemon]\n").append(rs.rawOutput);
-        if (!rs.ok) {
-            steps.add("自动拉起未成功（不影响部署结论）："
-                    + (rs.error.isEmpty() ? "详见原始输出" : rs.error));
-        }
-
+        // 到位即止：拉起daemon 不在本方法里做（见 javadoc）——界面在部署上屏后再自动调一次
+        // startDaemon()，那是独立的一段（自己的忙态、操作记录与进度条）。
         Status st = probe();
         return new Result(st.deployed, "部署", steps, st.deployed ? "" : "部署后自检未通过", raw.toString(), st);
     }
@@ -485,7 +475,8 @@ public final class Deployer {
      * 只重推 service.d 脚本：不动二进制、不重启守护进程、不碰配置。<b>阻塞</b>（root 往返 1 次）。
      *
      * <p>用途：{@link #probe()} 发现设备上的脚本与 APK 内资源哈希不一致时自动纠正。脚本是纯文本、
-     * 无运行态，重推无损；二进制若不一致仍须走完整 {@link #deploy()}（重推会重启守护进程，代价高得多）。
+     * 无运行态，重推无损；二进制若不一致仍须走完整 {@link #deploy()}（部署流程会连带重启守护进程，
+     * 代价高得多）。
      */
     public Result updateScript() {
         List<String> steps = new ArrayList<>();

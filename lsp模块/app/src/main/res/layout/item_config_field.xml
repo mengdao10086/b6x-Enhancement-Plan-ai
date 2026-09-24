@@ -49,7 +49,9 @@
 
     <!-- 字段名 + 开关也走换行容器：字段名 leading、开关 trailing（贴字段右界）。
          高度取 minHeight @dimen/field_height：与同一键里的输入框等高；
-         换行后由内容撑高（定高会把第二行裁掉，WrapRowLayout 已把 minHeight 并进测量） -->
+         换行后由内容撑高（定高会把第二行裁掉，WrapRowLayout 已把 minHeight 并进测量）。
+         开关自己也必须定高（同 item_config_row.xml 的那段说明）：库样式里的 minHeight 是触控尺寸 48dp，
+         光靠容器 minHeight 挡不住，开关会把本行撑到 48dp -->
     <com.example.waspwingtempctrl.ui.WrapRowLayout
         android:id="@+id/config_field_switch_row"
         android:layout_width="wrap_content"
@@ -67,9 +69,10 @@
         <com.google.android.material.materialswitch.MaterialSwitch
             android:id="@+id/config_field_switch"
             android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
+            android:layout_height="@dimen/field_height"
             android:layout_marginStart="@dimen/space_xs"
             android:layout_marginEnd="@dimen/switch_trim_end"
+            android:gravity="center_vertical"
             android:scaleX="0.75"
             android:scaleY="0.75"
             app:wrapTrailing="true" />

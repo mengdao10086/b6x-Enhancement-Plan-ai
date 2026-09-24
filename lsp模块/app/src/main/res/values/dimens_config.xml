@@ -81,4 +81,12 @@
         左移 6dp，正好落进开关的空白里。
     -->
     <dimen name="switch_trim_end">-6dp</dimen>
+
+    <!--
+        参数名的下移量：其控件<b>不是开关</b>的行（int / path / enum / 首字段非布尔的 multi），
+        参数名整体下移这么多，名字与框内正文看起来更齐。开关行的名字不动。
+        实现是 ConfigKeyRow 里的纯渲染位移（setTranslationY）：不进测量、不进排布，
+        行高与换行几何一个字都不变，观感不对只改这一个值。
+    -->
+    <dimen name="config_label_shift">3dp</dimen>
 </resources>

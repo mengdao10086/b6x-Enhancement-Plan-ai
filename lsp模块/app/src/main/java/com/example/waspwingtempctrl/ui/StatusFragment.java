@@ -96,13 +96,21 @@ public class StatusFragment extends Fragment implements PageAware {
     private volatile boolean rootJustGranted;
     /** 后台任务里置位、主线程回调读取：二进制哈希不一致，且本 APK 版本尚未提示过。 */
     private volatile boolean hashMismatchPending;
+    /** 后台任务里置位、主线程回调读取：本次部署判定是否成功（决定要不要接着自动拉起，见 {@link #deploy()}）。 */
+    private volatile boolean deployOk;
     /** 上次探测的开始时刻（手动与静默共用）；静默刷新据此节流。内存态，进程重启即失效。 */
     private long lastProbeAtMs;
     /** 淡入淡出代号：每次新动画递增，回调里对不上号即作废（连续刷新时两段动画不交叠）。 */
     private int fadeGeneration;
 
-    /** 当前在跑的后台动作；非 null 且存活时拒绝并发触发。 */
-    private Thread worker;
+    /**
+     * 是否有动作在跑（结果还没回到主线程）；为 true 时拒绝并发触发。
+     *
+     * <p><b>为什么不是"那条线程还活着"</b>：结果上屏后紧接着还要接一段（部署→自动拉起，见
+     * {@link #deploy()}），而那一刻线程刚 post 完、往往还没真正结束——按"线程存活"判会把该接的一段
+     * 挡在门外。这里只管"本页同时只有一个动作"：主线程置位于开跑，结果上屏时清除。
+     */
+    private boolean actionRunning;
 
     private static final SimpleDateFormat TIME_FMT =
             new SimpleDateFormat("HH:mm:ss", Locale.US);
@@ -171,7 +179,7 @@ public class StatusFragment extends Fragment implements PageAware {
 
     @Override
     public void onDestroyView() {
-        worker = null;
+        actionRunning = false;
         // 先收掉动画并复位透明度：回调里判空就返回，不给已销毁的视图留半透明残影
         cancelFade();
         statusView = null;
@@ -268,14 +276,24 @@ public class StatusFragment extends Fragment implements PageAware {
     /**
      * 部署：跑完部署动作后<b>重新探测</b>，把探测结果上屏——不再把部署动作日志（含步骤列表）
      * 灌进状态区：部署成没成看状态文本就够，步骤细节在「诊断信息」里。
+     *
+     * <p><b>随后自动「点」一次拉起daemon</b>（{@link #startDaemon()}）：{@link Deployer#deploy()}
+     * 只把新二进制换到盘上，不重启进程它就一直跑旧映像。这一段是<b>独立的一份</b>——自己的忙态文案、
+     * 自己的操作记录、自己的一次进度条起停，与手动点「拉起daemon」完全是同一条路径，
+     * 不是把部署那一趟拉长。
+     * 部署判定失败（{@code ok=false}）时<b>不接</b>：盘上没换成功，重启旧映像没有意义。
      */
     private void deploy() {
         final Context app = requireContext().getApplicationContext();
         runAsync(getString(R.string.status_busy_deploy), () -> {
             Deployer deployer = Deployer.get(app);
-            deployer.deploy();
+            deployOk = deployer.deploy().ok;
             return deployer.probe().describe();
-        }, false, true);
+        }, false, true, () -> {
+            if (deployOk) {
+                startDaemon();
+            }
+        });
     }
 
     private void uninstall() {
@@ -347,12 +365,25 @@ public class StatusFragment extends Fragment implements PageAware {
      */
     private void runAsync(final String busyText, final Task task, final boolean asDialog,
                           final boolean manual) {
-        if (worker != null && worker.isAlive()) {
+        runAsync(busyText, task, asDialog, manual, null);
+    }
+
+    /**
+     * 同上，另可指定"结果上屏之后接着跑的动作"。
+     *
+     * @param after 结果上屏、占用释放之后要接着跑的动作（部署→自动拉起就靠它）；null = 没有。
+     *              它在主线程、与用户下一次点击同一时机被调用，故里面可以直接调
+     *              {@link #startDaemon()} 这类动作入口，不必自己绕开并发守卫
+     */
+    private void runAsync(final String busyText, final Task task, final boolean asDialog,
+                          final boolean manual, @Nullable final Runnable after) {
+        if (actionRunning) {
             if (manual) {
                 appendLog(getString(R.string.status_busy_other));
             }
             return;
         }
+        actionRunning = true;
         final Context appContext = requireContext().getApplicationContext();
         lastProbeAtMs = System.currentTimeMillis();
         setBusy(true);
@@ -379,6 +410,9 @@ public class StatusFragment extends Fragment implements PageAware {
                 if (!isAdded() || statusView == null) {
                     return;
                 }
+                // 结果已回到主线程：本动作到此结束，先放掉占用——紧接着要接的那一段（after）
+                // 才不会被守卫挡在门外
+                actionRunning = false;
                 setBusy(false);
                 if (manual) {
                     appendLog(result);
@@ -404,10 +438,12 @@ public class StatusFragment extends Fragment implements PageAware {
                     hashMismatchPending = false;
                     showHashMismatchPrompt();
                 }
+                if (after != null) {
+                    after.run();
+                }
             });
         }, "ww-deploy");
         thread.setDaemon(true);
-        worker = thread;
         thread.start();
     }
 

@@ -16,6 +16,12 @@
 
     开关的负 end 外边距是"把缩放 0.75 后墨迹两侧的空白还出去"（见 @dimen/switch_trim_end）：
     尾段右对齐算的是含外边距的宽，负的 end 外边距让开关的墨迹正好贴行尾。
+
+    开关的高度不写 wrap_content：M3 的 MaterialSwitch 样式里 android:minHeight=?attr/minTouchTargetSize
+    （48dp）是"触控尺寸"，会把开关键行撑到 48dp——比只有输入框的行（@dimen/field_height 36dp）高出一截。
+    定高 @dimen/field_height 与输入框同高；轨道本体 32dp、缩放 0.75 后墨迹 24dp，定高不裁切。
+    android:gravity="center_vertical" 是同一件事的另一半：SwitchCompat 按 gravity 落轨，缺省（TOP）
+    会把轨道停在盒顶，缩放后墨迹落到盒中心上方约 1.5dp；写了才与行中心同心（也与参数名同轴）。
 -->
 <com.example.waspwingtempctrl.ui.WrapRowLayout
     xmlns:android="http://schemas.android.com/apk/res/android"
@@ -35,9 +41,10 @@
     <com.google.android.material.materialswitch.MaterialSwitch
         android:id="@+id/config_key_switch"
         android:layout_width="wrap_content"
-        android:layout_height="wrap_content"
+        android:layout_height="@dimen/field_height"
         android:layout_marginStart="@dimen/space_xs"
         android:layout_marginEnd="@dimen/switch_trim_end"
+        android:gravity="center_vertical"
         android:scaleX="0.75"
         android:scaleY="0.75"
         android:visibility="gone"

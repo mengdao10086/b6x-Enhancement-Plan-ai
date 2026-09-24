@@ -24,7 +24,8 @@
     <string name="status_dialog_failed">执行失败</string>
     <string name="status_dialog_close">关闭</string>
     <string name="status_busy_probe">读取部署状态…</string>
-    <string name="status_busy_deploy">部署中…（落盘 + root 就位 + 省电白名单 + 拉起daemon）</string>
+    <!-- 部署只到"盘上就位"为止；拉起daemon 是紧随其后独立的一段（见 StatusFragment.deploy），不写进本行 -->
+    <string name="status_busy_deploy">部署中…（落盘 + root 就位 + 省电白名单）</string>
     <string name="status_busy_uninstall">卸载部署中…</string>
     <!-- 拉起＝停旧实例再起新实例，空窗只来自等旧实例退出（最多 8 秒），故把代价写在忙态文案里（手动动作会进「操作记录」） -->
     <string name="status_busy_start">拉起daemon…（停旧实例→起新实例，温控空窗约 10 秒内）</string>
