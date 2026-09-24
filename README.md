@@ -10,10 +10,8 @@
 
 | 组件 | 路径 | 说明 | 状态 |
 |------|------|------|------|
-| **APK（唯一交付物）** | [lsp模块/](lsp模块/) | LSPosed 模块 + 原生配置界面；内置 C 守护程序（CI 编译后注入 `assets/tempctrl-arm64`） | ✅ 版本见 [lsp模块/app/build.gradle.kts](lsp模块/app/build.gradle.kts) |
-| C 守护程序源码 | [lsp模块/daemon/](lsp模块/daemon/) | 智能温控，由 CI 编译后打进上面的 APK | 已并入 APK |
-| 参数定义 | [参数定义/](参数定义/) | 配置键的单一来源（键数见 `参数定义/check_params.py` 的 `EXPECTED_KEY_COUNT`），生成 APK 内的 `assets/params.json` | — |
-
+| **APK（唯一交付物）** | [lsp模块/](lsp模块/) | LSPosed 模块 + 原生配置界面；内置 C 守护程序 | 3.0 ✅ |
+| C 守护程序源码 | [lsp模块/daemon/](lsp模块/daemon/) | 智能温控，由 CI 编译后打包入上面的 APK | 已并入 APK |
 ---
 
 ## 架构概览
@@ -41,8 +39,7 @@ C 守护程序（`tempctrl`）与 `service.d` 拉起脚本由 APK 内的部署�
 - **制冷→风扇自动映射**：冷端指数 + 热端线性自加权合并，冷/热端映射输入 EMA 平滑系数可配置（输入先平滑、映射后不滤波），保证散热相对够用的同时尽可能压低风扇转速降低噪音
 - **可自动拉起散热器 app**：无散热器 app 存活时自动拉起上次使用的 app（**默认关闭**，需在界面中开启）
 - **高可玩性**：大量可自定义参数
-- **界面内直接查看实时曲线与日志**：参数改即存，daemon 每 5s 热重载
-- **配置热重载**：界面或 profile.conf 修改参数后无需重启即生效
+- **配置热重载**：界面或 profile.conf 修改参数后无需重启，自动热重载
 
 > 详细策略设计 → [lsp模块/daemon/逻辑说明.md](lsp模块/daemon/逻辑说明.md) · 版本变更 → [CHANGELOG.md](CHANGELOG.md)
 

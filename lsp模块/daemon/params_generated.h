@@ -6,7 +6,7 @@
 #define PARAMS_GENERATED_H
 
 /* 键数：守护进程消费 / 仅界面读取 */
-#define CFG_DAEMON_KEY_COUNT 49
+#define CFG_DAEMON_KEY_COUNT 51
 #define CFG_WEBUI_KEY_COUNT 6
 
 /* 性能层单值键表（PERF_ENABLED=1）→ INT_CFG_KEYS[]：X(键名, C 变量, min, max) */
@@ -18,6 +18,8 @@
     X("FAN_RPM_ROUND_UNIT", fan_rpm_round_unit, 1, 500) \
     X("PID_KDP", pid_kdp_coef, 1, 1000) \
     X("PID_SPEED", pid_speed_coef, 0, 1000) \
+    X("PID_SPEED_NL_THR", pid_spd_nl_thr_p100, 10, 100) \
+    X("PID_SPEED_NL_EXP", pid_spd_nl_exp_p100, 0, 400) \
     X("PID_CH_THRESHOLD", pid_ch_threshold, 1, 100)
 
 /* sysfs 层键表（SYSFS_ENABLED=1）→ SYSFS_CFG_KEYS[]：
@@ -85,6 +87,10 @@
 #define CFG_MAX_PID_KI_RATE_2 1000
 #define CFG_MIN_PID_SPEED 0  /* C 变量 pid_speed_coef */
 #define CFG_MAX_PID_SPEED 1000
+#define CFG_MIN_PID_SPEED_NL_THR 10  /* C 变量 pid_spd_nl_thr_p100 */
+#define CFG_MAX_PID_SPEED_NL_THR 100
+#define CFG_MIN_PID_SPEED_NL_EXP 0  /* C 变量 pid_spd_nl_exp_p100 */
+#define CFG_MAX_PID_SPEED_NL_EXP 400
 #define CFG_MIN_PID_TARGET_1 1  /* C 变量 pid_target_coef */
 #define CFG_MAX_PID_TARGET_1 1000
 #define CFG_MIN_PID_TARGET_2 1  /* C 变量 pid_target_alpha */
@@ -155,5 +161,72 @@
 #define CFG_DEFAULT_BATT_CURRENT_PATH "/sys/class/power_supply/battery/current_now"
 #define CFG_DEFAULT_CPU_TEMP_PATH_FMT "/sys/class/thermal/thermal_zone%d/temp"
 #define CFG_DEFAULT_LOG_FILE "/data/data/com.example.waspwingtempctrl/files/tempctrl.log"
+
+/* 各层 int 取值位的**代码默认值**表：层开关由 1→0 时，tempctrl.c 展开本表把该层
+ * 运行时参数批量赋回代码默认值（= 等同该层配置不存在）。行格式 X(C 变量, 默认值)。
+ * 路径键不入表：3 个走上方 CFG_DEFAULT_* 宏；LOG_FILE 走 set_default_log_path()
+ * （该函数按二进制名派生路径，私有目录不可用时兜底 /cache，照抄宏会绕过兜底）。
+ * 各层总开关自身同样不入表（PERF_ENABLED 默认 1，复位它会立刻自我重开）。 */
+#define CFG_PERF_DEFAULTS(X) \
+    X(RATE_LIMIT_FAN, 250) \
+    X(RATE_LIMIT_FAN_DEBOUNCE, 50) \
+    X(RATE_LIMIT_COLD, 25) \
+    X(RATE_LIMIT_COLD_MULT, 10) \
+    X(COLD_DEADZONE, 3) \
+    X(reconnect_keep_cycles, 3) \
+    X(BATT_BASELINE, 350) \
+    X(CPU_FILTER_ALPHA, 25) \
+    X(cold_map_start, 40) \
+    X(cold_map_exp, 150) \
+    X(hot_map_min, 350) \
+    X(hot_map_max, 450) \
+    X(rpm_smooth_alpha, 33) \
+    X(fan_rpm_min, 2000) \
+    X(fan_rpm_max, 6000) \
+    X(b7_fan_rpm_max, 6000) \
+    X(fan_rpm_round_unit, 10) \
+    X(HOT_DERATE_THRESHOLD, 450) \
+    X(HOT_DERATE_MULT, 5) \
+    X(HOT_DERATE_COOLDOWN, 5) \
+    X(pid_kdp_coef, 300) \
+    X(pid_ki_up_coef, 20) \
+    X(pid_ki_down_coef, 30) \
+    X(pid_speed_coef, 100) \
+    X(pid_spd_nl_thr_p100, 20) \
+    X(pid_spd_nl_exp_p100, 100) \
+    X(pid_target_coef, 20) \
+    X(pid_target_alpha, 10) \
+    X(pid_target_max, 15) \
+    X(pid_ch_threshold, 2) \
+    X(pid_cpu_comp_filter_alpha, 25) \
+    X(pid_cpu_comp_divisor, 30) \
+    X(pid_cpu_comp_offset, 100) \
+    X(pid_target_dir_on, 1) \
+    X(pid_target_away_alpha, 20) \
+    X(pid_target_toward_alpha, 10) \
+    X(pid_spd_recall_on, 1) \
+    X(pid_spd_recall_weight, 1000) \
+    X(pid_cold_min, 1) \
+    X(pid_cold_max, 190) \
+    X(b7_pid_cold_max, 190) \
+    X(cold_dyn_in_lo, 40) \
+    X(cold_dyn_in_mid, 100) \
+    X(cold_dyn_in_hi, 190) \
+    X(cold_dyn_out_mid_p100, 50) \
+    X(cold_dyn_w_kdp_p100, 100) \
+    X(cold_dyn_w_up_p100, 100) \
+    X(cold_dyn_w_dn_p100, 100) \
+    X(cold_dyn_u_p100, 200) \
+    X(cold_dyn_gamma_p100, 100)
+
+#define CFG_SYSFS_DEFAULTS(X) \
+    X(BATT_TEMP_DIVISOR, 1) \
+    X(BATT_CURRENT_DIVISOR, 10000) \
+    X(CPU_TEMP_DIVISOR, 100) \
+    X(CPU_ZONE_MIN, 0) \
+    X(CPU_ZONE_MAX, 99) \
+    X(cpu_zone_rescan_sec, 60) \
+    X(cpu_zone_keep, 10) \
+    X(LOG_MAX, 16256)
 
 #endif  /* PARAMS_GENERATED_H */

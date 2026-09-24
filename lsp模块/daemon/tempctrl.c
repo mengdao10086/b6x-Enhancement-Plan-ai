@@ -210,6 +210,10 @@ static int pid_ki_up_coef = 20;
 static int pid_ki_down_coef = 30;
 // PID_SPEED：速度项倍率系数（÷10，100=速度×10，0=关闭；ch = error + v×speed_coef/10 + cpu_comp）
 static int pid_speed_coef = 100;
+// PID_SPEED_NL_THR：速度非线性阈值 L（÷100，单位 °C/周期；|v| ≥ L 严格恒等，|v| < L 按幂曲线降权）
+static int pid_spd_nl_thr_p100 = 20;
+// PID_SPEED_NL_EXP：速度非线性强度 q（÷100；0 = 完全线性）
+static int pid_spd_nl_exp_p100 = 100;
 // PID_TARGET 第一值：动态目标系数（÷1000，raw_target = clamp(error×target_coef, ±上限)）
 static int pid_target_coef = 20;
 // PID_TARGET 第二值：目标 EMA 平滑系数（%，滤波系数）
@@ -358,7 +362,7 @@ static const char *status_field_value(const char *line, const char *field) {
 // 自动拉起散热器 app（优先上次使用的 app）
 static int APP_LAUNCH_ENABLED = 0;      // 总开关：1=允许自动拉起，0=关闭（默认关，刷入时可选开）
 // 锁死自动重启（watchdog）：每次实际下发制冷变化时判定——实际停滞（=上周期实际）且≠上周期下发持续 N 次 → kill app 并重新拉起
-static int app_watchdog_cycles = 0;     // APP_WATCHDOG：连续停滞次数（0=关闭，默认 0）
+static int app_watchdog_cycles = 6;     // APP_WATCHDOG：连续停滞次数（0=关闭，默认 6）
 static int watchdog_stall_count = 0;    // 当前连续停滞次数（按实际下发周期计数）
 static int watchdog_last_cold = -1;     // 上周期实际制冷值（停滞判定基准）
 static int watchdog_last_cmd  = -1;     // 上周期下发制冷值（未达目标判定基准）
@@ -436,6 +440,7 @@ static void write_log(const char *fmt, ...);
 static inline int clamp(int val, int lo, int hi);
 static void alarm_handler(int sig);
 static int compute_fan_target(void);
+static void set_default_log_path(void);   // 层开关复位用（定义在 write_log 之后）
 
 /* 调试日志宏：总开关 debug_mode=1 且对应分区开关=1 时才输出。
  * 必须单行（NDK clang + CRLF 多行续行失效） */
@@ -774,6 +779,44 @@ static void publish_uiprefs(void) {
     uiprefs_fail_logged = 0;
 }
 
+// ======================== 层开关关闭 → 该层参数回落默认值 ========================
+// 语义：PERF_ENABLED / SYSFS_ENABLED 由 1→0 时，把该层的**运行时参数**批量赋回代码默认值
+// （等同该层配置不存在）；配置文件内容不动，开关再打开时文件里的值在下一次重载立刻恢复。
+// 总开关自身不复位——PERF_ENABLED 代码默认值是 1，复位它会让该层立刻自我重开，等于没复位。
+// 「首次加载不触发」：-1 表示"尚无上一轮状态"。首轮加载时这些配置变量本就是 static 初值
+// （= 代码默认值），复位是恒等操作，故直接跳过；哨兵只在下方的 load_config 内更新。
+static int last_perf_enabled  = -1;   // -1=未加载过；否则=上一轮 PERF_ENABLED（0/1）
+static int last_sysfs_enabled = -1;   // -1=未加载过；否则=上一轮 SYSFS_ENABLED（0/1）
+
+/* 默认值表行适配：把生成头的 X(C 变量, 默认值) 展开成赋值语句（用法同上两张键表） */
+#define CFG_RESET_ROW(var, def) var = (def);
+
+/** PERF 层 int 取值位 → 代码默认值（表见 params_generated.h 的 CFG_PERF_DEFAULTS） */
+static void reset_perf_layer_defaults(void) {
+    CFG_PERF_DEFAULTS(CFG_RESET_ROW)
+    // 削减量是"相对生效上限"的累减量：上限复位后基线失效，连同两个冷却计数一并清零。
+    // PID 运行态（积分/动态目标等）不动——那是运行状态，不是配置。
+    hot_derate = 0;
+    hot_derate_cooldown = 0;
+    hot_recover_cooldown = 0;
+}
+
+/** SYSFS 层取值位 → 代码默认值（int 位见 CFG_SYSFS_DEFAULTS；4 个路径键另行处理） */
+static void reset_sysfs_layer_defaults(void) {
+    CFG_SYSFS_DEFAULTS(CFG_RESET_ROW)
+    // 路径键：3 个用生成头的默认值宏（char[] 不能整型赋值），strncpy 后必须补 NUL
+    strncpy(BATT_TEMP_PATH, CFG_DEFAULT_BATT_TEMP_PATH, sizeof(BATT_TEMP_PATH) - 1);
+    BATT_TEMP_PATH[sizeof(BATT_TEMP_PATH) - 1] = '\0';
+    strncpy(BATT_CURRENT_PATH, CFG_DEFAULT_BATT_CURRENT_PATH, sizeof(BATT_CURRENT_PATH) - 1);
+    BATT_CURRENT_PATH[sizeof(BATT_CURRENT_PATH) - 1] = '\0';
+    strncpy(CPU_TEMP_PATH_FMT, CFG_DEFAULT_CPU_TEMP_PATH_FMT, sizeof(CPU_TEMP_PATH_FMT) - 1);
+    CPU_TEMP_PATH_FMT[sizeof(CPU_TEMP_PATH_FMT) - 1] = '\0';
+    // LOG_FILE 必须走派生函数（二进制名 + 私有目录，不可用时兜底 /cache），照抄宏会绕过兜底
+    set_default_log_path();
+}
+
+#undef CFG_RESET_ROW
+
 static void load_config(const char *path) {
     FILE *f = fopen(path, "r");
     if (!f) {
@@ -823,6 +866,19 @@ static void load_config(const char *path) {
         write_log("配置 自动拉起关闭 → 锁死自动重启 强制关闭（APP_WATCHDOG=%d 运行时置 0）", app_watchdog_cycles);
         app_watchdog_cycles = 0;
     }
+
+    // 层开关 1→0 边沿：该层运行时参数回落代码默认值（首次加载 last_* = -1，不触发）。
+    // 复位点必须在下面「三层全关提前 return」之前：三层全关时第二遍不跑，只有这里能复位。
+    if (last_perf_enabled == 1 && !perf_enabled) {
+        reset_perf_layer_defaults();
+        write_log("配置 性能参数层关闭 → 运行时参数回落代码默认值");
+    }
+    if (last_sysfs_enabled == 1 && !found_sysfs) {
+        reset_sysfs_layer_defaults();
+        write_log("配置 sysfs 层关闭 → 运行时参数回落代码默认值");
+    }
+    last_perf_enabled  = perf_enabled;
+    last_sysfs_enabled = found_sysfs;
 
     // debug_mode 需在提前 return 前更新（PERF=0 且 DEBUG=0 时也清零）
     if (found_debug) {
@@ -2107,11 +2163,32 @@ static void cold_dyn_reset(void) {
 // ======================== PID 控制函数 ========================
 
 /**
+ * 速度非线性映射（v → v'）：小幅速度按幂曲线降权，幅度到位后严格恒等。
+ * - 阈值 L = PID_SPEED_NL_THR/100（°C/周期）、强度 q = PID_SPEED_NL_EXP/100。
+ * - |v| ≥ L → 输出 = v（恒等，1:1，无恒定偏置）。
+ * - |v| < L → t = |v|/L；s = t²(3−2t)（平滑阶跃）；输出 = sign(v)·|v|·s^q。
+ * 性质：保号（奇函数）、处处 |输出| ≤ |v|、随 |v| 单调不减、v = ±L 处连续（s=1、s^q=1）。
+ * 护栏：v = 0 → 0（避开 0^0）；q = 0 → 位精确恒等（完全线性）；L ≤ 0（手改配置）→ 恒等，不除零。
+ */
+static float pid_spd_nl_map(float v) {
+    if (v == 0.0f) return 0.0f;                  // 护栏①：0 无符号，直接 0
+    if (pid_spd_nl_exp_p100 == 0) return v;      // 护栏②：q=0 → 完全线性，位精确恒等
+    float l = pid_spd_nl_thr_p100 / 100.0f;
+    if (l <= 0.0f) return v;                     // 护栏③：阈值非法 → 恒等，不除零
+    float a = (v < 0.0f) ? -v : v;               // |v|
+    if (a >= l) return v;                        // |v| ≥ L：严格恒等
+    float t = a / l;
+    float s = t * t * (3.0f - 2.0f * t);         // 平滑阶跃 ∈ (0,1)
+    return (v < 0.0f ? -a : a) * powf(s, pid_spd_nl_exp_p100 / 100.0f);   // sign(v)·|v|·s^q
+}
+
+/**
  * PID 计算（单累积器）：OUTPUT = clamp(acc + kdp, 0, 1)。
  * - error 为纯电池误差（不含 CPU 补偿）；cpu_comp 与速度同地位，算 ch 时加入。
  * - 速度 v = (error − 上次error)/dt（倍率系数缩放，不乘 dt）。
- * - 速度去噪：|v| ≤ 0.1°C/周期 视为测量噪声归零，超出部分对称向零收缩 0.1（不越过 0）；
- *   回溯注入的 v（recall_on）与常规 v 同样适用，去噪后的 v 共用给 ch 与 ch_kdp。
+ * - 速度非线性映射（pid_spd_nl_map）：|v| ≥ L 严格恒等（1:1）、|v| < L 按「平滑阶跃的幂」降权，
+ *   保号且 |输出| ≤ |v|；L/q 见 PID_SPEED_NL_THR / PID_SPEED_NL_EXP。
+ *   回溯注入的 v（recall_on）与常规 v 汇聚到同一处映射，各恰好施加一次，映射后的 v 共用给 ch 与 ch_kdp。
  * - ch 用于积分（acc += ki_rate×(ch − target_f)，ki_rate 按被积项符号取升/降速率），ch_kdp 用于 KDP（速度按 0.33 衰减，无记忆）。
  * - 动态目标 target_f（EMA 平滑），使积分逼近"误差×目标系数"包络，防静态过冲。
  * - 逻辑2 冷值动态倍率（cold_dyn_*）：重算门控与 kdp 同处（温度窗口变化），三倍率分别作用于 kdp / KI 升 / KI 降。
@@ -2134,10 +2211,8 @@ static float pid_compute(int batt_10, float dt, float cpu_comp, int batt_window_
         v = (error - pid_last_error) / dt;
     pid_last_error = error;
 
-    // 速度去噪：|v| ≤ 0.1°C/周期 视为测量噪声 → 归零；超出部分对称向零收缩 0.1（不越过 0）
-    if (v > 0.1f)       v -= 0.1f;
-    else if (v < -0.1f) v += 0.1f;
-    else                v  = 0.0f;
+    // 速度非线性映射：差分 v 与回溯注入 v 的唯一映射点（各恰好施加一次）
+    v = pid_spd_nl_map(v);
 
     // ch（受控量，用于积分）与 ch_kdp（用于 KDP，速度按 0.33 衰减）
     float sc = pid_speed_coef / 10.0f;

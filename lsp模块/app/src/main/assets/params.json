@@ -49,6 +49,8 @@
         "PID_KDP",
         "PID_KI_RATE",
         "PID_SPEED",
+        "PID_SPEED_NL_THR",
+        "PID_SPEED_NL_EXP",
         "PID_TARGET",
         "PID_CH_THRESHOLD",
         "PID_CPU_COMP",
@@ -260,7 +262,7 @@
       "role": "master",
       "type": "switch",
       "label": "性能参数总开关",
-      "desc": "=1 正常加载全部性能参数；=0 时除 DEBUG_ENABLED / SYSFS_ENABLED / [3] 自动拉起 三个独立大类外，性能参数一律使用代码内默认值",
+      "desc": "=1 正常加载全部性能参数；=0 时除 DEBUG_ENABLED / SYSFS_ENABLED / [3] 自动拉起 三个独立大类外，性能参数一律使用代码内默认值；运行中由 1 改为 0 时，已加载的性能参数立即回落代码内默认值（配置文件内容不动，改回 1 即恢复）",
       "unit": "",
       "unitNote": "布尔开关，取值 0/1，无单位",
       "default": 1,
@@ -722,6 +724,44 @@
       "daemonConsumes": true,
       "fields": null
     },
+    "PID_SPEED_NL_THR": {
+      "key": "PID_SPEED_NL_THR",
+      "group": "perf",
+      "role": "setting",
+      "type": "int",
+      "label": "速度非线性阈值(÷100)",
+      "desc": "速度幅度 ≥ 此阈值即完全跟随（1:1），低于此值按幂曲线降权；20 = 0.20 °C/周期，越小降权越多",
+      "unit": "×100（存储值 20 = 实际阈值 0.20 °C/周期）",
+      "unitNote": "",
+      "default": 20,
+      "factory": 20,
+      "min": 10,
+      "max": 100,
+      "requires": [
+        "PERF_ENABLED"
+      ],
+      "daemonConsumes": true,
+      "fields": null
+    },
+    "PID_SPEED_NL_EXP": {
+      "key": "PID_SPEED_NL_EXP",
+      "group": "perf",
+      "role": "setting",
+      "type": "int",
+      "label": "速度非线性强度(÷100)",
+      "desc": "降权曲线的幂次；100 = 1.00，0 = 完全线性（不降权，等价于关闭），越大降权越狠",
+      "unit": "×100（存储值 100 = 实际强度 1.00）",
+      "unitNote": "",
+      "default": 100,
+      "factory": 100,
+      "min": 0,
+      "max": 400,
+      "requires": [
+        "PERF_ENABLED"
+      ],
+      "daemonConsumes": true,
+      "fields": null
+    },
     "PID_TARGET": {
       "key": "PID_TARGET",
       "group": "perf",
@@ -1153,7 +1193,7 @@
       "role": "master",
       "type": "switch",
       "label": "路径与缩放开关",
-      "desc": "sysfs 路径与缩放独立大类（=1 加载 BATT_TEMP_* / BATT_CURRENT_* / CPU_TEMP_* / CPU_ZONE* / LOG_* 路径与系数配置，=0 使用代码内默认路径）",
+      "desc": "sysfs 路径与缩放独立大类（=1 加载 BATT_TEMP_* / BATT_CURRENT_* / CPU_TEMP_* / CPU_ZONE* / LOG_* 路径与系数配置，=0 使用代码内默认路径）；运行中由 1 改为 0 时，已加载的路径与系数立即回落代码内默认值（配置文件内容不动，改回 1 即恢复）",
       "unit": "",
       "unitNote": "布尔开关，取值 0/1，无单位",
       "default": 0,
@@ -1493,8 +1533,8 @@
       "desc": "实际制冷停滞（=上周期实际）且未达目标（≠上周期下发）连续 N 次下发 → kill app 并重新拉起；0=关闭；前置条件 APP_LAUNCH_ENABLED=1（自动拉起关闭时运行时强制置 0）",
       "unit": "次（连续下发周期数）",
       "unitNote": "",
-      "default": 0,
-      "factory": 0,
+      "default": 6,
+      "factory": 6,
       "min": 0,
       "max": 120,
       "requires": [

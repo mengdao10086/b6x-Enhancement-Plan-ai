@@ -325,6 +325,35 @@ def _c_default(entry):
     return str(val)
 
 
+def c_layer_defaults(definition, group):
+    """某层各 **int 取值位** 的代码默认值 → [(C 变量, 默认值)]（定义顺序，保证幂等）。
+
+    用途：层开关由 1→0 时把该层运行时参数批量赋回默认值（复位代码在 tempctrl.c）。
+    · C 变量取自 audit.cVars（fields[].cVar 可能为 null，不可用）；
+    · 默认值 = 该取值位的 default（单值键取键 default，多值键取字段 default），
+      它与 C 端 static 初值的一致性由 audit 的默认值核对逐位保证；
+    · 路径键不入表：`type=path` 没有数值语义，默认值由 CFG_DEFAULT_* 宏与
+      set_default_log_path() 分别处理（后者含"私有目录不可用→兜底"逻辑）。
+    """
+    rows = []
+    c_vars_all = definition.get("audit", {}).get("cVars", {})
+    for entry in definition["keys"]:
+        if entry["group"] != group or entry["role"] == "master":
+            continue                      # 各层总开关自身不复位（PERF 默认 1，复位会立刻自开）
+        if not entry.get("daemonConsumes", True):
+            continue
+        if entry["type"] == "path":
+            continue
+        c_vars = c_vars_all.get(entry["key"]) or []
+        if entry["type"] == "multi":
+            for i, field in enumerate(entry.get("fields") or []):
+                if i < len(c_vars) and c_vars[i]:
+                    rows.append((c_vars[i], field["default"]))
+        elif c_vars and c_vars[0]:
+            rows.append((c_vars[0], entry["default"]))
+    return rows
+
+
 def build_c_header(definition):
     entries = definition["keys"]
     daemon = [e for e in entries if e.get("daemonConsumes", True)]
@@ -400,6 +429,19 @@ def build_c_header(definition):
     for e in paths:
         lines.append("#define CFG_DEFAULT_%s %s" % (e["key"], _c_default(e)))
     lines.append("")
+
+    lines.append("/* 各层 int 取值位的**代码默认值**表：层开关由 1→0 时，tempctrl.c 展开本表把该层")
+    lines.append(" * 运行时参数批量赋回代码默认值（= 等同该层配置不存在）。行格式 X(C 变量, 默认值)。")
+    lines.append(" * 路径键不入表：3 个走上方 CFG_DEFAULT_* 宏；LOG_FILE 走 set_default_log_path()")
+    lines.append(" * （该函数按二进制名派生路径，私有目录不可用时兜底 /cache，照抄宏会绕过兜底）。")
+    lines.append(" * 各层总开关自身同样不入表（PERF_ENABLED 默认 1，复位它会立刻自我重开）。 */")
+    for group, macro in (("perf", "CFG_PERF_DEFAULTS"), ("sysfs", "CFG_SYSFS_DEFAULTS")):
+        lines.append("#define %s(X) \\" % macro)
+        rows = ['    X(%s, %d)' % (var, val)
+                for var, val in c_layer_defaults(definition, group)]
+        lines.append(" \\\n".join(rows))
+        lines.append("")
+
     lines.append("#endif  /* PARAMS_GENERATED_H */")
     return "\n".join(lines) + "\n"
 

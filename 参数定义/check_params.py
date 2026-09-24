@@ -7,9 +7,11 @@
 
 断言（任一不过即非 0 退出）：
   A 产物可复现：重跑生成逻辑，与落盘的 4 个产物必须一致（比较按换行归一化） → 退出 1
-  B 产物自洽：55 键齐全、必需字段完整、min ≤ default/factory ≤ max、分组可解析 → 退出 1
+  B 产物自洽：57 键齐全、必需字段完整、min ≤ default/factory ≤ max、分组可解析 → 退出 1
   C 三源无漂移：与 profile.conf / 逻辑说明.md 参数表 / tempctrl.c 对账（含包名） → 退出 2
-  D 产物形态自检：C 头括号配平、X 宏实参个数、tempctrl.c 格式串转换符 vs 实参 → 退出 1
+  D 产物形态自检：C 头括号配平、X 宏实参个数、tempctrl.c 格式串转换符 vs 实参、
+    **层默认值表覆盖面**（PERF/SYSFS 每个守护进程取值位要么在表里、要么在显式白名单里；
+    表内默认值与定义一致；总开关不入表）→ 退出 1
     （本机与 CI 均无 C 编译器，D 是编译期错误的替代检查）
 
 用法：
@@ -37,7 +39,7 @@ sys.dont_write_bytecode = True   # 不在 参数定义/ 里留 __pycache__（.gi
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import gen_params  # noqa: E402  同目录模块，标准库路径规则即可导入
 
-EXPECTED_KEY_COUNT = 55
+EXPECTED_KEY_COUNT = 57
 VALID_TYPES = ("switch", "int", "multi", "path", "enum")
 
 
@@ -285,7 +287,8 @@ def fail_check_d(definition):
             raise Failure("D1 %s 括号不配平：%r %d 个 / %r %d 个"
                           % (_rel(h_path), pair[0], code.count(pair[0]),
                              pair[1], code.count(pair[1])))
-    arity = {"CFG_PERF_INT_KEYS": 4, "CFG_SYSFS_KEYS": 7}
+    arity = {"CFG_PERF_INT_KEYS": 4, "CFG_SYSFS_KEYS": 7,
+             "CFG_PERF_DEFAULTS": 2, "CFG_SYSFS_DEFAULTS": 2}
     for name in arity:
         rows = re.findall(r"(?m)^\s*X\((.*?)\)\s*\\?$", h_text)
         body = gen_params._block(h_text, r"#define\s+%s\(X\)" % name, r"(?m)^#define\s")
@@ -354,7 +357,132 @@ def fail_check_d(definition):
         raise Failure("D2 格式串核对失败 %d 条：\n  - %s"
                       % (len(problems), "\n  - ".join(problems)))
     notes.append("C 格式串核对 %d 处（%d 处格式串非字面量已跳过）" % (checked, skipped))
+    notes.append(fail_check_d3(definition, h_text))
     return "D 产物形态自检：%s" % "；".join(notes)
+
+
+# --------------------------------------------------------------------------
+# D3 层默认值表覆盖面（层开关 1→0 复位用）
+# --------------------------------------------------------------------------
+
+# 层 id → 生成头里的默认值表宏（须与 gen_params.build_c_header 写出的一致）
+LAYER_DEFAULT_TABLES = {"perf": "CFG_PERF_DEFAULTS", "sysfs": "CFG_SYSFS_DEFAULTS"}
+
+# 不进默认值表、由专段代码显式复位的路径键。目前只有 LOG_FILE：它由
+# set_default_log_path() 按二进制名派生（私有目录不可用时兜底 /cache），
+# 照抄 CFG_DEFAULT_LOG_FILE 会绕过兜底。
+DEFAULT_TABLE_EXEMPT = ("LOG_FILE",)
+
+
+def _fmt_default(val):
+    """默认值在 C 表里的文本形态（bool 按 0/1 写，与 C 端 int 变量一致）。"""
+    if isinstance(val, bool):
+        return "1" if val else "0"
+    return str(val)
+
+
+def _default_table_rows(h_text, macro):
+    """生成头里某张默认值表的行 → [(C 变量, 默认值文本)]。"""
+    body = gen_params._block(h_text, r"#define\s+%s\(X\)" % macro, r"(?m)^#define\s")
+    rows = []
+    for m in re.finditer(r"(?m)^\s*X\((.*)\)\s*\\?$", body):
+        args = _split_args(m.group(1))
+        if len(args) != 2:
+            raise Failure("D3 %s 的行不是 X(C 变量, 默认值)：X(%s)" % (macro, m.group(1)))
+        rows.append((args[0], args[1]))
+    return rows
+
+
+def fail_check_d3(definition, h_text):
+    """D3 层默认值表覆盖面与取值。
+
+    作用：以后新增键若忘了我复位（没进默认值表），校验直接红，而不是静默漏掉；
+    同时挡住"复位时把总开关一起复位"（PERF_ENABLED 默认 1，复位会立刻自我重开）。
+    """
+    c_vars_all = definition.get("audit", {}).get("cVars", {})
+    owner = {}          # C 变量 → [(键, 该取值位的默认值文本)]
+    for e in definition["keys"]:
+        if not e.get("daemonConsumes", True):
+            continue
+        c_vars = c_vars_all.get(e["key"]) or []
+        fields = e.get("fields")
+        for i, v in enumerate(c_vars):
+            if not v:
+                continue
+            if fields and i < len(fields):
+                val = fields[i]["default"]
+            else:
+                val = e["default"]
+            owner.setdefault(v, []).append((e, _fmt_default(val)))
+
+    problems = []
+    counts = []
+    for group, macro in LAYER_DEFAULT_TABLES.items():
+        rows = _default_table_rows(h_text, macro)
+        table_vars = [v for v, _ in rows]
+        if len(set(table_vars)) != len(table_vars):
+            problems.append("D3 %s 内 C 变量重复出现" % macro)
+
+        # 该层应当进表的取值位（int 口径）；路径键走白名单 / CFG_DEFAULT_*，不进表
+        expect = []
+        paths = []
+        for e in definition["keys"]:
+            if e["group"] != group or e["role"] == "master":
+                continue            # 总开关自身不复位
+            if not e.get("daemonConsumes", True):
+                continue
+            if e["type"] == "path":
+                paths.append(e["key"])
+                continue
+            for i, v in enumerate(c_vars_all.get(e["key"]) or []):
+                if v is None:
+                    problems.append("D3 %s 的取值位 %d 在 audit.cVars 里为空，运行时无法复位"
+                                    % (e["key"], i + 1))
+                else:
+                    expect.append(v)
+
+        missing = [v for v in expect if v not in table_vars]
+        if missing:
+            problems.append("D3 %s 漏了取值位（新增键后忘了纳入默认值表）：%s" % (macro, missing))
+        extra = [v for v in table_vars if v not in expect]
+        if extra:
+            problems.append("D3 %s 含非本层取值位：%s" % (macro, extra))
+        for key in paths:
+            if key in DEFAULT_TABLE_EXEMPT:
+                continue
+            if "#define CFG_DEFAULT_%s " % key not in h_text:
+                problems.append("D3 %s 为路径键，既不在默认值表、也不在白名单 %s，"
+                                "且生成头里没有 CFG_DEFAULT_%s"
+                                % (key, list(DEFAULT_TABLE_EXEMPT), key))
+
+        # 总开关 / 跨层变量不得进表；表内默认值必须等于定义
+        for v, got in rows:
+            slots = owner.get(v)
+            if not slots:
+                problems.append("D3 %s 的 C 变量 %s 在 audit.cVars 里查不到归属" % (macro, v))
+                continue
+            for e, expect_default in slots:
+                if e["role"] == "master":
+                    problems.append("D3 %s 含总开关 %s（键 %s）：复位它会让该层立刻自我重开"
+                                    % (macro, v, e["key"]))
+                elif e["group"] != group:
+                    problems.append("D3 %s 含跨层变量 %s（属 %s 层键 %s）"
+                                    % (macro, v, e["group"], e["key"]))
+                if got != expect_default:
+                    problems.append("D3 %s 的 %s 默认值 %s ≠ 定义 %s（键 %s）"
+                                    % (macro, v, got, expect_default, e["key"]))
+        counts.append("%s %d 位" % (macro, len(rows)))
+
+    for key in DEFAULT_TABLE_EXEMPT:
+        e = next((x for x in definition["keys"] if x["key"] == key), None)
+        if e is None or e["type"] != "path" or not e.get("daemonConsumes", True):
+            problems.append("D3 白名单 DEFAULT_TABLE_EXEMPT 的 %s 不是守护进程消费的路径键" % key)
+
+    if problems:
+        raise Failure("D3 默认值表覆盖面失败 %d 条：\n  - %s"
+                      % (len(problems), "\n  - ".join(problems)))
+    return ("D3 默认值表覆盖面（%s；路径键 %s 单独处理，各层总开关均不在表内）"
+            % (" / ".join(counts), "、".join(DEFAULT_TABLE_EXEMPT)))
 
 
 def main(argv=None):
