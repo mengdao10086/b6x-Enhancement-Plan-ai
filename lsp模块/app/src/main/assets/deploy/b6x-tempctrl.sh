@@ -37,6 +37,9 @@ log() {
 }
 
 # 屏幕状态：Awake 才算亮屏（FBE 解锁完成的标志）
+# 与 C 端 is_screen_awake() 同口径，但这里是第三套写法（C 端已改为 fork 一个 dumpsys、不再走 sh|awk 管线）：
+# 只按 "mWakefulness=" 取值、不额外排除 Override 行 —— `mWakefulness=` 这个子串不会出现在
+# `mWakefulnessOverride=` 里，故与 C 端（额外排除 Override）等价。改一侧时想一遍另一侧。
 screen_on() {
     state=$(dumpsys power 2>/dev/null | grep 'mWakefulness=' | head -1 | cut -d= -f2)
     case "$state" in
