@@ -381,8 +381,6 @@ static int back_hide_enabled     = 1;    // UI_BACK_HIDE：1=返回键收后台�
 static int uiprefs_last_back_hide = -1;  // 上次已写出的值（-1 = 尚未写过，首轮必写一次）
 static int uiprefs_fail_logged    = 0;   // 写失败只记一条日志，避免每轮重复刷屏
 
-#define BOOT_START_DELAY_SEC 30         // 脚本启动成功后延迟开始运行（等待系统/蓝牙就绪，避开开机初期拉起 app 闪烁）
-
 // 双设备 BLE 连接状态
 static int b6_connected = 0;        // B6X: BLE 是否已连接
 static int b7_connected = 0;        // B7X: BLE 是否已连接
@@ -2921,7 +2919,6 @@ int main(int argc, char *argv[]) {
 
     write_log("脚本启动成功");
     write_log("单实例锁 已获取 %s", LOCK_FILE_PATH);
-    sleep(BOOT_START_DELAY_SEC);   // 延迟开始运行：等待系统/蓝牙就绪（守护进程保持存活，watchdog 不会误重启）
 
     // --- 等待任一设备模块就绪 + BLE 连接（BLE 字段语义见 read_single_status） ---
     active_device = DEVICE_NONE;

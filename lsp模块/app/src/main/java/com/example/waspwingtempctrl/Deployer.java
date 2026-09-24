@@ -19,7 +19,8 @@ import java.util.Map;
  * <b>I4（已冻结）：部署完成判定</b> + <b>I5 的一半：界面 ↔ 部署的调用边界</b>。
  *
  * <p>界面（线 D）只允许调本类的 {@link #probe()}、{@link #deploy()}、{@link #uninstall()}、
- * {@link #startDaemon()}、{@link #buildDiagnostics()}，<b>不得自己拼 shell、不得直接碰文件</b>。
+ * {@link #startDaemon()}、{@link #stopDaemon()}、{@link #buildDiagnostics()}，
+ * <b>不得自己拼 shell、不得直接碰文件</b>。
  *
  * <h3>I4 的判据（只用 APK 侧可得的信息，因此不许要求 C 端加 --version 之类开关）</h3>
  * <pre>
@@ -75,9 +76,17 @@ public final class Deployer {
     public static final String KEY_BIN_DEPLOYED_MD5 = "bin_deployed_md5";
 
     private static final long START_COOLDOWN_MS = 10_000L;
-    private static final long KILL_WAIT_LOOPS = 30L;
+    /**
+     * 发 {@code pkill}（SIGTERM）后轮询等进程退出的秒数。
+     *
+     * <p>C 端装了 SIGTERM 处理器——收到只置退出标志，要等当前一轮跑完，一轮最长约 5 秒
+     * （同部署脚本 {@code WAIT_LOOPS} 的注记），5 轮即够；实测用不到那么久，原为 30 轮。
+     */
+    private static final long KILL_WAIT_LOOPS = 5L;
     /** 强杀（{@code kill -9}）后的等待轮数：-9 已不可被忽略，只需一小段收尾时间。 */
-    private static final long KILL9_WAIT_LOOPS = 5L;
+    private static final long KILL9_WAIT_LOOPS = 3L;
+    /** 拉起失败后重试前的停顿（毫秒）：给旧实例收尾、单实例锁释放留一点时间。 */
+    private static final long RETRY_PAUSE_MS = 2_000L;
     private static final long EXEC_TIMEOUT_MS = 120_000L;
     /**
      * {@link #probe()} 那一趟 su 往返的超时。
@@ -378,13 +387,17 @@ public final class Deployer {
     }
 
     /**
-     * 一次性部署：资源落盘与授权 → 二进制就位 → service.d 脚本 → 省电白名单 → 配置保留写入。
+     * 一次性部署：资源落盘与授权 → 二进制就位 → service.d 脚本 → 配置保留写入 → 省电白名单
+     * → 自动拉起daemon。
      *
      * <p><b>配置保留</b>：{@code profile.conf} 不存在时才写出厂值（取自 params.json 的
      * {@code factory}），已存在则一个字都不覆盖。
      *
-     * <p>任一硬步骤失败即返回 {@code ok=false}（配置与白名单失败不算硬失败，记在 steps 里）。
-     * <b>阻塞</b>（root 往返 2 次 + 落盘）。
+     * <p><b>末步自动拉起一次</b>（委托 {@link #startDaemon()}）：盘上换了新二进制，不重启进程
+     * 它就一直在跑旧映像、等于没更新。拉起失败只记进 steps，<b>不影响部署结论</b>。
+     *
+     * <p>任一硬步骤失败即返回 {@code ok=false}（配置、白名单与拉起失败不算硬失败，记在 steps 里）。
+     * <b>阻塞</b>（root 往返 3 次 + 落盘 + 若干次 probe）。
      */
     public Result deploy() {
         List<String> steps = new ArrayList<>();
@@ -451,6 +464,18 @@ public final class Deployer {
         raw.append("\n[省电白名单]\n").append(pr.stdout).append(pr.stderr);
         steps.add(pr.isOk() ? "省电白名单批处理已下发（输出见原始输出）"
                 : "省电白名单下发失败（不影响部署）：" + pr.describe());
+
+        // 末步自动拉起一次：盘上已换成新二进制，不重启进程它不会生效（旧进程跑的是旧映像）。
+        // 复用 startDaemon()：停止序列、单实例锁代价、失败重试与手动入口完全一致，也共用冷却计时。
+        // 失败不算硬失败——文件已就位并核对过哈希，只记进 steps 供排查。
+        steps.add("部署后自动拉起daemon");
+        Result rs = startDaemon();
+        steps.addAll(rs.steps);
+        raw.append("\n[拉起daemon]\n").append(rs.rawOutput);
+        if (!rs.ok) {
+            steps.add("自动拉起未成功（不影响部署结论）："
+                    + (rs.error.isEmpty() ? "详见原始输出" : rs.error));
+        }
 
         Status st = probe();
         return new Result(st.deployed, "部署", steps, st.deployed ? "" : "部署后自检未通过", raw.toString(), st);
@@ -531,14 +556,14 @@ public final class Deployer {
                     r.stdout + r.stderr, null);
         }
         boolean watchdogStopped = "1".equals(kv.get("WATCHDOG_STOPPED"));
-        boolean daemonStopped = "1".equals(kv.get("STOPPED"));
+        boolean daemonStopped = "1".equals(kv.get("DAEMON_STOPPED"));
         steps.add(watchdogStopped
                 ? "已停止看门狗 shell（先于守护进程杀，否则它会重建日志并把守护进程再拉起来）"
-                : "警告：30 秒内未能确认看门狗 shell 已退出（脚本自身的自尽自检会在下一轮兜底）");
+                : "警告：" + KILL_WAIT_LOOPS + " 秒内未能确认看门狗 shell 已退出（脚本自身的自尽自检会在下一轮兜底）");
         if (daemonStopped) {
             steps.add("已停止运行中的 tempctrl");
         } else {
-            steps.add("警告：30 秒内未能确认 tempctrl 已退出，锁文件暂不删除（避免绕过单实例锁）");
+            steps.add("警告：" + KILL_WAIT_LOOPS + " 秒内未能确认 tempctrl 已退出，锁文件暂不删除（避免绕过单实例锁）");
         }
         steps.add("已删 service.d 脚本（两个候选目录都查了）");
         steps.add("已删 " + BIN_DEST + "（进程已停，可安全 unlink）");
@@ -573,8 +598,13 @@ public final class Deployer {
      * → {@code pkill -9} → 再轮询 ≤{@value #KILL9_WAIT_LOOPS} 秒；仍未退出则<b>放弃启动</b>
      * 并如实回吐（抢锁必然失败，静默失败比报错更难查）。
      *
-     * <p><b>代价</b>：C 端启动延时 {@code BOOT_START_DELAY_SEC} 为 30 秒，一次点击约有
-     * 30~35 秒温控空窗，步骤里会写明。冷却 {@value #START_COOLDOWN_MS} ms 保留（防连点）。
+     * <p><b>失败自动重试一次</b>：等 {@value #RETRY_PAUSE_MS} ms 再跑一遍完整序列。确定性失败
+     * 不重试——冷却是拒绝而非失败（先于重试返回）、二进制不存在重试必然同样失败；其余
+     * （root 通道失败、旧实例未退出、新实例没起来）都再试一次。
+     *
+     * <p><b>代价</b>：只等旧实例退出的最多 {@value #KILL_WAIT_LOOPS} + {@value #KILL9_WAIT_LOOPS} 秒
+     * （C 端已无启动延时），即一次点击约 0~8 秒温控空窗；失败重试会再叠一次，步骤里都会写明。
+     * 冷却 {@value #START_COOLDOWN_MS} ms 保留（防连点）。
      *
      * <p><b>阻塞</b>。注意：这条路起的进程仍在该 app 的 cgroup 内，
      * 常驻仍以 {@code service.d} 为主（见 {@link #deploy()}）。
@@ -588,39 +618,124 @@ public final class Deployer {
             return new Result(false, "拉起daemon", steps, "冷却中", "", null);
         }
         lastStartAtMs = now;
+
+        StringBuilder raw = new StringBuilder();
+        Attempt a = restartOnce(steps, raw);
+        if (a.retryable && pauseBeforeRetry()) {
+            steps.add("拉起未成功（" + a.error + "），自动重试一次");
+            a = restartOnce(steps, raw);
+        }
+        return new Result(a.ok, "拉起daemon", steps, a.ok ? "" : a.error, raw.toString(), probe());
+    }
+
+    /**
+     * 跑一次完整的「先停再起」，把可读步骤追加进 {@code steps}、原始输出追加进 {@code raw}。
+     *
+     * <p>不判冷却（由调用方管），只回吐这一次的成败、失败原因、以及是否值得再试一次——
+     * 可重试＝root 通道失败 / 旧实例未退出 / 未探测到新进程；不可重试＝二进制不存在
+     * （重试必然同样失败）。
+     */
+    private Attempt restartOnce(List<String> steps, StringBuilder raw) {
         RootShell.Result r = shell.exec(restartScript(), EXEC_TIMEOUT_MS);
+        raw.append("\n[拉起daemon]\n").append(r.stdout).append(r.stderr);
+        if (!r.isOk()) {
+            return new Attempt(false, true, "root 执行失败：" + r.describe());
+        }
+        Map<String, String> kv = parseKv(r.stdout);
+        boolean viaWatchdog = "0".equals(kv.get("WD_ALIVE"));
+        String oldPid = nvl(kv.get("OLD_PID"));
+        if (viaWatchdog) {
+            if (!"1".equals(kv.get("WD_STARTED"))) {
+                steps.add("看门狗 shell 不在，且 service.d 脚本缺失（两个候选目录都没找到）");
+                return new Attempt(false, false, "看门狗脚本不存在（需先重新部署）");
+            }
+            steps.add("看门狗 shell 不在（如刚点过「停止daemon」），已重新拉起，由它停旧起新");
+        } else if (!"1".equals(kv.get("OLD_STOPPED"))) {
+            steps.add("检测到守护进程在运行（PID " + oldPid + "），先停止它");
+            steps.add(KILL_WAIT_LOOPS + " 秒内未退出，kill -9 后仍未退出");
+            return new Attempt(false, true,
+                    "旧实例未退出，已放弃启动（否则新实例抢单实例锁必然失败）");
+        } else if ("1".equals(kv.get("NOBIN"))) {
+            steps.add(oldPid.isEmpty() ? "未检测到运行中的守护进程" : "已停止旧实例（PID " + oldPid + "）");
+            return new Attempt(false, false, "二进制不存在（需先部署）：" + BIN_DEST);
+        } else {
+            steps.add(oldPid.isEmpty() ? "未检测到运行中的守护进程，直接启动"
+                    : "已停止旧实例（PID " + oldPid + "）");
+            if ("1".equals(kv.get("OLD_KILLED"))) {
+                steps.add("旧实例未响应 pkill，已用 kill -9 结束");
+            }
+        }
+        if (!"1".equals(kv.get("STARTED"))) {
+            steps.add(viaWatchdog
+                    ? "看门狗已拉起，但尚未探测到 daemon（它启动前要等亮屏，灭屏时会等到亮屏才起）"
+                    : "启动命令已执行，但未探测到新进程（未起或起后立即退出）");
+            return new Attempt(false, true, "未启动");
+        }
+        steps.add((viaWatchdog ? "已由看门狗启动 tempctrl（PID " : "已拉起新实例（PID ")
+                + nvl(kv.get("NEW_PID")) + "，已 renice -20）");
+        steps.add("温控空窗约 0~" + (KILL_WAIT_LOOPS + KILL9_WAIT_LOOPS)
+                + " 秒（只等旧实例退出；C 端无启动延时）");
+        return new Attempt(true, false, "");
+    }
+
+    /** 一次拉起尝试的结果：{@code ok}=新实例已起来；{@code retryable}=值得再试一次。 */
+    private static final class Attempt {
+        final boolean ok;
+        final boolean retryable;
+        final String error;
+
+        Attempt(boolean ok, boolean retryable, String error) {
+            this.ok = ok;
+            this.retryable = retryable;
+            this.error = error;
+        }
+    }
+
+    /** 重试前的停顿；被中断则不重试（恢复中断标志，按上一次的结果返回）。 */
+    private static boolean pauseBeforeRetry() {
+        try {
+            Thread.sleep(RETRY_PAUSE_MS);
+            return true;
+        } catch (InterruptedException ie) {
+            Thread.currentThread().interrupt();
+            return false;
+        }
+    }
+
+    /**
+     * 停止守护进程（界面入口）：<b>先停看门狗 shell、再停 daemon</b>，只杀进程，不删任何文件。
+     *
+     * <p><b>为什么必须连看门狗一起停</b>：它每 {@code RESTART_INTERVAL} 秒检查一次「daemon 不在就
+     * 拉起」，只杀 daemon 的话最多 5 分钟就被它拉回来，「停止」不成立。代价是看门狗要重启手机
+     * （由 {@code service.d} 拉起）才会回到常驻；期间恢复靠 {@link #startDaemon()}——它会发现
+     * 看门狗不在并把看门狗一起拉起来——或重新 {@link #deploy()}。
+     *
+     * <p>与 {@link #uninstall()} 的区别：两者停的是同一对进程（共用 {@link #killAndWaitSnippet}），
+     * 但卸载停稳之后还要删文件，这里什么都不删。<b>阻塞</b>。
+     */
+    public Result stopDaemon() {
+        List<String> steps = new ArrayList<>();
+        RootShell.Result r = shell.exec(stopDaemonScript(), EXEC_TIMEOUT_MS);
         Map<String, String> kv = parseKv(r.stdout);
         if (!r.isOk()) {
-            return new Result(false, "拉起daemon", steps, "root 执行失败：" + r.describe(),
+            return new Result(false, "停止daemon", steps, "root 执行失败：" + r.describe(),
                     r.stdout + r.stderr, null);
         }
-        String oldPid = nvl(kv.get("OLD_PID"));
-        if ("1".equals(kv.get("OLD_ALIVE"))) {
-            steps.add("检测到守护进程在运行（PID " + oldPid + "），先停止它");
-            steps.add("30 秒内未退出，kill -9 后仍未退出");
-            return new Result(false, "拉起daemon", steps,
-                    "旧实例未退出，已放弃启动（否则新实例抢单实例锁必然失败）",
-                    r.stdout, probe());
-        }
-        if ("1".equals(kv.get("NOBIN"))) {
-            steps.add(oldPid.isEmpty() ? "未检测到运行中的守护进程" : "已停止旧实例（PID " + oldPid + "）");
-            return new Result(false, "拉起daemon", steps, "二进制不存在（需先部署）：" + BIN_DEST,
-                    r.stdout, null);
-        }
-        steps.add(oldPid.isEmpty() ? "未检测到运行中的守护进程，直接启动"
-                : "已停止旧实例（PID " + oldPid + "）");
-        if ("1".equals(kv.get("KILLED"))) {
-            steps.add("旧实例未响应 pkill，已用 kill -9 结束");
-        }
-        boolean started = "1".equals(kv.get("STARTED"));
-        if (started) {
-            steps.add("已拉起新实例（PID " + nvl(kv.get("NEW_PID")) + "，已 renice -20）");
-            steps.add("温控空窗约 30~35 秒（C 端启动延时 30 秒）");
-        } else {
-            steps.add("启动命令已执行，但未探测到新进程（未起或起后立即退出）");
-        }
-        return new Result(started, "拉起daemon", steps,
-                started ? "" : "未启动", r.stdout, probe());
+        boolean watchdogStopped = "1".equals(kv.get("WATCHDOG_STOPPED"));
+        boolean daemonStopped = "1".equals(kv.get("DAEMON_STOPPED"));
+        String wdPid = nvl(kv.get("WATCHDOG_PID"));
+        String daemonPid = nvl(kv.get("DAEMON_PID"));
+        steps.add(watchdogStopped
+                ? (wdPid.isEmpty() ? "未检测到运行中的看门狗 shell"
+                        : "已停止看门狗 shell（PID " + wdPid + "；它在 daemon 之前杀，否则会把 daemon 拉回来）")
+                : "警告：" + KILL_WAIT_LOOPS + " 秒内未能确认看门狗 shell 已退出");
+        steps.add(daemonStopped
+                ? (daemonPid.isEmpty() ? "未检测到运行中的 tempctrl"
+                        : "已停止运行中的 tempctrl（PID " + daemonPid + "）")
+                : "警告：" + KILL_WAIT_LOOPS + " 秒内未能确认 tempctrl 已退出");
+        boolean ok = watchdogStopped && daemonStopped;
+        return new Result(ok, "停止daemon", steps, ok ? "" : "有进程未确认退出，见步骤",
+                r.stdout, probe());
     }
 
     /** 诊断串：部署状态 + 配置状态 + root 诊断。阻塞。部署段与状态区同一份文本（describe）。 */
@@ -850,26 +965,10 @@ public final class Deployer {
     }
 
     private String uninstallScript() {
+        // 停止序列与 stopDaemonScript() 同源（同一个片段），差别只在后面这堆 rm。
         return "BIN=" + BIN_DEST + "\n"
-                // 1) 先杀看门狗 shell：它的 cmdline 是本脚本路径、不含 $BIN，只 pkill $BIN 抓不到它。
-                //    不先杀它，它下一轮 tick 会把刚删掉的日志文件重建出来，还可能把守护进程再拉起来。
-                + "pkill -f " + SCRIPT_NAME + " 2>/dev/null\n"
-                + "i=0\n"
-                + "while [ $i -lt " + KILL_WAIT_LOOPS + " ]; do\n"
-                + "  pgrep -f " + SCRIPT_NAME + " > /dev/null 2>&1 || break\n"
-                + "  sleep 1\n"
-                + "  i=$((i + 1))\n"
-                + "done\n"
-                + "pgrep -f " + SCRIPT_NAME + " > /dev/null 2>&1 && echo WATCHDOG_STOPPED=0 || echo WATCHDOG_STOPPED=1\n"
-                // 2) 再杀守护进程并轮询等它真退出
-                + "pkill -f \"$BIN\" 2>/dev/null\n"
-                + "i=0\n"
-                + "while [ $i -lt " + KILL_WAIT_LOOPS + " ]; do\n"
-                + "  pgrep -f \"$BIN\" > /dev/null 2>&1 || break\n"
-                + "  sleep 1\n"
-                + "  i=$((i + 1))\n"
-                + "done\n"
-                + "pgrep -f \"$BIN\" > /dev/null 2>&1 && echo STOPPED=0 || echo STOPPED=1\n"
+                + killAndWaitSnippet(SCRIPT_NAME, "WATCHDOG")
+                + killAndWaitSnippet(BIN_DEST, "DAEMON")
                 // 3) 两个进程都停稳后再删文件
                 + "rm -f " + SERVICE_D_MODERN + "/" + SCRIPT_NAME + "\n"
                 + "rm -f " + SERVICE_D_KSU_LEGACY + "/" + SCRIPT_NAME + "\n"
@@ -891,65 +990,114 @@ public final class Deployer {
     }
 
     /**
-     * 「先停再起」的 shell。停止序列与 {@link #uninstallScript()} 同口径（pkill → 等 → pkill -9 → 等），
-     * 但<b>只杀 {@code $BIN}</b>：{@code service.d} 看门狗 shell 的 cmdline 里是本脚本名、
-     * 不含 {@code $BIN}，故抓不到它——这是有意的，杀了它常驻保障就没了。
+     * 「先停再起」的 shell，<b>按看门狗在不在分两条路</b>：
+     * <ul>
+     *   <li>看门狗 shell 存活（常态）→ 只停/起 {@code $BIN}：看门狗自己的 tick 会兜住后续的进程级
+     *       死亡，不必也不该动它（杀了它常驻保障就没了）。</li>
+     *   <li>看门狗 shell 不在（例如刚点过「停止daemon」）→ 把 service.d 脚本拉起来，由它
+     *       {@code stop_old + start} 把 daemon 带回来——这是「停止daemon」之后唯一能恢复常驻的路
+     *       （service.d 脚本平时只由系统在开机时拉起）。</li>
+     * </ul>
+     *
+     * <p>看门狗脚本第一步是<b>等亮屏</b>，灭屏时它会一直等到亮屏才启动 daemon，故第二条路要等；
+     * 调用方据此区分「看门狗还没轮到」与「新实例真的没起来」（见 {@code restartOnce}）。
      *
      * <p>不含 {@code exit}：{@link RootShell#exec} 靠脚本末尾的结束标记回传退出码，
      * 脚本自己退出会让标记丢失、整次调用被判成通道失败（见 {@code RootShell} 的说明）。
      */
     private String restartScript() {
         return "BIN=" + BIN_DEST + "\n"
-                // 1) 记录旧实例（没有则为空串）
-                + "OLD_PID=$(pgrep -f \"$BIN\" | head -1)\n"
-                + "STOPPED=0\n"
-                + "KILLED=0\n"
-                + "OLD_ALIVE=0\n"
-                + "if [ -n \"$OLD_PID\" ]; then\n"
-                // 2) 先温和停：pkill 后轮询等它自己退出（flock 的持有者必须先消失）
-                + "  pkill -f \"$BIN\" 2>/dev/null\n"
+                + serviceDirPreamble()
+                + "WD=\"$svcd/" + SCRIPT_NAME + "\"\n"
+                // 1) 看门狗在不在（脚本 cmdline 是本脚本路径、不含 $BIN，故按脚本名匹配）
+                + "pgrep -f " + SCRIPT_NAME + " > /dev/null 2>&1 && WD_ALIVE=1 || WD_ALIVE=0\n"
+                + "echo \"WD_ALIVE=$WD_ALIVE\"\n"
+                // 2) 两条路都要先把在跑的旧实例停稳（flock 的持有者必须先消失）
+                + killAndWaitSnippet(BIN_DEST, "OLD")
+                // 3) 看门狗不在就拉起它、由它停旧起新；在就自己起
+                + "if [ \"$WD_ALIVE\" = \"0\" ]; then\n"
+                + "  if [ -f \"$WD\" ]; then\n"
+                + "    nohup sh \"$WD\" > /dev/null 2>&1 < /dev/null &\n"
+                + "    echo WD_STARTED=1\n"
+                + "  else\n"
+                + "    echo WD_STARTED=0\n"
+                + "  fi\n"
                 + "  i=0\n"
                 + "  while [ $i -lt " + KILL_WAIT_LOOPS + " ]; do\n"
-                + "    pgrep -f \"$BIN\" > /dev/null 2>&1 || break\n"
+                + "    pgrep -f \"$BIN\" > /dev/null 2>&1 && break\n"
                 + "    sleep 1\n"
                 + "    i=$((i + 1))\n"
                 + "  done\n"
-                // 3) 仍未退出才强杀，再等一小轮
-                + "  if pgrep -f \"$BIN\" > /dev/null 2>&1; then\n"
-                + "    pkill -9 -f \"$BIN\" 2>/dev/null\n"
-                + "    KILLED=1\n"
-                + "    i=0\n"
-                + "    while [ $i -lt " + KILL9_WAIT_LOOPS + " ]; do\n"
-                + "      pgrep -f \"$BIN\" > /dev/null 2>&1 || break\n"
-                + "      sleep 1\n"
-                + "      i=$((i + 1))\n"
-                + "    done\n"
-                + "  fi\n"
-                + "  if pgrep -f \"$BIN\" > /dev/null 2>&1; then OLD_ALIVE=1; else STOPPED=1; fi\n"
-                + "fi\n"
-                + "echo \"OLD_PID=$OLD_PID\"\n"
-                + "echo \"STOPPED=$STOPPED\"\n"
-                + "echo \"KILLED=$KILLED\"\n"
-                + "echo \"OLD_ALIVE=$OLD_ALIVE\"\n"
-                // 4) 旧实例没停稳就不启动：抢 flock 必失败，还要白等一次启动延时
-                + "if [ \"$OLD_ALIVE\" = \"1\" ]; then\n"
-                + "  echo STARTED=0\n"
+                + "  NEW_PID=$(pgrep -f \"$BIN\" | head -1)\n"
+                + "elif [ \"$OLD_STOPPED\" != \"1\" ]; then\n"
+                // 旧实例没停稳就不启动：抢 flock 必失败，还要白等一次启动延时
+                + "  NEW_PID=\"\"\n"
                 + "elif [ ! -x \"$BIN\" ]; then\n"
                 + "  echo NOBIN=1\n"
-                + "  echo STARTED=0\n"
+                + "  NEW_PID=\"\"\n"
                 + "else\n"
                 + "  nohup \"$BIN\" >> /data/local/tmp/tempctrl_service.log 2>&1 < /dev/null &\n"
                 + "  sleep 2\n"
                 + "  NEW_PID=$(pgrep -f \"$BIN\" | head -1)\n"
-                // 5) 新 PID 必须与旧的不同，否则只是"读到了同一个残留进程"
-                + "  if [ -n \"$NEW_PID\" ] && [ \"$NEW_PID\" != \"$OLD_PID\" ]; then\n"
-                + "    renice -n -20 -p \"$NEW_PID\" > /dev/null 2>&1\n"
-                + "    echo STARTED=1\n"
-                + "  else\n"
-                + "    echo STARTED=0\n"
+                + "fi\n"
+                + "if [ -n \"$NEW_PID\" ]; then renice -n -20 -p \"$NEW_PID\" > /dev/null 2>&1; fi\n"
+                // 4) 新 PID 必须与旧的不同，否则只是"读到了同一个残留进程"
+                + "if [ -n \"$NEW_PID\" ] && [ \"$NEW_PID\" = \"$OLD_PID\" ]; then NEW_PID=\"\"; fi\n"
+                + "if [ -n \"$NEW_PID\" ]; then echo STARTED=1; else echo STARTED=0; fi\n"
+                + "echo \"NEW_PID=$NEW_PID\"\n";
+    }
+
+    /**
+     * 停止的 shell：先杀看门狗 shell、再杀 daemon，各自「pkill → 等 → pkill -9 → 等」。
+     * 只杀进程、<b>不删任何文件</b>（{@link #uninstallScript()} 用同一段片段，停稳之后才删）。
+     */
+    private String stopDaemonScript() {
+        return "BIN=" + BIN_DEST + "\n"
+                // 先杀看门狗 shell：它的 cmdline 是本脚本路径、不含 $BIN，只 pkill $BIN 抓不到它。
+                // 不先杀它，它下一轮 tick 就会把刚停掉的守护进程再拉起来，「停止」不成立。
+                + killAndWaitSnippet(SCRIPT_NAME, "WATCHDOG")
+                + killAndWaitSnippet(BIN_DEST, "DAEMON");
+    }
+
+    /**
+     * 「杀进程 + 轮询等它真退出」的 shell 片段——<b>停止序列的唯一出处</b>：
+     * {@code pkill}（SIGTERM）→ 轮询 ≤{@value #KILL_WAIT_LOOPS} 秒 → {@code pkill -9}
+     * → 再轮询 ≤{@value #KILL9_WAIT_LOOPS} 秒。等它真退出是必须的：C 端用非阻塞 {@code flock}
+     * 做单实例锁，旧实例还在时新实例会立刻以退出码 {@value #EXIT_ALREADY_RUNNING} 退出。
+     *
+     * <p>回吐 {@code <TAG>_PID} / {@code <TAG>_STOPPED} / {@code <TAG>_KILLED}；
+     * PID 为空串表示本来就没在跑，此时 STOPPED=1（没在跑也算已停稳）。
+     *
+     * @param pattern pgrep / pkill 的 {@code -f} 匹配串（调用方传字面量）
+     * @param tag     回吐键前缀，必须是合法的 shell 变量名片段（调用方传字面量）
+     */
+    private static String killAndWaitSnippet(String pattern, String tag) {
+        return tag + "_PID=$(pgrep -f \"" + pattern + "\" | head -1)\n"
+                + tag + "_STOPPED=1\n"
+                + tag + "_KILLED=0\n"
+                + "if [ -n \"$" + tag + "_PID\" ]; then\n"
+                + "  pkill -f \"" + pattern + "\" 2>/dev/null\n"
+                + "  i=0\n"
+                + "  while [ $i -lt " + KILL_WAIT_LOOPS + " ]; do\n"
+                + "    pgrep -f \"" + pattern + "\" > /dev/null 2>&1 || break\n"
+                + "    sleep 1\n"
+                + "    i=$((i + 1))\n"
+                + "  done\n"
+                + "  if pgrep -f \"" + pattern + "\" > /dev/null 2>&1; then\n"
+                + "    pkill -9 -f \"" + pattern + "\" 2>/dev/null\n"
+                + "    " + tag + "_KILLED=1\n"
+                + "    i=0\n"
+                + "    while [ $i -lt " + KILL9_WAIT_LOOPS + " ]; do\n"
+                + "      pgrep -f \"" + pattern + "\" > /dev/null 2>&1 || break\n"
+                + "      sleep 1\n"
+                + "      i=$((i + 1))\n"
+                + "    done\n"
+                + "    if pgrep -f \"" + pattern + "\" > /dev/null 2>&1; then " + tag + "_STOPPED=0; fi\n"
                 + "  fi\n"
-                + "  echo \"NEW_PID=$NEW_PID\"\n"
-                + "fi\n";
+                + "fi\n"
+                + "echo \"" + tag + "_PID=$" + tag + "_PID\"\n"
+                + "echo \"" + tag + "_STOPPED=$" + tag + "_STOPPED\"\n"
+                + "echo \"" + tag + "_KILLED=$" + tag + "_KILLED\"\n";
     }
 
     // ==================== 内部：小工具 ====================

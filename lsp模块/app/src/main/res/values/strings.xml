@@ -17,17 +17,31 @@
     <string name="status_action_deploy">一键部署</string>
     <string name="status_action_uninstall">卸载部署</string>
     <string name="status_action_start">拉起daemon</string>
+    <string name="status_action_stop">停止daemon</string>
     <string name="status_action_diag">su 诊断</string>
     <string name="status_busy_other">上一个动作还没结束，请稍候</string>
     <string name="status_dialog_diag">诊断</string>
     <string name="status_dialog_failed">执行失败</string>
     <string name="status_dialog_close">关闭</string>
     <string name="status_busy_probe">读取部署状态…</string>
-    <string name="status_busy_deploy">部署中…（落盘 + root 就位 + 省电白名单）</string>
+    <string name="status_busy_deploy">部署中…（落盘 + root 就位 + 省电白名单 + 拉起daemon）</string>
     <string name="status_busy_uninstall">卸载部署中…</string>
-    <!-- 拉起＝停旧实例再起新实例，C 端启动延时 30s，故把代价写在忙态文案里（手动动作会进「操作记录」） -->
-    <string name="status_busy_start">拉起daemon…（停旧实例→起新实例，温控空窗约 30~35 秒）</string>
+    <!-- 拉起＝停旧实例再起新实例，空窗只来自等旧实例退出（最多 8 秒），故把代价写在忙态文案里（手动动作会进「操作记录」） -->
+    <string name="status_busy_start">拉起daemon…（停旧实例→起新实例，温控空窗约 10 秒内）</string>
+    <string name="status_busy_stop">停止daemon…</string>
     <string name="status_busy_diag">采集 su 诊断…</string>
+
+    <!--
+        状态页：破坏性动作的二次确认（与配置页「重置」同一口径：确认才动手，默认不动作）。
+        两个动作都会让温控增强失效，故各给一句后果说明；肯定按钮用动作本身的名字，不用泛化的「确定」。
+    -->
+    <string name="status_dialog_cancel">取消</string>
+    <string name="status_dialog_uninstall_title">卸载部署？</string>
+    <string name="status_dialog_uninstall_message">将从设备移除 service.d 脚本与守护进程二进制，温控增强失效，需重新「一键部署」才能恢复。是否继续？</string>
+    <string name="status_dialog_uninstall_confirm">卸载</string>
+    <string name="status_dialog_stop_title">停止daemon？</string>
+    <string name="status_dialog_stop_message">将停止正在运行的守护进程，温控增强随之失效，需重新「拉起daemon」才能恢复。是否继续？</string>
+    <string name="status_dialog_stop_confirm">停止</string>
 
     <!-- 状态页：设备与版本（不显示本应用包名与 targetSdk） -->
     <string name="status_info_version">模块版本: %1$s (%2$d)</string>
@@ -50,5 +64,5 @@
         同一个 APK 版本最多弹一次，去重见 StatusFragment.armHashMismatchPrompt。
     -->
     <string name="status_hash_title">守护进程二进制与 APK 不一致</string>
-    <string name="status_hash_message">设备上的守护进程二进制与当前 APK 内的不一致，需要重新部署才会生效。是否立即一键部署？\n\n部署会重启守护进程，期间温控空窗约 30~35 秒。</string>
+    <string name="status_hash_message">设备上的守护进程二进制与当前 APK 内的不一致，需要重新部署才会生效。是否立即一键部署？\n\n部署会重启守护进程，期间温控短暂空窗（约 10 秒内）。</string>
 </resources>

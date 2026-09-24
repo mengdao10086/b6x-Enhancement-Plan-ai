@@ -27,12 +27,12 @@ import java.util.Date;
 import java.util.Locale;
 
 /**
- * 状态页：部署状态 / 一键部署 / 卸载部署 / 拉起daemon / su 诊断。
+ * 状态页：部署状态 / 一键部署 / 卸载部署 / 拉起daemon / 停止daemon / su 诊断。
  *
  * <p>逻辑与线 C 接线时完全一致，只是从 Activity 挪进 Fragment、并套上 Material 外观：
  * <b>I5 调用边界原样保留</b> —— 本类只调 {@link Deployer} 的
- * {@code probe() / deploy() / uninstall() / startDaemon() / buildDiagnostics() / ensureRoot() /
- * updateScript()}，不拼 shell、不碰文件、不绕过 {@code Deployer}。
+ * {@code probe() / deploy() / uninstall() / startDaemon() / stopDaemon() / buildDiagnostics() /
+ * ensureRoot() / updateScript()}，不拼 shell、不碰文件、不绕过 {@code Deployer}。
  *
  * <p>{@link Deployer} 的方法都阻塞，故一律放后台线程；结果回主线程渲染。
  *
@@ -135,7 +135,8 @@ public class StatusFragment extends Fragment implements PageAware {
         // 手动路径：写操作记录 + 结果文本淡入淡出（静默路径不走这两处；进度条两条路径都走）
         view.findViewById(R.id.btn_refresh).setOnClickListener(v -> refreshStatus(true));
         view.findViewById(R.id.btn_deploy).setOnClickListener(v -> deploy());
-        view.findViewById(R.id.btn_uninstall).setOnClickListener(v -> uninstall());
+        view.findViewById(R.id.btn_uninstall).setOnClickListener(v -> confirmUninstall());
+        view.findViewById(R.id.btn_stop).setOnClickListener(v -> confirmStopDaemon());
         view.findViewById(R.id.btn_start).setOnClickListener(v -> startDaemon());
         view.findViewById(R.id.btn_diag).setOnClickListener(v -> showDiagnostics());
 
@@ -289,10 +290,48 @@ public class StatusFragment extends Fragment implements PageAware {
                 () -> Deployer.get(app).startDaemon().describe(), false, true);
     }
 
+    private void stopDaemon() {
+        final Context app = requireContext().getApplicationContext();
+        runAsync(getString(R.string.status_busy_stop),
+                () -> Deployer.get(app).stopDaemon().describe(), false, true);
+    }
+
     private void showDiagnostics() {
         final Context app = requireContext().getApplicationContext();
         runAsync(getString(R.string.status_busy_diag),
                 () -> Deployer.get(app).buildDiagnostics(), true, true);
+    }
+
+    // ==================== 破坏性动作的二次确认 ====================
+
+    /**
+     * 点「确认」才执行、点「取消」什么都不做。两个入口（卸载部署 / 停止daemon）都会让温控增强失效，
+     * 且都是一次点击就落盘或杀进程，故都要先问一次。
+     */
+    private void confirmThen(int titleRes, int messageRes, int confirmRes, Runnable action) {
+        if (!isAdded()) {
+            return;
+        }
+        new AlertDialog.Builder(requireContext())
+                .setTitle(titleRes)
+                .setMessage(messageRes)
+                .setPositiveButton(confirmRes, (d, w) -> action.run())
+                .setNegativeButton(R.string.status_dialog_cancel, null)
+                .show();
+    }
+
+    /** 「卸载部署」的确认入口（动作本身见 {@link #uninstall()}）。 */
+    private void confirmUninstall() {
+        confirmThen(R.string.status_dialog_uninstall_title,
+                R.string.status_dialog_uninstall_message,
+                R.string.status_dialog_uninstall_confirm, this::uninstall);
+    }
+
+    /** 「停止daemon」的确认入口（动作本身见 {@link #stopDaemon()}）。 */
+    private void confirmStopDaemon() {
+        confirmThen(R.string.status_dialog_stop_title,
+                R.string.status_dialog_stop_message,
+                R.string.status_dialog_stop_confirm, this::stopDaemon);
     }
 
     /**

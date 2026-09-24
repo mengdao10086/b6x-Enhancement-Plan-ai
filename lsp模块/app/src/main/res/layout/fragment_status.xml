@@ -66,9 +66,10 @@
                     android:visibility="invisible" />
 
                 <!--
-                    按钮排布：行1 [一键部署][拉起daemon]、行2 [su诊断][刷新状态]、行3 [卸载部署]。
+                    按钮排布：行1 [一键部署][拉起daemon]、行2 [su诊断][刷新状态]、行3 [卸载部署][停止daemon]。
                     「刷新状态」与「su 诊断」同为点一次即出一段文本的动作，故同用 TextButton 样式。
-                    这 5 个按钮都是 M3 按钮样式，insetTop/insetBottom 各 4dp 会把可见圆角块上下各收 4dp，
+                    行3 两个同为破坏性动作（都要二次确认、都会让温控增强失效），故同用 TextButton + state_error。
+                    这 6 个按钮都是 M3 按钮样式，insetTop/insetBottom 各 4dp 会把可见圆角块上下各收 4dp，
                     故行间的可见空白 = margin + 8dp（调 margin 的观感与数值不成比例，细则见 dimens_status.xml）。
                     四处可见空白：
                       · 部署状态文本 → 进度条：0dp，走 status_progress_gap（进度条无 inset，margin 即所见）
@@ -122,14 +123,29 @@
                         android:text="@string/status_action_refresh" />
                 </LinearLayout>
 
-                <com.google.android.material.button.MaterialButton
-                    android:id="@+id/btn_uninstall"
-                    style="@style/Widget.Material3.Button.TextButton"
-                    android:layout_width="wrap_content"
+                <LinearLayout
+                    android:layout_width="match_parent"
                     android:layout_height="wrap_content"
                     android:layout_marginTop="@dimen/status_button_last_gap"
-                    android:text="@string/status_action_uninstall"
-                    android:textColor="@color/state_error" />
+                    android:orientation="horizontal">
+
+                    <com.google.android.material.button.MaterialButton
+                        android:id="@+id/btn_uninstall"
+                        style="@style/Widget.Material3.Button.TextButton"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:text="@string/status_action_uninstall"
+                        android:textColor="@color/state_error" />
+
+                    <com.google.android.material.button.MaterialButton
+                        android:id="@+id/btn_stop"
+                        style="@style/Widget.Material3.Button.TextButton"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:layout_marginStart="@dimen/space_s"
+                        android:text="@string/status_action_stop"
+                        android:textColor="@color/state_error" />
+                </LinearLayout>
             </LinearLayout>
         </com.google.android.material.card.MaterialCardView>
 
