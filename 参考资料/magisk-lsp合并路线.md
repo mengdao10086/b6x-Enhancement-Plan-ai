@@ -99,7 +99,7 @@
 | `profile.conf` | **不清** | 用户配置，卸载部署 ≠ 删配置 |
 | `tempctrl_last_dev` **旧落点** `/data/local/tmp/…` | `Deployer`（root） | 旧版迁移残留，daemon 侧预创建已删、现无人读写，不会自己消失 |
 | `tempctrl_last_dev` **新落点**（飞智 app 私有目录，各包各记） | **不碰** | 不属本次产物，也不在有权的目录里 |
-| 省电白名单（deviceidle / appops / standby） | **不清** | 对仍装着的 LSPosed 模块同样有益，用户可自行撤销 |
+| 省电白名单（deviceidle / appops / standby） | **不清** | 下发对象是已安装的散热器控制 app（不是界面自身）；对它们仍有益，用户可自行撤销 |
 
 ---
 
