@@ -6,6 +6,7 @@ import android.graphics.Bitmap;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
+import android.os.Process;
 import android.view.View;
 import android.view.ViewGroup;
 import android.view.ViewParent;
@@ -48,6 +49,11 @@ import java.util.concurrent.atomic.AtomicInteger;
  * 主线程不再为"落哪一页"读 {@code params.json} 与 {@code profile.conf}、算资产 MD5、首读
  * {@code SharedPreferences}。落页判定另有 {@link #LANDING_WAIT_MS} 的有界等待：拿到判定就直接落定
  * 最终那一页（无纠正动作，也就不会闪），拿不到才先用占位页、由 {@link #applyLanding} 事后纠正。
+ * <b>两件事各在自己那根线程上同时起跑</b>（判定在 {@link #PRELOAD}、曲线预热在 {@link #WARMUP}）：
+ * 放行主线程的那次 {@code countDown} 只可能由判定任务发出，判定那根线程上除判定外也别无他活 ——
+ * 这是"判定仍最先唤醒主线程"的结构性保证（不靠调度让路）。预热线程降为后台优先级，但它碰<b>共享</b>的
+ * 配置单例（那一段带锁）时仍在默认优先级（见 {@link #preload}）；剩下的只有纯粹的 CPU 争抢 ——
+ * 设备有空闲核时不成立，单核或核被占满时判定可能被拉长（真机未测）。
  *
  * <p><b>骨架占位层</b>：真页面的内容（尤其配置页那份几十行表单）要几百毫秒才建出来，这段空窗里页面区是白的。
  * 故上一轮启动时把三页各自「已建好、还没绑具体数据」的样子截下来存盘（{@link SkeletonStore}），本次启动
@@ -89,14 +95,25 @@ public class SetupActivity extends AppCompatActivity {
     /** 读不到配置时的出厂起始页（与 {@code params.json} 的 {@code UI_START_PAGE} factory 一致）。 */
     private static final int DEFAULT_START_TAB = R.id.tab_config;
 
-    /** 预热线程：进程级一个，只跑 {@link #preload} 那一次。 */
+    /** 落页判定线程：进程级一个。 */
     private static final ExecutorService PRELOAD = Executors.newSingleThreadExecutor(runnable -> {
         Thread thread = new Thread(runnable, "ww-preload");
         thread.setDaemon(true);
         return thread;
     });
-    /** 预热是否已提交（见 {@link #preload}：进程级只跑一次）。 */
-    private static final AtomicBoolean PRELOADED = new AtomicBoolean();
+    /**
+     * 曲线预热线程：进程级一个，与判定<b>同时</b>起跑（见 {@link #preload}）。
+     *
+     * <p>单独一根而不与 {@link #PRELOAD} 共用：判定是"主线程在等它"，预热只是纯优化，两者的优先级
+     * 完全不同；共用一根就是串行，共用一个池则将来有人再塞任务进来就可能把"判定不能等"的保证破坏。
+     */
+    private static final ExecutorService WARMUP = Executors.newSingleThreadExecutor(runnable -> {
+        Thread thread = new Thread(runnable, "ww-chart-warmup");
+        thread.setDaemon(true);
+        return thread;
+    });
+    /** 曲线预热是否已提交（见 {@link #preload}：进程级只跑一次）。判定不在此列，每次 onCreate 都要跑。 */
+    private static final AtomicBoolean WARMED = new AtomicBoolean();
     /** 预热算出的落页页序号；{@code -1} = 还没算出来。static、不随 Activity 重建清零。 */
     private static final AtomicInteger LANDING_INDEX = new AtomicInteger(-1);
     private static final Handler MAIN = new Handler(Looper.getMainLooper());
@@ -136,6 +153,8 @@ public class SetupActivity extends AppCompatActivity {
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
+        // 启动耗时记账的原点：越早越准（本行之前只剩系统框架的时间，我方无更早的钩子）
+        StartupTiming.begin();
         // 必须在 super.onCreate() 之前：AppCompatActivity 会在自己的 onCreate 里校验主题。
         setTheme(R.style.Theme_B6XTempCtrl);
         // 首行预热：越早提交，后台越能吃到下面这些主线程工作的空档。只用到 Application Context
@@ -195,6 +214,9 @@ public class SetupActivity extends AppCompatActivity {
         // 骨架占位层（口径见类注释）：图与当前外观配套就先挂上（解图在后台），不配套则等三页都就绪后重截
         showSkeleton(pager.getCurrentItem());
         armSkeletonCapture();
+        // 记账（旁路）：主线程这段壳工作到此为止；再挂一个一次性回调量"页面区第一次绘制前"
+        StartupTiming.mark(StartupTiming.MARK_ONCREATE_END);
+        markFirstDraw();
     }
 
     @Override
@@ -215,43 +237,73 @@ public class SetupActivity extends AppCompatActivity {
     // ==================== 预热 ====================
 
     /**
-     * 进程级预热（{@link #PRELOADED} 守住"只跑一次"），任务体<b>全在后台线程</b>：
+     * 进程级预热：<b>两件事各在自己那根线程上同时起跑</b>，互不阻塞。
+     *
      * <ol>
-     *   <li><b>落页判定</b>（{@link #landingPageIndex}）：要建 {@link ConfigStore} 单例（读并解析
-     *       {@code assets/params.json}）、整份读 {@code profile.conf}、算资产 MD5，还要首读
-     *       {@code SharedPreferences}。这四件原先全在 {@code onCreate} 的主线程链上，只为定"落哪一页"；</li>
-     *   <li><b>曲线首帧</b>（{@link ChartLoader#warmUp}）：曲线口径与数据文件的第一次读取 + 解析。</li>
+     *   <li><b>落页判定</b>（{@link #landingPageIndex}，{@link #PRELOAD}）：要建 {@link ConfigStore}
+     *       单例（读并解析 {@code assets/params.json}）、整份读 {@code profile.conf}、算资产 MD5，
+     *       还要首读 {@code SharedPreferences}。这四件原先全在 {@code onCreate} 的主线程链上，只为定
+     *       "落哪一页"；</li>
+     *   <li><b>曲线首帧</b>（{@link ChartLoader#warmUp}，{@link #WARMUP}）：曲线口径与数据文件的第一次
+     *       读取 + 解析。原先它与判定串在同一根线程上、排在判定之后，被白白推迟一个判定的时长。</li>
      * </ol>
-     * 判定算完先 {@code countDown} 唤醒等它的主线程（{@link #settleInitialPage} 的有界等待），
-     * 再回主线程 {@link #applyLanding} 兜底纠正，最后才是曲线预热 —— 顺序即优先级：主线程等的是判定。
+     * 判定算完就 {@code countDown} 放行等它的主线程（{@link #settleInitialPage} 的有界等待），再回主线程
+     * {@link #applyLanding} 兜底纠正。判定那根线程上<b>除判定外再无别的活</b>，且预热线程在预热的其余部分
+     * 都是后台优先级 —— 剩下的只有纯粹的 CPU 争抢（口径见类注释的〈预热〉一段）。
+     *
+     * <p>预热<b>失败无副作用</b>：{@link ChartLoader#warmUp} 自己吞掉一切异常且什么都留不下，曲线页随后
+     * 照旧自己读一次、失败时照旧把诊断原文铺在曲线区（既有路径逐字不变）。
      *
      * @param landingDone 本次冷启动等落页判定的同步点；判定算完即 {@code countDown}。<b>只覆盖判定
-     *                    这一步</b>（后面还有曲线预热，主线程不必也不该等它）。进程重建（saved state
-     *                    非空）不需要判定 —— 落页取回上次那一页即可，传 {@code null}（也就不建同步点，
-     *                    免得白等满上界）
+     *                    这一步</b>（曲线预热在另一根线程上，主线程不必也不该等它）。进程重建（saved
+     *                    state 非空）不需要判定 —— 落页取回上次那一页即可，传 {@code null}（判定任务
+     *                    整个不提交，免得白等满上界）
      */
     private static void preload(SetupActivity activity, CountDownLatch landingDone) {
         Context app = activity.getApplicationContext();
-        boolean firstInProcess = PRELOADED.compareAndSet(false, true);
-        PRELOAD.execute(() -> {
-            if (landingDone != null) {
+        // 判定先提交：先提交的先被创建并启动，让判定早一步待跑（这只是顺序偏好，不是调度保证 ——
+        // "判定最先唤醒主线程"靠的是 countDown 只可能由判定任务发出，与谁先跑无关）
+        if (landingDone != null) {
+            PRELOAD.execute(() -> {
+                long startedAt = StartupTiming.now();
                 int landing;
                 try {
                     landing = landingPageIndex(app);
                 } catch (Throwable t) {
                     landing = indexOf(DEFAULT_START_TAB);   // 兜底：判定挂了也不能让落页悬着
                 }
+                StartupTiming.span(StartupTiming.LANDING, startedAt);
                 LANDING_INDEX.set(landing);
-                // 判定一到手就放行主线程（此刻曲线预热还没开始，主线程不会连它一起等）
-                landingDone.countDown();
+                StartupTiming.mark(StartupTiming.MARK_LANDING_WAKE);
+                landingDone.countDown();   // 判定一到手就放行主线程
                 // 拷一份给 lambda 捕获：上面的 try/catch 有两处赋值，landing 本身不是 effectively final
                 final int landingForMain = landing;
                 MAIN.post(() -> activity.applyLanding(landingForMain));
-            }
-            if (firstInProcess) {
+            });
+        }
+        // 曲线预热：进程级只跑一次（判定不在此列，每次 onCreate 都要跑）
+        if (WARMED.compareAndSet(false, true)) {
+            WARMUP.execute(() -> {
+                // 先在默认优先级下把配置单例碰出来：它内部有一段 synchronized 构造（读并解析 45KB
+                // params.json），而判定那根线程要的第一件东西就是它（landingPageIndex 先取起始页开关）。
+                // 若降到后台优先级之后才触发构造，就可能出现"nice=10 的预热线程持锁解析、nice=0 的判定
+                // 线程在监视器上等它"——后台线程被限流时，等的就是被拉长的整段解析，与"让判定先跑"
+                // 正好相反。这一步不比原有路径多做任何事：ChartConfig.load 下面本来也要碰它。
+                try {
+                    ConfigStore.get(app);
+                } catch (Throwable ignored) {
+                    // 建不起来也无所谓：下面 warmUp 自己还会再试一次，失败照旧无副作用
+                }
+                try {
+                    // 降为后台优先级：主线程那次有界等待（≤50ms）优先于"把曲线缓存备好"。
+                    // 设备有空闲核时两者并不冲突；争抢时让判定先跑，预热晚一点完成（最坏即退回现状）。
+                    Process.setThreadPriority(Process.THREAD_PRIORITY_BACKGROUND);
+                } catch (Throwable ignored) {
+                    // 降不下去也不影响：最坏就是与判定等权争抢
+                }
                 ChartLoader.warmUp(app);
-            }
-        });
+            });
+        }
     }
 
     // ==================== 骨架占位层 ====================
@@ -382,6 +434,8 @@ public class SetupActivity extends AppCompatActivity {
         if (parent instanceof ViewGroup) {
             ((ViewGroup) parent).removeView(cover);
         }
+        // 记账（旁路）：真撤掉了一层才记；本次启动压根没挂层时这行不会执行，展示成"—"
+        StartupTiming.mark(StartupTiming.MARK_SKELETON_OFF);
     }
 
     /**
@@ -476,6 +530,26 @@ public class SetupActivity extends AppCompatActivity {
         if (observer.isAlive()) {
             observer.removeOnPreDrawListener(listener);
         }
+    }
+
+    /**
+     * 记账（旁路）：量"页面区第一次绘制之前"这个时间点（{@link StartupTiming#MARK_FIRST_DRAW}）。
+     * 一次性回调，记完即摘（{@link #detach}），故只吃一帧。
+     *
+     * <p>挂在 pager 的视图树上而不是别处：它是页面区的根，它要画了就意味着这一屏内容要上屏了。
+     * pre-draw 在绘制<b>之前</b>派发，故本时刻是"即将画出第一帧"，与用户看到第一帧几乎同一瞬间。
+     * 回调体内只有两个不会抛的静态调用与一次摘除，故不可能影响绘制。
+     */
+    private void markFirstDraw() {
+        final ViewTreeObserver observer = pager.getViewTreeObserver();
+        observer.addOnPreDrawListener(new ViewTreeObserver.OnPreDrawListener() {
+            @Override
+            public boolean onPreDraw() {
+                StartupTiming.mark(StartupTiming.MARK_FIRST_DRAW);
+                detach(observer, this);
+                return true;
+            }
+        });
     }
 
     // ==================== 启动落页 ====================

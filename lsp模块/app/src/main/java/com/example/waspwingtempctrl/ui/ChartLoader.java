@@ -6,6 +6,7 @@ import androidx.annotation.NonNull;
 import androidx.annotation.Nullable;
 
 import com.example.waspwingtempctrl.R;
+import com.example.waspwingtempctrl.StartupTiming;
 
 import java.io.File;
 
@@ -65,7 +66,11 @@ public final class ChartLoader {
     public static void warmUp(Context context) {
         try {
             Context app = context.getApplicationContext();
+            // 记账（旁路）：曲线口径首次加载。首次写入胜出，故曲线页若抢先自读，这次只报它的命中耗时
+            // 而不会覆盖那一次（见 ChartFragment.loadConfigTimed 的同槽位）
+            long startedAt = StartupTiming.now();
             ChartConfig cfg = ChartConfig.load(app);
+            StartupTiming.span(StartupTiming.CHART_CFG, startedAt);
             read(app, AppFiles.dataFile(app), cfg, null);
         } catch (Throwable ignored) {
             // 预热失败无副作用：缓存没写进去，后续读取照旧走完整路径
@@ -152,6 +157,9 @@ public final class ChartLoader {
         }
 
         String text;
+        // 记账（旁路）：只量"真读盘 + 真解析"这一段（上面几处缓存命中都已早退，不在此计时）；
+        // 首次写入胜出，故预热与曲线页自读并发时，报的是先完成的那一次真实成本
+        long startedAt = StartupTiming.now();
         try {
             text = AppFiles.readTailText(file, TAIL_BYTES);
         } catch (Throwable t) {
@@ -162,6 +170,7 @@ public final class ChartLoader {
 
         ChartDataset ds = ChartDataset.parse(tailForParse(text, cfg.rollingMaxLines), cfg,
                 cfg.rollingMaxLines);
+        StartupTiming.span(StartupTiming.CHART_DATA, startedAt);
         if (ds.parsedLines == 0) {
             return failure(probe, appContext.getString(R.string.chart_fail_parse_empty, probe.size)
                     + "\n\n" + AppFiles.diagnose(file));

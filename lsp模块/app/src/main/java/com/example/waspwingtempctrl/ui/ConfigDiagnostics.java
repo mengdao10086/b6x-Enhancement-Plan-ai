@@ -11,6 +11,7 @@ import androidx.annotation.Nullable;
 import com.example.waspwingtempctrl.ConfigStore;
 import com.example.waspwingtempctrl.ConfigStore.Snapshot;
 import com.example.waspwingtempctrl.R;
+import com.example.waspwingtempctrl.StartupTiming;
 
 import java.text.SimpleDateFormat;
 import java.util.Date;
@@ -32,6 +33,10 @@ import java.util.concurrent.RejectedExecutionException;
  * （{@code ConfigStore.writeFactoryIfAbsent()} 的 javadoc 明确"界面不要自己调"），
  * 界面另开一个写入口就是绕过 I5 的重复写入路径。
  *
+ * <p><b>启动耗时是追加在正文之后的</b>（见 {@link StartupTiming}）：既有的诊断正文一个字不动，只在
+ * 其后空一行接一段"启动各段耗时"。它落在本折叠体内（默认收起），故不新增开关也不会常驻界面；
+ * 展开时重算一次，好让比"建表"更晚的时间点也现出来。真机排障用，不参与任何判断。
+ *
  * <p>只调 {@link ConfigStore} 的公开接口，不碰文件、不拼 shell；读取在后台线程，主线程只做渲染。
  */
 final class ConfigDiagnostics {
@@ -49,6 +54,8 @@ final class ConfigDiagnostics {
     private final TextView stateView;
 
     private boolean expanded;
+    /** 最近一次上屏的配置诊断正文（不含启动耗时段）：展开时用它重算一次追加段（见 {@link #setExpanded}）。 */
+    private String lastState;
     /** 在途标记：一次刷新（后台取数 + 主线程上屏）没跑完就不再起第二个。 */
     private boolean refreshInFlight;
     /** 在途期间到达的请求：作废不得，等本轮结束再刷一次（见 {@link #refresh(Snapshot)}）。 */
@@ -82,6 +89,20 @@ final class ConfigDiagnostics {
         arrowView.setRotation(value ? ARROW_EXPANDED_ROTATION : 0f);
         arrowView.setContentDescription(body.getContext().getString(
                 value ? R.string.config_action_collapse : R.string.config_action_expand));
+        // 展开那一刻才是用户看它的时候：用最近一次正文重算追加段，好让比"建表"更晚的时间点
+        // （首帧 / 撤占位层）也现出来。只读几个静态槽位，无 IO、无后台线程
+        if (value && lastState != null) {
+            stateView.setText(lastState + timingBlock());
+        }
+    }
+
+    /**
+     * 启动耗时段的追加形态：正文之后空一行接上；没量到任何一段（{@link StartupTiming#report()} 为空）
+     * 就一个字符都不加，既有诊断文本保持逐字不变。
+     */
+    private static String timingBlock() {
+        String report = StartupTiming.report();
+        return report.isEmpty() ? "" : "\n\n" + report;
     }
 
     /** 后台重读诊断信息（落点一致性 / 参数定义 / 未定义键 / mtime）：没有现成快照，自己读一次。 */
@@ -158,7 +179,9 @@ final class ConfigDiagnostics {
         if (released) {
             return;
         }
-        stateView.setText(state);
+        lastState = state;
+        // 正文之后追加启动耗时（旁路数据，只读几个静态槽位；没量到就什么都不加）
+        stateView.setText(state + timingBlock());
         if (snapshot.exists) {
             String time = new SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.getDefault())
                     .format(new Date(snapshot.mtimeMs));

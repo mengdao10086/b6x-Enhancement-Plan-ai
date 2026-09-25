@@ -19,6 +19,7 @@ import androidx.annotation.Nullable;
 import androidx.fragment.app.Fragment;
 
 import com.example.waspwingtempctrl.R;
+import com.example.waspwingtempctrl.StartupTiming;
 import com.google.android.material.button.MaterialButton;
 import com.google.android.material.button.MaterialButtonToggleGroup;
 
@@ -277,13 +278,27 @@ public class ChartFragment extends Fragment {
         final String fingerprint = cfgNow != null ? lastFingerprint : null;
 
         Thread thread = new Thread(() -> {
-            ChartConfig cfg = cfgNow != null ? cfgNow : ChartConfig.load(appContext);
+            ChartConfig cfg = cfgNow != null ? cfgNow : loadConfigTimed(appContext);
             ChartLoader.Snapshot snap = ChartLoader.read(appContext, file, cfg, fingerprint);
             mainHandler.post(() -> applySnapshot(cfg, snap));
         }, "ww-chart");
         thread.setDaemon(true);
         worker = thread;
         thread.start();
+    }
+
+    /**
+     * 首次加载曲线口径，并记账（旁路）。
+     *
+     * <p>这是 {@link ChartConfig#load} 的<b>另一个</b>调用点（另一个是 {@code ChartLoader.warmUp}）：
+     * 预热线程是后台优先级，争抢时可能晚于本线程，只记预热那一处就会永远报"命中"的零头。两处记同一个
+     * 槽位、首次写入胜出 —— 谁先真正加载完这份口径，耗时就算谁的真实成本。
+     */
+    private static ChartConfig loadConfigTimed(Context appContext) {
+        long startedAt = StartupTiming.now();
+        ChartConfig cfg = ChartConfig.load(appContext);
+        StartupTiming.span(StartupTiming.CHART_CFG, startedAt);
+        return cfg;
     }
 
     // ==================== 渲染（主线程） ====================

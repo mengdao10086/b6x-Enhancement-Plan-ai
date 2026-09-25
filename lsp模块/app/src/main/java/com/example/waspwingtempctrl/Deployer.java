@@ -165,17 +165,28 @@ public final class Deployer {
      * ＝不再自动引导，落回用户设定的起始页。
      *
      * <p>APK 内取不到二进制（本地构建没有 CI 注入的 asset）→ 无从比对，一律 false。
+     *
+     * <p><b>求值顺序</b>：先读 {@code SharedPreferences}、后算资产哈希 —— 只调换顺序，判据逐分支不变。
+     * 资产哈希（解压 + 哈希）是这里有同步 IO 的一步，且它是落页判定那条路上最贵的一步；而"已试过
+     * root 却无缓存"这一支的结果与资产无关，故那条路上不再白算它。
      */
     public static boolean needsRedeploy(Context context) {
         Context app = context.getApplicationContext();
-        String expected = md5OfAssetOrEmpty(app, BIN_ASSET);
-        if (expected.isEmpty()) {
-            return false;
-        }
+        // 先读 SharedPreferences：下面这一支（从没部署过）的判据只有"试过 root 没有"，与资产是否可比
+        // 无关，故不再为它白算一遍资产 MD5（解压 + 哈希）。这是落页判定那条路上最贵的一步。
         SharedPreferences prefs = app.getSharedPreferences(PREFS_ROOT_PROBE, Context.MODE_PRIVATE);
         String cached = prefs.getString(KEY_BIN_DEPLOYED_MD5, null);
         if (cached == null || cached.isEmpty()) {
-            return !prefs.getBoolean(KEY_ROOT_TRIED, false);
+            if (prefs.getBoolean(KEY_ROOT_TRIED, false)) {
+                return false;   // 已试过 root 却仍无缓存：不再自动引导（见上一段"无缓存时退化"的判据）
+            }
+            // 未试过 root：仍要"资产取不到 → 一律 false"这条既有护栏，故资产可比性还是得问一次
+            // （本地构建没有 CI 注入的 asset 时，正是靠它不把用户引到状态页去）
+            return !md5OfAssetOrEmpty(app, BIN_ASSET).isEmpty();
+        }
+        String expected = md5OfAssetOrEmpty(app, BIN_ASSET);
+        if (expected.isEmpty()) {
+            return false;
         }
         return !cached.equals(expected);
     }

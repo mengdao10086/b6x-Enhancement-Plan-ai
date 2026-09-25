@@ -103,6 +103,9 @@ public final class ConfigStore {
     private String loadError = "";
 
     private ConfigStore(Context context) {
+        // 记账（旁路）：定义加载（读 assets/params.json + 建键表）的耗时。构造只可能成功一次
+        // （双检锁），而"谁来构造"取决于哪根线程先到，故计时贴在这里（干活的地方）而不是任一调用点
+        long startedAt = StartupTiming.now();
         Context app = context.getApplicationContext();
         this.filesDir = app.getFilesDir();
         this.configFile = new File(filesDir, CONFIG_FILE_NAME);
@@ -121,6 +124,7 @@ public final class ConfigStore {
         if (root != null) {
             parseDefinitions(root);
         }
+        StartupTiming.span(StartupTiming.DEF_LOAD, startedAt);
     }
 
     public static ConfigStore get(Context context) {
@@ -263,6 +267,9 @@ public final class ConfigStore {
             return absent;
         }
         long mtime = configFile.lastModified();
+        // 记账（旁路）：只量"真读盘 + 真解析"这一段（上面几处命中 memo / 文件不存在都已早退）。
+        // 首次写入胜出，故并发时只认本次进程里先完成的那一次
+        long startedAt = StartupTiming.now();
         String text;
         try {
             text = new String(readAllBytes(configFile), StandardCharsets.UTF_8);
@@ -272,6 +279,7 @@ public final class ConfigStore {
             return allDefaults(true, mtime, "配置读取失败：" + e.getMessage());
         }
         Snapshot snapshot = parseText(text, mtime);
+        StartupTiming.span(StartupTiming.SNAP_LOAD, startedAt);
         // 登记前复核：这一趟（取指纹 → 读盘 → 解析）里但凡有人换过 memo，我手上这份就不是盘上当前的
         // 内容 —— 登记等于把新内容顶回旧内容。这里以"memo 还是我开头看到的那个"为准，因为指纹认不出这
         // 一茬：st_mtime 只有秒级精度，同秒内的等长改写新旧指纹完全相同（{@link #configFingerprint()}），

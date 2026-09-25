@@ -18,6 +18,7 @@ import com.example.waspwingtempctrl.ConfigStore.Snapshot;
 import com.example.waspwingtempctrl.ConfigStore.Value;
 import com.example.waspwingtempctrl.ConfigStore.WriteResult;
 import com.example.waspwingtempctrl.R;
+import com.example.waspwingtempctrl.StartupTiming;
 
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
@@ -227,10 +228,13 @@ final class ConfigFormController implements ConfigKeyRow.Host, ConfigWriteQueue.
         }
         built = true;
         everSettled = true;
+        // 记账（旁路）：主线程建表那一段（建卡建行 + 值上屏 + 自检/诊断对齐 + 参数区露出）
+        long startedAt = StartupTiming.now();
         buildForm(loadedSnapshot);
         applySnapshot(loadedSnapshot);   // 值、组头开关、徽标、自检、诊断一次对齐
         page.onFormBuilt(groups.size());
         page.cardContainer().setVisibility(View.VISIBLE);   // 都对齐了才露：不出现半成品
+        StartupTiming.span(StartupTiming.FORM_BUILD, startedAt);
     }
 
     /**
