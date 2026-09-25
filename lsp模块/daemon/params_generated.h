@@ -6,7 +6,7 @@
 #define PARAMS_GENERATED_H
 
 /* 键数：守护进程消费 / 仅界面读取 */
-#define CFG_DAEMON_KEY_COUNT 51
+#define CFG_DAEMON_KEY_COUNT 52
 #define CFG_WEBUI_KEY_COUNT 6
 
 /* 性能层单值键表（PERF_ENABLED=1）→ INT_CFG_KEYS[]：X(键名, C 变量, min, max) */
@@ -34,6 +34,7 @@
     X("CPU_TEMP_DIVISOR", SK_INT, &CPU_TEMP_DIVISOR, 1, 10000, NULL, 0) \
     X("CPU_ZONE", SK_ZONE, NULL, 0, 0, NULL, 0) \
     X("CPU_ZONE_RESCAN", SK_RESCAN, NULL, 0, 0, NULL, 0) \
+    X("CPU_AFFINITY", SK_AFFINITY, NULL, 0, 0, NULL, 0) \
     X("LOG_FILE", SK_PATH, NULL, 0, 0, log_file_path, sizeof(log_file_path)) \
     X("LOG_MAX", SK_INT, &LOG_MAX, 0, 1048576, NULL, 0)
 
@@ -149,6 +150,10 @@
 #define CFG_MAX_CPU_ZONE_RESCAN_1 3600
 #define CFG_MIN_CPU_ZONE_RESCAN_2 1  /* C 变量 cpu_zone_keep */
 #define CFG_MAX_CPU_ZONE_RESCAN_2 64
+#define CFG_MIN_CPU_AFFINITY_1 0  /* C 变量 affinity_cpu_lo */
+#define CFG_MAX_CPU_AFFINITY_1 7
+#define CFG_MIN_CPU_AFFINITY_2 0  /* C 变量 affinity_cpu_hi */
+#define CFG_MAX_CPU_AFFINITY_2 7
 #define CFG_MIN_LOG_MAX 0  /* C 变量 LOG_MAX */
 #define CFG_MAX_LOG_MAX 1048576
 #define CFG_MIN_APP_LAUNCH_COOLDOWN 0  /* C 变量 app_launch_cooldown */
@@ -227,6 +232,8 @@
     X(CPU_ZONE_MAX, 99) \
     X(cpu_zone_rescan_sec, 60) \
     X(cpu_zone_keep, 10) \
+    X(affinity_cpu_lo, 0) \
+    X(affinity_cpu_hi, 5) \
     X(LOG_MAX, 16256)
 
 #endif  /* PARAMS_GENERATED_H */

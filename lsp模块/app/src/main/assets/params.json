@@ -65,7 +65,7 @@
     },
     {
       "id": "sysfs",
-      "title": "[2] 路径与缩放",
+      "title": "[2] 接口与外围",
       "master": "SYSFS_ENABLED",
       "keys": [
         "BATT_TEMP_PATH",
@@ -76,6 +76,7 @@
         "CPU_TEMP_DIVISOR",
         "CPU_ZONE",
         "CPU_ZONE_RESCAN",
+        "CPU_AFFINITY",
         "LOG_FILE",
         "LOG_MAX"
       ]
@@ -1192,8 +1193,8 @@
       "group": "sysfs",
       "role": "master",
       "type": "switch",
-      "label": "路径与缩放开关",
-      "desc": "sysfs 路径与缩放独立大类（=1 加载 BATT_TEMP_* / BATT_CURRENT_* / CPU_TEMP_* / CPU_ZONE* / LOG_* 路径与系数配置，=0 使用代码内默认路径）；运行中由 1 改为 0 时，已加载的路径与系数立即回落代码内默认值（配置文件内容不动，改回 1 即恢复）",
+      "label": "接口与外围开关",
+      "desc": "sysfs 接口与外围独立大类（=1 加载 BATT_TEMP_* / BATT_CURRENT_* / CPU_TEMP_* / CPU_ZONE* / LOG_* 路径与系数配置，=0 使用代码内默认路径）；运行中由 1 改为 0 时，已加载的路径与系数立即回落代码内默认值（配置文件内容不动，改回 1 即恢复）",
       "unit": "",
       "unitNote": "布尔开关，取值 0/1，无单位",
       "default": 0,
@@ -1403,6 +1404,47 @@
         }
       ]
     },
+    "CPU_AFFINITY": {
+      "key": "CPU_AFFINITY",
+      "group": "sysfs",
+      "role": "setting",
+      "type": "multi",
+      "label": "CPU 亲和核范围",
+      "desc": "守护进程自身被限制运行的核区间（起始核 结束核）；运行期按本机 /sys/devices/system/cpu/present 取交集后生效，值非法或交集为空则回落代码默认 0 5",
+      "unit": "",
+      "unitNote": "多值键，各字段单位见 fields",
+      "default": [
+        0,
+        5
+      ],
+      "factory": [
+        0,
+        5
+      ],
+      "min": null,
+      "max": null,
+      "requires": [
+        "SYSFS_ENABLED"
+      ],
+      "daemonConsumes": true,
+      "rangeNote": "范围逐字段见 fields；运行期与本机核数取交集，交集为空回落默认",
+      "fields": [
+        {
+          "label": "起始核",
+          "unit": "核心编号",
+          "min": 0,
+          "max": 7,
+          "default": 0
+        },
+        {
+          "label": "结束核",
+          "unit": "核心编号",
+          "min": 0,
+          "max": 7,
+          "default": 5
+        }
+      ]
+    },
     "LOG_FILE": {
       "key": "LOG_FILE",
       "group": "sysfs",
@@ -1553,11 +1595,11 @@
       "unit": "",
       "unitNote": "多值键，各字段单位见 fields",
       "default": [
-        5,
+        2,
         15
       ],
       "factory": [
-        5,
+        2,
         15
       ],
       "min": null,
@@ -1571,7 +1613,7 @@
           "unit": "秒",
           "min": 1,
           "max": 120,
-          "default": 5
+          "default": 2
         },
         {
           "label": "空白最大宽度",

@@ -36,14 +36,16 @@
     <color name="badge_muted_bg">#2A3133</color>
     <color name="badge_muted_fg">#B0B8BA</color>
 
-    <!-- ===== 曲线（与 values 同名，深色下提亮保对比） ===== -->
-    <color name="chart_series_batt">#FF8A80</color>
-    <color name="chart_series_hot">#F48FB1</color>
-    <color name="chart_series_cold">#82B1FF</color>
-    <color name="chart_series_cpu">#FFC46B</color>
-    <color name="chart_series_rpm">#CE93D8</color>
-    <color name="chart_series_cool">#81C784</color>
-    <color name="chart_axis">#9AA2A5</color>
+    <!-- ===== 曲线（与 values 同名，值也相同） =====
+         原 WebUI 只有一套色吃明暗两种底色，故本轮按「逐项对齐 WebUI」改为与浅色同值，
+         不再提亮（理由与色号见 values/colors.xml 同名段）。 -->
+    <color name="chart_series_batt">#F44336</color>
+    <color name="chart_series_hot">#E91E63</color>
+    <color name="chart_series_cold">#2196F3</color>
+    <color name="chart_series_cpu">#FF9800</color>
+    <color name="chart_series_rpm">#9C27B0</color>
+    <color name="chart_series_cool">#4CAF50</color>
+    <color name="chart_axis">#888888</color>
 
     <!-- ===== 日志分级 ===== -->
     <color name="log_level_debug">#9AA2A5</color>

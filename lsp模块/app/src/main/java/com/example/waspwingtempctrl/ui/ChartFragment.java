@@ -187,6 +187,7 @@ public class ChartFragment extends Fragment {
         if (chartView != null) {
             chartView.refreshThemeColors();   // 主题色可能在页面之外变化过
         }
+        applyLegendTints();                   // 图例与曲线同一口径：一起跟当前主题重取色
         if (!pageHidden) {
             configStale = true;               // 页面可见即重读配置（用户可能刚在配置页改过）
             startRefresh();
@@ -383,8 +384,9 @@ public class ChartFragment extends Fragment {
 
     /**
      * 图例：6 条曲线，默认开关照 {@code 逻辑说明.md} 的「曲线」一节〈系列开关〉；勾选框着色 = 该曲线的
-     * chart_series_* 色。容器是可换行的 WrapRowLayout：按自然宽依次排布，放不下自动换行，窄屏也不会被裁；
-     * 行首由 {@link ChartSeries#startsLegendRow} 决定——「冷端℃」「CPU℃」两条可选温度传感器固定另起第二行。
+     * chart_series_* 色（着色统一交给 {@link #applyLegendTints()}）。容器是可换行的 WrapRowLayout：
+     * 按自然宽依次排布，放不下自动换行，窄屏也不会被裁；行首由 {@link ChartSeries#startsLegendRow} 决定
+     * ——「冷端℃」「CPU℃」两条可选温度传感器固定另起第二行。
      */
     private void buildLegend() {
         LayoutInflater inflater = LayoutInflater.from(requireContext());
@@ -395,11 +397,34 @@ public class ChartFragment extends Fragment {
             CheckBox box = (CheckBox) inflater.inflate(R.layout.item_chart_legend, legendRow, false);
             box.setText(s.labelRes);
             box.setChecked(s.on);
-            int color = requireContext().getResources().getColor(s.colorRes, requireContext().getTheme());
-            box.setButtonTintList(ColorStateList.valueOf(color));
             box.setOnCheckedChangeListener((button, checked) -> chartView.setSeriesEnabled(index, checked));
             legendRow.setBreakBefore(box, ChartSeries.startsLegendRow(s));
             legendRow.addView(box);
+        }
+        applyLegendTints();
+    }
+
+    /**
+     * 给已有 6 个勾选框重取一次 chart_series_* 色。
+     *
+     * <p>色值按当前主题现取，故运行中切明暗要再走一遍——原先只在 {@link #buildLegend} 建视图时取一次，
+     * 主题一变曲线会跟着变、图例却不跟（{@link #onResume} 只刷新了 {@link ChartView}）。
+     * 子项顺序与 {@link ChartView#seriesAt} 的下标一一对应（{@link #buildLegend} 按序 addView，
+     * 容器内不放别的子项）。
+     */
+    private void applyLegendTints() {
+        if (legendRow == null || chartView == null) {
+            return;
+        }
+        Context context = requireContext();
+        int count = Math.min(legendRow.getChildCount(), chartView.seriesCount());
+        for (int i = 0; i < count; i++) {
+            View child = legendRow.getChildAt(i);
+            if (child instanceof CheckBox) {
+                int color = context.getResources().getColor(chartView.seriesAt(i).colorRes,
+                        context.getTheme());
+                ((CheckBox) child).setButtonTintList(ColorStateList.valueOf(color));
+            }
         }
     }
 

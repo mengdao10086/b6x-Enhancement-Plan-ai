@@ -48,6 +48,15 @@ import java.util.Set;
  * <p>键的元数据（类型 / min / max / 默认值 / 分组 / label / enum 取值域）全部来自
  * {@code assets/params.json}（I1，单一来源），本类不手抄任何键定义。
  *
+ * <h3>读的 memo（快照 + 指纹）</h3>
+ * {@link #read()} 按文件指纹（{@code mtime:size}）复用上一份快照：一次冷启动会连着读两次
+ * （落页判定 + 表单铺底），中间没有任何写入，第二次是白读一遍整文件。指纹<b>必须带 size</b> ——
+ * {@code st_mtime} 只有秒级精度（见上），同一秒内改过而指纹不变会漏判。写盘成功
+ * （{@link #setAll} / {@link #writeFactoryIfAbsent}）就地更新 memo，不必等下一次读再解一遍；
+ * <b>读失败不留档</b>（与 {@code Deployer.ASSET_MD5_MEMO} 同口径：一次瞬时失败要能重试）。
+ * 指纹口径也对外给出（{@link #configFingerprint()}），供 {@code ui.ChartConfig} 之类的
+ * 派生缓存共用 —— 不让各处自己 stat 文件。
+ *
  * <p><b>线程模型</b>：全部方法都是本地磁盘 I/O，会阻塞（毫秒级）。可在主线程调用，
  * 但大批量读写在后台线程更稳。本类不含任何 root 调用。
  */
@@ -69,6 +78,20 @@ public final class ConfigStore {
     public static final String DAEMON_PRIVATE_DIR = "/data/data/com.example.waspwingtempctrl/files";
 
     private static volatile ConfigStore instance;
+
+    /** {@link #read()} 的最近一次结果；指纹一致就直接回吐（见类注释〈读的 memo〉）。 */
+    private volatile Memo memo;
+
+    /** 一份快照 + 它对应的文件指纹。不可变对象，故 volatile 一次读写即一致，不会读到错配的一对。 */
+    private static final class Memo {
+        final String fingerprint;
+        final Snapshot snapshot;
+
+        Memo(String fingerprint, Snapshot snapshot) {
+            this.fingerprint = fingerprint;
+            this.snapshot = snapshot;
+        }
+    }
 
     private final File filesDir;
     private final File configFile;
@@ -215,36 +238,85 @@ public final class ConfigStore {
     }
 
     /**
-     * 读全文并解析。文件不存在 → 全部取 {@link KeyMeta#defaultValue}（与 C 端
-     * "未找到配置 → 用代码默认值"一致）。
+     * 读全文并解析。<b>同一份文件（{@link #configFingerprint()} 未变）复用上一份快照</b>：
+     * 不再读盘、也不再解析（同一份内容每次都会解出等值的一份，纯是白跑）。文件不存在 →
+     * 全部取 {@link KeyMeta#defaultValue}（与 C 端"未找到配置 → 用代码默认值"一致）。
      *
      * <p>解析口径照 C 端 {@code config_parse_line()}：跳过前导空白后以 {@code #} 开头的行
      * 与不含 {@code =} 的行；键尾空白 trim；值 = {@code =} 之后的全部内容（<b>行内注释不剥离</b>，
      * 数值键靠 {@code atoi/sscanf} 自然截断，路径键会把注释一起当成路径 —— C 端同样如此）。
      * 同键多行时<b>后出现的覆盖先出现的</b>（C 端按行顺序覆盖）。
+     *
+     * <p>指纹未变时返回的<b>就是上一份快照</b>（同一次读取被多处复用），故它与
+     * {@link Snapshot} 自己的字段一样只读，调用方不得改动。
      */
     public Snapshot read() {
-        LinkedHashMap<String, Value> values = new LinkedHashMap<>();
-        List<String> unknown = new ArrayList<>();
-        List<String> notes = new ArrayList<>();
+        String fingerprint = configFingerprint();
+        Memo cached = memo;
+        if (cached != null && fingerprint.equals(cached.fingerprint)) {
+            return cached.snapshot;
+        }
         if (!exists()) {
-            for (KeyMeta meta : keys.values()) {
-                values.put(meta.key, meta.defaultValue);
-            }
-            notes.add("配置不存在，以下为出厂默认值：" + configFile.getAbsolutePath());
-            return new Snapshot(values, unknown, false, 0L, notes);
+            Snapshot absent = allDefaults(false, 0L,
+                    "配置不存在，以下为出厂默认值：" + configFile.getAbsolutePath());
+            memo = new Memo(fingerprint, absent);   // 文件一出现指纹就变，不会读到旧账
+            return absent;
         }
         long mtime = configFile.lastModified();
         String text;
         try {
             text = new String(readAllBytes(configFile), StandardCharsets.UTF_8);
         } catch (IOException e) {
-            for (KeyMeta meta : keys.values()) {
-                values.put(meta.key, meta.defaultValue);
-            }
-            notes.add("配置读取失败：" + e.getMessage());
-            return new Snapshot(values, unknown, true, mtime, notes);
+            // 读失败不进 memo（与 Deployer.ASSET_MD5_MEMO 同口径）：一次瞬时失败不该被永久记住，
+            // 文件没变、指纹也认不出这一茬，留档就等于此后连重试的机会都没有
+            return allDefaults(true, mtime, "配置读取失败：" + e.getMessage());
         }
+        Snapshot snapshot = parseText(text, mtime);
+        // 登记前复核：这一趟（取指纹 → 读盘 → 解析）里但凡有人换过 memo，我手上这份就不是盘上当前的
+        // 内容 —— 登记等于把新内容顶回旧内容。这里以"memo 还是我开头看到的那个"为准，因为指纹认不出这
+        // 一茬：st_mtime 只有秒级精度，同秒内的等长改写新旧指纹完全相同（{@link #configFingerprint()}），
+        // 事后无从分辨。读盘期间盘上没变过才顺手登记，省掉下一次读盘。
+        if (memo == cached && fingerprint.equals(configFingerprint())) {
+            memo = new Memo(fingerprint, snapshot);
+        }
+        return snapshot;
+    }
+
+    /**
+     * 配置文件指纹（{@code mtime:size}）；文件不存在时 {@code "-"}。
+     *
+     * <p>{@link #read()} 拿它判"文件变过没有"；派生的进程级缓存（如 {@code ui.ChartConfig}
+     * 的曲线口径）也用同一个口径 —— 文件新不新只有这一处判断，各页面不自己 stat。
+     * 必带 {@code size}：{@code st_mtime} 只有秒级精度（见类注释），同一秒内先写后读会漏判。
+     */
+    public String configFingerprint() {
+        if (!configFile.isFile()) {
+            return "-";
+        }
+        return configFile.lastModified() + ":" + configFile.length();
+    }
+
+    /** 读不到盘时的快照：每个定义键取出厂默认值，附一条说明（{@link #read()} 的两条退化路径共用）。 */
+    private Snapshot allDefaults(boolean exists, long mtimeMs, String note) {
+        LinkedHashMap<String, Value> values = new LinkedHashMap<>();
+        for (KeyMeta meta : keys.values()) {
+            values.put(meta.key, meta.defaultValue);
+        }
+        return new Snapshot(values, new ArrayList<>(), exists, mtimeMs,
+                new ArrayList<>(Collections.singletonList(note)));
+    }
+
+    /**
+     * 解析一段已就位的配置文本（口径见 {@link #read()}）。<b>不碰磁盘</b>，故写盘成功后可以拿
+     * 刚写进去的那段文本直接走这里（见 {@link #rememberWritten}）：省掉一次读盘，且与
+     * "再读一遍盘"逐字同源（同一段字节、同一套解析）。
+     *
+     * @param mtimeMs 该段文本对应的文件 mtime（只用于快照里给界面显示的元信息）
+     */
+    private Snapshot parseText(String text, long mtimeMs) {
+        LinkedHashMap<String, Value> values = new LinkedHashMap<>();
+        List<String> unknown = new ArrayList<>();
+        List<String> notes = new ArrayList<>();
         Set<String> seenUnknown = new HashSet<>();
         LinkedHashMap<String, Value> fromFile = new LinkedHashMap<>();
         for (String line : ConfText.splitLines(text)) {
@@ -268,7 +340,17 @@ public final class ConfigStore {
             Value v = fromFile.get(meta.key);
             values.put(meta.key, v != null ? v : meta.defaultValue);
         }
-        return new Snapshot(values, unknown, true, mtime, notes);
+        return new Snapshot(values, unknown, true, mtimeMs, notes);
+    }
+
+    /**
+     * 写盘成功后就地更新 {@link #memo}：新内容就在手上，不必等下一次 {@link #read()} 再读盘解一遍。
+     *
+     * <p>与"重新读一遍盘"同源（{@link #parseText}），故 memo 里的值与重读逐字一致；
+     * 也正因如此，同秒内连写两次（{@code mtime} 撞车、size 又相同）不会读出旧值。
+     */
+    private void rememberWritten(String text) {
+        memo = new Memo(configFingerprint(), parseText(text, configFile.lastModified()));
     }
 
     /** 单键取值；文件缺失或键缺失 → 出厂默认值。 */
@@ -383,6 +465,7 @@ public final class ConfigStore {
         } catch (IOException e) {
             return WriteResult.failure(e.getMessage());
         }
+        rememberWritten(edit.text);
         return new WriteResult(true, false, true, replaced, appended, configFile.lastModified(), "", "");
     }
 
@@ -439,11 +522,13 @@ public final class ConfigStore {
             sb.append(meta.key).append('=').append(meta.factoryValue.format()).append('\n');
             orphans++;
         }
+        String text = sb.toString();
         try {
-            writeAtomic(sb.toString());
+            writeAtomic(text);
         } catch (IOException e) {
             return WriteResult.failure(e.getMessage());
         }
+        rememberWritten(text);
         return new WriteResult(true, false, true, 0, emitted.size() + orphans,
                 configFile.lastModified(), "", "");
     }

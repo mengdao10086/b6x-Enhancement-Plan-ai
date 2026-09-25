@@ -102,12 +102,13 @@ public final class Deployer {
      * asset 哈希的进程级 memo（key = asset 路径）。
      *
      * <p>APK 内的 asset 在进程存活期间不可能变，故一次算过的哈希可以一直用；而两处调用点的代价都不轻：
-     * {@link #needsRedeploy} 落在 {@code SetupActivity.onCreate} 的主线程链上，{@link #probe()} 每次要算
-     * 两份、而 probe 是每个动作的收尾（一次部署要跑好几次）。asset 无 {@code noCompress}，
+     * {@link #needsRedeploy} 是冷启动落页判定的必经一步（{@code SetupActivity} 把它连判定一起放在
+     * {@code ww-preload} 预热线程上，见 {@code SetupActivity#preload}），{@link #probe()} 每次要算两份、
+     * 而 probe 是每个动作的收尾（一次部署要跑好几次）。asset 无 {@code noCompress}，
      * 每次都要实时解压再哈希，memo 于是把「每动作数份」降成「每进程各一份」。
      *
-     * <p>用 {@link ConcurrentHashMap} 而非 HashMap：probe 在后台线程、needsRedeploy 在主线程，两侧都会写。
-     * 并发撞上同一路径时只是重复算一次（结果幂等），故不加锁互斥。
+     * <p>用 {@link ConcurrentHashMap} 而非 HashMap：probe 与 needsRedeploy 各自在自己的后台线程上调用
+     * （后者是预热线程），两侧都会写。并发撞上同一路径时只是重复算一次（结果幂等），故不加锁互斥。
      *
      * <p><b>只在成功时写</b>：asset 缺失/读错误照旧抛 {@link IOException}、不进表 ——
      * 否则一次瞬时失败会被永久记住，此后连重试的机会都没有。
@@ -151,7 +152,8 @@ public final class Deployer {
     }
 
     /**
-     * 是否需要重新部署 —— <b>只读缓存，不跑 su</b>，供启动落页判定调用（可在主线程调）。
+     * 是否需要重新部署 —— <b>只读缓存，不跑 su</b>，供启动落页判定调用（{@code SetupActivity} 已把整个
+     * 判定连它一起放在 {@code ww-preload} 预热线程上，见 {@code SetupActivity#preload}，故不在主线程）。
      *
      * <p>判据：设备上上次已知的二进制 md5（{@link #KEY_BIN_DEPLOYED_MD5}）与 APK 内
      * {@code assets/tempctrl-arm64} 的 md5 不一致。缓存来自「部署成功」或「探测确认一致」两条路径

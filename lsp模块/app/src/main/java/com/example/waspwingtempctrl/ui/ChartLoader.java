@@ -10,8 +10,9 @@ import com.example.waspwingtempctrl.R;
 import java.io.File;
 
 /**
- * 曲线数据的一次读取 + 解析。<b>全部在后台线程调用</b>（唯一入口
- * {@link #read(Context, File, ChartConfig, String)}），主线程只消费返回的快照。
+ * 曲线数据的一次读取 + 解析。<b>全部在后台线程调用</b>：读取入口
+ * {@link #read(Context, File, ChartConfig, String)}，另有进程级预热入口 {@link #warmUp(Context)}
+ * （供 {@code SetupActivity} 的冷启动预热调）；主线程只消费返回的快照。
  *
  * <p>三条硬约束：
  * <ol>
@@ -23,13 +24,52 @@ import java.io.File;
  *   <li>直读失败是<b>正常路径</b>：SELinux 直读未真机验证，errno=13 就可能发生，
  *       界面必须给得出可诊断文本。</li>
  * </ol>
+ *
+ * <p><b>进程级缓存</b>：最近一次成功读取的结果（含解析产物）按数据文件指纹（{@code size:mtime}）
+ * 留一份。曲线页每次重新可见都会强制重读（口径可能变，指纹一并作废），那时文件往往根本没变
+ * —— 命中即复用解析产物，不再读 256KB 也不再逐行解析。<b>只缓存解析产物</b>（{@code ChartDataset}），
+ * 不缓存原始文本；失败一律不进缓存（下次照旧重读，诊断信息绝不陈旧）。
+ * 返回的 {@link Snapshot} 因此<b>可能被多处共用</b>：只读。
  */
-final class ChartLoader {
+public final class ChartLoader {
 
     /** 尾读上限：C 端文件最多 780 行（约 40KB），这里给足余量，绝不整文件无界读。 */
     static final int TAIL_BYTES = 256 * 1024;
 
+    /** 最近一次成功读取的结果 + 它对应的数据文件指纹（不可变，故 volatile 一次读写即一致）。 */
+    private static final class Cached {
+        final String fingerprint;
+        final Snapshot snapshot;
+
+        Cached(String fingerprint, Snapshot snapshot) {
+            this.fingerprint = fingerprint;
+            this.snapshot = snapshot;
+        }
+    }
+
+    private static volatile Cached cached;
+
     private ChartLoader() {
+    }
+
+    // ==================== 进程级预热 ====================
+
+    /**
+     * 预热曲线首帧：先把曲线口径备好（{@link ChartConfig} 的进程级缓存），再读一次数据文件
+     * （解析产物进 {@link #read} 的进程级缓存），曲线页第一次刷新即可命中。冷启动时由
+     * {@code SetupActivity} 的预热线程调，<b>只在后台线程调</b>（内有同步 IO）。
+     *
+     * <p>纯优化，故失败不抛也不再报：读不到就什么都留不下，各入口随后照旧自己读一次、失败时
+     * 照旧把诊断原文铺在曲线区（既有路径不受本方法影响）。不新增定时器 —— 它只跑这一次。
+     */
+    public static void warmUp(Context context) {
+        try {
+            Context app = context.getApplicationContext();
+            ChartConfig cfg = ChartConfig.load(app);
+            read(app, AppFiles.dataFile(app), cfg, null);
+        } catch (Throwable ignored) {
+            // 预热失败无副作用：缓存没写进去，后续读取照旧走完整路径
+        }
     }
 
     /** 一次读取的完整结果。 */
@@ -105,6 +145,11 @@ final class ChartLoader {
         if (fingerprint.equals(lastFingerprint)) {
             return Snapshot.unchanged();
         }
+        Cached hit = cached;
+        if (hit != null && fingerprint.equals(hit.fingerprint)) {
+            // 进程内已解过这一份内容（但调用方手上没有可比的指纹）：读盘与解析都不必再做
+            return hit.snapshot;
+        }
 
         String text;
         try {
@@ -121,7 +166,9 @@ final class ChartLoader {
             return failure(probe, appContext.getString(R.string.chart_fail_parse_empty, probe.size)
                     + "\n\n" + AppFiles.diagnose(file));
         }
-        return new Snapshot(probe, true, null, ds, fingerprint, false);
+        Snapshot snapshot = new Snapshot(probe, true, null, ds, fingerprint, false);
+        cached = new Cached(fingerprint, snapshot);
+        return snapshot;
     }
 
     /**

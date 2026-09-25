@@ -57,6 +57,9 @@ public class ChartView extends View {
     private static final float SEAM_EXTRA_DP = 4f;   // 转速圆点允许下越界的量
     private static final float SEAM_BOTTOM_DP = 5f;  // 接缝离画布下沿的下限：圆点（半径 3.2 + 外圈 0.5）不许被裁
     private static final float LABEL_GAP_DP = 6f;    // 标签与端点的水平间距
+    // 标注行高：webui 的同名常量 LABEL_H（其注释写「标签近似高度（10px 字体）」）。取常量而不用
+    // 实测 descent − ascent（≈ 11.7dp），是为了与 webui 逐项对齐时同一个量同名同值。
+    private static final float LABEL_H_DP = 11f;
 
     private final Paint gridPaint = new Paint();
     private final Paint tickPaint = new Paint();     // 左轴刻度（右对齐）
@@ -132,6 +135,9 @@ public class ChartView extends View {
         haloPaint.setAntiAlias(true);
         haloPaint.setStyle(Paint.Style.STROKE);
         haloPaint.setStrokeWidth(HALO_WIDTH_DP * density);
+        // 描边文字的字号必须与 labelPaint 一致：halo 是「同一串字先描边再填色」，
+        // 字号不同就描出一个与字形不重合的底色轮廓（原先漏设，halo 按 Paint 的默认字号画）
+        haloPaint.setTextSize(TICK_TEXT_DP * density);
         labelPaint.setAntiAlias(true);
         labelPaint.setStyle(Paint.Style.FILL);
         labelPaint.setTextSize(TICK_TEXT_DP * density);
@@ -516,10 +522,12 @@ public class ChartView extends View {
         }
 
         Paint.FontMetrics fm = tickPaint.getFontMetrics();
-        float labelH = fm.descent - fm.ascent;
+        // 行高取 webui 同名常量（11dp），不用实测 descent − ascent（≈ 11.7dp，差 0.7dp）；
+        // fm 仍要留：下面「画布下沿 − descent」那条钳制要用实测值。
+        float labelH = LABEL_H_DP * density;
         // 标注基线允许的最低位置：绘图区下沿 + 一行高（原口径）再被「画布下沿 − descent」收住，
         // 否则最低那条标注的文字会越出画布被裁。
-        // 注：PAD_B_DP 缩到 4 后上式第一项（fPadT + fH + 一行高 = h − 4 + 11.7) 已高于第二项，
+        // 注：PAD_B_DP 缩到 4 后上式第一项（fPadT + fH + 一行高 = h − 4 + 11）已高于第二项，
         // 实际恒取 h − descent，故这条上限位置不随 PAD_B 变化；但画布下沿的拖柄横条贴到了下沿，
         // 最低那条标注现在与横条之间没有余量（原先隔着触控带居中留出的 4dp），真机需看是否打架。
         // 上侧不用额外钳制：ly 下限是 fPadT（17dp），已大于 10dp 文字的 ascent(≈9.3dp)
@@ -649,6 +657,7 @@ public class ChartView extends View {
             haloPaint.setColor(colorBg);
             haloPaint.setStrokeWidth(HALO_WIDTH_DP * density);
             labelPaint.setTextSize(TICK_TEXT_DP * density);
+            haloPaint.setTextSize(TICK_TEXT_DP * density);   // 与 labelPaint 同字号，见 init
             for (ChartLabelOp e : labels) {
                 labelPaint.setColor(e.color);
                 canvas.drawText(e.text, e.x, e.y, haloPaint);   // STROKE 画笔 = 描边

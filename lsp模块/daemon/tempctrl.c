@@ -13,6 +13,10 @@
 //
 // ================================================================
 
+// _GNU_SOURCE 必须在任何头文件之前：CPU 亲和用的 cpu_set_t / sched_setaffinity 在 bionic 里
+// 由 __USE_GNU 门控（不定义会只报未声明，不报缺失的头文件，难以定位）。
+#define _GNU_SOURCE
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -20,6 +24,8 @@
 #include <signal.h>
 #include <time.h>
 #include <stdarg.h>
+#include <errno.h>
+#include <sched.h>
 #include <sys/stat.h>
 #include <sys/file.h>
 #include <sys/wait.h>
@@ -128,6 +134,16 @@ static int CPU_ZONE_MIN = 0;
 static int CPU_ZONE_MAX = 99;
 static int cpu_zone_rescan_sec = 60;   // CPU thermal_zone 全量重扫间隔（秒，CPU_ZONE_RESCAN 第一值，默认 60）
 static int cpu_zone_keep = 10;         // 保留温度值个数（CPU_ZONE_RESCAN 第二值，默认 10）
+
+// --- CPU 亲和核范围（可配置；双值：起始核 结束核）---
+// 静态初值必须写字面量：默认值核对按字面量逐位比对它与定义 default，写成宏会被当成
+// "C 内未找到初值"而跳过核对（洞会变哑）。CPU_AFFINITY_DEF_* 是"值非法 → 回落默认"用的
+// 同一对数字，改默认值时必须与上面两行同步。
+#define CPU_AFFINITY_DEF_LO 0
+#define CPU_AFFINITY_DEF_HI 5
+static int affinity_cpu_lo = 0;   // CPU_AFFINITY 第一值（起始核）
+static int affinity_cpu_hi = 5;   // CPU_AFFINITY 第二值（结束核）
+static int affinity_cfg_seen = 0; // 本次加载是否读到该键（缺键时回落默认，见 load_config）
 
 // ======================== 通用参数 ========================
 // --- 基准温度 ---
@@ -449,6 +465,7 @@ static inline int clamp(int val, int lo, int hi);
 static void alarm_handler(int sig);
 static int compute_fan_target(void);
 static void set_default_log_path(void);   // 层开关复位用（定义在 write_log 之后）
+static void reset_cpu_affinity_defaults(void);   // parse_sysfs_cfg/load_config 在前，定义在复位函数区
 
 /* 调试日志宏：总开关 debug_mode=1 且对应分区开关=1 时才输出。
  * 必须单行（NDK clang + CRLF 多行续行失效） */
@@ -517,11 +534,11 @@ static char *config_parse_line(char *line, char **out_key) {
 // --- sysfs 层键表：键名与解析方式的唯一权威名单 ---
 // is_sysfs_key 与 parse_sysfs_cfg 同源查表，新增键只在此加一行；
 // 不存在"名单里有、分发里没有"而被静默忽略的可能。
-enum { SK_INT = 0, SK_PATH, SK_ZONE, SK_RESCAN };
+enum { SK_INT = 0, SK_PATH, SK_ZONE, SK_RESCAN, SK_AFFINITY };
 
 struct SysfsCfgKey {
     const char *key;
-    int kind;               // SK_INT / SK_PATH / SK_ZONE / SK_RESCAN
+    int kind;               // SK_INT / SK_PATH / SK_ZONE / SK_RESCAN / SK_AFFINITY
     int *ivar;              // SK_INT：目标变量
     int imin, imax;         // SK_INT：clamp 范围
     char *svar;             // SK_PATH：目标路径缓冲
@@ -606,6 +623,26 @@ static void parse_sysfs_cfg(const char *key, int val, const char *val_str) {
         int n = sscanf(val_str, "%d %d", &a, &b);
         if (n >= 1) cpu_zone_rescan_sec = clamp(a, 5, 3600);
         if (n >= 2) cpu_zone_keep = clamp(b, 1, 64);
+        break;
+    }
+    case SK_AFFINITY: {
+        // 双值：起始核 结束核
+        affinity_cfg_seen = 1;
+        char *raw = trim_value((char *)val_str);
+        if (*raw == '\0') break;   // 空值 = 保持原值（与其它键的空值约定一致）
+        int a = affinity_cpu_lo, b = affinity_cpu_hi;
+        if (sscanf(raw, "%d %d", &a, &b) < 2) {
+            // 不满足双值即解析失败，回落代码默认而非"保持原值"：只吃到一半会静默沿用旧区间，
+            // 用户改错一个字符时看不出配置没生效
+            write_log("配置 CPU_AFFINITY 值非法(%s) → 回落默认 %d %d",
+                      raw, CPU_AFFINITY_DEF_LO, CPU_AFFINITY_DEF_HI);
+            reset_cpu_affinity_defaults();
+            break;
+        }
+        // 边界写字面量：审计按字面量核对 C 的 clamp 与定义 fields 的 min/max（生成的
+        // CFG_MIN/MAX_CPU_AFFINITY_* 只是参考值，审计不认，写成宏等于放弃这项核对）
+        affinity_cpu_lo = clamp(a, 0, 7);
+        affinity_cpu_hi = clamp(b, 0, 7);
         break;
     }
     }
@@ -825,6 +862,12 @@ static void reset_sysfs_layer_defaults(void) {
 
 #undef CFG_RESET_ROW
 
+/** CPU 亲和取值位回落代码默认值（值非法/交集为空时用；层开关 1→0 的复位另走 CFG_SYSFS_DEFAULTS） */
+static void reset_cpu_affinity_defaults(void) {
+    affinity_cpu_lo = CPU_AFFINITY_DEF_LO;
+    affinity_cpu_hi = CPU_AFFINITY_DEF_HI;
+}
+
 static void load_config(const char *path) {
     FILE *f = fopen(path, "r");
     if (!f) {
@@ -906,6 +949,7 @@ static void load_config(const char *path) {
     }
 
     // --- 第二遍：全量单次扫描，仅按层分发（DEBUG/sysfs/PERF），无子守卫 ---
+    affinity_cfg_seen = 0;
     rewind(f);
     while (fgets(line, sizeof(line), f)) {
         char *key;
@@ -934,9 +978,216 @@ static void load_config(const char *path) {
         if (parse_common_cfg(key, val, val_str)) continue;
         debug_log(debug_config, "配置 未识别键 %s（已忽略）", key);
     }
+
+    // CPU_AFFINITY 缺键时回落代码默认（其余键沿用"缺键 = 保持上次值"）：该键的默认值就是
+    // "未配置时应生效的区间"，沿用旧值会让手删该行后仍留着旧区间
+    if (found_sysfs && !affinity_cfg_seen) reset_cpu_affinity_defaults();
+
     fclose(f);
 
     // （CTRL_MODE 模式切换过渡 / GEAR 档位表后处理 已随 Gear 删除）
+}
+
+// ======================== CPU 亲和（把配置落到进程上） ========================
+// 时机：启动一次（main）、配置热重载各一次（main_loop 的重载块）；等待设备循环不查 mtime，
+// 故那段时间改配置不会立即生效。
+// 顺序固定为「先迁 cpuset 组、后设亲和」：cgroup v1 的 cpuset 组 cpus 是硬上限，任务可运行的核
+// = 组 cpus ∩ 自身亲和，组内只能收窄不能放宽。本进程若落在 cpus 很窄的组里（真机
+// cpuset:/top-app/main 只给 CPU7），直接 sched_setaffinity 会被夹回。
+// 边界：只写 cgroup.procs 迁移自身，绝不改任何组的 cpus（那会连带影响前台 app 的线程）；
+// 不碰 cpu/blkio/memcg 控制器，也不碰 cgroup v2 层级（真机 0::/ 是冻结器所在层）。
+#define CPUSET_DIR "/dev/cpuset"   // 本机 cpuset v1 挂载点（mountinfo：/dev/cpuset rw,cpuset,noprefix）
+
+/** 从核区间文件（内容如 "0-7" 或单值 "0"）读 [lo,hi]；读不到或形态不符返回 0 */
+static int read_cpu_range(const char *path, int *lo, int *hi) {
+    FILE *f = fopen(path, "r");
+    if (!f) return 0;
+    char buf[64] = "";
+    int a = -1, b = -1;
+    if (fgets(buf, sizeof(buf), f)) {
+        if (sscanf(buf, "%d-%d", &a, &b) != 2) {
+            a = -1; b = -1;
+            if (sscanf(buf, "%d", &a) == 1) b = a;
+        }
+    }
+    fclose(f);
+    if (a < 0 || b < a) return 0;
+    *lo = a;
+    *hi = b;
+    return 1;
+}
+
+/** 读某 cpuset 组的 cpus（组目录绝对路径） */
+static int read_dir_cpus(const char *dir, int *lo, int *hi) {
+    char path[320];
+    snprintf(path, sizeof(path), "%s/cpus", dir);
+    return read_cpu_range(path, lo, hi);
+}
+
+/** 取 /proc/self/cgroup 里 cpuset 控制器（v1）的组路径（如 /top-app/main）；未挂 cpuset 返回 0 */
+static int read_self_cpuset_group(char *out, size_t size) {
+    FILE *f = fopen("/proc/self/cgroup", "r");
+    if (!f) return 0;
+    char line[256];
+    int found = 0;
+    while (fgets(line, sizeof(line), f)) {
+        // 行格式 <层级>:<控制器>:<组路径>；cgroup v2 的控制器是空段（0::/），与 cpuset 不相等
+        char *ctrl = strchr(line, ':');
+        if (!ctrl) continue;
+        char *sep = strchr(ctrl + 1, ':');
+        if (!sep) continue;
+        *sep = '\0';
+        if (strcmp(ctrl + 1, "cpuset") != 0) continue;
+        strncpy(out, trim_value(sep + 1), size - 1);
+        out[size - 1] = '\0';
+        found = 1;
+        break;
+    }
+    fclose(f);
+    return found;
+}
+
+/** 把自身 pid 写进 <dir>/cgroup.procs（迁移自身；本段唯一的 cgroup 写操作） */
+static int cpuset_join(const char *dir) {
+    char path[320];
+    snprintf(path, sizeof(path), "%s/cgroup.procs", dir);
+    int fd = open(path, O_WRONLY);
+    if (fd < 0) return 0;
+    char pid[32];
+    int n = snprintf(pid, sizeof(pid), "%d", (int)getpid());
+    ssize_t wr = write(fd, pid, (size_t)n);
+    close(fd);
+    return wr == n;
+}
+
+/**
+ * 在 base 下最多递归 depth 层，找第一个 cpus 覆盖 [lo,hi] 且非 top-app 的组并迁入。
+ * 覆盖是必需条件：迁进 cpus 不含目标区间的组，亲和仍会被夹在组外核上，等于没迁。
+ */
+static int cpuset_migrate_scan(const char *base, int depth, int lo, int hi,
+                               char *landed, size_t size) {
+    DIR *d = opendir(base);
+    if (!d) return 0;
+    struct dirent *ent;
+    int done = 0;
+    while (!done && (ent = readdir(d)) != NULL) {
+        if (ent->d_name[0] == '.') continue;
+        if (strncmp(ent->d_name, "top-app", 7) == 0) continue;   // 要离开的组，迁回去等于没迁
+        char dir[320];
+        snprintf(dir, sizeof(dir), "%s/%s", base, ent->d_name);
+        struct stat st;
+        if (stat(dir, &st) != 0 || !S_ISDIR(st.st_mode)) continue;
+        int clo = 0, chi = 0;
+        if (read_dir_cpus(dir, &clo, &chi) && clo <= lo && hi <= chi && cpuset_join(dir)) {
+            snprintf(landed, size, "%s", dir);
+            done = 1;
+        } else if (depth > 0 && cpuset_migrate_scan(dir, depth - 1, lo, hi, landed, size)) {
+            done = 1;
+        }
+    }
+    closedir(d);
+    return done;
+}
+
+/** 迁出到 cpus 覆盖 [lo,hi] 的组：首选根组（名字无关、最稳），写不进再扫子组；成功返回 1 */
+static int cpuset_migrate_self(int lo, int hi, char *landed, size_t size) {
+    if (cpuset_join(CPUSET_DIR)) {
+        snprintf(landed, size, "%s", CPUSET_DIR);
+        return 1;
+    }
+    return cpuset_migrate_scan(CPUSET_DIR, 1, lo, hi, landed, size);
+}
+
+/** 把 [*lo,*hi] 收进本机核号区间；返回 0 = 交集为空（区间不被修改） */
+static int cpu_range_intersect(int *lo, int *hi, int dev_lo, int dev_hi) {
+    int a = *lo > dev_lo ? *lo : dev_lo;
+    int b = *hi < dev_hi ? *hi : dev_hi;
+    if (a > b) return 0;
+    *lo = a;
+    *hi = b;
+    return 1;
+}
+
+/** 读 /proc/self/status 里 "字段:"（含冒号，如 "Cpus_allowed_list:"）后的值；找到返回 1 */
+static int read_status_field(const char *field, char *out, size_t size) {
+    FILE *f = fopen("/proc/self/status", "r");
+    if (!f) return 0;
+    char line[256];
+    size_t flen = strlen(field);
+    int found = 0;
+    while (fgets(line, sizeof(line), f)) {
+        if (strncmp(line, field, flen) != 0) continue;
+        strncpy(out, trim_value(line + flen), size - 1);
+        out[size - 1] = '\0';
+        found = 1;
+        break;
+    }
+    fclose(f);
+    return found;
+}
+
+/**
+ * 把 affinity_cpu_lo~affinity_cpu_hi 应用到自身进程。
+ * 降级：区间反向、与本机核号无交集 → 回落代码默认并记日志；迁组失败 → 只设亲和；
+ * 实际生效范围一律以读回的 Cpus_allowed_list 为准，故这里不写"已生效"。
+ */
+static void apply_cpu_affinity(void) {
+    int lo = affinity_cpu_lo, hi = affinity_cpu_hi;
+    if (lo > hi) {
+        write_log("CPU 亲和 区间反向(%d > %d) → 回落默认 %d %d",
+                  lo, hi, CPU_AFFINITY_DEF_LO, CPU_AFFINITY_DEF_HI);
+        reset_cpu_affinity_defaults();
+        lo = affinity_cpu_lo;
+        hi = affinity_cpu_hi;
+    }
+
+    // 与本机核号取交集：机型核数不同，写死的区间可能越界（如 6 核机上 0~7）
+    int dev_lo = 0, dev_hi = 0;
+    if (!read_cpu_range("/sys/devices/system/cpu/present", &dev_lo, &dev_hi)) {
+        write_log("CPU 亲和 读不到本机核编号 → 按配置区间 %d %d 直接设置", lo, hi);
+    } else if (!cpu_range_intersect(&lo, &hi, dev_lo, dev_hi)) {
+        write_log("CPU 亲和 配置区间与本机核 %d~%d 无交集 → 回落默认 %d %d",
+                  dev_lo, dev_hi, CPU_AFFINITY_DEF_LO, CPU_AFFINITY_DEF_HI);
+        reset_cpu_affinity_defaults();
+        lo = affinity_cpu_lo;
+        hi = affinity_cpu_hi;
+        if (!cpu_range_intersect(&lo, &hi, dev_lo, dev_hi))
+            write_log("CPU 亲和 默认区间与本机核也无交集 → 仍按默认设置，结果以读回为准");
+    }
+
+    // 先迁组：当前组 cpus 已覆盖目标区间时无需迁组（组已是上限，直接设亲和即可）
+    char group[256] = "/";
+    char cur_dir[320];
+    if (read_self_cpuset_group(group, sizeof(group)))
+        snprintf(cur_dir, sizeof(cur_dir), "%s%s", CPUSET_DIR, group);
+    else
+        snprintf(cur_dir, sizeof(cur_dir), "%s", CPUSET_DIR);
+    int cur_lo = 0, cur_hi = 0;
+    if (!read_dir_cpus(cur_dir, &cur_lo, &cur_hi) || cur_lo > lo || cur_hi < hi) {
+        char landed[320] = "";
+        if (cpuset_migrate_self(lo, hi, landed, sizeof(landed)))
+            write_log("CPU 亲和 迁组 %s → %s", cur_dir, landed);
+        else
+            write_log("CPU 亲和 迁组失败（当前组 %s 不覆盖 %d %d，且无可迁入组）→ 只设亲和",
+                      cur_dir, lo, hi);
+    }
+
+    // 设亲和：被 cpuset 夹取时调用会成功但结果被收窄，故后面必须读回
+    cpu_set_t mask;
+    CPU_ZERO(&mask);
+    for (int c = lo; c <= hi && c < CPU_SETSIZE; c++) CPU_SET(c, &mask);
+    if (sched_setaffinity(0, sizeof(mask), &mask) != 0)
+        write_log("CPU 亲和 设置失败 errno=%d(%s)", errno, strerror(errno));
+
+    // 读回：实际可运行的核 = cpuset 组 cpus ∩ 自身亲和，只有读回的值才是事实
+    char allowed[64] = "读取失败";
+    char now_group[256] = "";
+    read_status_field("Cpus_allowed_list:", allowed, sizeof(allowed));
+    if (read_self_cpuset_group(now_group, sizeof(now_group)))
+        write_log("CPU 亲和 读回 Cpus_allowed_list=%s cpuset=%s（本次请求 %d %d）",
+                  allowed, now_group, lo, hi);
+    else
+        write_log("CPU 亲和 读回 Cpus_allowed_list=%s（本次请求 %d %d）", allowed, lo, hi);
 }
 
 // ======================== 可执行文件名提取 ========================
@@ -2945,6 +3196,8 @@ static void main_loop(void) {
         write_log("配置 热重载");
         // 配置重载可能重置了 fan_rpm_max/pid_cold_max，立即用设备限制覆盖
         update_active_limits();
+        // 亲和同样按重载后的值重算（CPU_AFFINITY 可能被改，也可能随层关闭被复位为默认）
+        apply_cpu_affinity();
     }
 
     // 0.5. 热端过温 → 制冷削减（先于 PID 决策，本周期即生效）
@@ -3080,6 +3333,10 @@ int main(int argc, char *argv[]) {
 
     write_log("脚本启动成功");
     write_log("单实例锁 已获取 %s", LOCK_FILE_PATH);
+
+    // CPU 亲和：配置与日志都已就绪，此时应用一次。该键未读到（层未启用/无 profile.conf）时
+    // 也按代码默认生效——亲和必须无条件生效，不能被开关意外关掉。
+    apply_cpu_affinity();
 
     // --- 等待任一设备模块就绪 + BLE 连接（BLE 字段语义见 read_single_status） ---
     active_device = DEVICE_NONE;

@@ -31,6 +31,13 @@ import java.util.List;
  *       故本类直接读该 asset（<b>本页唯一允许碰 assets 的地方，只读</b>）。
  *       读失败时回落已确认的常量，并把回落事实写进 {@link #notes}，不静默。</li>
  * </ol>
+ *
+ * <p><b>进程级缓存</b>：{@link #load} 的结果按 {@link ConfigStore#configFingerprint()} 缓存。
+ * {@code chart} 块是 APK 内资产（进程存活期间不可能变），上面那批口径键则随 {@code profile.conf}
+ * 的指纹变化自动失效。曲线页每次重新可见都要重读一次口径（用户可能刚在配置页改过），本条缓存
+ * 把那轮的 47KB JSON 重解与整份配置重读一并消掉。失效判据只此一处（指纹），本类不自己 stat 文件；
+ * 指纹一致就是同一份输入，故回落/读不到之类的降级结果也一并留档（降级原因已进 {@link #notes}）。
+ * 因此返回的对象<b>可能被多处共用</b>：只读，谁都不许改它的字段。
  */
 final class ChartConfig {
 
@@ -40,7 +47,7 @@ final class ChartConfig {
     static final int FALLBACK_ROLLING_MAX_LINES = 720;
 
     /** 断联判定阈值（秒）——{@code UI_GAP_SEC} 第 1 值。 */
-    int gapDetectSec = 5;
+    int gapDetectSec = 2;
     /** 空白封顶（秒）——{@code UI_GAP_SEC} 第 2 值。 */
     int gapMaxSec = 15;
     /** 标注合并阈值（配置 px，使用时按 density 换算）——{@code UI_LABEL_MERGE_PX}。 */
@@ -66,17 +73,40 @@ final class ChartConfig {
     private ChartConfig() {
     }
 
+    /** {@link #load} 的进程级缓存条目：一份口径 + 它对应的配置指纹（不可变，故 volatile 一次读写即一致）。 */
+    private static final class Cached {
+        final String fingerprint;
+        final ChartConfig config;
+
+        Cached(String fingerprint, ChartConfig config) {
+            this.fingerprint = fingerprint;
+            this.config = config;
+        }
+    }
+
+    private static volatile Cached cached;
+
+    /**
+     * 取一份曲线口径（带进程级缓存，见类注释）。<b>只能在后台线程调用</b>：缓存未命中时这里有
+     * 同步 File IO 与 47KB JSON 解析。
+     */
     static ChartConfig load(Context context) {
+        ConfigStore store = ConfigStore.get(context);
+        String fingerprint = store.configFingerprint();
+        Cached hit = cached;
+        if (hit != null && fingerprint.equals(hit.fingerprint)) {
+            return hit.config;
+        }
         ChartConfig c = new ChartConfig();
-        c.readKeys(context);
+        c.readKeys(store);
         c.readChartBlock(context);
+        cached = new Cached(fingerprint, c);
         return c;
     }
 
     // ==================== 配置键 ====================
 
-    private void readKeys(Context context) {
-        ConfigStore store = ConfigStore.get(context);
+    private void readKeys(ConfigStore store) {
         ConfigStore.Snapshot snap;
         try {
             snap = store.read();
@@ -84,10 +114,10 @@ final class ChartConfig {
             notes.add("读取 profile.conf 失败（" + t.getClass().getSimpleName() + "），曲线参数全部使用默认值");
             return;
         }
-        // 断联：两个字段都要求 > 0，否则各自回落 5 / 15（口径见 逻辑说明.md 的「曲线」一节〈断联空白〉）
-        int detect = field(store, snap, "UI_GAP_SEC", 0, 5);
+        // 断联：两个字段都要求 > 0，否则各自回落 2 / 15（口径见 逻辑说明.md 的「曲线」一节〈断联空白〉）
+        int detect = field(store, snap, "UI_GAP_SEC", 0, 2);
         int maxSec = field(store, snap, "UI_GAP_SEC", 1, 15);
-        gapDetectSec = detect > 0 ? detect : 5;
+        gapDetectSec = detect > 0 ? detect : 2;
         gapMaxSec = maxSec > 0 ? maxSec : 15;
         // 合并阈值：≥ 0 合法（0 = 不合并以外全合并），负值回落 9（口径见 逻辑说明.md 的「可配置参数一览」UI_LABEL_MERGE_PX）
         int merge = field(store, snap, "UI_LABEL_MERGE_PX", 0, 9);

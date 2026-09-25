@@ -40,15 +40,19 @@
     <color name="badge_muted_bg">#E4E9EA</color>
     <color name="badge_muted_fg">#4A5254</color>
 
-    <!-- ===== 曲线（D2 用；6 条系列，色相沿用 WebUI 的语义分配，明度按 Material 观感重调） =====
-         batt/hot/cold/cpu 走左轴，rpm 走左轴（百 rpm），cool 走右轴（制冷档位）。 -->
-    <color name="chart_series_batt">#C62828</color>
-    <color name="chart_series_hot">#AD1457</color>
-    <color name="chart_series_cold">#1565C0</color>
-    <color name="chart_series_cpu">#B57A00</color>
-    <color name="chart_series_rpm">#6A1B9A</color>
-    <color name="chart_series_cool">#2E7D32</color>
-    <color name="chart_axis">#8A9295</color>
+    <!-- ===== 曲线（D2 用；6 条系列） =====
+         色号 = 原 WebUI 末版的 Material 500 标准色板（唯一来源：WebUI 的 webroot/app.js，
+         提交 7f4328b3，从 1738f84e 起一字未改），不再按明暗各自重调——见 values-night 同名项。
+         batt/hot/cold/cpu 走左轴，rpm 走左轴（百 rpm），cool 走右轴（制冷档位）。
+         chart_axis = 刻度文字/轴标题/合并行 ' / ' 共用的灰（WebUI 三处同用 #888 一个值，
+         本文件按 XML 要求写成 #888888 全 6 位）。 -->
+    <color name="chart_series_batt">#F44336</color>
+    <color name="chart_series_hot">#E91E63</color>
+    <color name="chart_series_cold">#2196F3</color>
+    <color name="chart_series_cpu">#FF9800</color>
+    <color name="chart_series_rpm">#9C27B0</color>
+    <color name="chart_series_cool">#4CAF50</color>
+    <color name="chart_axis">#888888</color>
 
     <!-- ===== 日志分级（D3 用） ===== -->
     <color name="log_level_debug">#6B7275</color>
