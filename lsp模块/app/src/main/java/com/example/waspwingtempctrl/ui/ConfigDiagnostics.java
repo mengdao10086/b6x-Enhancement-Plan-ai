@@ -182,6 +182,8 @@ final class ConfigDiagnostics {
         lastState = state;
         // 正文之后追加启动耗时（旁路数据，只读几个静态槽位；没量到就什么都不加）
         stateView.setText(state + timingBlock());
+        // 记账（旁路）：诊断正文上屏那一刻（首次写入胜出；诊断区在折叠体内，与首屏无关）
+        StartupTiming.mark(StartupTiming.MARK_DIAG_APPLY);
         if (snapshot.exists) {
             String time = new SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.getDefault())
                     .format(new Date(snapshot.mtimeMs));

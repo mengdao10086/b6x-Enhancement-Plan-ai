@@ -7,6 +7,7 @@ import android.text.TextUtils;
 import android.view.LayoutInflater;
 import android.view.View;
 import android.view.ViewGroup;
+import android.view.ViewTreeObserver;
 
 import androidx.annotation.NonNull;
 import androidx.annotation.Nullable;
@@ -21,6 +22,7 @@ import com.example.waspwingtempctrl.R;
 import com.example.waspwingtempctrl.StartupTiming;
 
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -42,17 +44,19 @@ import java.util.concurrent.RejectedExecutionException;
  * （在各行的 {@link ConfigKeyRow} 里，本类不插手）。所有文件 I/O 都排在同一个单线程 executor 上，
  * 先后顺序即调用顺序；主线程只做渲染。
  *
- * <h3>加载策略：与预读并行，建完才出现</h3>
+ * <h3>加载策略：与预读并行，看得见的部分先出现</h3>
  * 建表单要读 {@code assets/params.json}（45KB）+ {@code profile.conf}，两件事都慢，<b>都放到后台</b>：
  * <ul>
  *   <li>{@link #start()}（{@code onCreate} 调）把「{@code ConfigStore.get} + 首读盘」排上后台线程，
  *       与壳的 inflate / 首帧并行；</li>
- *   <li>读完回主线程<b>一次建满</b>（{@link #buildForm}：卡与键行一起，{@link ConfigGroupBinder}
- *       已不懒建），随即把快照上屏（值、组头开关、徽标、自检、诊断一次对齐），<b>最后才让卡片容器露面</b>。</li>
+ *   <li>读完回主线程建表（见 {@link #buildIfNeeded}）：<b>段一</b>先建各组卡头并把它们的值摆正，
+ *       随即让卡片容器露面（默认折叠的页在这里置「就绪」，外壳据此撤骨架占位层）；<b>段二</b>再建那几十行
+ *       看不见的键行并上屏（值、组头开关、徽标、自检、诊断一次对齐），它在撤层之后才跑。</li>
  * </ul>
- * 故不存在"半成品"：容器在露面之前一直是 {@link View#GONE}——要么整块参数区建好摆出来，
- * 要么（定义没到位）走 {@link Page#showDefinitionError} 如实报错。<b>没有</b>逐组补齐的入口，
- * 也没有"可见才建"的门控：页面视图一建就建，展开/收起只切可见性（不再现场 inflate + 测量）。
+ * 故不存在"半成品"：容器在露面之前一直是 {@link View#GONE}，露面时<b>可见的那部分</b>已经摆好
+ * （卡头、组头开关值、卡头徽标）——要么如此，要么（定义没到位）走 {@link Page#showDefinitionError}
+ * 如实报错。<b>没有</b>逐组补齐的入口，也没有"可见才建"的门控：行在撤层后一次建满，
+ * 展开/收起只切可见性（不在展开时现场 inflate + 测量，见 {@code ConfigGroupBinder#setExpanded}）。
  *
  * <p>视图重建（配置变更 / 进程恢复）时沿用预热那一份快照立刻重建，同时补读一次盘
  * （{@link #attachView}），避免用一份可能已旧的快照。
@@ -71,7 +75,7 @@ final class ConfigFormController implements ConfigKeyRow.Host, ConfigWriteQueue.
         /**
          * 分组卡（设置页还有重置栏）的落点。页面负责把它<b>先藏着</b>（配置页由
          * {@code fragment_config.xml} 声明 {@code visibility="gone"}，设置页在自己搭的壳里置
-         * {@code GONE}），控制器建满并上屏后才露出（见 {@link #buildIfNeeded}）。
+         * {@code GONE}），控制器把<b>可见的那部分</b>摆好之后才露出（见 {@link #buildIfNeeded}）。
          */
         @NonNull
         ViewGroup cardContainer();
@@ -96,6 +100,12 @@ final class ConfigFormController implements ConfigKeyRow.Host, ConfigWriteQueue.
         void showDefinitionError(@NonNull String message);
 
         /**
+         * 建表的"可见后段"（建行那一段）失败：卡片与卡头已经露出来了，如实补一句失败原因
+         * （不回退已露出的内容，也绝不静默留在半张表上）。
+         */
+        void showPartialBuildFailure(@NonNull String message);
+
+        /**
          * 卡与行一次建满、值也已上屏（只来一次）：页面在这里收尾自己那一块
          * （设置页：空态提示与重置栏）。
          *
@@ -113,6 +123,11 @@ final class ConfigFormController implements ConfigKeyRow.Host, ConfigWriteQueue.
     private final Page page;
     /** 应用上下文：只为拿 {@link ConfigStore} 单例与读文件，故 {@code onCreate} 里就能拿到。 */
     private final Context appContext;
+    /**
+     * 建表取视图的来源：本页所有控件的唯一取处（预制造优先，取不到现场 inflate，见 {@link ViewSource}）。
+     * 设置页传 {@code null} 预制造器 = 全部现场造——它按需打开、不在启动链上，且是另一个 Activity 的上下文。
+     */
+    private final ViewSource views;
     /** 所有后台 I/O（预热、读盘、写盘）都排在这一个线程上。 */
     private final ExecutorService io = Executors.newSingleThreadExecutor();
     private final Handler main = new Handler(Looper.getMainLooper());
@@ -128,6 +143,27 @@ final class ConfigFormController implements ConfigKeyRow.Host, ConfigWriteQueue.
     private final Map<String, Value> diskValues = new LinkedHashMap<>();
     private final List<ConfigGroupBinder> groups = new ArrayList<>();
 
+    /**
+     * 建表时一次算定的三件小账（见 {@link #indexBuiltForm()}）：本页各分组的行、键行键数、组头开关数。
+     * 行与定义里的键一一对应，建表之后不再变（{@link #detachView()} 才清）。
+     *
+     * <p>原先这三件都是每次要的时候现算：{@link #rows()} 每次上屏都要遍历各分组并 {@code new} 一个
+     * 列表，两个自检分项每次都要 O(键数) 重算 + 每组 {@code new} 一个 {@code ArrayList}。
+     */
+    private List<ConfigKeyRow> allRows = Collections.emptyList();
+    private int builtRowKeyCount;
+    private int builtMasterKeyCount;
+
+    /**
+     * 建表轮次：每建一轮 +1。段二的异步回调带着自己那一轮的号回来，轮次对不上就整个丢弃
+     * （视图已重建 → 那一轮的行与值都不该再往新视图上铺）。
+     */
+    private int buildRound;
+    /** 已经建完行的那一轮（0 = 还没建过）：段二的三条入口靠它幂等（pre-draw、兜底延时、展开页同步）。 */
+    private int rowsPhaseRound;
+    /** 视图重建时要补读一次盘（见 {@link #attachView}）：行建完之后才起读（见 {@link #buildRowsPhase}）。 */
+    private boolean pendingReload;
+
     /** 页面根视图（建诊断区要用）；视图不在时为 null。 */
     private View pageRoot;
     private boolean viewAlive;
@@ -141,9 +177,11 @@ final class ConfigFormController implements ConfigKeyRow.Host, ConfigWriteQueue.
     /** 曾经定过一次（跨视图重建保持）：视图重建时那份预热快照可能已旧，要补读一次盘。 */
     private boolean everSettled;
 
-    ConfigFormController(@NonNull Page page, @NonNull Context appContext) {
+    ConfigFormController(@NonNull Page page, @NonNull Context appContext,
+                         @Nullable ConfigPreInflater preInflater) {
         this.page = page;
         this.appContext = appContext;
+        this.views = new ViewSource(page.formInflater(), preInflater);
     }
 
     // ==================== 起步：预热与首读 ====================
@@ -178,6 +216,8 @@ final class ConfigFormController implements ConfigKeyRow.Host, ConfigWriteQueue.
         if (io.isShutdown()) {
             return;   // 页面已销毁：结果丢弃（单例仍已就位，别的页面直接受益）
         }
+        // 记账（旁路）：建表数据到位这一刻（与后面的"建表起点"相减，即"视图与数据谁在等谁"）
+        StartupTiming.mark(StartupTiming.MARK_FORM_DATA);
         store = loaded;
         loadedSnapshot = snapshot;
         failureText = failure;
@@ -199,15 +239,33 @@ final class ConfigFormController implements ConfigKeyRow.Host, ConfigWriteQueue.
         }
     }
 
-    // ==================== 建表：一次建满，建完才露 ====================
+    // ==================== 建表：卡头先露，行随后 ====================
+
+    /** 段二兜底延时（毫秒）：pre-draw 迟迟不派发时，到点也把行建出来（见 {@link #scheduleRowsPhase}）。 */
+    private static final long ROWS_PHASE_FALLBACK_MS = 1500L;
 
     /**
-     * 把本页的表单一次建满（预热与首读都回来、视图也在时才做，只做一次）。三条路：
-     * 定义没到位 → 如实报错；数据没回来 → 什么都不做，等 {@link #onLoaded}；
-     * 都齐了 → 建卡、建行、上屏、露出。
+     * 把本页的表单建出来（预热与首读都回来、视图也在时才做，只做一次）。三条路：
+     * 定义没到位 → 如实报错；数据没回来 → 什么都不做，等 {@link #onLoaded}；都齐了 → 建表。
      *
-     * <p>露出的时机是本方法的最后一行：值、组头开关、徽标、自检、诊断全对齐之后才把容器
-     * 置为可见，故页面不会出现"半张表"。
+     * <p><b>建表分成两段</b>，分界点就是"用户看得见的部分"：
+     * <ul>
+     *   <li><b>段一</b>：各分组的<b>卡头</b>（标题、总开关、徽标、箭头）+ 组头开关值与卡头徽标。
+     *       配置页默认全部折叠，此时用户能看到的每一样东西都已就位——故这一段末尾就把参数区露出来、
+     *       置「就绪」（外壳据此撤骨架占位层）。</li>
+     *   <li><b>段二</b>：各行与全部字段 + 值上屏 + 自检 + 诊断（见 {@link #buildRowsPhase}）。
+     *       这一段在撤层之后才跑：用户等的是"看得见的界面"，而不是那几十行还折叠着的输入框，
+     *       总工作量并没有减少，只是把它挪到了用户看不见的时候。</li>
+     * </ul>
+     *
+     * <p><b>默认展开的页面不分段</b>（设置页只有一组且默认展开）：折叠体可见时先露卡头会露出一张
+     * 空卡，那就成了"半张表"，故它的两段在同一趟里连着跑完再露出。<b>终点状态与改前一致</b>，过程有
+     * 三处可指的差别（都幂等，不影响终态）：多跑一趟 {@link #applyHeaderValues}；
+     * {@link #applySnapshot} 改取 {@link #effectiveValue}（首次建表时待写队列为空，与取快照等价）；
+     * 补读盘（{@link #pendingReload}）从"紧随建表"挪到"段二收尾"。
+     *
+     * <p>不管哪条路，"行建完"与"值上屏"都是相邻两步（中间不插别的活）：建行时不各自铺值，
+     * 值、徽标、压暗全由 {@link #applySnapshot} 一次铺满（见 {@link ConfigGroupBinder#buildRows}）。
      */
     private void buildIfNeeded() {
         if (built || !viewAlive) {
@@ -221,6 +279,7 @@ final class ConfigFormController implements ConfigKeyRow.Host, ConfigWriteQueue.
             if (diagnostics != null) {
                 diagnostics.refresh();
             }
+            reloadIfPending();   // 这条路上没有段二，视图重建那次补读在这里补上（改前是无条件补读）
             return;
         }
         if (store == null || loadedSnapshot == null) {
@@ -228,23 +287,163 @@ final class ConfigFormController implements ConfigKeyRow.Host, ConfigWriteQueue.
         }
         built = true;
         everSettled = true;
-        // 记账（旁路）：主线程建表那一段（建卡建行 + 值上屏 + 自检/诊断对齐 + 参数区露出）
+        // 记账（旁路）：建表这一段（首屏段 + 可见后段两笔），外加段内六个细分槽的累计
+        // （见 StartupTiming 的 acc* 一族）
         long startedAt = StartupTiming.now();
-        buildForm(loadedSnapshot);
-        applySnapshot(loadedSnapshot);   // 值、组头开关、徽标、自检、诊断一次对齐
-        page.onFormBuilt(groups.size());
-        page.cardContainer().setVisibility(View.VISIBLE);   // 都对齐了才露：不出现半成品
-        StartupTiming.span(StartupTiming.FORM_BUILD, startedAt);
+        StartupTiming.accReset();
+        ConfigKeyRow.resetHintStyle();   // 说明字号/字距的一轮缓存同样从零开始
+        buildForm(loadedSnapshot);       // 段一：各分组卡头（可见结构）
+        applyHeaderValues(loadedSnapshot);   // 组头开关值 + 卡头徽标（折叠态下看得见的两样值）
+        // 本轮建表轮次：段二的异步回调带着它回来，对不上就整个丢弃（视图已重建）
+        final int round = ++buildRound;
+        if (page.expandsByDefault()) {
+            // 默认展开的页（设置页）：折叠体可见，先露卡头会露出空卡 → 两段连着跑完再露
+            StartupTiming.span(StartupTiming.FORM_BUILD_HEAD, startedAt);
+            buildRowsPhase(round, loadedSnapshot);
+            revealBuiltForm();
+            return;
+        }
+        // 默认折叠的页（配置页）：可见的只有卡头，先把可见结构露出来并置「就绪」（外壳据此撤骨架
+        // 占位层），看不见的行留到撤层那一帧之后再建
+        revealBuiltForm();
+        StartupTiming.span(StartupTiming.FORM_BUILD_HEAD, startedAt);
+        scheduleRowsPhase(round, loadedSnapshot);
     }
 
     /**
-     * 建表：本页该渲染的分组一次建满（{@link ConfigGroupBinder} 已不懒建，键行随卡一起建）。
-     * 值不在这里铺：行建起来时各自用 {@link ConfigKeyRow.Host#diskValue} 回填，而此刻
-     * {@link #diskValues} 已是快照真值（见下），故不存在"先默认值再回填"的一跳。
+     * 段一的上屏：此时可见的只有卡头与组头开关，先把它们的值摆正（行、自检、诊断都留到段二）。
+     *
+     * <p>卡头徽标必须在这里算出来：折叠态下它是"本组有键未生效"的唯一提示，而那时刻行还不存在
+     * （判据与行内压暗同源，见 {@link ConfigGroupBinder#refreshHeaderBadge}）。
+     *
+     * <p>顺序上它必须早于 {@link #revealBuiltForm()}：参数区一露出来，上面这些值就得已经是最终值，
+     * 否则用户会看到"先空一下再跳成真值"。
+     */
+    private void applyHeaderValues(@NonNull Snapshot snapshot) {
+        for (ConfigGroupBinder group : groups) {
+            String masterKey = group.masterKey();
+            if (masterKey != null) {
+                group.applyMasterValue(snapshot.get(masterKey));
+            }
+            group.refreshHeaderBadge();
+        }
+    }
+
+    /** 参数区露面并置「就绪」：容器可见 + 页面收尾（设置页在这里追加它的重置栏）+ 记账。 */
+    private void revealBuiltForm() {
+        page.onFormBuilt(groups.size());
+        page.cardContainer().setVisibility(View.VISIBLE);   // 都摆好了才露：不出现半成品
+        markAfterBuildFrame();
+    }
+
+    /**
+     * 段二的起跑线：参数区根部的一次性 pre-draw（另配一条一次性的兜底延时，见下）。
+     *
+     * <p><b>为什么挂在 pre-draw 而不是直接 post</b>：撤骨架占位层是外壳在它自己的 pre-draw 监听器里做的
+     * （那个监听器注册得更早，在同一个 {@link ViewTreeObserver} 上先执行），所以"撤层那一帧"会先到；
+     * 本回调随后才把段二 post 进消息队列，段二于是在<b>撤层那一帧画完之后</b>才开始跑——用户先看到真界面，
+     * 行在看不见的地方建。直接 post 的话，段二可能抢在那一帧之前跑，撤层等于没提前。
+     *
+     * <p><b>兜底那一次延时</b>：pre-draw 只在窗口绘制时派发。万一这一段窗口压根不绘制（极端情况），
+     * 只挂 pre-draw 就会一直等不到。故另挂一次性延时（不轮询、不重试、跑过即废），到点也把行建出来。
+     * 这与"不许等用户展开才建"是同一件事的两面：行必须在某个不依赖用户动作的时机建完，
+     * 用户展开某组时它应当已经在了（展开只切可见性，从不现场建控件）。
+     */
+    private void scheduleRowsPhase(int round, @NonNull Snapshot snapshot) {
+        final View anchor = page.cardContainer();
+        final ViewTreeObserver observer = anchor.getViewTreeObserver();
+        observer.addOnPreDrawListener(new ViewTreeObserver.OnPreDrawListener() {
+            @Override
+            public boolean onPreDraw() {
+                if (observer.isAlive()) {
+                    observer.removeOnPreDrawListener(this);
+                }
+                anchor.post(() -> buildRowsPhase(round, snapshot));
+                return true;
+            }
+        });
+        anchor.postDelayed(() -> buildRowsPhase(round, snapshot), ROWS_PHASE_FALLBACK_MS);
+    }
+
+    /**
+     * 段二：建各行与全部字段，随后把值、组头开关、徽标、自检、诊断一次上屏。
+     *
+     * <p><b>幂等且只认自己那一轮</b>：同一个轮次只跑一次（{@link #rowsPhaseRound}），轮次对不上、
+     * 视图已销毁或内容还没定（{@link #viewAlive} / {@link #built}）都整个丢弃——它可能由 pre-draw
+     * 或兜底延时触发，两条路都可能晚到。
+     *
+     * <p><b>失败不回退已经露出的卡头</b>：如实说明"行没建全"（给一句人话，不把原始异常铺给用户），
+     * 留着半张表也比整块不露更接近用户预期（改前这里是"整块不露"：异常会从建表一路抛出去）。
+     */
+    private void buildRowsPhase(int round, @NonNull Snapshot snapshot) {
+        if (round != buildRound || round == rowsPhaseRound || !viewAlive || !built) {
+            return;
+        }
+        rowsPhaseRound = round;
+        long startedAt = StartupTiming.now();
+        try {
+            for (ConfigGroupBinder group : groups) {
+                group.buildRows();
+            }
+            indexBuiltForm();   // 行与自检分项一次算定（紧随其后的自检与上屏都要用）
+            long alignStartedAt = StartupTiming.accBegin(StartupTiming.FORM_SUB_ALIGN);
+            applySnapshot(snapshot);   // 值、组头开关、徽标、自检、诊断一次对齐
+            StartupTiming.accEnd(StartupTiming.FORM_SUB_ALIGN, alignStartedAt);
+        } catch (Throwable ignored) {
+            // 用应用上下文取文案：失败路径上不该再去碰页面视图（万一异常正是视图侧抛的）。
+            // 文案里不带原始异常（那会把类名与英文 message 铺给用户）；要排查就顺着"行没建全"这个
+            // 现象去看建表链路上的改动，界面这边只给一句人话
+            page.showPartialBuildFailure(appContext.getString(R.string.config_build_failed));
+        }
+        StartupTiming.span(StartupTiming.FORM_BUILD_ROWS, startedAt);
+        StartupTiming.accFlush();
+        views.release();   // 预制造件已用完：丢掉剩余件（见 ViewSource#release）
+        reloadIfPending();
+    }
+
+    /**
+     * 视图重建要补读一次盘（见 {@link #attachView}）：正常路在段二收尾起读（建表用的那份预热快照可能
+     * 已旧，早读回来的新值会被那一趟建表整片盖掉）；定义没到位那条路没有段二，在 {@link #buildIfNeeded}
+     * 的错误分支里补上。改前这里是 {@code attachView} 里的一句无条件补读，故两条路都必须补。
+     */
+    private void reloadIfPending() {
+        if (pendingReload) {
+            pendingReload = false;
+            reloadAsync();
+        }
+    }
+
+    /**
+     * 记账（旁路）：建表结束后的第一次 pre-draw（一次性回调，记完即摘）。
+     *
+     * <p>用来切"撤占位层"之前那一小段：它与建表结束之间隔着一次 vsync 与一轮 measure/layout。
+     * 挂在卡片容器上——它正是建表刚填满的那棵树。回调体里只有一次静态 mark 与一次摘除，无 IO、无锁。
+     */
+    private void markAfterBuildFrame() {
+        final View anchor = page.cardContainer();
+        final ViewTreeObserver observer = anchor.getViewTreeObserver();
+        observer.addOnPreDrawListener(new ViewTreeObserver.OnPreDrawListener() {
+            @Override
+            public boolean onPreDraw() {
+                StartupTiming.mark(StartupTiming.MARK_AFTER_BUILD_FRAME);
+                if (observer.isAlive()) {
+                    observer.removeOnPreDrawListener(this);
+                }
+                return true;
+            }
+        });
+    }
+
+    /**
+     * 建表<b>段一</b>：本页该渲染的分组各建一张卡（<b>只有卡头</b>，行由 {@link #buildRowsPhase} 补）。
+     * 值不在这里铺：可见的两样（组头开关、卡头徽标）由 {@link #applyHeaderValues} 摆正，
+     * 行与字段的值由 {@link #applySnapshot} 一次铺满。
+     *
+     * <p>{@link #diskValues} 在下面按快照铺底：卡头徽标判据、以及随后的用户交互（值未变不写）
+     * 都以它为准。
      */
     private void buildForm(@NonNull Snapshot snapshot) {
         groups.clear();
-        final LayoutInflater inflater = page.formInflater();
         final ViewGroup container = page.cardContainer();
         // 快照为准铺底：read() 已把文件里缺失的键补成定义默认值，故每个定义键都有值
         diskValues.clear();
@@ -272,7 +471,7 @@ final class ConfigFormController implements ConfigKeyRow.Host, ConfigWriteQueue.
             if (master != null) {
                 covered.add(master.key);
             }
-            addGroup(inflater, container, page.groupTitle(group), master, keyMetas);
+            addGroup(container, page.groupTitle(group), master, keyMetas);
         }
 
         if (page.showsUngroupedGroup()) {
@@ -284,7 +483,7 @@ final class ConfigFormController implements ConfigKeyRow.Host, ConfigWriteQueue.
                 }
             }
             if (!orphans.isEmpty()) {
-                addGroup(inflater, container,
+                addGroup(container,
                         container.getContext().getString(R.string.config_group_ungrouped),
                         null, orphans);
             }
@@ -296,47 +495,57 @@ final class ConfigFormController implements ConfigKeyRow.Host, ConfigWriteQueue.
      * 摆出来只是噪音（设置页的定义里没有本组时即走这条路，由
      * {@link Page#onFormBuilt} 给空态提示）。
      */
-    private void addGroup(@NonNull LayoutInflater inflater, @NonNull ViewGroup container,
-                          @NonNull String title, @Nullable KeyMeta master,
-                          @NonNull List<KeyMeta> keyMetas) {
+    private void addGroup(@NonNull ViewGroup container, @NonNull String title,
+                          @Nullable KeyMeta master, @NonNull List<KeyMeta> keyMetas) {
         if (keyMetas.isEmpty() && master == null) {
             return;
         }
-        ConfigGroupBinder binder = ConfigGroupBinder.create(inflater, container, title, master,
-                keyMetas, this);
+        ConfigGroupBinder binder = ConfigGroupBinder.create(container, title, master,
+                keyMetas, this, views);
+        long startedAt = StartupTiming.accBegin(StartupTiming.FORM_SUB_ATTACH);
         container.addView(binder.card());
+        StartupTiming.accEnd(StartupTiming.FORM_SUB_ATTACH, startedAt);
         groups.add(binder);
         binder.setExpanded(page.expandsByDefault());
     }
 
-    /** 本页键行的键数（各分组整组的键，含「未分组」兜底组）：键渲染自检的分项之一。 */
-    int rowKeyCount() {
-        int count = 0;
-        for (ConfigGroupBinder group : groups) {
-            count += group.rowKeys().size();
-        }
-        return count;
-    }
-
-    /** 本页组头开关数：键渲染自检的分项之一。 */
-    int masterKeyCount() {
-        int count = 0;
-        for (ConfigGroupBinder group : groups) {
-            if (group.masterKey() != null) {
-                count++;
-            }
-        }
-        return count;
-    }
-
-    /** 本页各分组的键行（不懒建后即整组的行）。 */
-    @NonNull
-    private List<ConfigKeyRow> rows() {
+    /**
+     * 建表收尾的一次算定：本页的行与两个自检分项（见 {@link #allRows} / {@link #builtRowKeyCount}）。
+     *
+     * <p>这三件原先都是"每次要的时候现算"：{@link #rows()} 每次上屏都要遍历各分组再 {@code new} 一个
+     * 列表，两个自检分项每次都要 O(键数) 重算、每组还要 {@code new} 一个 {@code ArrayList}。
+     * 行与定义里的键一一对应，建完就不变，故算一次存着。
+     */
+    private void indexBuiltForm() {
         List<ConfigKeyRow> all = new ArrayList<>();
+        int rowKeys = 0;
+        int masterKeys = 0;
         for (ConfigGroupBinder group : groups) {
             all.addAll(group.rows());
+            rowKeys += group.rowKeys().size();
+            if (group.masterKey() != null) {
+                masterKeys++;
+            }
         }
-        return all;
+        allRows = Collections.unmodifiableList(all);
+        builtRowKeyCount = rowKeys;
+        builtMasterKeyCount = masterKeys;
+    }
+
+    /** 本页键行的键数（各分组整组的键，含「未分组」兜底组）：键渲染自检的分项之一，建表时算定。 */
+    int rowKeyCount() {
+        return builtRowKeyCount;
+    }
+
+    /** 本页组头开关数：键渲染自检的分项之一，建表时算定。 */
+    int masterKeyCount() {
+        return builtMasterKeyCount;
+    }
+
+    /** 本页各分组的键行（不懒建后即整组的行；建表时算定的那一份，见 {@link #indexBuiltForm()}）。 */
+    @NonNull
+    private List<ConfigKeyRow> rows() {
+        return allRows;
     }
 
     private void refreshBadges() {
@@ -371,17 +580,25 @@ final class ConfigFormController implements ConfigKeyRow.Host, ConfigWriteQueue.
         });
     }
 
-    /** 一份快照上屏：值、组头开关、徽标都对齐后，交给页面（自检）与诊断区。 */
+    /**
+     * 一份快照上屏：值、组头开关、徽标都对齐后，交给页面（自检）与诊断区。
+     *
+     * <p>写进控件的值取<b>当前有效值</b>（{@link ConfigKeyRow.Host#effectiveValue}：待写项优先、
+     * 否则磁盘值）而不是快照本身：快照可能比用户刚做的改动旧，直接铺快照会把用户眼前的改动悄悄顶回去。
+     * 这在段二那条路上尤其要守——参数区露面与行建好之间隔着约三百毫秒，用户完全可能在这段时间里
+     * 拨过组头开关，而那一下改动此时还在待写队列里（磁盘值还没变）。
+     * 待写项本身也是"已经过校验的最终值"（见 {@link ConfigWriteQueue}），故不存在铺进非法值的问题。
+     */
     private void applySnapshot(@NonNull Snapshot snapshot) {
         diskValues.clear();
         diskValues.putAll(snapshot.values);
         for (ConfigKeyRow row : rows()) {
-            row.applyValue(snapshot.get(row.key()));
+            row.applyValue(effectiveValue(row.key()));
         }
         for (ConfigGroupBinder group : groups) {
             String masterKey = group.masterKey();
             if (masterKey != null) {
-                group.applyMasterValue(snapshot.get(masterKey));
+                group.applyMasterValue(effectiveValue(masterKey));
             }
         }
         refreshBadges();
@@ -507,19 +724,19 @@ final class ConfigFormController implements ConfigKeyRow.Host, ConfigWriteQueue.
     // ==================== 视图与生命周期 ====================
 
     /**
-     * 页面视图已建（{@code onCreateView} 调）：接管诊断区，并在预热已回来的情况下立刻建满。
-     * 页面壳自己先藏着卡片容器（见 {@link Page#cardContainer()}），本类只在建满后露出。
+     * 页面视图已建（{@code onCreateView} 调）：接管诊断区，并在预热已回来的情况下立刻建出来。
+     * 页面壳自己先藏着卡片容器（见 {@link Page#cardContainer()}），本类只在摆好之后露出。
+     *
+     * <p>视图重建（配置变更 / 进程恢复）时那份预热快照可能已旧，要补读一次盘（{@code rebuild}）——
+     * 补读<b>等行建完之后再起</b>（{@link #pendingReload}）：建表用的还是那份旧快照，先读回来的新值
+     * 会被随后那一趟建表整片盖掉（建表最后一步就是上屏）。
      */
     void attachView(@NonNull View root) {
         pageRoot = root;
         viewAlive = true;
         ensureDiagnostics();
-        final boolean rebuild = everSettled;   // 先取：本次是"再来一遍"还是头一次
+        pendingReload = everSettled;   // 先取：本次是"再来一遍"还是头一次
         buildIfNeeded();
-        if (rebuild) {
-            // 视图重建（配置变更 / 进程恢复）：预热那份快照可能已旧，重建后补读一次
-            reloadAsync();
-        }
     }
 
     /** 页面视图销毁（{@code onDestroyView} 调）：冲刷待写、释放诊断区；下次视图重建再建满。 */
@@ -534,13 +751,17 @@ final class ConfigFormController implements ConfigKeyRow.Host, ConfigWriteQueue.
             diagnostics = null;
         }
         groups.clear();
+        allRows = Collections.emptyList();   // 与 groups 同寿：行随视图一起没了
+        builtRowKeyCount = 0;
+        builtMasterKeyCount = 0;
         built = false;
         pageRoot = null;
     }
 
-    /** 页面销毁（{@code onDestroy} 调）：冲刷待写并关掉后台线程。 */
+    /** 页面销毁（{@code onDestroy} 调）：冲刷待写、丢掉预制造剩余件并关掉后台线程。 */
     void shutdown() {
         flush();
+        views.release();   // 视图没了，预制造件也不会再有人取（否则那些件会把 Activity 钉在池子里）
         io.shutdown();
     }
 

@@ -12,6 +12,9 @@
     <!-- ===== 定义加载失败的错误态 ===== -->
     <string name="config_error_title">参数定义加载失败</string>
     <string name="config_error_body">无法生成配置表单：应用内置的参数定义没有加载成功。以下为诊断信息。</string>
+    <!-- 建表的"可见后段"失败：卡头已经露出来了，只在错误位补一句实话（不回退已露出的部分）。
+         不带占位符：原始异常会露出类名与英文 message，不该铺给用户。 -->
+    <string name="config_build_failed">参数行未建全（本页其余设置不受影响）。</string>
 
     <!-- ===== 分组卡头 ===== -->
     <!-- 展开/收起的三角是 drawable/ic_triangle.xml（字符字形会把三角顶部裁掉），故只剩无障碍描述两条 -->

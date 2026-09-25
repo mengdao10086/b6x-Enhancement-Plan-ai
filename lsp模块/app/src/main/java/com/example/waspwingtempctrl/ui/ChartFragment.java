@@ -354,6 +354,8 @@ public class ChartFragment extends Fragment {
         lastBreaks = win.breaks;
         lastBreakSeconds = win.breakSeconds;
         chartView.setData(win, config);
+        // 记账（旁路）：曲线首次上数据完成那一刻（首次写入胜出，后续窗口切换不会改写）
+        StartupTiming.mark(StartupTiming.MARK_CHART_DATA);
         updateInfoText();
     }
 

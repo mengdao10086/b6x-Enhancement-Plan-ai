@@ -109,7 +109,9 @@ public class UiSettingsFragment extends Fragment
     @Override
     public void onCreate(@Nullable Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
-        form = new ConfigFormController(this, requireContext().getApplicationContext());
+        // 建表一律现场 inflate：本页按需打开、不在启动链上，且它是另一个 Activity 的上下文——
+        // 启动期那份预制造件（为配置页准备的，带的是配置页 Activity 的上下文）不该跨页取用
+        form = new ConfigFormController(this, requireContext().getApplicationContext(), null);
         // 与首帧并行：定义与首份快照在后台读，读完主线程一次建满（建满之前内容不露面）
         form.start();
     }
@@ -262,6 +264,24 @@ public class UiSettingsFragment extends Fragment
             contentBox.addView(empty);
         }
         contentBox.addView(ConfigResetBar.create(inflater, contentBox, this).view());
+    }
+
+    /**
+     * 建表的"可见后段"失败：本页不分段（只有一组且默认展开，见 {@code ConfigFormController} 的说明），
+     * 故这一段失败时参数区还没露出来——把失败原因摆进内容容器并让它可见，同样不给静默空白。
+     */
+    @Override
+    public void showPartialBuildFailure(@NonNull String message) {
+        if (contentBox == null) {
+            return;   // 视图已销毁：无处可放
+        }
+        Context context = contentBox.getContext();
+        TextView failure = new TextView(context);
+        failure.setText(message);
+        failure.setTextAppearance(context, R.style.TextAppearance_B6XTempCtrl_Mono);
+        failure.setTextIsSelectable(true);
+        contentBox.addView(failure);
+        contentBox.setVisibility(View.VISIBLE);
     }
 
     /** 本页没有随快照变的自检/诊断块（曲线上屏在配置页）。 */

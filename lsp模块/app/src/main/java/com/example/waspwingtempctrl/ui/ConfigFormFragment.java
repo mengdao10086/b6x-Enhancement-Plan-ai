@@ -39,11 +39,13 @@ import com.google.android.material.snackbar.Snackbar;
  * {@link ConfigFormController} 里，与设置页共用；本页只做控制器不做的事：挂曲线子页、摆诊断
  * 折叠体里的内容（数据文件信息条 + 键渲染自检）、把用户反馈落到本页的 Snackbar 上。
  *
- * <h3>加载：与预读并行，建完才出现</h3>
+ * <h3>加载：与预读并行，看得见的部分先出现</h3>
  * 定义与首份快照在后台读（{@link ConfigFormController#start()}，{@code onCreate} 即起），读完
- * 主线程一次把卡与键行建满、值也上屏，最后才让参数区露面；在那之前
- * {@code config_group_container} 一直是 {@code gone}（布局里就是这么定的），故打开本页不会看到
- * "先空、再逐组冒出来"的一闪。展开/收起只切可见性，不再现场 inflate + 测量。
+ * 主线程先建各组卡头、把组头开关与卡头徽标摆正，随即让参数区露面；那几十行折叠体里的键行随后
+ * （撤层那一帧之后）才建。在那之前 {@code config_group_container} 一直是 {@code gone}
+ * （布局里就是这么定的），故打开本页不会看到"先空、再逐组冒出来"的一闪。
+ * <b>展开/收起只切可见性</b>，既不现场 inflate + 测量，也不等用户展开才建行（见
+ * {@link ConfigFormController} 的建表两段）。
  *
  * <h3>边界（I3）</h3>
  * 界面读写 {@code profile.conf} 只经 {@link ConfigStore}，不自己拼 shell、不直接碰文件、
@@ -87,7 +89,10 @@ public class ConfigFormFragment extends Fragment
     @Override
     public void onCreate(@Nullable Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
-        form = new ConfigFormController(this, requireContext().getApplicationContext());
+        // 预制造器（启动期那根后台线程造的键行控件，见 ConfigPreInflater）：本页吃它，取不到就现场造。
+        // 传本页上下文当身份凭据：Activity 换了一个就不再取用（否则会挂上属于上一个 Activity 的件）
+        form = new ConfigFormController(this, requireContext().getApplicationContext(),
+                ConfigPreInflater.get(requireContext()));
         // 与首帧并行：定义与首份快照在后台读，读完主线程一次建满（建满之前参数区不露面）
         form.start();
     }
@@ -232,10 +237,12 @@ public class ConfigFormFragment extends Fragment
     }
 
     /**
-     * 表单建满（本页内容的终态之一）：置「就绪」。
+     * 参数区露面（本页内容的终态之一）：置「就绪」。
      *
-     * <p>配置页没有别的建表后收尾动作（曲线子页与诊断折叠体在 {@code onCreateView} 里已挂好），
-     * 这里只为外壳的骨架占位层留一个准信：此刻起本页的结构不会再变（见 {@link #isStructureReady()}）。
+     * <p>调用点在"可见结构已就位"那一刻（各组卡头、组头开关、卡头徽标都摆好了，行还没建——
+     * 本页默认全部折叠，行本来就看不见），故此刻起本页<b>可见</b>的内容不会再变
+     * （见 {@link #isStructureReady()}）：外壳的骨架占位层据此撤下，而用户看到的就是最终界面。
+     * 配置页没有别的建表后收尾动作（曲线子页与诊断折叠体在 {@code onCreateView} 里已挂好）。
      */
     @Override
     public void onFormBuilt(int groupCount) {
@@ -243,11 +250,32 @@ public class ConfigFormFragment extends Fragment
     }
 
     /**
-     * 本页结构是否已就绪（＝「已建好、尚无具体数据」的那个状态）。
+     * 建表的"可见后段"失败：卡片与卡头已经露出来了，用那个错误位补一句实话。
+     *
+     * <p>用参数区末尾那张错误卡（它与"定义没到位"共用一处落点，是页面上唯一一处常驻的错误位），
+     * 故失败原因<b>不需要用户展开任何东西就能看见</b>。不回退已露出的卡头：留着半张表比整块不露
+     * 更接近用户预期，也留住了"哪些键存在"这个信息。
+     */
+    @Override
+    public void showPartialBuildFailure(@NonNull String message) {
+        if (errorCard == null) {
+            return;   // 视图已销毁：无处可放，也不该再碰视图
+        }
+        errorCard.setVisibility(View.VISIBLE);
+        errorText.setText(message);
+    }
+
+    /**
+     * 本页<b>可见结构</b>是否已就绪（＝「看得见的部分已建好、尚无具体数据」的那个状态）。
      *
      * <p>给外壳用：状态页、日志页的结构就是 inflate 出来的，视图一有即就绪；本页的表单是读完定义
      * 后在主线程异步建出来的，只有建完（或把"定义没到位"如实上屏）才算就绪。外壳据此撤骨架占位层、
      * 并决定何时截这套骨架图。
+     *
+     * <p><b>口径是"可见结构"而不是"结构"</b>（建表拆成两段之后的口径）：本页默认全部折叠，用户看得见的
+     * 只有各组的卡头（标题、总开关、徽标、箭头）。就绪在卡头与它们的值都摆好那一刻成立；那几十行折叠体
+     * 里的内容随后才建（见 {@code ConfigFormController} 的段二），<b>但绝不等到用户点展开才建</b>
+     * ——展开/收起只切可见性（见 {@link ConfigGroupBinder#setExpanded}），这是本页的一条既有不变量。
      *
      * <p>调在 {@code onDestroyView} 里复位：视图重建后要重新建成才算就绪（那条路上
      * {@link ConfigFormController} 也会 {@code detachView} 后重建，两者同寿）。

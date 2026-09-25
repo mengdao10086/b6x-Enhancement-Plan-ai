@@ -1,6 +1,7 @@
 package com.example.waspwingtempctrl.ui;
 
 import android.content.Context;
+import android.content.res.Configuration;
 import android.content.res.Resources;
 import android.content.res.TypedArray;
 import android.graphics.Paint;
@@ -10,7 +11,6 @@ import android.text.Layout;
 import android.text.TextUtils;
 import android.text.TextWatcher;
 import android.util.TypedValue;
-import android.view.LayoutInflater;
 import android.view.View;
 import android.view.ViewGroup;
 import android.widget.TextView;
@@ -26,6 +26,7 @@ import com.example.waspwingtempctrl.ConfigStore.KeyMeta;
 import com.example.waspwingtempctrl.ConfigStore.OptionMeta;
 import com.example.waspwingtempctrl.ConfigStore.Value;
 import com.example.waspwingtempctrl.R;
+import com.example.waspwingtempctrl.StartupTiming;
 import com.google.android.material.button.MaterialButton;
 import com.google.android.material.button.MaterialButtonToggleGroup;
 import com.google.android.material.materialswitch.MaterialSwitch;
@@ -114,6 +115,11 @@ final class ConfigKeyRow {
         /** 承载 {@link #input} 的 OutlinedBox；宽度回写也要改它的 LayoutParams。布尔字段为 null。 */
         final TextInputLayout layout;
         final MaterialSwitch toggle;
+        /**
+         * 说明文字的实测宽（见 {@link #measuredFieldWidth}）：只与说明文本、说明字号有关，值变了不影响它。
+         * {@code -1} = 还没量过。一轮建表里同一字段会被量两次（建行一遍、上屏一遍），缓存后第二遍只量值宽。
+         */
+        private int hintWidth = -1;
 
         Field(@NonNull View root, @Nullable TextInputEditText input, @Nullable TextInputLayout layout,
               @Nullable MaterialSwitch toggle) {
@@ -143,21 +149,42 @@ final class ConfigKeyRow {
             return input == null ? null : textOf(input);
         }
 
+        /** 写值：<b>文本没变就不写回控件</b>（见 {@link #setTextIfChanged}）。 */
         void setValue(int value) {
+            long startedAt = StartupTiming.accBegin(StartupTiming.FORM_SUB_FILL);
             if (toggle != null) {
                 toggle.setChecked(value != 0);
             } else {
-                input.setText(String.valueOf(value));
+                setTextIfChanged(input, String.valueOf(value));
             }
+            StartupTiming.accEnd(StartupTiming.FORM_SUB_FILL, startedAt);
         }
 
+        /** 写值（路径文本）：同样只在文本真的变了才写回。 */
         void setValue(String text) {
-            input.setText(text);
+            long startedAt = StartupTiming.accBegin(StartupTiming.FORM_SUB_FILL);
+            setTextIfChanged(input, text);
+            StartupTiming.accEnd(StartupTiming.FORM_SUB_FILL, startedAt);
+        }
+
+        /**
+         * 文本与控件里的一致就什么都不做。
+         *
+         * <p>{@code TextView.setText} 对内容相同的文本没有短路：它照样换掉内部 {@code CharSequence}、
+         * 把光标复位（{@link PathRenderer#applyValue} 的"光标钉到末尾"就是在补这一下）并请求重排。
+         * 建表那两遍里第二遍的值与第一遍完全相同，这一层比较就是替它省掉那些白做的动作。
+         */
+        private static void setTextIfChanged(@NonNull TextInputEditText input, @NonNull String text) {
+            if (!text.contentEquals(input.getText())) {
+                input.setText(text);
+            }
         }
     }
 
     private final KeyMeta meta;
     private final Host host;
+    /** 取视图的来源（预制造优先，取不到现场 inflate）：本类所有控件的唯一取处，见 {@link ViewSource}。 */
+    private final ViewSource views;
     private final WrapRowLayout root;
     private final TextView labelView;
     private final TextView descView;
@@ -187,20 +214,23 @@ final class ConfigKeyRow {
      * @param groupShowsUiOnly 本组卡头已经挂出「界面自用，守护进程不读取」时传 true：
      *                         该标注整组只出现一次，行内不再重复
      */
-    static ConfigKeyRow create(@NonNull LayoutInflater inflater, @NonNull ViewGroup parent,
-                               @NonNull KeyMeta meta, @NonNull ConfigKeyRow.Host host,
-                               boolean groupShowsUiOnly) {
+    static ConfigKeyRow create(@NonNull ViewGroup parent, @NonNull KeyMeta meta,
+                               @NonNull ConfigKeyRow.Host host, boolean groupShowsUiOnly,
+                               @NonNull ViewSource views) {
         // 行"整行独占"由 item_config_row.xml 根标签上的 app:wrapFullLine 声明（父容器读它当标记），
         // 键内换行交给同一个容器，本类不再向容器声明任何几何。
-        WrapRowLayout root = (WrapRowLayout) inflater.inflate(R.layout.item_config_row, parent, false);
-        return new ConfigKeyRow(inflater, root, meta, host, groupShowsUiOnly);
+        long startedAt = StartupTiming.accBegin(StartupTiming.FORM_SUB_INFLATE);
+        WrapRowLayout root = (WrapRowLayout) views.inflate(R.layout.item_config_row, parent);
+        StartupTiming.accEnd(StartupTiming.FORM_SUB_INFLATE, startedAt);
+        return new ConfigKeyRow(root, meta, host, groupShowsUiOnly, views);
     }
 
-    private ConfigKeyRow(LayoutInflater inflater, WrapRowLayout root, KeyMeta meta, Host host,
-                         boolean groupShowsUiOnly) {
+    private ConfigKeyRow(WrapRowLayout root, KeyMeta meta, Host host, boolean groupShowsUiOnly,
+                         ViewSource views) {
         this.root = root;
         this.meta = meta;
         this.host = host;
+        this.views = views;
         Resources res = root.getResources();
         dimAlpha = readDimAlpha(res);
         hintFitGuard = res.getDimensionPixelSize(R.dimen.config_hint_slack);
@@ -230,7 +260,7 @@ final class ConfigKeyRow {
         }
 
         renderer = createRenderer();
-        renderer.build(inflater);
+        renderer.build();
         alignLabelToInputBox();
         shiftLabelInNonSwitchRow();
     }
@@ -303,7 +333,7 @@ final class ConfigKeyRow {
     private interface Renderer {
 
         /** 建键内控件并挂到行骨架上（键内控件标 trailing，行级文本标 fullLine）。 */
-        void build(@NonNull LayoutInflater inflater);
+        void build();
 
         /** 程序化回填（不触发写入），并按新值重算一次字段宽。 */
         void applyValue(@NonNull Value value);
@@ -324,10 +354,12 @@ final class ConfigKeyRow {
     private final class SwitchRenderer implements Renderer {
 
         @Override
-        public void build(@NonNull LayoutInflater inflater) {
+        public void build() {
             // 开关是尾段成员，与输入框 / 字段走同一条路：按需建出（item_config_key_switch.xml）后
             // 挂上并标 trailing（见 #addToTail）——非 switch 型的键行因此不再白建一个 MaterialSwitch
-            View switchRoot = inflater.inflate(R.layout.item_config_key_switch, root, false);
+            long startedAt = StartupTiming.accBegin(StartupTiming.FORM_SUB_INFLATE);
+            View switchRoot = views.inflate(R.layout.item_config_key_switch, root);
+            StartupTiming.accEnd(StartupTiming.FORM_SUB_INFLATE, startedAt);
             addToTail(switchRoot);
             switchView = switchRoot.findViewById(R.id.config_key_switch);
             switchView.setVisibility(View.VISIBLE);
@@ -389,13 +421,16 @@ final class ConfigKeyRow {
         private final Map<Integer, String> valueOfButton = new LinkedHashMap<>();
 
         @Override
-        public void build(@NonNull LayoutInflater inflater) {
-            group = (MaterialButtonToggleGroup) inflater.inflate(
-                    R.layout.item_config_enum_group, root, false);
+        public void build() {
+            long startedAt = StartupTiming.accBegin(StartupTiming.FORM_SUB_INFLATE);
+            group = (MaterialButtonToggleGroup) views.inflate(R.layout.item_config_enum_group, root);
+            StartupTiming.accEnd(StartupTiming.FORM_SUB_INFLATE, startedAt);
             addToTail(group);
             for (OptionMeta option : meta.options) {
-                MaterialButton button = (MaterialButton) inflater.inflate(
-                        R.layout.item_chart_window_button, group, false);
+                startedAt = StartupTiming.accBegin(StartupTiming.FORM_SUB_INFLATE);
+                MaterialButton button = (MaterialButton) views.inflate(
+                        R.layout.item_chart_window_button, group);
+                StartupTiming.accEnd(StartupTiming.FORM_SUB_INFLATE, startedAt);
                 // 按钮的 id 是"取值 ↔ 控件"的唯一纽带（组按 id 报选中项）
                 button.setId(View.generateViewId());
                 button.setText(option.label);
@@ -460,9 +495,9 @@ final class ConfigKeyRow {
         private final List<Field> fields = new ArrayList<>();
 
         @Override
-        public void build(@NonNull LayoutInflater inflater) {
+        public void build() {
             String caption = joinParts(joinParts(meta.unit, rangeText(0)), meta.unitNote);
-            fields.add(addNumberField(inflater,
+            fields.add(addNumberField(
                     root.getContext().getString(R.string.config_hint_value), caption, true));
         }
 
@@ -495,16 +530,16 @@ final class ConfigKeyRow {
         private final List<Field> fields = new ArrayList<>();
 
         @Override
-        public void build(@NonNull LayoutInflater inflater) {
+        public void build() {
             for (int i = 0; i < meta.fieldCount(); i++) {
                 FieldMeta fieldMeta = meta.fields.get(i);
                 if (fieldMeta.bool) {
-                    fields.add(addBoolField(inflater, fieldMeta));
+                    fields.add(addBoolField(fieldMeta));
                     continue;
                 }
                 // ConfigStore.FieldMeta 没有解析 params.json 的字段级 unitNote，界面不自行读 assets
                 // （I1/I3 边界），故多值字段只显示 unit 能拿到的部分。
-                fields.add(addNumberField(inflater, fieldMeta.label,
+                fields.add(addNumberField(fieldMeta.label,
                         joinParts(fieldMeta.unit, rangeText(i)), false));
             }
         }
@@ -542,15 +577,21 @@ final class ConfigKeyRow {
         suppressChange = true;
         try {
             for (int i = 0; i < fields.size(); i++) {
-                fields.get(i).setValue(value.intAt(i));
+                fields.get(i).setValue(value.intAt(i));   // 记账在 Field.setValue（值回填槽）
             }
         } finally {
             suppressChange = false;
         }
         for (Field field : fields) {
-            if (!field.isBool()) {
-                writeWidth(field, measuredFieldWidth(field));
+            if (field.isBool()) {
+                continue;
             }
+            // 先量宽、再写宽：量宽那一段记在"说明画笔/文本实测宽"两个槽里，若把它圈进写宽的窗口里，
+            // 同一段时间就会被六个细分槽中的两个各记一次（合计虚高）。故两段各自成窗、互不嵌套。
+            int width = measuredFieldWidth(field);
+            long startedAt = StartupTiming.accBegin(StartupTiming.FORM_SUB_FILL);
+            writeWidth(field, width);
+            StartupTiming.accEnd(StartupTiming.FORM_SUB_FILL, startedAt);
         }
     }
 
@@ -593,8 +634,8 @@ final class ConfigKeyRow {
         private Field field;
 
         @Override
-        public void build(@NonNull LayoutInflater inflater) {
-            field = addField(inflater, root.getContext().getString(R.string.config_hint_path),
+        public void build() {
+            field = addField(root.getContext().getString(R.string.config_hint_path),
                     "", false, true);
             // 不按说明/内容定宽：路径长度不可控（默认日志路径 58 字符在 16sp 下约 570dp），
             // 定宽会顶出屏幕，而文字在框里居中、被裁掉的是两端。吃满行尾，放不下由输入框自己横向滚。
@@ -675,16 +716,18 @@ final class ConfigKeyRow {
     // ==================== 键内控件：建、说明落位、量宽 ====================
 
     /** int / multi 的数值字段：说明 + 单位/范围说明，每次输入都排入防抖队列（失焦时钳制回写）。 */
-    private Field addNumberField(@NonNull LayoutInflater inflater, @NonNull String hint,
-                                 @NonNull String caption, boolean hoistCaption) {
-        Field field = addField(inflater, hint, caption, hoistCaption, false);
+    private Field addNumberField(@NonNull String hint, @NonNull String caption,
+                                 boolean hoistCaption) {
+        Field field = addField(hint, caption, hoistCaption, false);
         field.input.addTextChangedListener(new Watcher());
         return field;
     }
 
     /** 布尔字段（multi 键里值为 0/1 的字段）：字段名 + 开关，取布尔那份字段布局。 */
-    private Field addBoolField(@NonNull LayoutInflater inflater, @NonNull FieldMeta fieldMeta) {
-        View fieldView = inflater.inflate(R.layout.item_config_field_switch, root, false);
+    private Field addBoolField(@NonNull FieldMeta fieldMeta) {
+        long startedAt = StartupTiming.accBegin(StartupTiming.FORM_SUB_INFLATE);
+        View fieldView = views.inflate(R.layout.item_config_field_switch, root);
+        StartupTiming.accEnd(StartupTiming.FORM_SUB_INFLATE, startedAt);
         addToTail(fieldView);
 
         View switchRow = fieldView.findViewById(R.id.config_field_switch_row);
@@ -716,10 +759,12 @@ final class ConfigKeyRow {
      *                     长说明留在框里要折四五行的独立一列，挂行级后同样内容一两行）
      * @param path         true = 路径输入框（单行文本；失焦才落盘）
      */
-    private Field addField(@NonNull LayoutInflater inflater, @NonNull String hint,
-                           @NonNull String caption, boolean hoistCaption, boolean path) {
+    private Field addField(@NonNull String hint, @NonNull String caption,
+                           boolean hoistCaption, boolean path) {
         // 数值 / 路径字段取数值那一份字段布局，布尔字段走 addBoolField（两份见 item_config_field*.xml）
-        View fieldView = inflater.inflate(R.layout.item_config_field, root, false);
+        long startedAt = StartupTiming.accBegin(StartupTiming.FORM_SUB_INFLATE);
+        View fieldView = views.inflate(R.layout.item_config_field, root);
+        StartupTiming.accEnd(StartupTiming.FORM_SUB_INFLATE, startedAt);
         addToTail(fieldView);
 
         TextInputLayout layout = fieldView.findViewById(R.id.config_field_layout);
@@ -746,8 +791,10 @@ final class ConfigKeyRow {
 
     /** 把键内控件挂到行骨架上：参数名之后、行级文本之前，并标 trailing（与参数名同行的尾段）。 */
     private void addToTail(@NonNull View child) {
+        long startedAt = StartupTiming.accBegin(StartupTiming.FORM_SUB_ATTACH);
         root.addView(child, ++tailCount);
         root.setTrailing(child, true);
+        StartupTiming.accEnd(StartupTiming.FORM_SUB_ATTACH, startedAt);
     }
 
     /**
@@ -797,19 +844,39 @@ final class ConfigKeyRow {
      * 这条临界与字号无关（两侧随字号等比缩），且 material 量说明用的是同一个 {@code measureText}
      * （同样的字距、同样的取整规则）——故把字号改小只会更宽裕，不会把这条临界推到不利的一侧。
      *
+     * <p><b>说明宽按字段缓存</b>（见 {@link Field#hintWidth}）：说明文字与量说明用的字号都不随值变，
+     * 故同一字段第二次量宽（上屏那一遍）只剩"值宽"要实测。
+     *
      * <p><b>最小宽</b>取最小可点目标 @dimen/row_min_height(48dp)：说明与值都很短的键（如 hint "数值" +
      * 值 "0"）不至于缩成一条点不准的窄框。只与说明和内容有关的"无上限"一侧不设钳制：
      * 装不下由容器换行，不为了塞进一行把说明截断。
      */
     private int measuredFieldWidth(@NonNull Field field) {
+        // 说明宽按字段缓存（见 Field#hintWidth）：它只与说明文本和说明字号有关，值怎么变都不影响；
+        // 一轮建表要量两遍（建行一遍、上屏一遍），缓存后第二遍只剩"值宽"这一项要实测
+        if (field.hintWidth < 0) {
+            CharSequence hint = field.layout.getHint();
+            field.hintWidth = hint == null ? 0 : measuredTextWidth(hintPaint(field), hint.toString());
+        }
         Paint valuePaint = field.input.getPaint();
-        CharSequence hint = field.layout.getHint();
-        int hintWidth = hint == null ? 0 : textWidth(hintPaint(field), hint.toString());
         String value = field.text();
-        int valueWidth = value == null ? 0 : textWidth(valuePaint, value);
-        int content = Math.max(hintWidth, valueWidth) + hintFitGuard
+        int valueWidth = value == null ? 0 : measuredTextWidth(valuePaint, value);
+        int content = Math.max(field.hintWidth, valueWidth) + hintFitGuard
                 + field.input.getPaddingStart() + field.input.getPaddingEnd();
         return Math.max(content, minFieldWidth);
+    }
+
+    /**
+     * 文本实测宽，并记账（{@link StartupTiming#FORM_SUB_MEASURE}）。
+     *
+     * <p>画笔由调用方先备好再传进来（而不是在这里取）：{@link #hintPaint} 自己另记一个槽，
+     * 放进本窗口里会让同一段时间被两个细分槽各记一次。
+     */
+    private static int measuredTextWidth(@NonNull Paint paint, @NonNull String text) {
+        long startedAt = StartupTiming.accBegin(StartupTiming.FORM_SUB_MEASURE);
+        int width = textWidth(paint, text);
+        StartupTiming.accEnd(StartupTiming.FORM_SUB_MEASURE, startedAt);
+        return width;
     }
 
     /** 文本实测宽（向上取整：不足一个像素的余量在中间被吃掉，说明就会打上省略号）。 */
@@ -831,6 +898,66 @@ final class ConfigKeyRow {
     private static final int[] HINT_APPEARANCE_VALUES =
             {android.R.attr.textSize, android.R.attr.letterSpacing};
 
+    /** 说明外观的失效键（密度 × 字体缩放）；{@code -1} = 还没取过。见 {@link #ensureHintStyle}。 */
+    private static int hintStyleKey = -1;
+    /** 说明的字号：{@code 0} = 取不到，按输入框正文那份画笔量（改前的兜底口径）。 */
+    private static float hintStyleSize;
+    /** 说明的字距。 */
+    private static float hintStyleSpacing;
+
+    /**
+     * 量说明用的那把画笔（<b>复用一份</b>，不再每个字段新建一支）。只主线程用，取到即量即弃。
+     *
+     * <p>复用是安全的：{@link #hintPaint} 每次都先 {@code set} 成输入框正文那份画笔再改字号字距，
+     * 用的是<b>控件自己那支画笔的副本</b>（{@code set} 是拷贝，不改来源），故"绝不改控件自己的 Paint"
+     * 这条既有约束不变；调用方（{@link #measuredFieldWidth}）拿到它只做一次 {@code measureText}。
+     */
+    private static final Paint HINT_PAINT = new Paint();
+
+    /**
+     * 取"说明用多大字号、多少字距"，<b>一轮建表只走一次样式链</b>。
+     *
+     * <p>这一对值在一轮建表里完全不变（只取决于主题与系统字体设置），而原先每个字段每次量宽都要走
+     * 两趟 {@code obtainStyledAttributes} —— 64 个字段量两遍就是 256 次。失效键取"密度 + 字体缩放"：
+     * 改系统字体大小、换屏后重取；{@link #resetHintStyle()} 另在建表开头清一次，故每轮最多取一次。
+     */
+    private static void ensureHintStyle(@NonNull Context context) {
+        Configuration configuration = context.getResources().getConfiguration();
+        int key = configuration.densityDpi * 31 + Float.floatToIntBits(configuration.fontScale);
+        if (key == hintStyleKey) {
+            return;
+        }
+        hintStyleKey = key;
+        hintStyleSize = 0f;
+        hintStyleSpacing = 0f;
+        TypedArray style = context.obtainStyledAttributes(HINT_TEXT_STYLE, HINT_APPEARANCE_ATTR);
+        int appearanceRes;
+        try {
+            appearanceRes = style.getResourceId(0, 0);
+        } finally {
+            style.recycle();
+        }
+        if (appearanceRes == 0) {
+            return;
+        }
+        TypedArray appearance = context.obtainStyledAttributes(appearanceRes, HINT_APPEARANCE_VALUES);
+        try {
+            float textSize = appearance.getDimension(0, 0f);
+            if (textSize <= 0f) {
+                return;
+            }
+            hintStyleSize = textSize;
+            hintStyleSpacing = appearance.getFloat(1, 0f);
+        } finally {
+            appearance.recycle();
+        }
+    }
+
+    /** 丢掉说明外观的缓存（每轮建表开头调一次，与 {@link StartupTiming#accReset()} 同级）。 */
+    static void resetHintStyle() {
+        hintStyleKey = -1;
+    }
+
     /**
      * 量说明文字用的画笔：把输入框自己的画笔（正文 @dimen/config_field_text_size 16sp）复制一份，
      * 再按 material 实际渲染浮起说明用的那档字号与字距改过来——控件自己的 Paint 不动。
@@ -847,34 +974,22 @@ final class ConfigKeyRow {
      * 字体不用管：外观里的 fontFamily 就是 sans-serif（m3_ref_typeface_plain_regular），
      * 与输入框的默认字体同一种。
      *
-     * <p><b>兜底</b>：样式上取不到 {@code hintTextAppearance}（material 改了这套样式）或读不出字号时，
-     * 原样返回那份拷贝——按正文画笔量，即改前的口径，不比改前差（框偏宽，但不会截断说明）。
+     * <p><b>兜底</b>：样式上取不到 {@code hintTextAppearance}（material 改了这套样式）或读不出字号时
+     * 不施加字号字距——按正文画笔量，即改前的口径，不比改前差（框偏宽，但不会截断说明）。
+     *
+     * <p>返回值是共用的那一份（见 {@link #HINT_PAINT}）：<b>只许当场量一次</b>，不可留存、不可跨字段。
      */
     private static Paint hintPaint(@NonNull Field field) {
-        Paint paint = new Paint(field.input.getPaint());
-        Context context = field.layout.getContext();
-        TypedArray style = context.obtainStyledAttributes(HINT_TEXT_STYLE, HINT_APPEARANCE_ATTR);
-        int appearanceRes;
-        try {
-            appearanceRes = style.getResourceId(0, 0);
-        } finally {
-            style.recycle();
+        long startedAt = StartupTiming.accBegin(StartupTiming.FORM_SUB_PAINT);
+        ensureHintStyle(field.layout.getContext());
+        HINT_PAINT.set(field.input.getPaint());
+        if (hintStyleSize > 0f) {
+            HINT_PAINT.setTextSize(hintStyleSize);
+            HINT_PAINT.setLetterSpacing(hintStyleSpacing);
         }
-        if (appearanceRes == 0) {
-            return paint;
-        }
-        TypedArray appearance = context.obtainStyledAttributes(appearanceRes, HINT_APPEARANCE_VALUES);
-        try {
-            float textSize = appearance.getDimension(0, 0f);
-            if (textSize <= 0f) {
-                return paint;
-            }
-            paint.setTextSize(textSize);
-            paint.setLetterSpacing(appearance.getFloat(1, 0f));
-        } finally {
-            appearance.recycle();
-        }
-        return paint;
+        // 记账（旁路）：说明画笔与外观取值这一类的耗时（配色链那一步已随缓存降到每轮一次）
+        StartupTiming.accEnd(StartupTiming.FORM_SUB_PAINT, startedAt);
+        return HINT_PAINT;
     }
 
     /**
@@ -1117,13 +1232,13 @@ final class ConfigKeyRow {
      * 依 {@code requires} 压暗本行（参数名、键内控件、行级文本，含从字段里挪出来的说明行）。
      *
      * <p>依赖键名取自 {@link KeyMeta#requires}，本类不硬编码任何键名；判据见
-     * {@link #dependencyUnsatisfied()}。
+     * {@link #isUnsatisfied}。
      * "未生效"的徽标由 {@link ConfigGroupBinder} 在分组卡头显示一次，故本方法只压暗并回报状态。
      *
      * @return true 表示本行当前未生效（供分组卡头汇总）
      */
     boolean refreshDependencyState() {
-        boolean unsatisfied = dependencyUnsatisfied();
+        boolean unsatisfied = isUnsatisfied(meta, host);
         float alpha = unsatisfied ? dimAlpha : 1f;
         labelView.setAlpha(alpha);
         descView.setAlpha(alpha);
@@ -1139,10 +1254,14 @@ final class ConfigKeyRow {
     }
 
     /**
-     * 本键的依赖是否未满足：{@code requires} 里任一键的当前值（取整数值，文件缺失时用定义默认值）
+     * 某个键的依赖是否未满足：{@code requires} 里任一键的当前值（取整数值，文件缺失时用定义默认值）
      * 为 0 或取不到值，即为未满足。
+     *
+     * <p><b>判据只有这一份</b>：行内压暗（{@link #refreshDependencyState()}）与分组卡头那枚「未生效」
+     * 徽标都调它——后者在"行还没建出来"的时序里（先建卡头、行稍后再建）要自己问 store 算同一个结论，
+     * 抄第二份判据迟早会两边不一致（收起态显示错的徽标）。
      */
-    private boolean dependencyUnsatisfied() {
+    static boolean isUnsatisfied(@NonNull KeyMeta meta, @NonNull Host host) {
         for (String dependency : meta.requires) {
             Value value = host.effectiveValue(dependency);
             if (value == null || value.intAt(0) == 0) {

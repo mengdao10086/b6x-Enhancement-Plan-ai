@@ -15,13 +15,16 @@ import android.widget.FrameLayout;
 import android.widget.ImageView;
 
 import androidx.annotation.NonNull;
+import androidx.annotation.Nullable;
 import androidx.appcompat.app.AppCompatActivity;
 import androidx.fragment.app.Fragment;
+import androidx.fragment.app.FragmentManager;
 import androidx.viewpager2.adapter.FragmentStateAdapter;
 import androidx.viewpager2.widget.ViewPager2;
 
 import com.example.waspwingtempctrl.ui.ChartLoader;
 import com.example.waspwingtempctrl.ui.ConfigFormFragment;
+import com.example.waspwingtempctrl.ui.ConfigPreInflater;
 import com.example.waspwingtempctrl.ui.EdgeToEdge;
 import com.example.waspwingtempctrl.ui.LogFragment;
 import com.example.waspwingtempctrl.ui.StatusFragment;
@@ -60,10 +63,12 @@ import java.util.concurrent.atomic.AtomicInteger;
  * 先把落定那一页的截图盖在页面区上（{@link #showSkeleton}），等<b>当前这页就绪</b>再撤
  * （{@link #applySkeleton}）。覆盖层 {@code setClickable(false)}，翻页与滚动手势照旧落到下面的真页面。
  *
- * <p><b>「就绪」的口径</b>（截图与撤层共用同一个判据，见 {@link #pageReady}）：结构已建好、还没有具体数据
- * 的那个状态。状态页与日志页的结构就是 inflate 出来的，视图一有即就绪；配置页的表单是异步建出来的，
- * 要等它建完（{@link ConfigFormFragment#isStructureReady()}）。此外<b>任何翻页动作都立刻撤掉占位层</b>：
- * 它盖的是落定那一页的骨架，翻到别页就不再成立。
+ * <p><b>「就绪」的口径</b>（截图与撤层共用同一个判据，见 {@link #pageReady}）：<b>可见结构</b>已建好、
+ * 还没有具体数据的那个状态。状态页与日志页的结构就是 inflate 出来的，视图一有即就绪；配置页的表单是异步
+ * 建出来的，要等它把"看得见的那部分"建完（各组卡头与它们的值，见
+ * {@link ConfigFormFragment#isStructureReady()}）——配置页默认全部折叠，折叠体里那几十行随后才建，
+ * 但那不影响本页的判断：盖在页面上的骨架图与撤层后露出的界面都是折叠态，两者对齐。
+ * 此外<b>任何翻页动作都立刻撤掉占位层</b>：它盖的是落定那一页的骨架，翻到别页就不再成立。
  *
  * <p><b>页签数量与顺序必须与 {@link #MENU_IDS} 一一对应</b>（同为 3 个、同序），菜单顺序声明在
  * {@code res/menu/menu_bottom.xml}。
@@ -163,6 +168,7 @@ public class SetupActivity extends AppCompatActivity {
         CountDownLatch landingDone = savedInstanceState == null ? new CountDownLatch(1) : null;
         preload(this, landingDone);
         super.onCreate(savedInstanceState);
+        preInflate();
         setContentView(R.layout.activity_setup);
 
         pager = findViewById(R.id.page_pager);
@@ -171,6 +177,7 @@ public class SetupActivity extends AppCompatActivity {
         EdgeToEdge.apply(this, findViewById(R.id.setup_root), nav);
         pager.setAdapter(new PagesAdapter());
         pager.setOffscreenPageLimit(MENU_IDS.length - 1);
+        armPageViewMarks();
 
         nav.setOnItemSelectedListener(item -> {
             setPage(indexOf(item.getItemId()));
@@ -180,6 +187,8 @@ public class SetupActivity extends AppCompatActivity {
         pager.registerOnPageChangeCallback(new ViewPager2.OnPageChangeCallback() {
             @Override
             public void onPageSelected(int position) {
+                // 记账（旁路）：首轮 onPageSelected 落在哪一刻（首次写入胜出，后续翻页不会改写）
+                StartupTiming.mark(StartupTiming.MARK_PAGE_SELECTED);
                 // 翻了页：占位层盖的是落定那一页的骨架，换页即失效，立刻撤（不必等"就绪"）。
                 // 只比页号、不看"回调来了没"：初始那次 setCurrentItem 也会回一次 onPageSelected
                 // （同一个页号），按"任何回调都撤"写会把刚要上屏的那层误杀
@@ -235,6 +244,28 @@ public class SetupActivity extends AppCompatActivity {
     }
 
     // ==================== 预热 ====================
+
+    /**
+     * 提交"控件预制造"（{@link ConfigPreInflater}）：与落页判定、曲线预热并列的第三件后台活，
+     * 趁主线程忙首帧的时候把配置页要 inflate 的键行控件先造出来放着（主线程取不到就现场造，
+     * 故它失败或没赶上都没有副作用）。
+     *
+     * <p><b>为什么提交点在这里，而不在 {@link #preload} 里</b>：预制造要用的 inflater 必须带上
+     * AppCompat/Material 装好的视图工厂（否则 {@code <TextView>} 造出来的是基类而不是
+     * {@code MaterialTextView}，预制造件就与现场造的不是同一种控件、也不是同一套样式），
+     * 而那个工厂是 {@code AppCompatActivity.onCreate} 里装的——{@code preload} 在
+     * {@code super.onCreate()} 之前跑，那时还没有工厂。故提交点放在 {@code super.onCreate()} 之后
+     * （约第 25ms），到建表起点仍有三百多毫秒的余量。
+     *
+     * <p>本方法只交"这是谁的件"（{@code this}）：克隆 inflater、归属比对、关门都在
+     * {@link ConfigPreInflater} 里做。克隆的来源是 Activity 自己那一份（与页面的
+     * {@code getLayoutInflater()} 同源、同一个 Context 与主题），故造出来的控件与现场造的逐像素一致；
+     * 那份 inflater 只许后台那一根线程用（LayoutInflater 不能跨线程共用）。与主线程共用 AppCompat
+     * 视图工厂这一层的边界与警告，写在 {@link ConfigPreInflater} 的类注释里。
+     */
+    private void preInflate() {
+        ConfigPreInflater.start(getApplicationContext(), this);
+    }
 
     /**
      * 进程级预热：<b>两件事各在自己那根线程上同时起跑</b>，互不阻塞。
@@ -397,6 +428,8 @@ public class SetupActivity extends AppCompatActivity {
             return;
         }
         overlay.setImageBitmap(bitmap);
+        // 记账（旁路）：占位图真上屏那一刻（量"首帧 334 那一帧画的到底是骨架还是白页"）
+        StartupTiming.mark(StartupTiming.MARK_SKELETON_UP);
         final ViewTreeObserver observer = pager.getViewTreeObserver();
         observer.addOnPreDrawListener(new ViewTreeObserver.OnPreDrawListener() {
             /** 第一次 pre-draw = 这一帧才要把占位图画出来，此时撤等于没画。 */
@@ -533,6 +566,33 @@ public class SetupActivity extends AppCompatActivity {
     }
 
     /**
+     * 记账（旁路）：量第一页 / 第三页的视图各自何时建好（{@link StartupTiming#MARK_PAGE_VIEW_1} /
+     * {@link StartupTiming#MARK_PAGE_VIEW_ALL}），用来切分 `[onCreate 结束, 首帧]` 那一段：外壳布局
+     * 与类加载占多少、三页的构造又占多少。
+     *
+     * <p>{@code recursive=false}：只收本页三个页签，不把配置页的子 Fragment（曲线区）算进来。
+     * 回调体里只有一次计数与最多两次静态 mark，无 IO、无锁、不建线程；不改变任何 Fragment 生命周期
+     * ——只是多挂一个观察者。
+     */
+    private void armPageViewMarks() {
+        getSupportFragmentManager().registerFragmentLifecycleCallbacks(
+                new FragmentManager.FragmentLifecycleCallbacks() {
+                    private int created;
+
+                    @Override
+                    public void onFragmentViewCreated(@NonNull FragmentManager fm, @NonNull Fragment f,
+                                                      @NonNull View v, @Nullable Bundle savedInstanceState) {
+                        created++;
+                        if (created == 1) {
+                            StartupTiming.mark(StartupTiming.MARK_PAGE_VIEW_1);
+                        } else if (created == MENU_IDS.length) {
+                            StartupTiming.mark(StartupTiming.MARK_PAGE_VIEW_ALL);
+                        }
+                    }
+                }, false);
+    }
+
+    /**
      * 记账（旁路）：量"页面区第一次绘制之前"这个时间点（{@link StartupTiming#MARK_FIRST_DRAW}）。
      * 一次性回调，记完即摘（{@link #detach}），故只吃一帧。
      *
@@ -595,6 +655,8 @@ public class SetupActivity extends AppCompatActivity {
      * 曲线再慢也不会拖住落页。
      */
     private static int awaitLanding(CountDownLatch landingDone) {
+        // 记账（旁路）：主线程进有界等待那一刻（与"判定放行"相减 = onCreate 里白等的那段）
+        StartupTiming.mark(StartupTiming.MARK_LANDING_AWAIT);
         int decided = LANDING_INDEX.get();
         if (decided >= 0 || landingDone == null) {
             return decided;
