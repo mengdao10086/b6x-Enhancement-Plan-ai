@@ -196,13 +196,30 @@ final class ConfigFormController implements ConfigKeyRow.Host, ConfigWriteQueue.
      * {@code definitionsLoaded()==false} 的错误串），真正的异常（如 OOM）在这里兜底上报。
      */
     void start() {
+        // 快路（就地在主线程取一次）：定义与快照都现成时，read() 走的是它自己的 memo——指纹（mtime+size）
+        // 没变就直接返回上次那份快照，不读盘、不解析，成本≈一次 stat（判定线程在起 ~12 已经读过一次，
+        // 故 memo 早就是热的）。就地取省掉"新起一根 io 线程 + 一次消息往返"：实测那一趟的调度代价是
+        // 35~110ms，而它正是"数据到位 → 撤层 → 段二"整条链的起点（见方案文件 §2）。
+        // 此刻视图还没有（本方法由页的 onCreate 调），onLoaded 只做"存字段 + 建写队列"：ensureDiagnostics
+        // 与 buildIfNeeded 自己会因视图没建而跳过，建表仍由 attachView 触发，故快路不改变任何时序语义。
+        try {
+            final ConfigStore loaded = ConfigStore.get(appContext);
+            if (loaded.definitionsLoaded()) {
+                onLoaded(loaded, loaded.read(), null);
+                return;
+            }
+        } catch (Throwable ignored) {
+            // 取不到（或读失败）就落回下面那条后台路，语义与改前逐字一致
+        }
         submit(() -> {
+            StartupTiming.mark(StartupTiming.MARK_CFG_IO_BEGIN);   // 记账（旁路）：走的不是快路
             try {
                 final ConfigStore loaded = ConfigStore.get(appContext);
                 final boolean defined = loaded.definitionsLoaded();
                 final Snapshot snapshot = defined ? loaded.read() : null;
                 // 定义没到位时把诊断串也在后台算出来：它内部还要读一次盘，不能留到主线程上做
                 final String failure = defined ? null : loaded.describeState();
+                StartupTiming.mark(StartupTiming.MARK_CFG_IO_DONE);   // 记账（旁路）：即将回主线程
                 main.post(() -> onLoaded(loaded, snapshot, failure));
             } catch (Throwable t) {
                 main.post(() -> onLoadFailed(t));
@@ -388,9 +405,9 @@ final class ConfigFormController implements ConfigKeyRow.Host, ConfigWriteQueue.
                 group.buildRows();
             }
             indexBuiltForm();   // 行与自检分项一次算定（紧随其后的自检与上屏都要用）
-            long alignStartedAt = StartupTiming.accBegin(StartupTiming.FORM_SUB_ALIGN);
-            applySnapshot(snapshot);   // 值、组头开关、徽标、自检、诊断一次对齐
-            StartupTiming.accEnd(StartupTiming.FORM_SUB_ALIGN, alignStartedAt);
+            // 值、组头开关、徽标、自检、诊断一次对齐（其中"徽标 / 自检 / 诊断提交"三项各自计时，
+            // 见 applySnapshot：拆分只为看清诊断自身占多少，口径见 StartupTiming 的 FORM_SUB_*）
+            applySnapshot(snapshot);
         } catch (Throwable ignored) {
             // 用应用上下文取文案：失败路径上不该再去碰页面视图（万一异常正是视图侧抛的）。
             // 文案里不带原始异常（那会把类名与英文 message 铺给用户）；要排查就顺着"行没建全"这个
@@ -603,11 +620,18 @@ final class ConfigFormController implements ConfigKeyRow.Host, ConfigWriteQueue.
                 group.applyMasterValue(effectiveValue(masterKey));
             }
         }
+        // 记账（旁路）：下面三件原先合成一个"自检对齐"槽，拆开才看得清诊断自身占多少（见方案 §3）
+        long badgeAt = StartupTiming.accBegin(StartupTiming.FORM_SUB_BADGE);
         refreshBadges();
+        StartupTiming.accEnd(StartupTiming.FORM_SUB_BADGE, badgeAt);
+        long selfCheckAt = StartupTiming.accBegin(StartupTiming.FORM_SUB_SELFCHECK);
         page.onValuesApplied(snapshot);
+        StartupTiming.accEnd(StartupTiming.FORM_SUB_SELFCHECK, selfCheckAt);
         if (diagnostics != null) {
             // 复用刚读到的快照：诊断串里的"未定义键/提示"与 mtime 同源，不再多读一次 profile.conf
+            long diagAt = StartupTiming.accBegin(StartupTiming.FORM_SUB_DIAG_SUBMIT);
             diagnostics.refresh(snapshot);
+            StartupTiming.accEnd(StartupTiming.FORM_SUB_DIAG_SUBMIT, diagAt);
         }
     }
 

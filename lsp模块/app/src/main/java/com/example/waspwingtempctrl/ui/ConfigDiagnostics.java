@@ -37,6 +37,10 @@ import java.util.concurrent.RejectedExecutionException;
  * 其后空一行接一段"启动各段耗时"。它落在本折叠体内（默认收起），故不新增开关也不会常驻界面；
  * 展开时重算一次，好让比"建表"更晚的时间点也现出来。真机排障用，不参与任何判断。
  *
+ * <p><b>收起态下不上屏</b>：本区整块默认收起，收起期间的刷新只登记一笔欠账（见 {@link #refresh(Snapshot)}），
+ * 展开那一刻才现算现上屏——启动链上那一次"建表触发的刷新"因此不再落在关键路径上；数字一个都不少
+ * （展开即见），只是"何时算、何时上屏"推迟到用户真的看得见的时候。
+ *
  * <p>只调 {@link ConfigStore} 的公开接口，不碰文件、不拼 shell；读取在后台线程，主线程只做渲染。
  */
 final class ConfigDiagnostics {
@@ -64,6 +68,16 @@ final class ConfigDiagnostics {
     private boolean queuedSelfRead;
     /** 排队请求里最近一次带来的快照（有"自读盘"的请求时以自读盘为准）。 */
     private Snapshot queuedKnown;
+    /**
+     * 收起期间欠下的一次刷新（见 {@link #refresh(Snapshot)} 与 {@link #setExpanded(boolean)}）。
+     *
+     * <p>本区整块默认收起，收起时它一个字都看不见：为它跑一趟后台、再往三个不可见的 TextView 里
+     * setText（正文那次还会把整块标脏、连带一次整页重排），在启动链上是纯开销。故收起时只登记这一笔，
+     * 展开那一刻再补。多次请求合并成一笔，口径与"在途排队"那三个字段一致（自读盘优先、否则取最新快照）。
+     */
+    private boolean pendingRefresh;
+    private boolean pendingSelfRead;
+    private Snapshot pendingKnown;
     private boolean released;
 
     ConfigDiagnostics(@NonNull View pageRoot, @NonNull ConfigStore store, @NonNull ExecutorService io,
@@ -89,11 +103,32 @@ final class ConfigDiagnostics {
         arrowView.setRotation(value ? ARROW_EXPANDED_ROTATION : 0f);
         arrowView.setContentDescription(body.getContext().getString(
                 value ? R.string.config_action_collapse : R.string.config_action_expand));
-        // 展开那一刻才是用户看它的时候：用最近一次正文重算追加段，好让比"建表"更晚的时间点
-        // （首帧 / 撤占位层）也现出来。只读几个静态槽位，无 IO、无后台线程
-        if (value && lastState != null) {
-            stateView.setText(lastState + timingBlock());
+        if (!value) {
+            return;
         }
+        // 展开那一刻才是用户看它的时候。两种情况都走"现算现上屏"：一是收起期间欠下的那一笔
+        // （见 refresh），二是压根没上过屏（例如定义没到位那条路，或页面刚建好就展开）
+        if (pendingRefresh || lastState == null) {
+            flushPending();
+            return;
+        }
+        // 有现成正文：用最近一次那份重算追加段，好让比"建表"更晚的时间点（首帧 / 撤占位层）也现出来。
+        // 只读几个静态槽位，无 IO、无后台线程
+        stateView.setText(lastState + timingBlock());
+    }
+
+    /**
+     * 补上收起期间欠下的那一笔刷新（没有欠账时按"自读盘"补一次，用于"一次都没上过屏"）。
+     *
+     * <p>与 {@link #refresh(Snapshot)} 的在途排队同构：合并规则一致，只是触发时机从"这一轮结束后"
+     * 换成"展开那一刻"。
+     */
+    private void flushPending() {
+        final Snapshot next = pendingSelfRead ? null : pendingKnown;
+        pendingRefresh = false;
+        pendingSelfRead = false;
+        pendingKnown = null;
+        refresh(next);
     }
 
     /**
@@ -122,10 +157,22 @@ final class ConfigDiagnostics {
      * 故在途时只登记"还欠一次刷新"（{@link #queuedKnown} 记下最新的快照），本轮上屏后立刻再刷一次。
      * 两路请求合一时以"自读盘"为准：它读的是磁盘当下状态，而快照可能正是写盘之前的那一份。
      *
+     * <p><b>收起态下只登记、不上屏</b>（见 {@link #pendingRefresh}）：收起时整块都看不见，为它跑一趟
+     * 后台 + 三次 setText 在启动链上是纯开销；展开那一刻由 {@link #setExpanded(boolean)} 补上。
+     *
      * @param known 调用方刚读到的快照；null = 本类自己读一次
      */
     void refresh(@Nullable Snapshot known) {
         if (released || io.isShutdown()) {
+            return;
+        }
+        if (!expanded) {
+            pendingRefresh = true;
+            if (known == null) {
+                pendingSelfRead = true;
+            } else {
+                pendingKnown = known;
+            }
             return;
         }
         if (refreshInFlight) {

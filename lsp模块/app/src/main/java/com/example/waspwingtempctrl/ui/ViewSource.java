@@ -7,6 +7,7 @@ import android.view.ViewGroup;
 import androidx.annotation.NonNull;
 import androidx.annotation.Nullable;
 
+import com.example.waspwingtempctrl.R;
 import com.example.waspwingtempctrl.StartupTiming;
 
 /**
@@ -49,7 +50,38 @@ final class ViewSource {
             }
         }
         StartupTiming.count(StartupTiming.PRE_MISS);   // 记账（旁路）：现场 inflate
+        StartupTiming.count(missSlot(layoutId));       // 记账（旁路）：未命中构成（按布局 id）
         return inflater.inflate(layoutId, parent, false);
+    }
+
+    /**
+     * 未命中计数落到哪个槽：按布局 id 分到 {@link StartupTiming} 的七个槽之一。
+     *
+     * <p>只服务诊断区"缺的是哪几种件"这一个问题（见方案 §1）。<b>写成 if/else 而不是 switch</b>：
+     * 本工程的 R 字段不是编译期常量（{@code android.nonTransitiveRClass}），做不了 {@code case} 标签。
+     * 认不出来（将来新增的布局）一律落到"字段"槽——这是记账口径的兜底，不参与取件路径的任何判断，
+     * 取件结果与本方法无关。
+     */
+    private static int missSlot(int layoutId) {
+        if (layoutId == R.layout.item_config_group) {
+            return StartupTiming.MISS_GROUP;
+        }
+        if (layoutId == R.layout.item_config_row) {
+            return StartupTiming.MISS_ROW;
+        }
+        if (layoutId == R.layout.item_config_key_switch) {
+            return StartupTiming.MISS_KEY_SWITCH;
+        }
+        if (layoutId == R.layout.item_config_enum_group) {
+            return StartupTiming.MISS_ENUM_GROUP;
+        }
+        if (layoutId == R.layout.item_chart_window_button) {
+            return StartupTiming.MISS_ENUM_BUTTON;
+        }
+        if (layoutId == R.layout.item_config_field_switch) {
+            return StartupTiming.MISS_FIELD_SWITCH;
+        }
+        return StartupTiming.MISS_FIELD;
     }
 
     /**

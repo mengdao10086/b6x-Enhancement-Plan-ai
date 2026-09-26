@@ -15,8 +15,10 @@ import com.example.waspwingtempctrl.ConfigStore.KeyMeta;
 import com.example.waspwingtempctrl.R;
 import com.example.waspwingtempctrl.StartupTiming;
 
+import java.util.LinkedHashSet;
 import java.util.Map;
 import java.util.Queue;
+import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.ExecutorService;
@@ -85,11 +87,19 @@ import java.util.concurrent.atomic.AtomicBoolean;
  * <p>本类不引入 {@code asynclayoutinflater} 那条依赖（见 build.gradle.kts 的依赖口径）：本类要处理的
  * parent/attach 语义与它一样，收益不抵依赖；且本类允许"没造完就不造"，而它没有这个档位。
  *
- * <h3>备料口径：宁多不少，错也不错在正确性上</h3>
- * 按定义<b>全量</b>备料，不模仿页面的取舍规则（哪一页渲染哪几个组）：多备的件没人取、只是白造
- * （后台线程的空档，代价近零），少备的件由主线程现场 inflate。这条口径换来的是一个关键性质——
- * {@link #produceKey} 里那份"每个键要哪几种控件"的清单<b>与消费侧对不上时不会造出错视图，只会少省一点</b>。
- * 故这份清单不必与 {@code ConfigFormController} 的分组/兜底逻辑同步（也不必复制它）。
+ * <h3>备料口径：只备"池子的消费者会取的件"（2026-09-26 按实测收紧）</h3>
+ * 池子只有配置页一个消费者（设置页传 {@code null} 预制造器，见 {@code ConfigFormController} 的构造点），
+ * 故备料清单按"配置页会取什么"来定：<b>不备</b>只在设置页渲染的那一组（它的卡与它各键的件都不备；
+ * 判据与页面同源——{@link UiSettingsFragment#isSettingsGroup}，不复制组名），也<b>不备</b>{@code role=master}
+ * 那些键（它们只以卡头开关的形态出现，那个开关在 {@code item_config_group} 里，从来没有"行"可建）。
+ * 收紧后每一种布局的备料量都<b>正好等于</b>消费量（合计 126 件），余量归零。
+ *
+ * <p>收紧的理由是实测的：旧口径（按定义全量）每轮多造 <b>28 件</b>（154 对 126），而备料线程本来就追不上
+ * 消费侧的尾件——白造的件占住它的时间，代价不是"近零"，而是"尾部十几件每轮必缺"。数量对表与四轮
+ * 互证见方案文件 §1；未命中构成可在诊断区按布局 id 直接读（{@code StartupTiming} 的七个 MISS_* 槽）。
+ *
+ * <p><b>将来若"设置页也吃池子"或"某页把总开关键渲染成行"，这批件就变成少备</b>：那只是收益退化——
+ * 取不到就由主线程现场 inflate（{@link ViewSource#inflate}），<b>不会造出错视图</b>，这条性质没变。
  *
  * <p>唯一的"必须对得上"是<b>父容器的类型</b>：{@link #produceAll} 里那两个空壳父容器要与真正接收这些件的
  * 容器同类型（卡片进内容容器、键行与字段进流式行容器），否则生成的 {@code LayoutParams} 类型不对。
@@ -220,17 +230,31 @@ public final class ConfigPreInflater {
         }
     }
 
-    /** 按定义全量备料：每张分组卡、每个键的键内控件各一份。 */
+    /** 按定义备料：本页会取的每张分组卡、每个键（不含总开关键）的键内控件各一份。 */
     private void produceAll(@NonNull LayoutInflater inflater, @NonNull ConfigStore store) {
         // 空壳父容器：只为生成 LayoutParams（见类注释的〈不 attach〉）。类型必须与真正接收这些件的容器
         // 同类型——卡进页面的内容容器（LinearLayout），键行与字段进流式行容器（WrapRowLayout）。
         ViewGroup cardParent = new LinearLayout(inflater.getContext());
         ViewGroup rowParent = new WrapRowLayout(inflater.getContext());
-        for (int i = 0; i < store.groups().size(); i++) {
+        // 只备本页会取的件（设置页不取池子，见类注释的〈备料口径〉）：
+        //   ① 只在设置页渲染的那一组——它的卡与它那些键的件都不备；
+        //   ② 总开关键——它只以卡头开关的形态出现（在 item_config_group 里），不出行、也没有键内控件。
+        final Set<String> masterKeys = new LinkedHashSet<>();
+        final Set<String> settingsOnlyKeys = new LinkedHashSet<>();
+        for (GroupMeta group : store.groups()) {
+            if (group.master != null) {
+                masterKeys.add(group.master);
+            }
+            if (UiSettingsFragment.isSettingsGroup(group)) {
+                settingsOnlyKeys.addAll(group.keys);
+                continue;
+            }
             put(inflater, R.layout.item_config_group, cardParent);
         }
-        // 键按定义全量（含 role=master 的那些：它们本该渲染成组头开关而不是行，多备的件没人取）
         for (KeyMeta meta : store.keys()) {
+            if (masterKeys.contains(meta.key) || settingsOnlyKeys.contains(meta.key)) {
+                continue;
+            }
             produceKey(inflater, rowParent, meta);
         }
     }

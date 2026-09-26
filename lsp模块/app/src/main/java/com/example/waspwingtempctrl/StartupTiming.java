@@ -64,7 +64,7 @@ public final class StartupTiming {
      */
     public static final int FORM_BUILD_ROWS = 6;
 
-    // ---- 建表内部的 6 个累计槽（见 {@link #accBegin}/{@link #accEnd}）：只在建表的主线程上写 ----
+    // ---- 建表内部的 8 个累计槽（见 {@link #accBegin}/{@link #accEnd}）：只在建表的主线程上写 ----
     /** 累计：控件制造（inflate + 构造 + LayoutParams 样式解析）。 */
     public static final int FORM_SUB_INFLATE = 7;
     /** 累计：说明画笔与外观取值（{@code new Paint} + {@code obtainStyledAttributes}）。 */
@@ -75,73 +75,105 @@ public final class StartupTiming {
     public static final int FORM_SUB_FILL = 10;
     /** 累计：挂载（{@code addView}/{@code addToTail}）。 */
     public static final int FORM_SUB_ATTACH = 11;
-    /** 累计：自检 + 徽标 + 诊断提交。 */
-    public static final int FORM_SUB_ALIGN = 12;
+    /** 累计：徽标（组内压暗 + 卡头「未生效」）。 */
+    public static final int FORM_SUB_BADGE = 12;
+    /** 累计：键渲染自检（拼那一行自检文本并上屏）。 */
+    public static final int FORM_SUB_SELFCHECK = 13;
+    /**
+     * 累计：提交诊断（把上屏请求交给诊断区；重活在它自己的后台线程上）。
+     *
+     * <p>诊断区收起时这一项≈0：收起态下只登记"欠一次刷新"，不上屏（见 {@code ConfigDiagnostics}）。
+     */
+    public static final int FORM_SUB_DIAG_SUBMIT = 14;
 
     /** 累计槽个数（{@link #FORM_SUB_INFLATE} 起连续 {@code SUB_COUNT} 个）。 */
-    private static final int SUB_COUNT = 6;
+    private static final int SUB_COUNT = 8;
 
     // ---- 时间点 ----
     /** 时间点：{@code onCreate} 返回（壳与页容器建完）。 */
-    public static final int MARK_ONCREATE_END = 13;
+    public static final int MARK_ONCREATE_END = 15;
     /** 时间点：落页判定算完、放行主线程（{@code countDown}）那一刻。 */
-    public static final int MARK_LANDING_WAKE = 14;
+    public static final int MARK_LANDING_WAKE = 16;
     /** 时间点：页面区第一次绘制之前。 */
-    public static final int MARK_FIRST_DRAW = 15;
+    public static final int MARK_FIRST_DRAW = 17;
     /** 时间点：骨架占位层真被撤下那一刻（本次没挂过层就不记）。 */
-    public static final int MARK_SKELETON_OFF = 16;
+    public static final int MARK_SKELETON_OFF = 18;
     /** 时间点：主线程进 {@code awaitLanding} 那一刻（与"判定放行"相减即 onCreate 里白等的那段）。 */
-    public static final int MARK_LANDING_AWAIT = 17;
+    public static final int MARK_LANDING_AWAIT = 19;
     /** 时间点：第一页的视图建好。 */
-    public static final int MARK_PAGE_VIEW_1 = 18;
+    public static final int MARK_PAGE_VIEW_1 = 20;
     /** 时间点：第三页（最后一页）的视图建好。 */
-    public static final int MARK_PAGE_VIEW_ALL = 19;
+    public static final int MARK_PAGE_VIEW_ALL = 21;
     /** 时间点：建表数据到位（{@code onLoaded} 进主线程）。 */
-    public static final int MARK_FORM_DATA = 20;
+    public static final int MARK_FORM_DATA = 22;
     /** 时间点：首轮 {@code onPageSelected}。 */
-    public static final int MARK_PAGE_SELECTED = 21;
+    public static final int MARK_PAGE_SELECTED = 23;
     /**
      * 时间点：参数区<b>露出之后</b>的第一次 pre-draw。
      *
      * <p>与 {@link #MARK_SKELETON_OFF} 相减即"露出到撤层之间"的那一段（vsync 与布局，还是队列里的
      * 别的活）。建表拆两段之后，露出点落在"建表·首屏"末尾，故本时间点仍与撤层同一帧或紧邻其前。
      */
-    public static final int MARK_AFTER_BUILD_FRAME = 22;
+    public static final int MARK_AFTER_BUILD_FRAME = 24;
     /** 时间点：曲线首次上数据完成。 */
-    public static final int MARK_CHART_DATA = 23;
+    public static final int MARK_CHART_DATA = 25;
     /** 时间点：占位图真上屏。 */
-    public static final int MARK_SKELETON_UP = 24;
-    /** 时间点：诊断正文上屏。 */
-    public static final int MARK_DIAG_APPLY = 25;
+    public static final int MARK_SKELETON_UP = 26;
+    /** 时间点：诊断正文上屏（收起态下不上屏，故通常为"—"；展开那一刻才有值）。 */
+    public static final int MARK_DIAG_APPLY = 27;
 
     // ---- 预制造（B）的埋点：2 个累计计数 + 6 个成因 + 1 个骨架首帧 ----
     // 全部只记账，不改变任何既有分支；判读口径见方案文件 §5 的那张表。
 
     /** 累计计数：取件命中（{@code ViewSource} 从池子里拿到了件）。 */
-    public static final int PRE_HIT = 26;
+    public static final int PRE_HIT = 28;
     /** 累计计数：现场 inflate 的次数（没走预制造件那一路，含本页压根没启用预制造时）。 */
-    public static final int PRE_MISS = 27;
+    public static final int PRE_MISS = 29;
     /** 时间点：后台备料抛了异常（{@code ConfigPreInflater.produce} 那个静默 catch）。 */
-    public static final int MARK_PRE_FAIL = 28;
+    public static final int MARK_PRE_FAIL = 30;
     /** 时间点：后台备料早退（配置定义尚未就绪）。 */
-    public static final int MARK_PRE_NOT_READY = 29;
+    public static final int MARK_PRE_NOT_READY = 31;
     /** 时间点：取预制造器时进程级实例还是 {@code null}（压根没提交过预制造）。 */
-    public static final int MARK_PRE_NO_INSTANCE = 30;
+    public static final int MARK_PRE_NO_INSTANCE = 32;
     /** 时间点：预制造器已关门（剩余件被丢光，{@code ViewSource.release()} 之后）。 */
-    public static final int MARK_PRE_CLOSED = 31;
+    public static final int MARK_PRE_CLOSED = 33;
     /** 时间点：预制造器归属的上下文不是本页那一个（件属于上一个 Activity，跨页复用）。 */
-    public static final int MARK_PRE_OWNER_MISMATCH = 32;
+    public static final int MARK_PRE_OWNER_MISMATCH = 34;
     /** 时间点：预制造闸门已置位（本轮不是进程内第一次打开，备料不会重跑）。 */
-    public static final int MARK_PRE_ALREADY_STARTED = 33;
+    public static final int MARK_PRE_ALREADY_STARTED = 35;
     /**
      * 时间点：骨架监听器第一次 pre-draw。
      *
      * <p>撤层不再有"画过一帧"的闸门，此点与 {@link #MARK_SKELETON_OFF} 相减，量的就是"骨架监听器
      * 第一趟到真撤层之间隔了几趟/多久"（用来确认两者之间没有多出来的 traversal）。
      */
-    public static final int MARK_SKELETON_FIRST_PREDRAW = 34;
+    public static final int MARK_SKELETON_FIRST_PREDRAW = 36;
 
-    private static final int SLOTS = 35;
+    // ---- 建表首读那趟后台任务的两端（只服务"数据到位为什么晚"这一个问题，见方案 §2） ----
+
+    /** 时间点：首读后台任务开工（走的是降级路；就地取快照那条快路上本槽不记）。 */
+    public static final int MARK_CFG_IO_BEGIN = 37;
+    /** 时间点：首读后台任务算完、即将回主线程那一刻。 */
+    public static final int MARK_CFG_IO_DONE = 38;
+
+    // ---- 未命中构成：按布局 id 各一个累计计数（把"缺的是哪几种件"一次定死，见方案 §1） ----
+
+    /** 未命中计数：分组卡。 */
+    public static final int MISS_GROUP = 39;
+    /** 未命中计数：键行。 */
+    public static final int MISS_ROW = 40;
+    /** 未命中计数：开关行的开关。 */
+    public static final int MISS_KEY_SWITCH = 41;
+    /** 未命中计数：枚举组。 */
+    public static final int MISS_ENUM_GROUP = 42;
+    /** 未命中计数：枚举按钮。 */
+    public static final int MISS_ENUM_BUTTON = 43;
+    /** 未命中计数：字段开关。 */
+    public static final int MISS_FIELD_SWITCH = 44;
+    /** 未命中计数：字段。 */
+    public static final int MISS_FIELD = 45;
+
+    private static final int SLOTS = 46;
     private static final long UNSET = -1L;
 
     /** 每槽两个 long：{@code [i*2]} = 该段起点的偏移（"时间点"槽只用它）、{@code [i*2+1]} = 该段耗时。 */
@@ -296,7 +328,17 @@ public final class StartupTiming {
                     .append(" · 已关门 ").append(moment(MARK_PRE_CLOSED))
                     .append(" · 身份不符 ").append(moment(MARK_PRE_OWNER_MISMATCH))
                     .append(" · 已启动 ").append(moment(MARK_PRE_ALREADY_STARTED));
-            sb.append("\n时间点 · 骨架首帧 ").append(moment(MARK_SKELETON_FIRST_PREDRAW));
+            // 未命中构成：把"缺的是哪几种件"按布局 id 摊开（判读见方案 §1）
+            sb.append("\n未命中构成 · 卡 ").append(counter(MISS_GROUP))
+                    .append(" · 行 ").append(counter(MISS_ROW))
+                    .append(" · 开关 ").append(counter(MISS_KEY_SWITCH))
+                    .append(" · 枚举组 ").append(counter(MISS_ENUM_GROUP))
+                    .append(" · 枚举钮 ").append(counter(MISS_ENUM_BUTTON))
+                    .append(" · 字段开关 ").append(counter(MISS_FIELD_SWITCH))
+                    .append(" · 字段 ").append(counter(MISS_FIELD));
+            sb.append("\n时间点 · 骨架首帧 ").append(moment(MARK_SKELETON_FIRST_PREDRAW))
+                    .append(" · 首读IO 起 ").append(moment(MARK_CFG_IO_BEGIN))
+                    .append(" · 完成 ").append(moment(MARK_CFG_IO_DONE));
             sb.append("\n时间点 · onCreate 结束 ").append(moment(MARK_ONCREATE_END))
                     .append(" · 判定放行 ").append(moment(MARK_LANDING_WAKE))
                     .append(" · 首帧 ").append(moment(MARK_FIRST_DRAW))
@@ -323,10 +365,13 @@ public final class StartupTiming {
     }
 
     /**
-     * 建表细分的六项（每行三项，紧跟在两个建表段之后）+ 六项合计。
+     * 建表细分的八项（每行三项，紧跟在两个建表段之后）+ 八项合计。
      *
-     * <p>读法：<b>六项合计与"建表·首屏 + 建表·可见后"相减，差额就是没埋到点上的胶水代码</b>；
+     * <p>读法：<b>八项合计与"建表·首屏 + 建表·可见后"相减，差额就是没埋到点上的胶水代码</b>；
      * 某一项占比高就说明那一类活是瓶颈（判据见方案文件 §4.3）。一项都没计入过就整段不显示。
+     *
+     * <p>"自检 / 徽标 / 诊断提交"三项原先合成一项"自检对齐"：拆开是为了看清诊断自身占多少
+     * （诊断区收起时"诊断提交"应≈0，见 {@link #FORM_SUB_DIAG_SUBMIT}）。
      */
     private static void appendSubs(StringBuilder sb) {
         if (!anySubRecorded()) {
@@ -337,7 +382,9 @@ public final class StartupTiming {
                 .append(" · 文本实测宽 ").append(ms(FORM_SUB_MEASURE));
         sb.append("\n细分 · 值回填 ").append(ms(FORM_SUB_FILL))
                 .append(" · 挂载 ").append(ms(FORM_SUB_ATTACH))
-                .append(" · 自检对齐 ").append(ms(FORM_SUB_ALIGN));
+                .append(" · 自检 ").append(ms(FORM_SUB_SELFCHECK));
+        sb.append("\n细分 · 徽标 ").append(ms(FORM_SUB_BADGE))
+                .append(" · 诊断提交 ").append(ms(FORM_SUB_DIAG_SUBMIT));
         long sum = 0L;
         for (int i = 0; i < SUB_COUNT; i++) {
             // 合计必须与上面六项<b>同源</b>：两边都取已 flush 的展示槽位。取 ACC_MS 的话，
