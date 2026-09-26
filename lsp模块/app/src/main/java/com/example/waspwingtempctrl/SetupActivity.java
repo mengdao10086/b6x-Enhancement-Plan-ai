@@ -404,16 +404,17 @@ public class SetupActivity extends AppCompatActivity {
     }
 
     /**
-     * 占位图到手（主线程）：换上，并在「当前页就绪」时撤下（另加"至少上屏一帧"与硬上界两条边界）。
+     * 占位图到手（主线程）：换上，并在「当前页就绪」时撤下（另加硬上界这一条边界）。
      *
-     * <p>撤的时机有两个坑，各用一句话说明为什么这么写：
-     * <ul>
-     *   <li>pre-draw 在绘制<b>之前</b>派发，换完图顺手就撤等于同一帧里又撤掉、这张图从没上过屏；
-     *       故放过第一次 pre-draw（那一帧正是把占位图画出来的）之后再谈撤。</li>
-     *   <li>撤的判据是<b>当前这页就绪</b>（见类注释的口径），不是"画过一帧"——配置页落页时它要一直
-     *       盖到表单建出来那一刻，那正是用户看到白页的那段空窗。就绪由
-     *       {@link #pageReady} 判，逐帧看一眼（这段时间通常几百毫秒）。</li>
-     * </ul>
+     * <p>撤的判据是<b>当前这页就绪</b>（见类注释的口径），不是"画过一帧"——配置页落页时它要一直
+     * 盖到表单建出来那一刻，那正是用户看到白页的那段空窗。就绪由 {@link #pageReady} 判，逐帧看一眼
+     * （这段时间通常几百毫秒）。
+     *
+     * <p><b>为什么不额外要求"骨架已显示过一帧"</b>：pre-draw 在 measure/layout<b>之后</b>、绘制之前
+     * 派发（同 {@link #armSkeletonCapture} 的口径），故它一到就说明"真页面已建好且已布局"，撤的判据
+     * 此时必然已满足。那条闸门买到的只是一次闪动，代价却是：页面比骨架先就绪时，撤层要白等一个
+     * "段二建行的消息 + 一趟 traversal"——真机实测 276 一直被拖到 540。故第一次 pre-draw 只记一个账
+     * （{@link StartupTiming#MARK_SKELETON_FIRST_PREDRAW}，与撤层时刻相减即两者之间隔了多久）。
      *
      * <p>硬上界已在 {@link #showSkeleton} 挂上，负责兜住"解码没回来"、"pre-draw 不派发"与
      * "当前页迟迟不就绪"三种情况；上界撤层后本监听在下一帧发现自己盖的那层没了，自行退场。
@@ -432,8 +433,8 @@ public class SetupActivity extends AppCompatActivity {
         StartupTiming.mark(StartupTiming.MARK_SKELETON_UP);
         final ViewTreeObserver observer = pager.getViewTreeObserver();
         observer.addOnPreDrawListener(new ViewTreeObserver.OnPreDrawListener() {
-            /** 第一次 pre-draw = 这一帧才要把占位图画出来，此时撤等于没画。 */
-            private boolean painted;
+            /** 只用于记账：本监听器是不是第一次被调用（不参与下面任何判断）。 */
+            private boolean firstPreDraw;
 
             @Override
             public boolean onPreDraw() {
@@ -441,9 +442,9 @@ public class SetupActivity extends AppCompatActivity {
                     detach(observer, this);   // 已被别处撤掉：监听退场
                     return true;
                 }
-                if (!painted) {
-                    painted = true;
-                    return true;
+                if (!firstPreDraw) {
+                    firstPreDraw = true;
+                    StartupTiming.mark(StartupTiming.MARK_SKELETON_FIRST_PREDRAW);   // 记账（旁路）
                 }
                 if (!currentPageReady()) {
                     return true;   // 真页面还没就绪：继续盖着

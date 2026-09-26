@@ -15,7 +15,8 @@ import java.util.concurrent.atomic.AtomicLongArray;
  *       "相对 onCreate 首行"的毫秒数，同一进程内可比，跨启动也可比；但<b>不能</b>与 logcat 的
  *       {@code Displayed} 之类直接相减（那些从进程 fork 起算）。</li>
  *   <li><b>每槽只记第一次</b>（首次写入胜出，见 {@link #span}/{@link #mark}）：报文说的就是"本次进程冷启动
- *       那一次"。故进程内第二次进 Activity（暖启动）不会把这些数字刷成别的含义。</li>
+ *       那一次"。故进程内第二次进 Activity（暖启动）不会把这些数字刷成别的含义。<b>例外</b>是两个计数槽
+ *       （{@link #count}）：它们就是"每来一次加一"，故报的是"到此刻为止一共几次"。</li>
  *   <li><b>计时贴在"干活的地方"</b>：并行之后同一份活可能由这根线程干、也可能由那根干（谁先到谁干，
  *       后到的命中缓存），若在"调用的地方"计时，先干的那条会把耗时算走、后到的只报 0——数字随调度翻脸。
  *       故各调用方把计时点放在真正读盘/解析的那几行上。</li>
@@ -31,8 +32,9 @@ import java.util.concurrent.atomic.AtomicLongArray;
  * 不阻塞</b>）或一次 volatile 读 + 一次减法；建表细分的累计槽（{@link #accBegin}/{@link #accEnd}）更轻
  * ——只在建表的主线程上对一块普通 {@code long[]} 做两次数组访问与一次加法，<b>无锁、无 CAS</b>，
  * 一整轮建表收尾才写一次展示槽位。全部记账<b>无 IO、不建线程、不轮询、不分配对象</b>
- * （只有 {@link #report()} 拼文本时分配一个 StringBuilder）。每槽在进程内只可能被写一次，故竞争窗口
- * 只存在于启动那一瞬。所有方法都<b>无抛点</b>（无 IO、无解析、无数组增长、无除零），故它在链上调用
+ * （只有 {@link #report()} 拼文本时分配一个 StringBuilder）。除两个计数槽外，每槽在进程内只可能被写
+ * 一次，故竞争窗口只存在于启动那一瞬；计数槽会一直被写，但它每次只有两次原子数组操作，且只由主线程写。
+ * 所有方法都<b>无抛点</b>（无 IO、无解析、无数组增长、无除零），故它在链上调用
  * 不可能改变原有逻辑。
  */
 public final class StartupTiming {
@@ -112,7 +114,34 @@ public final class StartupTiming {
     /** 时间点：诊断正文上屏。 */
     public static final int MARK_DIAG_APPLY = 25;
 
-    private static final int SLOTS = 26;
+    // ---- 预制造（B）的埋点：2 个累计计数 + 6 个成因 + 1 个骨架首帧 ----
+    // 全部只记账，不改变任何既有分支；判读口径见方案文件 §5 的那张表。
+
+    /** 累计计数：取件命中（{@code ViewSource} 从池子里拿到了件）。 */
+    public static final int PRE_HIT = 26;
+    /** 累计计数：现场 inflate 的次数（没走预制造件那一路，含本页压根没启用预制造时）。 */
+    public static final int PRE_MISS = 27;
+    /** 时间点：后台备料抛了异常（{@code ConfigPreInflater.produce} 那个静默 catch）。 */
+    public static final int MARK_PRE_FAIL = 28;
+    /** 时间点：后台备料早退（配置定义尚未就绪）。 */
+    public static final int MARK_PRE_NOT_READY = 29;
+    /** 时间点：取预制造器时进程级实例还是 {@code null}（压根没提交过预制造）。 */
+    public static final int MARK_PRE_NO_INSTANCE = 30;
+    /** 时间点：预制造器已关门（剩余件被丢光，{@code ViewSource.release()} 之后）。 */
+    public static final int MARK_PRE_CLOSED = 31;
+    /** 时间点：预制造器归属的上下文不是本页那一个（件属于上一个 Activity，跨页复用）。 */
+    public static final int MARK_PRE_OWNER_MISMATCH = 32;
+    /** 时间点：预制造闸门已置位（本轮不是进程内第一次打开，备料不会重跑）。 */
+    public static final int MARK_PRE_ALREADY_STARTED = 33;
+    /**
+     * 时间点：骨架监听器第一次 pre-draw。
+     *
+     * <p>撤层不再有"画过一帧"的闸门，此点与 {@link #MARK_SKELETON_OFF} 相减，量的就是"骨架监听器
+     * 第一趟到真撤层之间隔了几趟/多久"（用来确认两者之间没有多出来的 traversal）。
+     */
+    public static final int MARK_SKELETON_FIRST_PREDRAW = 34;
+
+    private static final int SLOTS = 35;
     private static final long UNSET = -1L;
 
     /** 每槽两个 long：{@code [i*2]} = 该段起点的偏移（"时间点"槽只用它）、{@code [i*2+1]} = 该段耗时。 */
@@ -170,6 +199,19 @@ public final class StartupTiming {
     /** 记一个时间点（首次写入胜出）。 */
     public static void mark(int slot) {
         VALUES.compareAndSet(slot * 2, UNSET, now());
+    }
+
+    /**
+     * 累加一个计数槽（"每来一次加一"，与 {@link #mark} 的"只记第一次"相反）。
+     *
+     * <p>计数写在槽位的<b>耗时格</b>上（起点格留空，由 {@link #counter(int)} 读）：先从 {@code UNSET}
+     * 归零，再自增，故展示出来的就是真实次数，而"一次都没发生"仍显示 {@code 0}（不是"—"）。
+     * 两次 {@link AtomicLongArray} 操作，无锁、无 IO、无抛点。
+     */
+    public static void count(int slot) {
+        int cell = slot * 2 + 1;
+        VALUES.compareAndSet(cell, UNSET, 0L);
+        VALUES.incrementAndGet(cell);
     }
 
     // ==================== 建表细分的累计槽 ====================
@@ -245,6 +287,16 @@ public final class StartupTiming {
             appendSpan(sb, "建表·首屏", FORM_BUILD_HEAD);
             appendSpan(sb, "建表·可见后", FORM_BUILD_ROWS);
             appendSubs(sb);
+            // 预制造（B）：命中/未命中看"池子里有没有件"，六个成因看"谁是死因"（判读口径见方案文件 §5）
+            sb.append("\n预制造 · 命中 ").append(counter(PRE_HIT))
+                    .append(" · 未命中 ").append(counter(PRE_MISS));
+            sb.append("\n预制造 · 失败 ").append(moment(MARK_PRE_FAIL))
+                    .append(" · 未就绪 ").append(moment(MARK_PRE_NOT_READY))
+                    .append(" · 无实例 ").append(moment(MARK_PRE_NO_INSTANCE))
+                    .append(" · 已关门 ").append(moment(MARK_PRE_CLOSED))
+                    .append(" · 身份不符 ").append(moment(MARK_PRE_OWNER_MISMATCH))
+                    .append(" · 已启动 ").append(moment(MARK_PRE_ALREADY_STARTED));
+            sb.append("\n时间点 · 骨架首帧 ").append(moment(MARK_SKELETON_FIRST_PREDRAW));
             sb.append("\n时间点 · onCreate 结束 ").append(moment(MARK_ONCREATE_END))
                     .append(" · 判定放行 ").append(moment(MARK_LANDING_WAKE))
                     .append(" · 首帧 ").append(moment(MARK_FIRST_DRAW))
@@ -312,6 +364,11 @@ public final class StartupTiming {
 
     private static String moment(int slot) {
         return value(VALUES.get(slot * 2));
+    }
+
+    /** 计数槽的读数：没记过按 {@code 0} 显示（"一次都没发生"）。 */
+    private static String counter(int slot) {
+        return Long.toString(Math.max(0L, VALUES.get(slot * 2 + 1)));
     }
 
     private static String value(long v) {

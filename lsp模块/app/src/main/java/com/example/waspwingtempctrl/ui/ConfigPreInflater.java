@@ -13,6 +13,7 @@ import com.example.waspwingtempctrl.ConfigStore;
 import com.example.waspwingtempctrl.ConfigStore.GroupMeta;
 import com.example.waspwingtempctrl.ConfigStore.KeyMeta;
 import com.example.waspwingtempctrl.R;
+import com.example.waspwingtempctrl.StartupTiming;
 
 import java.util.Map;
 import java.util.Queue;
@@ -143,6 +144,7 @@ public final class ConfigPreInflater {
      */
     public static void start(@NonNull Context app, @NonNull Context ownerContext) {
         if (!STARTED.compareAndSet(false, true)) {
+            StartupTiming.mark(StartupTiming.MARK_PRE_ALREADY_STARTED);   // 记账（旁路）：本轮不是进程内第一次打开
             return;
         }
         ConfigPreInflater pre = new ConfigPreInflater(ownerContext);
@@ -160,11 +162,23 @@ public final class ConfigPreInflater {
      * 就会挂上一批<b>属于上一个 Activity</b> 的控件：既拿到过期的 Context 与主题，又把那个已经销毁的
      * Activity 钉在新视图树上。故身份对不上即视为"本页没有预制造件"（代价只是这一轮全部现场造，
      * 与不做预制造时逐字一致）。
+     *
+     * <p>返回 {@code null} 的三个成因各记一个时间点（只用于诊断区展示，见 {@link StartupTiming}），
+     * 三者互斥且不影响这里的判断结果。
      */
     @Nullable
     static ConfigPreInflater get(@NonNull Context ownerContext) {
         ConfigPreInflater pre = instance;
-        if (pre == null || pre.closed || pre.owner != ownerContext) {
+        if (pre == null) {
+            StartupTiming.mark(StartupTiming.MARK_PRE_NO_INSTANCE);   // 记账（旁路）：压根没提交过
+            return null;
+        }
+        if (pre.closed) {
+            StartupTiming.mark(StartupTiming.MARK_PRE_CLOSED);   // 记账（旁路）：剩余件已被丢光
+            return null;
+        }
+        if (pre.owner != ownerContext) {
+            StartupTiming.mark(StartupTiming.MARK_PRE_OWNER_MISMATCH);   // 记账（旁路）：件属于上一个页面
             return null;
         }
         return pre;
@@ -196,11 +210,13 @@ public final class ConfigPreInflater {
         try {
             ConfigStore store = ConfigStore.get(app);   // 可能要等预热线程把这份单例构造完（见 start 的说明）
             if (!store.definitionsLoaded()) {
+                StartupTiming.mark(StartupTiming.MARK_PRE_NOT_READY);   // 记账（旁路）：定义还没就绪
                 return;
             }
             produceAll(inflater, store);
         } catch (Throwable ignored) {
             // 预制造只是优化：失败即"什么都没造"，主线程照旧自己 inflate
+            StartupTiming.mark(StartupTiming.MARK_PRE_FAIL);   // 记账（旁路）：静默吞掉的那一次
         }
     }
 

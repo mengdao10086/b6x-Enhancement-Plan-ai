@@ -7,6 +7,8 @@ import android.view.ViewGroup;
 import androidx.annotation.NonNull;
 import androidx.annotation.Nullable;
 
+import com.example.waspwingtempctrl.StartupTiming;
+
 /**
  * 建表取视图的<b>唯一入口</b>：先问预制造器要（见 {@link ConfigPreInflater}），要不到才现场 inflate。
  *
@@ -31,15 +33,22 @@ final class ViewSource {
         this.preInflater = preInflater;
     }
 
-    /** 取一份布局为 {@code layoutId} 的视图；{@code parent} 只用于生成 LayoutParams（不 attach）。 */
+    /**
+     * 取一份布局为 {@code layoutId} 的视图；{@code parent} 只用于生成 LayoutParams（不 attach）。
+     *
+     * <p>两个累计计数只服务诊断区展示（{@link StartupTiming}），不参与这里的任何判断，
+     * 也不改变两条路各自的取件结果。
+     */
     @NonNull
     View inflate(int layoutId, @NonNull ViewGroup parent) {
         if (preInflater != null) {
             View preMade = preInflater.take(layoutId);
             if (preMade != null) {
+                StartupTiming.count(StartupTiming.PRE_HIT);   // 记账（旁路）：池子命中
                 return preMade;
             }
         }
+        StartupTiming.count(StartupTiming.PRE_MISS);   // 记账（旁路）：现场 inflate
         return inflater.inflate(layoutId, parent, false);
     }
 
