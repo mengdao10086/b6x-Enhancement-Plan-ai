@@ -77,15 +77,6 @@ public class ConfigFormFragment extends Fragment
     /** 曲线区（子 Fragment）；页面视图销毁后置空。 */
     private ChartFragment chart;
 
-    /**
-     * 本视图的内容是否已定（表单建满，或已把"定义没到位"如实上屏）。
-     *
-     * <p>这是外壳判定本页「就绪」的唯一依据（见 {@link #isStructureReady()}）：它表达的是
-     * <b>结构已建好</b>，不是"数据已绑满"——建成与上屏是同一次主线程操作（见
-     * {@link ConfigFormController} 的 {@code buildIfNeeded}）。
-     */
-    private boolean structureReady;
-
     @Override
     public void onCreate(@Nullable Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
@@ -225,28 +216,26 @@ public class ConfigFormFragment extends Fragment
      * 诊断串（含失败原因）一并摆出来，不给静默空列表。
      *
      * <p>这条路<b>不会</b>经过 {@link #onFormBuilt}（见 {@code ConfigFormController.buildIfNeeded}
-     * 的分支），而它同样是本页内容的终态（此后不会再有任何东西建出来），故在这里一并置「就绪」——
-     * 否则外壳的骨架占位层要一直等到硬上界才撤。
+     * 的分支），而它同样是本页内容的终态（此后不会再有任何东西建出来）。
      */
     @Override
     public void showDefinitionError(@NonNull String message) {
         errorCard.setVisibility(View.VISIBLE);
         errorText.setText(message);
         selfCheckView.setVisibility(View.GONE);
-        structureReady = true;
     }
 
     /**
-     * 参数区露面（本页内容的终态之一）：置「就绪」。
+     * 参数区露面（本页内容的终态之一）。
      *
      * <p>调用点在"可见结构已就位"那一刻（各组卡头、组头开关、卡头徽标都摆好了，行还没建——
-     * 本页默认全部折叠，行本来就看不见），故此刻起本页<b>可见</b>的内容不会再变
-     * （见 {@link #isStructureReady()}）：外壳的骨架占位层据此撤下，而用户看到的就是最终界面。
-     * 配置页没有别的建表后收尾动作（曲线子页与诊断折叠体在 {@code onCreateView} 里已挂好）。
+     * 本页默认全部折叠，行本来就看不见），故此刻起用户看到的就是最终界面。配置页没有别的建表后
+     * 收尾动作（曲线子页与诊断折叠体在 {@code onCreateView} 里已挂好），故这里不做任何事；
+     * 设置页用 {@code groupCount} 给自己的空态提示。
      */
     @Override
     public void onFormBuilt(int groupCount) {
-        structureReady = true;
+        // 本页无需在此做事
     }
 
     /**
@@ -263,25 +252,6 @@ public class ConfigFormFragment extends Fragment
         }
         errorCard.setVisibility(View.VISIBLE);
         errorText.setText(message);
-    }
-
-    /**
-     * 本页<b>可见结构</b>是否已就绪（＝「看得见的部分已建好、尚无具体数据」的那个状态）。
-     *
-     * <p>给外壳用：状态页、日志页的结构就是 inflate 出来的，视图一有即就绪；本页的表单是读完定义
-     * 后在主线程异步建出来的，只有建完（或把"定义没到位"如实上屏）才算就绪。外壳据此撤骨架占位层、
-     * 并决定何时截这套骨架图。
-     *
-     * <p><b>口径是"可见结构"而不是"结构"</b>（建表拆成两段之后的口径）：本页默认全部折叠，用户看得见的
-     * 只有各组的卡头（标题、总开关、徽标、箭头）。就绪在卡头与它们的值都摆好那一刻成立；那几十行折叠体
-     * 里的内容随后才建（见 {@code ConfigFormController} 的段二），<b>但绝不等到用户点展开才建</b>
-     * ——展开/收起只切可见性（见 {@link ConfigGroupBinder#setExpanded}），这是本页的一条既有不变量。
-     *
-     * <p>调在 {@code onDestroyView} 里复位：视图重建后要重新建成才算就绪（那条路上
-     * {@link ConfigFormController} 也会 {@code detachView} 后重建，两者同寿）。
-     */
-    public boolean isStructureReady() {
-        return structureReady;
     }
 
     @Override
@@ -365,7 +335,6 @@ public class ConfigFormFragment extends Fragment
         selfCheckView = null;
         dataFileView = null;
         chart = null;   // 子 Fragment 实例仍在（视图随本页一起销毁），只是不再从这里驱动它
-        structureReady = false;   // 控制器的 built 也在这里复位（detachView）：重建后要重新建成才算就绪
         super.onDestroyView();
     }
 

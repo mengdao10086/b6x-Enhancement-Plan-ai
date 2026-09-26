@@ -50,8 +50,8 @@ import java.util.concurrent.RejectedExecutionException;
  *   <li>{@link #start()}（{@code onCreate} 调）把「{@code ConfigStore.get} + 首读盘」排上后台线程，
  *       与壳的 inflate / 首帧并行；</li>
  *   <li>读完回主线程建表（见 {@link #buildIfNeeded}）：<b>段一</b>先建各组卡头并把它们的值摆正，
- *       随即让卡片容器露面（默认折叠的页在这里置「就绪」，外壳据此撤骨架占位层）；<b>段二</b>再建那几十行
- *       看不见的键行并上屏（值、组头开关、徽标、自检、诊断一次对齐），它在撤层之后才跑。</li>
+ *       随即让卡片容器露面（默认折叠的页在这里置「就绪」）；<b>段二</b>再建那几十行看不见的键行并上屏
+ *       （值、组头开关、徽标、自检、诊断一次对齐），它在"真页面第一帧画完"之后才跑。</li>
  * </ul>
  * 故不存在"半成品"：容器在露面之前一直是 {@link View#GONE}，露面时<b>可见的那部分</b>已经摆好
  * （卡头、组头开关值、卡头徽标）——要么如此，要么（定义没到位）走 {@link Page#showDefinitionError}
@@ -269,9 +269,10 @@ final class ConfigFormController implements ConfigKeyRow.Host, ConfigWriteQueue.
      * <ul>
      *   <li><b>段一</b>：各分组的<b>卡头</b>（标题、总开关、徽标、箭头）+ 组头开关值与卡头徽标。
      *       配置页默认全部折叠，此时用户能看到的每一样东西都已就位——故这一段末尾就把参数区露出来、
-     *       置「就绪」（外壳据此撤骨架占位层）。</li>
+     *       置「就绪」。</li>
      *   <li><b>段二</b>：各行与全部字段 + 值上屏 + 自检 + 诊断（见 {@link #buildRowsPhase}）。
-     *       这一段在撤层之后才跑：用户等的是"看得见的界面"，而不是那几十行还折叠着的输入框，
+     *       这一段在"真页面第一帧画完"之后才跑（见 {@link #scheduleRowsPhase}）：用户等的是"看得见的
+     *       界面"，而不是那几十行还折叠着的输入框，
      *       总工作量并没有减少，只是把它挪到了用户看不见的时候。</li>
      * </ul>
      *
@@ -320,8 +321,8 @@ final class ConfigFormController implements ConfigKeyRow.Host, ConfigWriteQueue.
             revealBuiltForm();
             return;
         }
-        // 默认折叠的页（配置页）：可见的只有卡头，先把可见结构露出来并置「就绪」（外壳据此撤骨架
-        // 占位层），看不见的行留到撤层那一帧之后再建
+        // 默认折叠的页（配置页）：可见的只有卡头，先把可见结构露出来并置「就绪」，
+        // 看不见的行留到下一段（本趟 traversal 的 pre-draw 之后，见 scheduleRowsPhase）再建
         revealBuiltForm();
         StartupTiming.span(StartupTiming.FORM_BUILD_HEAD, startedAt);
         scheduleRowsPhase(round, loadedSnapshot);
@@ -356,12 +357,18 @@ final class ConfigFormController implements ConfigKeyRow.Host, ConfigWriteQueue.
     /**
      * 段二的起跑线：参数区根部的一次性 pre-draw（另配一条一次性的兜底延时，见下）。
      *
-     * <p><b>为什么挂在 pre-draw 而不是直接 post</b>：pre-draw 在 measure/layout 之后、绘制之前派发，
-     * 本回调在这里只把段二 {@code post} 进消息队列——<b>post 只排队、不在这一趟里执行</b>，故这条消息
-     * 必然等到这一趟画完之后才跑，段二因此不可能挡在"撤骨架占位层"前面，这与两条监听器谁先注册无关。
+     * <p><b>为什么等这一趟 pre-draw</b>：段二是一段一两百毫秒<b>不中断</b>的主线程消息，它必须在
+     * "真页面第一帧画完"之后才开跑——否则它会把那一帧整段推后，用户从（还没建好的）白页切到真界面的
+     * 那一刻跟着晚。这条闸门<b>不能</b>改成"段一末尾直接 post"：在"段一落在首趟 traversal 之后"的形状里
+     * （真机出现过：数据 267 那一轮），直接 post 会让首见时刻最晚推后一个段二（实测 115~245ms）。
      *
-     * <p>（这里原先写的是"撤层那条监听器注册得更早、所以撤层那一帧会先到"：已被真机实测证伪——
-     * 两者同处一趟 traversal 时，段二那段 228ms 的不中断消息照样把撤层从 276 拖到 540。）
+     * <p><b>为什么是队首投递而不是普通 post</b>：pre-draw 在 measure/layout 之后、绘制之前派发，
+     * 这一趟画完就轮到队列里的消息；而普通 post 排在队<b>尾</b>——实测"本趟 pre-draw"到"段二真起跑"
+     * 之间白等 <b>38~48ms</b>（排在它前面的是曲线子页的异步事务、曲线首次上数据，谁先谁后纯看运气）。
+     * 段二要等的只有"这一帧画完"，故插到<b>队首</b>：本趟一结束就起跑，不早（不吃首帧）、不晚（不吃排队）。
+     *
+     * <p>（更早以前这里写的是"撤层那条监听器注册得更早、所以撤层那一帧会先到"：那条依据先随
+     * "撤骨架改为就绪即撤"作废，骨架整套又于 2026-09-26 删除；闸门保留的理由是上面第一条。）
      *
      * <p><b>兜底那一次延时</b>：pre-draw 只在窗口绘制时派发。万一这一段窗口压根不绘制（极端情况），
      * 只挂 pre-draw 就会一直等不到。故另挂一次性延时（不轮询、不重试、跑过即废），到点也把行建出来。
@@ -377,7 +384,13 @@ final class ConfigFormController implements ConfigKeyRow.Host, ConfigWriteQueue.
                 if (observer.isAlive()) {
                     observer.removeOnPreDrawListener(this);
                 }
-                anchor.post(() -> buildRowsPhase(round, snapshot));
+                // 队首投递（见方法注释）：取不到 Handler（视图未 attach）就退回普通 post，与改前一致
+                Handler handler = anchor.getHandler();
+                if (handler != null) {
+                    handler.postAtFrontOfQueue(() -> buildRowsPhase(round, snapshot));
+                } else {
+                    anchor.post(() -> buildRowsPhase(round, snapshot));
+                }
                 return true;
             }
         });
@@ -399,6 +412,9 @@ final class ConfigFormController implements ConfigKeyRow.Host, ConfigWriteQueue.
             return;
         }
         rowsPhaseRound = round;
+        // 记账（旁路）：段二开跑这一刻池子里已经取走了多少件 ⇒ 与"未命中"一起判
+        // "段二起跑前就缺（结构性）"还是"段二期间没赶上（竞态）"（判读见方案 §3.2）
+        StartupTiming.markCount(StartupTiming.POOL_AT_ROWS_BEGIN, StartupTiming.PRE_HIT);
         long startedAt = StartupTiming.now();
         try {
             for (ConfigGroupBinder group : groups) {
@@ -414,6 +430,8 @@ final class ConfigFormController implements ConfigKeyRow.Host, ConfigWriteQueue.
             // 现象去看建表链路上的改动，界面这边只给一句人话
             page.showPartialBuildFailure(appContext.getString(R.string.config_build_failed));
         }
+        // 记账（旁路）：收尾这一刻的同一读数（正常应等于"命中"总数，见方案 §3.2 的判读表）
+        StartupTiming.markCount(StartupTiming.POOL_AT_ROWS_END, StartupTiming.PRE_HIT);
         StartupTiming.span(StartupTiming.FORM_BUILD_ROWS, startedAt);
         StartupTiming.accFlush();
         views.release();   // 预制造件已用完：丢掉剩余件（见 ViewSource#release）

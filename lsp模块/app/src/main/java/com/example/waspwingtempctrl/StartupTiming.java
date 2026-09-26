@@ -53,7 +53,7 @@ public final class StartupTiming {
     public static final int CHART_DATA = 4;
     /**
      * 建表<b>首屏段</b>：建各分组的卡头 + 摆正组头开关与卡头徽标 + 参数区露出（默认折叠的页面在这一段
-     * 末尾就置「就绪」，外壳据此撤骨架占位层）。
+     * 末尾就置「就绪」——建表两段的里程碑之一）。
      */
     public static final int FORM_BUILD_HEAD = 5;
     /**
@@ -63,7 +63,6 @@ public final class StartupTiming {
      * （= 首屏段）与"用户不用等的活有多重"（= 可见后段）。
      */
     public static final int FORM_BUILD_ROWS = 6;
-
     // ---- 建表内部的 8 个累计槽（见 {@link #accBegin}/{@link #accEnd}）：只在建表的主线程上写 ----
     /** 累计：控件制造（inflate + 构造 + LayoutParams 样式解析）。 */
     public static final int FORM_SUB_INFLATE = 7;
@@ -85,7 +84,6 @@ public final class StartupTiming {
      * <p>诊断区收起时这一项≈0：收起态下只登记"欠一次刷新"，不上屏（见 {@code ConfigDiagnostics}）。
      */
     public static final int FORM_SUB_DIAG_SUBMIT = 14;
-
     /** 累计槽个数（{@link #FORM_SUB_INFLATE} 起连续 {@code SUB_COUNT} 个）。 */
     private static final int SUB_COUNT = 8;
 
@@ -96,84 +94,81 @@ public final class StartupTiming {
     public static final int MARK_LANDING_WAKE = 16;
     /** 时间点：页面区第一次绘制之前。 */
     public static final int MARK_FIRST_DRAW = 17;
-    /** 时间点：骨架占位层真被撤下那一刻（本次没挂过层就不记）。 */
-    public static final int MARK_SKELETON_OFF = 18;
     /** 时间点：主线程进 {@code awaitLanding} 那一刻（与"判定放行"相减即 onCreate 里白等的那段）。 */
-    public static final int MARK_LANDING_AWAIT = 19;
+    public static final int MARK_LANDING_AWAIT = 18;
     /** 时间点：第一页的视图建好。 */
-    public static final int MARK_PAGE_VIEW_1 = 20;
+    public static final int MARK_PAGE_VIEW_1 = 19;
     /** 时间点：第三页（最后一页）的视图建好。 */
-    public static final int MARK_PAGE_VIEW_ALL = 21;
+    public static final int MARK_PAGE_VIEW_ALL = 20;
     /** 时间点：建表数据到位（{@code onLoaded} 进主线程）。 */
-    public static final int MARK_FORM_DATA = 22;
+    public static final int MARK_FORM_DATA = 21;
     /** 时间点：首轮 {@code onPageSelected}。 */
-    public static final int MARK_PAGE_SELECTED = 23;
+    public static final int MARK_PAGE_SELECTED = 22;
     /**
      * 时间点：参数区<b>露出之后</b>的第一次 pre-draw。
      *
-     * <p>与 {@link #MARK_SKELETON_OFF} 相减即"露出到撤层之间"的那一段（vsync 与布局，还是队列里的
-     * 别的活）。建表拆两段之后，露出点落在"建表·首屏"末尾，故本时间点仍与撤层同一帧或紧邻其前。
+     * <p>与建表两段的接缝相减，即"参数区露出之后到真正绘制之前"那一段（vsync 与布局，还是队列里的
+     * 别的活）。露出点落在"建表·首屏"末尾。
      */
-    public static final int MARK_AFTER_BUILD_FRAME = 24;
+    public static final int MARK_AFTER_BUILD_FRAME = 23;
     /** 时间点：曲线首次上数据完成。 */
-    public static final int MARK_CHART_DATA = 25;
-    /** 时间点：占位图真上屏。 */
-    public static final int MARK_SKELETON_UP = 26;
+    public static final int MARK_CHART_DATA = 24;
     /** 时间点：诊断正文上屏（收起态下不上屏，故通常为"—"；展开那一刻才有值）。 */
-    public static final int MARK_DIAG_APPLY = 27;
-
-    // ---- 预制造（B）的埋点：2 个累计计数 + 6 个成因 + 1 个骨架首帧 ----
+    public static final int MARK_DIAG_APPLY = 25;
+    // ---- 预制造（B）的埋点：2 个累计计数 + 6 个成因 ----
     // 全部只记账，不改变任何既有分支；判读口径见方案文件 §5 的那张表。
 
     /** 累计计数：取件命中（{@code ViewSource} 从池子里拿到了件）。 */
-    public static final int PRE_HIT = 28;
+    public static final int PRE_HIT = 26;
     /** 累计计数：现场 inflate 的次数（没走预制造件那一路，含本页压根没启用预制造时）。 */
-    public static final int PRE_MISS = 29;
+    public static final int PRE_MISS = 27;
     /** 时间点：后台备料抛了异常（{@code ConfigPreInflater.produce} 那个静默 catch）。 */
-    public static final int MARK_PRE_FAIL = 30;
+    public static final int MARK_PRE_FAIL = 28;
     /** 时间点：后台备料早退（配置定义尚未就绪）。 */
-    public static final int MARK_PRE_NOT_READY = 31;
+    public static final int MARK_PRE_NOT_READY = 29;
     /** 时间点：取预制造器时进程级实例还是 {@code null}（压根没提交过预制造）。 */
-    public static final int MARK_PRE_NO_INSTANCE = 32;
+    public static final int MARK_PRE_NO_INSTANCE = 30;
     /** 时间点：预制造器已关门（剩余件被丢光，{@code ViewSource.release()} 之后）。 */
-    public static final int MARK_PRE_CLOSED = 33;
+    public static final int MARK_PRE_CLOSED = 31;
     /** 时间点：预制造器归属的上下文不是本页那一个（件属于上一个 Activity，跨页复用）。 */
-    public static final int MARK_PRE_OWNER_MISMATCH = 34;
+    public static final int MARK_PRE_OWNER_MISMATCH = 32;
     /** 时间点：预制造闸门已置位（本轮不是进程内第一次打开，备料不会重跑）。 */
-    public static final int MARK_PRE_ALREADY_STARTED = 35;
-    /**
-     * 时间点：骨架监听器第一次 pre-draw。
-     *
-     * <p>撤层不再有"画过一帧"的闸门，此点与 {@link #MARK_SKELETON_OFF} 相减，量的就是"骨架监听器
-     * 第一趟到真撤层之间隔了几趟/多久"（用来确认两者之间没有多出来的 traversal）。
-     */
-    public static final int MARK_SKELETON_FIRST_PREDRAW = 36;
-
+    public static final int MARK_PRE_ALREADY_STARTED = 33;
     // ---- 建表首读那趟后台任务的两端（只服务"数据到位为什么晚"这一个问题，见方案 §2） ----
 
     /** 时间点：首读后台任务开工（走的是降级路；就地取快照那条快路上本槽不记）。 */
-    public static final int MARK_CFG_IO_BEGIN = 37;
+    public static final int MARK_CFG_IO_BEGIN = 34;
     /** 时间点：首读后台任务算完、即将回主线程那一刻。 */
-    public static final int MARK_CFG_IO_DONE = 38;
-
+    public static final int MARK_CFG_IO_DONE = 35;
     // ---- 未命中构成：按布局 id 各一个累计计数（把"缺的是哪几种件"一次定死，见方案 §1） ----
 
     /** 未命中计数：分组卡。 */
-    public static final int MISS_GROUP = 39;
+    public static final int MISS_GROUP = 36;
     /** 未命中计数：键行。 */
-    public static final int MISS_ROW = 40;
+    public static final int MISS_ROW = 37;
     /** 未命中计数：开关行的开关。 */
-    public static final int MISS_KEY_SWITCH = 41;
+    public static final int MISS_KEY_SWITCH = 38;
     /** 未命中计数：枚举组。 */
-    public static final int MISS_ENUM_GROUP = 42;
+    public static final int MISS_ENUM_GROUP = 39;
     /** 未命中计数：枚举按钮。 */
-    public static final int MISS_ENUM_BUTTON = 43;
+    public static final int MISS_ENUM_BUTTON = 40;
     /** 未命中计数：字段开关。 */
-    public static final int MISS_FIELD_SWITCH = 44;
+    public static final int MISS_FIELD_SWITCH = 41;
     /** 未命中计数：字段。 */
-    public static final int MISS_FIELD = 45;
+    public static final int MISS_FIELD = 42;
+    // ---- 备料"结构性缺件 vs 没赶上"的判据（见方案 §3.2）：两个数字快照 ----
 
-    private static final int SLOTS = 46;
+    /**
+     * 数字快照：段二<b>开跑那一刻</b>池子里已经取走了多少件（即 {@link #PRE_HIT} 的当前值）。
+     *
+     * <p>用法：`126 − 本槽` = 段二开跑前就缺的件数（结构性）；`未命中 − 上面这个数` = 段二期间
+     * 备料还没赶上的件数（竞态）。两个数加起来即"没赶上"那一类的全部。
+     */
+    public static final int POOL_AT_ROWS_BEGIN = 43;
+    /** 数字快照：段二<b>收尾那一刻</b>的同一读数（正常应等于"命中"总数）。 */
+    public static final int POOL_AT_ROWS_END = 44;
+
+    private static final int SLOTS = 45;
     private static final long UNSET = -1L;
 
     /** 每槽两个 long：{@code [i*2]} = 该段起点的偏移（"时间点"槽只用它）、{@code [i*2+1]} = 该段耗时。 */
@@ -231,6 +226,21 @@ public final class StartupTiming {
     /** 记一个时间点（首次写入胜出）。 */
     public static void mark(int slot) {
         VALUES.compareAndSet(slot * 2, UNSET, now());
+    }
+
+    /**
+     * 记一个<b>数字快照</b>（首次写入胜出）：把一个"此刻的读数"存进某个槽，用来切"事情发生时它是多少"。
+     *
+     * <p>与 {@link #mark} 同为一次 CAS，只是存的是调用方给的数而不是现在时刻。两种用法见
+     * {@link #POOL_AT_ROWS_BEGIN}（段二开跑那一刻池子里已备多少件）。
+     */
+    public static void markValue(int slot, long value) {
+        VALUES.compareAndSet(slot * 2, UNSET, value);
+    }
+
+    /** 记一个"某计数槽此刻的读数"（见 {@link #POOL_AT_ROWS_BEGIN}）：没记过该计数槽就记 0。 */
+    public static void markCount(int slot, int counterSlot) {
+        markValue(slot, Math.max(0L, VALUES.get(counterSlot * 2 + 1)));
     }
 
     /**
@@ -321,7 +331,9 @@ public final class StartupTiming {
             appendSubs(sb);
             // 预制造（B）：命中/未命中看"池子里有没有件"，六个成因看"谁是死因"（判读口径见方案文件 §5）
             sb.append("\n预制造 · 命中 ").append(counter(PRE_HIT))
-                    .append(" · 未命中 ").append(counter(PRE_MISS));
+                    .append(" · 未命中 ").append(counter(PRE_MISS))
+                    .append(" · 段二起已备 ").append(moment(POOL_AT_ROWS_BEGIN))
+                    .append(" · 段二末已备 ").append(moment(POOL_AT_ROWS_END));
             sb.append("\n预制造 · 失败 ").append(moment(MARK_PRE_FAIL))
                     .append(" · 未就绪 ").append(moment(MARK_PRE_NOT_READY))
                     .append(" · 无实例 ").append(moment(MARK_PRE_NO_INSTANCE))
@@ -336,13 +348,11 @@ public final class StartupTiming {
                     .append(" · 枚举钮 ").append(counter(MISS_ENUM_BUTTON))
                     .append(" · 字段开关 ").append(counter(MISS_FIELD_SWITCH))
                     .append(" · 字段 ").append(counter(MISS_FIELD));
-            sb.append("\n时间点 · 骨架首帧 ").append(moment(MARK_SKELETON_FIRST_PREDRAW))
-                    .append(" · 首读IO 起 ").append(moment(MARK_CFG_IO_BEGIN))
+            sb.append("\n时间点 · 首读IO 起 ").append(moment(MARK_CFG_IO_BEGIN))
                     .append(" · 完成 ").append(moment(MARK_CFG_IO_DONE));
             sb.append("\n时间点 · onCreate 结束 ").append(moment(MARK_ONCREATE_END))
                     .append(" · 判定放行 ").append(moment(MARK_LANDING_WAKE))
-                    .append(" · 首帧 ").append(moment(MARK_FIRST_DRAW))
-                    .append(" · 撤占位层 ").append(moment(MARK_SKELETON_OFF));
+                    .append(" · 首帧 ").append(moment(MARK_FIRST_DRAW));
             sb.append("\n时间点 · 落页等待 ").append(moment(MARK_LANDING_AWAIT))
                     .append(" · 首页视图 ").append(moment(MARK_PAGE_VIEW_1))
                     .append(" · 三页视图 ").append(moment(MARK_PAGE_VIEW_ALL))
@@ -350,7 +360,6 @@ public final class StartupTiming {
             sb.append("\n时间点 · 数据到位 ").append(moment(MARK_FORM_DATA))
                     .append(" · 建表后首帧 ").append(moment(MARK_AFTER_BUILD_FRAME))
                     .append(" · 曲线数据 ").append(moment(MARK_CHART_DATA))
-                    .append(" · 骨架上屏 ").append(moment(MARK_SKELETON_UP))
                     .append(" · 诊断上屏 ").append(moment(MARK_DIAG_APPLY));
             return sb.toString();
         } catch (Throwable t) {

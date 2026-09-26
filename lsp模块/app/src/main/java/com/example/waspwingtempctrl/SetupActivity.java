@@ -2,17 +2,12 @@ package com.example.waspwingtempctrl;
 
 import android.content.Context;
 import android.content.Intent;
-import android.graphics.Bitmap;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
 import android.os.Process;
 import android.view.View;
-import android.view.ViewGroup;
-import android.view.ViewParent;
 import android.view.ViewTreeObserver;
-import android.widget.FrameLayout;
-import android.widget.ImageView;
 
 import androidx.annotation.NonNull;
 import androidx.annotation.Nullable;
@@ -58,17 +53,12 @@ import java.util.concurrent.atomic.AtomicInteger;
  * 配置单例（那一段带锁）时仍在默认优先级（见 {@link #preload}）；剩下的只有纯粹的 CPU 争抢 ——
  * 设备有空闲核时不成立，单核或核被占满时判定可能被拉长（真机未测）。
  *
- * <p><b>骨架占位层</b>：真页面的内容（尤其配置页那份几十行表单）要几百毫秒才建出来，这段空窗里页面区是白的。
- * 故上一轮启动时把三页各自「已建好、还没绑具体数据」的样子截下来存盘（{@link SkeletonStore}），本次启动
- * 先把落定那一页的截图盖在页面区上（{@link #showSkeleton}），等<b>当前这页就绪</b>再撤
- * （{@link #applySkeleton}）。覆盖层 {@code setClickable(false)}，翻页与滚动手势照旧落到下面的真页面。
- *
- * <p><b>「就绪」的口径</b>（截图与撤层共用同一个判据，见 {@link #pageReady}）：<b>可见结构</b>已建好、
- * 还没有具体数据的那个状态。状态页与日志页的结构就是 inflate 出来的，视图一有即就绪；配置页的表单是异步
- * 建出来的，要等它把"看得见的那部分"建完（各组卡头与它们的值，见
- * {@link ConfigFormFragment#isStructureReady()}）——配置页默认全部折叠，折叠体里那几十行随后才建，
- * 但那不影响本页的判断：盖在页面上的骨架图与撤层后露出的界面都是折叠态，两者对齐。
- * 此外<b>任何翻页动作都立刻撤掉占位层</b>：它盖的是落定那一页的骨架，翻到别页就不再成立。
+ * <p><b>参数区的露面时机</b>：真页面的内容（尤其配置页那份几十行表单）要几百毫秒才建出来，
+ * 建好之前配置页的参数区一直 {@code GONE}（见 {@link ConfigFormFragment} 的建表两段）——空窗里不会
+ * 出现"半成品"，页面区是空的。
+ * （2026-09-26：原先还有一层"骨架占位层"盖这段空窗，已按实测<b>整套删除</b>——它盖不到首帧，
+ * 当前形状下只剩十几毫秒的遮盖窗口，成本却要一次解码 + 一层常驻视图 + 一次重截；见
+ * {@code 启动与界面加载全流程梳理与优化方案.md} §9。）
  *
  * <p><b>页签数量与顺序必须与 {@link #MENU_IDS} 一一对应</b>（同为 3 个、同序），菜单顺序声明在
  * {@code res/menu/menu_bottom.xml}。
@@ -135,23 +125,8 @@ public class SetupActivity extends AppCompatActivity {
      */
     private static final long LANDING_WAIT_MS = 50L;
 
-    /**
-     * 骨架占位层最长存在时间（毫秒）——硬上界：解码没回来、绘制回调不派发、当前页迟迟不就绪，都必须撤，
-     * 不能一直盖着。
-     *
-     * <p>取 5 秒而不是 1.5 秒：本层正常路径的寿命由"当前页就绪"决定，配置页在慢机上建表可能超过 1.5 秒，
-     * 上界若卡在那之前就会抢在真内容前面把白页露出来——那正是这一层要挡的东西。上界只用于兜底。
-     */
-    private static final long OVERLAY_MAX_MS = 5000L;
-
     private BottomNavigationView nav;
     private ViewPager2 pager;
-
-    /** 骨架占位层（只盖 pager 那一片的覆盖层）；{@code null} = 当前没有。 */
-    private ImageView overlay;
-
-    /** 占位层画的是第几页；{@code -1} = 没有层。翻页判定要用它比页号（见 {@link #hideSkeleton} 的调用点）。 */
-    private int overlayPage = -1;
 
     /** 底栏与 pager 互相驱动时的防重入标记（两者任一变化都会回调对方）。 */
     private boolean syncing;
@@ -189,27 +164,11 @@ public class SetupActivity extends AppCompatActivity {
             public void onPageSelected(int position) {
                 // 记账（旁路）：首轮 onPageSelected 落在哪一刻（首次写入胜出，后续翻页不会改写）
                 StartupTiming.mark(StartupTiming.MARK_PAGE_SELECTED);
-                // 翻了页：占位层盖的是落定那一页的骨架，换页即失效，立刻撤（不必等"就绪"）。
-                // 只比页号、不看"回调来了没"：初始那次 setCurrentItem 也会回一次 onPageSelected
-                // （同一个页号），按"任何回调都撤"写会把刚要上屏的那层误杀
-                if (position != overlayPage) {
-                    hideSkeleton();
-                }
                 // 底栏跟随滑动结果；此处改底栏会回调上面的监听器，故加防重入标记
                 syncing = true;
                 nav.setSelectedItemId(MENU_IDS[position]);
                 syncing = false;
                 broadcastVisibility();
-            }
-
-            @Override
-            public void onPageScrollStateChanged(int state) {
-                // 手指一压（DRAGGING）就撤：拖动期间新旧两页同时在屏上，一张盖满 pager 区的静态图
-                // 必然穿帮，不能等到 onPageSelected。只认 DRAGGING（用户的动作）：程序性跳页走
-                // IDLE→SETTLING，那条路交给上面的页号判定，免得初始落页的杂音把这一层误杀
-                if (state == ViewPager2.SCROLL_STATE_DRAGGING) {
-                    hideSkeleton();
-                }
             }
         });
 
@@ -220,9 +179,6 @@ public class SetupActivity extends AppCompatActivity {
         settleInitialPage(savedInstanceState, landingDone);
         // 首帧之后再广播一次：此刻页面视图才建好（ViewPager2 在布局中创建页面）
         pager.post(this::broadcastVisibility);
-        // 骨架占位层（口径见类注释）：图与当前外观配套就先挂上（解图在后台），不配套则等三页都就绪后重截
-        showSkeleton(pager.getCurrentItem());
-        armSkeletonCapture();
         // 记账（旁路）：主线程这段壳工作到此为止；再挂一个一次性回调量"页面区第一次绘制前"
         StartupTiming.mark(StartupTiming.MARK_ONCREATE_END);
         markFirstDraw();
@@ -335,228 +291,6 @@ public class SetupActivity extends AppCompatActivity {
                 ChartLoader.warmUp(app);
             });
         }
-    }
-
-    // ==================== 骨架占位层 ====================
-
-    /**
-     * 装上骨架占位层（主线程，{@code onCreate} 里调；图的存取见 {@link SkeletonStore}）。
-     *
-     * <p><b>只盖 pager 那一片</b>：给 pager 现包一个 FrameLayout，覆盖层与它同格。外壳布局与资源都不动
-     * ——包出来的 FrameLayout 直接顶替 pager 在 {@code setup_root} 里的位置与 {@code weight}，
-     * 几何与原来完全一致。撤覆盖层时不拆它（拆回去只多一次布局，位置本来就没变）。
-     *
-     * <p><b>解图在后台</b>（{@link #loadSkeleton}）：解码是 IO + 像素活，放主线程就是给首帧添堵。
-     * 代价是覆盖层会先以「还没图的 ImageView」形态存在一小会儿（不可见、不吃触摸）——这段空窗是
-     * 本方案的固有延迟：主线程要先忙完首帧，后台解完的图才轮得到上屏。
-     *
-     * <p>撤层时机见 {@link #applySkeleton}（当前页就绪）。翻页、落页纠正则在别处直接撤。
-     *
-     * @param page 本次落定的页序号（取落页判定的结论，不是第 0 页）
-     */
-    private void showSkeleton(int page) {
-        Context app = getApplicationContext();
-        if (!SkeletonStore.isCurrent(app)) {
-            // 尺寸、夜间、字体、版本与截图那轮不同：本次不挡屏，由 armSkeletonCapture 等三页就绪后重截
-            return;
-        }
-        ViewParent rawParent = pager.getParent();
-        if (!(rawParent instanceof ViewGroup)) {
-            // 布局层级被改过：宁可不显示覆盖层，也不要动一条没验证过的层级
-            return;
-        }
-        ViewGroup parent = (ViewGroup) rawParent;
-        int at = parent.indexOfChild(pager);
-        ViewGroup.LayoutParams pagerParams = pager.getLayoutParams();
-        parent.removeViewAt(at);
-        FrameLayout holder = new FrameLayout(this);
-        holder.setLayoutParams(pagerParams);
-        pager.setLayoutParams(new FrameLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
-        holder.addView(pager);
-
-        ImageView cover = new ImageView(this);
-        // 半分辨率图按 FIT_XY 拉满页面区（宽高比与截图时一致，故不会变形）
-        cover.setScaleType(ImageView.ScaleType.FIT_XY);
-        cover.setClickable(false);   // 不吃触摸：翻页与滚动手势照旧传给下面的真页面
-        holder.addView(cover, new FrameLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
-        parent.addView(holder, at);   // 与 pager 同格，画在它之上
-        overlay = cover;
-        overlayPage = page;
-
-        // 硬上界（同时也是"post 兜底"）：解码没回来、或窗口不可见导致 pre-draw 不派发，都得撤
-        pager.postDelayed(this::hideSkeleton, OVERLAY_MAX_MS);
-        loadSkeleton(page);
-    }
-
-    /**
-     * 后台解图（{@link SkeletonStore#load} 有 File IO 与解码）：解完回主线程换上。
-     */
-    private void loadSkeleton(int page) {
-        Context app = getApplicationContext();
-        Thread thread = new Thread(() -> {
-            Bitmap bitmap = SkeletonStore.load(app, page);
-            MAIN.post(() -> applySkeleton(bitmap));
-        }, "ww-skeleton-load");
-        thread.setDaemon(true);   // 只是个占位图：进程要退时不必等它
-        thread.start();
-    }
-
-    /**
-     * 占位图到手（主线程）：换上，并在「当前页就绪」时撤下（另加硬上界这一条边界）。
-     *
-     * <p>撤的判据是<b>当前这页就绪</b>（见类注释的口径），不是"画过一帧"——配置页落页时它要一直
-     * 盖到表单建出来那一刻，那正是用户看到白页的那段空窗。就绪由 {@link #pageReady} 判，逐帧看一眼
-     * （这段时间通常几百毫秒）。
-     *
-     * <p><b>为什么不额外要求"骨架已显示过一帧"</b>：pre-draw 在 measure/layout<b>之后</b>、绘制之前
-     * 派发（同 {@link #armSkeletonCapture} 的口径），故它一到就说明"真页面已建好且已布局"，撤的判据
-     * 此时必然已满足。那条闸门买到的只是一次闪动，代价却是：页面比骨架先就绪时，撤层要白等一个
-     * "段二建行的消息 + 一趟 traversal"——真机实测 276 一直被拖到 540。故第一次 pre-draw 只记一个账
-     * （{@link StartupTiming#MARK_SKELETON_FIRST_PREDRAW}，与撤层时刻相减即两者之间隔了多久）。
-     *
-     * <p>硬上界已在 {@link #showSkeleton} 挂上，负责兜住"解码没回来"、"pre-draw 不派发"与
-     * "当前页迟迟不就绪"三种情况；上界撤层后本监听在下一帧发现自己盖的那层没了，自行退场。
-     */
-    private void applySkeleton(Bitmap bitmap) {
-        if (overlay == null || isDestroyed()) {
-            return;   // 已撤下（硬上界 / 翻页 / 落页纠正先到）：这张图没人要了
-        }
-        if (bitmap == null || currentPageReady()) {
-            // 没图可盖；或者真页面已经就绪（图来得太晚）——两种都没得可挡，立刻撤干净
-            hideSkeleton();
-            return;
-        }
-        overlay.setImageBitmap(bitmap);
-        // 记账（旁路）：占位图真上屏那一刻（量"首帧 334 那一帧画的到底是骨架还是白页"）
-        StartupTiming.mark(StartupTiming.MARK_SKELETON_UP);
-        final ViewTreeObserver observer = pager.getViewTreeObserver();
-        observer.addOnPreDrawListener(new ViewTreeObserver.OnPreDrawListener() {
-            /** 只用于记账：本监听器是不是第一次被调用（不参与下面任何判断）。 */
-            private boolean firstPreDraw;
-
-            @Override
-            public boolean onPreDraw() {
-                if (overlay == null) {
-                    detach(observer, this);   // 已被别处撤掉：监听退场
-                    return true;
-                }
-                if (!firstPreDraw) {
-                    firstPreDraw = true;
-                    StartupTiming.mark(StartupTiming.MARK_SKELETON_FIRST_PREDRAW);   // 记账（旁路）
-                }
-                if (!currentPageReady()) {
-                    return true;   // 真页面还没就绪：继续盖着
-                }
-                detach(observer, this);
-                hideSkeleton();
-                return true;
-            }
-        });
-    }
-
-    /** 撤下覆盖层（幂等）：没挂就什么都不做。包装用的 FrameLayout 不动（见 {@link #showSkeleton}）。 */
-    private void hideSkeleton() {
-        ImageView cover = overlay;
-        if (cover == null) {
-            return;
-        }
-        overlay = null;
-        overlayPage = -1;
-        ViewParent parent = cover.getParent();
-        if (parent instanceof ViewGroup) {
-            ((ViewGroup) parent).removeView(cover);
-        }
-        // 记账（旁路）：真撤掉了一层才记；本次启动压根没挂层时这行不会执行，展示成"—"
-        StartupTiming.mark(StartupTiming.MARK_SKELETON_OFF);
-    }
-
-    /**
-     * 三页都「就绪」之后取一次骨架截图（见 {@link SkeletonStore} 与类注释的口径）。
-     *
-     * <p>挂钩子之前先判一次键：图与当前外观配套就没什么可截的，那就不挂——省掉一个要等到视图树销毁
-     * 才退场的每帧回调。键不配套才逐帧判"三页齐备且都就绪"，齐了就在这一帧截。
-     *
-     * <p><b>为什么不能挂在"就绪"那一刻同步截</b>：配置页的表单是刚 inflate 出来的一批子视图，
-     * 要过完本帧的 measure+layout 才有尺寸，在 {@link ConfigFormFragment#isStructureReady()} 变真的
-     * 那一刻直接 {@code view.draw(canvas)} 画出来是空表单（容器那时才刚置为可见）。pre-draw 在布局之后、
-     * 绘制之前派发，正好卡在"建好且已布局"这一点上。
-     *
-     * <p>缺一页（或某页永不就绪，例如预热一直没回来）则整批不截、不写键（见
-     * {@link SkeletonStore#captureIfNeeded}）：本监听就继续留着，每帧只做几次字段读与一次三元素列表
-     * 遍历，不另设超时兜底——截不成这一轮就不截，下次启动重来。
-     */
-    private void armSkeletonCapture() {
-        final Context app = getApplicationContext();
-        if (SkeletonStore.isCurrent(app)) {
-            return;
-        }
-        final ViewTreeObserver observer = pager.getViewTreeObserver();
-        observer.addOnPreDrawListener(new ViewTreeObserver.OnPreDrawListener() {
-            @Override
-            public boolean onPreDraw() {
-                if (!allPagesReady()) {
-                    return true;   // 还有页没就绪：留着，下一帧再判
-                }
-                detach(observer, this);
-                SkeletonStore.captureIfNeeded(app, pageRoots());
-                return true;
-            }
-        });
-    }
-
-    /** 三页是否都已「就绪」：根视图都在（非配置页的结构就是 inflate 出来的，视图在即就绪）+ 配置页表单已建。 */
-    private boolean allPagesReady() {
-        View[] roots = pageRoots();
-        for (int i = 0; i < roots.length; i++) {
-            if (roots[i] == null || !pageReady(i)) {
-                return false;
-            }
-        }
-        return true;
-    }
-
-    /** 本次显示占位层的那一页（pager 当前页）是否已「就绪」（见 {@link #pageReady}）。 */
-    private boolean currentPageReady() {
-        return pager != null && pageReady(pager.getCurrentItem());
-    }
-
-    /**
-     * 第 {@code page} 页是否已「就绪」——结构已建好、还没有具体数据的那个状态（见类注释的口径）。
-     *
-     * <p>状态页与日志页的结构就是 inflate 出来的，视图一有即就绪；配置页的表单是读完定义后
-     * 异步建出来的，要它自己说建成（{@link ConfigFormFragment#isStructureReady()}）。
-     * 按类而不是按页序号判：将来页序变动不会静默错位。
-     */
-    private boolean pageReady(int page) {
-        for (Fragment fragment : getSupportFragmentManager().getFragments()) {
-            Bundle args = fragment.getArguments();
-            if (args == null || args.getInt(ARG_PAGE, -1) != page) {
-                continue;
-            }
-            return !(fragment instanceof ConfigFormFragment)
-                    || ((ConfigFormFragment) fragment).isStructureReady();
-        }
-        return false;   // 还没有实例：谈不上就绪
-    }
-
-    /**
-     * 三页的根视图，<b>下标即页序号</b>；某页还没有实例或视图时该位为 {@code null}（由调用方判断）。
-     *
-     * <p>按 arguments 里的页序号归位（与 {@link #broadcastVisibility} 同一口径），不去扒 pager 内部
-     * 那个 RecyclerView 的子项顺序：那是 ViewPager2 / FragmentStateAdapter 的内部约定，比 arguments 脆。
-     */
-    private View[] pageRoots() {
-        View[] roots = new View[MENU_IDS.length];
-        for (Fragment fragment : getSupportFragmentManager().getFragments()) {
-            Bundle args = fragment.getArguments();
-            int page = args == null ? -1 : args.getInt(ARG_PAGE, -1);
-            if (page >= 0 && page < roots.length) {
-                roots[page] = fragment.getView();
-            }
-        }
-        return roots;
     }
 
     /** 摘掉一次性绘制回调（视图树观察者已死时什么都不做，它自己会随视图树一起消失）。 */
@@ -680,8 +414,6 @@ public class SetupActivity extends AppCompatActivity {
         if (index == pager.getCurrentItem()) {
             return;
         }
-        // 纠正落页：占位层盖的是另一页的骨架，换图不如撤掉（本次启动就让它退回现状）
-        hideSkeleton();
         syncing = true;
         pager.setCurrentItem(index, false);
         nav.setSelectedItemId(MENU_IDS[index]);
