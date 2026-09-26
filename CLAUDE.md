@@ -27,7 +27,6 @@
 
 - 改函数/类方法的**行为、签名或公共接口**前 → 先跑 `impact`，并向用户报告直接调用者、受影响流程、风险级别
 - 重命名符号用 `rename`，不得文本替换
-- 改完后跑 `detect_changes()` 检查影响范围
 - 风险 HIGH/CRITICAL → 先告知用户再继续
 - 普通日志降级为 debug 时，用**对应功能分区的子开关**（如配置加载→`debug_config`、传感器→`debug_sensor`、PID→`debug_pid`），不得用通用 `write_log` 或乱选分区。注意 C 宏按文本顺序生效，调用点位于宏定义之前时需把 `debug_log`/`pid_log` 宏上移
 - **加/改配置参数**：`参数定义/params.def.json` 是配置键的**唯一手写处**（键数见 `check_params.py` 的 `EXPECTED_KEY_COUNT`，不要在文档里写死数字）。改定义 → `python 参数定义/gen_params.py` 重新生成 4 个产物 → `python 参数定义/check_params.py` 必须 EXIT=0（已接入 CI，在 checkout 之后、Gradle 编译之前）
