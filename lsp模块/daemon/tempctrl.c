@@ -406,8 +406,11 @@ static int uiprefs_fail_logged    = 0;   // 写失败只记一条日志，避免
 
 // --- 看门狗反向保活开关（WD_KEEPALIVE）---
 // 声明点必须在 load_config 之前（那里第一遍读它）；实现与其余状态在文件末尾的
-// 「看门狗反向保活」小节。默认开（与定义 default/factory 一致，由 check_params.py 审计核对）。
-static int wd_keepalive_enabled = 1;     // WD_KEEPALIVE：1=守护进程反过来看护 service.d 看门狗（默认）
+// 「看门狗反向保活」小节。**默认关**（与定义 default/factory 一致，由 check_params.py 审计核对：
+// 开关类键没有生成头宏，一致性靠该审计逐键核对，改一侧不改另一侧直接红）。
+// 为什么先默认关：本机制尚未真机验证，而它是"会自动拉起另一个进程"的自动行为，
+// 未验证的自动行为不该默认作用在温控主链上；要用请显式开启（注意 profile.conf 里已写入的旧值优先于默认值）。
+static int wd_keepalive_enabled = 0;     // WD_KEEPALIVE：1=守护进程反过来看护 service.d 看门狗（默认 0=关）
 
 // 双设备 BLE 连接状态
 static int b6_connected = 0;        // B6X: BLE 是否已连接
@@ -2109,14 +2112,25 @@ static void send_am_broadcast(int mode, int target, int windOC, int coldOC, int 
         execv(AM_BIN, argv);
         _exit(127);
     }
-    // 父进程：限时等待子进程（3 秒超时）
-    signal(SIGALRM, alarm_handler);
+    // 父进程：限时等待子进程（3 秒超时）。
+    // 坑（改回去必复现，2026-09-28 修）：本文件的 signal() 是 BSD 语义（bionic 下 = bsd_signal，
+    // 带 SA_RESTART）—— 用它装 SIGALRM 会让被中断的 waitpid **自动重启**，3s 闹钟永远打不断它，
+    // 下面 `r == -1` 的超时分支就成了死代码；am 一旦不退（system_server 卡住），主循环永久停摆，
+    // 与「看门狗拉起」那个缺陷同型。故这里显式用 sigaction 且 sa_flags = 0（刻意不置 SA_RESTART）。
+    struct sigaction sa;
+    memset(&sa, 0, sizeof(sa));
+    sa.sa_handler = alarm_handler;
+    sigemptyset(&sa.sa_mask);
+    sa.sa_flags = 0;                     // 关键：不置 SA_RESTART，waitpid 才会被闹钟打断
+    sigaction(SIGALRM, &sa, NULL);
     alarm(3);
     int status;
-    if (waitpid(pid, &status, 0) == -1) {
+    int r = waitpid(pid, &status, 0);
+    alarm(0);                            // 先撤闹钟再记日志：后面不需要（也不该）再被打断
+    if (r == -1) {
         write_log("am broadcast 超时");
         kill(pid, SIGKILL);
-        waitpid(pid, NULL, 0);
+        waitpid(pid, NULL, 0);           // 强杀后回收，避免僵尸
     } else if (WIFEXITED(status) && WEXITSTATUS(status) != 0) {
         // am 退出码非零 → 广播未送达，需让故障可见
         write_log("am broadcast 失败：退出码 %d（广播未送达）", WEXITSTATUS(status));
@@ -2126,7 +2140,6 @@ static void send_am_broadcast(int mode, int target, int windOC, int coldOC, int 
         debug_log(debug_exec, "am broadcast 已发送 mode=%d target=%d windOC=%d coldOC=%d windLevel=%d",
                   mode, target, windOC, coldOC, windLevel);
     }
-    alarm(0);
     signal(SIGALRM, SIG_DFL);
 }
 
@@ -3558,7 +3571,8 @@ static void write_webui_data(void) {
 
 // ======================== 看门狗反向保活（WD_KEEPALIVE）========================
 // 需求：除既有的「service.d 脚本（看门狗）守护守护进程」之外，再加反方向——守护进程每
-// WD_KEEPALIVE_INTERVAL 秒探测看门狗是否存活，不在就把它拉起来（开关 WD_KEEPALIVE，默认开）。
+// WD_KEEPALIVE_INTERVAL 秒探测看门狗是否存活，不在就把它拉起来（开关 WD_KEEPALIVE，**默认关**：
+// 见声明处的理由；本机制尚未真机验证，先留作显式开启）。
 //
 // 破环设计（本节全部理由都在前两条，缺一条就会成环：守护进程拉起看门狗 → 看门狗杀掉守护进程 →
 // 新守护进程又发现没看门狗 → 每分钟自杀重启一次）：
@@ -3570,16 +3584,28 @@ static void write_webui_data(void) {
 //   3) 拉起冷却（WD_SPAWN_MIN_INTERVAL，且跨进程重启持久化到私有目录小文件）：把最坏情况
 //      （两侧判据同时假阴）从「每分钟多一个」压到「每 5 分钟多一个」。
 //
-// 判据为何是 cmdline 子串而不是 /proc/<pid>/exe：脚本的 exe 是 /system/bin/sh，与一切 shell 共享，
-// 无法据此识别；子串匹配的假阳只是「这一分钟不拉」（下一轮复查），假阴才是要多花代价的那个。
+// 判据为何是 cmdline 逐参数整等、而不是 /proc/<pid>/exe 也不是子串：脚本的 exe 是 /system/bin/sh，
+// 与一切 shell 共享，无法据此识别；子串（无论对整段还是对第一个参数）都不对，理由是两条各错一半的坑，
+// 详见 cmdline_has_script_arg() 的注释。
+//
+// 两个曾经踩过的坑（2026-09-28 修，都是"看着对、真机必然错"的那类，改动时别退回去）：
+//   · 判活用 strstr 搜 cmdline 缓冲区 → 只搜到 argv[0]（NUL 截断）→ 对 `sh <脚本>` 形态恒判「未见」
+//     → 冷却与去抖全被绕开，"拉起"每次都会发生。现按 NUL 逐参数整等。
+//   · 拉起时直接 exec 脚本 + 父进程 waitpid 回收 → 脚本第 3 节是常驻循环，子进程永不退出，
+//     而 3s 定时因 SA_RESTART 打不断 waitpid → 父进程永久阻塞 = 主循环停摆（进程还在、日志与曲线
+//     停更、不下发 BLE，且两个方向的判活都看不出来）。现改 double-fork，只回收必然速退的中间层。
+//
 // 降级（全部只记日志、不影响温控主链）：/proc 读不到 → 按未见处理但受冷却约束；两条候选路径都不
-// 存在 → 记日志（节流）且不重建脚本内容（等 app 重新部署）；拉起失败 → 记日志 + 连续失败退避。
+// 存在 → 记日志（节流）且不重建脚本内容（等 app 重新部署）；拉起失败 → 记日志 + 连续失败退避；
+// 拉起成功但下一轮仍未见 → 记一条日志（exec 结果在 double-fork 下只能这样观测，见 spawn_watchdog）。
 #define WD_KEEPALIVE_INTERVAL   60    // 检查间隔（秒）
 #define WD_MISS_CONFIRM         2     // 连续未见次数阈值（≥ 此值才拉起）
 #define WD_SPAWN_MIN_INTERVAL   300   // 拉起冷却（秒）：冷却窗内即使判定缺失也只记日志、不动作
 #define WD_SPAWN_BACKOFF_FAILS  3     // 连续拉起失败次数阈值：达到后退避到 WD_SPAWN_BACKOFF
 #define WD_SPAWN_BACKOFF        600   // 连续失败退避（秒）
 #define WD_LOG_MIN_INTERVAL     600   // 「脚本不存在」类日志的最小间隔（秒），防每分钟刷日志
+#define WD_REAP_TRIES           30    // 回收"拉起时那层中间进程"的轮询次数（× WD_REAP_STEP_US ≈ 3 秒上限）
+#define WD_REAP_STEP_US         100000 // 回收轮询的间隔（微秒）：用轮询而非阻塞 waitpid，杜绝无限等待
 #define WD_NAME                 "b6x-tempctrl.sh"   // 与 Deployer.SCRIPT_NAME 及脚本内的 SCRIPT_NAME 一致
 #define WD_SPAWN_STAMP_PATH     PRIVATE_DIR "/tempctrl_wd_spawn"   // 冷却时间戳（私有目录，随卸载自清）
 #define SH_BIN                  "/system/bin/sh"     // 脚本必须经 sh 执行（/data/adb 是 noexec 挂载）
@@ -3598,11 +3624,45 @@ static int    wd_miss_hits    = 0;  // 连续未见次数
 static int    wd_fail_hits    = 0;  // 连续拉起失败次数（成功后清零）
 static time_t wd_spawn_at     = 0;  // 本进程内上次拉起时刻
 static time_t wd_last_log_at  = 0;  // 「脚本不存在」日志最近一次输出时刻（节流）
+static int    wd_spawn_pending = 0; // 1=上一轮已交出控制权、这一轮要看它是否真起来（double-fork 后的唯一观测点）
+
+/**
+ * cmdline 里是否有**某个参数恰好等于**脚本路径（两条候选之一）或脚本名。
+ *
+ * 为什么必须逐参数整等（两个各错一半的坑，2026-09-28 修）：
+ *   ① `/proc/<pid>/cmdline` 是 **NUL 分隔**的参数序列，而 `strstr()` 按 C 字符串工作——搜索在
+ *      第一个 NUL 处就结束了，实际**只搜到了 argv[0]**。看门狗的真实形态是 `sh <脚本路径>`
+ *      （app 的 `nohup sh <路径>`、本文件的 execv、各 root 方案的启动方式都如此），脚本路径落在
+ *      argv[1] → 子串搜索恒不命中 → 判活恒为「未见」→ 去抖与冷却全被绕开、"拉起"每次都会发生。
+ *   ② 若改成对整段字节做子串搜索，`cp`/`rm`/`md5sum <脚本>` 这类命令行里出现过路径名的临时进程
+ *      又会被认成看门狗（假阳 → 该轮不拉，若长期存在就永远不拉）。
+ * 逐参数整等同时避开这两者。**口径与 app 侧 `wd_pids()` 只是相近、并不相同**（别当成可互换）：
+ * app 侧先 `grep -l '^sh$' /proc/[0-9]*/comm` 筛掉一切非 shell，再用 `grep -qx` 只比对两条
+ * **完整**候选路径；本侧不筛 comm，且额外接受裸脚本名 `b6x-tempctrl.sh`。两个可观察差异：
+ * `md5sum`/`cp <完整路径>` 这类临时进程在本侧算「在」（app 侧不算），相对调用
+ * `sh b6x-tempctrl.sh` 在本侧也算「在」（app 侧不算）。两者都只让该轮不拉，无停摆风险。
+ * 代价：非常规包装（如 `sh -c 'sh <路径>'`，参数不是裸路径）会漏 → 假阴 → 多拉一个
+ * 站岗实例（受冷却与"存在即不重复拉起"约束，代价可控）。脚本名同样按整等，不再用子串，
+ * 免得 `<路径>.new` 这类中转副本被算进来。
+ */
+static int cmdline_has_script_arg(const char *buf, ssize_t n) {
+    for (ssize_t pos = 0; pos < n; ) {
+        const char *arg = buf + pos;
+        size_t len = strlen(arg);          // 安全：调用方已在 buf[n] 处补 '\0'
+        for (int i = 0; i < SVC_SCRIPT_PATHS_N; i++) {
+            if (len == strlen(SVC_SCRIPT_PATHS[i]) &&
+                strncmp(arg, SVC_SCRIPT_PATHS[i], len) == 0) return 1;
+        }
+        if (len == strlen(WD_NAME) && strncmp(arg, WD_NAME, len) == 0) return 1;
+        pos += (ssize_t)len + 1;           // 跳过该参数与它的 NUL 分隔符
+    }
+    return 0;
+}
 
 /**
  * 扫 /proc 判看门狗是否存活（不经 shell、不 fork pgrep，范式同 app_process_scan）。
  * 命中返回 1；/proc 打不开返回 -1（调用方按「未见」处理，但受冷却约束）。
- * 匹配口径：cmdline 里出现两条候选路径之一，或出现脚本名（与 app 侧 pgrep -f 同口径的宽松匹配）。
+ * 匹配口径：cmdline 的某个参数整等于两条候选路径之一或脚本名（见 cmdline_has_script_arg）。
  */
 static int watchdog_alive(void) {
     DIR *d = opendir("/proc");
@@ -3620,12 +3680,7 @@ static int watchdog_alive(void) {
         close(fd);
         if (n <= 0) continue;
         buf[n] = '\0';
-        // 不同 root 方案下看门狗 shell 的 cmdline 形态不一样（sh <路径> / shebang 直接 exec / sh -c），
-        // 故按子串匹配而不做整 token 全等：本方向的假阳只是「这一分钟不拉」。
-        for (int i = 0; i < SVC_SCRIPT_PATHS_N && !alive; i++) {
-            if (strstr(buf, SVC_SCRIPT_PATHS[i]) != NULL) alive = 1;
-        }
-        if (!alive && strstr(buf, WD_NAME) != NULL) alive = 1;
+        alive = cmdline_has_script_arg(buf, n);
     }
     closedir(d);
     return alive;
@@ -3658,10 +3713,21 @@ static void wd_spawn_stamp_write(time_t now) {
 }
 
 /**
- * 拉起看门狗脚本：fork → setsid（脱离本进程会话，避免连带）→ stdio 全重定向 /dev/null →
- * execv(SH_BIN, {sh, <脚本路径>})。**绝对路径 + 不经 PATH**（同 am / dumpsys 那条的既有教训）。
- * 父进程限时 3s 回收；退出码 127 视为 exec 失败（子进程 _exit(127) 约定）。
- * 返回 1=已成功交出控制权，0=失败（已记日志）。
+ * 拉起看门狗脚本：**double-fork** —— 父 → 中间层（setsid 后立刻退出）→ 孙层（真正的看门狗：
+ * stdio 全重定向 /dev/null → execv(SH_BIN, {sh, <脚本路径>})；**绝对路径 + 不经 PATH**，同
+ * am / dumpsys 那条的既有教训）。
+ *
+ * 为什么要 double-fork（2026-09-28 修）：脚本第 3 节是 `while true; do sleep 300; …` 常驻循环，
+ * 子进程**永不退出**。旧实现让父进程直接 `waitpid` 这个子进程，而 3s 定时打不断它（本文件的
+ * `signal()` 是 BSD 语义带 SA_RESTART，`waitpid` 会被自动重启）→ 父进程永久阻塞在 wait4，
+ * 主循环停摆（进程还在、日志与曲线停更、不下发 BLE，且两个方向的判活都是"按进程在不在"判，
+ * 谁也看不出来）。改成只回收"必然速退的中间层"后，父进程的等待有确定上界。
+ *
+ * exec 是否成功无法在本函数内观测（父进程不再回收孙层，也就拿不到它的退出码）——由下一轮
+ * `watchdog_alive()` 复查：仍为「未见」时由 maybe_keepalive_watchdog() 记一条日志。这是刻意的
+ * 取舍：不为了一条更早的日志引入阻塞或额外复杂度。
+ * 孙层被 init 收养（无僵尸）；`setsid` 保留，与父进程会话解耦。
+ * 返回 1=已交出控制权（中间层已回收），0=未交出去（已记日志）。
  */
 static int spawn_watchdog(const char *path) {
     pid_t pid = fork();
@@ -3670,7 +3736,10 @@ static int spawn_watchdog(const char *path) {
         return 0;
     }
     if (pid == 0) {
-        setsid();
+        setsid();                    // 中间层脱离本进程会话并成为**新会话首进程**；孙层是它 fork 出来的，
+                                     // **不是**会话首进程，故永远拿不到控制终端（这正是 double-fork 的目的）
+        pid_t gpid = fork();         // 孙层 = 看门狗本体
+        if (gpid != 0) _exit(0);     // 中间层（含孙层派生失败）：立刻退出，好让父进程的回收立即返回
         int fd = open("/dev/null", O_RDWR);
         if (fd >= 0) {
             dup2(fd, STDIN_FILENO);
@@ -3683,24 +3752,22 @@ static int spawn_watchdog(const char *path) {
         argv[1] = (char *)path;
         argv[2] = NULL;
         execv(SH_BIN, argv);
-        _exit(127);
+        _exit(127);                  // exec 失败：退出码由下一轮判活复查间接体现（见函数注释）
     }
-    signal(SIGALRM, alarm_handler);
-    alarm(3);
-    int status;
-    int ok = 0;
-    if (waitpid(pid, &status, 0) == -1) {
-        write_log("看门狗 拉起超时（3s），已放弃本次");
+    // 父进程：只回收中间层；用 WNOHANG 轮询而非阻塞 waitpid —— 本函数的唯一职责是"交出去"，
+    // 不允许任何形式的无限等待（旧实现正是死在那里）。上界 WD_REAP_TRIES × WD_REAP_STEP_US。
+    int reaped = 0;
+    for (int i = 0; i < WD_REAP_TRIES; i++) {
+        pid_t r = waitpid(pid, NULL, WNOHANG);
+        if (r == pid || r < 0) { reaped = 1; break; }   // r<0：已被回收（ECHILD）等，同样按已回收
+        usleep(WD_REAP_STEP_US);
+    }
+    if (!reaped) {
+        write_log("看门狗 拉起超时（%dms），已放弃本次", WD_REAP_TRIES * (WD_REAP_STEP_US / 1000));
         kill(pid, SIGKILL);
-        waitpid(pid, NULL, 0);
-    } else if (WIFEXITED(status) && WEXITSTATUS(status) == 127) {
-        write_log("看门狗 拉起失败：无法执行 %s（权限或域限制？）", SH_BIN);
-    } else {
-        ok = 1;
+        waitpid(pid, NULL, WNOHANG);   // 不强等：残留由内核在它退出后回收
     }
-    alarm(0);
-    signal(SIGALRM, SIG_DFL);
-    return ok;
+    return reaped;
 }
 
 /**
@@ -3713,11 +3780,27 @@ static void maybe_keepalive_watchdog(void) {
     if (wd_check_at != 0 && now - wd_check_at < WD_KEEPALIVE_INTERVAL) return;
     wd_check_at = now;
 
-    // 1) 先查后拉：存在 → 不重复拉起（顺带清零计数）
-    if (watchdog_alive() > 0) {
+    // 1) 先查后拉：存在 → 不重复拉起（顺带清零计数）。返回值须区分「未见(0)」与「/proc 读不到(-1)」，
+    //    两者在 1.5) 的日志措辞里必须分开，否则排障时会把「判据降级」归因成「看门狗没起来」。
+    int alive = watchdog_alive();
+    if (alive > 0) {
+        if (wd_spawn_pending) {   // 上一轮交出去的实例已就位（double-fork 后唯一的成功确认）
+            wd_spawn_pending = 0;
+            debug_log(debug_main, "看门狗 复查 上次拉起的实例已在");
+        }
         wd_miss_hits = 0;
         wd_fail_hits = 0;
         return;
+    }
+    // 1.5) 上一轮报告「已拉起」、这一轮仍未见 → 脚本在、看门狗没起来（exec 失败 / 域限制 / 脚本自己秒退）。
+    //      这是 double-fork 之后能观测 exec 结果的唯一位置（父进程不再回收孙层，见 spawn_watchdog）。
+    if (wd_spawn_pending) {
+        wd_spawn_pending = 0;
+        if (alive < 0) {
+            write_log("看门狗 上次拉起后仍未见实例（本次 /proc 不可读，判据降级，非看门狗未起）");
+        } else {
+            write_log("看门狗 上次拉起后仍未见实例（脚本存在但看门狗未起来）");
+        }
     }
     // 2) 连续 WD_MISS_CONFIRM 次未见才拉（单次采样可能是瞬态）
     if (++wd_miss_hits < WD_MISS_CONFIRM) {
@@ -3742,6 +3825,7 @@ static void maybe_keepalive_watchdog(void) {
     wd_spawn_at = now;
     if (spawn_watchdog(path)) {
         wd_spawn_stamp_write(now);
+        wd_spawn_pending = 1;   // 下一轮复查它是否真起来（exec 结果只能这样观测）
         wd_miss_hits = 0;   // 已拉起：计数清零，下一轮以判活结果为准
         wd_fail_hits = 0;
         write_log("看门狗 连续 %d 次未见 → 已拉起 %s", WD_MISS_CONFIRM, path);
