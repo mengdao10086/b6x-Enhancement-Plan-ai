@@ -254,6 +254,10 @@ Caused by: java.lang.NullPointerException: Attempt to read from field 'android.o
 
 **真机判据**：停摆时 `/proc/<pid>/syscall` 首字段 = **260**（arm64 `wait4`）、`/proc/<pid>/task/*/children` 里有 **`sh <脚本路径>`**、且日志尾**没有**「看门狗 连续 2 次未见 → 已拉起」这行（fork 发生了、函数从未返回）；修复后静置 3 分钟日志与曲线 mtime 持续前进、`syscall` 永不为 260。
 
-**状态**：**已修复（2026-09-28）**。C 端**未真编译**（CI 是唯一门禁）、改后行为**未真机验证**（见未解决区 §7 的判据清单）。
+**状态**：**已修复（2026-09-28）**。CI **真编译已通过**（提交 `8447e76f`，NDK `aarch64-linux-android21-clang`，编译步骤实跑、非缓存命中）。
+
+**2026-09-28 用户真机确认（部分）**：装上含本修复的包后，界面「拉起daemon」**不再等满 5 秒延迟再走 `kill -9`** —— 旧实例能正常响应 SIGTERM 退出。这与「double-fork 去掉了主线程永久阻塞」的预期一致：修复前该路径几乎固定要等满延迟再 `kill -9`，那正是旧实例卡在 `wait4` 里、SIGTERM 只置标志而 `wait4` 被 `SA_RESTART` 自动重启的表现。
+
+**仍未验证**：① 判活（逐参数整等）在真机的命中率与假阴频率；② 「默认关」对已有 `profile.conf` 的设备不生效（旧值优先，需在界面里关掉或删掉该行）；③ `am broadcast` 的真 3s 超时是否确实能打断 `waitpid`（本机无 C 编译器、无设备，只能静态判据）。完整判据清单见未解决区 §7。
 
 **同日顺带修（同类坑，2026-09-28 用户批准）**：`am broadcast` 下发路径（`tempctrl.c:send_am_broadcast()`）是**同一个坑** —— 用 `signal()` 装 SIGALRM（BSD 语义带 `SA_RESTART`）→ 被中断的 `waitpid` 自动重启 → 那句「am broadcast 超时」与随后的强杀是**死代码**；`am` 一旦挂死（system_server 卡住），主循环照样永久停摆 —— 正是本节判据里列的「`am`/`pm`/`dumpsys` 命令子进程挂死」那一类。已改为显式 `sigaction` 且 `sa_flags = 0`（刻意不置 `SA_RESTART`），并把 `alarm(0)` 提到 `waitpid` 返回之后；3s 上界、既有失败日志与强杀逻辑不变。同样**未真编译、未真机验证**。
