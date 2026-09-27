@@ -88,7 +88,8 @@
       "keys": [
         "APP_LAUNCH_COOLDOWN",
         "APP_LAUNCH_SCREEN_GATE",
-        "APP_WATCHDOG"
+        "APP_WATCHDOG",
+        "WD_KEEPALIVE"
       ]
     },
     {
@@ -102,7 +103,8 @@
         "UI_CURVE_FILTER",
         "UI_BACK_HIDE",
         "UI_START_PAGE",
-        "UI_DEPLOY_ENTRY"
+        "UI_DEPLOY_ENTRY",
+        "UI_AUTO_UPDATE"
       ]
     }
   ],
@@ -1408,42 +1410,21 @@
       "key": "CPU_AFFINITY",
       "group": "sysfs",
       "role": "setting",
-      "type": "multi",
-      "label": "CPU 亲和核范围",
-      "desc": "守护进程自身被限制运行的核区间（起始核 结束核）；运行期按本机 /sys/devices/system/cpu/present 取交集后生效，值非法或交集为空则回落代码默认 0 5",
+      "type": "path",
+      "label": "CPU 亲和核/簇",
+      "desc": "守护进程自身被限制运行的核。首字符 c = 簇模式（c 后每一位数字是一个簇号：c0 只用 0 号簇、c123 用 1/2/3 号簇；簇边界按本机内核拓扑现算）；否则按核号：单值 0、范围 0-1、列表 0,2-3，旧写法 0 5 仍按区间 0~5 解释。运行期与本机 /sys/devices/system/cpu/present 取交集后生效，值非法或交集为空则回落代码默认 c0；**值内不能带行内注释**（如 0 5  # 大核 会整串判非法并回落默认 c0）",
       "unit": "",
-      "unitNote": "多值键，各字段单位见 fields",
-      "default": [
-        0,
-        5
-      ],
-      "factory": [
-        0,
-        5
-      ],
+      "unitNote": "文本键（簇表达式或核号列表），无单位",
+      "default": "c0",
+      "factory": "c0",
       "min": null,
       "max": null,
       "requires": [
         "SYSFS_ENABLED"
       ],
       "daemonConsumes": true,
-      "rangeNote": "范围逐字段见 fields；运行期与本机核数取交集，交集为空回落默认",
-      "fields": [
-        {
-          "label": "起始核",
-          "unit": "核心编号",
-          "min": 0,
-          "max": 7,
-          "default": 0
-        },
-        {
-          "label": "结束核",
-          "unit": "核心编号",
-          "min": 0,
-          "max": 7,
-          "default": 5
-        }
-      ]
+      "rangeNote": "文本键，无 schema 取值域；语法与非法值回落见 desc（运行期按本机核集合取交集，交集为空回落默认 c0）",
+      "fields": null
     },
     "LOG_FILE": {
       "key": "LOG_FILE",
@@ -1582,6 +1563,23 @@
       "requires": [
         "APP_LAUNCH_ENABLED"
       ],
+      "daemonConsumes": true,
+      "fields": null
+    },
+    "WD_KEEPALIVE": {
+      "key": "WD_KEEPALIVE",
+      "group": "launch",
+      "role": "setting",
+      "type": "switch",
+      "label": "双向保活",
+      "desc": "守护进程每 60 秒探测 service.d 看门狗脚本是否存活，连续两次未见才拉起（存在则不重复拉起）；关闭则退回只有看门狗守护守护进程的单向模式",
+      "unit": "",
+      "unitNote": "布尔开关，取值 0/1，无单位",
+      "default": 1,
+      "factory": 1,
+      "min": 0,
+      "max": 1,
+      "requires": [],
       "daemonConsumes": true,
       "fields": null
     },
@@ -1752,6 +1750,23 @@
       "type": "switch",
       "label": "需重新部署时进状态页",
       "desc": "需重新部署时先进入状态页并给出提示；关闭则照常进入默认页面",
+      "unit": "",
+      "unitNote": "布尔开关，取值 0/1，无单位",
+      "default": 1,
+      "factory": 1,
+      "min": 0,
+      "max": 1,
+      "requires": [],
+      "daemonConsumes": false,
+      "fields": null
+    },
+    "UI_AUTO_UPDATE": {
+      "key": "UI_AUTO_UPDATE",
+      "group": "webui",
+      "role": "setting",
+      "type": "switch",
+      "label": "自动更新",
+      "desc": "设备上的部署产物与 APK 内不一致时，由 service.d 脚本在开机时自动重装并重启守护进程；关闭则只在 app 内弹窗请求",
       "unit": "",
       "unitNote": "布尔开关，取值 0/1，无单位",
       "default": 1,

@@ -40,8 +40,10 @@ import java.util.Locale;
  * 自动重试（否则每次冷启动都弹系统授权框）。成功则弹窗问是否立即一键部署。
  *
  * <p><b>脚本自动纠正</b>：{@code service.d} 脚本是纯文本、可无损重推，故探测到它与 APK 内
- * 资源哈希不一致时自动重推一次（<b>不动二进制</b> —— 重推二进制要重启守护进程，代价高得多，
- * 那种情况改由弹窗请求用户部署，见 {@link #armHashMismatchPrompt}）。
+ * 资源哈希不一致时自动重推一次。重推<b>会连带重启守护进程</b>（脚本与二进制是同一份部署产物，
+ * 且脚本本身就是常驻的看门狗 shell，只换盘上文件它那一层仍跑旧映像）——见
+ * {@link Deployer#updateScript()}。二进制不一致则代价高得多（要重装 + 重启），走
+ * {@link #armDeployPrompt} 的判定：自动更新开着就直接重装，否则弹窗请求用户部署。
  *
  * <h3>刷新分两条路径（消闪烁）</h3>
  * 状态区是<b>单个 TextView</b>、卡片 {@code wrap_content}，一旦把约 8 行的结果换成 1 行忙文本，
@@ -66,6 +68,27 @@ public class StatusFragment extends Fragment implements PageAware {
 
     /** 一副图标两种状态：图标本身指向右，展开时顺时针转 90° 指向下（同配置页分组卡头）。 */
     private static final float ARROW_EXPANDED_ROTATION = 90f;
+
+    /** 待弹的部署请求（探测阶段判定、主线程回调消费）：不弹。 */
+    private static final int PROMPT_NONE = 0;
+    /** 待弹：设备上的二进制与 APK 内不一致（已部署过）。 */
+    private static final int PROMPT_HASH_MISMATCH = 1;
+    /** 待弹：从没部署过（设备上没有二进制）。 */
+    private static final int PROMPT_NOT_DEPLOYED = 2;
+    /** 待弹：二进制就位且内容一致，但守护进程没在跑。 */
+    private static final int PROMPT_NOT_RUNNING = 3;
+
+    /**
+     * 三种「待弹」情形的去重标记前缀。
+     *
+     * <p>都写进 {@link Deployer#KEY_HASH_PROMPTED_MD5} 这同一个键（值形如 {@code notdeployed:&lt;md5&gt;}）：
+     * 每种情形各占一个前缀，故同一个 APK 版本里每种最多问一次；装了新 APK（指纹变了）会重新武装。
+     * 沿用旧键是为了不给升级再加一个一次性标记 —— 旧值（裸 md5）与新格式对不上，
+     * 升级后至多每个情形多问一次。
+     */
+    private static final String MARK_NOT_DEPLOYED = "notdeployed:";
+    private static final String MARK_HASH_MISMATCH = "hash:";
+    private static final String MARK_NOT_RUNNING = "notrunning:";
 
     /** 静默刷新的最小间隔：30 秒内的重复触发不再跑 su 探测（该路径会顺带自动重推脚本）。 */
     private static final long PROBE_MIN_INTERVAL_MS = 30_000L;
@@ -94,8 +117,17 @@ public class StatusFragment extends Fragment implements PageAware {
     private boolean firstProbeDone;
     /** 后台任务里置位、主线程回调读取：本次刚拿到 root 授权，需弹部署确认。 */
     private volatile boolean rootJustGranted;
-    /** 后台任务里置位、主线程回调读取：二进制哈希不一致，且本 APK 版本尚未提示过。 */
-    private volatile boolean hashMismatchPending;
+    /** 后台任务里置位、主线程回调读取：这次要弹哪种部署请求（{@link #PROMPT_NONE} = 不弹）。 */
+    private volatile int pendingPrompt = PROMPT_NONE;
+    /** 后台任务里置位、主线程回调读取：自动更新开着且内容不一致 → 静默重新部署（不弹窗）。 */
+    private volatile boolean autoDeployPending;
+    /**
+     * 用户在本页点过「停止daemon」（主线程写、后台探测读）。
+     *
+     * <p>只用于抑制「守护进程没在跑」那条提示：刚停完马上又被问"要不要拉起来"很烦，
+     * 而且看门狗会在下一轮 tick 自己把它拉回来。部署 / 拉起会把这一位清掉。
+     */
+    private boolean daemonStoppedByUser;
     /** 后台任务里置位、主线程回调读取：本次部署判定是否成功（决定要不要接着自动拉起，见 {@link #deploy()}）。 */
     private volatile boolean deployOk;
     /** 上次探测的开始时刻（手动与静默共用）；静默刷新据此节流。内存态，进程重启即失效。 */
@@ -235,11 +267,12 @@ public class StatusFragment extends Fragment implements PageAware {
     }
 
     /**
-     * 探测部署状态；脚本哈希不一致且 su 可用时自动重推脚本，再复探一次。
+     * 探测部署状态；脚本哈希不一致且 su 可用时自动重推脚本（重推会连带重启守护进程），再复探一次。
      *
-     * <p>副作用：末尾按最终状态武装「二进制哈希不一致」提示（见 {@link #armHashMismatchPrompt}）。
-     * 无论走静默还是手动路径都执行 —— 该提示正是"探测才发现的事"，只在真正不一致时出现，
-     * 且同一个 APK 版本最多一次。
+     * <p>副作用两条：①按最终状态武装部署请求（三种情形见 {@link #armDeployPrompt}）；
+     * ②顺手刷新「同步清单」（见 {@link Deployer#writeSyncManifestIfNeeded()}，脚本侧在没有可用
+     * 解压工具时的降级来源；APK 没换时只是一次 stat）。两条无论走静默还是手动路径都执行 ——
+     * 它们正是"探测才发现的事"，且同一个 APK 版本最多发作一次。
      *
      * @return 可直接上屏的文本
      */
@@ -249,22 +282,36 @@ public class StatusFragment extends Fragment implements PageAware {
         final String head;
         // su 不可用时不尝试（否则每次进页面都白撞一次授权框）
         if (status.suOk && status.scriptPresent && !status.scriptHashOk) {
-            head = app.getString(deployer.updateScript().ok
-                    ? R.string.status_script_autofixed : R.string.status_script_autofix_failed) + "\n\n";
+            // 三选一，判据取自**紧随其后的那次 probe**（更晚、更权威，且不额外增加 su 往返）：
+            //   动作失败 → 失败文案；动作成功但探测显示守护进程没在跑 → 第三条文案
+            //   （重推本身成功了，说"失败"不实；说"已自动重推脚本"又把"进程没起来"盖掉，同样与事实不符）；
+            //   其余 → 成功文案。
+            Deployer.Result r = deployer.updateScript();
             status = deployer.probe();
+            int res;
+            if (!r.ok) {
+                res = R.string.status_script_autofix_failed;
+            } else if (!status.daemonRunning) {
+                res = R.string.status_script_autofixed_no_daemon;
+            } else {
+                res = R.string.status_script_autofixed;
+            }
+            head = app.getString(res) + "\n\n";
         } else {
             head = "";
         }
-        armHashMismatchPrompt(app, status);
+        // 同步清单只在这一处刷新：它是"APK 换了"才会变的东西，顺路做掉即可（失败才占一行）
+        final String manifestNote = deployer.writeSyncManifestIfNeeded();
+        armDeployPrompt(app, status);
         rememberDeployedBinMd5(app, status);
-        return head + status.describe();
+        return head + (manifestNote == null ? "" : manifestNote + "\n") + status.describe();
     }
 
     /**
      * 探测确认设备上二进制与 APK 内一致时，把设备侧 md5 落盘 —— 这是「需要重新部署」判定的缓存，
      * 供下次冷启动落页用（见 {@link Deployer#needsRedeploy}）。
      *
-     * <p>判据与提示判据互补、互不重叠：一致才记，不一致留给 {@link #armHashMismatchPrompt} 的部署请求；
+     * <p>判据与提示判据互补、互不重叠：一致才记，不一致留给 {@link #armDeployPrompt} 的部署请求；
      * 没部署过（二进制不存在）时探测到的 md5 为空，{@link Deployer#rememberDeployedBinMd5} 会拒写。
      */
     private static void rememberDeployedBinMd5(Context app, Deployer.Status status) {
@@ -287,6 +334,7 @@ public class StatusFragment extends Fragment implements PageAware {
      * 部署判定失败（{@code ok=false}）时<b>不接</b>：盘上没换成功，重启旧映像没有意义。
      */
     private void deploy() {
+        daemonStoppedByUser = false;   // 部署结束会接着拉起（见本方法的 after 回调）
         final Context app = requireContext().getApplicationContext();
         runAsync(getString(R.string.status_busy_deploy), () -> {
             Deployer.Result result = Deployer.get(app).deploy();
@@ -306,12 +354,15 @@ public class StatusFragment extends Fragment implements PageAware {
     }
 
     private void startDaemon() {
+        daemonStoppedByUser = false;   // 用户明确要拉起：把「刚停过」的抑制位清掉
         final Context app = requireContext().getApplicationContext();
         runAsync(getString(R.string.status_busy_start),
                 () -> Deployer.get(app).startDaemon().describe(), false, true);
     }
 
     private void stopDaemon() {
+        // 「没在跑」那条提示的抑制位：刚点过停止就别马上再问"要不要拉起来"（见 armDeployPrompt）
+        daemonStoppedByUser = true;
         final Context app = requireContext().getApplicationContext();
         runAsync(getString(R.string.status_busy_stop),
                 () -> Deployer.get(app).stopDaemon().describe(), false, true);
@@ -435,11 +486,28 @@ public class StatusFragment extends Fragment implements PageAware {
                 }
                 if (rootJustGranted) {
                     rootJustGranted = false;
-                    // 刚拿到授权：状态区已显示"root 可用"，这里只问要不要顺势部署
+                    // 刚拿到授权：状态区已显示"root 可用"，这里只问要不要顺势部署。
+                    // 这一支优先于「自动更新」的静默部署 —— 用户刚授权，给他一次明确的确认。
+                    // 同一次探测武装的另一条请求就地作废：否则紧随其后的部署回调会把它当成
+                    // 这次探测刚发现的再弹一遍（实测路径：首启授权→部署成功→又弹"尚未部署"）。
+                    pendingPrompt = PROMPT_NONE;
                     showDeployPrompt();
-                } else if (hashMismatchPending) {
-                    hashMismatchPending = false;
-                    showHashMismatchPrompt();
+                } else if (autoDeployPending) {
+                    autoDeployPending = false;
+                    // 「自动更新」开着且设备上的内容旧了：不弹窗，直接重装（写进操作记录，
+                    // 让用户能看出"刚才自动做了什么"）。deploy() 结束会自己接着拉起守护进程。
+                    appendLog(getString(R.string.status_auto_deploy_log));
+                    deploy();
+                } else if (pendingPrompt != PROMPT_NONE) {
+                    final int kind = pendingPrompt;
+                    pendingPrompt = PROMPT_NONE;
+                    if (kind == PROMPT_HASH_MISMATCH) {
+                        showHashMismatchPrompt();
+                    } else if (kind == PROMPT_NOT_DEPLOYED) {
+                        showNotDeployedPrompt();
+                    } else {
+                        showNotRunningPrompt();
+                    }
                 }
                 if (after != null) {
                     after.run();
@@ -455,32 +523,66 @@ public class StatusFragment extends Fragment implements PageAware {
     }
 
     /**
-     * 判定是否需要为「二进制哈希不一致」弹一次部署请求（已部署过但内容与 APK 内不符）。
+     * 判定这次探测要不要弹部署请求（三种情形），或（开关开着时）改为静默重新部署。
      *
-     * <p><b>判据</b>：设备上存在二进制（{@code binExists}）且哈希对不上（{@code !binHashOk}）。
-     * 二进制不存在＝还没部署过，走「一键部署」即可，不在此处打扰；
-     * {@code binExpectedMd5} 为空＝APK 内资源缺失，无从比对。
+     * <p><b>三种情形互斥，按此优先级取一条</b>：
+     * <ol>
+     *   <li>{@link #PROMPT_HASH_MISMATCH}：二进制在、内容与 APK 内不一致（原有行为）。</li>
+     *   <li>{@link #PROMPT_NOT_DEPLOYED}：二进制不在 = 从没部署过。</li>
+     *   <li>{@link #PROMPT_NOT_RUNNING}：二进制在且一致，但守护进程没在跑。</li>
+     * </ol>
      *
-     * <p><b>去重</b>：把 APK 侧的 {@code expectedMd5} 落盘，同一个值最多提示一次。
-     * 故「装了新 APK」体现为 expected 变了 → 重新武装提示；重装同一个 APK 不会重复打扰。
-     * 设备侧哈希被改坏（expected 未变）时，用户在第一次提示后没部署就不再弹——
-     * 这是"每版本最多一次"的必然含义，状态区里仍逐次列出两个哈希供比对。
+     * <p><b>为什么三种都要 su 可用</b>：su 不通时 {@code probe()} 里 {@code binExists} 必为 false
+     * （它来自同一趟 su 往返的输出），不加这一条会让未 root 的设备也弹一次部署请求
+     * （去重标记只保证不重复问，第一次仍会弹；且 su 不通时点「一键部署」注定失败）。
+     * 首启那次拿 root 的提示另有其路（见 {@link #firstProbe}）。
+     * {@code binExpectedMd5} 为空＝APK 内资源缺失，同样无从判定。
      *
-     * <p><b>先落标记再动作</b>（同 {@link #KEY_ROOT_TRIED}）：弹窗还没显示就已落盘，
+     * <p><b>「自动更新」开着时的分工</b>（见 {@link Deployer#isAutoUpdateEnabled}）：
+     * 第 1 种属于"设备上的内容旧了"，正是开关的语义 → 不弹，改为在回调里静默重新部署
+     * （{@link #autoDeployPending}）。第 2、3 种<b>永远只弹</b>：用户从没同意过部署（或刚主动停过
+     * 进程），替他决定不合适；设备端脚本那一侧也是同一分工（从未部署过不自动装）。
+     *
+     * <p><b>去重</b>：把「情形前缀 + 该情形下的指纹」落盘，同一个值最多提示一次
+     * （指纹取 APK 侧 expected md5 或设备侧 bin md5，都随 APK 更新而变 →
+     * 装了新 APK 会重新武装；重装同一个 APK 不会重复打扰）。
+     * <b>先落标记再动作</b>（同 {@code KEY_ROOT_TRIED}）：弹窗还没显示就已落盘，
      * 中途进程被杀也不会下次再弹。
      */
-    private void armHashMismatchPrompt(Context app, Deployer.Status status) {
-        hashMismatchPending = false;   // 每次探测重新判定，不留上一次的残留
-        if (!status.binExists || status.binHashOk || status.binExpectedMd5.isEmpty()) {
+    private void armDeployPrompt(Context app, Deployer.Status status) {
+        pendingPrompt = PROMPT_NONE;   // 每次探测重新判定，不留上一次的残留
+        autoDeployPending = false;
+        if (!status.suOk || status.binExpectedMd5.isEmpty()) {
+            return;
+        }
+        final int kind;
+        final String mark;
+        if (!status.binExists) {
+            kind = PROMPT_NOT_DEPLOYED;
+            mark = MARK_NOT_DEPLOYED + status.binExpectedMd5;
+        } else if (!status.binHashOk) {
+            kind = PROMPT_HASH_MISMATCH;
+            mark = MARK_HASH_MISMATCH + status.binExpectedMd5;
+        } else if (!status.daemonRunning) {
+            if (daemonStoppedByUser) {
+                return;   // 用户刚点过「停止daemon」：别马上又问"要不要拉起来"
+            }
+            kind = PROMPT_NOT_RUNNING;
+            mark = MARK_NOT_RUNNING + status.binMd5;
+        } else {
             return;
         }
         final SharedPreferences prefs =
                 app.getSharedPreferences(Deployer.PREFS_ROOT_PROBE, Context.MODE_PRIVATE);
-        if (status.binExpectedMd5.equals(prefs.getString(Deployer.KEY_HASH_PROMPTED_MD5, null))) {
+        if (mark.equals(prefs.getString(Deployer.KEY_HASH_PROMPTED_MD5, null))) {
             return;
         }
-        prefs.edit().putString(Deployer.KEY_HASH_PROMPTED_MD5, status.binExpectedMd5).apply();
-        hashMismatchPending = true;
+        prefs.edit().putString(Deployer.KEY_HASH_PROMPTED_MD5, mark).apply();
+        if (kind == PROMPT_HASH_MISMATCH && Deployer.isAutoUpdateEnabled(app)) {
+            autoDeployPending = true;
+            return;
+        }
+        pendingPrompt = kind;
     }
 
     // ==================== 操作记录折叠 ====================
@@ -561,15 +663,37 @@ public class StatusFragment extends Fragment implements PageAware {
         }
     }
 
-    /** 二进制哈希不一致：请求重新部署（去重见 {@link #armHashMismatchPrompt}）。 */
+    /** 二进制与 APK 内不一致：请求重新部署（去重见 {@link #armDeployPrompt}）。 */
     private void showHashMismatchPrompt() {
+        showDeployRequestPrompt(R.string.status_hash_title, R.string.status_hash_message,
+                R.string.status_action_deploy, this::deploy);
+    }
+
+    /** 从没部署过：请求一键部署（**不自动装** —— 用户此前从没同意过部署）。 */
+    private void showNotDeployedPrompt() {
+        showDeployRequestPrompt(R.string.status_notdeployed_title, R.string.status_notdeployed_message,
+                R.string.status_action_deploy, this::deploy);
+    }
+
+    /** 二进制就位但进程没在跑：请求拉起（动作是"拉起 daemon"，不是重装一遍）。 */
+    private void showNotRunningPrompt() {
+        showDeployRequestPrompt(R.string.status_notrunning_title, R.string.status_notrunning_message,
+                R.string.status_action_start, this::startDaemon);
+    }
+
+    /**
+     * 三条部署请求共用的对话框：标题/正文/肯定按钮文案 + 肯定动作各不同，其余一致。
+     *
+     * <p>否定按钮一律「稍后」（不动作）；去重标记已在探测阶段落盘，故点「稍后」不会下次又问。
+     */
+    private void showDeployRequestPrompt(int titleRes, int messageRes, int confirmRes, Runnable action) {
         if (!isAdded()) {
             return;
         }
         new AlertDialog.Builder(requireContext())
-                .setTitle(R.string.status_hash_title)
-                .setMessage(R.string.status_hash_message)
-                .setPositiveButton(R.string.status_action_deploy, (d, w) -> deploy())
+                .setTitle(titleRes)
+                .setMessage(messageRes)
+                .setPositiveButton(confirmRes, (d, w) -> action.run())
                 .setNegativeButton(R.string.status_root_later, null)
                 .show();
     }

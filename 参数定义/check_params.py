@@ -39,7 +39,7 @@ sys.dont_write_bytecode = True   # 不在 参数定义/ 里留 __pycache__（.gi
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import gen_params  # noqa: E402  同目录模块，标准库路径规则即可导入
 
-EXPECTED_KEY_COUNT = 58
+EXPECTED_KEY_COUNT = 60
 VALID_TYPES = ("switch", "int", "multi", "path", "enum")
 
 
@@ -357,7 +357,7 @@ def fail_check_d(definition):
         raise Failure("D2 格式串核对失败 %d 条：\n  - %s"
                       % (len(problems), "\n  - ".join(problems)))
     notes.append("C 格式串核对 %d 处（%d 处格式串非字面量已跳过）" % (checked, skipped))
-    notes.append(fail_check_d3(definition, h_text))
+    notes.append(fail_check_d3(definition, h_text, c_text))
     return "D 产物形态自检：%s" % "；".join(notes)
 
 
@@ -393,11 +393,33 @@ def _default_table_rows(h_text, macro):
     return rows
 
 
-def fail_check_d3(definition, h_text):
+def _c_function_blocks(text):
+    """粗切 C 源的顶层「函数体」块（每块含它的签名行与收尾一行）。
+
+    只用于把「某层的复位行」定位到「该层的复位函数」里：以行首的 `签名 {` 起、以行首 `}` 收。
+    tempctrl.c 全篇用这一种大括号风格（收尾括号单独占行），故不解析语法。
+    """
+    blocks, cur, in_fn = [], [], False
+    for line in text.splitlines():
+        if not in_fn:
+            if re.match(r"^(?:static\s+)?[A-Za-z_][\w \*]*\([^;{]*\)\s*\{\s*$", line):
+                in_fn, cur = True, [line]
+            continue
+        cur.append(line)
+        if line.startswith("}"):
+            blocks.append("\n".join(cur))
+            in_fn = False
+    return blocks
+
+
+def fail_check_d3(definition, h_text, c_text):
     """D3 层默认值表覆盖面与取值。
 
     作用：以后新增键若忘了我复位（没进默认值表），校验直接红，而不是静默漏掉；
     同时挡住"复位时把总开关一起复位"（PERF_ENABLED 默认 1，复位会立刻自我重开）。
+    路径键不进默认值表（无 int 语义），其复位是 tempctrl.c 里的手写行，故单独核对
+    「生成头有 CFG_DEFAULT_<键>」+「C 源里有该键的复位落点」两件事（只看前者会漏掉
+    "宏在、复位行被删"——例如删掉 affinity_spec 的复位行，亲和会在层关闭后停在旧值）。
     """
     c_vars_all = definition.get("audit", {}).get("cVars", {})
     owner = {}          # C 变量 → [(键, 该取值位的默认值文本)]
@@ -447,6 +469,8 @@ def fail_check_d3(definition, h_text):
         extra = [v for v in table_vars if v not in expect]
         if extra:
             problems.append("D3 %s 含非本层取值位：%s" % (macro, extra))
+        # 本层的复位函数 = 展开本层默认值表的那个函数（与 int 取值位同源，不另立名册）
+        layer_fn = next((b for b in _c_function_blocks(c_text) if macro in b), None)
         for key in paths:
             if key in DEFAULT_TABLE_EXEMPT:
                 continue
@@ -454,6 +478,25 @@ def fail_check_d3(definition, h_text):
                 problems.append("D3 %s 为路径键，既不在默认值表、也不在白名单 %s，"
                                 "且生成头里没有 CFG_DEFAULT_%s"
                                 % (key, list(DEFAULT_TABLE_EXEMPT), key))
+                continue
+            # 复位落点：路径键的复位是手写行（不进默认值表），必须能在**本层复位函数内**看到
+            # 「C 变量与 CFG_DEFAULT_<键> 同一行」的赋值。只查宏存在（或只查"全文件出现过"）
+            # 会漏掉"复位行被删"——层开关 1→0 时该键就停在旧值，正是默认值表那条路靠 D3 挡住的。
+            cvars = [v for v in (c_vars_all.get(key) or []) if v]
+            if not cvars:
+                problems.append("D3 %s 为路径键但 audit.cVars 未给 C 变量，无法核对复位落点" % key)
+                continue
+            if layer_fn is None:
+                scope, where = c_text, "tempctrl.c 内"
+            else:
+                scope, where = layer_fn, "该层复位函数（展开 %s 的那个）内" % macro
+            for cvar in cvars:
+                if not any(("CFG_DEFAULT_%s" % key) in line and cvar in line
+                           for line in scope.splitlines()):
+                    problems.append("D3 %s 的复位在%s没找到（应为同一行同时出现 %s 与 "
+                                    "CFG_DEFAULT_%s 的赋值，如 strncpy(%s, CFG_DEFAULT_%s, ...)；"
+                                    "只把默认值写进生成头、或只在别处写过一次，都不算本层复位）"
+                                    % (key, where, cvar, key, cvar, key))
 
         # 总开关 / 跨层变量不得进表；表内默认值必须等于定义
         for v, got in rows:
@@ -481,7 +524,8 @@ def fail_check_d3(definition, h_text):
     if problems:
         raise Failure("D3 默认值表覆盖面失败 %d 条：\n  - %s"
                       % (len(problems), "\n  - ".join(problems)))
-    return ("D3 默认值表覆盖面（%s；路径键 %s 单独处理，各层总开关均不在表内）"
+    return ("D3 默认值表覆盖面（%s；路径键 %s 单独处理、其余路径键逐键核对"
+            "「本层复位函数内有 CFG_DEFAULT_* 复位行」，各层总开关均不在表内）"
             % (" / ".join(counts), "、".join(DEFAULT_TABLE_EXEMPT)))
 
 

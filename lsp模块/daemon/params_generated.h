@@ -6,8 +6,8 @@
 #define PARAMS_GENERATED_H
 
 /* 键数：守护进程消费 / 仅界面读取 */
-#define CFG_DAEMON_KEY_COUNT 52
-#define CFG_WEBUI_KEY_COUNT 6
+#define CFG_DAEMON_KEY_COUNT 53
+#define CFG_WEBUI_KEY_COUNT 7
 
 /* 性能层单值键表（PERF_ENABLED=1）→ INT_CFG_KEYS[]：X(键名, C 变量, min, max) */
 #define CFG_PERF_INT_KEYS(X) \
@@ -150,10 +150,6 @@
 #define CFG_MAX_CPU_ZONE_RESCAN_1 3600
 #define CFG_MIN_CPU_ZONE_RESCAN_2 1  /* C 变量 cpu_zone_keep */
 #define CFG_MAX_CPU_ZONE_RESCAN_2 64
-#define CFG_MIN_CPU_AFFINITY_1 0  /* C 变量 affinity_cpu_lo */
-#define CFG_MAX_CPU_AFFINITY_1 7
-#define CFG_MIN_CPU_AFFINITY_2 0  /* C 变量 affinity_cpu_hi */
-#define CFG_MAX_CPU_AFFINITY_2 7
 #define CFG_MIN_LOG_MAX 0  /* C 变量 LOG_MAX */
 #define CFG_MAX_LOG_MAX 1048576
 #define CFG_MIN_APP_LAUNCH_COOLDOWN 0  /* C 变量 app_launch_cooldown */
@@ -165,6 +161,7 @@
 #define CFG_DEFAULT_BATT_TEMP_PATH "/sys/class/power_supply/battery/temp"
 #define CFG_DEFAULT_BATT_CURRENT_PATH "/sys/class/power_supply/battery/current_now"
 #define CFG_DEFAULT_CPU_TEMP_PATH_FMT "/sys/class/thermal/thermal_zone%d/temp"
+#define CFG_DEFAULT_CPU_AFFINITY "c0"
 #define CFG_DEFAULT_LOG_FILE "/data/data/com.example.waspwingtempctrl/files/tempctrl.log"
 
 /* 各层 int 取值位的**代码默认值**表：层开关由 1→0 时，tempctrl.c 展开本表把该层
@@ -232,8 +229,6 @@
     X(CPU_ZONE_MAX, 99) \
     X(cpu_zone_rescan_sec, 60) \
     X(cpu_zone_keep, 10) \
-    X(affinity_cpu_lo, 0) \
-    X(affinity_cpu_hi, 5) \
     X(LOG_MAX, 16256)
 
 #endif  /* PARAMS_GENERATED_H */

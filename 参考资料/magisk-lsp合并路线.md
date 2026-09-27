@@ -45,11 +45,11 @@
   - daemon 侧不再预创建该文件（预创建块已删），文件完全由 app 自建自用；对旧路径**不做兼容读取**（一次性切换）。
 - **单实例锁**：`flock(LOCK_EX|LOCK_NB)` 落在私有目录；取不到锁退出码 **2**（语义「已有实例在运行」，部署脚本判活/幂等可直接用），其余启动失败路径均返回 0，可区分。
   - 锁文件曾一度放 `/data/local/tmp/`，经用户复核裁定迁回私有目录。**已知后果**：app「清除数据」会连锁文件一起删，运行中的实例仍持旧 inode 上的锁 → **那一次锁失效**，兜底靠部署脚本的开机自检。
-  - `pkill` 后必须等旧进程真正退出再启动，否则新实例立刻以 2 退出；`service.d` 脚本负责轮询 `pgrep` 等真退出，不能只 `sleep 1`。
+  - `pkill` 后必须等旧进程真正退出再启动，否则新实例立刻以 2 退出；**这段轮询现在由 app 侧的停止片段负责**（每次启动前无条件先停旧实例），`service.d` 脚本自 2026-09-27 起**已不再先杀 daemon**，不能只 `sleep 1`。
 - **日志 / 曲线数据落点**：`PRIVATE_DIR/<二进制名>.log` 与 `PRIVATE_DIR/tempctrl_webui.data`；私有目录不可用时日志兜底回 `/cache/<二进制名>.log` 并写 stderr（**不静默**）。
   - 部署时由 app 以自身 uid **预创建**空 `tempctrl.log` 与 `tempctrl_webui.data`（仅不存在时建、失败不阻断部署），因为 root 创建的文件 SELinux 标签未必是 `app_data_file`——按防御性处理、不作依赖项，界面读失败仍按原样报错。C 端日志轮转是原地截断（不 rename 不重建），故预创建不会被轮转打回 root 创建。
 - **`status` 双文件原样不动**：路径、字段、预创建、`chmod 0666` 一字未改，仍在 `/data/local/tmp/`；daemon 不写 status，只 `fopen(...,"a")` 预创建，写入端只有 `MainHook`。
-- **卸载先杀看门狗 shell、再杀守护进程**：`service.d` 脚本自身的 `while true` 看门狗，其 cmdline 不含二进制路径，只 `pkill -f "$BIN"` 抓不到它——脚本文件删了 shell 还在，下一轮 tick 会把刚删的日志重建、把守护进程拉回来。做法：`pkill -f b6x-tempctrl.sh` + 轮询等真退出，**先于**守护进程杀；脚本侧另加纵深防御——每轮 tick 先查脚本文件（`$0` 含 `/` 时）与二进制是否还在，任一不在就**静默** `exit 0`（一旦写盘就又把它删掉的日志建了回来），且该检查排在任何 `log()` / `start()` 之前。
+- **卸载先杀看门狗 shell、再杀守护进程**：`service.d` 脚本自身的 `while true` 看门狗，其 cmdline 不含二进制路径，只 `pkill -f "$BIN"` 抓不到它——脚本文件删了 shell 还在，下一轮 tick 会把刚删的日志重建、把守护进程拉回来。做法：按「`comm` 为 shell 且 `cmdline` 中某个参数**恰好等于**脚本路径」精确列出看门狗 pid 再 kill + 轮询等真退出，**先于**守护进程杀（不再用 `pkill -f`——子串匹配会被 `cp`/`rm` 这类带全路径实参的无关进程命中）；脚本侧另加纵深防御——每轮 tick 先查脚本文件（`$0` 含 `/` 时）与二进制是否还在，任一不在就**静默** `exit 0`（一旦写盘就又把它删掉的日志建了回来），且该检查排在任何 `log()` / `start()` 之前。
 - **护栏键语义（已失效，2026-09-23）**：下列三个键与 `ConfigStore.daemonAccepts()` 已随「冷值动态倍率」落地一并删除，现存参数一律走 C 端钳位、界面钳制即 C 端语义。以下为当时的约定，保留作记录：`PID_KI_DYN_T` / `PID_KI_DYN_GATE` / `PID_KI_DYN_WIN` 在 C 端是**越界整组拒绝（不是钳位）**、保留旧值；界面按 min/max 钳制会让用户触发不到该分支。界面问「会不会生效」必须用 `ConfigStore.daemonAccepts()`，不得声称界面钳制等同 C 端。
 
 ---
@@ -87,7 +87,7 @@
 
 | 残留物 | 谁清 | 说明 |
 |---|---|---|
-| 看门狗 shell（`service.d` 脚本自身循环） | `Deployer`（root）：`pkill -f b6x-tempctrl.sh` + 轮询等真退出，**先于守护进程杀** | 必须杀：否则下一轮 tick 会把刚删的日志重建、并把守护进程拉回来 |
+| 看门狗 shell（`service.d` 脚本自身循环） | `Deployer`（root）：按「`comm` 为 shell 且 `cmdline` 某参数恰好等于脚本路径」精确列出 pid 再 kill + 轮询等真退出，**先于守护进程杀** | 必须杀：否则下一轮 tick 会把刚删的日志重建、并把守护进程拉回来 |
 | `service.d` 脚本（两个候选目录都 rm） | `Deployer`（root） | 不影响：脚本只在开机跑一次 |
 | `/data/local/tmp/tempctrl` | `Deployer`（root），先 kill 再 rm | unlink 不影响已运行进程 |
 | 私有目录 `tempctrl.lock` | Java，**仅确认两个进程都已退出后** | 进程活着时删会绕过单实例锁 |

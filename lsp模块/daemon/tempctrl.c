@@ -135,14 +135,11 @@ static int CPU_ZONE_MAX = 99;
 static int cpu_zone_rescan_sec = 60;   // CPU thermal_zone 全量重扫间隔（秒，CPU_ZONE_RESCAN 第一值，默认 60）
 static int cpu_zone_keep = 10;         // 保留温度值个数（CPU_ZONE_RESCAN 第二值，默认 10）
 
-// --- CPU 亲和核范围（可配置；双值：起始核 结束核）---
+// --- CPU 亲和核集合（可配置；单一输入位，两种语法：簇 c0/c123 与核号 0 / 0-1 / 0,2-3）---
 // 静态初值必须写字面量：默认值核对按字面量逐位比对它与定义 default，写成宏会被当成
-// "C 内未找到初值"而跳过核对（洞会变哑）。CPU_AFFINITY_DEF_* 是"值非法 → 回落默认"用的
-// 同一对数字，改默认值时必须与上面两行同步。
-#define CPU_AFFINITY_DEF_LO 0
-#define CPU_AFFINITY_DEF_HI 5
-static int affinity_cpu_lo = 0;   // CPU_AFFINITY 第一值（起始核）
-static int affinity_cpu_hi = 5;   // CPU_AFFINITY 第二值（结束核）
+// "C 内未找到初值"而跳过核对（洞会变哑）。运行期的"回落默认"用生成头的 CFG_DEFAULT_CPU_AFFINITY
+//（由定义 default/factory 派生），故改默认值时只须同步这两处（本行字面量 + 定义）。
+static char affinity_spec[64] = "c0";   // CPU_AFFINITY 原样字符串（解析在 apply_cpu_affinity）
 static int affinity_cfg_seen = 0; // 本次加载是否读到该键（缺键时回落默认，见 load_config）
 
 // ======================== 通用参数 ========================
@@ -407,6 +404,11 @@ static int back_hide_enabled     = 1;    // UI_BACK_HIDE：1=返回键收后台�
 static int uiprefs_last_back_hide = -1;  // 上次已写出的值（-1 = 尚未写过，首轮必写一次）
 static int uiprefs_fail_logged    = 0;   // 写失败只记一条日志，避免每轮重复刷屏
 
+// --- 看门狗反向保活开关（WD_KEEPALIVE）---
+// 声明点必须在 load_config 之前（那里第一遍读它）；实现与其余状态在文件末尾的
+// 「看门狗反向保活」小节。默认开（与定义 default/factory 一致，由 check_params.py 审计核对）。
+static int wd_keepalive_enabled = 1;     // WD_KEEPALIVE：1=守护进程反过来看护 service.d 看门狗（默认）
+
 // 双设备 BLE 连接状态
 static int b6_connected = 0;        // B6X: BLE 是否已连接
 static int b7_connected = 0;        // B7X: BLE 是否已连接
@@ -625,26 +627,13 @@ static void parse_sysfs_cfg(const char *key, int val, const char *val_str) {
         if (n >= 2) cpu_zone_keep = clamp(b, 1, 64);
         break;
     }
-    case SK_AFFINITY: {
-        // 双值：起始核 结束核
+    case SK_AFFINITY:
+        // 单一文本位：簇语法（c0/c123）或核号（0 / 0-1 / 0,2-3，旧写法 "0 5" 仍按区间）。
+        // 这里只存原样字符串（空值 = 保持原值，与其它键的空值约定一致）；值是否合法要看本机
+        // 核集合与簇划分，故判定与回落都放在 apply_cpu_affinity。
         affinity_cfg_seen = 1;
-        char *raw = trim_value((char *)val_str);
-        if (*raw == '\0') break;   // 空值 = 保持原值（与其它键的空值约定一致）
-        int a = affinity_cpu_lo, b = affinity_cpu_hi;
-        if (sscanf(raw, "%d %d", &a, &b) < 2) {
-            // 不满足双值即解析失败，回落代码默认而非"保持原值"：只吃到一半会静默沿用旧区间，
-            // 用户改错一个字符时看不出配置没生效
-            write_log("配置 CPU_AFFINITY 值非法(%s) → 回落默认 %d %d",
-                      raw, CPU_AFFINITY_DEF_LO, CPU_AFFINITY_DEF_HI);
-            reset_cpu_affinity_defaults();
-            break;
-        }
-        // 边界写字面量：审计按字面量核对 C 的 clamp 与定义 fields 的 min/max（生成的
-        // CFG_MIN/MAX_CPU_AFFINITY_* 只是参考值，审计不认，写成宏等于放弃这项核对）
-        affinity_cpu_lo = clamp(a, 0, 7);
-        affinity_cpu_hi = clamp(b, 0, 7);
+        config_read_path(affinity_spec, sizeof(affinity_spec), (char *)val_str);
         break;
-    }
     }
 }
 
@@ -846,7 +835,7 @@ static void reset_perf_layer_defaults(void) {
     hot_recover_cooldown = 0;
 }
 
-/** SYSFS 层取值位 → 代码默认值（int 位见 CFG_SYSFS_DEFAULTS；4 个路径键另行处理） */
+/** SYSFS 层取值位 → 代码默认值（int 位见 CFG_SYSFS_DEFAULTS；文本键另行处理） */
 static void reset_sysfs_layer_defaults(void) {
     CFG_SYSFS_DEFAULTS(CFG_RESET_ROW)
     // 路径键：3 个用生成头的默认值宏（char[] 不能整型赋值），strncpy 后必须补 NUL
@@ -856,16 +845,19 @@ static void reset_sysfs_layer_defaults(void) {
     BATT_CURRENT_PATH[sizeof(BATT_CURRENT_PATH) - 1] = '\0';
     strncpy(CPU_TEMP_PATH_FMT, CFG_DEFAULT_CPU_TEMP_PATH_FMT, sizeof(CPU_TEMP_PATH_FMT) - 1);
     CPU_TEMP_PATH_FMT[sizeof(CPU_TEMP_PATH_FMT) - 1] = '\0';
+    // CPU_AFFINITY 同为文本键（走 path 型通道），不在 CFG_SYSFS_DEFAULTS 里，同样手写一行
+    strncpy(affinity_spec, CFG_DEFAULT_CPU_AFFINITY, sizeof(affinity_spec) - 1);
+    affinity_spec[sizeof(affinity_spec) - 1] = '\0';
     // LOG_FILE 必须走派生函数（二进制名 + 私有目录，不可用时兜底 /cache），照抄宏会绕过兜底
     set_default_log_path();
 }
 
 #undef CFG_RESET_ROW
 
-/** CPU 亲和取值位回落代码默认值（值非法/交集为空时用；层开关 1→0 的复位另走 CFG_SYSFS_DEFAULTS） */
+/** CPU 亲和取值位回落代码默认值（值非法/交集为空时用；层开关 1→0 的复位走 reset_sysfs_layer_defaults） */
 static void reset_cpu_affinity_defaults(void) {
-    affinity_cpu_lo = CPU_AFFINITY_DEF_LO;
-    affinity_cpu_hi = CPU_AFFINITY_DEF_HI;
+    strncpy(affinity_spec, CFG_DEFAULT_CPU_AFFINITY, sizeof(affinity_spec) - 1);
+    affinity_spec[sizeof(affinity_spec) - 1] = '\0';
 }
 
 static void load_config(const char *path) {
@@ -906,6 +898,10 @@ static void load_config(const char *path) {
             // 界面键里唯一被守护进程读取的一个：本机不消费，只转写标志文件供钩子读取。
             // 与 APP_LAUNCH_ENABLED 同理，必须在第一遍读掉——否则 PERF/DEBUG/SYSFS 全关时本函数会提前 return。
             back_hide_enabled = (atoi(val_str) != 0);
+        } else if (strcmp(key, "WD_KEEPALIVE") == 0) {
+            // 反向保活开关：与 UI_BACK_HIDE 同理必须在第一遍读掉（它是基础设施，不受 PERF/DEBUG/SYSFS 层开关管辖，
+            // 三层全关时本函数会提前 return，那时也必须已生效）。
+            wd_keepalive_enabled = (atoi(val_str) != 0);
         }
     }
 
@@ -991,37 +987,158 @@ static void load_config(const char *path) {
 // ======================== CPU 亲和（把配置落到进程上） ========================
 // 时机：启动一次（main）、配置热重载各一次（main_loop 的重载块）；等待设备循环不查 mtime，
 // 故那段时间改配置不会立即生效。
+// 取值语法（单一输入位，按首字符是否 c 分派）：
+//   · 首字符 c（只认小写）→ 簇模式：c 后每一位数字是一个簇号，c0 = 只用 0 号簇、c123 = 簇 1/2/3 的并集；
+//     簇边界从内核拓扑现算（含 cpu0 的簇是 c0，其余按各簇首核号升序），不写死任何机型的核数表；
+//   · 否则按核号：单值 0、区间 0-1、列表 0,2-3；旧写法 "0 5"（两个空格分隔的十进制核号）仍按区间 0~5。
 // 顺序固定为「先迁 cpuset 组、后设亲和」：cgroup v1 的 cpuset 组 cpus 是硬上限，任务可运行的核
 // = 组 cpus ∩ 自身亲和，组内只能收窄不能放宽。本进程若落在 cpus 很窄的组里（真机
 // cpuset:/top-app/main 只给 CPU7），直接 sched_setaffinity 会被夹回。
 // 边界：只写 cgroup.procs 迁移自身，绝不改任何组的 cpus（那会连带影响前台 app 的线程）；
 // 不碰 cpu/blkio/memcg 控制器，也不碰 cgroup v2 层级（真机 0::/ 是冻结器所在层）。
 #define CPUSET_DIR "/dev/cpuset"   // 本机 cpuset v1 挂载点（mountinfo：/dev/cpuset rw,cpuset,noprefix）
+#define CPU_CLUSTER_MAX 8          // 簇数上限（手机 SoC 实际 ≤4；簇号只取单个十进制数字）
 
-/** 从核区间文件（内容如 "0-7" 或单值 "0"）读 [lo,hi]；读不到或形态不符返回 0 */
-static int read_cpu_range(const char *path, int *lo, int *hi) {
-    FILE *f = fopen(path, "r");
-    if (!f) return 0;
-    char buf[64] = "";
-    int a = -1, b = -1;
-    if (fgets(buf, sizeof(buf), f)) {
-        if (sscanf(buf, "%d-%d", &a, &b) != 2) {
-            a = -1; b = -1;
-            if (sscanf(buf, "%d", &a) == 1) b = a;
-        }
-    }
-    fclose(f);
-    if (a < 0 || b < a) return 0;
-    *lo = a;
-    *hi = b;
+// 本段一律用核集合（cpu_set_t）表达目标核，不再用「[lo,hi] 连续区间」——
+// 簇模式的各簇未必相邻（如 c0c2 跳过中间簇），区间表达不了。
+
+/** 核集合空？ */
+static int cpu_set_empty(const cpu_set_t *set) {
+    for (int c = 0; c < CPU_SETSIZE; c++)
+        if (CPU_ISSET(c, set)) return 0;
     return 1;
 }
 
+/** 核集合 super ⊇ sub？ */
+static int cpu_set_covers(const cpu_set_t *super, const cpu_set_t *sub) {
+    for (int c = 0; c < CPU_SETSIZE; c++)
+        if (CPU_ISSET(c, sub) && !CPU_ISSET(c, super)) return 0;
+    return 1;
+}
+
+/** 核集合 dst ∩= other */
+static void cpu_set_intersect(cpu_set_t *dst, const cpu_set_t *other) {
+    for (int c = 0; c < CPU_SETSIZE; c++)
+        if (!CPU_ISSET(c, other)) CPU_CLR(c, dst);
+}
+
+/** 核集合 dst |= other */
+static void cpu_set_union(cpu_set_t *dst, const cpu_set_t *other) {
+    for (int c = 0; c < CPU_SETSIZE; c++)
+        if (CPU_ISSET(c, other)) CPU_SET(c, dst);
+}
+
+/** 核集合里最小的核号；空集合返回 CPU_SETSIZE */
+static int cpu_set_first(const cpu_set_t *set) {
+    for (int c = 0; c < CPU_SETSIZE; c++)
+        if (CPU_ISSET(c, set)) return c;
+    return CPU_SETSIZE;
+}
+
+/** 核集合 → "0-3,5"（日志用；连续段折叠成区间） */
+static void cpu_set_format(const cpu_set_t *set, char *out, size_t size) {
+    size_t n = 0;
+    int c = 0;
+    if (size) out[0] = '\0';
+    while (c < CPU_SETSIZE && size && n + 1 < size) {
+        if (!CPU_ISSET(c, set)) { c++; continue; }
+        int lo = c, hi = c;
+        while (hi + 1 < CPU_SETSIZE && CPU_ISSET(hi + 1, set)) hi++;
+        const char *sep = n ? "," : "";   // 单独取出：三元表达式里的逗号会被 D2 格式串核对当成实参分隔
+        int w = snprintf(out + n, size - n, "%s%d", sep, lo);
+        if (w < 0 || (size_t)w >= size - n) break;
+        n += (size_t)w;
+        if (hi > lo) {
+            w = snprintf(out + n, size - n, "-%d", hi);
+            if (w < 0 || (size_t)w >= size - n) break;
+            n += (size_t)w;
+        }
+        c = hi + 1;
+    }
+    if (n == 0 && size) snprintf(out, size, "-");
+}
+
+/** 十六进制数字 → 值；非十六进制返回 -1 */
+static int hex_digit(char ch) {
+    if (ch >= '0' && ch <= '9') return ch - '0';
+    if (ch >= 'a' && ch <= 'f') return ch - 'a' + 10;
+    if (ch >= 'A' && ch <= 'F') return ch - 'A' + 10;
+    return -1;
+}
+
+/**
+ * 解析核集合文本。两种用法：
+ *   · allow_mask=1（内核侧：present / cpuset 的 cpus / cpufreq 的 related_cpus）—— cpulist（"0-3,5"）、
+ *     空白分隔（"0 1 2 3"）、十六进制位掩码（"0f"，右侧最低位 = cpu0）三种形态都认；
+ *   · allow_mask=0（用户配置值）—— 只认核号（cpulist 与空白分隔），字母一律判非法，
+ *     免得"a0"这种笔误被当成掩码悄悄变成另一组核。
+ * 掩码与十进制核号在**纯数字**时无法区分（"7" 既可能是 cpu7、也可能是掩码 {0,1,2}），故只把
+ * **含 a~f 的 token** 认作掩码；纯数字掩码若被误读，上层的"各簇并集必须等于 present"校验会
+ * 拒掉这一级探测源（见 clusters_accept），不会拿错误划分去设亲和。
+ * 返回 1=解析出至少一个核；0=空串或形态不符。
+ */
+static int cpu_list_parse(const char *s, cpu_set_t *set, int allow_mask) {
+    CPU_ZERO(set);
+    if (!s) return 0;
+    int any = 0;
+    const char *p = s;
+    while (*p) {
+        while (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r' || *p == ',') p++;
+        if (!*p) break;
+        const char *tok = p;
+        while (*p && *p != ' ' && *p != '\t' && *p != '\n' && *p != '\r' && *p != ',') p++;
+        size_t len = (size_t)(p - tok);
+        char buf[64];
+        if (len == 0 || len >= sizeof(buf)) return 0;
+        memcpy(buf, tok, len);
+        buf[len] = '\0';
+
+        if (allow_mask && strpbrk(buf, "abcdefABCDEF")) {   // 十六进制掩码（仅内核侧认）
+            int shift = 0;
+            for (int i = (int)len - 1; i >= 0; i--) {
+                int d = hex_digit(buf[i]);
+                if (d < 0) return 0;
+                for (int b = 0; b < 4; b++)
+                    if ((d & (1 << b)) && shift + b < CPU_SETSIZE) CPU_SET(shift + b, set);
+                shift += 4;
+            }
+            any = 1;
+            continue;
+        }
+
+        char *end = NULL;                            // 核号：N 或 N-M
+        long a = strtol(buf, &end, 10);
+        if (end == buf || a < 0) return 0;
+        long b = a;
+        if (*end == '-') {
+            char *end2 = NULL;
+            b = strtol(end + 1, &end2, 10);
+            if (end2 == end + 1 || b < a) return 0;
+            end = end2;
+        }
+        if (*end != '\0') return 0;
+        for (long c = a; c <= b && c < CPU_SETSIZE; c++) CPU_SET((int)c, set);
+        any = 1;
+    }
+    return any ? 1 : 0;
+}
+
+/** 读一个核集合文件（内容形如 "0-7" / "0-3,5" / "0 1 2 3" / "0f"）；读不到或形态不符返回 0 */
+static int cpu_list_read(const char *path, cpu_set_t *set) {
+    FILE *f = fopen(path, "r");
+    if (!f) return 0;
+    char buf[256] = "";
+    size_t n = fread(buf, 1, sizeof(buf) - 1, f);
+    buf[n] = '\0';
+    fclose(f);
+    return cpu_list_parse(buf, set, 1);   // 内核侧：三种形态都认
+}
+
 /** 读某 cpuset 组的 cpus（组目录绝对路径） */
-static int read_dir_cpus(const char *dir, int *lo, int *hi) {
+static int read_dir_cpus(const char *dir, cpu_set_t *set) {
     char path[320];
     snprintf(path, sizeof(path), "%s/cpus", dir);
-    return read_cpu_range(path, lo, hi);
+    return cpu_list_read(path, set);
 }
 
 /** 取 /proc/self/cgroup 里 cpuset 控制器（v1）的组路径（如 /top-app/main）；未挂 cpuset 返回 0 */
@@ -1061,10 +1178,10 @@ static int cpuset_join(const char *dir) {
 }
 
 /**
- * 在 base 下最多递归 depth 层，找第一个 cpus 覆盖 [lo,hi] 且非 top-app 的组并迁入。
- * 覆盖是必需条件：迁进 cpus 不含目标区间的组，亲和仍会被夹在组外核上，等于没迁。
+ * 在 base 下最多递归 depth 层，找第一个 cpus 覆盖目标核集合且非 top-app 的组并迁入。
+ * 覆盖是必需条件：迁进 cpus 不含目标核的组，亲和仍会被夹在组外核上，等于没迁。
  */
-static int cpuset_migrate_scan(const char *base, int depth, int lo, int hi,
+static int cpuset_migrate_scan(const char *base, int depth, const cpu_set_t *want,
                                char *landed, size_t size) {
     DIR *d = opendir(base);
     if (!d) return 0;
@@ -1077,11 +1194,11 @@ static int cpuset_migrate_scan(const char *base, int depth, int lo, int hi,
         snprintf(dir, sizeof(dir), "%s/%s", base, ent->d_name);
         struct stat st;
         if (stat(dir, &st) != 0 || !S_ISDIR(st.st_mode)) continue;
-        int clo = 0, chi = 0;
-        if (read_dir_cpus(dir, &clo, &chi) && clo <= lo && hi <= chi && cpuset_join(dir)) {
+        cpu_set_t cset;
+        if (read_dir_cpus(dir, &cset) && cpu_set_covers(&cset, want) && cpuset_join(dir)) {
             snprintf(landed, size, "%s", dir);
             done = 1;
-        } else if (depth > 0 && cpuset_migrate_scan(dir, depth - 1, lo, hi, landed, size)) {
+        } else if (depth > 0 && cpuset_migrate_scan(dir, depth - 1, want, landed, size)) {
             done = 1;
         }
     }
@@ -1089,23 +1206,163 @@ static int cpuset_migrate_scan(const char *base, int depth, int lo, int hi,
     return done;
 }
 
-/** 迁出到 cpus 覆盖 [lo,hi] 的组：首选根组（名字无关、最稳），写不进再扫子组；成功返回 1 */
-static int cpuset_migrate_self(int lo, int hi, char *landed, size_t size) {
+/** 迁出到 cpus 覆盖目标核集合的组：首选根组（名字无关、最稳），写不进再扫子组；成功返回 1 */
+static int cpuset_migrate_self(const cpu_set_t *want, char *landed, size_t size) {
     if (cpuset_join(CPUSET_DIR)) {
         snprintf(landed, size, "%s", CPUSET_DIR);
         return 1;
     }
-    return cpuset_migrate_scan(CPUSET_DIR, 1, lo, hi, landed, size);
+    return cpuset_migrate_scan(CPUSET_DIR, 1, want, landed, size);
 }
 
-/** 把 [*lo,*hi] 收进本机核号区间；返回 0 = 交集为空（区间不被修改） */
-static int cpu_range_intersect(int *lo, int *hi, int dev_lo, int dev_hi) {
-    int a = *lo > dev_lo ? *lo : dev_lo;
-    int b = *hi < dev_hi ? *hi : dev_hi;
-    if (a > b) return 0;
-    *lo = a;
-    *hi = b;
+// ---- 簇探测（从内核拓扑现算，不写死机型核数表）----
+// 编号规则：含 cpu0 的簇 = c0，其余按各簇首核号升序 = c1、c2…（故无需给探测结果排序，簇号由核号推出）。
+#define CLUSTER_SRC_POLICY   "cpufreq/policy"                 // 每 policy 一个频率域 = 一个簇（日志出处）
+#define CLUSTER_SRC_CAPACITY "cpu_capacity"                   // 同容量 = 同簇（兼作 sysfs 叶子名与日志出处）
+#define CLUSTER_SRC_PACKAGE  "topology/physical_package_id"   // 同封装 = 同簇（兼作 sysfs 叶子名与日志出处）
+#define CLUSTER_SRC_SINGLE   "单簇(降级)"                     // 探测失败：c0 = 本机全部核，等于不限制
+
+/**
+ * 校验并归一化一组簇：两两不相交、并集恰好等于本机 present（这条同时挡住"格式被误读成小数"
+ * 之类的不完整划分）；再把含 cpu0 的簇排到 0 号、其余按首核号升序。成功返回 1。
+ */
+static int clusters_accept(cpu_set_t *clusters, int n, const cpu_set_t *present) {
+    if (n <= 0 || n > CPU_CLUSTER_MAX) return 0;
+    cpu_set_t all;
+    CPU_ZERO(&all);
+    for (int i = 0; i < n; i++) {
+        if (cpu_set_empty(&clusters[i])) return 0;              // 空簇：形态不可信
+        for (int j = 0; j < i; j++) {
+            cpu_set_t overlap = clusters[i];
+            cpu_set_intersect(&overlap, &clusters[j]);
+            if (!cpu_set_empty(&overlap)) return 0;             // 两簇有交：形态不可信
+        }
+        cpu_set_union(&all, &clusters[i]);
+    }
+    if (!cpu_set_covers(&all, present) || !cpu_set_covers(present, &all)) return 0;  // 并集 ≠ present
+    int zero = -1;
+    for (int i = 0; i < n; i++)
+        if (CPU_ISSET(0, &clusters[i])) { zero = i; break; }
+    if (zero < 0) return 0;                                     // 没有簇含 cpu0：形态不可信
+    if (zero != 0) {
+        cpu_set_t tmp = clusters[0];
+        clusters[0] = clusters[zero];
+        clusters[zero] = tmp;
+    }
+    for (int i = 1; i < n; i++) {                               // 其余按首核号升序（簇数很小，选择排序足够）
+        int best = i;
+        for (int j = i + 1; j < n; j++)
+            if (cpu_set_first(&clusters[j]) < cpu_set_first(&clusters[best])) best = j;
+        if (best != i) {
+            cpu_set_t tmp = clusters[i];
+            clusters[i] = clusters[best];
+            clusters[best] = tmp;
+        }
+    }
     return 1;
+}
+
+/** 探测源 1：cpufreq policy 目录（每目录读 related_cpus，读不到退 affected_cpus） */
+static int clusters_probe_policy(cpu_set_t *clusters, const cpu_set_t *present) {
+    DIR *d = opendir("/sys/devices/system/cpu/cpufreq");
+    if (!d) return 0;
+    struct dirent *ent;
+    int n = 0;
+    while (n < CPU_CLUSTER_MAX && (ent = readdir(d)) != NULL) {
+        if (strncmp(ent->d_name, "policy", 6) != 0) continue;
+        char path[320];
+        snprintf(path, sizeof(path), "/sys/devices/system/cpu/cpufreq/%s/related_cpus",
+                 ent->d_name);
+        if (!cpu_list_read(path, &clusters[n])) {
+            snprintf(path, sizeof(path), "/sys/devices/system/cpu/cpufreq/%s/affected_cpus",
+                     ent->d_name);
+            if (!cpu_list_read(path, &clusters[n])) continue;   // 两个都读不到：弃用本源
+        }
+        n++;
+    }
+    closedir(d);
+    return clusters_accept(clusters, n, present) ? n : 0;
+}
+
+/** 探测源 2/3 共用：按"每核一个整数"的 sysfs 属性分组（值相同 = 同簇）；任一核读不到就弃用本源 */
+static int clusters_probe_by_key(cpu_set_t *clusters, const cpu_set_t *present, const char *leaf) {
+    long vals[CPU_CLUSTER_MAX];
+    int n = 0;
+    for (int c = 0; c < CPU_SETSIZE; c++) {
+        if (!CPU_ISSET(c, present)) continue;
+        char path[320];
+        snprintf(path, sizeof(path), "/sys/devices/system/cpu/cpu%d/%s", c, leaf);
+        FILE *f = fopen(path, "r");
+        if (!f) return 0;
+        long v = 0;
+        int ok = fscanf(f, "%ld", &v) == 1;
+        fclose(f);
+        if (!ok) return 0;
+        int idx = -1;
+        for (int i = 0; i < n; i++)
+            if (vals[i] == v) { idx = i; break; }
+        if (idx < 0) {
+            if (n >= CPU_CLUSTER_MAX) return 0;
+            idx = n;
+            vals[n] = v;
+            CPU_ZERO(&clusters[n]);
+            n++;
+        }
+        CPU_SET(c, &clusters[idx]);
+    }
+    return clusters_accept(clusters, n, present) ? n : 0;
+}
+
+/**
+ * 探测簇划分：依次试「cpufreq policy → cpu_capacity → physical_package_id」，全失败则单簇降级
+ * （c0 = 本机全部核，等于不限制——宁可不管，也不把用户限到错误的核上）。
+ * 返回簇数（≥1）；连本机核集合都读不到时返回 0，由调用方按"全部核"处理。*src 回传出处供日志。
+ */
+static int clusters_probe(cpu_set_t *clusters, const char **src) {
+    cpu_set_t present;
+    if (!cpu_list_read("/sys/devices/system/cpu/present", &present)) return 0;
+    int n = clusters_probe_policy(clusters, &present);
+    if (n > 0) { *src = CLUSTER_SRC_POLICY; return n; }
+    n = clusters_probe_by_key(clusters, &present, CLUSTER_SRC_CAPACITY);
+    if (n > 0) { *src = CLUSTER_SRC_CAPACITY; return n; }
+    n = clusters_probe_by_key(clusters, &present, CLUSTER_SRC_PACKAGE);
+    if (n > 0) { *src = CLUSTER_SRC_PACKAGE; return n; }
+    clusters[0] = present;
+    *src = CLUSTER_SRC_SINGLE;
+    return 1;
+}
+
+/**
+ * 配置值 → 目标核集合。返回 1=成功；0=非法（整串丢弃，调用方回落默认）。
+ * 语法：首字符 c（只认小写）= 簇模式，c 后每一位数字一个簇号，含非数字/簇号超本机簇数都算非法；
+ * 否则核号：单值 N、区间 N-M、逗号或空白分隔的列表；此外"恰好两个空白分隔的十进制核号"按旧写法
+ * 解释成区间 N~M（迁移期不改变已部署设备的行为）。
+ */
+static int affinity_expand(const char *spec, const cpu_set_t *clusters, int nclusters,
+                           cpu_set_t *out) {
+    CPU_ZERO(out);
+    if (!spec || !*spec) return 0;
+    if (spec[0] == 'c') {
+        if (!spec[1]) return 0;                      // "c" 后没有数字
+        for (const char *p = spec + 1; *p; p++) {
+            if (*p < '0' || *p > '9') return 0;      // 非数字（含 c0,3 这类混写）→ 整串非法
+            int idx = *p - '0';
+            if (idx >= nclusters) return 0;          // 簇号超出本机簇数
+            cpu_set_union(out, &clusters[idx]);
+        }
+        return 1;
+    }
+    // 旧写法 "N M"：整串没有 ',' 与 '-'，且恰好是"数字 空白 数字"时按区间解释
+    if (!strchr(spec, ',') && !strchr(spec, '-')) {
+        int a = 0, b = 0;
+        char tail[2] = "";
+        if (sscanf(spec, "%d %d %1s", &a, &b, tail) == 2) {
+            if (a < 0 || b < a) return 0;
+            for (int c = a; c <= b && c < CPU_SETSIZE; c++) CPU_SET(c, out);
+            return 1;
+        }
+    }
+    return cpu_list_parse(spec, out, 0);             // 单值 0 / 区间 0-1 / 列表 0,2-3（配置值不认掩码）
 }
 
 /** 读 /proc/self/status 里 "字段:"（含冒号，如 "Cpus_allowed_list:"）后的值；找到返回 1 */
@@ -1127,56 +1384,86 @@ static int read_status_field(const char *field, char *out, size_t size) {
 }
 
 /**
- * 把 affinity_cpu_lo~affinity_cpu_hi 应用到自身进程。
- * 降级：区间反向、与本机核号无交集 → 回落代码默认并记日志；迁组失败 → 只设亲和；
- * 实际生效范围一律以读回的 Cpus_allowed_list 为准，故这里不写"已生效"。
+ * 把 affinity_spec 应用到自身进程。
+ * 降级：值非法、或与本机核集合无交集 → 回落代码默认并记日志；簇探测失败 → 单簇（c0 = 全部核）；
+ * 迁组失败 → 只设亲和；实际生效范围一律以读回的 Cpus_allowed_list 为准，故这里不写"已生效"。
  */
 static void apply_cpu_affinity(void) {
-    int lo = affinity_cpu_lo, hi = affinity_cpu_hi;
-    if (lo > hi) {
-        write_log("CPU 亲和 区间反向(%d > %d) → 回落默认 %d %d",
-                  lo, hi, CPU_AFFINITY_DEF_LO, CPU_AFFINITY_DEF_HI);
-        reset_cpu_affinity_defaults();
-        lo = affinity_cpu_lo;
-        hi = affinity_cpu_hi;
+    // 簇划分：含 cpu0 的簇 = c0，其余按首核号升序（探测失败 = 单簇，见 clusters_probe）
+    cpu_set_t clusters[CPU_CLUSTER_MAX];
+    const char *cluster_src = CLUSTER_SRC_SINGLE;
+    int nclusters = clusters_probe(clusters, &cluster_src);
+    if (nclusters <= 0) {
+        // 连本机核集合都读不到：按"全部核"单簇处理（不至于因探测不出而把进程限死）
+        CPU_ZERO(&clusters[0]);
+        for (int c = 0; c < CPU_SETSIZE; c++) CPU_SET(c, &clusters[0]);
+        nclusters = 1;
+    }
+    // 簇划分写进日志，供真机核对（探测源与每个簇的核集合都如实报出）
+    write_log("CPU 亲和 簇划分 %d 个（来源 %s）", nclusters, cluster_src);
+    for (int i = 0; i < nclusters; i++) {
+        char one[128];
+        cpu_set_format(&clusters[i], one, sizeof(one));
+        write_log("CPU 亲和 簇 c%d = %s", i, one);
     }
 
-    // 与本机核号取交集：机型核数不同，写死的区间可能越界（如 6 核机上 0~7）
-    int dev_lo = 0, dev_hi = 0;
-    if (!read_cpu_range("/sys/devices/system/cpu/present", &dev_lo, &dev_hi)) {
-        write_log("CPU 亲和 读不到本机核编号 → 按配置区间 %d %d 直接设置", lo, hi);
-    } else if (!cpu_range_intersect(&lo, &hi, dev_lo, dev_hi)) {
-        write_log("CPU 亲和 配置区间与本机核 %d~%d 无交集 → 回落默认 %d %d",
-                  dev_lo, dev_hi, CPU_AFFINITY_DEF_LO, CPU_AFFINITY_DEF_HI);
+    // 展开配置值：非法 → 回落代码默认（不静默沿用旧值，否则用户改错一个字符看不出没生效）
+    cpu_set_t want;
+    if (!affinity_expand(affinity_spec, clusters, nclusters, &want)) {
+        write_log("CPU 亲和 配置值非法(%s) → 回落默认 %s", affinity_spec, CFG_DEFAULT_CPU_AFFINITY);
         reset_cpu_affinity_defaults();
-        lo = affinity_cpu_lo;
-        hi = affinity_cpu_hi;
-        if (!cpu_range_intersect(&lo, &hi, dev_lo, dev_hi))
-            write_log("CPU 亲和 默认区间与本机核也无交集 → 仍按默认设置，结果以读回为准");
+        if (!affinity_expand(affinity_spec, clusters, nclusters, &want)) {
+            write_log("CPU 亲和 默认值 %s 也展开失败 → 按 0 号簇处理", CFG_DEFAULT_CPU_AFFINITY);
+            want = clusters[0];
+        }
     }
 
-    // 先迁组：当前组 cpus 已覆盖目标区间时无需迁组（组已是上限，直接设亲和即可）
+    // 与本机核集合取交集：机型核数不同，写死的核号可能越界（如 6 核机上 0-7）
+    cpu_set_t present;
+    if (!cpu_list_read("/sys/devices/system/cpu/present", &present)) {
+        char w_str[128];
+        cpu_set_format(&want, w_str, sizeof(w_str));
+        write_log("CPU 亲和 读不到本机核编号 → 按配置核集合 %s 直接设置", w_str);
+    } else {
+        cpu_set_intersect(&want, &present);
+        if (cpu_set_empty(&want)) {
+            char p_str[128];
+            cpu_set_format(&present, p_str, sizeof(p_str));
+            write_log("CPU 亲和 配置核集合与本机核 %s 无交集 → 回落默认 %s",
+                      p_str, CFG_DEFAULT_CPU_AFFINITY);
+            reset_cpu_affinity_defaults();
+            if (!affinity_expand(affinity_spec, clusters, nclusters, &want))
+                want = clusters[0];
+            cpu_set_intersect(&want, &present);
+            if (cpu_set_empty(&want)) {
+                write_log("CPU 亲和 默认核集合与本机核也无交集 → 仍按默认设置，结果以读回为准");
+                want = clusters[0];
+            }
+        }
+    }
+
+    char want_str[128];
+    cpu_set_format(&want, want_str, sizeof(want_str));
+
+    // 先迁组：当前组 cpus 已覆盖目标核集合时无需迁组（组已是上限，直接设亲和即可）
     char group[256] = "/";
     char cur_dir[320];
     if (read_self_cpuset_group(group, sizeof(group)))
         snprintf(cur_dir, sizeof(cur_dir), "%s%s", CPUSET_DIR, group);
     else
         snprintf(cur_dir, sizeof(cur_dir), "%s", CPUSET_DIR);
-    int cur_lo = 0, cur_hi = 0;
-    if (!read_dir_cpus(cur_dir, &cur_lo, &cur_hi) || cur_lo > lo || cur_hi < hi) {
+    cpu_set_t cur_set;
+    if (!read_dir_cpus(cur_dir, &cur_set) || !cpu_set_covers(&cur_set, &want)) {
         char landed[320] = "";
-        if (cpuset_migrate_self(lo, hi, landed, sizeof(landed)))
+        if (cpuset_migrate_self(&want, landed, sizeof(landed)))
             write_log("CPU 亲和 迁组 %s → %s", cur_dir, landed);
         else
-            write_log("CPU 亲和 迁组失败（当前组 %s 不覆盖 %d %d，且无可迁入组）→ 只设亲和",
-                      cur_dir, lo, hi);
+            write_log("CPU 亲和 迁组失败（当前组 %s 不覆盖 %s，且无可迁入组）→ 只设亲和",
+                      cur_dir, want_str);
     }
 
     // 设亲和：被 cpuset 夹取时调用会成功但结果被收窄，故后面必须读回
-    cpu_set_t mask;
-    CPU_ZERO(&mask);
-    for (int c = lo; c <= hi && c < CPU_SETSIZE; c++) CPU_SET(c, &mask);
-    if (sched_setaffinity(0, sizeof(mask), &mask) != 0)
+    if (sched_setaffinity(0, sizeof(cpu_set_t), &want) != 0)
         write_log("CPU 亲和 设置失败 errno=%d(%s)", errno, strerror(errno));
 
     // 读回：实际可运行的核 = cpuset 组 cpus ∩ 自身亲和，只有读回的值才是事实
@@ -1184,10 +1471,10 @@ static void apply_cpu_affinity(void) {
     char now_group[256] = "";
     read_status_field("Cpus_allowed_list:", allowed, sizeof(allowed));
     if (read_self_cpuset_group(now_group, sizeof(now_group)))
-        write_log("CPU 亲和 读回 Cpus_allowed_list=%s cpuset=%s（本次请求 %d %d）",
-                  allowed, now_group, lo, hi);
+        write_log("CPU 亲和 读回 Cpus_allowed_list=%s cpuset=%s（本次请求 %s）",
+                  allowed, now_group, want_str);
     else
-        write_log("CPU 亲和 读回 Cpus_allowed_list=%s（本次请求 %d %d）", allowed, lo, hi);
+        write_log("CPU 亲和 读回 Cpus_allowed_list=%s（本次请求 %s）", allowed, want_str);
 }
 
 // ======================== 可执行文件名提取 ========================
@@ -3269,6 +3556,201 @@ static void write_webui_data(void) {
     }
 }
 
+// ======================== 看门狗反向保活（WD_KEEPALIVE）========================
+// 需求：除既有的「service.d 脚本（看门狗）守护守护进程」之外，再加反方向——守护进程每
+// WD_KEEPALIVE_INTERVAL 秒探测看门狗是否存活，不在就把它拉起来（开关 WD_KEEPALIVE，默认开）。
+//
+// 破环设计（本节全部理由都在前两条，缺一条就会成环：守护进程拉起看门狗 → 看门狗杀掉守护进程 →
+// 新守护进程又发现没看门狗 → 每分钟自杀重启一次）：
+//   1) 先查后拉：拉起前先扫 /proc 确认没有看门狗实例（存在即不重复拉起，见 watchdog_alive）；
+//      对侧对称：脚本启动时**不再先杀守护进程**（见 b6x-tempctrl.sh 第 2 节），两半缺一不可。
+//   2) 连续两次未见才拉（WD_MISS_CONFIRM）：单次采样可能撞上瞬态（/proc 抖动、看门狗正在启动或
+//      正在重部署），而误判的代价是白拉一个站岗实例；两轮 60s 也顺带让「app 先杀看门狗、再杀
+//      守护进程」那类窗口（约 8~13 秒）不可能凑齐两次——即「停止daemon」不会被这条新链路顶回来。
+//   3) 拉起冷却（WD_SPAWN_MIN_INTERVAL，且跨进程重启持久化到私有目录小文件）：把最坏情况
+//      （两侧判据同时假阴）从「每分钟多一个」压到「每 5 分钟多一个」。
+//
+// 判据为何是 cmdline 子串而不是 /proc/<pid>/exe：脚本的 exe 是 /system/bin/sh，与一切 shell 共享，
+// 无法据此识别；子串匹配的假阳只是「这一分钟不拉」（下一轮复查），假阴才是要多花代价的那个。
+// 降级（全部只记日志、不影响温控主链）：/proc 读不到 → 按未见处理但受冷却约束；两条候选路径都不
+// 存在 → 记日志（节流）且不重建脚本内容（等 app 重新部署）；拉起失败 → 记日志 + 连续失败退避。
+#define WD_KEEPALIVE_INTERVAL   60    // 检查间隔（秒）
+#define WD_MISS_CONFIRM         2     // 连续未见次数阈值（≥ 此值才拉起）
+#define WD_SPAWN_MIN_INTERVAL   300   // 拉起冷却（秒）：冷却窗内即使判定缺失也只记日志、不动作
+#define WD_SPAWN_BACKOFF_FAILS  3     // 连续拉起失败次数阈值：达到后退避到 WD_SPAWN_BACKOFF
+#define WD_SPAWN_BACKOFF        600   // 连续失败退避（秒）
+#define WD_LOG_MIN_INTERVAL     600   // 「脚本不存在」类日志的最小间隔（秒），防每分钟刷日志
+#define WD_NAME                 "b6x-tempctrl.sh"   // 与 Deployer.SCRIPT_NAME 及脚本内的 SCRIPT_NAME 一致
+#define WD_SPAWN_STAMP_PATH     PRIVATE_DIR "/tempctrl_wd_spawn"   // 冷却时间戳（私有目录，随卸载自清）
+#define SH_BIN                  "/system/bin/sh"     // 脚本必须经 sh 执行（/data/adb 是 noexec 挂载）
+
+// service.d 脚本两个候选路径（KSU 版本分界，见 Deployer）。路径字面量与
+// cleanup_artifacts_on_uninstall() 的 artifacts[] 中两条必须一致（那两份是卸载清理的固定清单，
+// 不共用变量；改一处须同步另一处）。
+static const char *const SVC_SCRIPT_PATHS[] = {
+    "/data/adb/service.d/b6x-tempctrl.sh",
+    "/data/adb/ksu/service.d/b6x-tempctrl.sh",
+};
+#define SVC_SCRIPT_PATHS_N ((int)(sizeof(SVC_SCRIPT_PATHS) / sizeof(SVC_SCRIPT_PATHS[0])))
+
+static time_t wd_check_at    = 0;   // 上次检查时刻（0 = 尚未检查过，首轮必查）
+static int    wd_miss_hits    = 0;  // 连续未见次数
+static int    wd_fail_hits    = 0;  // 连续拉起失败次数（成功后清零）
+static time_t wd_spawn_at     = 0;  // 本进程内上次拉起时刻
+static time_t wd_last_log_at  = 0;  // 「脚本不存在」日志最近一次输出时刻（节流）
+
+/**
+ * 扫 /proc 判看门狗是否存活（不经 shell、不 fork pgrep，范式同 app_process_scan）。
+ * 命中返回 1；/proc 打不开返回 -1（调用方按「未见」处理，但受冷却约束）。
+ * 匹配口径：cmdline 里出现两条候选路径之一，或出现脚本名（与 app 侧 pgrep -f 同口径的宽松匹配）。
+ */
+static int watchdog_alive(void) {
+    DIR *d = opendir("/proc");
+    if (!d) return -1;
+    struct dirent *de;
+    char buf[4096];
+    int alive = 0;
+    while (!alive && (de = readdir(d)) != NULL) {
+        if (de->d_name[0] < '0' || de->d_name[0] > '9') continue;   // 只扫数字 PID
+        char path[64];
+        snprintf(path, sizeof(path), "/proc/%s/cmdline", de->d_name);
+        int fd = open(path, O_RDONLY);
+        if (fd < 0) continue;
+        ssize_t n = read(fd, buf, sizeof(buf) - 1);
+        close(fd);
+        if (n <= 0) continue;
+        buf[n] = '\0';
+        // 不同 root 方案下看门狗 shell 的 cmdline 形态不一样（sh <路径> / shebang 直接 exec / sh -c），
+        // 故按子串匹配而不做整 token 全等：本方向的假阳只是「这一分钟不拉」。
+        for (int i = 0; i < SVC_SCRIPT_PATHS_N && !alive; i++) {
+            if (strstr(buf, SVC_SCRIPT_PATHS[i]) != NULL) alive = 1;
+        }
+        if (!alive && strstr(buf, WD_NAME) != NULL) alive = 1;
+    }
+    closedir(d);
+    return alive;
+}
+
+/** 选一个可读的脚本路径（优先 modern，与 Deployer 的默认一致）；都不在返回 NULL */
+static const char *pick_script_path(void) {
+    for (int i = 0; i < SVC_SCRIPT_PATHS_N; i++) {
+        if (access(SVC_SCRIPT_PATHS[i], R_OK) == 0) return SVC_SCRIPT_PATHS[i];
+    }
+    return NULL;
+}
+
+/** 读冷却时间戳（私有目录小文件，内容=上次拉起时刻的 epoch 秒）。读不到返回 0。 */
+static time_t wd_spawn_stamp_read(void) {
+    FILE *f = fopen(WD_SPAWN_STAMP_PATH, "r");
+    if (!f) return 0;
+    long v = 0;
+    if (fscanf(f, "%ld", &v) != 1) v = 0;
+    fclose(f);
+    return (time_t)v;
+}
+
+/** 记冷却时间戳（跨守护进程重启有效）。写失败不重试。 */
+static void wd_spawn_stamp_write(time_t now) {
+    FILE *f = fopen(WD_SPAWN_STAMP_PATH, "w");
+    if (!f) return;
+    fprintf(f, "%ld\n", (long)now);
+    fclose(f);
+}
+
+/**
+ * 拉起看门狗脚本：fork → setsid（脱离本进程会话，避免连带）→ stdio 全重定向 /dev/null →
+ * execv(SH_BIN, {sh, <脚本路径>})。**绝对路径 + 不经 PATH**（同 am / dumpsys 那条的既有教训）。
+ * 父进程限时 3s 回收；退出码 127 视为 exec 失败（子进程 _exit(127) 约定）。
+ * 返回 1=已成功交出控制权，0=失败（已记日志）。
+ */
+static int spawn_watchdog(const char *path) {
+    pid_t pid = fork();
+    if (pid < 0) {
+        write_log("看门狗 拉起失败：fork 失败");
+        return 0;
+    }
+    if (pid == 0) {
+        setsid();
+        int fd = open("/dev/null", O_RDWR);
+        if (fd >= 0) {
+            dup2(fd, STDIN_FILENO);
+            dup2(fd, STDOUT_FILENO);
+            dup2(fd, STDERR_FILENO);
+            if (fd > STDERR_FILENO) close(fd);
+        }
+        char *argv[3];
+        argv[0] = (char *)"sh";
+        argv[1] = (char *)path;
+        argv[2] = NULL;
+        execv(SH_BIN, argv);
+        _exit(127);
+    }
+    signal(SIGALRM, alarm_handler);
+    alarm(3);
+    int status;
+    int ok = 0;
+    if (waitpid(pid, &status, 0) == -1) {
+        write_log("看门狗 拉起超时（3s），已放弃本次");
+        kill(pid, SIGKILL);
+        waitpid(pid, NULL, 0);
+    } else if (WIFEXITED(status) && WEXITSTATUS(status) == 127) {
+        write_log("看门狗 拉起失败：无法执行 %s（权限或域限制？）", SH_BIN);
+    } else {
+        ok = 1;
+    }
+    alarm(0);
+    signal(SIGALRM, SIG_DFL);
+    return ok;
+}
+
+/**
+ * 反向保活的一次检查（60s 门控，调用方每轮调即可）。
+ * 顺序：开关 → 判活（存在即不重复拉起）→ 连续未见阈值 → 脚本存在性 → 拉起冷却/失败退避 → 拉起。
+ */
+static void maybe_keepalive_watchdog(void) {
+    if (!wd_keepalive_enabled) return;
+    time_t now = time(NULL);
+    if (wd_check_at != 0 && now - wd_check_at < WD_KEEPALIVE_INTERVAL) return;
+    wd_check_at = now;
+
+    // 1) 先查后拉：存在 → 不重复拉起（顺带清零计数）
+    if (watchdog_alive() > 0) {
+        wd_miss_hits = 0;
+        wd_fail_hits = 0;
+        return;
+    }
+    // 2) 连续 WD_MISS_CONFIRM 次未见才拉（单次采样可能是瞬态）
+    if (++wd_miss_hits < WD_MISS_CONFIRM) {
+        debug_log(debug_main, "看门狗 未见（第 %d 次，未达阈值 %d）", wd_miss_hits, WD_MISS_CONFIRM);
+        return;
+    }
+    // 3) 脚本不在 → 只记日志（节流）：守护进程无法重建脚本内容，等 app 重新部署
+    const char *path = pick_script_path();
+    if (!path) {
+        if (now - wd_last_log_at >= WD_LOG_MIN_INTERVAL) {
+            wd_last_log_at = now;
+            write_log("看门狗 连续 %d 次未见且脚本不存在（需在 app 内重新部署）", wd_miss_hits);
+        }
+        return;
+    }
+    // 4) 冷却（取本进程内与持久化时间戳的较晚者）+ 连续失败退避
+    time_t stamp = wd_spawn_stamp_read();
+    time_t last = stamp > wd_spawn_at ? stamp : wd_spawn_at;
+    if (last != 0 && now - last < WD_SPAWN_MIN_INTERVAL) return;
+    if (wd_fail_hits >= WD_SPAWN_BACKOFF_FAILS && now - last < WD_SPAWN_BACKOFF) return;
+
+    wd_spawn_at = now;
+    if (spawn_watchdog(path)) {
+        wd_spawn_stamp_write(now);
+        wd_miss_hits = 0;   // 已拉起：计数清零，下一轮以判活结果为准
+        wd_fail_hits = 0;
+        write_log("看门狗 连续 %d 次未见 → 已拉起 %s", WD_MISS_CONFIRM, path);
+    } else {
+        wd_fail_hits++;
+        write_log("看门狗 拉起失败（连续 %d 次）", wd_fail_hits);
+    }
+}
+
 // ======================== 单实例锁 ========================
 // service.d 开机拉起 + app 内手动拉起两条路径都直接执行启动命令，由本锁保证幂等。
 // 锁文件与配置/日志/曲线数据同处私有目录。
@@ -3346,6 +3828,8 @@ int main(int argc, char *argv[]) {
             cleanup_artifacts_on_uninstall();
             break;   // running 已置 0，由下方 if (!running) goto exit 收尾
         }
+        // 看门狗反向保活：与卸载自清理同理必须放在本循环内（无 BLE、一直停在等待设备时也不漏检）
+        maybe_keepalive_watchdog();
         read_status_ble_both();
         DeviceType dev = select_active_device();
         if (dev != DEVICE_NONE) {
@@ -3409,6 +3893,10 @@ int main(int argc, char *argv[]) {
                 cleanup_artifacts_on_uninstall();
                 break;   // running 已置 0，跳出主循环走 exit: 收尾
             }
+
+            // -1.5 看门狗反向保活：必须排在本块内所有 `continue`（断联/无设备）之前——两处 continue
+            //      之后的代码在无 BLE 时不执行，放后面就会出现"最需要它的时候它不跑"。内部 60s 门控。
+            maybe_keepalive_watchdog();
 
             // 0. CPU thermal_zone 周期重扫（移入 5s 控制块：全量扫描 ~100 个 zone 阻塞近 1s，
             //    不在 1s 采集热路径 write_webui_data 内触发）

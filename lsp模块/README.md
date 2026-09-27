@@ -146,6 +146,42 @@ TARGET_TEMP=180     ← 18.0°C
 
 ---
 
+## 部署自校验文件协议（app / 脚本 → service.d 脚本）
+
+开机自校验由 `/data/adb/service.d/b6x-tempctrl.sh` 执行，**不依赖 app 在后台**：先比 APK 文件 mtime，
+有变化再验哈希，不一致就重装并重启守护进程；时间戳未变则整段短路。开关与期望状态分两处传递 ——
+界面与脚本不共享内存：
+
+| 项 | 值 |
+|---|---|
+| 开关 | `profile.conf` 的 `UI_AUTO_UPDATE`（0/1，默认 1）：脚本直接读该文件，读不到按 1 处理 |
+| 期望状态 | APK 私有目录 `tempctrl_sync_manifest`：`APK_MTIME` / `BIN_MD5` / `SCRIPT_MD5` / `BIN_SRC` / `SCRIPT_SRC`，由 app 在 APK 变化时刷新（`.tmp` + `rename` 原子替换） |
+| 时间戳记录 | APK 私有目录 `tempctrl_deploy_stamp`：内容 `<mtime> ok`，由脚本在核对通过后写；app 卸载时清理 |
+| 降级路径 | 设备端 `busybox` / `toybox` / `unzip` 都不可用时，脚本改按清单比对；清单的 `APK_MTIME` 与当前 APK 不一致即视为陈旧、**不采用**（宁可不动也不装错） |
+
+> 方向是「app 写、脚本读」，与上文两条相反。中间状态一律落 APK 私有目录，**不新增 `/data/local/tmp` 文件**。
+
+---
+
+## 反向保活（daemon → service.d 脚本）
+
+既有链路是「`service.d` 脚本（看门狗）守护守护进程」；本节是其**反方向**：守护进程反过来探测看门狗是否存活，
+不在就把它拉起来。开关是 `profile.conf` 的 `WD_KEEPALIVE`（0/1，**默认 1**，界面「[3] 自动拉起 app」组可改，热重载生效）。
+
+| 项 | 值 |
+|---|---|
+| 探测节奏 | 守护进程每 60 秒扫一次 `/proc/*/cmdline`（不经 shell、不 fork `pgrep`），匹配两条候选脚本路径之一或脚本名 `b6x-tempctrl.sh` |
+| 拉起条件 | **连续两次（≥2 个检查周期）都未见**看门狗才拉起；存在则**不重复拉起** |
+| 拉起形态 | `fork` + `setsid` + stdio→`/dev/null` + `execv("/system/bin/sh", {sh, <脚本路径>})`（`/data/adb` 是 noexec 挂载，脚本不能直接 exec） |
+| 节流 | 拉起冷却 300s（时间戳落 APK 私有目录 `tempctrl_wd_spawn`，**跨守护进程重启有效**）；连续失败 3 次后退避到 600s |
+| 对称约定 | 看门狗脚本**启动时不再先杀守护进程**（`start()` 内部先查后拉，已有实例就跳过）——两侧都是"先查后拉、存在即不重复拉起"，缺一半会成环 |
+| 关掉后 | 退回只有「看门狗守护守护进程」的单向模式（C 端不再探测/拉起，脚本侧那道门仍生效） |
+
+> 设计理由（判据强度为何两侧不同、三重节流各挡什么、"停止daemon"竞态为何被挡掉、降级路径）见
+> [daemon/逻辑说明.md](daemon/逻辑说明.md)「看门狗反向保活（WD_KEEPALIVE）」。路径与键的单一来源是 `参数定义/params.def.json`。
+
+---
+
 ## 文件落点
 
 部署产物与运行文件落在三处：APK 私有目录、`/data/local/tmp/`（KSU noexec 规避）、`/data/adb/service.d/`。
@@ -161,6 +197,9 @@ TARGET_TEMP=180     ← 18.0°C
 | `tempctrl_last_dev` | `/data/data/<飞智包名>/files/`（**各包各记**） | LSPosed 侧（`MainHook`）自建自用，daemon 不参与 |
 | `tempctrl`（二进制） | `/data/local/tmp/tempctrl`（沿用 noexec 规避） | 部署时由 root 从 APK assets 落盘 + `chmod 0755` |
 | `b6x-tempctrl.sh` | `/data/adb/service.d/`（KSU <10683 为 `/data/adb/ksu/service.d/`） | 同上 |
+| `tempctrl_sync_manifest` | `/data/data/com.example.waspwingtempctrl/files/` | 界面（APK 变化时刷新，详见上文部署自校验文件协议） |
+| `tempctrl_deploy_stamp` | 同上 | service.d 脚本（核对通过后写）；界面卸载时清理 |
+| `tempctrl_wd_spawn` | 同上 | daemon（每次拉起看门狗时写一行时间戳，作拉起冷却用，详见上文反向保活） |
 
 > 卸载自清的清理清单与「清除数据」的已知代价见 [daemon/逻辑说明.md](daemon/逻辑说明.md)「参数落点」注记。
 

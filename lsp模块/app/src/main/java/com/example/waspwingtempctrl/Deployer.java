@@ -4,9 +4,11 @@ import android.content.Context;
 import android.content.SharedPreferences;
 
 import java.io.File;
+import java.io.FileInputStream;
 import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
+import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.util.ArrayList;
@@ -62,6 +64,20 @@ public final class Deployer {
     /** C 端单实例锁退出码：已有实例在运行。 */
     public static final int EXIT_ALREADY_RUNNING = 2;
 
+    /** 同步清单文件名（放私有目录，随卸载连目录一起删）。 */
+    public static final String MANIFEST_NAME = "tempctrl_sync_manifest";
+    /** 清单里的 APK 时间戳键（app 写、脚本读；两边字面量必须一致）。 */
+    private static final String MANIFEST_KEY_APK_MTIME = "APK_MTIME";
+
+    /**
+     * 「自动更新」开关的配置键。
+     *
+     * <p>键定义在 {@code params.def.json} 的 webui 组（{@code daemonConsumes=false}，界面自用），
+     * 值落在 {@code profile.conf}：之所以不另写一份标记文件，是为了让<b>脚本侧读同一个键</b>
+     * （{@code b6x-tempctrl.sh} 直接 grep profile.conf），避免"界面写一处、脚本读另一处"的双份真相。
+     */
+    public static final String KEY_UI_AUTO_UPDATE = "UI_AUTO_UPDATE";
+
     /**
      * root 探测的一次性落盘标记所在的 prefs 文件名与键。
      *
@@ -78,7 +94,7 @@ public final class Deployer {
 
     private static final long START_COOLDOWN_MS = 10_000L;
     /**
-     * 发 {@code pkill}（SIGTERM）后轮询等进程退出的秒数。
+     * 发 {@code kill}（SIGTERM）后轮询等进程退出的秒数。
      *
      * <p>C 端装了 SIGTERM 处理器——收到只置退出标志，要等当前一轮跑完，一轮最长约 5 秒
      * （同部署脚本 {@code WAIT_LOOPS} 的注记），5 轮即够；实测用不到那么久，原为 30 轮。
@@ -92,7 +108,7 @@ public final class Deployer {
     /**
      * {@link #probe()} 那一趟 su 往返的超时。
      *
-     * <p>probe 只跑只读脚本（存在性 / md5sum / pgrep），不等任何进程退出，故远短于
+     * <p>probe 只跑只读脚本（存在性 / md5sum / 扫 /proc 判活），不等任何进程退出，故远短于
      * {@link #EXEC_TIMEOUT_MS} —— 那个长度是 deploy / uninstall 轮询等进程退出才需要的。
      * 取 15 秒：给慢设备上 su 冷启动与首次授权框留余量，又不再让状态区干等两分钟。
      */
@@ -204,6 +220,21 @@ public final class Deployer {
         context.getApplicationContext()
                 .getSharedPreferences(PREFS_ROOT_PROBE, Context.MODE_PRIVATE)
                 .edit().putString(KEY_BIN_DEPLOYED_MD5, deviceBinMd5).apply();
+    }
+
+    /**
+     * 「自动更新」开关当前是否开启（<b>默认开</b>）。
+     *
+     * <p>键是 {@link #KEY_UI_AUTO_UPDATE}，值落在 {@code profile.conf}；<b>脚本侧读的是同一个键</b>
+     * （{@code b6x-tempctrl.sh} 直接 grep 该文件），故界面与脚本不会各有一份真相。
+     * 读不到（键还没落到设备上的 profile.conf、或定义尚未发布）即按默认值【开】处理，
+     * 与定义的 {@code default} 一致 —— 口径与 {@code SetupActivity#isDeployEntryEnabled} 相同。
+     *
+     * <p>不阻塞（读的是 {@link ConfigStore} 的内存快照）。
+     */
+    public static boolean isAutoUpdateEnabled(Context context) {
+        ConfigStore.Value value = ConfigStore.get(context).get(KEY_UI_AUTO_UPDATE);
+        return value == null || value.intAt(0) != 0;
     }
 
     // ==================== 状态 / 判定 ====================
@@ -515,11 +546,24 @@ public final class Deployer {
     }
 
     /**
-     * 只重推 service.d 脚本：不动二进制、不重启守护进程、不碰配置。<b>阻塞</b>（root 往返 1 次）。
+     * 只重推 service.d 脚本：不动二进制、不碰配置，<b>但会重启守护进程</b>。<b>阻塞</b>（root 往返 1 次）。
      *
      * <p>用途：{@link #probe()} 发现设备上的脚本与 APK 内资源哈希不一致时自动纠正。脚本是纯文本、
-     * 无运行态，重推无损；二进制若不一致仍须走完整 {@link #deploy()}（部署流程会连带重启守护进程，
-     * 代价高得多）。
+     * 无运行态，重推无损；二进制若不一致仍须走完整 {@link #deploy()}。
+     *
+     * <p><b>为什么要连守护进程一起重启</b>：脚本与二进制同属"部署产物"、按同一份 APK 配套发布，
+     * 脚本变了就等于这次部署产物变了；且 service.d 脚本本身就是常驻的看门狗 shell（每
+     * {@code RESTART_INTERVAL} 秒一轮），只换盘上文件、不重起它，那一层仍然跑旧脚本的内存映像
+     * ——新脚本里改掉的判别逻辑要等重启手机才生效。故这里<b>先把看门狗 shell 停掉</b>，再由
+     * {@link #restartScript()} 的同一段逻辑用<b>磁盘上的新脚本</b>把它拉起来。
+     *
+     * <p>守护进程的停旧起新<b>不靠脚本</b>：{@code restartCore()} 在决定是否拉起脚本之前就已经把旧
+     * 实例停稳（含 {@code kill -9} 升级），脚本只负责把新的拉起来（脚本自身已不再先杀守护进程——见
+     * {@code tempctrl.c} 的「看门狗反向保活」：两侧统一为"先查后拉、存在即不重复拉起"）。
+     * 代价与「拉起daemon」同级：温控空窗 ≤{@value #KILL_WAIT_LOOPS}+{@value #KILL9_WAIT_LOOPS} 秒。
+     *
+     * <p><b>不探测</b>：返回的 {@link Result#status} 恒为 null（多一趟 su 往返不划算）。
+     * 重启的成败写在 {@link Result#steps} 里，调用方据此上屏。
      */
     public Result updateScript() {
         List<String> steps = new ArrayList<>();
@@ -556,6 +600,15 @@ public final class Deployer {
                     null);
         }
         steps.add("脚本哈希核对通过：" + svcd + "/" + SCRIPT_NAME);
+        // 重启那一趟的结果：见方法 javadoc（脚本换了必须连看门狗与守护进程一起换）
+        if ("0".equals(kv.get("WD_ALIVE"))) {
+            steps.add("1".equals(kv.get("WD_STARTED"))
+                    ? "已停旧看门狗 shell，并由磁盘上的新脚本重新拉起（新脚本自此生效）"
+                    : "警告：看门狗脚本不在、且未能重新拉起（需重新部署）");
+        }
+        steps.add("1".equals(kv.get("STARTED"))
+                ? "守护进程已重启（PID " + nvl(kv.get("NEW_PID")) + "）"
+                : "警告：未探测到新的守护进程（它启动前要等亮屏，灭屏时会更晚一些）");
         return new Result(true, "更新脚本", steps, "", null);
     }
 
@@ -628,8 +681,8 @@ public final class Deployer {
      * 旧实例还在时新实例会立刻以退出码 {@value #EXIT_ALREADY_RUNNING} 退出，
      * 所以"已在运行"不能当作"无需拉起"——那正是"点了没反应"的原因。
      *
-     * <p>停止序列照 {@link #uninstall()} 的口径：{@code pkill} → 轮询等 ≤{@value #KILL_WAIT_LOOPS} 秒
-     * → {@code pkill -9} → 再轮询 ≤{@value #KILL9_WAIT_LOOPS} 秒；仍未退出则<b>放弃启动</b>
+     * <p>停止序列照 {@link #uninstall()} 的口径：{@code kill} → 轮询等 ≤{@value #KILL_WAIT_LOOPS} 秒
+     * → {@code kill -9} → 再轮询 ≤{@value #KILL9_WAIT_LOOPS} 秒；仍未退出则<b>放弃启动</b>
      * 并如实回吐（抢锁必然失败，静默失败比报错更难查）。
      *
      * <p><b>失败自动重试一次</b>：等 {@value #RETRY_PAUSE_MS} ms 再跑一遍完整序列。确定性失败
@@ -695,7 +748,7 @@ public final class Deployer {
             steps.add(oldPid.isEmpty() ? "未检测到运行中的守护进程，直接启动"
                     : "已停止旧实例（PID " + oldPid + "）");
             if ("1".equals(kv.get("OLD_KILLED"))) {
-                steps.add("旧实例未响应 pkill，已用 kill -9 结束");
+                steps.add("旧实例未响应 kill（SIGTERM），已用 kill -9 结束");
             }
         }
         if (!"1".equals(kv.get("STARTED"))) {
@@ -921,10 +974,128 @@ public final class Deployer {
         return sb.toString();
     }
 
-    /** 删私有目录里的运行时产物；返回删除成功的文件名。{@code profile.conf} 不在列（用户配置）。 */
+    /**
+     * 刷新「同步清单」—— service.d 脚本在设备上找不到可用解压工具时的<b>降级来源</b>。
+     *
+     * <p>正常路径下脚本自己解 APK 取资源（`busybox/toybox/unzip` 三选一），用不到本清单；
+     * 三个都不可用时它才退而读这份清单。清单是一份 {@code KEY=VALUE}：
+     * <pre>
+     * APK_MTIME=&lt;base.apk 的 mtime，秒&gt;        ← 与脚本侧 {@code stat -c %Y} 同口径
+     * BIN_MD5 / SCRIPT_MD5=&lt;期望内容哈希&gt;
+     * BIN_SRC / SCRIPT_SRC=&lt;私有目录里中转副本的绝对路径&gt;
+     * </pre>
+     * <b>时间戳是这份清单的保鲜期</b>：脚本只在「清单里的 APK_MTIME 与当前 APK 文件一致」时才用它
+     * —— 否则清单描述的是旧 APK，照它装就是装旧内容（宁可不动，也不能装错）。
+     *
+     * <p><b>只在 APK 换了才做</b>：判据是一次 {@code stat}（比较清单里记的 mtime 与当前 APK 文件的
+     * mtime），所以每次进状态页顺手调都不亏；真刷新时才解压两份 asset 并复刻到中转副本。
+     * <b>清单不存在</b>（老版本升上来 / 用户刚清过数据）也走刷新，故降级路不会因为"从没写过清单"而瞎。
+     *
+     * <p>清单与副本都在私有目录（随系统卸载连目录一起删，不需要动卸载清理清单）。
+     * <b>阻塞</b>（解压 + 写盘），只在后台线程调；失败不抛异常，记在返回值里。
+     *
+     * @return 需要上屏的失败说明；无需刷新或刷新成功时返回 null
+     */
+    public String writeSyncManifestIfNeeded() {
+        long apkMtimeSec = apkFileMtimeSec();
+        if (apkMtimeSec <= 0L) {
+            // 取不到 APK 文件时间戳：无从判定清单是否过期，也就不写（脚本侧会退化为"不动作"）
+            return null;
+        }
+        // APK 内资源不完整（本地构建没有 CI 注入的 asset）：probe() 已有"APK 内资源不完整"的提示行，
+        // 这里静默跳过，不重复报一遍（两份哈希的 memo 命中，代价只是一次查表）
+        if (md5OfAssetOrEmpty(appContext, BIN_ASSET).isEmpty()
+                || md5OfAssetOrEmpty(appContext, SCRIPT_ASSET).isEmpty()) {
+            return null;
+        }
+        File manifest = new File(configStore.getPrivateDir(), MANIFEST_NAME);
+        if (Long.toString(apkMtimeSec).equals(readManifestValue(manifest, MANIFEST_KEY_APK_MTIME))) {
+            return null;   // APK 没换：清单还是新鲜的，一个字都不用动
+        }
+        File staging = new File(configStore.getPrivateDir(), "deploy");
+        if (!staging.isDirectory() && !staging.mkdirs()) {
+            return "同步清单未刷新：中转目录创建失败 " + staging;
+        }
+        File stagedBin = new File(staging, "tempctrl");
+        File stagedScript = new File(staging, SCRIPT_NAME);
+        try {
+            String binMd5 = stageAsset(BIN_ASSET, stagedBin, true);
+            String scriptMd5 = stageAsset(SCRIPT_ASSET, stagedScript, true);
+            writeManifest(manifest, apkMtimeSec, binMd5, scriptMd5, stagedBin, stagedScript);
+            return null;   // 静默：状态区不该因为一次清单刷新多出一行
+        } catch (IOException e) {
+            return "同步清单未刷新：" + e.getMessage();
+        }
+    }
+
+    /** APK 自身文件的 mtime（秒）；与脚本侧 {@code stat -c %Y} 同口径，取不到返回 0。 */
+    private long apkFileMtimeSec() {
+        try {
+            // getPackageCodePath() 就是 `pm path` 回吐的那份 base.apk —— 脚本侧 stat 的是同一个文件
+            return new File(appContext.getPackageCodePath()).lastModified() / 1000L;
+        } catch (RuntimeException e) {
+            return 0L;   // 取不到（异常/文件不在）→ 调用方按"不写清单"退化
+        }
+    }
+
+    /** 原子写清单（{@code .tmp} + rename，与 daemon 写 uiprefs 同一口径）：读到半截比读不到更坏。 */
+    private static void writeManifest(File manifest, long apkMtimeSec, String binMd5, String scriptMd5,
+                                      File bin, File script) throws IOException {
+        File tmp = new File(manifest.getAbsolutePath() + ".tmp");
+        FileOutputStream out = null;
+        try {
+            out = new FileOutputStream(tmp, false);
+            out.write((MANIFEST_KEY_APK_MTIME + "=" + apkMtimeSec + "\n"
+                    + "BIN_MD5=" + binMd5 + "\n"
+                    + "SCRIPT_MD5=" + scriptMd5 + "\n"
+                    + "BIN_SRC=" + bin.getAbsolutePath() + "\n"
+                    + "SCRIPT_SRC=" + script.getAbsolutePath() + "\n")
+                    .getBytes(StandardCharsets.UTF_8));
+            out.flush();
+            out.getFD().sync();
+        } finally {
+            closeQuietly(out);
+        }
+        if (!tmp.renameTo(manifest)) {
+            tmp.delete();
+            throw new IOException("同步清单改名失败：" + tmp);
+        }
+    }
+
+    /** 读清单里某个键；读不到（文件不在/读失败/没这个键）一律空串。解析复用 {@link #parseKv}。 */
+    private static String readManifestValue(File manifest, String key) {
+        if (!manifest.isFile()) {
+            return "";
+        }
+        InputStream in = null;
+        try {
+            long len = Math.min(manifest.length(), 64L * 1024L);
+            byte[] raw = new byte[(int) len];
+            in = new FileInputStream(manifest);
+            int n = in.read(raw);
+            if (n <= 0) {
+                return "";
+            }
+            String value = parseKv(new String(raw, 0, n, StandardCharsets.UTF_8)).get(key);
+            return value == null ? "" : value;
+        } catch (IOException e) {
+            return "";
+        } finally {
+            closeQuietly(in);
+        }
+    }
+
+    /**
+     * 删私有目录里的运行时产物；返回删除成功的文件名。{@code profile.conf} 不在列（用户配置）。
+     *
+     * <p>清单与时间戳记录（{@link #MANIFEST_NAME} / {@code tempctrl_deploy_stamp}）也在列：
+     * 它们描述的是"部署产物当前是什么样"。卸载之后不清掉，脚本侧那份「上次核对通过」的记录
+     * 会让 {@code service.d} 脚本认为"本机部署过"，下次开机把刚卸载掉的东西又装回来。
+     */
     private List<String> cleanPrivateRuntime() {
         List<String> removed = new ArrayList<>();
-        String[] names = {"tempctrl.lock", "tempctrl.log", "tempctrl_webui.data"};
+        String[] names = {"tempctrl.lock", "tempctrl.log", "tempctrl_webui.data",
+                MANIFEST_NAME, "tempctrl_deploy_stamp", "tempctrl_wd_spawn"};
         for (String name : names) {
             File f = new File(configStore.getPrivateDir(), name);
             if (f.exists() && f.delete()) {
@@ -946,8 +1117,58 @@ public final class Deployer {
 
     // ==================== 内部：shell 片段 ====================
 
-    private String probeScript() {
+    /**
+     * 两个「按 pid 找目标进程」的 shell 函数（跑在设备端 su shell 里、toybox 环境）。
+     *
+     * <p><b>为什么替掉 {@code pgrep -f}</b>：那是 cmdline 子串匹配，凡命令行里出现过该串的进程都被
+     * 算进来。对 {@code $BIN} 尤其糟——该路径同时是 {@code tempctrl_service.log} / {@code tempctrl_uiprefs} /
+     * {@code tempctrl_*.status} 等一串兄弟文件名的前缀，而后果不只是"多杀一个无关进程"：等待循环会
+     * 永远等不到"已退出"（无关进程不受我们的 signal 影响），{@code <TAG>_STOPPED} 恒 0，
+     * 「拉起daemon」直接判「旧实例未退出，已放弃启动」——一次无关进程就能让该功能硬失败。
+     *
+     * <p><b>判据只剩这一处</b>：{@link #killAndWaitSnippet}（停）与 {@link #restartCore()}（判活 / 取 PID）
+     * 共用这两个函数，故"判有没有在跑"与"判停没停稳"不可能给出不同结论。判据与 service.d 脚本的
+     * {@code running()} 同源（{@code /proc/<pid>/exe} 的指向），差别只在脚本那边不必管
+     * {@code (deleted)}——它不再承担"换掉在跑实例"的职责。
+     */
+    private static String pidsPreamble() {
         return "BIN=" + BIN_DEST + "\n"
+                // 二进制实例＝/proc/<pid>/exe 的指向**恰好**是 $BIN（末端锚定，故不会命中
+                // tempctrl_service.log / tempctrl_*.status 那些兄弟文件）。
+                // 末尾允许 " (deleted)"：部署流程是 rm -f 后 cp（`deployScript()`），而旧实例可能正跑着
+                // 那个被 unlink 的 inode —— 此时它的 exe 显示成 "<路径> (deleted)"，但它**仍持着单实例锁**，
+                // 必须仍算"在跑"、仍要能被停掉；否则新实例以退出码 2 退出，盘上的新二进制永远不生效
+                // （正是 deploy() 警告过的"等于没更新"）。二元括号写成 [(] [)]，不在 ERE 里用转义括号。
+                + "bin_pids() {\n"
+                + "    ls -l /proc/[0-9]*/exe 2>/dev/null"
+                + " | grep -E -- \"-> $BIN( [(]deleted[)])?$\""
+                + " | sed -n \"s#.* /proc/\\([0-9]*\\)/exe ->.*#\\1#p\"\n"
+                + "}\n"
+                // 看门狗 shell：exe 判不出来（一切 shell 的 exe 都是 /system/bin/sh），故改为看两件事：
+                //   ① 进程映像就是 shell（/proc/<pid>/comm == sh —— 内核按 execve 的可执行文件名给，
+                //      与 argv[0] 无关）；
+                //   ② 它的某个**参数恰好等于**候选脚本路径（不是子串：cp/rm/md5sum 的实参、部署中转
+                //      副本 <staging>/b6x-tempctrl.sh、".new" 后缀、只是提到过该文件名的进程，一概不算）。
+                // 合起来命中的就是"另一个正在跑本脚本的实例"（含 `sh <路径>`、shebang 直 exec、
+                // `sh -c '<路径>'` 三种形态；本 app 自己的 su shell 参数为空，天然不命中）。
+                // 先按 comm 一次 grep 筛出 shell（每 pid 省掉后面的 fork），再把 NUL 换成换行做成文本
+                // 管道后用 grep -qx（整行相等）——不依赖 grep 的二进制文件语义，也不用 -z。
+                + "wd_pids() {\n"
+                + "    for c in $(grep -l '^sh$' /proc/[0-9]*/comm 2>/dev/null); do\n"
+                + "        p=${c#/proc/}; p=${p%/comm}\n"
+                + "        a=$(tr '\\000' '\\n' < \"/proc/$p/cmdline\" 2>/dev/null)\n"
+                + "        case \"$a\" in *" + SCRIPT_NAME + "*) ;; *) continue ;; esac\n"
+                + "        if printf '%s\\n' \"$a\" | grep -qx -- \"" + SERVICE_D_MODERN + "/" + SCRIPT_NAME + "\""
+                + " || printf '%s\\n' \"$a\" | grep -qx -- \""
+                + SERVICE_D_KSU_LEGACY + "/" + SCRIPT_NAME + "\"; then\n"
+                + "            echo \"$p\"\n"
+                + "        fi\n"
+                + "    done\n"
+                + "}\n";
+    }
+
+    private String probeScript() {
+        return pidsPreamble()
                 + "[ -e \"$BIN\" ] && echo BIN_EXISTS=1 || echo BIN_EXISTS=0\n"
                 + "[ -x \"$BIN\" ] && echo BIN_EXEC=1 || echo BIN_EXEC=0\n"
                 + "if command -v md5sum > /dev/null 2>&1; then echo MD5TOOL=1; else echo MD5TOOL=0; fi\n"
@@ -956,7 +1177,7 @@ public final class Deployer {
                 + "  f=\"$d/" + SCRIPT_NAME + "\"\n"
                 + "  if [ -f \"$f\" ]; then echo \"SCRIPT=$f\"; echo \"SCRIPT_MD5=$(md5sum \"$f\" 2>/dev/null | cut -d' ' -f1)\"; fi\n"
                 + "done\n"
-                + "pgrep -f \"$BIN\" > /dev/null 2>&1 && echo RUNNING=1 || echo RUNNING=0\n";
+                + "[ -n \"$(bin_pids)\" ] && echo RUNNING=1 || echo RUNNING=0\n";
     }
 
     /**
@@ -977,24 +1198,45 @@ public final class Deployer {
                 + "echo \"KSU_VER=$ver\"\n";
     }
 
-    /** 把脚本装到 $svcd 并回吐 SCRIPT_OK 的片段（部署与单独更新脚本共用）。 */
+    /**
+     * 把脚本装到 $svcd 并回吐 SCRIPT_OK 的片段（部署与单独更新脚本共用）。
+     *
+     * <p><b>先落 {@code .new} 再 {@code mv}</b>：这个脚本自己就是常驻的看门狗 shell，
+     * 覆写它正在读的那个文件会让 sh "边写边读"读到半截内容；{@code mv} 换的是目录项，
+     * 正在跑的那个 shell 继续持旧 inode，读写两边互不干扰。失败路径顺手清掉半个 {@code .new}。
+     */
     private static String scriptInstallSnippet(File stagedScript) {
-        return "cp -f " + quote(stagedScript.getAbsolutePath()) + " \"$svcd/" + SCRIPT_NAME + "\" "
-                + "&& chmod 0755 \"$svcd/" + SCRIPT_NAME + "\" && echo SCRIPT_OK=1 || echo SCRIPT_OK=0\n";
+        return "cp -f " + quote(stagedScript.getAbsolutePath()) + " \"$svcd/" + SCRIPT_NAME + ".new\" "
+                + "&& chmod 0755 \"$svcd/" + SCRIPT_NAME + ".new\" "
+                + "&& mv -f \"$svcd/" + SCRIPT_NAME + ".new\" \"$svcd/" + SCRIPT_NAME + "\" "
+                + "&& echo SCRIPT_OK=1 || echo SCRIPT_OK=0\n"
+                + "rm -f \"$svcd/" + SCRIPT_NAME + ".new\" 2>/dev/null\n";
     }
 
-    /** 只重推脚本时的 shell（完全不碰 $BIN）。 */
+    /**
+     * 只重推脚本时的 shell（完全不碰 $BIN）。
+     *
+     * <p>脚本换完要连看门狗与守护进程一起换：<b>先停看门狗 shell</b>（{@link #killAndWaitSnippet}），
+     * 再由 {@link #restartCore()} 走"看门狗不在"那条路——它会用磁盘上的<b>新脚本</b>把看门狗拉起来，
+     * 由它把守护进程停旧起新。只重启守护进程是不够的，原因见 {@link #updateScript()} 的 javadoc。
+     */
     private String updateScriptScript(File stagedScript) {
-        return serviceDirPreamble()
+        return pidsPreamble()
+                + serviceDirPreamble()
                 + "mkdir -p \"$svcd\" 2>&1\n"
                 + scriptInstallSnippet(stagedScript)
-                + "echo \"SCRIPT_MD5=$(md5sum \"$svcd/" + SCRIPT_NAME + "\" 2>/dev/null | cut -d' ' -f1)\"\n";
+                + "echo \"SCRIPT_MD5=$(md5sum \"$svcd/" + SCRIPT_NAME + "\" 2>/dev/null | cut -d' ' -f1)\"\n"
+                + killAndWaitSnippet("wd_pids", "WATCHDOG")
+                + restartCore();
     }
 
     private String deployScript(File stagedBin, File stagedScript) {
         return "BIN=" + BIN_DEST + "\n"
                 + serviceDirPreamble()
                 + "mkdir -p \"$svcd\" 2>&1\n"
+                // 先删再落：旧实例可能正跑着这个文件，直接 cp 覆写会 ETXTBSY（unlink 则不受影响，
+                // 在跑的进程继续持旧 inode 跑完自己那一轮）。随后的自动拉起会把新二进制换上去。
+                + "rm -f \"$BIN\"\n"
                 + "cp -f " + quote(stagedBin.getAbsolutePath()) + " \"$BIN\" && chmod 0755 \"$BIN\" "
                 + "&& echo BIN_OK=1 || echo BIN_OK=0\n"
                 + scriptInstallSnippet(stagedScript)
@@ -1039,9 +1281,9 @@ public final class Deployer {
 
     private String uninstallScript() {
         // 停止序列与 stopDaemonScript() 同源（同一个片段），差别只在后面这堆 rm。
-        return "BIN=" + BIN_DEST + "\n"
-                + killAndWaitSnippet(SCRIPT_NAME, "WATCHDOG")
-                + killAndWaitSnippet(BIN_DEST, "DAEMON")
+        return pidsPreamble()
+                + killAndWaitSnippet("wd_pids", "WATCHDOG")
+                + killAndWaitSnippet("bin_pids", "DAEMON")
                 // 3) 两个进程都停稳后再删文件
                 + "rm -f " + SERVICE_D_MODERN + "/" + SCRIPT_NAME + "\n"
                 + "rm -f " + SERVICE_D_KSU_LEGACY + "/" + SCRIPT_NAME + "\n"
@@ -1063,30 +1305,39 @@ public final class Deployer {
     }
 
     /**
-     * 「先停再起」的 shell，<b>按看门狗在不在分两条路</b>：
-     * <ul>
-     *   <li>看门狗 shell 存活（常态）→ 只停/起 {@code $BIN}：看门狗自己的 tick 会兜住后续的进程级
-     *       死亡，不必也不该动它（杀了它常驻保障就没了）。</li>
-     *   <li>看门狗 shell 不在（例如刚点过「停止daemon」）→ 把 service.d 脚本拉起来，由它
-     *       {@code stop_old + start} 把 daemon 带回来——这是「停止daemon」之后唯一能恢复常驻的路
-     *       （service.d 脚本平时只由系统在开机时拉起）。</li>
-     * </ul>
-     *
-     * <p>看门狗脚本第一步是<b>等亮屏</b>，灭屏时它会一直等到亮屏才启动 daemon，故第二条路要等；
-     * 调用方据此区分「看门狗还没轮到」与「新实例真的没起来」（见 {@code restartOnce}）。
+     * 「先停再起」的完整 shell = {@code BIN=} + 目录定位 + {@link #restartCore()}。
      *
      * <p>不含 {@code exit}：{@link RootShell#exec} 靠脚本末尾的结束标记回传退出码，
      * 脚本自己退出会让标记丢失、整次调用被判成通道失败（见 {@code RootShell} 的说明）。
      */
     private String restartScript() {
-        return "BIN=" + BIN_DEST + "\n"
-                + serviceDirPreamble()
-                + "WD=\"$svcd/" + SCRIPT_NAME + "\"\n"
-                // 1) 看门狗在不在（脚本 cmdline 是本脚本路径、不含 $BIN，故按脚本名匹配）
-                + "pgrep -f " + SCRIPT_NAME + " > /dev/null 2>&1 && WD_ALIVE=1 || WD_ALIVE=0\n"
+        return pidsPreamble() + serviceDirPreamble() + restartCore();
+    }
+
+    /**
+     * 「先停再起」的核心片段（调用方负责备好 {@code BIN=} 与 {@code $svcd}），<b>按看门狗在不在分两条路</b>：
+     * <ul>
+     *   <li>看门狗 shell 存活（常态）→ 只停/起 {@code $BIN}：看门狗自己的 tick 会兜住后续的进程级
+     *       死亡，不必也不该动它（杀了它常驻保障就没了）。</li>
+     *   <li>看门狗 shell 不在（例如刚点过「停止daemon」，或 {@link #updateScript()} 刚把它停掉）
+     *       → 把 service.d 脚本拉起来，由它把 daemon 带回来（脚本启动时<b>不再</b>先杀 daemon：
+     *       "先杀"由上一步 {@link #killAndWaitSnippet} 负责，脚本内部是"存在即不重复拉起"，
+     *       见 {@code tempctrl.c} 的「看门狗反向保活」）——这是
+     *       「停止daemon」之后唯一能恢复常驻的路（service.d 脚本平时只由系统在开机时拉起），
+     *       也是「换了新脚本」之后让新脚本立刻生效的路。</li>
+     * </ul>
+     *
+     * <p>看门狗脚本第一步是<b>等亮屏</b>，灭屏时它会一直等到亮屏才启动 daemon，故第二条路要等；
+     * 调用方据此区分「看门狗还没轮到」与「新实例真的没起来」（见 {@code restartOnce}）。
+     */
+    private static String restartCore() {
+        return "WD=\"$svcd/" + SCRIPT_NAME + "\"\n"
+                // 1) 看门狗在不在：用 wd_pids（exe 判不出来——一切 shell 的 exe 都是 /system/bin/sh，
+                //    改判「影像为 sh 且某个参数恰好等于候选脚本路径」，见 pidsPreamble）
+                + "[ -n \"$(wd_pids)\" ] && WD_ALIVE=1 || WD_ALIVE=0\n"
                 + "echo \"WD_ALIVE=$WD_ALIVE\"\n"
                 // 2) 两条路都要先把在跑的旧实例停稳（flock 的持有者必须先消失）
-                + killAndWaitSnippet(BIN_DEST, "OLD")
+                + killAndWaitSnippet("bin_pids", "OLD")
                 // 3) 看门狗不在就拉起它、由它停旧起新；在就自己起
                 + "if [ \"$WD_ALIVE\" = \"0\" ]; then\n"
                 + "  if [ -f \"$WD\" ]; then\n"
@@ -1097,11 +1348,11 @@ public final class Deployer {
                 + "  fi\n"
                 + "  i=0\n"
                 + "  while [ $i -lt " + KILL_WAIT_LOOPS + " ]; do\n"
-                + "    pgrep -f \"$BIN\" > /dev/null 2>&1 && break\n"
+                + "    [ -n \"$(bin_pids)\" ] && break\n"
                 + "    sleep 1\n"
                 + "    i=$((i + 1))\n"
                 + "  done\n"
-                + "  NEW_PID=$(pgrep -f \"$BIN\" | head -1)\n"
+                + "  NEW_PID=$(bin_pids | head -1)\n"
                 + "elif [ \"$OLD_STOPPED\" != \"1\" ]; then\n"
                 // 旧实例没停稳就不启动：抢 flock 必失败，还要白等一次启动延时
                 + "  NEW_PID=\"\"\n"
@@ -1111,7 +1362,7 @@ public final class Deployer {
                 + "else\n"
                 + "  nohup \"$BIN\" >> /data/local/tmp/tempctrl_service.log 2>&1 < /dev/null &\n"
                 + "  sleep 2\n"
-                + "  NEW_PID=$(pgrep -f \"$BIN\" | head -1)\n"
+                + "  NEW_PID=$(bin_pids | head -1)\n"
                 + "fi\n"
                 + "if [ -n \"$NEW_PID\" ]; then renice -n -20 -p \"$NEW_PID\" > /dev/null 2>&1; fi\n"
                 // 4) 新 PID 必须与旧的不同，否则只是"读到了同一个残留进程"
@@ -1121,51 +1372,64 @@ public final class Deployer {
     }
 
     /**
-     * 停止的 shell：先杀看门狗 shell、再杀 daemon，各自「pkill → 等 → pkill -9 → 等」。
+     * 停止的 shell：先杀看门狗 shell、再杀 daemon，各自「kill → 等 → kill -9 → 等」。
      * 只杀进程、<b>不删任何文件</b>（{@link #uninstallScript()} 用同一段片段，停稳之后才删）。
      */
     private String stopDaemonScript() {
-        return "BIN=" + BIN_DEST + "\n"
-                // 先杀看门狗 shell：它的 cmdline 是本脚本路径、不含 $BIN，只 pkill $BIN 抓不到它。
+        return pidsPreamble()
+                // 先杀看门狗 shell：它的可执行映像就是 /system/bin/sh（与一切 shell 共享），故不能按
+                // $BIN 找，用 wd_pids（映像为 sh 且某个参数恰好等于候选脚本路径，见 pidsPreamble）。
                 // 不先杀它，它下一轮 tick 就会把刚停掉的守护进程再拉起来，「停止」不成立。
-                + killAndWaitSnippet(SCRIPT_NAME, "WATCHDOG")
-                + killAndWaitSnippet(BIN_DEST, "DAEMON");
+                + killAndWaitSnippet("wd_pids", "WATCHDOG")
+                + killAndWaitSnippet("bin_pids", "DAEMON");
     }
 
     /**
-     * 「杀进程 + 轮询等它真退出」的 shell 片段——<b>停止序列的唯一出处</b>：
-     * {@code pkill}（SIGTERM）→ 轮询 ≤{@value #KILL_WAIT_LOOPS} 秒 → {@code pkill -9}
+     * 「按 pid 停进程 + 轮询等它真退出」的 shell 片段——<b>停止序列的唯一出处</b>：
+     * {@code kill}（SIGTERM）→ 轮询 ≤{@value #KILL_WAIT_LOOPS} 秒 → {@code kill -9}
      * → 再轮询 ≤{@value #KILL9_WAIT_LOOPS} 秒。等它真退出是必须的：C 端用非阻塞 {@code flock}
      * 做单实例锁，旧实例还在时新实例会立刻以退出码 {@value #EXIT_ALREADY_RUNNING} 退出。
      *
-     * <p>回吐 {@code <TAG>_PID} / {@code <TAG>_STOPPED} / {@code <TAG>_KILLED}；
-     * PID 为空串表示本来就没在跑，此时 STOPPED=1（没在跑也算已停稳）。
+     * <p>目标 pid 由 {@code pidSource} 提供（{@code bin_pids} / {@code wd_pids}，见
+     * {@link #pidsPreamble()}）：<b>不再用 {@code pkill -f}</b>——子串匹配会牵连无关进程，且"杀"
+     * 与"等"会用两套判据。等待期内每轮重新取一次 pid 并再杀一遍（保留旧 {@code pkill} 的语义：
+     * 等待期内新冒出来的同类进程也一并停掉）。
      *
-     * @param pattern pgrep / pkill 的 {@code -f} 匹配串（调用方传字面量）
-     * @param tag     回吐键前缀，必须是合法的 shell 变量名片段（调用方传字面量）
+     * <p>回吐 {@code <TAG>_PID} / {@code <TAG>_STOPPED} / {@code <TAG>_KILLED}；
+     * PID 为空串表示本来就没在跑，此时 STOPPED=1（没在跑也算已停稳）。{@code <TAG>_PID} 取首次
+     * 快照的第一个（供上屏与 {@code restartCore()} 的"新 PID 不得等于旧 PID"判据用）。
+     *
+     * @param pidSource 打印目标 pid（每行一个）的 shell 函数名，调用方传字面量
+     * @param tag       回吐键前缀，必须是合法的 shell 变量名片段（调用方传字面量）
      */
-    private static String killAndWaitSnippet(String pattern, String tag) {
-        return tag + "_PID=$(pgrep -f \"" + pattern + "\" | head -1)\n"
+    private static String killAndWaitSnippet(String pidSource, String tag) {
+        return tag + "_PIDS=$(" + pidSource + ")\n"
+                + tag + "_PID=$(printf '%s\\n' \"$" + tag + "_PIDS\" | head -1)\n"
                 + tag + "_STOPPED=1\n"
                 + tag + "_KILLED=0\n"
-                + "if [ -n \"$" + tag + "_PID\" ]; then\n"
-                + "  pkill -f \"" + pattern + "\" 2>/dev/null\n"
+                + "if [ -n \"$" + tag + "_PIDS\" ]; then\n"
+                + "  for p in $" + tag + "_PIDS; do kill $p 2>/dev/null; done\n"
                 + "  i=0\n"
                 + "  while [ $i -lt " + KILL_WAIT_LOOPS + " ]; do\n"
-                + "    pgrep -f \"" + pattern + "\" > /dev/null 2>&1 || break\n"
+                + "    " + tag + "_PIDS=$(" + pidSource + ")\n"
+                + "    [ -z \"$" + tag + "_PIDS\" ] && break\n"
+                + "    for p in $" + tag + "_PIDS; do kill $p 2>/dev/null; done\n"
                 + "    sleep 1\n"
                 + "    i=$((i + 1))\n"
                 + "  done\n"
-                + "  if pgrep -f \"" + pattern + "\" > /dev/null 2>&1; then\n"
-                + "    pkill -9 -f \"" + pattern + "\" 2>/dev/null\n"
+                + "  " + tag + "_PIDS=$(" + pidSource + ")\n"
+                + "  if [ -n \"$" + tag + "_PIDS\" ]; then\n"
                 + "    " + tag + "_KILLED=1\n"
+                + "    for p in $" + tag + "_PIDS; do kill -9 $p 2>/dev/null; done\n"
                 + "    i=0\n"
                 + "    while [ $i -lt " + KILL9_WAIT_LOOPS + " ]; do\n"
-                + "      pgrep -f \"" + pattern + "\" > /dev/null 2>&1 || break\n"
+                + "      " + tag + "_PIDS=$(" + pidSource + ")\n"
+                + "      [ -z \"$" + tag + "_PIDS\" ] && break\n"
+                + "      for p in $" + tag + "_PIDS; do kill -9 $p 2>/dev/null; done\n"
                 + "      sleep 1\n"
                 + "      i=$((i + 1))\n"
                 + "    done\n"
-                + "    if pgrep -f \"" + pattern + "\" > /dev/null 2>&1; then " + tag + "_STOPPED=0; fi\n"
+                + "    if [ -n \"$(" + pidSource + ")\" ]; then " + tag + "_STOPPED=0; fi\n"
                 + "  fi\n"
                 + "fi\n"
                 + "echo \"" + tag + "_PID=$" + tag + "_PID\"\n"

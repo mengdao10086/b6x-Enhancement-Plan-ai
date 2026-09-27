@@ -59,6 +59,8 @@
     <!-- 状态页：脚本哈希不一致时的自动重推 -->
     <string name="status_script_autofixed">检测到 service.d 脚本与 APK 内不一致，已自动重推脚本（二进制未动）</string>
     <string name="status_script_autofix_failed">检测到 service.d 脚本与 APK 内不一致，自动重推失败：</string>
+    <!-- 第三种状态：重推成功但守护进程没在跑。只报"已自动重推"会把"进程没起来"盖掉，只报"失败"又与事实不符 -->
+    <string name="status_script_autofixed_no_daemon">检测到 service.d 脚本与 APK 内不一致，已自动重推脚本；但当前未探测到守护进程在运行（灭屏或正在重部署时会稍晚，否则请点「拉起daemon」）</string>
 
     <!--
         状态页：二进制哈希不一致时的部署请求（脚本不一致仍是静默自动重推，不走弹窗）。
@@ -66,4 +68,16 @@
     -->
     <string name="status_hash_title">守护进程二进制与 APK 不一致</string>
     <string name="status_hash_message">设备上的守护进程二进制与当前 APK 内的不一致，需要重新部署才会生效。是否立即一键部署？\n\n部署会重启守护进程，期间温控短暂空窗（约 10 秒内）。</string>
+
+    <!--
+        状态页：另外两种「该部署/该拉起」的状态（同一套去重与优先级，见 StatusFragment.armDeployPrompt）。
+        分两条文案而不是合并成一条：没部署过要装一遍，进程没在跑只要拉起来，动作用的不该是同一个按钮。
+        「自动更新」开关开着时这两种仍然只弹窗 —— 用户从没同意过部署（或刚主动停过进程），不替他决定。
+    -->
+    <string name="status_notdeployed_title">尚未部署守护进程</string>
+    <string name="status_notdeployed_message">检测到本机还没有部署守护进程，温控增强不会生效。是否立即一键部署？\n\n部署需要 root：会把二进制与开机脚本写到设备上，并拉起守护进程。</string>
+    <string name="status_notrunning_title">守护进程未运行</string>
+    <string name="status_notrunning_message">守护进程二进制已就位、内容与当前 APK 一致，但进程当前没有在运行，温控增强不会生效。是否立即拉起守护进程？</string>
+    <!-- 「自动更新」开着且设备上的内容旧了：不弹窗，直接重装；这一条进操作记录，让用户能看出刚才自动做了什么 -->
+    <string name="status_auto_deploy_log">自动更新：检测到设备上的守护进程与当前 APK 不一致，已自动重新部署</string>
 </resources>
