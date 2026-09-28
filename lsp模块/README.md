@@ -171,9 +171,9 @@ TARGET_TEMP=180     ← 18.0°C
 
 | 项 | 值 |
 |---|---|
-| 探测节奏 | 守护进程每 60 秒扫一次 `/proc/*/cmdline`（不经 shell、不 fork `pgrep`）；按 NUL 切开后**逐参数整等**两条候选脚本路径之一或脚本名 `b6x-tempctrl.sh`。子串匹配会因 cmdline 是 NUL 分隔而只看到 `argv[0]`、恒不命中（见 [TECH_DEBT.md](../TECH_DEBT.md) 已解决区 §8）。app 侧 `wd_pids()` 已统一到同一口径：comm 白名单只做省 fork 的快筛，一个都没命中时全量兜底扫一轮 |
+| 探测节奏 | 守护进程每 60 秒扫一次 `/proc/*/cmdline`（不经 shell、不 fork `pgrep`）；按 NUL 切开后**逐参数整等**两条候选脚本路径之一或脚本名 `b6x-tempctrl.sh`。子串匹配会因 cmdline 是 NUL 分隔而只看到 `argv[0]`、恒不命中（见 [TECH_DEBT.md](../TECH_DEBT.md) 已解决区 §7）。app 侧 `wd_pids()` 已统一到同一口径：comm 白名单只做省 fork 的快筛，一个都没命中时全量兜底扫一轮 |
 | 拉起条件 | **连续两次（≥2 个检查周期）都未见**看门狗才拉起；存在则**不重复拉起** |
-| 拉起形态 | **double-fork**：中间层 `setsid` 后立刻 `_exit(0)`，孙层 `execv("/system/bin/sh", {sh, <脚本路径>})`（`/data/adb` 是 noexec 挂载，脚本不能直接 exec）；父进程只回收中间层、`WNOHANG` 轮询兜 3s，**不等待常驻的看门狗本体**（等它就会把主循环永久堵死，见 [TECH_DEBT.md](../TECH_DEBT.md) 已解决区 §8） |
+| 拉起形态 | **double-fork**：中间层 `setsid` 后立刻 `_exit(0)`，孙层 `execv("/system/bin/sh", {sh, <脚本路径>})`（`/data/adb` 是 noexec 挂载，脚本不能直接 exec）；父进程只回收中间层、`WNOHANG` 轮询兜 3s，**不等待常驻的看门狗本体**（等它就会把主循环永久堵死，见 [TECH_DEBT.md](../TECH_DEBT.md) 已解决区 §7） |
 | 节流 | 拉起冷却 300s（时间戳落 APK 私有目录 `tempctrl_wd_spawn`，**跨守护进程重启有效**）；连续失败 3 次后退避到 600s |
 | 对称约定 | 看门狗脚本**启动时不再先杀守护进程**（`start()` 内部先查后拉，已有实例就跳过）——两侧都是"先查后拉、存在即不重复拉起"，缺一半会成环 |
 | 关掉后 | 退回只有「看门狗守护守护进程」的单向模式（C 端不再探测/拉起，脚本侧那道门仍生效） |
