@@ -31,7 +31,7 @@
 
     <!-- ===== 键行 ===== -->
     <string name="config_badge_inactive">未生效</string>
-    <string name="config_ui_only">界面自用，守护进程不读取</string>
+    <string name="config_ui_only">界面自用，c-daemon 不读取</string>
     <string name="config_hint_value">数值</string>
     <string name="config_hint_path">路径</string>
     <string name="config_range">范围 %1$s~%2$s</string>

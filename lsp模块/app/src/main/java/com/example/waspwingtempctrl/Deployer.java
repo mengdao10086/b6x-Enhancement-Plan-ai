@@ -270,6 +270,8 @@ public final class Deployer {
         public final boolean configPresent;
         public final boolean configPathAligned;
         public final boolean daemonRunning;
+        /** c-daemon 的 PID，空格分隔（{@link #daemonRunning} 为 false 时为空串）。 */
+        public final String daemonPids;
         /**
          * 看门狗 shell 的个数与 PID（与 {@link #daemonRunning} 取自同一趟 su 往返）。
          *
@@ -289,7 +291,7 @@ public final class Deployer {
                String binMd5, String binExpectedMd5, String scriptPath, boolean scriptPresent,
                boolean scriptHashOk, String scriptMd5, String scriptExpectedMd5,
                boolean configPresent, boolean configPathAligned, boolean daemonRunning,
-               int watchdogCount, String watchdogPids,
+               String daemonPids, int watchdogCount, String watchdogPids,
                boolean deployed, String configPath, List<String> notes) {
             this.suOk = suOk;
             this.binExists = binExists;
@@ -305,6 +307,7 @@ public final class Deployer {
             this.configPresent = configPresent;
             this.configPathAligned = configPathAligned;
             this.daemonRunning = daemonRunning;
+            this.daemonPids = daemonPids;
             this.watchdogCount = watchdogCount;
             this.watchdogPids = watchdogPids;
             this.deployed = deployed;
@@ -332,10 +335,12 @@ public final class Deployer {
                 appendHashPair(sb, scriptExpectedMd5, scriptMd5);
             }
             sb.append("  配置 ").append(configPath).append("：")
-                    .append(configPresent ? "已存在" : "不存在（守护进程将用代码默认值）")
+                    .append(configPresent ? "已存在" : "不存在（c-daemon 将用代码默认值）")
                     .append(configPathAligned ? "" : "，且与 C 端落点不一致").append('\n');
-            sb.append("  守护进程：").append(daemonRunning ? "运行中" : "未运行").append('\n');
-            sb.append("  看门狗 shell：").append(watchdogLine()).append('\n');
+            sb.append("  c-daemon：").append(daemonRunning
+                    ? "运行中" + (daemonPids.isEmpty() ? "" : "（PID " + daemonPids + "）")
+                    : "未运行").append('\n');
+            sb.append("  sh-watchdog：").append(watchdogLine()).append('\n');
             appendNotes(sb);
             return sb.toString();
         }
@@ -446,7 +451,7 @@ public final class Deployer {
         return new Status(suOk, binExists, binExec, binHashOk, binMd5, expectedBin,
                 scriptPath, scriptPresent, scriptHashOk, scriptMd5, expectedScript,
                 configStore.exists(), aligned, "1".equals(kv.get("RUNNING")),
-                wdCount, nvl(kv.get("WD_PIDS")),
+                nvl(kv.get("DAEMON_PIDS")), wdCount, nvl(kv.get("WD_PIDS")),
                 deployed, configStore.getConfigFile().getAbsolutePath(), notes);
     }
 
@@ -656,12 +661,12 @@ public final class Deployer {
         // 重启那一趟的结果：见方法 javadoc（脚本换了必须连看门狗与守护进程一起换）
         if ("0".equals(kv.get("WD_ALIVE"))) {
             steps.add("1".equals(kv.get("WD_STARTED"))
-                    ? "已停旧看门狗 shell，并由磁盘上的新脚本重新拉起（新脚本自此生效）"
+                    ? "已停旧 sh-watchdog，并由磁盘上的新脚本重新拉起（新脚本自此生效）"
                     : "警告：看门狗脚本不在、且未能重新拉起（需重新部署）");
         }
         steps.add("1".equals(kv.get("STARTED"))
-                ? "守护进程已重启（PID " + nvl(kv.get("NEW_PID")) + "）"
-                : "警告：未探测到新的守护进程（它启动前要等亮屏，灭屏时会更晚一些）");
+                ? "c-daemon 已重启（PID " + nvl(kv.get("NEW_PID")) + "）"
+                : "警告：未探测到新的 c-daemon（它启动前要等亮屏，灭屏时会更晚一些）");
         return new Result(true, "更新脚本", steps, "", null);
     }
 
@@ -698,8 +703,8 @@ public final class Deployer {
         boolean watchdogStopped = "1".equals(kv.get("WATCHDOG_STOPPED"));
         boolean daemonStopped = "1".equals(kv.get("DAEMON_STOPPED"));
         steps.add(watchdogStopped
-                ? "已停止看门狗 shell（先于守护进程杀，否则它会重建日志并把守护进程再拉起来）"
-                : "警告：" + KILL_WAIT_LOOPS + " 秒内未能确认看门狗 shell 已退出（脚本自身的自尽自检会在下一轮兜底）");
+                ? "已停止 sh-watchdog（先于 c-daemon 杀，否则它会重建日志并把 c-daemon 再拉起来）"
+                : "警告：" + KILL_WAIT_LOOPS + " 秒内未能确认 sh-watchdog 已退出（脚本自身的自尽自检会在下一轮兜底）");
         if (daemonStopped) {
             steps.add("已停止运行中的 tempctrl");
         } else {
@@ -707,13 +712,13 @@ public final class Deployer {
         }
         steps.add("已删 service.d 脚本（两个候选目录都查了）");
         steps.add("已删 " + BIN_DEST + "（进程已停，可安全 unlink）");
-        steps.add("已删 status 双文件（守护进程下次启动会重建；仍激活的 MainHook 读到缺失即视为断联）");
+        steps.add("已删 status 双文件（c-daemon 下次启动会重建；仍激活的 MainHook 读到缺失即视为断联）");
         steps.add("已删脚本自身日志 /data/local/tmp/tempctrl_service.log");
         steps.add("已删旧版迁移残留 /data/local/tmp/tempctrl_last_dev"
                 + "（新版落点在飞智 app 自己的私有目录，各包各记，本类不碰）");
         steps.add(daemonStopped
-                ? "已删兜底单实例锁 /data/local/tmp/tempctrl.lock（守护进程已确认停止）"
-                : "保留兜底单实例锁 /data/local/tmp/tempctrl.lock（守护进程未确认停止，删了会绕过单实例锁）");
+                ? "已删兜底单实例锁 /data/local/tmp/tempctrl.lock（c-daemon 已确认停止）"
+                : "保留兜底单实例锁 /data/local/tmp/tempctrl.lock（c-daemon 未确认停止，删了会绕过单实例锁）");
         steps.add("已删私有目录不可用时的兜底日志 /cache/tempctrl.log");
 
         if (daemonStopped && watchdogStopped) {
@@ -786,20 +791,20 @@ public final class Deployer {
         String oldPid = nvl(kv.get("OLD_PID"));
         if (viaWatchdog) {
             if (!"1".equals(kv.get("WD_STARTED"))) {
-                steps.add("看门狗 shell 不在，且 service.d 脚本缺失（两个候选目录都没找到）");
+                steps.add("sh-watchdog 不在，且 service.d 脚本缺失（两个候选目录都没找到）");
                 return new Attempt(false, false, "看门狗脚本不存在（需先重新部署）");
             }
-            steps.add("看门狗 shell 不在（如刚点过「停止daemon」），已重新拉起，由它停旧起新");
+            steps.add("sh-watchdog 不在（如刚点过「停止daemon」），已重新拉起，由它停旧起新");
         } else if (!"1".equals(kv.get("OLD_STOPPED"))) {
-            steps.add("检测到守护进程在运行（PID " + oldPid + "），先停止它");
+            steps.add("检测到 c-daemon 在运行（PID " + oldPid + "），先停止它");
             steps.add(KILL_WAIT_LOOPS + " 秒内未退出，kill -9 后仍未退出");
             return new Attempt(false, true,
                     "旧实例未退出，已放弃启动（否则新实例抢单实例锁必然失败）");
         } else if ("1".equals(kv.get("NOBIN"))) {
-            steps.add(oldPid.isEmpty() ? "未检测到运行中的守护进程" : "已停止旧实例（PID " + oldPid + "）");
+            steps.add(oldPid.isEmpty() ? "未检测到运行中的 c-daemon" : "已停止旧实例（PID " + oldPid + "）");
             return new Attempt(false, false, "二进制不存在（需先部署）：" + BIN_DEST);
         } else {
-            steps.add(oldPid.isEmpty() ? "未检测到运行中的守护进程，直接启动"
+            steps.add(oldPid.isEmpty() ? "未检测到运行中的 c-daemon，直接启动"
                     : "已停止旧实例（PID " + oldPid + "）");
             if ("1".equals(kv.get("OLD_KILLED"))) {
                 steps.add("旧实例未响应 kill（SIGTERM），已用 kill -9 结束");
@@ -865,9 +870,9 @@ public final class Deployer {
         String wdPid = nvl(kv.get("WATCHDOG_PID"));
         String daemonPid = nvl(kv.get("DAEMON_PID"));
         steps.add(watchdogStopped
-                ? (wdPid.isEmpty() ? "未检测到运行中的看门狗 shell"
-                        : "已停止看门狗 shell（PID " + wdPid + "；它在 daemon 之前杀，否则会把 daemon 拉回来）")
-                : "警告：" + KILL_WAIT_LOOPS + " 秒内未能确认看门狗 shell 已退出");
+                ? (wdPid.isEmpty() ? "未检测到运行中的 sh-watchdog"
+                        : "已停止 sh-watchdog（PID " + wdPid + "；先停它，否则它会把 c-daemon 拉回来）")
+                : "警告：" + KILL_WAIT_LOOPS + " 秒内未能确认 sh-watchdog 已退出");
         steps.add(daemonStopped
                 ? (daemonPid.isEmpty() ? "未检测到运行中的 tempctrl"
                         : "已停止运行中的 tempctrl（PID " + daemonPid + "）")
@@ -1245,7 +1250,11 @@ public final class Deployer {
                 + "  f=\"$d/" + SCRIPT_NAME + "\"\n"
                 + "  if [ -f \"$f\" ]; then echo \"SCRIPT=$f\"; echo \"SCRIPT_MD5=$(md5sum \"$f\" 2>/dev/null | cut -d' ' -f1)\"; fi\n"
                 + "done\n"
-                + "[ -n \"$(bin_pids)\" ] && echo RUNNING=1 || echo RUNNING=0\n"
+                // c-daemon 的 pid 列表只取一次：既出 RUNNING 也出 PID（不为第二件事再扫一趟 /proc）
+                + "BIN_LIST=$(bin_pids)\n"
+                + "[ -n \"$BIN_LIST\" ] && echo RUNNING=1 || echo RUNNING=0\n"
+                + "set -- $BIN_LIST\n"
+                + "echo \"DAEMON_PIDS=$*\"\n"
                 // 看门狗同样上屏（P3-G7：不输出它，「停机时看门狗仍在跑」「两个看门狗并存」在界面上
                 // 就完全不可观测）。先落到变量再一次取用：wd_pids 要扫全部 pid，不能为了计数再跑一次。
                 // set -- 借位置参数数个数、并用 $* 把多行折成一行，省掉 wc/tr 各一次 fork。
@@ -1363,19 +1372,19 @@ public final class Deployer {
                 + "rm -f " + SERVICE_D_MODERN + "/" + SCRIPT_NAME + "\n"
                 + "rm -f " + SERVICE_D_KSU_LEGACY + "/" + SCRIPT_NAME + "\n"
                 + "rm -f \"$BIN\"\n"
-                + "# 兜底单实例锁（C 端在私有目录不可用时用的那把，LOCK_FALLBACK_PATH）：只在守护进程确认\n"
+                + "# 兜底单实例锁（C 端在私有目录不可用时用的那把，LOCK_FALLBACK_PATH）：只在 c-daemon 确认\n"
                 + "# 已停之后删 —— 它若还在跑就握着这把锁，删掉文件会让新实例锁到新的 inode、单实例保护被绕过。\n"
                 + "if [ \"$DAEMON_STOPPED\" = 1 ]; then rm -f /data/local/tmp/tempctrl.lock; fi\n"
                 + "rm -f /data/local/tmp/tempctrl_b6x.status\n"
                 + "rm -f /data/local/tmp/tempctrl_b7x.status\n"
-                + "# 守护进程转写给钩子的界面开关快照（钩子每次返回键读一次；删掉后钩子回退默认值）\n"
+                + "# c-daemon 转写给钩子的界面开关快照（钩子每次返回键读一次；删掉后钩子回退默认值）\n"
                 + "rm -f /data/local/tmp/tempctrl_uiprefs\n"
                 + "rm -f /data/local/tmp/tempctrl_service.log\n"
                 + "# 旧版迁移残留：老版本把 tempctrl_last_dev 放在这里（daemon 侧的预创建已删、现已无人读写），\n"
                 + "# 它不会自己消失，故卸载时一并清掉。\n"
                 + "# 与新落点区分：新落点是飞智 app 自己的私有目录（各包各记），不属本次部署产物，本脚本不碰。\n"
                 + "rm -f /data/local/tmp/tempctrl_last_dev\n"
-                + "# 私有目录不可用时守护进程的兜底日志落点（/cache/<二进制名>.log），可能残留\n"
+                + "# 私有目录不可用时 c-daemon 的兜底日志落点（/cache/<二进制名>.log），可能残留\n"
                 + "rm -f /cache/tempctrl.log\n";
     }
 

@@ -26,7 +26,7 @@
     <string name="log_empty_no_hit">没有命中「%1$s」的行（仅在最近 %2$d 行内匹配）</string>
 
     <string name="log_failure_title">读取失败（下方为原始诊断）</string>
-    <string name="log_empty_file_hint">提示：文件存在但为 0 字节 —— 守护进程还没写过日志，或 LOG_MAX=0 关闭了日志。</string>
+    <string name="log_empty_file_hint">提示：文件存在但为 0 字节 —— c-daemon 还没写过日志，或 LOG_MAX=0 关闭了日志。</string>
 
     <string name="log_action_follow_bottom">回到底部</string>
 

@@ -44,7 +44,7 @@
     <string name="chart_fail_stat">读取失败：stat 失败，文件不可达或路径不存在。</string>
     <string name="chart_fail_not_file">读取失败：该路径不是普通文件。</string>
     <string name="chart_fail_no_perm">读取失败：文件存在，但 app 无读权限（SELinux/属主问题）。</string>
-    <string name="chart_fail_empty">读取失败：数据文件为 0 字节，守护进程还没有写入过。</string>
+    <string name="chart_fail_empty">读取失败：数据文件为 0 字节，c-daemon 还没有写入过。</string>
     <string name="chart_fail_read">读取失败：%1$s</string>
     <string name="chart_fail_parse_empty">读取成功（%1$d 字节）但解析出 0 行有效数据：每行至少需要 8 列（epoch,电池,CPU,热端,冷端,转速,实际制冷,目标制冷）。</string>
 </resources>
