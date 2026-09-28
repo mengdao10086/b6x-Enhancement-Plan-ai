@@ -61,6 +61,18 @@ public final class Deployer {
     public static final String SERVICE_D_KSU_LEGACY = "/data/adb/ksu/service.d";
     /** KernelSU 从此 versionCode 起支持 /data/adb/service.d。 */
     public static final int KSU_MODERN_VER_CODE = 10683;
+
+    /**
+     * 看门狗候选进程的 comm 白名单：常见 shell 的进程映像名。
+     *
+     * <p><b>它只是快筛、不是判据</b>：身份判据只有一条——「某个参数<b>整等于</b>候选脚本路径」
+     * （见 {@code pidsPreamble()/wd_pids()}，与 C 侧 {@code cmdline_has_script_arg()} 同口径）。
+     * 名单用来省 fork：真机上 service.d 拉起的看门狗 comm 是 {@code busybox}
+     * （{@code /data/adb/ksu/bin/busybox sh <脚本>}），app 自己拉起的是 {@code sh} ——
+     * 曾经只认 {@code sh} 就把前者整条漏掉（「停止daemon」静默失效且假报成功）。
+     * 而枚举必然再撞墙（换个 root 方案就换个壳），故未命中时由 {@code wd_pids()} 全量兜底一轮。
+     */
+    private static final String WD_COMM_WHITELIST = "sh|ash|busybox|mksh|dash|toybox";
     /** C 端单实例锁退出码：已有实例在运行。 */
     public static final int EXIT_ALREADY_RUNNING = 2;
 
@@ -241,7 +253,7 @@ public final class Deployer {
 
     /**
      * 部署状态。{@link #describe()} 是唯一出屏形态，状态区与诊断信息共用同一份文本：
-     * 结论行 + 二进制 / service.d 脚本 / 配置 / 守护进程逐项 + 提示行。
+     * 结论行 + 二进制 / service.d 脚本 / 配置 / 守护进程 / 看门狗 shell 逐项 + 提示行。
      */
     public static final class Status {
         public final boolean suOk;
@@ -258,6 +270,15 @@ public final class Deployer {
         public final boolean configPresent;
         public final boolean configPathAligned;
         public final boolean daemonRunning;
+        /**
+         * 看门狗 shell 的个数与 PID（与 {@link #daemonRunning} 取自同一趟 su 往返）。
+         *
+         * <p>个数为 0 有两种情形，本行不区分：确实没有；或 su 不通（{@code WD_COUNT} 拿不到）——
+         * 后者由结论行的「（无 su）」与提示行兜住，与 {@link #daemonRunning} 同一条约定。
+         */
+        public final int watchdogCount;
+        /** 看门狗 shell 的 PID，空格分隔（{@link #watchdogCount} 为 0 时为空串）。 */
+        public final String watchdogPids;
         /** I4 判据的结果。 */
         public final boolean deployed;
         /** 配置文件绝对路径（app 侧）。 */
@@ -268,6 +289,7 @@ public final class Deployer {
                String binMd5, String binExpectedMd5, String scriptPath, boolean scriptPresent,
                boolean scriptHashOk, String scriptMd5, String scriptExpectedMd5,
                boolean configPresent, boolean configPathAligned, boolean daemonRunning,
+               int watchdogCount, String watchdogPids,
                boolean deployed, String configPath, List<String> notes) {
             this.suOk = suOk;
             this.binExists = binExists;
@@ -283,6 +305,8 @@ public final class Deployer {
             this.configPresent = configPresent;
             this.configPathAligned = configPathAligned;
             this.daemonRunning = daemonRunning;
+            this.watchdogCount = watchdogCount;
+            this.watchdogPids = watchdogPids;
             this.deployed = deployed;
             this.configPath = configPath;
             this.notes = Collections.unmodifiableList(notes);
@@ -311,8 +335,26 @@ public final class Deployer {
                     .append(configPresent ? "已存在" : "不存在（守护进程将用代码默认值）")
                     .append(configPathAligned ? "" : "，且与 C 端落点不一致").append('\n');
             sb.append("  守护进程：").append(daemonRunning ? "运行中" : "未运行").append('\n');
+            sb.append("  看门狗 shell：").append(watchdogLine()).append('\n');
             appendNotes(sb);
             return sb.toString();
+        }
+
+        /**
+         * 「看门狗 shell」一行的取值（P3-G7 的补救）：在此之前状态区只有前四项，看门狗既不在
+         * "在跑"里也不在"没跑"里——「停机时它仍在跑」「同时有两个」都只能在 root shell 里才看得见。
+         *
+         * <p>个数直出，不做"正常/异常"判断：0 个在「刚点过停止daemon」和「首次部署前」都是正常的。
+         * 只有 ≥2 才额外标一句——那是本轮要根治的双实例并存。
+         */
+        private String watchdogLine() {
+            if (watchdogCount <= 0) {
+                return "未检测到";
+            }
+            if (watchdogCount == 1) {
+                return "运行中（PID " + watchdogPids + "）";
+            }
+            return "检测到 " + watchdogCount + " 个（PID " + watchdogPids + "）——多实例并存，异常";
         }
 
         /** 结论行（两种形态共用）：「无 su」紧跟其后 —— 它是部署未完成最常见的原因，单列容易被当成另一件事。 */
@@ -391,9 +433,20 @@ public final class Deployer {
         }
         boolean deployed = suOk && binExists && binExec && binHashOk
                 && scriptPresent && scriptHashOk;
+        // 看门狗：个数与 PID 都来自同一趟 wd_pids()（缺键＝su 未通、值非法都退化为"未检测到"）
+        int wdCount = 0;
+        String wdCountRaw = nvl(kv.get("WD_COUNT")).trim();
+        if (!wdCountRaw.isEmpty()) {
+            try {
+                wdCount = Integer.parseInt(wdCountRaw);
+            } catch (NumberFormatException ignored) {
+                wdCount = 0;
+            }
+        }
         return new Status(suOk, binExists, binExec, binHashOk, binMd5, expectedBin,
                 scriptPath, scriptPresent, scriptHashOk, scriptMd5, expectedScript,
                 configStore.exists(), aligned, "1".equals(kv.get("RUNNING")),
+                wdCount, nvl(kv.get("WD_PIDS")),
                 deployed, configStore.getConfigFile().getAbsolutePath(), notes);
     }
 
@@ -1130,6 +1183,10 @@ public final class Deployer {
      * 共用这两个函数，故"判有没有在跑"与"判停没停稳"不可能给出不同结论。判据与 service.d 脚本的
      * {@code running()} 同源（{@code /proc/<pid>/exe} 的指向），差别只在脚本那边不必管
      * {@code (deleted)}——它不再承担"换掉在跑实例"的职责。
+     *
+     * <p><b>看门狗那一半与 C 侧同口径</b>：{@code wd_pids()} 与 {@code tempctrl.c} 的
+     * {@code cmdline_has_script_arg()} 都只认「某个参数整等于候选脚本路径」，两侧都不拿 comm 定身份
+     * （那份名单只做省 fork 的快筛，见 {@code WD_COMM_WHITELIST}）。
      */
     private static String pidsPreamble() {
         return "BIN=" + BIN_DEST + "\n"
@@ -1144,25 +1201,35 @@ public final class Deployer {
                 + " | grep -E -- \"-> $BIN( [(]deleted[)])?$\""
                 + " | sed -n \"s#.* /proc/\\([0-9]*\\)/exe ->.*#\\1#p\"\n"
                 + "}\n"
-                // 看门狗 shell：exe 判不出来（一切 shell 的 exe 都是 /system/bin/sh），故改为看两件事：
-                //   ① 进程映像就是 shell（/proc/<pid>/comm == sh —— 内核按 execve 的可执行文件名给，
-                //      与 argv[0] 无关）；
-                //   ② 它的某个**参数恰好等于**候选脚本路径（不是子串：cp/rm/md5sum 的实参、部署中转
-                //      副本 <staging>/b6x-tempctrl.sh、".new" 后缀、只是提到过该文件名的进程，一概不算）。
-                // 合起来命中的就是"另一个正在跑本脚本的实例"（含 `sh <路径>`、shebang 直 exec、
-                // `sh -c '<路径>'` 三种形态；本 app 自己的 su shell 参数为空，天然不命中）。
-                // 先按 comm 一次 grep 筛出 shell（每 pid 省掉后面的 fork），再把 NUL 换成换行做成文本
-                // 管道后用 grep -qx（整行相等）——不依赖 grep 的二进制文件语义，也不用 -z。
-                + "wd_pids() {\n"
-                + "    for c in $(grep -l '^sh$' /proc/[0-9]*/comm 2>/dev/null); do\n"
-                + "        p=${c#/proc/}; p=${p%/comm}\n"
-                + "        a=$(tr '\\000' '\\n' < \"/proc/$p/cmdline\" 2>/dev/null)\n"
-                + "        case \"$a\" in *" + SCRIPT_NAME + "*) ;; *) continue ;; esac\n"
-                + "        if printf '%s\\n' \"$a\" | grep -qx -- \"" + SERVICE_D_MODERN + "/" + SCRIPT_NAME + "\""
+                // 看门狗 shell：exe 判不出来（一切 shell 的 exe 都是 /system/bin/sh），故身份只由一件事定：
+                // 它的某个**参数恰好等于**候选脚本路径（不是子串：cp/rm/md5sum 的实参、部署中转副本
+                // <staging>/b6x-tempctrl.sh、".new" 后缀、只是提到过该文件名的进程，一概不算）。
+                // 命中的就是"另一个正在跑本脚本的实例"（含 `busybox sh <路径>`、`sh <路径>`、
+                // shebang 直 exec、`sh -c '<路径>'` 四种形态；本 app 自己的 su shell 参数为空，天然不命中）。
+                // 分两步：② 用 NUL→换行的文本管道 + grep -qx 做整行相等（不依赖 grep 的二进制文件语义，
+                // 也不用 -z），③ 先按 comm 白名单一次 grep 快筛（每 pid 省掉后面的 fork）。
+                // comm 只做快筛：它枚举不全（开机那条约是 busybox），而漏判的代价是「停止daemon 静默失效」，
+                // 故白名单一个都没命中时再全量扫一轮（不筛 comm）——那才是兜底，代价见 wd_pids 的注释。
+                + "wd_match() {\n"
+                + "    a=$(tr '\\000' '\\n' < \"/proc/$1/cmdline\" 2>/dev/null)\n"
+                + "    case \"$a\" in *" + SCRIPT_NAME + "*) ;; *) return 1 ;; esac\n"
+                + "    printf '%s\\n' \"$a\" | grep -qx -- \"" + SERVICE_D_MODERN + "/" + SCRIPT_NAME + "\""
                 + " || printf '%s\\n' \"$a\" | grep -qx -- \""
-                + SERVICE_D_KSU_LEGACY + "/" + SCRIPT_NAME + "\"; then\n"
-                + "            echo \"$p\"\n"
-                + "        fi\n"
+                + SERVICE_D_KSU_LEGACY + "/" + SCRIPT_NAME + "\"\n"
+                + "}\n"
+                // 常态走快筛（两三个候选，代价约每次三四个 fork）；一个都没命中才全量兜底
+                // （约每个进程一次 fork 的 tr）——所以「确实没有看门狗」时每次调用会付这一轮扫描，
+                // 而 killAndWaitSnippet 的等待循环只在首轮有 pid 时才继续，兜底至多被多付一次。
+                + "wd_pids() {\n"
+                + "    _wd_hit=0\n"
+                + "    for c in $(grep -l -E '^(" + WD_COMM_WHITELIST + ")$' /proc/[0-9]*/comm 2>/dev/null); do\n"
+                + "        p=${c#/proc/}; p=${p%/comm}\n"
+                + "        if wd_match \"$p\"; then echo \"$p\"; _wd_hit=1; fi\n"
+                + "    done\n"
+                + "    [ \"$_wd_hit\" = 1 ] && return 0\n"
+                + "    for d in /proc/[0-9]*; do\n"
+                + "        p=${d#/proc/}\n"
+                + "        wd_match \"$p\" && echo \"$p\"\n"
                 + "    done\n"
                 + "}\n";
     }
@@ -1177,7 +1244,14 @@ public final class Deployer {
                 + "  f=\"$d/" + SCRIPT_NAME + "\"\n"
                 + "  if [ -f \"$f\" ]; then echo \"SCRIPT=$f\"; echo \"SCRIPT_MD5=$(md5sum \"$f\" 2>/dev/null | cut -d' ' -f1)\"; fi\n"
                 + "done\n"
-                + "[ -n \"$(bin_pids)\" ] && echo RUNNING=1 || echo RUNNING=0\n";
+                + "[ -n \"$(bin_pids)\" ] && echo RUNNING=1 || echo RUNNING=0\n"
+                // 看门狗同样上屏（P3-G7：不输出它，「停机时看门狗仍在跑」「两个看门狗并存」在界面上
+                // 就完全不可观测）。先落到变量再一次取用：wd_pids 要扫全部 pid，不能为了计数再跑一次。
+                // set -- 借位置参数数个数、并用 $* 把多行折成一行，省掉 wc/tr 各一次 fork。
+                + "WD_LIST=$(wd_pids)\n"
+                + "set -- $WD_LIST\n"
+                + "echo \"WD_COUNT=$#\"\n"
+                + "echo \"WD_PIDS=$*\"\n";
     }
 
     /**
@@ -1333,7 +1407,7 @@ public final class Deployer {
     private static String restartCore() {
         return "WD=\"$svcd/" + SCRIPT_NAME + "\"\n"
                 // 1) 看门狗在不在：用 wd_pids（exe 判不出来——一切 shell 的 exe 都是 /system/bin/sh，
-                //    改判「影像为 sh 且某个参数恰好等于候选脚本路径」，见 pidsPreamble）
+                //    改判「某个参数恰好等于候选脚本路径」，见 pidsPreamble）
                 + "[ -n \"$(wd_pids)\" ] && WD_ALIVE=1 || WD_ALIVE=0\n"
                 + "echo \"WD_ALIVE=$WD_ALIVE\"\n"
                 // 2) 两条路都要先把在跑的旧实例停稳（flock 的持有者必须先消失）
@@ -1378,7 +1452,7 @@ public final class Deployer {
     private String stopDaemonScript() {
         return pidsPreamble()
                 // 先杀看门狗 shell：它的可执行映像就是 /system/bin/sh（与一切 shell 共享），故不能按
-                // $BIN 找，用 wd_pids（映像为 sh 且某个参数恰好等于候选脚本路径，见 pidsPreamble）。
+                // $BIN 找，用 wd_pids（某个参数恰好等于候选脚本路径，见 pidsPreamble）。
                 // 不先杀它，它下一轮 tick 就会把刚停掉的守护进程再拉起来，「停止」不成立。
                 + killAndWaitSnippet("wd_pids", "WATCHDOG")
                 + killAndWaitSnippet("bin_pids", "DAEMON");

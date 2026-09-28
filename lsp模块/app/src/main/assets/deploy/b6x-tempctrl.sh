@@ -10,7 +10,7 @@
 #   2) 从 app 里 su 起的进程仍留在该 app 的 cgroup 内，app 一死就被连带杀
 #   3) LSPosed 钩子以 untrusted_app 域与 uid 运行，读不了 thermal sysfs、用不了 am/dumpsys
 #
-# 幂等由 C 端单实例锁兜底（锁文件在私有目录 tempctrl.lock）：第二个实例打印 stderr 后
+# 幂等由 C 端单实例锁兜底（私有目录 tempctrl.lock，另加一把 /data/local/tmp 的兜底锁）：第二个实例打印 stderr 后
 # 以退出码 2 退出，其它启动失败路径返回 0。启动前**不再**先杀旧实例（新规则：先查后拉、
 # 存在即不重复拉起，见 running() 与第 2 节）——需要换掉在跑的实例时由调用方负责停稳
 # （app 的停止序列，以及本脚本重部署路径里自带的 stop_old）。
@@ -79,30 +79,41 @@ screen_on() {
     esac
 }
 
+# daemon 实例的 pid 列表：/proc/<pid>/exe 恰好指向 $BIN（末端锚定，故不会命中
+# tempctrl_service.log / tempctrl_uiprefs / tempctrl_*.status 那些兄弟文件）。
+# 判据只有这一处：running()、stop_old()、start() 都从它取，故"判有没有在跑"与"停哪些 / 给谁
+# 改优先级"不可能给出不同结论（与 app 侧 Deployer 的 bin_pids 同源同口径）。
+# **不用 pkill -f "$BIN"**：那是 cmdline 子串匹配，凡命令行里出现过该路径的临时进程
+# （诊断脚本里的 ls -l /data/local/tmp/tempctrl、grep tempctrl 等）都会被误杀 —— 2026-09-28 修。
+# 二进制在运行中被替换（rm+mv）时 exe 会显示 "(deleted)"，此处按"不在"处理：拉起会因单实例锁
+# 立刻退出，代价只是一条日志。
+bin_pids() {
+    ls -l /proc/[0-9]*/exe 2>/dev/null \
+        | grep -E -- "-> $BIN$" \
+        | sed -n "s#.* /proc/\([0-9]*\)/exe ->.*#\1#p"
+}
+
 # 守护进程是否在跑。**本判据必须紧**：它现在同时决定"要不要保留在跑的那个实例"与
 # "要不要拉起一个"（先查后拉），假阳（把别的进程认成 daemon）会让真正的 daemon 永远起不来；
 # 假阴最多多起一个（C 端单实例锁会让它立刻以退出码 2 退出；且第 2 节已不再先杀，故不会误杀）。
-# 故按 /proc/<pid>/exe 是否指向 $BIN 判 —— 不用 pgrep -f "$BIN"：后者是 cmdline 子串匹配，
-# 而该路径同时是 tempctrl_service.log / tempctrl_uiprefs / tempctrl_*.status 等一串兄弟文件名的
-# 前缀，凡命令行里带这些串的临时进程（如诊断脚本里的 ls -l /data/local/tmp/tempctrl）都会被误认成 daemon。
-# 二进制在运行中被替换（rm+mv）时 exe 会显示 "(deleted)"，此处按"不在"处理：拉起会因单实例锁
-# 立刻退出，代价只是一条日志。
 running() {
-    ls -l /proc/[0-9]*/exe 2>/dev/null | grep -q -- "-> $BIN$"
+    [ -n "$(bin_pids)" ]
 }
 
-# 停旧实例：pkill 之后必须轮询 pgrep 等它真正退出。
+# 停旧实例：kill 之后必须轮询等它真正退出。
 # 只 sleep 1 就启动，新实例会因单实例锁立刻以 2 退出（旧 service.sh 就踩过这个坑）。
+# 目标 pid 每轮重新取一次：等待期内新冒出来的同类进程也一并停掉（保留旧 pkill 的语义）。
 stop_old() {
-    pkill -f "$BIN" 2>/dev/null
+    for p in $(bin_pids); do kill "$p" 2>/dev/null; done
     i=0
     while [ $i -lt $WAIT_LOOPS ]; do
         running || return 0
+        for p in $(bin_pids); do kill "$p" 2>/dev/null; done
         sleep 1
         i=$((i + 1))
     done
     log "旧实例 $WAIT_LOOPS 秒未退出，升级 SIGKILL"
-    pkill -9 -f "$BIN" 2>/dev/null
+    for p in $(bin_pids); do kill -9 "$p" 2>/dev/null; done
     i=0
     while [ $i -lt 5 ]; do
         running || return 0
@@ -128,10 +139,10 @@ start() {
     nohup "$BIN" >> "$SVC_LOG" 2>&1 < /dev/null &
     sleep 2
     if running; then
-        # PID 取自与 running() 同一个判据（/proc/<pid>/exe），不再用 pgrep -f "$BIN"：
+        # PID 取自与 running() 同一个判据（bin_pids），不再用 pgrep -f "$BIN"：
         # 那个子串匹配可能先命中"命令行里出现过该路径"的别的进程，导致 renice 打到别人身上、
         # 日志里的 pid 也不是守护进程的。
-        pid=$(ls -l /proc/[0-9]*/exe 2>/dev/null | sed -n "s#.* /proc/\([0-9]*\)/exe -> $BIN\$#\1#p" | head -1)
+        pid=$(bin_pids | head -1)
         renice -n -20 -p "$pid" > /dev/null 2>&1
         log "已启动 tempctrl（pid=$pid）"
         return 0
@@ -389,8 +400,32 @@ cleanup_all() {
     fi
 }
 
-# 1. 等亮屏（FBE 解锁后私有目录与 sysfs 才可靠可读）
-while ! screen_on; do
+# 1. 等「亮屏 且 私有目录就绪」（FBE 解锁后私有目录与 sysfs 才可靠可读）
+#    为什么要多等这一条：旧写法只等 mWakefulness=Awake，**而亮屏不等于已解锁** —— 锁屏界面
+#    本身就是 Awake，于是守护进程会在 CE 存储尚未解锁时被拉起，那一轮它读不到 profile.conf
+#    （detect_config_path 只跑一次），只能全程跑代码默认值、界面改配置也不生效。
+#    判据取「私有目录可列」而不是某个 getprop/cmd：它就是守护进程真正要用的那个目录，
+#    同源、零额外 fork；探测失败按"未就绪"处理（与 screen_on 的兜底方向相反 ——
+#    这里的两个方向代价不对称：多等一会儿只推迟控温，而放过一次就要等这个实例重启才恢复）。
+#    超时兜底：万一判据在该机型/root 方案下不成立，也不能永远不拉起（那比跑默认值更糟）——
+#    超时后照常拉起并记一条日志，配置由 C 端的周期重试自行补齐（见 tempctrl.c 的 config_loaded）。
+CE_WAIT_MAX=600         # 等解锁的上限（秒）；每轮 sleep 5，另有探测开销，实际 ≥ 此值
+CE_WAIT_TRIES=$((CE_WAIT_MAX / 5))
+
+ce_ready() {
+    [ -d "$HOST_FILES" ]
+}
+
+i=0
+while :; do
+    if screen_on && ce_ready; then
+        break
+    fi
+    i=$((i + 1))
+    if [ $i -ge $CE_WAIT_TRIES ]; then
+        log "等待亮屏/解锁超过 $CE_WAIT_MAX 秒，先拉起（配置由守护进程的周期重试补齐）"
+        break
+    fi
     sleep 5
 done
 

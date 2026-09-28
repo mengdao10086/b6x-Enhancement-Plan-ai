@@ -211,6 +211,16 @@ static int debug_launch = 0;    // [自动拉起] 目标选择/回退/跳过（�
 static char config_path[256] = "";
 // 配置文件的最后修改时间（用于热重载检测）
 static time_t config_mtime = 0;
+// 是否已成功加载过配置（0 = 尚未加载成功）。为 0 时 main_loop 按 CONFIG_RETRY_INTERVAL 周期重试，
+// 这是"开机那一刻私有目录不可访问 → 整个生命周期都用默认值"那个缺陷的唯一自愈途径。
+static int config_loaded = 0;
+// --config 显式指定过路径（1）还是自动探测（0）。重试时沿用同一条来源，不中途改换落点。
+static int config_explicit = 0;
+// 上次重试探测的时刻（节流用；0 = 尚未重试过，首次重试不额外等待）
+static time_t config_retry_at = 0;
+// 未加载状态下重新探测/加载配置的间隔（秒）。取值与 WD_KEEPALIVE_INTERVAL 同量级：
+// 配置对温控是有意义的输入，晚 1 分钟内补上不影响控制正确性，而探测本身只是一次 access+stat。
+#define CONFIG_RETRY_INTERVAL 60
 
 // ======================== PID 控制（单累积器） ========================
 // --- 配置变量（按 profile.conf 键顺序排列）---
@@ -863,11 +873,11 @@ static void reset_cpu_affinity_defaults(void) {
     affinity_spec[sizeof(affinity_spec) - 1] = '\0';
 }
 
-static void load_config(const char *path) {
+static int load_config(const char *path) {
     FILE *f = fopen(path, "r");
     if (!f) {
         write_log("配置 无法打开 %s", path);
-        return;
+        return 0;   // 打不开 = 未加载成功，调用方据此保留"待重试"状态（见 config_loaded）
     }
     // --- 第一遍：预读 PERF_ENABLED 和 DEBUG_ENABLED（全扫描，不受配置顺序影响）---
     char line[256];
@@ -940,7 +950,7 @@ static void load_config(const char *path) {
 
     if (!perf_enabled && !found_debug && !found_sysfs) {
         fclose(f);   // PERF/DEBUG/SYSFS 全关：跳过解析
-        return;
+        return 1;    // 文件已读到（内容就是"全关"），算加载成功，不要再触发重试
     }
 
     if (perf_enabled) {
@@ -985,6 +995,7 @@ static void load_config(const char *path) {
     fclose(f);
 
     // （CTRL_MODE 模式切换过渡 / GEAR 档位表后处理 已随 Gear 删除）
+    return 1;   // 已读完并解析
 }
 
 // ======================== CPU 亲和（把配置落到进程上） ========================
@@ -1539,6 +1550,41 @@ static int detect_config_path(void) {
 
     config_path[0] = '\0';
     return 0;
+}
+
+/**
+ * 配置的"延迟加载"重试：未加载成功时按 CONFIG_RETRY_INTERVAL 周期重新探测并加载，已加载则直接返回。
+ *
+ * 为什么必须有它：启动阶段那次探测只跑一次，而开机早期（CE 未解锁、私有目录或 profile.conf
+ * 尚未就位）它会失败。旧实现失败即置空路径并永久放弃 → 该实例**整个生命周期**都只跑代码默认值：
+ * 界面改配置永不生效，且一切配置派生的行为（界面开关转写、WD_KEEPALIVE 等）全按默认值走
+ * （缺陷记录见 TECH_DEBT.md §4）。两个调用点各覆盖一段：[main 的等设备循环] 覆盖"开机后
+ * 还没连设备"那段（此时也可能已经很久），[main_loop] 覆盖已进入控制循环之后。
+ *
+ * **本函数只做"探测 + 加载 + 记一条日志"，刻意不碰 update_active_limits()** —— 那是"按当前设备
+ * 刷新上限"的活，在没有有效设备时调用会按 DEVICE_NONE 刷坏上限。配置派生的后处理由调用方
+ * 按自己所处的状态决定（见两处调用点）。load_config() 自身的副作用（如界面开关文件转写）
+ * 在该函数内，照旧生效。
+ *
+ * 返回 1 = 本次刚刚加载成功（调用方据此做后处理），0 = 早已加载过 / 未到间隔 / 仍加载不上。
+ */
+static int config_retry_if_needed(void) {
+    if (config_loaded) return 0;                 // 已加载：交回调用方原有的 mtime 热重载路径
+    time_t now = time(NULL);
+    if (config_retry_at != 0 && now - config_retry_at < CONFIG_RETRY_INTERVAL) return 0;
+    config_retry_at = now;
+    // --config 显式指定过路径就沿用原路径重试，不去改换落点。
+    // 两条路都先确认"可读"再 load_config：否则文件长期不可读时，load_config 那条
+    // 「配置 无法打开」会每 60s 刷一条（重试本身应当是静默的）。
+    int have_path = config_explicit ? (access(config_path, R_OK) == 0)
+                                    : (detect_config_path() != 0);
+    if (!have_path) return 0;
+    if (!load_config(config_path)) return 0;
+    config_loaded = 1;
+    struct stat st;
+    if (stat(config_path, &st) == 0) config_mtime = st.st_mtime;
+    write_log("配置 延迟加载成功 %s", config_path);
+    return 1;
 }
 
 // ======================== 辅助函数 ========================
@@ -3191,6 +3237,7 @@ static float pid_ratio_from_cold(int cold_ref, int cold_max) {
 static int    host_miss_hits = 0;    // 一级（父目录不存在）连续命中次数
 static time_t host_probe_at  = 0;    // 上次二级（pm path）探测时间戳
 static int    host_probe_gone = 0;   // 上次二级探测结论：1=包已不注册（节流窗口内复用）
+static int    host_probe_unknown = 0;// 上次二级探测结论：1=无法判定（pm 跑不起来）；与上面互斥
 
 /**
  * 判断宿主 APK 是否已卸载。返回 1=确认已卸载（可清理），0=仍在 / 无法确认。
@@ -3201,9 +3248,17 @@ static int    host_probe_gone = 0;   // 上次二级探测结论：1=包已不�
  *     该代价已记录在 逻辑说明.md 的「参数落点」注记处（清除数据会清掉私有目录产物）。
  *     每轮可跑、零成本。
  *   二级 app_installed_probe(HOST_PKG)（走 pm path，实时不缓存）—— 一级命中后才跑，且按 HOST_PROBE_INTERVAL
- *     节流（fork+exec pm 的开销不能进每轮热路径）。
+ *     节流（fork+exec pm 的开销不能进每轮热路径）。**只有 pm 明确回答"包不存在"才算已卸载**；
+ *     "无法判定"（命令跑不起来/被信号杀死）一律按「无法确认」处理，不计数。
  * 再叠「连续 HOST_CONFIRM_HITS 次命中才判真」：单次 stat 失败可能来自瞬时挂载抖动、
  * app 正在被 installd 重装（目录短暂消失）等瞬态，连续两次（间隔 ≥5s 一轮）可滤掉。
+ *
+ * 为什么"无法判定"必须与"包不存在"分开（2026-09-28 修）：一级判据在开机早期会**必然**失败——
+ * 首次解锁前 /data/data 整体不可访问，那是持续状态而不是瞬态，两个计数也滤不掉。此时若把
+ * pm 的"无法判定"也算成命中，就会凑满 HOST_CONFIRM_HITS 判成「已卸载」→ 清理产物并自删二进制。
+ * 而 pm 在开机早期确实会不可用（部署脚本为此专门写了 3 次重试，见 b6x-tempctrl.sh 的 apk_path）。
+ * 分开之后最坏情况退化为「pm 长期不可用时永不自动清理」，那是安全的降级方向：
+ * 卸载还有系统卸载与脚本侧自清两道兜底，而误删是不可逆的。
  */
 static int host_app_uninstalled(void) {
     struct stat st;
@@ -3217,9 +3272,14 @@ static int host_app_uninstalled(void) {
     if (now - host_probe_at >= HOST_PROBE_INTERVAL) {
         host_probe_at = now;
         // 走实时探测而非缓存版：卸载自清理需要在同一次开机内看到安装状态变化，缓存对它只有风险没有收益
-        // （本处自带 HOST_PROBE_INTERVAL 节流，不在热路径上）。「== 1」与加缓存前的 app_installed() 真值等价：
-        // 无法判定（命令跑不起来）时同样按「已不注册」处理，由连续 HOST_CONFIRM_HITS 次命中叠加过滤瞬态。
-        host_probe_gone = (app_installed_probe(HOST_PKG) == 1) ? 0 : 1;
+        // （本处自带 HOST_PROBE_INTERVAL 节流，不在热路径上）。
+        int probe = app_installed_probe(HOST_PKG);
+        host_probe_gone    = (probe == 0);   // 仅"pm 明确报包不存在"才算已不注册
+        host_probe_unknown = (probe < 0);    // 无法判定：既不计数也不算"仍注册"
+    }
+    if (host_probe_unknown) {
+        host_miss_hits = 0;   // 判不了就不当证据（开机早期 pm 未就绪即此路）
+        return 0;
     }
     if (!host_probe_gone) {
         // 目录不在但包仍注册（重装过程中、多用户数据目录尚未创建等）→ 不判真
@@ -3486,11 +3546,18 @@ static void main_loop(void) {
     batt_window_changed = batt_changed_since_ctrl;
     batt_changed_since_ctrl = 0;                 // 开启新窗口
 
-    // 0. 检查配置文件是否更新（热重载）
+    // 0. 配置文件：未加载成功 → 周期重试探测；已加载 → 按 mtime 热重载
     debug_log(debug_main, "main_loop 开始 温度窗口=%s",
               batt_window_changed ? "变化" : "未变");
     struct stat st;
-    if (config_path[0] != '\0' && stat(config_path, &st) == 0 && st.st_mtime != config_mtime) {
+    if (!config_loaded) {
+        // 自愈分支：开机早期探测失败时按周期补加载（实现与理由见 config_retry_if_needed）。
+        // 到这里已经选到设备了，故与下面的热重载同一套后处理：设备限制与 CPU 亲和都按新配置重算。
+        if (config_retry_if_needed()) {
+            update_active_limits();
+            apply_cpu_affinity();
+        }
+    } else if (config_path[0] != '\0' && stat(config_path, &st) == 0 && st.st_mtime != config_mtime) {
         load_config(config_path);
         config_mtime = st.st_mtime;
         write_log("配置 热重载");
@@ -3837,30 +3904,60 @@ static void maybe_keepalive_watchdog(void) {
 
 // ======================== 单实例锁 ========================
 // service.d 开机拉起 + app 内手动拉起两条路径都直接执行启动命令，由本锁保证幂等。
-// 锁文件与配置/日志/曲线数据同处私有目录。
+// 主锁与配置/日志/曲线数据同处私有目录，另加一把 /data/local/tmp 的兜底锁（见下）。
 // 残留后果（不美化）：app「清除数据」会把锁文件一起删掉，运行中的实例与新实例随即锁到
 // 不同 inode，那一次锁失效；兜底靠部署脚本的开机自检。
 #define LOCK_FILE_PATH        PRIVATE_DIR "/tempctrl.lock"
+// 兜底锁：/data/local/tmp 属 DE 存储，首次解锁前也可写。只靠私有目录那把锁时，私有目录不可用
+// 就等于单实例保护整段消失（开机早期被拉起 + 随后 app 手动拉起 → 两个实例并存、各写各的状态）。
+// 故再加一把任何时刻都能拿到的锁：两把都持有时才放行，任一把被别人持有即判"已有实例"。
+// 落点沿用三份清理清单里已有的 /data/local/tmp/tempctrl.lock（旧版残留项），不新增文件。
+#define LOCK_FALLBACK_PATH    "/data/local/tmp/tempctrl.lock"
 #define EXIT_ALREADY_RUNNING  2     // 退出码 2：已有实例在跑（其它启动失败路径均返回 0）
-static int lock_fd = -1;
+static int lock_fd = -1;            // 私有目录锁（不可用时保持 -1）
+static int lock_fd_fallback = -1;   // 兜底锁
+
+/** 非阻塞 flock 一把锁。返回 1=取到（fd 写入 out_fd）、0=已被别人持有、-1=文件建不了（无法判定） */
+static int try_flock_path(const char *path, int *out_fd) {
+    int fd = open(path, O_RDWR | O_CREAT | O_CLOEXEC, 0666);
+    if (fd < 0) return -1;
+    if (flock(fd, LOCK_EX | LOCK_NB) != 0) {
+        close(fd);
+        return 0;
+    }
+    *out_fd = fd;
+    return 1;
+}
 
 /** 取单实例锁（flock 非阻塞）。返回 1=取到可继续启动，0=已有实例在运行
- *  私有目录不可用（mkdir 被拒 / 父目录不存在）时不阻塞启动，仅 stderr 记录 */
+ *
+ *  两把锁都尝试持有：兜底锁（/data/local/tmp，恒可写）负责"任何时刻都能挡住第二个实例"，
+ *  私有目录锁保留原落点与既有语义。任一把被占即退出；任一把建不了只是该路降级（仅 stderr），
+ *  不阻塞启动——与旧行为一致（旧行为在私有目录不可用时整段跳过检查）。 */
 static int acquire_single_instance_lock(void) {
-    if (!ensure_private_dir()) {
-        fprintf(stderr, "tempctrl: 私有目录 %s 不可用，跳过单实例检查\n", PRIVATE_DIR);
-        return 1;
-    }
-    lock_fd = open(LOCK_FILE_PATH, O_RDWR | O_CREAT | O_CLOEXEC, 0666);
-    if (lock_fd < 0) {
-        // 锁文件建不了 → 不阻塞启动，仅 stderr 记录
-        fprintf(stderr, "tempctrl: 锁文件 %s 不可用（跳过单实例检查）\n", LOCK_FILE_PATH);
-        return 1;
-    }
-    if (flock(lock_fd, LOCK_EX | LOCK_NB) != 0) {
-        close(lock_fd);
-        lock_fd = -1;
+    int r = try_flock_path(LOCK_FALLBACK_PATH, &lock_fd_fallback);
+    if (r == 0) {
+        fprintf(stderr, "tempctrl: 已有实例在运行（锁 %s），本次退出\n", LOCK_FALLBACK_PATH);
         return 0;
+    }
+    if (r < 0) {
+        fprintf(stderr, "tempctrl: 锁文件 %s 不可用（该路单实例检查跳过）\n", LOCK_FALLBACK_PATH);
+    }
+    // 私有目录这一路先确保目录存在：本函数在 main 里排在 set_default_log_path() 之前，
+    // 而目录可能尚未被创建（首次安装、系统刚清过数据）——不先建就会 open 到 ENOENT，
+    // 那样即便目录紧接着被 set_default_log_path() 建出来，本进程也永远不持有私有目录锁。
+    // 建不出来（开机早期 /data/data 整体不可见）不是错误，只是这一路降级，互斥由兜底锁保证。
+    if (ensure_private_dir()) {
+        r = try_flock_path(LOCK_FILE_PATH, &lock_fd);
+        if (r == 0) {
+            fprintf(stderr, "tempctrl: 已有实例在运行（锁 %s），本次退出\n", LOCK_FILE_PATH);
+            return 0;   // 兜底锁随本进程退出自动释放
+        }
+        if (r < 0) {
+            fprintf(stderr, "tempctrl: 锁文件 %s 不可用（该路单实例检查跳过）\n", LOCK_FILE_PATH);
+        }
+    } else {
+        fprintf(stderr, "tempctrl: 私有目录 %s 不可用（该路单实例检查降级，兜底锁仍生效）\n", PRIVATE_DIR);
     }
     return 1;   // 锁随进程存活持有，退出即自动释放
 }
@@ -3871,25 +3968,32 @@ int main(int argc, char *argv[]) {
 
     // --- 单实例锁：已有实例在跑则退出（退出码 EXIT_ALREADY_RUNNING，与普通启动失败区分）---
     if (!acquire_single_instance_lock()) {
-        fprintf(stderr, "tempctrl: 已有实例在运行（锁 %s），本次退出\n", LOCK_FILE_PATH);
+        fprintf(stderr, "tempctrl: 已有实例在运行，本次退出\n");
         return EXIT_ALREADY_RUNNING;
     }
 
     // --- 日志路径、配置加载 ---
+    // 探测失败不再"一锤定音"：config_path 保留为空、config_loaded 保持 0，
+    // 由 main_loop 按 CONFIG_RETRY_INTERVAL 周期重试（开机早期私有目录尚未挂上时只能如此，
+    // 见 config_loaded 声明处的说明）。--config 指定的路径同样保留，重试时沿用同一条来源。
     set_default_log_path();
     if (argc >= 3 && strcmp(argv[1], "--config") == 0) {
         strncpy(config_path, argv[2], sizeof(config_path) - 1);
         config_path[sizeof(config_path) - 1] = '\0';
-        load_config(config_path);
-    } else if (detect_config_path()) {
-        load_config(config_path);
+        config_explicit = 1;
     } else {
-        config_path[0] = '\0';   // 未找到配置（私有目录不可用或文件不存在）→ 全部用代码默认值
-        write_log("配置 未找到 %s/profile.conf，使用代码默认值", PRIVATE_DIR);
+        detect_config_path();   // 成功时写入 config_path；失败时留空（保持可重试）
     }
     if (config_path[0] != '\0') {
-        struct stat st;
-        if (stat(config_path, &st) == 0) config_mtime = st.st_mtime;
+        config_loaded = load_config(config_path);
+        if (config_loaded) {
+            struct stat st;
+            if (stat(config_path, &st) == 0) config_mtime = st.st_mtime;
+        }
+    }
+    if (!config_loaded) {
+        if (!config_explicit) write_log("配置 未找到 %s/profile.conf，使用代码默认值", PRIVATE_DIR);
+        config_retry_at = time(NULL);   // 首次重试等满一个周期，不在启动瞬间连打
     }
     debug_log(debug_main, "main 启动 ALPHA=%d ZONE=%d~%d", CPU_FILTER_ALPHA, CPU_ZONE_MIN, CPU_ZONE_MAX);
 
@@ -3898,7 +4002,9 @@ int main(int argc, char *argv[]) {
     create_status_files();
 
     write_log("脚本启动成功");
-    write_log("单实例锁 已获取 %s", LOCK_FILE_PATH);
+    if (lock_fd_fallback >= 0) write_log("单实例锁 已获取 %s", LOCK_FALLBACK_PATH);
+    else                       write_log("单实例锁 兜底锁不可用（%s），本次仅私有目录锁生效", LOCK_FALLBACK_PATH);
+    if (lock_fd < 0) write_log("单实例锁 私有目录锁不可用（%s），本次仅兜底锁生效", LOCK_FILE_PATH);
 
     // CPU 亲和：配置与日志都已就绪，此时应用一次。该键未读到（层未启用/无 profile.conf）时
     // 也按代码默认生效——亲和必须无条件生效，不能被开关意外关掉。
@@ -3914,6 +4020,12 @@ int main(int argc, char *argv[]) {
         }
         // 看门狗反向保活：与卸载自清理同理必须放在本循环内（无 BLE、一直停在等待设备时也不漏检）
         maybe_keepalive_watchdog();
+        // 配置延迟加载：同样必须放在本循环内 —— 开机后"还没连上设备"那段可能很久，
+        // 而配置没加载时一切配置派生的行为（界面开关转写、WD_KEEPALIVE 等）都按默认值走。
+        // 此处**不调** update_active_limits()：本循环里 active_device 还是 DEVICE_NONE，
+        // 那是"按当前设备刷新上限"的活，选到设备时 select_active_device 之后自会刷一次。
+        // CPU 亲和与设备无关（apply_cpu_affinity 只读配置与自身），故这里补一次即可。
+        if (config_retry_if_needed()) apply_cpu_affinity();
         read_status_ble_both();
         DeviceType dev = select_active_device();
         if (dev != DEVICE_NONE) {
