@@ -100,7 +100,7 @@
 
 > 上述两条的现场论据、14 例假 `/proc` 行为测试与 13 条真机判据，见仓库外 `../.claude/subagent方案存放区/双向保活-验证.md`（**不进子模块版本库**）。
 >
-> **2026-09-28 追加（含一次订正）**：`WD_KEEPALIVE` 已改为**默认关**；同日 C 侧判据由「cmdline 子串」改为「逐参数整等」。
+> **2026-09-28 追加（含一次订正）**：`WD_KEEPALIVE` 曾改为**默认关**，2026-09-29 又由用户指定改回**默认开**；同日 C 侧判据由「cmdline 子串」改为「逐参数整等」。
 >
 > **订正**：本行原先写「上面第一条（「停止daemon」静默失效）只在用户显式开启该键时才存在」——**这是错的**。另有 `comm=busybox` 一条成因**与开关无关、恒存在**：app 侧 `wd_pids()` 的 `grep -l '^sh$' /proc/[0-9]*/comm` 前置过滤把开机看门狗整条滤掉（真机形态 `comm=busybox`、cmdline=`/data/adb/ksu/bin/busybox sh <脚本>`），于是 pid 列表为空 → 停止片段直接判「已停稳」并**假报成功**，而「拉起daemon / 一键部署 / 更新脚本」会再拉一个 `comm=sh` 的看门狗 → **双看门狗并存**。已于同日修复（白名单快筛 + 未命中时全量兜底），详见已解决区 §9。
 >
@@ -256,7 +256,7 @@ Caused by: java.lang.NullPointerException: Attempt to read from field 'android.o
 1. **判活恒假阴**：`watchdog_alive()` 用 `strstr()` 搜 `/proc/<pid>/cmdline` 的读缓冲，而该文件是 **NUL 分隔**的、`strstr()` 在第一个 NUL 处就结束 —— 实际**只搜到了 `argv[0]`**；看门狗的真实形态是 `sh <脚本路径>`（路径在 `argv[1]`），于是恒判「未见」→ 去抖（连续两次）与拉起冷却全被绕开、"拉起"**每次都会发生**。
 2. **拉起永久阻塞**：`spawn_watchdog()` 直接 `execv` **整份脚本**（第 3 节是 `while true; do sleep 300; …` 常驻循环）并让父进程 `waitpid` 回收；而 3s 定时打不断 `waitpid`（本文件 `signal()` 是 BSD 语义带 SA_RESTART，会被自动重启）→ 父进程**永久阻塞在 `wait4`**，主循环停摆。冷却时间戳只在"拉起函数返回"后才写，而它永不返回 → 每个新 daemon 都在第 2 次检查（启动后约 60s）复现。
 
-**修复**：① 判活改**逐参数整等**（`tempctrl.c:cmdline_has_script_arg()`，与 app 侧 `wd_pids()` **相近但不同**：C 侧不筛 `comm`、且额外接受裸脚本名，见 `逻辑说明.md` 反向保活节）；② 拉起改 **double-fork + `WNOHANG` 轮询**，只回收必然速退的中间层，不再等待常驻的看门狗本体；③ `WD_KEEPALIVE` **默认关**（未真机验证的自动行为不默认生效，见未解决区 §7）。exec 结果无法在拉起处观测，由下一轮判活复查（仍「未见」记一条日志）。
+**修复**：① 判活改**逐参数整等**（`tempctrl.c:cmdline_has_script_arg()`，与 app 侧 `wd_pids()` **相近但不同**：C 侧不筛 `comm`、且额外接受裸脚本名，见 `逻辑说明.md` 反向保活节）；② 拉起改 **double-fork + `WNOHANG` 轮询**，只回收必然速退的中间层，不再等待常驻的看门狗本体；③ `WD_KEEPALIVE` 曾改为默认关（2026-09-29 由用户指定改回**默认开**，见未解决区 §7）。exec 结果无法在拉起处观测，由下一轮判活复查（仍「未见」记一条日志）。
 
 **真机判据**：停摆时 `/proc/<pid>/syscall` 首字段 = **260**（arm64 `wait4`）、`/proc/<pid>/task/*/children` 里有 **`sh <脚本路径>`**、且日志尾**没有**「看门狗 连续 2 次未见 → 已拉起」这行（fork 发生了、函数从未返回）；修复后静置 3 分钟日志与曲线 mtime 持续前进、`syscall` 永不为 260。
 
@@ -264,7 +264,7 @@ Caused by: java.lang.NullPointerException: Attempt to read from field 'android.o
 
 **2026-09-28 用户真机确认（部分）**：装上含本修复的包后，界面「拉起daemon」**不再等满 5 秒延迟再走 `kill -9`** —— 旧实例能正常响应 SIGTERM 退出。这与「double-fork 去掉了主线程永久阻塞」的预期一致：修复前该路径几乎固定要等满延迟再 `kill -9`，那正是旧实例卡在 `wait4` 里、SIGTERM 只置标志而 `wait4` 被 `SA_RESTART` 自动重启的表现。
 
-**仍未验证**：① 判活（逐参数整等）在真机的命中率与假阴频率；② 「默认关」对已有 `profile.conf` 的设备不生效（旧值优先，需在界面里关掉或删掉该行）；③ `am broadcast` 的真 3s 超时是否确实能打断 `waitpid`（本机无 C 编译器、无设备，只能静态判据）。完整判据清单见未解决区 §7。
+**仍未验证**：① 判活（逐参数整等）在真机的命中率与假阴频率；② 「改默认值」对已有 `profile.conf` 的设备不生效（旧值优先，需在界面里改或删掉该行）；③ `am broadcast` 的真 3s 超时是否确实能打断 `waitpid`（本机无 C 编译器、无设备，只能静态判据）。完整判据清单见未解决区 §7。
 
 **同日顺带修（同类坑，2026-09-28 用户批准）**：`am broadcast` 下发路径（`tempctrl.c:send_am_broadcast()`）是**同一个坑** —— 用 `signal()` 装 SIGALRM（BSD 语义带 `SA_RESTART`）→ 被中断的 `waitpid` 自动重启 → 那句「am broadcast 超时」与随后的强杀是**死代码**；`am` 一旦挂死（system_server 卡住），主循环照样永久停摆 —— 正是本节判据里列的「`am`/`pm`/`dumpsys` 命令子进程挂死」那一类。已改为显式 `sigaction` 且 `sa_flags = 0`（刻意不置 `SA_RESTART`），并把 `alarm(0)` 提到 `waitpid` 返回之后；3s 上界、既有失败日志与强杀逻辑不变。同样**未真编译、未真机验证**。
 

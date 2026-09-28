@@ -418,9 +418,9 @@ static int uiprefs_fail_logged    = 0;   // 写失败只记一条日志，避免
 // 声明点必须在 load_config 之前（那里第一遍读它）；实现与其余状态在文件末尾的
 // 「看门狗反向保活」小节。**默认关**（与定义 default/factory 一致，由 check_params.py 审计核对：
 // 开关类键没有生成头宏，一致性靠该审计逐键核对，改一侧不改另一侧直接红）。
-// 为什么先默认关：本机制尚未真机验证，而它是"会自动拉起另一个进程"的自动行为，
-// 未验证的自动行为不该默认作用在温控主链上；要用请显式开启（注意 profile.conf 里已写入的旧值优先于默认值）。
-static int wd_keepalive_enabled = 0;     // WD_KEEPALIVE：1=守护进程反过来看护 service.d 看门狗（默认 0=关）
+// 默认开（2026-09-29 由用户指定）：判活口径与拉起方式见 TECH_DEBT 已解决区 §8/§9；关掉可退回单向模式。
+// 注意 profile.conf 里已写入的旧值优先于默认值——存量设备不会被这次改默认值翻动。
+static int wd_keepalive_enabled = 1;     // WD_KEEPALIVE：1=守护进程反过来看护 service.d 看门狗（默认 1=开）
 
 // 双设备 BLE 连接状态
 static int b6_connected = 0;        // B6X: BLE 是否已连接
