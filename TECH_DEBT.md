@@ -293,4 +293,4 @@ Caused by: java.lang.NullPointerException: Attempt to read from field 'android.o
 
 **⑦ 界面侧（用户新指令）**：改配置成功后的绿色「已写入（替换 N 行…）」提示已去掉——成功不再出声、失败照旧出声，`setResultStatus` 收窄为 `setErrorStatus`；`state_ok` 色值随之无消费者（资源保留未删）。
 
-**未验证（真机待办）**：① 解锁后应出现「配置 延迟加载成功」日志（P1 自愈生效的判据）；② 未解锁期不再出现两个 daemon；③ 未解锁期不再自毁；④ 兜底扫描在真机上的正确性与耗时（toybox/busybox 的 `grep -l -E` 组合、`set --` 的展开）；⑤ **C 端未做真编译**（本机无 gcc/clang），编译结论以 CI 为准。方案与判据清单见仓库外 `../.claude/subagent方案存放区/开机看门狗daemon配置与识别-方案.md`（**不进子模块版本库**）。
+**未验证（真机待办）**：① 解锁后应出现「配置 延迟加载成功」日志（P1 自愈生效的判据）。**注意查两份日志**：若启动时私有目录确实不可用，日志会**整程**落在 `/cache/tempctrl.log`（改道后不会自己切回去），此时只 grep 私有目录那份会误判「自愈没生效」；② 未解锁期不再出现两个 daemon；③ 未解锁期不再自毁；④ 兜底扫描在真机上的正确性与耗时（toybox/busybox 的 `grep -l -E` 组合、`set --` 的展开）；⑤ **C 端未做真编译**（本机无 gcc/clang），编译结论以 CI 为准。方案与判据清单见仓库外 `../.claude/subagent方案存放区/开机看门狗daemon配置与识别-方案.md`（**不进子模块版本库**）。

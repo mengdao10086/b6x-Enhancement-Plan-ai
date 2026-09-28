@@ -711,8 +711,9 @@ public final class Deployer {
         steps.add("已删脚本自身日志 /data/local/tmp/tempctrl_service.log");
         steps.add("已删旧版迁移残留 /data/local/tmp/tempctrl_last_dev"
                 + "（新版落点在飞智 app 自己的私有目录，各包各记，本类不碰）");
-        steps.add("已删旧版锁文件残留 /data/local/tmp/tempctrl.lock"
-                + "（C 端锁文件已迁私有目录，那份由本类在确认进程退出后清）");
+        steps.add(daemonStopped
+                ? "已删兜底单实例锁 /data/local/tmp/tempctrl.lock（守护进程已确认停止）"
+                : "保留兜底单实例锁 /data/local/tmp/tempctrl.lock（守护进程未确认停止，删了会绕过单实例锁）");
         steps.add("已删私有目录不可用时的兜底日志 /cache/tempctrl.log");
 
         if (daemonStopped && watchdogStopped) {
@@ -1362,9 +1363,9 @@ public final class Deployer {
                 + "rm -f " + SERVICE_D_MODERN + "/" + SCRIPT_NAME + "\n"
                 + "rm -f " + SERVICE_D_KSU_LEGACY + "/" + SCRIPT_NAME + "\n"
                 + "rm -f \"$BIN\"\n"
-                + "# 旧版迁移残留：C 端锁文件已迁到私有目录（tempctrl.lock，由 app 侧在确认进程退出后清）。\n"
-                + "# 这里删的是老版本留在 /data/local/tmp 的那一份，不是重复代码，别删这一行。\n"
-                + "rm -f /data/local/tmp/tempctrl.lock\n"
+                + "# 兜底单实例锁（C 端在私有目录不可用时用的那把，LOCK_FALLBACK_PATH）：只在守护进程确认\n"
+                + "# 已停之后删 —— 它若还在跑就握着这把锁，删掉文件会让新实例锁到新的 inode、单实例保护被绕过。\n"
+                + "if [ \"$DAEMON_STOPPED\" = 1 ]; then rm -f /data/local/tmp/tempctrl.lock; fi\n"
                 + "rm -f /data/local/tmp/tempctrl_b6x.status\n"
                 + "rm -f /data/local/tmp/tempctrl_b7x.status\n"
                 + "# 守护进程转写给钩子的界面开关快照（钩子每次返回键读一次；删掉后钩子回退默认值）\n"

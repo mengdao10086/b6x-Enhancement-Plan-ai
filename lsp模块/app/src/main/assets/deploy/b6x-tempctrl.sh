@@ -82,7 +82,7 @@ screen_on() {
 # daemon 实例的 pid 列表：/proc/<pid>/exe 恰好指向 $BIN（末端锚定，故不会命中
 # tempctrl_service.log / tempctrl_uiprefs / tempctrl_*.status 那些兄弟文件）。
 # 判据只有这一处：running()、stop_old()、start() 都从它取，故"判有没有在跑"与"停哪些 / 给谁
-# 改优先级"不可能给出不同结论（与 app 侧 Deployer 的 bin_pids 同源同口径）。
+# 改优先级"不可能给出不同结论（与 app 侧 Deployer 的 bin_pids 同为 exe 末端锚定，但对 "(deleted)" 的口径故意不同：app 侧接受、本处不接受）。
 # **不用 pkill -f "$BIN"**：那是 cmdline 子串匹配，凡命令行里出现过该路径的临时进程
 # （诊断脚本里的 ls -l /data/local/tmp/tempctrl、grep tempctrl 等）都会被误杀 —— 2026-09-28 修。
 # 二进制在运行中被替换（rm+mv）时 exe 会显示 "(deleted)"，此处按"不在"处理：拉起会因单实例锁

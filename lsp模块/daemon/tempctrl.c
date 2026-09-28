@@ -3321,7 +3321,7 @@ static void cleanup_artifacts_on_uninstall(void) {
         "/data/local/tmp/tempctrl_b7x.status",
         "/data/local/tmp/tempctrl_uiprefs",
         "/data/local/tmp/tempctrl_service.log",
-        "/data/local/tmp/tempctrl.lock",       // 旧版残留（现锁文件已移至私有目录）
+        "/data/local/tmp/tempctrl.lock",       // 兜底单实例锁 LOCK_FALLBACK_PATH（非旧版残留）：卸载时同等清理
         "/data/local/tmp/tempctrl_last_dev",   // 旧版残留
         // service.d 脚本两个候选路径（KSU 版本分界，见 Deployer）
         "/data/adb/service.d/b6x-tempctrl.sh",
