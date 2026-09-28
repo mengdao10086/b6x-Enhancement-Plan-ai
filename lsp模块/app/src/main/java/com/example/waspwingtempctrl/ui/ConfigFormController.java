@@ -674,14 +674,15 @@ final class ConfigFormController implements ConfigKeyRow.Host, ConfigWriteQueue.
         if (result.ok) {
             diskValues.putAll(written);
         }
-        final String message = messageFor(result, written.keySet());
-        for (ConfigKeyRow row : rows()) {
-            if (written.containsKey(row.key())) {
-                row.setResultStatus(message, result.ok);
-            }
-        }
+        // 只在失败时出声：成功时值已经在控件里，绿色「已写入（替换 N 行…）」是噪音
         if (!result.ok) {
-            page.notifyUser(message, true);   // 成功不必弹：值已经在控件里了
+            final String message = messageFor(result, written.keySet());
+            for (ConfigKeyRow row : rows()) {
+                if (written.containsKey(row.key())) {
+                    row.setErrorStatus(message);
+                }
+            }
+            page.notifyUser(message, true);
         }
         refreshBadges();
         if (diagnostics != null) {
@@ -758,7 +759,7 @@ final class ConfigFormController implements ConfigKeyRow.Host, ConfigWriteQueue.
         if (!result.ok) {
             for (ConfigKeyRow row : rows()) {
                 if (factoryValues.containsKey(row.key())) {
-                    row.setResultStatus(message, false);
+                    row.setErrorStatus(message);
                 }
             }
         }

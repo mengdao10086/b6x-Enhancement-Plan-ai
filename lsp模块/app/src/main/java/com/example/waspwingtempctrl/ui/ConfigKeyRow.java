@@ -1273,9 +1273,9 @@ final class ConfigKeyRow {
 
     // ==================== 状态文字 ====================
 
-    /** 落盘结果反馈（人话来自 {@link ConfigStore.WriteResult#describe()}）。 */
-    void setResultStatus(String message, boolean ok) {
-        setStatus(message, ok ? R.color.state_ok : R.color.state_error);
+    /** 落盘**失败**反馈（人话来自 {@link ConfigStore.WriteResult#describe()}）；成功不出声，见 ConfigFormController。 */
+    void setErrorStatus(String message) {
+        setStatus(message, R.color.state_error);
     }
 
     private void setStatus(String message, int colorRes) {
