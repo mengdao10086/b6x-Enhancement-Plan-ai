@@ -2509,17 +2509,24 @@ static int run_cmd_silent(const char *fmt, const char *arg) {
 
 /**
  * 包安装状态实时探测（走 pm path）。
- * 返回：1=已安装、0=未安装（pm 明确报包不存在）、-1=无法判定（命令没跑起来）。
+ * 返回：1=已安装、0=未安装（pm 明确报"包未找到"，退出码 1）、-1=无法判定（pm 没给出明确回答）。
  * 每次调用都要 fork+exec 一次 pm（ART 冷启动，约 100~300ms，同 is_foreground_pkg 处 dumpsys 量级），
  * 故探测链上不要直接调用本函数，一律走带缓存的 app_installed()；只有需要实时结论的宿主卸载探测才直接用它。
  */
 static int app_installed_probe(const char *pkg) {
     int st = run_cmd_silent(PM_BIN " path %s > /dev/null 2>&1", pkg);
     if (st == 0) return 1;
-    // system() 返回的是 wait 状态而不是退出码：-1=fork/exec 失败；WIFEXITED 假=进程被信号杀死（pm 没跑完）；
-    // 退出码 126=无执行权限、127=shell 找不到 pm。这三类都是「命令跑不起来」的环境故障，不是「未安装」。
-    if (st == -1 || !WIFEXITED(st) || WEXITSTATUS(st) == 126 || WEXITSTATUS(st) == 127) return -1;
-    return 0;   // pm 正常退出且非 0 → 包确实不存在
+    // system() 返回的是 wait 状态而不是退出码：-1=fork/exec 失败；WIFEXITED 假=进程被信号杀死（pm 没跑完）。
+    if (st == -1 || !WIFEXITED(st)) return -1;
+    // 只有退出码 1（pm 自己报"包未找到"）才算「确实不存在」，其余非 0 一律「无法判定」：
+    //   126=无执行权限、127=shell 找不到 pm  —— 命令跑不起来
+    //   2=Failure calling service package（binder 调用失败）
+    //   20=cmd: Can't find service: package（package 服务还没起来）
+    // 后两类是 2026-09-30 真机实测（开机未解锁窗口里六种调用**全部** rc=20）——那是"服务未就绪"，
+    // 不是"包不存在"。把它当"不存在"会在开机早期凑满 host_miss_hits 判成已卸载 → 清产物 + 自删
+    // 二进制（不可逆）；而 pm 长期不可用的最坏后果只是"永不自动清理"，那是安全的降级方向。
+    if (WEXITSTATUS(st) == 1) return 0;
+    return -1;
 }
 
 // —— 包安装状态缓存 ——
@@ -3248,8 +3255,9 @@ static int    host_probe_unknown = 0;// 上次二级探测结论：1=无法判�
  *     该代价已记录在 逻辑说明.md 的「参数落点」注记处（清除数据会清掉私有目录产物）。
  *     每轮可跑、零成本。
  *   二级 app_installed_probe(HOST_PKG)（走 pm path，实时不缓存）—— 一级命中后才跑，且按 HOST_PROBE_INTERVAL
- *     节流（fork+exec pm 的开销不能进每轮热路径）。**只有 pm 明确回答"包不存在"才算已卸载**；
- *     "无法判定"（命令跑不起来/被信号杀死）一律按「无法确认」处理，不计数。
+ *     节流（fork+exec pm 的开销不能进每轮热路径）。**只有 pm 明确回答"包未找到"（退出码 1）才算已卸载**；
+ *     其余一切非 0 —— 命令跑不起来、被信号杀死、binder 调用失败（rc=2）、package 服务未就绪（rc=20，
+ *     2026-09-30 真机实测于开机未解锁窗口）—— 一律按「无法确认」处理，不计数。
  * 再叠「连续 HOST_CONFIRM_HITS 次命中才判真」：单次 stat 失败可能来自瞬时挂载抖动、
  * app 正在被 installd 重装（目录短暂消失）等瞬态，连续两次（间隔 ≥5s 一轮）可滤掉。
  *
@@ -3259,6 +3267,11 @@ static int    host_probe_unknown = 0;// 上次二级探测结论：1=无法判�
  * 而 pm 在开机早期确实会不可用（部署脚本为此专门写了 3 次重试，见 b6x-tempctrl.sh 的 apk_path）。
  * 分开之后最坏情况退化为「pm 长期不可用时永不自动清理」，那是安全的降级方向：
  * 卸载还有系统卸载与脚本侧自清两道兜底，而误删是不可逆的。
+ *
+ * 2026-09-30 真机把"pm 不可用"的确切形态钉死了：开机未解锁窗口里 `pm path`（已安装/不存在/对照组）、
+ * `pm list`、`cmd package path`（原生 binary）、`env -i pm path`（清环境）**六种调用全部 rc=20 +
+ * "cmd: Can't find service: package"** —— 是 package 服务未就绪，与域权限、环境变量、app_process 均无关。
+ * 故二级判据收紧为「只有 rc=1 才算不存在」（见 app_installed_probe）。
  */
 static int host_app_uninstalled(void) {
     struct stat st;
