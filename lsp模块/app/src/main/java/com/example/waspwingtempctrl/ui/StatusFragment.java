@@ -49,13 +49,20 @@ import java.util.Locale;
  * 状态区是<b>单个 TextView</b>、卡片 {@code wrap_content}，一旦把约 8 行的结果换成 1 行忙文本，
  * 状态卡立刻变矮、其下两张卡整体上跳再回落 —— 这是"每次回状态页闪一下"的根因。故：
  * <ul>
- *   <li><b>静默路径</b>（{@code onResume} / 首次探测）：不碰状态区文本、不写操作记录、不做动画，
- *       结果先比后写（内容没变就一个字都不动）；30 秒内不重复跑 su 探测。</li>
+ *   <li><b>静默路径</b>（首次探测在 {@code onViewCreated}、其余刷新在 {@code onResume}）：不碰状态区
+ *       文本、不写操作记录、不做动画，结果先比后写（内容没变就一个字都不动）；30 秒内不重复跑 su 探测。</li>
  *   <li><b>手动路径</b>（用户点按钮）：写操作记录 + 结果文本淡出→换文本（带高度补间）→淡入。</li>
  * </ul>
  * <b>进度条两条路径都显示</b>（它是刷新唯一的反馈），且它在布局里常占位、可见性只影响绘制，
  * 故开关它不引起任何高度变化 —— 高度变化只来自手动路径的文本补间，那是要的效果而非闪烁。
  * 切页时外壳（{@code SetupActivity}）广播可见性，本类据此收掉在跑的动画（{@link PageAware}）。
+ *
+ * <p><b>首次探测（含那一次 root 尝试）为什么在 {@code onViewCreated} 而不在 {@code onResume}</b>：
+ * 三页被外壳的 {@code FragmentStateAdapter} 在启动时一并建出来（{@code offscreenPageLimit = 2}），故
+ * 本页的 {@code onViewCreated} 在冷启动那一刻就到了 —— 与"进 app"等价，首次滑到本页时结果通常已就绪，
+ * 不必现场等一趟 su（原先挂在 {@code onResume}，那是 Activity 时代的接线：换成 ViewPager2 后非当前页
+ * 只到 STARTED，等于"滑到才探"）。依赖：三页须仍在启动时全部建出来，将来改成懒加载就要挪回
+ * {@code onResume}。
  */
 public class StatusFragment extends Fragment implements PageAware {
 
@@ -185,12 +192,20 @@ public class StatusFragment extends Fragment implements PageAware {
         // 操作记录已是自适应高、无内部滚动（同诊断卡），故不再需要
         // PageScrollView.yieldVerticalDragTo：没有内层可滚动区，就不存在手势相争。
         // 页面根保持 PageScrollView（配置页的曲线拖柄仍在用它）。
+
+        // 首次探测（含那一次 root 尝试）在这里起跑，不留给 onResume —— 冷启动时本页已被建出来
+        // （三页一并建，见类注释），故"进 app"就等于这一行；firstProbeDone 挡住视图重建时的重入。
+        // 紧随其后的 onResume 只剩静默刷新，并被 30 秒节流挡下（runAsync 起跑即记账）。
+        if (!firstProbeDone) {
+            firstProbeDone = true;
+            firstProbe();
+        }
     }
 
     @Override
     public void onPageVisible(boolean visible) {
         // 非当前页只是被压到 STARTED（不派发 onPause），故这里不做刷新：
-        // 刷新统一由 onResume 那条（并已节流）；这里只把在跑的淡入淡出收掉。
+        // 刷新由 onViewCreated（首次探测）与 onResume（其后，已节流）负责；这里只把在跑的淡入淡出收掉。
         if (!visible) {
             cancelFade();
         }
@@ -199,14 +214,10 @@ public class StatusFragment extends Fragment implements PageAware {
     @Override
     public void onResume() {
         super.onResume();
-        // 第一次进来连带做一次 root 尝试，之后只刷新状态（避免每次回前台都弹授权框）。
-        // 两条都走静默路径：外壳每切回本页都会派发 onResume，手动路径的动画/记录不该被它触发。
-        if (firstProbeDone) {
-            refreshStatus(false);
-        } else {
-            firstProbeDone = true;
-            firstProbe();
-        }
+        // 首次探测已由 onViewCreated 起跑（含那一次 root 尝试，见那里的注释），这里只剩静默刷新：
+        // 外壳每切回本页都会派发 onResume，走静默路径（不写记录、不碰文本、不做动画），
+        // 手动路径的动画/记录不该被切页触发；冷启动时刚探过，会被 30 秒节流挡下，不会多跑一趟 su。
+        refreshStatus(false);
     }
 
     @Override
