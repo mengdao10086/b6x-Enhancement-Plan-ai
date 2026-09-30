@@ -82,14 +82,16 @@ screen_on() {
 # daemon 实例的 pid 列表：/proc/<pid>/exe 恰好指向 $BIN（末端锚定，故不会命中
 # tempctrl_service.log / tempctrl_uiprefs / tempctrl_*.status 那些兄弟文件）。
 # 判据只有这一处：running()、stop_old()、start() 都从它取，故"判有没有在跑"与"停哪些 / 给谁
-# 改优先级"不可能给出不同结论（与 app 侧 Deployer 的 bin_pids 同为 exe 末端锚定，但对 "(deleted)" 的口径故意不同：app 侧接受、本处不接受）。
+# 改优先级"不可能给出不同结论。
+# **两侧对 "(deleted)" 必须同口径（都算"在跑"）**：app 侧 Deployer 的 bin_pids 与本处同为 exe
+# 末端锚定、且都接受 "<路径> (deleted)"。二进制在运行中被替换（app 部署是 rm 再 cp）时 exe 正是
+# 这个形态，而该实例仍持着单实例锁；本处若按"不在"处理，就会以为没有 daemon 而反复起新实例
+# （全被锁以退出码 2 顶掉），且这个旧实例谁也停不掉、盘上的新二进制永不生效。
 # **不用 pkill -f "$BIN"**：那是 cmdline 子串匹配，凡命令行里出现过该路径的临时进程
 # （诊断脚本里的 ls -l /data/local/tmp/tempctrl、grep tempctrl 等）都会被误杀 —— 2026-09-28 修。
-# 二进制在运行中被替换（rm+mv）时 exe 会显示 "(deleted)"，此处按"不在"处理：拉起会因单实例锁
-# 立刻退出，代价只是一条日志。
 bin_pids() {
     ls -l /proc/[0-9]*/exe 2>/dev/null \
-        | grep -E -- "-> $BIN$" \
+        | grep -E -- "-> $BIN( [(]deleted[)])?$" \
         | sed -n "s#.* /proc/\([0-9]*\)/exe ->.*#\1#p"
 }
 

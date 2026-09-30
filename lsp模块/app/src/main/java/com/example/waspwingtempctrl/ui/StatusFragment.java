@@ -5,6 +5,8 @@ import android.content.SharedPreferences;
 import android.content.pm.PackageInfo;
 import android.os.Build;
 import android.os.Bundle;
+import android.os.Handler;
+import android.os.Looper;
 import android.view.LayoutInflater;
 import android.view.View;
 import android.view.ViewGroup;
@@ -135,12 +137,29 @@ public class StatusFragment extends Fragment implements PageAware {
      * 而且看门狗会在下一轮 tick 自己把它拉回来。部署 / 拉起会把这一位清掉。
      */
     private boolean daemonStoppedByUser;
-    /** 后台任务里置位、主线程回调读取：本次部署判定是否成功（决定要不要接着自动拉起，见 {@link #deploy()}）。 */
-    private volatile boolean deployOk;
+    /** 后台任务里置位、主线程回调读取：本次部署<b>盘面是否已就位</b>（据此决定要不要接着自动拉起）。 */
+    private volatile boolean deployPlaced;
+    /** 后台任务里置位、主线程回调读取：本次部署整体是否失败（据此清掉一次性标记，允许下次自动重试）。 */
+    private volatile boolean deployFailed;
     /** 上次探测的开始时刻（手动与静默共用）；静默刷新据此节流。内存态，进程重启即失效。 */
     private long lastProbeAtMs;
     /** 淡入淡出代号：每次新动画递增，回调里对不上号即作废（连续刷新时两段动画不交叠）。 */
     private int fadeGeneration;
+    /**
+     * 动作代号：每次起跑自增，收尾复位忙态时对不上号即作废（同 {@link #fadeGeneration} 的手法）。
+     *
+     * <p>为什么需要：{@code onDestroyView} 会无条件放开占用位，若视图随即重建、期间又起了新动作，
+     * 旧动作的收尾回调就会把<b>新动作</b>的忙态清掉（同时守卫短暂失效）。代号一变，旧回调只认
+     * 自己那一次，不动别人的忙态。
+     */
+    private int actionGeneration;
+
+    /**
+     * 主线程 Handler：只在「拿不到 Activity」的收尾路径上用（那一刻不能借 Activity 回主线程）。
+     * 类加载发生在主线程（Fragment 由外壳在主线程建出来），且 {@code new Handler(Looper)} 本身
+     * 可在任意线程调用，故静态持有是安全的。
+     */
+    private static final Handler MAIN = new Handler(Looper.getMainLooper());
 
     /**
      * 是否有动作在跑（结果还没回到主线程）；为 true 时拒绝并发触发。
@@ -342,20 +361,56 @@ public class StatusFragment extends Fragment implements PageAware {
      * 只把新二进制换到盘上，不重启进程它就一直跑旧映像。这一段是<b>独立的一份</b>——自己的忙态文案、
      * 自己的操作记录、自己的一次进度条起停，与手动点「拉起daemon」完全是同一条路径，
      * 不是把部署那一趟拉长。
-     * 部署判定失败（{@code ok=false}）时<b>不接</b>：盘上没换成功，重启旧映像没有意义。
+     *
+     * <p><b>接不接这一段的判据是「盘面是否已就位」（{@link Deployer.Result#placementsOk}），
+     * 不是「部署是否整体成功」</b>：收尾自检是一次读回，会因 su 往返超时、或与设备侧另一个写者
+     * （脚本的自动更新）撞窗而为假，那时盘上其实已经换了新二进制——只按整体成败决定，一次读回失败
+     * 就会把旧映像永久留在设备上（旧进程照旧"运行中"，界面也看不出异常），且没有任何补偿。
+     * 盘面真没就位时仍<b>不接</b>：那时重启旧映像没有意义。
+     *
+     * <p><b>部署失败时清掉一次性去重标记</b>（见 {@link #clearPromptMark()}）：不清就等于把
+     * "下次进页面自动补上"这条路也一起封死——而失败恰恰是最需要再试一次的时候。
      */
     private void deploy() {
         daemonStoppedByUser = false;   // 部署结束会接着拉起（见本方法的 after 回调）
         final Context app = requireContext().getApplicationContext();
         runAsync(getString(R.string.status_busy_deploy), () -> {
             Deployer.Result result = Deployer.get(app).deploy();
-            deployOk = result.ok;
+            deployPlaced = result.placementsOk;
+            deployFailed = !result.ok;
             return result.status != null ? result.status.describe() : result.describe();
         }, false, true, () -> {
-            if (deployOk) {
+            if (deployPlaced) {
                 startDaemon();
             }
+            if (deployFailed) {
+                clearPromptMark();
+            }
         });
+    }
+
+    /**
+     * 清掉「本 APK 版本已经自动装过 / 已经问过」的一次性去重标记（{@link Deployer#KEY_HASH_PROMPTED_MD5}）。
+     *
+     * <p><b>只在部署失败时调</b>：标记是"这一版已经尝试过"的记录，失败却留着它，等于把"下次进页面
+     * 自动补上"这条路也封死了。
+     *
+     * <p><b>边界（"反复"到哪一步为止）</b>：清一次只换来"下次进页面的一次动作"——部署类情形在自动
+     * 更新开着时是静默重装一次、关着时是把确认框再弹一次；失败一次清一次，故一直失败就一直"每进一次
+     * 页面动作一次"。不是自转的循环（每次都要用户再进页面，静默刷新另有
+     * {@link #PROBE_MIN_INTERVAL_MS} 节流）；收敛条件是"盘面就位且进程在跑"——那时探测不武装任何
+     * 请求，自然不再动作（见 {@link #armDeployPrompt}）。
+     *
+     * <p>读的是已加载过的 prefs（探测阶段读过同一份），写入走 {@code apply()} 异步落盘。
+     */
+    private void clearPromptMark() {
+        Context context = getContext();
+        if (context == null) {
+            return;   // 已 detach：不改标记，下次进页面探测会重新判定
+        }
+        context.getApplicationContext()
+                .getSharedPreferences(Deployer.PREFS_ROOT_PROBE, Context.MODE_PRIVATE)
+                .edit().remove(Deployer.KEY_HASH_PROMPTED_MD5).apply();
     }
 
     private void uninstall() {
@@ -439,6 +494,10 @@ public class StatusFragment extends Fragment implements PageAware {
      * @param after 结果上屏、占用释放之后要接着跑的动作（部署→自动拉起就靠它）；null = 没有。
      *              它在主线程、与用户下一次点击同一时机被调用，故里面可以直接调
      *              {@link #startDaemon()} 这类动作入口，不必自己绕开并发守卫
+     *
+     * <p><b>忙态与占用位的收尾只有一处</b>（{@link #finishAction}）：正常上屏、视图已销毁、
+     * 以及<b>拿不到 Activity</b> 三条路都要走它——最后那条尤其不能省（那时进度条还在屏上，
+     * 早退会把它永久留在"忙"上，此后本页所有动作都被守卫挡下）。
      */
     private void runAsync(final String busyText, final Task task, final boolean asDialog,
                           final boolean manual, @Nullable final Runnable after) {
@@ -450,6 +509,7 @@ public class StatusFragment extends Fragment implements PageAware {
         }
         actionRunning = true;
         final Context appContext = requireContext().getApplicationContext();
+        final int generation = ++actionGeneration;
         lastProbeAtMs = System.currentTimeMillis();
         setBusy(true);
         if (manual) {
@@ -469,16 +529,21 @@ public class StatusFragment extends Fragment implements PageAware {
             final boolean isFailure = failed;
             android.app.Activity activity = getActivity();
             if (activity == null) {
+                // 拿不到 Activity（视图已随宿主分离/重建）：也必须在主线程把忙态与占用位放开。
+                // 早退什么都不做的话，进度条会一直转、且此后本页每次点击都被守卫挡下（永久"忙"）。
+                // 走静态 Handler：此刻不能借 Activity 回主线程；finishAction 按代号判定，不碰别人的忙态。
+                MAIN.post(() -> finishAction(generation));
                 return;
             }
             activity.runOnUiThread(() -> {
                 if (!isAdded() || statusView == null) {
+                    // 视图已没了：至少把占用位放开（进度条随视图一起消失，由 onDestroyView 收尾）
+                    finishAction(generation);
                     return;
                 }
                 // 结果已回到主线程：本动作到此结束，先放掉占用——紧接着要接的那一段（after）
                 // 才不会被守卫挡在门外
-                actionRunning = false;
-                setBusy(false);
+                finishAction(generation);
                 if (manual) {
                     appendLog(result);
                 }
@@ -529,6 +594,23 @@ public class StatusFragment extends Fragment implements PageAware {
         thread.start();
     }
 
+    /**
+     * 收尾复位：放掉占用位并关掉进度条。<b>只在代号未变时动</b>——期间若已起了新动作
+     * （视图销毁重建那条路），忙态归它管，本回调不得越俎代庖（否则会把新动作的进度条关掉、
+     * 并让并发守卫短暂失效）。必须在主线程调。
+     *
+     * <p><b>三条收尾路径都必须走它</b>：正常上屏、视图已销毁、以及拿不到 Activity
+     * （见 {@link #runAsync}）。少走一条就会留下"永久忙"——进度条一直转，且此后本页每次点击
+     * 都被 {@code actionRunning} 守卫拒绝。
+     */
+    private void finishAction(int generation) {
+        if (generation != actionGeneration) {
+            return;
+        }
+        actionRunning = false;
+        setBusy(false);
+    }
+
     private interface Task {
         String run() throws Exception;
     }
@@ -559,6 +641,8 @@ public class StatusFragment extends Fragment implements PageAware {
      * 装了新 APK 会重新武装；重装同一个 APK 不会重复打扰）。
      * <b>先落标记再动作</b>（同 {@code KEY_ROOT_TRIED}）：弹窗还没显示就已落盘，
      * 中途进程被杀也不会下次再弹。
+     * <b>唯一例外</b>：部署失败时调用方会把标记清掉（见 {@link #deploy()} 的收尾与
+     * {@link #clearPromptMark()}）——否则一次失败就等于把"自动重部署"这条路也一并停掉。
      */
     private void armDeployPrompt(Context app, Deployer.Status status) {
         pendingPrompt = PROMPT_NONE;   // 每次探测重新判定，不留上一次的残留

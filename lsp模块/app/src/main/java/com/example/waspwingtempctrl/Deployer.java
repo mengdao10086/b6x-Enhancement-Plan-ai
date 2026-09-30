@@ -472,6 +472,17 @@ public final class Deployer {
     /** 一次动作的结果。 */
     public static final class Result {
         public final boolean ok;
+        /**
+         * <b>盘面是否已就位</b>（只有 {@link Deployer#deploy()} 会置真）：二进制与脚本都已落盘、
+         * 且与 APK 内资源逐字节一致。它比 {@link #ok} 弱——{@code ok} 还要求收尾自检也通过。
+         *
+         * <p><b>为什么单列</b>：部署只动盘（见 {@link Deployer#deploy()} 的 javadoc），让新二进制
+         * "生效"要靠随后那次「停旧起新」。而收尾自检是一次<b>读回</b>——su 往返超时、或与设备侧另一个
+         * 写者（脚本的自动更新）撞窗都会让它为假。若调用方只按 {@code ok} 决定要不要接着换进程，
+         * 一次读回失败就会留下「盘上已换新、进程还在跑旧映像」且<b>没有任何补偿</b>的状态
+         * （旧映像会一直跑到下次手动动作）。故单列这一位：<b>盘面已就位就仍值得尝试换进程</b>。
+         */
+        public final boolean placementsOk;
         public final String action;
         public final List<String> steps;
         public final String error;
@@ -484,8 +495,18 @@ public final class Deployer {
          */
         public final Status status;
 
+        /**
+         * 除 {@link Deployer#deploy()} 外的动作用这一条：它们不承担"把新二进制写上盘"这件事，
+         * {@link #placementsOk} 无意义（恒假），调用方不得据此判断。
+         */
         Result(boolean ok, String action, List<String> steps, String error, Status status) {
+            this(ok, false, action, steps, error, status);
+        }
+
+        Result(boolean ok, boolean placementsOk, String action, List<String> steps, String error,
+               Status status) {
             this.ok = ok;
+            this.placementsOk = placementsOk;
             this.action = action;
             this.steps = Collections.unmodifiableList(steps);
             this.error = error;
@@ -524,7 +545,12 @@ public final class Deployer {
      * 等于没更新。"换完盘立刻拉起一次"接在部署之后，由调用方负责——状态页在部署结果上屏后
      * 自动调一次 {@link #startDaemon()}，与手动点「拉起daemon」走的是同一条路径。
      *
-     * <p>任一硬步骤失败即返回 {@code ok=false}（配置与白名单失败不算硬失败，记在 steps 里）。
+     * <p><b>调用方该看哪一个位</b>：{@link Result#placementsOk}（盘面已就位）而不是 {@link Result#ok}
+     * （还含收尾自检）。自检是一次读回、可能为假，而"盘上已经换了新二进制"这件事在硬判据过完就已成立；
+     * 只按 {@code ok} 决定接不接拉起，一次读回失败就会把旧映像永久留下（无补偿）。
+     *
+     * <p>任一硬步骤失败即返回 {@code ok=false}（配置与白名单失败不算硬失败，记在 steps 里）；
+     * 走到末尾仍自检不过时 {@code ok=false} 但 {@code placementsOk=true}。
      * <b>阻塞</b>（root 往返 3 次 + 落盘 + 若干次 probe）。
      */
     public Result deploy() {
@@ -591,16 +617,21 @@ public final class Deployer {
         steps.add(pr.isOk() ? "省电白名单批处理已执行（仅对已安装的散热器控制 app 生效）"
                 : "省电白名单下发失败（不影响部署）：" + pr.describe());
 
+        // 盘上确实换了新二进制（本行之前三条硬判据都过了）：清掉拉起冷却，让紧随其后的自动拉起
+        // 不被「防连点」挡下 —— 挡下的后果是旧进程继续跑旧映像，正是本方法 javadoc 警告的
+        // 「等于没更新」，且没有任何自动补偿。防连点的语义只对「手动点拉起daemon」成立，那条路径一个字不动。
+        // （清冷却不看后面的自检结果：自检是读回，可能为假，而"盘上刚换过"这件事已经成立。）
+        lastStartAtMs = 0L;
         // 到位即止：拉起daemon 不在本方法里做（见 javadoc）——界面在部署上屏后再自动调一次
         // startDaemon()，那是独立的一段（自己的忙态、操作记录与进度条）。
         Status st = probe();
-        if (st.deployed) {
-            // 盘上确实换了新二进制：清掉拉起冷却，让紧随其后的自动拉起不被「防连点」挡下 ——
-            // 挡下的后果是旧进程继续跑旧映像，正是本方法 javadoc 警告的「等于没更新」，
-            // 且没有任何自动补偿。防连点的语义只对「手动点拉起daemon」成立，那条路径一个字不动。
-            lastStartAtMs = 0L;
-        }
-        return new Result(st.deployed, "部署", steps, st.deployed ? "" : "部署后自检未通过", st);
+        steps.add(st.deployed ? "部署后自检通过"
+                : "部署后自检未通过（" + (st.suOk ? "内容或进程未符合判据" : "root 通道本次未通")
+                + "）——盘面已就位，仍交由随后的拉起动作换进程");
+        // placementsOk 恒真是因为走到了这里：三条硬判据（BIN_OK / SCRIPT_OK / 双侧哈希一致）都过了。
+        // 自检未通过也照回吐，调用方据此仍会补一次「停旧起新」（见 Result#placementsOk）。
+        return new Result(st.deployed, true, "部署", steps,
+                st.deployed ? "" : "部署后自检未通过（盘面已就位）", st);
     }
 
     /**
@@ -1187,8 +1218,10 @@ public final class Deployer {
      *
      * <p><b>判据只剩这一处</b>：{@link #killAndWaitSnippet}（停）与 {@link #restartCore()}（判活 / 取 PID）
      * 共用这两个函数，故"判有没有在跑"与"判停没停稳"不可能给出不同结论。判据与 service.d 脚本的
-     * {@code running()} 同源（{@code /proc/<pid>/exe} 的指向），差别只在脚本那边不必管
-     * {@code (deleted)}——它不再承担"换掉在跑实例"的职责。
+     * {@code running()} 同源（{@code /proc/<pid>/exe} 的指向），并且<b>两侧对 {@code (deleted)} 必须同口径
+     * （都算"在跑"）</b>：部署是 {@code rm -f} 后 {@code cp}，旧实例此时 exe 显示成
+     * {@code <路径> (deleted)} 却仍持着单实例锁；任一侧漏判它，"这个实例谁也替换不掉"就成立
+     * （脚本会以为没在跑、反复起新实例又被锁以退出码 2 顶掉，盘上的新二进制永不生效）。
      *
      * <p><b>看门狗那一半与 C 侧同口径</b>：{@code wd_pids()} 与 {@code tempctrl.c} 的
      * {@code cmdline_has_script_arg()} 都只认「某个参数整等于候选脚本路径」，两侧都不拿 comm 定身份
