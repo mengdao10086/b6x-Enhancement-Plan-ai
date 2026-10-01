@@ -57,6 +57,8 @@ public class ChartView extends View {
     private static final float SEAM_EXTRA_DP = 4f;   // 转速圆点允许下越界的量
     private static final float SEAM_BOTTOM_DP = 5f;  // 接缝离画布下沿的下限：圆点（半径 3.2 + 外圈 0.5）不许被裁
     private static final float LABEL_GAP_DP = 6f;    // 标签与端点的水平间距
+    // 标签落在簇上方时相对簇顶端的抬升量（原 WebUI 同名口径：top − 4）；落下方的间距见 LABEL_H_DP + 1dp
+    private static final float LABEL_LIFT_DP = 4f;
     // 标注行高：webui 的同名常量 LABEL_H（其注释写「标签近似高度（10px 字体）」）。取常量而不用
     // 实测 descent − ascent（≈ 11.7dp），是为了与 webui 逐项对齐时同一个量同名同值。
     private static final float LABEL_H_DP = 11f;
@@ -455,7 +457,13 @@ public class ChartView extends View {
         }
     }
 
-    /** 头部标注：每条系列的最后一个有效样本；垂直近者合并成一行（与簇首比距离）。 */
+    /**
+     * 头部标注：每条系列的最后一个有效样本；垂直近者合并成一行（与簇首比距离）。
+     *
+     * <p><b>选边</b>：比较「簇顶端到上方最近障碍物」与「下方最近障碍物到簇底端」的空隙，空隙更大的一侧
+     * 放标签；障碍物 = 同页其它曲线的端点圆点（即相邻簇的圆点边缘）与绘图区上下沿，<b>不含曲线中段</b>。
+     * 两侧都放不下时同样取空隙更大的一侧。
+     */
     private void buildMarkers(ChartWindow win, ChartAxis lAxis, ChartAxis rAxis) {
         List<ChartLabelOp> entries = new ArrayList<>();
         for (int si = 0; si < series.length; si++) {
@@ -534,17 +542,35 @@ public class ChartView extends View {
         float labelMaxY = Math.min(fPadT + fH + labelH, getHeight() - fm.descent);
         List<ChartLabelOp> textOps = new ArrayList<>();
         List<ChartDotOp> dotOps = new ArrayList<>();
-        for (List<ChartLabelOp> cl : clusters) {
+        // 标注要占的高度：上方 = 抬升量 + 文字 ascent（负值取反）；下方 = 一行高 + 1dp 间隙 + 文字 descent
+        float dotR = (DOT_RADIUS_DP + DOT_HALO_DP) * density;
+        float needAbove = LABEL_LIFT_DP * density - fm.ascent;
+        float needBelow = labelH + 1f * density + fm.descent;
+        for (int ci = 0; ci < clusters.size(); ci++) {
+            List<ChartLabelOp> cl = clusters.get(ci);
             float top = cl.get(0).y;
             float bot = cl.get(cl.size() - 1).y;
-            float ly;
-            if (bot > fPadT + fH) {
-                ly = top - 4f * density;                  // 簇最低点已越界 → 改放上方
-            } else if ((top - fPadT) >= (fPadT + fH - bot)) {
-                ly = top - 4f * density;                  // 上方空间大 → 放上面
-            } else {
-                ly = bot + labelH + 1f * density;         // 下方空间大 → 放下面
+            // 空隙只量到最近的那个障碍物：同页其它曲线的端点圆点（上一个/下一个簇的圆点边缘），
+            // 该侧没有别的簇时就量到绘图区上沿/下沿。簇按 y 升序且两两不重叠（合并判据是"与簇首
+            // 的距离 < 阈值"，故前一簇的所有点必然在后一簇之上），所以只取相邻的那个簇就够。
+            // 障碍物不含曲线中段：标签压在某条曲线腰部这种情况本口径不判（只算端点圆点与画布上下沿）。
+            float obstacleAbove = fPadT;
+            if (ci > 0) {
+                List<ChartLabelOp> prev = clusters.get(ci - 1);
+                obstacleAbove = Math.max(obstacleAbove, prev.get(prev.size() - 1).y + dotR);
             }
+            float obstacleBelow = fPadT + fH;
+            if (ci + 1 < clusters.size()) {
+                obstacleBelow = Math.min(obstacleBelow, clusters.get(ci + 1).get(0).y - dotR);
+            }
+            float gapAbove = top - obstacleAbove;
+            float gapBelow = obstacleBelow - bot;
+            // 两侧都放得下（或都放不下）→ 取空隙更大的一侧；只有一侧放得下 → 取那一侧
+            boolean fitsAbove = gapAbove >= needAbove;
+            boolean fitsBelow = gapBelow >= needBelow;
+            boolean placeAbove = fitsAbove == fitsBelow ? gapAbove >= gapBelow : fitsAbove;
+            float ly = placeAbove ? top - LABEL_LIFT_DP * density
+                                  : bot + labelH + 1f * density;
             if (ly < fPadT) {
                 ly = fPadT;
             }

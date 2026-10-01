@@ -44,13 +44,10 @@
         "HOT_RPM_MAP",
         "MAP_INPUT_SMOOTH_ALPHA",
         "FAN_RPM_RANGE",
-        "FAN_RPM_ROUND_UNIT",
         "HOT_DERATE",
         "PID_KDP",
         "PID_KI_RATE",
         "PID_SPEED",
-        "PID_SPEED_NL_THR",
-        "PID_SPEED_NL_EXP",
         "PID_TARGET",
         "PID_CH_THRESHOLD",
         "PID_CPU_COMP",
@@ -284,16 +281,18 @@
       "role": "setting",
       "type": "multi",
       "label": "风扇限速",
-      "desc": "变化量升/降共用同一步长；防抖生效条件：变化量 ≤ 阈值 且 升速时距最高、降速时距最低 ≥ 阈值×1.5（更近则失效）；阈值 0=关闭防抖",
+      "desc": "变化量升/降共用同一步长；防抖生效条件：变化量 ≤ 阈值 且 升速时距最高、降速时距最低 ≥ 阈值×1.5（更近则失效）；阈值 0=关闭防抖；第三值为下发前转速的就近取整单位（2044→2040、2045→2050）",
       "unit": "",
       "unitNote": "多值键，各字段单位见 fields",
       "default": [
         250,
-        50
+        50,
+        10
       ],
       "factory": [
         250,
-        50
+        50,
+        10
       ],
       "min": null,
       "max": null,
@@ -316,6 +315,13 @@
           "min": 0,
           "max": 2000,
           "default": 50
+        },
+        {
+          "label": "风扇转速取整单位(RPM)",
+          "unit": "RPM",
+          "min": 1,
+          "max": 500,
+          "default": 10
         }
       ]
     },
@@ -578,25 +584,6 @@
         }
       ]
     },
-    "FAN_RPM_ROUND_UNIT": {
-      "key": "FAN_RPM_ROUND_UNIT",
-      "group": "perf",
-      "role": "setting",
-      "type": "int",
-      "label": "风扇转速取整单位(RPM)",
-      "desc": "下发风扇转速前就近取整到该单位的整数倍（默认 10：2044→2040、2045→2050）",
-      "unit": "RPM",
-      "unitNote": "",
-      "default": 10,
-      "factory": 10,
-      "min": 1,
-      "max": 500,
-      "requires": [
-        "PERF_ENABLED"
-      ],
-      "daemonConsumes": true,
-      "fields": null
-    },
     "HOT_DERATE": {
       "key": "HOT_DERATE",
       "group": "perf",
@@ -712,58 +699,51 @@
       "key": "PID_SPEED",
       "group": "perf",
       "role": "setting",
-      "type": "int",
-      "label": "速度倍率(÷10)",
-      "desc": "100 = 速度×10；温度变化速度对控制量的权重，同时进入积分与 KDP；0=关闭",
-      "unit": "×10（存储值 100 = 实际倍率 10）",
-      "unitNote": "",
-      "default": 100,
-      "factory": 100,
-      "min": 0,
-      "max": 1000,
+      "type": "multi",
+      "label": "速度倍率与非线性",
+      "desc": "三值：速度倍率（÷10，100 = 速度×10，0=关闭）· 非线性阈值 L（÷100，20 = 0.20 °C/周期）· 非线性强度 q（÷100，100 = 1.00，0 = 不降权）；速度幅度 ≥ L 完全跟随，< L 按幂曲线降权",
+      "unit": "",
+      "unitNote": "多值键，各字段单位见 fields",
+      "default": [
+        100,
+        20,
+        100
+      ],
+      "factory": [
+        100,
+        20,
+        100
+      ],
+      "min": null,
+      "max": null,
       "requires": [
         "PERF_ENABLED"
       ],
       "daemonConsumes": true,
-      "fields": null
-    },
-    "PID_SPEED_NL_THR": {
-      "key": "PID_SPEED_NL_THR",
-      "group": "perf",
-      "role": "setting",
-      "type": "int",
-      "label": "速度非线性阈值(÷100)",
-      "desc": "速度幅度 ≥ 此阈值即完全跟随（1:1），低于此值按幂曲线降权；20 = 0.20 °C/周期，越小降权越多",
-      "unit": "×100（存储值 20 = 实际阈值 0.20 °C/周期）",
-      "unitNote": "",
-      "default": 20,
-      "factory": 20,
-      "min": 10,
-      "max": 100,
-      "requires": [
-        "PERF_ENABLED"
-      ],
-      "daemonConsumes": true,
-      "fields": null
-    },
-    "PID_SPEED_NL_EXP": {
-      "key": "PID_SPEED_NL_EXP",
-      "group": "perf",
-      "role": "setting",
-      "type": "int",
-      "label": "速度非线性强度(÷100)",
-      "desc": "降权曲线的幂次；100 = 1.00，0 = 完全线性（不降权，等价于关闭），越大降权越狠",
-      "unit": "×100（存储值 100 = 实际强度 1.00）",
-      "unitNote": "",
-      "default": 100,
-      "factory": 100,
-      "min": 0,
-      "max": 400,
-      "requires": [
-        "PERF_ENABLED"
-      ],
-      "daemonConsumes": true,
-      "fields": null
+      "rangeNote": "范围逐字段见 fields",
+      "fields": [
+        {
+          "label": "速度倍率(÷10)",
+          "unit": "×10（存储值 100 = 实际倍率 10）",
+          "min": 0,
+          "max": 1000,
+          "default": 100
+        },
+        {
+          "label": "速度非线性阈值(÷100)",
+          "unit": "×100（存储值 20 = 实际阈值 0.20 °C/周期）",
+          "min": 10,
+          "max": 100,
+          "default": 20
+        },
+        {
+          "label": "速度非线性强度(÷100)",
+          "unit": "×100（存储值 100 = 实际强度 1.00）",
+          "min": 0,
+          "max": 400,
+          "default": 100
+        }
+      ]
     },
     "PID_TARGET": {
       "key": "PID_TARGET",
@@ -1155,15 +1135,15 @@
       "role": "setting",
       "type": "multi",
       "label": "冷值动态倍率 映射",
-      "desc": "两值为倍率上界 U（×100，默认 200 = 2.00，范围 100~400）与形状指数 γ（×100，默认 100 = 1.00，范围 10~400）；倍率为 U 的 sign(s)×abs(s)^γ 次幂，上下界互为倒数",
+      "desc": "两值为倍率上界 U（×100，默认 300 = 3.00，范围 100~400）与形状指数 γ（×100，默认 100 = 1.00，范围 10~400）；倍率为 U 的 sign(s)×abs(s)^γ 次幂，上下界互为倒数",
       "unit": "",
       "unitNote": "多值键，各字段单位见 fields",
       "default": [
-        200,
+        300,
         100
       ],
       "factory": [
-        200,
+        300,
         100
       ],
       "min": null,
@@ -1179,7 +1159,7 @@
           "unit": "×100",
           "min": 100,
           "max": 400,
-          "default": 200
+          "default": 300
         },
         {
           "label": "形状指数 γ(×100)",

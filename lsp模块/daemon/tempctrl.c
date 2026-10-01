@@ -161,11 +161,11 @@ static int hot_map_max = 450;       // HOT_RPM_MAP 第二值（0.1°C）
 // --- 风扇转速范围 ---
 static int fan_rpm_min = 2000;      // FAN_RPM_RANGE 第一值
 static int fan_rpm_max = 6000;      // FAN_RPM_RANGE 第二值
-static int fan_rpm_round_unit = 10; // FAN_RPM_ROUND_UNIT：下发转速前按该单位就近取整（RPM，1~500）
+static int fan_rpm_round_unit = 10; // RATE_LIMIT_FAN 第三值：下发转速前按该单位就近取整（RPM，1~500）
 
 // ======================== 速率限制 ========================
 // --- 固定值 ---
-static int RATE_LIMIT_FAN = 250;   // RATE_LIMIT_FAN 第一值：风扇每周期最大变化量（RPM，升/降共用，双值键）
+static int RATE_LIMIT_FAN = 250;   // RATE_LIMIT_FAN 第一值：风扇每周期最大变化量（RPM，升/降共用，三值键）
 static int RATE_LIMIT_COLD = 25;   // 制冷强度升降速基础值：升速=base+dev×mult/10，降速=base-dev×mult/10，负值→0=禁止该方向
 
 // --- 动态值（根据电池温差自动调整）---
@@ -231,11 +231,11 @@ static int pid_kdp_coef = 300;
 static int pid_ki_up_coef = 20;
 // PID_KI_RATE 第二值：积分降速率（÷1000，被积项 < 0 时用；默认 30，可独立调）
 static int pid_ki_down_coef = 30;
-// PID_SPEED：速度项倍率系数（÷10，100=速度×10，0=关闭；ch = error + v×speed_coef/10 + cpu_comp）
+// PID_SPEED 第一值：速度项倍率系数（÷10，100=速度×10，0=关闭；ch = error + v×speed_coef/10 + cpu_comp）
 static int pid_speed_coef = 100;
-// PID_SPEED_NL_THR：速度非线性阈值 L（÷100，单位 °C/周期；|v| ≥ L 严格恒等，|v| < L 按幂曲线降权）
+// PID_SPEED 第二值：速度非线性阈值 L（÷100，单位 °C/周期；|v| ≥ L 严格恒等，|v| < L 按幂曲线降权）
 static int pid_spd_nl_thr_p100 = 20;
-// PID_SPEED_NL_EXP：速度非线性强度 q（÷100；0 = 完全线性）
+// PID_SPEED 第三值：速度非线性强度 q（÷100；0 = 完全线性）
 static int pid_spd_nl_exp_p100 = 100;
 // PID_TARGET 第一值：动态目标系数（÷1000，raw_target = clamp(error×target_coef, ±上限)）
 static int pid_target_coef = 20;
@@ -263,7 +263,7 @@ static int pid_cold_max = 190;            // PID_COLD_RANGE 第二值：制冷�
 // PID_COLD_DYN_IN  = 输入轴 下界 拐点 上界（冷值，零换算；默认 40 100 190）
 // PID_COLD_DYN_OUT = 输出轴拐点值（正数 ×100；默认 50 → 抽象值 −0.50，两端固定 0 与 −1）
 // PID_COLD_DYN_W   = KDP / KI升 / KI降 三作用点权重（各自 ×100；默认 100 100 100 = 1.00）
-// PID_COLD_DYN_MAP = 倍率上界 U / 形状指数 γ（各自 ×100；默认 200 100 = 2.00 / 1.00）
+// PID_COLD_DYN_MAP = 倍率上界 U / 形状指数 γ（各自 ×100；默认 300 100 = 3.00 / 1.00）
 static int cold_dyn_in_lo = 40;           // 输入轴下界（冷值；≤ 此处不干预）
 static int cold_dyn_in_mid = 100;         // 输入轴拐点（冷值；过此点转第二段）
 static int cold_dyn_in_hi = 190;          // 输入轴上界（冷值；≥ 此处最大降幅）
@@ -271,7 +271,7 @@ static int cold_dyn_out_mid_p100 = 50;    // 输出轴拐点值（正数 ×100�
 static int cold_dyn_w_kdp_p100 = 100;     // KDP 作用点权重（×100；0 = 该处不受影响）
 static int cold_dyn_w_up_p100  = 100;     // KI 升速率作用点权重（×100）
 static int cold_dyn_w_dn_p100  = 100;     // KI 降速率作用点权重（×100）
-static int cold_dyn_u_p100     = 200;     // 倍率上界 U（×100）；下界自动 = 1/U
+static int cold_dyn_u_p100     = 300;     // 倍率上界 U（×100）；下界自动 = 1/U
 static int cold_dyn_gamma_p100 = 100;     // 形状指数 γ（×100）
 
 // --- PID 运行时状态（单累积器）---
@@ -586,7 +586,7 @@ struct IntCfgKey { const char *key; int *var; int min; int max; };
 
 static const struct IntCfgKey INT_CFG_KEYS[] = {
     // 表行由 params_generated.h 的 CFG_PERF_INT_KEYS 展开，键序与 clamp 边界随定义，勿在此手抄。
-    // 多值键（PID_KI_RATE / PID_TARGET / PID_TARGET_DIR / PID_COLD_RANGE / PID_CPU_COMP / PID_SPEED_RECALL）
+    // 多值键（PID_SPEED / PID_KI_RATE / PID_TARGET / PID_TARGET_DIR / PID_COLD_RANGE / PID_CPU_COMP / PID_SPEED_RECALL）
     // 与冷值动态倍率四键（PID_COLD_DYN_IN/_OUT/_W/_MAP，含单值键 _OUT）均在 parse_pid_cfg 分段解析，不进本表
 #define CFG_ROW(k, var, lo, hi) { k, &var, lo, hi },
     CFG_PERF_INT_KEYS(CFG_ROW)
@@ -661,6 +661,16 @@ static int parse_pid_cfg(const char *key, int val, const char *val_str) {
         if (n >= 2) pid_ki_down_coef = clamp(b, 1, 1000);
         return 1;
     }
+    // PID_SPEED = 速度倍率(÷10) 非线性阈值 L(÷100) 非线性强度 q(÷100)
+    // 三值同属速度项一条链；旧单值行（只给第一值）仍按 n>=1 生效
+    if (strcmp(key, "PID_SPEED") == 0) {
+        int sp = pid_speed_coef, thr = pid_spd_nl_thr_p100, ex = pid_spd_nl_exp_p100;
+        int n = sscanf(val_str, "%d %d %d", &sp, &thr, &ex);
+        if (n >= 1) pid_speed_coef      = clamp(sp,  0, 1000);
+        if (n >= 2) pid_spd_nl_thr_p100 = clamp(thr, 10, 100);
+        if (n >= 3) pid_spd_nl_exp_p100 = clamp(ex,   0, 400);
+        return 1;
+    }
     // PID_TARGET = 目标系数(÷1000) 目标EMA平滑(%) 动态目标上限(0.1°C)
     if (strcmp(key, "PID_TARGET") == 0) {
         int a = pid_target_coef, b = pid_target_alpha, c = pid_target_max;
@@ -729,7 +739,7 @@ static int parse_pid_cfg(const char *key, int val, const char *val_str) {
         if (n >= 3) cold_dyn_w_dn_p100  = clamp(c, 0, 200);
         return 1;
     }
-    // PID_COLD_DYN_MAP = 倍率上界 U / 形状指数 γ（各自 ×100；默认 200 100 = 2.00 / 1.00）
+    // PID_COLD_DYN_MAP = 倍率上界 U / 形状指数 γ（各自 ×100；默认 300 100 = 3.00 / 1.00）
     if (strcmp(key, "PID_COLD_DYN_MAP") == 0) {
         int a = cold_dyn_u_p100, b = cold_dyn_gamma_p100;
         int n = sscanf(val_str, "%d %d", &a, &b);
@@ -764,12 +774,13 @@ static int parse_common_cfg(const char *key, int val, const char *val_str) {
         if (n >= 3) HOT_DERATE_COOLDOWN = clamp(c, 0, 20);
         return 1;
     }
-    // RATE_LIMIT_FAN = 每周期最大变化量 防抖阈值（双值，升降共用步长；阈值 0=关闭防抖）
+    // RATE_LIMIT_FAN = 每周期最大变化量 防抖阈值 转速取整单位（三值，升降共用步长；阈值 0=关闭防抖）
     if (strcmp(key, "RATE_LIMIT_FAN") == 0) {
-        int step = RATE_LIMIT_FAN, thr = RATE_LIMIT_FAN_DEBOUNCE;
-        int n = sscanf(val_str, "%d %d", &step, &thr);
+        int step = RATE_LIMIT_FAN, thr = RATE_LIMIT_FAN_DEBOUNCE, ru = fan_rpm_round_unit;
+        int n = sscanf(val_str, "%d %d %d", &step, &thr, &ru);
         if (n >= 1) RATE_LIMIT_FAN          = clamp(step, 50, 2000);
         if (n >= 2) RATE_LIMIT_FAN_DEBOUNCE = clamp(thr, 0, 2000);
+        if (n >= 3) fan_rpm_round_unit      = clamp(ru, 1, 500);
         return 1;
     }
     if (strcmp(key, "RATE_LIMIT_COLD") == 0) {
@@ -2221,7 +2232,7 @@ static void rate_limit_cold(int desired_cold) {
 
 /**
  * 风扇转速限速（升/降共用同一步长，两个方向各带一段防抖）。
- * 返回限速后的实际风扇转速，就近取整到 FAN_RPM_ROUND_UNIT 的倍数并钳制到设备范围。
+ * 返回限速后的实际风扇转速，就近取整到 RATE_LIMIT_FAN 第三值（取整单位）的倍数并钳制到设备范围。
  *
  * 防抖是「幅度阈值」：本周期变化量不超过阈值就整步不做（不看时间、不计数）；
  * 距最低转速（降）/最高转速（升）< 阈值×1.5 时防抖失效（贴近端点无需再抑制）。
@@ -2250,7 +2261,7 @@ static int rate_limit_fan(int desired_rpm) {
     // 否则风扇目标偏低时 actual_rpm 跌破 fan_rpm_min，rate_limited_execute 的就绪守卫会误判"未就绪"而永久跳过下发（死锁）。
     actual_rpm = clamp(actual_rpm, fan_rpm_min, active_fan_max);
 
-    // ---- 就近取整到 FAN_RPM_ROUND_UNIT 的倍数（默认 10：2044→2040、2045→2050）----
+    // ---- 就近取整到 RATE_LIMIT_FAN 第三值的倍数（默认 10：2044→2040、2045→2050）----
     int round_unit = (fan_rpm_round_unit > 0) ? fan_rpm_round_unit : 1;
     int send_rpm = ((actual_rpm + round_unit / 2) / round_unit) * round_unit;
     send_rpm = clamp(send_rpm, fan_rpm_min, active_fan_max);
@@ -2924,7 +2935,7 @@ static void cold_dyn_reset(void) {
 
 /**
  * 速度非线性映射（v → v'）：小幅速度按幂曲线降权，幅度到位后严格恒等。
- * - 阈值 L = PID_SPEED_NL_THR/100（°C/周期）、强度 q = PID_SPEED_NL_EXP/100。
+ * - 阈值 L = PID_SPEED 第二值/100（°C/周期）、强度 q = PID_SPEED 第三值/100。
  * - |v| ≥ L → 输出 = v（恒等，1:1，无恒定偏置）。
  * - |v| < L → t = |v|/L；s = t²(3−2t)（平滑阶跃）；输出 = sign(v)·|v|·s^q。
  * 性质：保号（奇函数）、处处 |输出| ≤ |v|、随 |v| 单调不减、v = ±L 处连续（s=1、s^q=1）。
@@ -2947,7 +2958,7 @@ static float pid_spd_nl_map(float v) {
  * - error 为纯电池误差（不含 CPU 补偿）；cpu_comp 与速度同地位，算 ch 时加入。
  * - 速度 v = (error − 上次error)/dt（倍率系数缩放，不乘 dt）。
  * - 速度非线性映射（pid_spd_nl_map）：|v| ≥ L 严格恒等（1:1）、|v| < L 按「平滑阶跃的幂」降权，
- *   保号且 |输出| ≤ |v|；L/q 见 PID_SPEED_NL_THR / PID_SPEED_NL_EXP。
+ *   保号且 |输出| ≤ |v|；L/q 见 PID_SPEED 第二值 / 第三值。
  *   回溯注入的 v（recall_on）与常规 v 汇聚到同一处映射，各恰好施加一次，映射后的 v 共用给 ch 与 ch_kdp。
  * - ch 用于积分（acc += ki_rate×(ch − target_f)，ki_rate 按被积项符号取升/降速率），ch_kdp 用于 KDP（速度按 0.33 衰减，无记忆）。
  * - 动态目标 target_f（EMA 平滑），使积分逼近"误差×目标系数"包络，防静态过冲。

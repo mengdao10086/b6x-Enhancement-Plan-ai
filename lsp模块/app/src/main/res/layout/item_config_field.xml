@@ -12,14 +12,18 @@
     高度写死 @dimen/field_height：Material OutlinedBox 默认高约 56dp，不给死压不下来。
 
     内层 EditText（宽度跟随框）：
-      · 说明（浮起提示）贴圆角、值仍居中：浮起说明的位置由 material 两处决定——
-        可用框 = [框左 + editText.getPaddingLeft(), 框右 − editText.getPaddingRight()]
-        （TextInputLayout.calculateCollapsedTextBounds 的 OUTLINED 分支），框内对齐取其水平分量
-        （setEditText / onLayout 里 setCollapsedTextGravity((gravity & ~VERTICAL) | CENTER_VERTICAL)，
-        水平分量原样带入）。所以取 gravity="start|center_vertical"：说明起笔落在框左 8dp =
-        圆角半径 @dimen/field_radius 刚结束处，不再像 gravity="center" 那样被居中、两头都留白
-        （框越宽留白越多）。「值」的水平居中改由 android:textAlignment="center" 承担
-        （只决定文本行对齐，不进 getGravity()），两者互不牵动。
+      · 说明（浮起提示）贴右圆角结束处、值仍居中：浮起说明的位置由 material 三处决定——
+        ① 水平对齐取 EditText 的 gravity 水平分量（setEditText / onLayout 里
+        setCollapsedTextGravity((getGravity() & ~0x70) | 0x30)：0x30 = Gravity.TOP 只顶纵向，
+        0x70 是纵向分量掩码、被清掉后水平分量原样带入；常量名按 material 1.11.0 字节码核过）；
+        ② 说明可用框 = [框左 + editText.getPaddingLeft(), 框右 − editText.getPaddingRight()]
+        （TextInputLayout.calculateCollapsedTextBounds 的 OUTLINED 分支，RTL 按 isLayoutRtl 换边）；
+        ③ 框内落点按该重力的水平分量取「左沿 / 居中 / 右沿减文字宽」（CollapsingTextHelper）。
+        所以取 gravity="end|center_vertical"：说明收笔落在框右 8dp = 圆角半径 @dimen/field_radius
+        刚结束处，不再像 gravity="center" 那样被居中、两头都留白（框越宽留白越多）；取 end 而非
+        right 是相对写法，RTL 下自动镜像，与 paddingStart/paddingEnd 同一边。
+        「值」的水平居中改由 android:textAlignment="center" 承担（只决定文本行对齐，不进
+        getGravity()），两者互不牵动。
         说明可用宽 = 框宽 − 左右内边距，装不下时 material 打省略号——故 ConfigKeyRow 按
         「说明文字宽 / 内容文字宽取大者」量出框宽，说明那一侧另加 @dimen/config_hint_slack(1dp)
         的防截断安全量。
@@ -62,7 +66,7 @@
             android:id="@+id/config_field_input"
             android:layout_width="match_parent"
             android:layout_height="match_parent"
-            android:gravity="start|center_vertical"
+            android:gravity="end|center_vertical"
             android:imeOptions="actionDone"
             android:includeFontPadding="false"
             android:inputType="number"

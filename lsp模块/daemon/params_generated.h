@@ -6,7 +6,7 @@
 #define PARAMS_GENERATED_H
 
 /* 键数：守护进程消费 / 仅界面读取 */
-#define CFG_DAEMON_KEY_COUNT 53
+#define CFG_DAEMON_KEY_COUNT 50
 #define CFG_WEBUI_KEY_COUNT 7
 
 /* 性能层单值键表（PERF_ENABLED=1）→ INT_CFG_KEYS[]：X(键名, C 变量, min, max) */
@@ -15,11 +15,7 @@
     X("BATT_BASELINE", BATT_BASELINE, 300, 500) \
     X("CPU_FILTER_ALPHA", CPU_FILTER_ALPHA, 1, 100) \
     X("MAP_INPUT_SMOOTH_ALPHA", rpm_smooth_alpha, 1, 99) \
-    X("FAN_RPM_ROUND_UNIT", fan_rpm_round_unit, 1, 500) \
     X("PID_KDP", pid_kdp_coef, 1, 1000) \
-    X("PID_SPEED", pid_speed_coef, 0, 1000) \
-    X("PID_SPEED_NL_THR", pid_spd_nl_thr_p100, 10, 100) \
-    X("PID_SPEED_NL_EXP", pid_spd_nl_exp_p100, 0, 400) \
     X("PID_CH_THRESHOLD", pid_ch_threshold, 1, 100)
 
 /* sysfs 层键表（SYSFS_ENABLED=1）→ SYSFS_CFG_KEYS[]：
@@ -44,6 +40,8 @@
 #define CFG_MAX_RATE_LIMIT_FAN_1 2000
 #define CFG_MIN_RATE_LIMIT_FAN_2 0  /* C 变量 RATE_LIMIT_FAN_DEBOUNCE */
 #define CFG_MAX_RATE_LIMIT_FAN_2 2000
+#define CFG_MIN_RATE_LIMIT_FAN_3 1  /* C 变量 fan_rpm_round_unit */
+#define CFG_MAX_RATE_LIMIT_FAN_3 500
 #define CFG_MIN_RATE_LIMIT_COLD_1 1  /* C 变量 RATE_LIMIT_COLD */
 #define CFG_MAX_RATE_LIMIT_COLD_1 194
 #define CFG_MIN_RATE_LIMIT_COLD_2 1  /* C 变量 RATE_LIMIT_COLD_MULT */
@@ -72,8 +70,6 @@
 #define CFG_MAX_FAN_RPM_RANGE_2 6000
 #define CFG_MIN_FAN_RPM_RANGE_3 2000  /* C 变量 b7_fan_rpm_max */
 #define CFG_MAX_FAN_RPM_RANGE_3 8000
-#define CFG_MIN_FAN_RPM_ROUND_UNIT 1  /* C 变量 fan_rpm_round_unit */
-#define CFG_MAX_FAN_RPM_ROUND_UNIT 500
 #define CFG_MIN_HOT_DERATE_1 350  /* C 变量 HOT_DERATE_THRESHOLD */
 #define CFG_MAX_HOT_DERATE_1 700
 #define CFG_MIN_HOT_DERATE_2 1  /* C 变量 HOT_DERATE_MULT */
@@ -86,12 +82,12 @@
 #define CFG_MAX_PID_KI_RATE_1 1000
 #define CFG_MIN_PID_KI_RATE_2 1  /* C 变量 pid_ki_down_coef */
 #define CFG_MAX_PID_KI_RATE_2 1000
-#define CFG_MIN_PID_SPEED 0  /* C 变量 pid_speed_coef */
-#define CFG_MAX_PID_SPEED 1000
-#define CFG_MIN_PID_SPEED_NL_THR 10  /* C 变量 pid_spd_nl_thr_p100 */
-#define CFG_MAX_PID_SPEED_NL_THR 100
-#define CFG_MIN_PID_SPEED_NL_EXP 0  /* C 变量 pid_spd_nl_exp_p100 */
-#define CFG_MAX_PID_SPEED_NL_EXP 400
+#define CFG_MIN_PID_SPEED_1 0  /* C 变量 pid_speed_coef */
+#define CFG_MAX_PID_SPEED_1 1000
+#define CFG_MIN_PID_SPEED_2 10  /* C 变量 pid_spd_nl_thr_p100 */
+#define CFG_MAX_PID_SPEED_2 100
+#define CFG_MIN_PID_SPEED_3 0  /* C 变量 pid_spd_nl_exp_p100 */
+#define CFG_MAX_PID_SPEED_3 400
 #define CFG_MIN_PID_TARGET_1 1  /* C 变量 pid_target_coef */
 #define CFG_MAX_PID_TARGET_1 1000
 #define CFG_MIN_PID_TARGET_2 1  /* C 变量 pid_target_alpha */
@@ -172,6 +168,7 @@
 #define CFG_PERF_DEFAULTS(X) \
     X(RATE_LIMIT_FAN, 250) \
     X(RATE_LIMIT_FAN_DEBOUNCE, 50) \
+    X(fan_rpm_round_unit, 10) \
     X(RATE_LIMIT_COLD, 25) \
     X(RATE_LIMIT_COLD_MULT, 10) \
     X(COLD_DEADZONE, 3) \
@@ -186,7 +183,6 @@
     X(fan_rpm_min, 2000) \
     X(fan_rpm_max, 6000) \
     X(b7_fan_rpm_max, 6000) \
-    X(fan_rpm_round_unit, 10) \
     X(HOT_DERATE_THRESHOLD, 450) \
     X(HOT_DERATE_MULT, 5) \
     X(HOT_DERATE_COOLDOWN, 5) \
@@ -218,7 +214,7 @@
     X(cold_dyn_w_kdp_p100, 100) \
     X(cold_dyn_w_up_p100, 100) \
     X(cold_dyn_w_dn_p100, 100) \
-    X(cold_dyn_u_p100, 200) \
+    X(cold_dyn_u_p100, 300) \
     X(cold_dyn_gamma_p100, 100)
 
 #define CFG_SYSFS_DEFAULTS(X) \
