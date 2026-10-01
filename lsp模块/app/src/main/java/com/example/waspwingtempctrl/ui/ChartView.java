@@ -54,6 +54,9 @@ public class ChartView extends View {
     private static final float LABEL_LIFT_DP = 4f;
     // 标注行高：取 webui 同名常量 LABEL_H，不用实测 descent − ascent（见 app/逻辑说明.md §7.4）
     private static final float LABEL_H_DP = 11f;
+    // 近同锚点判据：两条曲线末端相距不到该值就直接并成一组——它们视觉上本就是一个点。
+    // 取 8dp（略大于圆点直径 6.4dp），宁可多并一点；见 app/逻辑说明.md §7.4。
+    private static final float NEAR_DUP_DP = 8f;
 
     private final Paint gridPaint = new Paint();
     private final Paint tickPaint = new Paint();     // 左轴刻度（右对齐）
@@ -439,12 +442,17 @@ public class ChartView extends View {
     }
 
     /**
-     * 头部标注：每条系列取最后一个有效样本作锚点，锚点文字**纵向占位盒相交即合并成一行**——判据挂在
-     * 标注的实际显示位置，不再看锚点圆点之间的距离。合并会改变落点、可能又压上邻居，故迭代
-     * 「落位 → 合并」直到无相交（每次合并至少少一个簇，必然终止）。
+     * 头部标注：每条系列取最后一个有效样本作锚点。合并用**顺序贪心**——锚点按 y 升序，沿序扫、只与
+     * **当前组的第一条**比：两者的标注纵向占位盒相交（或两锚点距离不到 {@link #NEAR_DUP_DP}）就并进来，
+     * 一旦不交即**封组、不回头**（不再并查集跑传递闭包、不再迭代到不动点）。
      *
-     * <p><b>选边</b>：比较「簇顶端到上方最近障碍物」与「下方最近障碍物到簇底端」的空隙，空隙更大的一侧
-     * 放标签；障碍物 = 同页其它曲线的端点圆点（即相邻簇的圆点边缘）与绘图区上下沿，<b>不含曲线中段</b>。
+     * <p><b>组盒与落点同源</b>：每个锚点先各自算一次理想落点（{@link #placeSingleAnchors}），合并组的
+     * 标签就画在该组**第一条**的落点上——判据用的盒与画出来的盒是同一个，故相邻两组必不重叠、组内
+     * 锚点跨度有硬上界（一个文字盒高 + 上/下落点相对锚点的极差 ≈ 27.7dp）。每条的理想落点只算一次，
+     * 不存在「合并 → 落点外移 → 又压上邻居」的反馈回路。详见 app/逻辑说明.md §7.4。
+     *
+     * <p><b>选边</b>：比较「锚点到上方最近障碍物」与「下方最近障碍物到锚点」的空隙，空隙更大的一侧
+     * 放标签；障碍物 = 同页其它曲线的端点圆点（即相邻锚点的圆点边缘）与绘图区上下沿，<b>不含曲线中段</b>。
      * 两侧都放不下时同样取空隙更大的一侧。
      */
     private void buildMarkers(ChartWindow win, ChartAxis lAxis, ChartAxis rAxis) {
@@ -512,44 +520,53 @@ public class ChartView extends View {
         float needAbove = LABEL_LIFT_DP * density - fm.ascent;
         float needBelow = labelH + 1f * density + fm.descent;
 
-        // 起始：每个锚点各自一个簇——不再按锚点距离预合并，合并与否由落位后的盒相交决定
-        List<List<ChartLabelOp>> clusters = new ArrayList<>();
-        for (ChartLabelOp e : entries) {
-            List<ChartLabelOp> one = new ArrayList<>(1);
-            one.add(e);
-            clusters.add(one);
+        // 每个锚点先各自算一次理想落点（只此一次、不再随合并重算 → 无反馈回路）
+        int n = entries.size();
+        float[] lyS = new float[n];
+        placeSingleAnchors(entries, lyS, dotR, needAbove, needBelow, labelMaxY);
+
+        // 顺序贪心封组：只与当前组首成员比——两锚点过近（视觉同一处）或标注盒相交即并入，否则封组、不回头
+        float nearDup = NEAR_DUP_DP * density;
+        List<List<ChartLabelOp>> groups = new ArrayList<>();
+        List<Float> groupLy = new ArrayList<>();
+        List<ChartLabelOp> cur = new ArrayList<>();
+        int first = 0;
+        for (int i = 0; i < n; i++) {
+            if (cur.isEmpty()) {
+                cur.add(entries.get(i));
+                first = i;
+                continue;
+            }
+            boolean join = entries.get(i).y - entries.get(first).y <= nearDup
+                    || overlapsVertically(lyS[first], lyS[i], fm);
+            if (join) {
+                cur.add(entries.get(i));
+            } else {
+                groups.add(cur);
+                groupLy.add(lyS[first]);
+                cur = new ArrayList<>();
+                cur.add(entries.get(i));
+                first = i;
+            }
         }
-        // 落位产物按簇下标存，每轮迭代重算；结束时它对应的就是最后那次 placeClusters 的簇集合
-        float[] clTx = new float[entries.size()];
-        float[] clLy = new float[entries.size()];
-        // 迭代「落位 → 相交即合并」直到无相交。每次合并至少少一个簇，故必然终止；
-        // mergeBudget 只是防御性上界（正常用不到：只剩一个簇时不可能再有相交对）。
-        int mergeBudget = entries.size();
-        while (true) {
-            placeClusters(clusters, clTx, clLy, labelH, labelMaxY, dotR, needAbove, needBelow);
-            if (mergeBudget-- <= 0) {
-                break;
-            }
-            List<List<ChartLabelOp>> merged = mergeOverlapping(clusters, clLy, fm);
-            if (merged == null) {
-                break;
-            }
-            clusters = merged;
+        if (!cur.isEmpty()) {
+            groups.add(cur);
+            groupLy.add(lyS[first]);
         }
 
         List<ChartLabelOp> textOps = new ArrayList<>();
         List<ChartDotOp> dotOps = new ArrayList<>();
-        for (int ci = 0; ci < clusters.size(); ci++) {
-            List<ChartLabelOp> cl = clusters.get(ci);
-            float ly = clLy[ci];
+        float sep = tickPaint.measureText(" / ");
+        for (int ci = 0; ci < groups.size(); ci++) {
+            List<ChartLabelOp> cl = groups.get(ci);
+            float ly = groupLy.get(ci);
             if (cl.size() == 1) {
                 ChartLabelOp e = cl.get(0);
-                textOps.add(new ChartLabelOp(e.text, clTx[ci], ly, e.color));
+                textOps.add(new ChartLabelOp(e.text, e.tx, ly, e.color));
                 dotOps.add(new ChartDotOp(e.x, e.y, e.color));
                 continue;
             }
-            float sep = tickPaint.measureText(" / ");
-            float tx = clTx[ci];
+            float tx = clusterTx(cl, sep);
             for (int i = 0; i < cl.size(); i++) {
                 ChartLabelOp e = cl.get(i);
                 textOps.add(new ChartLabelOp(e.text, tx, ly, e.color));
@@ -567,124 +584,70 @@ public class ChartView extends View {
         dots = dotOps.toArray(new ChartDotOp[0]);
     }
 
-    /** 给一组簇算最终落点（纵向选边 + 横向起点），按下标写进 clTx/clLy。幂等，可在合并迭代里反复调用。 */
-    private void placeClusters(List<List<ChartLabelOp>> clusters, float[] clTx, float[] clLy,
-                               float labelH, float labelMaxY, float dotR,
-                               float needAbove, float needBelow) {
-        for (int ci = 0; ci < clusters.size(); ci++) {
-            List<ChartLabelOp> cl = clusters.get(ci);
-            float top = cl.get(0).y;
-            float bot = cl.get(cl.size() - 1).y;
-            // 空隙只量到最近的那个障碍物：同页其它曲线的端点圆点（相邻簇的圆点边缘），该侧没有别的簇时
-            // 就量到绘图区上沿/下沿。簇按 y 升序且两两不重叠，故只取相邻的那个簇就够。
+    /**
+     * 给每个锚点算各自的理想落点（单成员口径），按下标写进 ly。选边公式与旧 placeClusters 的单簇分支相同，
+     * 但只调用一次、不再随合并重算——这是「顺序贪心能真正封住链」的前提（见 app/逻辑说明.md §7.4）。
+     */
+    private void placeSingleAnchors(List<ChartLabelOp> entries, float[] ly, float dotR,
+                                    float needAbove, float needBelow, float labelMaxY) {
+        int n = entries.size();
+        for (int i = 0; i < n; i++) {
+            float y = entries.get(i).y;
+            // 空隙只量到最近的那个障碍物：相邻锚点的圆点边缘；该侧没有别的锚点时就量到绘图区上沿/下沿。
             // 障碍物不含曲线中段：标签压在某条曲线腰部这种情况本口径不判。
             float obstacleAbove = fPadT;
-            if (ci > 0) {
-                List<ChartLabelOp> prev = clusters.get(ci - 1);
-                obstacleAbove = Math.max(obstacleAbove, prev.get(prev.size() - 1).y + dotR);
+            if (i > 0) {
+                obstacleAbove = Math.max(obstacleAbove, entries.get(i - 1).y + dotR);
             }
             float obstacleBelow = fPadT + fH;
-            if (ci + 1 < clusters.size()) {
-                obstacleBelow = Math.min(obstacleBelow, clusters.get(ci + 1).get(0).y - dotR);
+            if (i + 1 < n) {
+                obstacleBelow = Math.min(obstacleBelow, entries.get(i + 1).y - dotR);
             }
-            float gapAbove = top - obstacleAbove;
-            float gapBelow = obstacleBelow - bot;
+            float gapAbove = y - obstacleAbove;
+            float gapBelow = obstacleBelow - y;
             // 两侧都放得下（或都放不下）→ 取空隙更大的一侧；只有一侧放得下 → 取那一侧
             boolean fitsAbove = gapAbove >= needAbove;
             boolean fitsBelow = gapBelow >= needBelow;
             boolean placeAbove = fitsAbove == fitsBelow ? gapAbove >= gapBelow : fitsAbove;
-            float ly = placeAbove ? top - LABEL_LIFT_DP * density
-                                  : bot + labelH + 1f * density;
-            if (ly < fPadT) {
-                ly = fPadT;
+            float lyLine = placeAbove ? y - LABEL_LIFT_DP * density
+                                      : y + LABEL_H_DP * density + 1f * density;
+            if (lyLine < fPadT) {
+                lyLine = fPadT;
             }
-            if (ly > labelMaxY) {
-                ly = labelMaxY;
+            if (lyLine > labelMaxY) {
+                lyLine = labelMaxY;
             }
-            clLy[ci] = ly;
-
-            if (cl.size() == 1) {
-                clTx[ci] = cl.get(0).tx;   // 单簇：沿用该锚点先前算好的水平起点（含翻边与左界）
-                continue;
-            }
-            float cx = 0f;
-            for (ChartLabelOp e : cl) {
-                cx += e.x;
-            }
-            cx /= cl.size();
-            float sep = tickPaint.measureText(" / ");
-            float total = 0f;
-            for (ChartLabelOp e : cl) {
-                total += e.w;
-            }
-            total += sep * (cl.size() - 1);
-            float tx = cx + LABEL_GAP_DP * density;
-            if (tx + total > fPadL + fW) {
-                tx = cx - LABEL_GAP_DP * density - total;
-            }
-            if (tx < 2f * density) {
-                tx = 2f * density;
-            }
-            clTx[ci] = tx;
+            ly[i] = lyLine;
         }
+    }
+
+    /** 合并组的横向起点：成员锚点 x 的均值 + 间距，右越界翻到左侧，左界钳到 2dp（横向口径不变）。 */
+    private float clusterTx(List<ChartLabelOp> cl, float sep) {
+        float cx = 0f;
+        for (ChartLabelOp e : cl) {
+            cx += e.x;
+        }
+        cx /= cl.size();
+        float total = 0f;
+        for (ChartLabelOp e : cl) {
+            total += e.w;
+        }
+        total += sep * (cl.size() - 1);
+        float tx = cx + LABEL_GAP_DP * density;
+        if (tx + total > fPadL + fW) {
+            tx = cx - LABEL_GAP_DP * density - total;
+        }
+        if (tx < 2f * density) {
+            tx = 2f * density;
+        }
+        return tx;
     }
 
     /**
-     * 标签**纵向**占位盒两两相交的簇归为一组（并查集）；无相交对时返回 null，调用方据此停止迭代。
-     * 只判纵向、横向不参与——横向取舍见 app/逻辑说明.md §7.4。
+     * 两个标注基线位置的**纵向**占位盒是否相交。只判纵向、横向不参与——横向取舍见 app/逻辑说明.md §7.4。
      */
-    private static List<List<ChartLabelOp>> mergeOverlapping(List<List<ChartLabelOp>> clusters,
-                                                             float[] clLy, Paint.FontMetrics fm) {
-        int n = clusters.size();
-        int[] parent = new int[n];
-        for (int i = 0; i < n; i++) {
-            parent[i] = i;
-        }
-        boolean any = false;
-        for (int i = 0; i < n; i++) {
-            float lo = clLy[i] + fm.ascent;
-            float hi = clLy[i] + fm.descent;
-            for (int j = i + 1; j < n; j++) {
-                if (clLy[j] + fm.ascent < hi && lo < clLy[j] + fm.descent) {
-                    union(parent, i, j);
-                    any = true;
-                }
-            }
-        }
-        if (!any) {
-            return null;
-        }
-        // 按下标升序归组：组内保持 y 序，组间也保持 y 序
-        List<List<ChartLabelOp>> out = new ArrayList<>();
-        int[] slot = new int[n];
-        for (int i = 0; i < n; i++) {
-            slot[i] = -1;
-        }
-        for (int i = 0; i < n; i++) {
-            int r = find(parent, i);
-            if (slot[r] < 0) {
-                slot[r] = out.size();
-                out.add(new ArrayList<>());
-            }
-            out.get(slot[r]).addAll(clusters.get(i));
-        }
-        return out;
-    }
-
-    private static int find(int[] parent, int i) {
-        while (parent[i] != i) {
-            parent[i] = parent[parent[i]];
-            i = parent[i];
-        }
-        return i;
-    }
-
-    private static void union(int[] parent, int a, int b) {
-        int ra = find(parent, a);
-        int rb = find(parent, b);
-        if (ra != rb) {
-            parent[Math.max(ra, rb)] = Math.min(ra, rb);
-        }
+    private static boolean overlapsVertically(float lyA, float lyB, Paint.FontMetrics fm) {
+        return lyB + fm.ascent < lyA + fm.descent && lyA + fm.ascent < lyB + fm.descent;
     }
 
     // ==================== 绘制（无计算、无分配） ====================

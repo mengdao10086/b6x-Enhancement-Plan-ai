@@ -2,9 +2,8 @@
 <!--
     全应用唯一主题。颜色名在 values-night/colors.xml 有同名深色版本，故本文件只有一份。
 
-    注意：AndroidManifest.xml 里没有 android:theme（该文件本轮冻结，不许改），
-    因此 SetupActivity 在 super.onCreate() 之前调用 setTheme(R.style.Theme_B6XTempCtrl) 应用本主题。
-    子 agent 不要另建主题、不要改本文件。
+    注意：AndroidManifest.xml 里没有 android:theme，因此 SetupActivity 在 super.onCreate()
+    之前调用 setTheme(R.style.Theme_B6XTempCtrl) 应用本主题。主题只有这一份，勿另建。
 -->
 <resources xmlns:tools="http://schemas.android.com/tools">
 

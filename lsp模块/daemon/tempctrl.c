@@ -236,16 +236,16 @@ static int pid_cold_max = 190;            // PID_COLD_RANGE 第二值：制冷�
 // --- 逻辑2「冷值动态倍率」参数（配置值为整数；冷值三点零换算，其余 ×100 换算进内部）---
 // PID_COLD_DYN_IN  = 输入轴 下界 拐点 上界（冷值，零换算；默认 40 100 190）
 // PID_COLD_DYN_OUT = 输出轴拐点值（正数 ×100；默认 50 → 抽象值 −0.50，两端固定 0 与 −1）
-// PID_COLD_DYN_W   = KDP / KI升 / KI降 三作用点权重（各自 ×100；默认 100 100 100 = 1.00）
-// PID_COLD_DYN_MAP = 倍率上界 U / 形状指数 γ（各自 ×100；默认 300 100 = 3.00 / 1.00）
+// PID_COLD_DYN_W   = KDP / KI升 / KI降 三作用点权重（各自 ×100；默认 100 100 70 = 1.00 / 1.00 / 0.70）
+// PID_COLD_DYN_MAP = 倍率上界 U / 形状指数 γ（各自 ×100；默认 200 100 = 2.00 / 1.00）
 static int cold_dyn_in_lo = 40;           // 输入轴下界（冷值；≤ 此处不干预）
 static int cold_dyn_in_mid = 100;         // 输入轴拐点（冷值；过此点转第二段）
 static int cold_dyn_in_hi = 190;          // 输入轴上界（冷值；≥ 此处最大降幅）
 static int cold_dyn_out_mid_p100 = 50;    // 输出轴拐点值（正数 ×100；C 内取负成抽象值）
 static int cold_dyn_w_kdp_p100 = 100;     // KDP 作用点权重（×100；0 = 该处不受影响）
 static int cold_dyn_w_up_p100  = 100;     // KI 升速率作用点权重（×100）
-static int cold_dyn_w_dn_p100  = 100;     // KI 降速率作用点权重（×100）
-static int cold_dyn_u_p100     = 300;     // 倍率上界 U（×100）；下界自动 = 1/U
+static int cold_dyn_w_dn_p100  = 70;      // KI 降速率作用点权重（×100）
+static int cold_dyn_u_p100     = 200;     // 倍率上界 U（×100）；下界自动 = 1/U
 static int cold_dyn_gamma_p100 = 100;     // 形状指数 γ（×100）
 
 // --- PID 运行时状态（单累积器）---
@@ -678,7 +678,7 @@ static int parse_pid_cfg(const char *key, int val, const char *val_str) {
         if (sscanf(val_str, "%d", &a) >= 1) cold_dyn_out_mid_p100 = clamp(a, 0, 100);
         return 1;
     }
-    // PID_COLD_DYN_W = KDP / KI升 / KI降 三作用点权重（各自 ×100；默认 100 100 100 = 1.00）
+    // PID_COLD_DYN_W = KDP / KI升 / KI降 三作用点权重（各自 ×100；默认 100 100 70 = 1.00 / 1.00 / 0.70）
     if (strcmp(key, "PID_COLD_DYN_W") == 0) {
         int a = cold_dyn_w_kdp_p100, b = cold_dyn_w_up_p100, c = cold_dyn_w_dn_p100;
         int n = sscanf(val_str, "%d %d %d", &a, &b, &c);
@@ -687,7 +687,7 @@ static int parse_pid_cfg(const char *key, int val, const char *val_str) {
         if (n >= 3) cold_dyn_w_dn_p100  = clamp(c, 0, 200);
         return 1;
     }
-    // PID_COLD_DYN_MAP = 倍率上界 U / 形状指数 γ（各自 ×100；默认 300 100 = 3.00 / 1.00）
+    // PID_COLD_DYN_MAP = 倍率上界 U / 形状指数 γ（各自 ×100；默认 200 100 = 2.00 / 1.00）
     if (strcmp(key, "PID_COLD_DYN_MAP") == 0) {
         int a = cold_dyn_u_p100, b = cold_dyn_gamma_p100;
         int n = sscanf(val_str, "%d %d", &a, &b);

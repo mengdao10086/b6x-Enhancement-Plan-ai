@@ -16,7 +16,6 @@ import android.widget.TextView;
 import androidx.annotation.NonNull;
 import androidx.annotation.Nullable;
 import androidx.appcompat.app.AlertDialog;
-import androidx.core.content.ContextCompat;
 import androidx.fragment.app.Fragment;
 import androidx.transition.AutoTransition;
 import androidx.transition.TransitionManager;
@@ -69,8 +68,10 @@ public class StatusFragment extends Fragment implements PageAware {
 
     /** 静默刷新的最小间隔：30 秒内的重复触发不再跑 su 探测（该路径会顺带自动重推脚本）。 */
     private static final long PROBE_MIN_INTERVAL_MS = 30_000L;
-    /** 手动刷新时文本淡出 / 淡入各自的时长。 */
-    private static final long FADE_MS = 150L;
+    /** 手动刷新时文本淡出时长（退出比进入快，见 {@link #swapStatusTextAnimated}）。 */
+    private static final long FADE_OUT_MS = 100L;
+    /** 手动刷新时文本淡入时长。 */
+    private static final long FADE_IN_MS = 150L;
 
     /**
      * 版本行的成品文案（`status_info_version` 已格式化）；null = 尚未从 PMS 读到。
@@ -85,7 +86,7 @@ public class StatusFragment extends Fragment implements PageAware {
     private View logBody;
     /** 操作记录的落盘归档（私有目录 oplog/ 子目录，本会话一个文件；见 {@link OpLog}）。 */
     private OpLog archive;
-    /** 「归档在哪/几份」提示行（代码插入：操作记录卡的布局文件被冻结，不能改，见 {@link #installArchiveHint}）。 */
+    /** 「归档在哪/几份」提示行：布局里的静态控件，随展开体一起显隐（见 {@code fragment_status.xml}）。 */
     private TextView archiveHintView;
     private ImageView arrowView;
     private View progress;
@@ -146,10 +147,11 @@ public class StatusFragment extends Fragment implements PageAware {
                 v -> setLogExpanded(!logExpanded));
         setLogExpanded(false);
 
-        // 操作记录归档：每进程起一次会话（淘汰旧归档 + 记住起点），并把提示行插到卡头下
+        // 操作记录归档：每进程起一次会话（淘汰旧归档 + 记住起点）；
+        // 提示行是展开体内的静态控件（布局已建），此处只取引用
         archive = OpLog.get(requireContext().getFilesDir());
         archive.beginSession();
-        installArchiveHint(view);
+        archiveHintView = view.findViewById(R.id.action_log_archive_hint);
         refreshArchiveHint();
 
         infoView.setText(buildInfo());
@@ -205,6 +207,7 @@ public class StatusFragment extends Fragment implements PageAware {
         infoView = null;
         logView = null;
         logBody = null;
+        archiveHintView = null;
         arrowView = null;
         progress = null;
         contentRoot = null;
@@ -586,7 +589,8 @@ public class StatusFragment extends Fragment implements PageAware {
             refreshArchiveHint();
         }
         if (arrowView != null) {
-            arrowView.setRotation(value ? ARROW_EXPANDED_ROTATION : 0f);
+            // 150ms ease-out 转过去（系统关动画时由 Motion 直落）；无障碍描述即时切换，不等动画
+            Motion.rotate(arrowView, value ? ARROW_EXPANDED_ROTATION : 0f);
             arrowView.setContentDescription(getString(value
                     ? R.string.config_action_collapse : R.string.config_action_expand));
         }
@@ -607,18 +611,27 @@ public class StatusFragment extends Fragment implements PageAware {
 
     /**
      * 手动刷新的结果上屏：文本淡出 → 换文本（顺带补间高度）→ 淡入；代号保证串行、打断不丢结果，
-     * 只碰本页视图树。见 {@code app/逻辑说明.md} §8.1。
+     * 只碰本页视图树。<b>退出比进入快</b>（100/150ms），进出均用强 ease-out；系统关掉动画时
+     * 直接上屏（不淡、不补间），结果照常呈现。见 {@code app/逻辑说明.md} §8.1。
      */
     private void swapStatusTextAnimated(final String text) {
         final TextView view = statusView;
         if (view == null || !isAdded()) {
             return;
         }
+        if (!Motion.enabled(view.getContext())) {
+            // 系统关掉动画：直接换文本，信息先可读
+            view.animate().cancel();
+            view.setAlpha(1f);
+            view.setText(text);
+            return;
+        }
         final int generation = ++fadeGeneration;
         final ViewGroup root = contentRoot;
         view.animate().cancel();
         view.setAlpha(1f);
-        view.animate().alpha(0f).setDuration(FADE_MS).withEndAction(() -> {
+        view.animate().alpha(0f).setDuration(FADE_OUT_MS).setInterpolator(Motion.easeOut())
+                .withEndAction(() -> {
             if (statusView == null || !isAdded()) {
                 return;   // 视图已销毁，无处上屏（onDestroyView 已复位）
             }
@@ -631,7 +644,8 @@ public class StatusFragment extends Fragment implements PageAware {
             if (interrupted) {
                 statusView.setAlpha(1f);
             } else {
-                statusView.animate().alpha(1f).setDuration(FADE_MS).start();
+                statusView.animate().alpha(1f).setDuration(FADE_IN_MS)
+                        .setInterpolator(Motion.easeOut()).start();
             }
         }).start();
     }
@@ -698,28 +712,6 @@ public class StatusFragment extends Fragment implements PageAware {
             // 代价可控——OpLog.snapshot() 是 O(1)（进页面时缓存既有归档基数，本会话文件只按当前长度累加），不做目录扫描。
             refreshArchiveHint();
         }
-    }
-
-    /**
-     * 在操作记录卡内插入「归档提示行」。操作记录卡的布局文件被冻结（首行注释明写不要改），
-     * 故以代码插到卡内层竖向容器的卡头之下、正文之前 —— 默认折叠时也看得见。
-     * 只展示、不提供翻看（用户口径）。
-     */
-    private void installArchiveHint(View root) {
-        if (logBody == null || !(logBody.getParent() instanceof ViewGroup)) {
-            return;
-        }
-        final ViewGroup card = (ViewGroup) logBody.getParent();
-        final Context context = root.getContext();
-        TextView hint = new TextView(context);
-        hint.setTextAppearance(context, R.style.TextAppearance_B6XTempCtrl_Caption);
-        hint.setTextColor(ContextCompat.getColor(context, R.color.app_on_surface_variant));
-        hint.setTextIsSelectable(true);
-        final int padH = context.getResources().getDimensionPixelSize(R.dimen.card_padding);
-        final int padV = context.getResources().getDimensionPixelSize(R.dimen.space_s);
-        hint.setPadding(padH, 0, padH, padV);
-        card.addView(hint, card.indexOfChild(logBody));
-        archiveHintView = hint;
     }
 
     /** 刷新归档提示行（进入本页、展开操作记录时各刷一次）。 */

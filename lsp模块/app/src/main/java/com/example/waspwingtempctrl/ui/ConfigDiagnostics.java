@@ -81,8 +81,9 @@ final class ConfigDiagnostics {
     void setExpanded(boolean value) {
         expanded = value;
         body.setVisibility(value ? View.VISIBLE : View.GONE);
-        // 一副图标两种状态：图标本身指向右，展开时顺时针转 90° 指向下（同分组卡头）
-        arrowView.setRotation(value ? ARROW_EXPANDED_ROTATION : 0f);
+        // 一副图标两种状态：图标本身指向右，展开时顺时针转 90° 指向下（同分组卡头）；
+        // 150ms ease-out 转过去（系统关动画时由 Motion 直落）
+        Motion.rotate(arrowView, value ? ARROW_EXPANDED_ROTATION : 0f);
         arrowView.setContentDescription(body.getContext().getString(
                 value ? R.string.config_action_collapse : R.string.config_action_expand));
         if (!value) {

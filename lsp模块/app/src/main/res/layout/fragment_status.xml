@@ -1,5 +1,5 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- 状态页（外壳自带的初始页）。子 agent 不要改本文件。 -->
+<!-- 状态页（外壳自带的初始页）。 -->
 <!--
     根用 PageScrollView（ScrollView 子类，未指定 captor 时行为与普通 ScrollView 完全一致）：
     「操作记录」展开后是个定高内部滚动区，纵向拖动落在它上面时必须让给它——
@@ -240,6 +240,19 @@
                     android:paddingEnd="@dimen/card_padding"
                     android:paddingBottom="@dimen/card_padding"
                     android:visibility="gone">
+
+                    <!--
+                        归档提示行：只在展开体里，故折叠时随本容器一起隐藏（用户口径）。
+                        左右不另加内边距（本容器已有 card_padding），使其与下方正文左边界对齐。
+                    -->
+                    <TextView
+                        android:id="@+id/action_log_archive_hint"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:paddingBottom="@dimen/space_s"
+                        android:textAppearance="@style/TextAppearance.B6XTempCtrl.Caption"
+                        android:textColor="@color/app_on_surface_variant"
+                        android:textIsSelectable="true" />
 
                     <TextView
                         android:id="@+id/action_log_text"

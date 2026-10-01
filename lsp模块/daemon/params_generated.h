@@ -213,8 +213,8 @@
     X(cold_dyn_out_mid_p100, 50) \
     X(cold_dyn_w_kdp_p100, 100) \
     X(cold_dyn_w_up_p100, 100) \
-    X(cold_dyn_w_dn_p100, 100) \
-    X(cold_dyn_u_p100, 300) \
+    X(cold_dyn_w_dn_p100, 70) \
+    X(cold_dyn_u_p100, 200) \
     X(cold_dyn_gamma_p100, 100)
 
 #define CFG_SYSFS_DEFAULTS(X) \
