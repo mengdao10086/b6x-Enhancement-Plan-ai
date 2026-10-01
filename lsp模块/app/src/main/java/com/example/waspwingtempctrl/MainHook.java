@@ -1493,7 +1493,7 @@ public class MainHook implements IXposedHookLoadPackage {
 
         // 状态自愈兜底：GATT 已就绪但 state≠2 时强制同步 state=2
         try {
-            // P2.15: 字段名由常量表按 app 类型选择
+            // 字段名由常量表按 app 类型选择
             String dicField = dicFieldName(), stateField = stateFieldName(), gattField = gattFieldName();
             Object dic = XposedHelpers.getStaticObjectField(inst.getClass(), dicField);
             if (dic != null) {
@@ -1545,7 +1545,7 @@ public class MainHook implements IXposedHookLoadPackage {
      */
     private static boolean ensureUsableController(Object inst) {
         try {
-            // P2.15: 字段名由常量表按 app 类型选择
+            // 字段名由常量表按 app 类型选择
             String dicField = dicFieldName(), gattField = gattFieldName();
             Object dic = XposedHelpers.getStaticObjectField(inst.getClass(), dicField);
             if (dic == null) {
@@ -1701,7 +1701,7 @@ public class MainHook implements IXposedHookLoadPackage {
     /** 读 static controller 实例；失败 null */
     private static Object getStaticController() {
         if (capturedWaspWingMgr == null) return null;
-        String dicField = dicFieldName();   // P2.15: 常量表按 app 类型选择
+        String dicField = dicFieldName();   // 常量表按 app 类型选择
         try {
             return XposedHelpers.getStaticObjectField(capturedWaspWingMgr.getClass(), dicField);
         } catch (Throwable t) { return null; }
@@ -1748,7 +1748,7 @@ public class MainHook implements IXposedHookLoadPackage {
                 return;
             }
             Thread t = new Thread(() -> {
-                Object headSeen = null;    // 上次观察到的队首对象（P1.4 接管判定用）
+                Object headSeen = null;    // 上次观察到的队首对象（接管判定用）
                 long headSeenAt = 0;       // 该队首对象首次被观察到的时刻（ms）
                 while (true) {
                     try {
@@ -1945,7 +1945,7 @@ public class MainHook implements IXposedHookLoadPackage {
      * 由 BLE 回调线程调用，字段均 volatile（M4）。
      */
     private static void markConnected(BluetoothGatt gatt) {
-        // P2.13: 记录上一连接状态，用于判断是否"断连→连接"翻转（决定唤醒次数是否重置）
+        // 记录上一连接状态，用于判断是否"断连→连接"翻转（决定唤醒次数是否重置）
         boolean wasConnected = bleConnected;
         bleConnected = true;
         diagLogCount = 0;            // 新连接：重置广播接收诊断计数（每连最多记录 DIAG_LOG_MAX_PER_CONN 对）

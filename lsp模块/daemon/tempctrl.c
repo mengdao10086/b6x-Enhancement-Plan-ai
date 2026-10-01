@@ -2974,7 +2974,7 @@ static float pid_compute(int batt_10, float dt, float cpu_comp, int batt_window_
     // 输入误差（纯电池）
     float error = (batt_10 - BATT_BASELINE) / 10.0f;
 
-    // 速度项（°C/周期）：首次重算（无常值历史）时 v=0；温度未变时用回溯速度（recall_on，item4）
+    // 速度项（°C/周期）：首次重算（无常值历史）时 v=0；温度未变时用回溯速度（recall_on）
     float v = 0.0f;
     if (recall_on)
         v = recall_v;
@@ -2995,7 +2995,7 @@ static float pid_compute(int batt_10, float dt, float cpu_comp, int batt_window_
     float tmax = pid_target_max / 10.0f;   // 0.1°C → °C
     if (raw_target >  tmax) raw_target =  tmax;
     if (raw_target < -tmax) raw_target = -tmax;
-    // 动态目标 EMA（item2 方向性滤波）：远离基线加快(away)，回归基线减慢(toward)
+    // 动态目标 EMA（方向性滤波）：远离基线加快(away)，回归基线减慢(toward)
     {
         float ta = pid_target_alpha / 100.0f;
         if (pid_target_dir_on) {
@@ -3467,7 +3467,7 @@ static void pid_cycle(void) {
     int batt_raw = cached_batt_raw;   // 1s 采集缓存
     if (batt_raw < 0) return;
 
-    // --- 无变化回溯锚点（item4）：温度窗口变化→锚点=变化前值+重置周期；未变→周期计数++ ---
+    // --- 无变化回溯锚点：温度窗口变化→锚点=变化前值+重置周期；未变→周期计数++ ---
     if (batt_window_changed) {
         recall_anchor  = recall_prev_batt;
         recall_cycles  = 1;
@@ -3534,7 +3534,7 @@ static void pid_cycle(void) {
     if (dt > 6.0f) dt = 6.0f;
     if (dt < 0.6f) dt = 0.6f;
 
-    // 无变化回溯速度（item4）：仅温度未变、开关开启、锚点有效时注入，否则走常规 v
+    // 无变化回溯速度：仅温度未变、开关开启、锚点有效时注入，否则走常规 v
     int recall_on = 0;
     float recall_v = 0.0f;
     if (pid_spd_recall_on && !batt_window_changed &&
