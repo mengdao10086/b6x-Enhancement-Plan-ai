@@ -30,14 +30,8 @@ import de.robv.android.xposed.XposedHelpers;
 import de.robv.android.xposed.callbacks.XC_LoadPackage;
 
 /**
- * 飞智散热器 — LSPosed 模块
- *
- * 功能：
- * 1. 控制器层 stopScan 保底
- * 2. ViewModel 层：更新 LiveData，不创建中间态 WaspWingInfo
- * 3. 强制 checkBluetoothPermission=true
- * 4. BLE 连接/断联 → 通过 FIFO 通知 tempctrl 守护进程
- * 5. B6ExpActivity.onResume 检查 BLE 唤醒守护进程
+ * 飞智散热器 — LSPosed 模块。
+ * 模块功能、钩子清单与注册时机见 app/逻辑说明.md §1。
  */
 public class MainHook implements IXposedHookLoadPackage {
 
@@ -49,16 +43,11 @@ public class MainHook implements IXposedHookLoadPackage {
     // 双文件路径
     private static final String STATUS_FILE_B6 = "/data/local/tmp/tempctrl_b6x.status";
     private static final String STATUS_FILE_B7 = "/data/local/tmp/tempctrl_b7x.status";
-    /**
-     * 界面开关标志文件（守护进程写、本进程读，见 {@code tempctrl.c} 的 {@code UIPREFS_PATH}）。
-     * 界面与钩子分属两个进程、不共享内存，这是界面 → 钩子的唯一通道
-     * （反向的钩子 → 守护进程走 status 文件）。
-     */
+    // 界面开关标志文件（守护进程写、本进程读）；界面 → 钩子的唯一通道。
+    // 跨进程通道说明见 app/逻辑说明.md §1.4，写入端见 tempctrl.c 的 UIPREFS_PATH。
     private static final String UIPREFS_FILE = "/data/local/tmp/tempctrl_uiprefs";
-    // 上次连接的散热器 MAC（持久化，冷启动自动连接用）的落点。
-    // 由固定 /data/local/tmp/tempctrl_last_dev 改为宿主 app 私有目录：各包各记、不再跨包共享。
-    // 包名常量有 3 个（B6X / B6X_NEW / B7X）而 appKind 只有 6、7 两值，故必须按命中的包名常量拼，
-    // 按 appKind 拼会把两个 B6X 包合并成同一个文件。在 handleLoadPackage 里赋值。
+    // 上次设备 MAC 落点（宿主 app 私有目录，各包各记，按包名拼死路径）。
+    // 落点选择与冷启动自动连接的说明见 app/逻辑说明.md §1.6；在 handleLoadPackage 里赋值。
     private static String lastDevFile = null;
     private static final String AUTO_LAUNCH_EXTRA = "b6x_auto_launch";               // tempctrl 拉起 app 时携带的标志
     // 广播 Action（按 appKind 选择）
@@ -123,7 +112,6 @@ public class MainHook implements IXposedHookLoadPackage {
 
     // ========== 后台自动重连 ==========
     private static volatile BluetoothDevice lastDevice = null;      // 上次连接的 BLE 设备
-    private static volatile Object capturedB7Controller = null;     // B7X 混淆控制器（com.flydigi.sdk.waspwing.a）实例，重连用 T0()
     private static ClassLoader appClassLoader = null;      // App 类加载器（后台线程反射用）
     private static volatile boolean loggedReconnectSkip = false;    // 后台重连被跳过（控制器/类加载器未就绪）仅记一次
     // 息屏退避用的屏幕状态（取法与缓存策略见 reconnectIntervalTicks）：
@@ -243,7 +231,7 @@ public class MainHook implements IXposedHookLoadPackage {
     private static synchronized void writeStatusFile() {
         try {
             StringBuilder sb = new StringBuilder();
-            // BLE 字段：0=未连接；B7X=型号(6/7)；B6X=1/2 区分两 app
+            // status 文件各字段的语义与量纲见 ../README.md 的 status 协议表
             int bleVal = bleConnected ? bleOwnerCode() : 0;
             sb.append("BLE=").append(bleVal).append("\n");
             sb.append("CONNECTED_AT=").append(bleConnectedTimestamp).append("\n");
@@ -252,13 +240,10 @@ public class MainHook implements IXposedHookLoadPackage {
             // 散热器全参数回传
             try {
                 if (lastWaspWingInfo != null) {
-                    // 运行模式：getRunMode() → int，0=固定功率(手动), 1=智能
                     appendGetterValue(sb, lastWaspWingInfo, "getRunMode", "RUN_MODE");
 
-                    // 热端温度：getHotSurfaceTemperature() → byte(°C) → 0.1°C
                     appendTenthValue(sb, lastWaspWingInfo, "getHotSurfaceTemperature", "HOT_TEMP");
 
-                    // 冷端温度：getTemp + getTempDecimal → 0.1°C
                     Object cold = XposedHelpers.callMethod(lastWaspWingInfo, "getTemperature");
                     Object coldDec = XposedHelpers.callMethod(lastWaspWingInfo, "getTemperatureDecimal");
                     if (cold != null && coldDec != null) {
@@ -270,13 +255,10 @@ public class MainHook implements IXposedHookLoadPackage {
                         sb.append("COLD_TEMP=").append((c < 0) ? c * 10 - d : c * 10 + d).append("\n");
                     }
 
-                    // 实际风扇转速（经超频逻辑折算）：getRealWindLevel()
                     appendGetterValue(sb, lastWaspWingInfo, "getRealWindLevel", "RPM_REAL");
 
-                    // 实际制冷强度（经超频逻辑折算）：getRealColdLevel()
                     appendGetterValue(sb, lastWaspWingInfo, "getRealColdLevel", "COLD_REAL");
 
-                    // 目标温度：getTargetTemperature() → int(°C) → 0.1°C
                     appendTenthValue(sb, lastWaspWingInfo, "getTargetTemperature", "TARGET_TEMP");
                     // 回传恢复：此前缺失则补一条（状态翻转才打）
                     if (paramMissingLogged) {
@@ -340,19 +322,13 @@ public class MainHook implements IXposedHookLoadPackage {
                     tick++;
                     writeStatusFile();   // 每 1 秒写一次 status（供 daemon 3s 判死 + 曲线页）
 
-                    // ═══ 后台自动重连 ═══
-                    // 亮屏保持 5 秒节奏（tick%5==0）；息屏拉到 10 秒（tick%10==0，用户拍板值）——
-                    // 屏灭＝宿主不在前台＝没有实时控温需求，此时重连只是"等散热器开机"，
-                    // 没必要每 5 秒打一次射频（connectGattWith / B7X 的 t9.j.E 都是真实蓝牙连接尝试）。
-                    // 屏幕若取不到一律按亮屏处理，见 reconnectIntervalTicks。
+                    // ═══ 后台自动重连（亮屏 5s / 息屏 10s，见 app/逻辑说明.md §1.2）═══
                     // 设备锁死（多次重连无回传）时停止自动重连，等用户强制重启 App
                     if (!bleConnected && lastDevice != null && !deviceLockedAlerted
                             && tick % reconnectIntervalTicks(tick) == 0) {
                         try {
                             if (appKind == 7) {
-                                // B7X 无 connectGattWith（仅 B6X 有）；它的等价入口是 t9.j.E(device)
-                                //（内部 f50991b.o0(device)），与 B6X connectGattWith 走同一 SDK 静态注册表，
-                                // 直接用 lastDevice 发起连接，避免依赖冷启动必丢的 capturedB7Controller 实例。
+                                // B7X 无 connectGattWith，等价入口 t9.j.E(device)（见 app/逻辑说明.md §1.2）
                                 if (appClassLoader == null) {
                                     if (!loggedReconnectSkip) {
                                         loggedReconnectSkip = true;
@@ -405,20 +381,7 @@ public class MainHook implements IXposedHookLoadPackage {
     }
 
     /**
-     * 后台重连节奏：亮屏 5 秒（原行为），息屏 10 秒（用户拍板值）。
-     *
-     * <p><b>为什么息屏可以拉长</b>：屏灭＝宿主不在前台＝没有实时控温需求，断连时的重连只是
-     * "等散热器开机"，5 秒一次纯属浪费射频（每次都是真实蓝牙连接尝试）。
-     *
-     * <p><b>取法与缓存</b>：用 Application.onCreate 钩子拿到的宿主 Context 取 PowerManager，
-     * {@code isInteractive()} 是一次到 system_server 的调用、不便宜，故按 tick 缓存，最多
-     * {@link #SCREEN_PROBE_TICKS} 秒探一次；且只在本方法被调用时探（调用点在三个重连条件之后，
-     * 连接正常时一次都不问）。缓存最坏过期 5 秒：早探到息屏＝多试一次、晚探到＝晚一轮，两个方向都无害。
-     *
-     * <p><b>失败兜底</b>：Context/PowerManager 取不到、或调用抛异常，一律按<b>亮屏</b>——
-     * 宁可维持原来的 5 秒节奏，也不许因为探测坏掉而把重连拉长甚至变成永不重连。
-     *
-     * <p><b>线程</b>：只在 tick 线程内被调用与读写（screenProbedAtTick / screenInteractive 因此无需 volatile）。
+     * 后台重连节奏：亮屏 5s、息屏 10s（由来、取法缓存与失败兜底见 app/逻辑说明.md §1.2）。
      *
      * @param tick 1Hz tick 计数（等价秒数）
      * @return 本次 tick 的重连间隔（秒）
@@ -615,7 +578,7 @@ public class MainHook implements IXposedHookLoadPackage {
                             if (!diagConnLogAllowed()) return;
                             Object result = param.getResult();
                             XposedBridge.log(TAG + " [诊断] discoverServices 返回 "
-                                    + (result != null ? result : "null"));  // L9：防御 getResult() 为 null
+                                    + (result != null ? result : "null"));  // 防御 getResult() 为 null
                         }
                     });
             XposedBridge.log(TAG + " 已钩住 BluetoothGatt.discoverServices");
@@ -963,7 +926,7 @@ public class MainHook implements IXposedHookLoadPackage {
      * 钩 onGattConnected 把 static 同步到当前实例（state=2）。
      */
     private static void hookSyncConnectedController(XC_LoadPackage.LoadPackageParam lpparam) {
-        if (appKind != 6) return;  // 仅 B6X（B7X 走 hookB7Obfuscated 的 H1 连接状态修正）
+        if (appKind != 6) return;  // 仅 B6X（B7X 走 hookB7Obfuscated 的连接状态修正）
         try {
             Class<?> ctrlCls = lpparam.classLoader.loadClass(
                     "com.flydigi.sdk.bluetooth.LeDataInteractionController");
@@ -990,10 +953,8 @@ public class MainHook implements IXposedHookLoadPackage {
                     });
             XposedBridge.log(TAG + " 已钩住 LeDataInteractionController.onGattConnected（static 同步修复）");
 
-            // 【方案A 前置：收包者定基准】B6X 数据到达（0x13 状态包）把 currentValidGatt 重绑到
-            // 真正在收包的 gatt。重连时 static/currentValidGatt 常指向"最后连接成功"实例，未必在
-            // 收包；命令写进失效 gatt 会被 SDK 静默丢弃 → 设备停在固件默认 125/4500。以真实收包
-            // 的 gatt 为下发基准（ensureUsableController 再按它重同步 static），可消除该窗口。
+            // 收包者定基准：B6X 数据到达时把 currentValidGatt 重绑到真在收包的 gatt，
+            // 消除「命令写进失效 gatt 被静默丢弃」窗口（见 app/逻辑说明.md §1.3）。
             try {
                 XposedHelpers.findAndHookMethod(
                         lpparam.classLoader.loadClass(
@@ -1033,28 +994,10 @@ public class MainHook implements IXposedHookLoadPackage {
                 });
 
         // ========== B7X 完整混淆适配 ==========
-        // com.flydigi.sdk.waspwing.a（混淆类 controller）
-        //   a.S1(BluetoothGatt)：GATT 连接成功点 → H1 连接状态 + H2 型号识别
-        //   a.T1(BluetoothGatt)：GATT 断连统一入口（远程+本地）→ M7
-        //   a.Z0(UUID,byte[])：特征分发（this.X=最新 Info）→ H2 + 回传
-        //   构造钩子：捕获控制器实例，供 H4 后台重连调用 T0()（重连其存储的 M() 设备）
+        // 混淆类 com.flydigi.sdk.waspwing.a 的方法映射（S1=连接成功 / T1=断连 / Z0=特征分发）
+        // 与 B7X 连接修复见 app/逻辑说明.md §1.5。
 
-        // H4：捕获 B7X 控制器(a) 实例（后台重连用）
-        try {
-            Class<?> ctrl7 = lpparam.classLoader.loadClass("com.flydigi.sdk.waspwing.a");
-            XposedBridge.hookAllConstructors(ctrl7, new XC_MethodHook() {
-                @Override
-                protected void afterHookedMethod(MethodHookParam param) {
-                    capturedB7Controller = param.thisObject;
-                    XposedBridge.log(TAG + " 已捕获 b7x 控制器(a) 实例");
-                }
-            });
-            XposedBridge.log(TAG + " 已钩住 b7x 控制器(a) 构造函数（H4 重连实例捕获）");
-        } catch (Throwable t) {
-            XposedBridge.log(TAG + " 捕获 b7x 控制器(a) 失败: " + t.getMessage());
-        }
-
-        // H1 + H2：连接成功 → 置状态 + 型号识别 + 捕获参数 + 写状态
+        // 连接成功 → 置状态 + 型号识别 + 捕获参数 + 写状态
         hookClassMethod(lpparam.classLoader, "com.flydigi.sdk.waspwing.a",
                 "S1", "b7x a.S1（连接状态 + 型号识别）", "钩 b7x a.S1 失败",
                 BluetoothGatt.class, new XC_MethodHook() {
@@ -1087,7 +1030,7 @@ public class MainHook implements IXposedHookLoadPackage {
                     }
                 });
 
-        // H2：数据分发 → 刷新回传 + 型号修正（7→6）+ 同步 owner
+        // 数据分发 → 刷新回传 + 型号修正（7→6）+ 同步 owner
         hookClassMethod(lpparam.classLoader, "com.flydigi.sdk.waspwing.a",
                 "Z0", "b7x a.Z0（数据回传 + 型号识别）", "钩 b7x a.Z0 失败",
                 UUID.class, byte[].class, new XC_MethodHook() {
@@ -1097,7 +1040,7 @@ public class MainHook implements IXposedHookLoadPackage {
                     }
                 });
 
-        // M7：断连（远程/本地统一入口 a.T1）→ 置未连接 + 写状态
+        // 断连（远程/本地统一入口 a.T1）→ 置未连接 + 写状态
         hookClassMethod(lpparam.classLoader, "com.flydigi.sdk.waspwing.a",
                 "T1", "b7x a.T1（断连检测）", "钩 b7x a.T1 失败",
                 BluetoothGatt.class, new XC_MethodHook() {
@@ -1250,14 +1193,9 @@ public class MainHook implements IXposedHookLoadPackage {
     }
 
     /**
-     * 把本任务从「最近任务」列表里摘掉（借鉴 Scene 的 excludeFromRecent 做法）。
-     *
-     * <p>只影响任务列表的显示，不改变进程存活，与 {@code moveTaskToBack} 各管一半：
-     * 前者保证进程活着（BLE 连接不断），后者保证不在最近任务里留痕。
-     * 定位本任务靠 {@code task.getId() == act.getTaskId()}；{@code getAppTasks()} 需 API 21+（宿主 minSdk 26）。
-     *
-     * <p>属附加动作：取不到 ActivityManager、或没匹配到本任务时只打一行日志，
-     * 绝不影响调用方（收后台）的结果。
+     * 把本任务从「最近任务」列表里摘掉（只影响任务列表、不动进程存活；属附加动作，
+     * 失败不影响调用方）。定位本任务靠 {@code task.getId() == act.getTaskId()}。
+     * 理由见 app/逻辑说明.md §1.4。
      */
     private static void excludeFromRecents(final Activity act) {
         try {
@@ -1281,10 +1219,8 @@ public class MainHook implements IXposedHookLoadPackage {
     }
 
     /**
-     * 读界面上的「返回隐藏后台」开关（守护进程写的 {@code BACK_HIDE=0/1} 标志文件）。
-     *
-     * <p>每次返回键都读一次：返回键是低频事件，一次小文件读取代价可忽略，换来"改了立即生效"。
-     * 读不到（文件不存在 / 无该行 / 值异常）时返回 true —— 与界面默认值一致，行为总是「默认开启」。
+     * 读界面上的「返回隐藏后台」开关（守护进程写的 {@code BACK_HIDE=0/1}）。
+     * 每次读以做到改即生效；读不到一律 true（默认开启）。见 app/逻辑说明.md §1.4。
      */
     private static boolean readBackHideEnabled() {
         try {
@@ -1311,11 +1247,8 @@ public class MainHook implements IXposedHookLoadPackage {
     };
 
     /**
-     * 该 Activity 是否在返回键接管范围内。
-     *
-     * <p>钩子只注册在宿主包进程内，故本进程里的 Activity 即宿主页面；但宿主 APK 内含若干
-     * <b>透明转发页</b>（借壳启动第三方界面、代替 startActivityForResult 取结果用），
-     * 它们不是用户可见页面，按返回不该收后台，故按类名前缀排除（见 {@link #BACK_HIDE_SKIP_ACTIVITIES}）。
+     * 该 Activity 是否在返回键接管范围内（排除宿主 APK 的透明转发页，见
+     * {@link #BACK_HIDE_SKIP_ACTIVITIES}）。理由见 app/逻辑说明.md §1.4。
      */
     private static boolean isBackHideTargetActivity(final Activity act) {
         String cls = act.getClass().getName();
@@ -1326,45 +1259,13 @@ public class MainHook implements IXposedHookLoadPackage {
     }
 
     /**
-     * 返回键退出时把 app 收进后台 + 从最近任务隐藏，而不是真正退出（借鉴 Scene 的做法）。
+     * 返回键退出时把 app 收进后台 + 从最近任务隐藏，而不是真正退出。
      *
-     * <p><b>接管判据</b>（三者全成立）：开关开（见 {@link #readBackHideEnabled()}）、
-     * 未在结束中（{@code !isFinishing()}）、当前 Activity 在接管范围内。
-     * "在范围内" = {@code isTaskRoot()}（任务根）<b>或</b> {@link #isBackHideTargetActivity}
-     * （宿主进程内任意页面，见该方法说明）—— 两者并列，任一成立即在范围内。
+     * <p>接管判据、为何不再硬要求 isTaskRoot、两处钩子的必要性、排除表与预测性返回的处理，
+     * 见 app/逻辑说明.md §1.4。
      *
-     * <p><b>为何不再硬要求 {@code isTaskRoot()}</b>：宿主只有引导页 MainActivity 与设置界面
-     * B6ExperimentalActivity，而<b>设置界面并非任务根</b> —— 宿主 launcher 是 MainActivity，
-     * 且模块的 {@code autoStartSetup()} 与宿主的跳转都不 finish 引导页。若硬要求任务根，
-     * 用户在设置界面按返回就完全不生效（这正是"开关无效"的主因）。
-     *
-     * <p>命中后做两件事：{@code moveTaskToBack(true)} 收后台（保进程、BLE 不断）
-     * + {@link #excludeFromRecents} 从最近任务隐藏；自动拉起路径（{@link #backgroundForAutoLaunch}）在开关开启时做同样两件事：
-     * 开关关闭则两条路径都只收后台、不动最近任务。
-     * 判据不成立时<b>必打一行日志</b>，便于真机区分"回调没进"与"进了但判据不成立"。
-     *
-     * <p>受界面开关 {@code UI_BACK_HIDE} 约束：关闭时不设 result，直接走系统默认的 finish。
-     * 开关值由守护进程转写成标志文件（见 {@link #readBackHideEnabled()}）。
-     *
-     * <p><b>必须挂两处，但一次返回只生效其一</b>：宿主 Activity 全部继承 AppCompatActivity，而
-     * androidx 的 {@code ComponentActivity} 已经重写了 {@code onBackPressed}（转调
-     * OnBackPressedDispatcher），虚拟派发永远落到这个重写版 —— 只挂 {@code android.app.Activity}
-     * 自己那个方法时它从不被调用，钩子静默空挂。故：
-     * <ul>
-     *   <li>主钩子挂 {@code androidx.activity.ComponentActivity.onBackPressed}（宿主真实入口）；</li>
-     *   <li>{@code android.app.Activity} 那份保留作兜底，覆盖未走 androidx 的页面。</li>
-     * </ul>
-     * 两者是同一继承链上的重写关系，同一次返回只会走到其中一个，不会重复执行。
-     *
-     * <p><b>预测性返回不在本钩子覆盖范围</b>：宿主 targetSdk=33 且未声明
-     * {@code android:enableOnBackInvokedCallback}，走的是 legacy {@code onBackPressed}。
-     * 而 androidx activity 1.8+ 自带预测性返回实现，若宿主将来 targetSdk ≥ 35 或显式开启该属性，
-     * 上面两种挂法都会失效，届时须改挂 {@code OnBackPressedDispatcher} /
-     * {@code OnBackInvokedDispatcher}（当前不需要处理）。
-     *
-     * <p>三包通用（不区分 B6X / B7X / farsef），故注册在通用分发处而非 {@code hookB6Activity}。
-     * 其中 B7X（farsef）包 targetSdk=29 且反编译产物已混淆，"是否同样是 AppCompatActivity" 尚未
-     * 验证；因此 androidx 类缺失（{@link ClassNotFoundException}）时只跳过主钩子、保留兜底，不崩。
+     * <p>未验证：B7X（farsef）是否同为 {@code AppCompatActivity}（见 app/逻辑说明.md §10）；
+     * androidx 类缺失时只跳过主钩子、保留兜底，不崩。
      */
     private static void hookBackToBackground(XC_LoadPackage.LoadPackageParam lpparam) {
         // 回调体两处共用一份，判据与开关读取保持一致
@@ -1774,9 +1675,7 @@ public class MainHook implements IXposedHookLoadPackage {
                                 }
                             }
                         }
-                        // 250ms（原 50ms）：接管判据 QUEUE_TAKEOVER_MS 是 5 秒级阈值，而 20Hz 轮询
-                        // 比它密两个数量级；粒度放粗只让最坏接管晚 200ms（5s 阈值下不可感知），
-                        // 换来唤醒次数与反射读字段开销降到 1/5。语义不变：仍是"同一队首停留超阈值才接管"。
+                        // 250ms 轮询（原 50ms；粒度论证见 app/逻辑说明.md §1.3）
                         Thread.sleep(250);
                     } catch (InterruptedException e) {
                         break;
@@ -1922,7 +1821,7 @@ public class MainHook implements IXposedHookLoadPackage {
             }
         }
         if (inst == null && appKind == 7) {
-            // (H3)：B7X 混淆管理器 t9.j 的 Kotlin 单例字段 f50990a（反编译确认）
+            // B7X 混淆管理器 t9.j 的 Kotlin 单例字段 f50990a（反编译确认）
             try {
                 Class<?> mgrCls7 = ctx.getClassLoader().loadClass("t9.j");
                 inst = XposedHelpers.getStaticObjectField(mgrCls7, "f50990a");
@@ -1942,7 +1841,7 @@ public class MainHook implements IXposedHookLoadPackage {
 
     /**
      * 记录连接状态（时间戳、连接者、型号兜底）；gatt 非空时顺带保存设备引用供后台重连使用。
-     * 由 BLE 回调线程调用，字段均 volatile（M4）。
+     * 由 BLE 回调线程调用，字段均 volatile。
      */
     private static void markConnected(BluetoothGatt gatt) {
         // 记录上一连接状态，用于判断是否"断连→连接"翻转（决定唤醒次数是否重置）
@@ -1997,7 +1896,7 @@ public class MainHook implements IXposedHookLoadPackage {
         try {
             connectedModel = modelFromDeviceCode(
                     XposedHelpers.callMethod(info, "getDeviceCode"));
-            refreshLastOwnerIfNeeded();  // (M3)：型号修正后同步 BLE_OWNER_LAST
+            refreshLastOwnerIfNeeded();  // 型号修正后同步 BLE_OWNER_LAST
         } catch (Throwable t) { /* 型号未知保持包名兜底 */ }
     }
 
@@ -2022,9 +1921,7 @@ public class MainHook implements IXposedHookLoadPackage {
                 reconnectPending = false;
                 stallReconnectCount = 0;    // 设备恢复响应，清零连续无回传重连计数
                 updateModelFromInfo(info);
-                // 【方案A 前置：收包者定基准】B7X 收包时把 currentValidGatt 重绑到该 controller 的
-                // gatt（真在通信）。重连时 static 常指向"最后连接成功"实例而非收包实例，命令写进
-                // 失效 gatt 被 SDK 静默丢弃 → 设备停在固件默认 125/4500。以收包实例为基准可消除。
+                // 收包者定基准：B7X 收包时把 currentValidGatt 重绑到该 controller 的 gatt（见 app/逻辑说明.md §1.3）。
                 BluetoothGatt g = connectedControllers.get(ctrl);
                 if (g != null) currentValidGatt = g;
             }

@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!--
-    曲线页（D2）文案。色值不在此文件、也不在布局里写死：曲线配色统一走 colors.xml 的 chart_*。
+    曲线页文案。色值不在此文件、也不在布局里写死：曲线配色统一走 colors.xml 的 chart_*。
     读取失败时的诊断正文来自 AppFiles.diagnose()（Java 侧拼好），不经字符串资源。
 -->
 <resources>

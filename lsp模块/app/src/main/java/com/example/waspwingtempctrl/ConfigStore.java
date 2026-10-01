@@ -25,40 +25,10 @@ import java.util.Set;
  * <b>I3（已冻结）：配置读写归属</b> —— 界面只用本类读写 {@code profile.conf}，
  * 不得自己拼 shell 命令或直接碰文件。
  *
- * <h3>为什么是普通 Java File IO</h3>
- * 配置落私有目录 {@code <filesDir>/profile.conf}，与守护进程同属一个 uid 之外的路径，
- * 但 app 对自己的私有目录有读写权，<b>整个读写链路不需要 root</b>。
+ * <p>写入一律「同目录临时文件 → fsync → rename」；改单键只替换该行的值片段，其余字节不动。
+ * 全部方法是本地磁盘 I/O（毫秒级阻塞），可在主线程调用；本类不含任何 root 调用。
  *
- * <h3>为什么必须原子替换</h3>
- * C 端每 5 秒 {@code stat()} + {@code st_mtime} 轮询热重载；半截文件会被读到。
- * 因此写入一律「同目录临时文件 + {@code renameTo}」。
- *
- * <h3>为什么不能整文件重写</h3>
- * {@code profile.conf} 是<b>带注释的文本</b>（整段说明、分组标题、行内注释 "值  # 说明"），
- * 不是 key=value 转储。改单键只替换该行的<b>值片段</b>，其余字节逐字节保持原样。
- *
- * <h3>已知语义约束（界面必须遵守）</h3>
- * <ul>
- *   <li>{@code st_mtime} 只有<b>秒级</b>精度：两次写入间隔 &lt; 1 秒时 C 端可能不重载
- *       （防抖窗口建议 ≥ 1 秒）。</li>
- *   <li>多值键在文件里给出的字段数少于定义时，C 端只应用给出的前几个字段，
- *       其余字段保持<b>代码默认值</b>（不是文件里的值）。</li>
- * </ul>
- *
- * <p>键的元数据（类型 / min / max / 默认值 / 分组 / label / enum 取值域）全部来自
- * {@code assets/params.json}（I1，单一来源），本类不手抄任何键定义。
- *
- * <h3>读的 memo（快照 + 指纹）</h3>
- * {@link #read()} 按文件指纹（{@code mtime:size}）复用上一份快照：一次冷启动会连着读两次
- * （落页判定 + 表单铺底），中间没有任何写入，第二次是白读一遍整文件。指纹<b>必须带 size</b> ——
- * {@code st_mtime} 只有秒级精度（见上），同一秒内改过而指纹不变会漏判。写盘成功
- * （{@link #setAll} / {@link #writeFactoryIfAbsent}）就地更新 memo，不必等下一次读再解一遍；
- * <b>读失败不留档</b>（与 {@code Deployer.ASSET_MD5_MEMO} 同口径：一次瞬时失败要能重试）。
- * 指纹口径也对外给出（{@link #configFingerprint()}），供 {@code ui.ChartConfig} 之类的
- * 派生缓存共用 —— 不让各处自己 stat 文件。
- *
- * <p><b>线程模型</b>：全部方法都是本地磁盘 I/O，会阻塞（毫秒级）。可在主线程调用，
- * 但大批量读写在后台线程更稳。本类不含任何 root 调用。
+ * <p>设计理由、解析口径、校验语义、memo 与指纹等详见 app/逻辑说明.md §3。
  */
 public final class ConfigStore {
 
@@ -69,20 +39,17 @@ public final class ConfigStore {
     public static final String PARAMS_ASSET = "params.json";
 
     /**
-     * C 端私有目录（{@code tempctrl.c} 的 {@code PRIVATE_DIR} 宏，硬编码）。
-     *
-     * <p>用于<b>跨端落点一致性检查</b>：C 端按这个绝对路径找 {@code profile.conf}，
-     * 而 app 只能写自己的 {@link Context#getFilesDir()}。两者不同名时配置互不可见，
-     * {@link #isPathAlignedWithDaemon()} 会返回 false，界面必须如实告警。
+     * C 端私有目录（{@code tempctrl.c} 的 {@code PRIVATE_DIR} 宏，硬编码）；改包名或改该宏时两边须同步。
+     * 跨端落点一致性检查的由来见 app/逻辑说明.md §3.1。
      */
     public static final String DAEMON_PRIVATE_DIR = "/data/data/com.example.waspwingtempctrl/files";
 
     private static volatile ConfigStore instance;
 
-    /** {@link #read()} 的最近一次结果；指纹一致就直接回吐（见类注释〈读的 memo〉）。 */
+    /** {@link #read()} 的最近一次结果；指纹一致就直接回吐（见 app/逻辑说明.md §3.5）。 */
     private volatile Memo memo;
 
-    /** 一份快照 + 它对应的文件指纹。不可变对象，故 volatile 一次读写即一致，不会读到错配的一对。 */
+    /** 一份快照 + 它对应的文件指纹。不可变对象，故 volatile 一次读写即一致（见 app/逻辑说明.md §3.5）。 */
     private static final class Memo {
         final String fingerprint;
         final Snapshot snapshot;
@@ -159,10 +126,7 @@ public final class ConfigStore {
 
     /**
      * 跨端落点是否一致：C 端 {@code PRIVATE_DIR} 与 app 的 {@link Context#getFilesDir()} 同路径时为 true。
-     *
-     * <p>{@link #DAEMON_PRIVATE_DIR} 是手抄的 C 端 {@code PRIVATE_DIR}（跨语言无法共享同一常量），
-     * 故保留本检查作为护栏：它一旦返回 false，就说明两端包名漂移了、守护进程读不到本类写的配置，
-     * 界面必须如实告警。改 {@code applicationId} 或改 C 端那个宏时，两边都要同步。
+     * 返回 false 即守护进程读不到本类写的配置，界面必须如实告警。护栏由来见 app/逻辑说明.md §3.1。
      */
     public boolean isPathAlignedWithDaemon() {
         // 只做字面比较会误报：Context.getFilesDir() 在设备上通常是 /data/user/0/<包名>/files，
@@ -207,7 +171,7 @@ public final class ConfigStore {
         return configFileNameFromDef;
     }
 
-    /** 键总数（定义里现有 53；界面可据此自检）。 */
+    /** 键总数（定义里现有 57；界面可据此自检）。 */
     public int keyCount() {
         return keys.size();
     }
@@ -243,16 +207,12 @@ public final class ConfigStore {
 
     /**
      * 读全文并解析。<b>同一份文件（{@link #configFingerprint()} 未变）复用上一份快照</b>：
-     * 不再读盘、也不再解析（同一份内容每次都会解出等值的一份，纯是白跑）。文件不存在 →
-     * 全部取 {@link KeyMeta#defaultValue}（与 C 端"未找到配置 → 用代码默认值"一致）。
+     * 不再读盘、也不再解析。文件不存在 → 全部取 {@link KeyMeta#defaultValue}。
      *
-     * <p>解析口径照 C 端 {@code config_parse_line()}：跳过前导空白后以 {@code #} 开头的行
-     * 与不含 {@code =} 的行；键尾空白 trim；值 = {@code =} 之后的全部内容（<b>行内注释不剥离</b>，
-     * 数值键靠 {@code atoi/sscanf} 自然截断，路径键会把注释一起当成路径 —— C 端同样如此）。
-     * 同键多行时<b>后出现的覆盖先出现的</b>（C 端按行顺序覆盖）。
+     * <p>解析口径照 C 端 {@code config_parse_line()}（见 app/逻辑说明.md §3.3）；
+     * memo 与「读失败不留档」见 app/逻辑说明.md §3.5。
      *
-     * <p>指纹未变时返回的<b>就是上一份快照</b>（同一次读取被多处复用），故它与
-     * {@link Snapshot} 自己的字段一样只读，调用方不得改动。
+     * <p>指纹未变时返回的<b>就是上一份快照</b>，故它与 {@link Snapshot} 自己的字段一样只读。
      */
     public Snapshot read() {
         String fingerprint = configFingerprint();
@@ -280,10 +240,7 @@ public final class ConfigStore {
         }
         Snapshot snapshot = parseText(text, mtime);
         StartupTiming.span(StartupTiming.SNAP_LOAD, startedAt);
-        // 登记前复核：这一趟（取指纹 → 读盘 → 解析）里但凡有人换过 memo，我手上这份就不是盘上当前的
-        // 内容 —— 登记等于把新内容顶回旧内容。这里以"memo 还是我开头看到的那个"为准，因为指纹认不出这
-        // 一茬：st_mtime 只有秒级精度，同秒内的等长改写新旧指纹完全相同（{@link #configFingerprint()}），
-        // 事后无从分辨。读盘期间盘上没变过才顺手登记，省掉下一次读盘。
+        // 登记前复核：仅当读盘期间 memo 没被别人换过才登记（st_mtime 秒级精度认不出同秒改写，见 §3.5）
         if (memo == cached && fingerprint.equals(configFingerprint())) {
             memo = new Memo(fingerprint, snapshot);
         }
@@ -291,11 +248,8 @@ public final class ConfigStore {
     }
 
     /**
-     * 配置文件指纹（{@code mtime:size}）；文件不存在时 {@code "-"}。
-     *
-     * <p>{@link #read()} 拿它判"文件变过没有"；派生的进程级缓存（如 {@code ui.ChartConfig}
-     * 的曲线口径）也用同一个口径 —— 文件新不新只有这一处判断，各页面不自己 stat。
-     * 必带 {@code size}：{@code st_mtime} 只有秒级精度（见类注释），同一秒内先写后读会漏判。
+     * 配置文件指纹（{@code mtime:size}）；文件不存在时 {@code "-"}。必带 {@code size}，
+     * 共用口径与理由见 app/逻辑说明.md §3.5。
      */
     public String configFingerprint() {
         if (!configFile.isFile()) {
@@ -315,9 +269,8 @@ public final class ConfigStore {
     }
 
     /**
-     * 解析一段已就位的配置文本（口径见 {@link #read()}）。<b>不碰磁盘</b>，故写盘成功后可以拿
-     * 刚写进去的那段文本直接走这里（见 {@link #rememberWritten}）：省掉一次读盘，且与
-     * "再读一遍盘"逐字同源（同一段字节、同一套解析）。
+     * 解析一段已就位的配置文本（口径见 {@link #read()}）。不碰磁盘，故写盘成功后可以拿刚写进去的
+     * 那段文本直接走这里（见 {@link #rememberWritten}）。理由见 app/逻辑说明.md §3.3。
      *
      * @param mtimeMs 该段文本对应的文件 mtime（只用于快照里给界面显示的元信息）
      */
@@ -353,9 +306,7 @@ public final class ConfigStore {
 
     /**
      * 写盘成功后就地更新 {@link #memo}：新内容就在手上，不必等下一次 {@link #read()} 再读盘解一遍。
-     *
-     * <p>与"重新读一遍盘"同源（{@link #parseText}），故 memo 里的值与重读逐字一致；
-     * 也正因如此，同秒内连写两次（{@code mtime} 撞车、size 又相同）不会读出旧值。
+     * 与「重新读一遍盘」同源（{@link #parseText}）。详见 app/逻辑说明.md §3.5。
      */
     private void rememberWritten(String text) {
         memo = new Memo(configFingerprint(), parseText(text, configFile.lastModified()));
@@ -418,10 +369,8 @@ public final class ConfigStore {
     /**
      * 批量改键：全部改动合并为<b>一次</b> rename，避免多次 mtime 触发多轮 C 端重载。
      *
-     * <p>保留全文（注释 / 空行 / 行序 / 行内注释），只替换目标行的值片段，然后写同目录临时文件
-     * 并 {@code renameTo} 原子替换。同键出现多行时全部替换（C 端按行顺序覆盖，只改第一行会不生效）；
-     * 文件中没有该键时追加到文件尾部。<b>未知键（params.json 未定义）拒绝写入</b>，
-     * 避免拼错键名写出一个永远不生效的配置项。值未变化时直接跳过，不触碰 mtime。
+     * <p>保留全文只替换目标行的值片段；未知键拒绝写入；值未变化时直接跳过。
+     * 详见 app/逻辑说明.md §3.2。
      */
     public WriteResult setAll(Map<String, Value> changes) {
         if (!definitionsLoaded()) {
@@ -479,13 +428,9 @@ public final class ConfigStore {
 
     /**
      * 写出厂配置：<b>仅当文件不存在时</b>；已存在则一个字都不覆盖（包括空白文件）。
+     * 值取自 {@code params.json} 的 {@code factory} 字段（不是 {@code default}）。
      *
-     * <p>值取自 {@code params.json} 的 {@code factory} 字段（不是 {@code default}）。
-     * 由 {@link Deployer} 在部署时调用，界面不要自己调。
-     *
-     * <p>{@code LOG_FILE} 的 factory 已与 C 端默认对齐（同在私有目录），
-     * 由 {@code 参数定义/check_params.py --audit} 的 crossChecks 盯住；
-     * 该键与 C 端 {@code PRIVATE_DIR} 宏、Gradle {@code applicationId} 的三方一致要求见其 {@code desc}。
+     * <p><b>由 {@link Deployer} 在部署时调用，界面不要自己调</b>。详见 app/逻辑说明.md §3.1。
      */
     public WriteResult writeFactoryIfAbsent() {
         if (!definitionsLoaded()) {
@@ -561,6 +506,7 @@ public final class ConfigStore {
     /**
      * 把用户输入折算成「界面能接受的值」：数值键按 {@code params.json} 的 min/max 逐字段钳制，
      * 文本键按自己的值域收敛（path 只 trim，enum 只认 {@code options} 里的字面量、表外回落出厂值）。
+     * 详见 app/逻辑说明.md §3.4。
      */
     public Assessment assess(String key, Value raw) {
         KeyMeta meta = key(key);
@@ -622,10 +568,8 @@ public final class ConfigStore {
     }
 
     /**
-     * 诊断串（路径 / 定义 / 一致性），复用调用方刚读到的快照。
-     *
-     * <p>给"已经读过一次盘"的调用方用：配置页每次刷新都是「读一次 → 上屏值 → 上屏诊断」，
-     * 让它再读一次只为拿"未定义键/提示"是白读一遍整个配置文件。
+     * 诊断串（路径 / 定义 / 一致性），复用调用方刚读到的快照（避免为拿提示白读一遍整文件）。
+     * 详见 app/逻辑说明.md §3.4。
      *
      * @param snap 已读到的快照（调用方负责它确实是最近一次读取的结果）
      */
@@ -695,6 +639,12 @@ public final class ConfigStore {
         public final Value defaultValue;
         public final Value factoryValue;
         public final List<String> requires;
+        /**
+         * 反向依赖：这些键中任一当前值为 1 时，本行在界面上<b>整行隐藏</b>（仅界面渲染用，不给 C 端）。
+         * 与 {@link #requires}（值为 1 时才生效 → 否则压暗）方向相反；定义里没写即空表、行为与改动前一致。
+         * 渲染落点见 {@link com.example.waspwingtempctrl.ui.ConfigKeyRow}。
+         */
+        public final List<String> hiddenWhen;
         public final boolean daemonConsumes;
         /** 多值键的字段定义；单值键为 null。 */
         public final List<FieldMeta> fields;
@@ -713,6 +663,7 @@ public final class ConfigStore {
             this.unit = o.optString("unit", "");
             this.unitNote = o.optString("unitNote", "");
             this.requires = jsonStringList(o.optJSONArray("requires"));
+            this.hiddenWhen = jsonStringList(o.optJSONArray("hiddenWhen"));
             this.daemonConsumes = o.optBoolean("daemonConsumes", true);
             // 字段表与范围必须先就位：下面的 parseValue() 依赖 fieldCount()/min()/max()
             List<FieldMeta> f = new ArrayList<>();
@@ -847,9 +798,8 @@ public final class ConfigStore {
         public final Integer max;
         public final int defaultValue;
         /**
-         * true = 布尔子开关（值只有 0/1）。界面据此把该字段渲染成开关而不是数字输入框
-         * （定义里 PID_TARGET_DIR[0] / PID_SPEED_RECALL[0] / APP_LAUNCH_SCREEN_GATE[0..1]
-         * 为 true）；C 端的逐字段 clamp 边界生成时也跳过这些字段。
+         * true = 布尔子开关（值只有 0/1）：界面据此渲染成开关而非数字输入框，C 端逐字段 clamp 跳过。
+         * 详见 app/逻辑说明.md §3.4。
          */
         public final boolean bool;
 
@@ -865,11 +815,9 @@ public final class ConfigStore {
     }
 
     /**
-     * enum 键的一个可选值（{@code options[]} 的一项）。
-     *
-     * <p>{@link #value} 是写进配置的<b>字面量</b>（文本，原样落盘）；{@link #label} 是界面上的
-     * 文案。取值域是闭合的：不在表里的值界面不接受（见 {@link ConfigStore#assess}）。
-     * 界面的渲染落在 {@code ui.ConfigKeyRow} 的分段开关上，本类只提供数据。
+     * enum 键的一个可选值（{@code options[]} 的一项）：{@link #value} 是落盘字面量，
+     * {@link #label} 是界面文案；取值域闭合（见 {@link ConfigStore#assess}）。
+     * 详见 app/逻辑说明.md §3.4。
      */
     public static final class OptionMeta {
         public final String value;
@@ -987,10 +935,8 @@ public final class ConfigStore {
     }
 
     /**
-     * 纯文本改写层（不引用任何 Android API，可在桌面 JVM 上直接跑测试）。
-     *
-     * <p>这里是「改单键逐字节可复现」的唯一实现点：除被改的那一行之外，
-     * 其余字节<b>逐字节</b>原样保留（注释、空行、行序、行内注释、CRLF 均不动）。
+     * 纯文本改写层（不引用任何 Android API，可在桌面 JVM 上直接跑测试）：「改单键逐字节可复现」
+     * 的唯一实现点。详见 app/逻辑说明.md §3.2。
      */
     public static final class ConfText {
 
@@ -1100,8 +1046,8 @@ public final class ConfigStore {
         }
 
         /**
-         * 把一行的值片段换成 {@code newValue}：保留 {@code =} 之前的全部内容、
-         * 值前后的空白（含行内注释前的对齐空格）以及 {@code #} 之后的注释原文。
+         * 把一行的值片段换成 {@code newValue}：保留 {@code =} 之前的内容、值前后的空白
+         * 与 {@code #} 之后的注释原文。详见 app/逻辑说明.md §3.2。
          */
         public static String spliceValue(String line, int eq, String newValue) {
             int hash = line.indexOf('#', eq + 1);
@@ -1331,10 +1277,5 @@ public final class ConfigStore {
                 // 只读流关闭失败无影响
             }
         }
-    }
-
-    /** 供 Deployer 复用：把值数组格式化为配置字面量。 */
-    static String format(Value value) {
-        return value == null ? "" : value.format();
     }
 }

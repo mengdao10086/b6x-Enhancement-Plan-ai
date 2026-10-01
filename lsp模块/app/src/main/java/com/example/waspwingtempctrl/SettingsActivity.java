@@ -12,15 +12,12 @@ import com.example.waspwingtempctrl.ui.UiSettingsFragment;
 
 /**
  * 设置页外壳：顶栏设置按钮点进来的独立页面，内容只有 {@link UiSettingsFragment}
- * （{@code params.json} 里 {@code webui} 组「[4] 界面」那几个界面自用参数）。
+ * （{@code params.json} 里 {@code webui} 组——标题 {@code [4] 界面}——那几个界面自用参数）。
  *
- * <p><b>为什么在 onCreate 里 setTheme</b>：与 {@link SetupActivity} 同因——{@code AndroidManifest.xml}
- * 本轮冻结、没有 {@code android:theme}，而 {@link AppCompatActivity} 要求 AppCompat/Material 主题，
- * 故在 {@code super.onCreate()} 之前手动应用 {@code R.style.Theme_B6XTempCtrl}
- * （顺序反了会直接抛 "You need to use a Theme.AppCompat theme"）。
- *
- * <p>本类不含业务：读、改、落盘全在 Fragment 里，返回键只结束本页（设置页是独立页面，
+ * <p><b>本类不含业务</b>：读、改、落盘全在 Fragment 里，返回键只结束本页（设置页是独立页面，
  * 不退到主界面，主界面由它自己的页签状态恢复）。
+ *
+ * <p>{@code setTheme} 必须在 {@code super.onCreate()} 之前，理由见 {@code app/逻辑说明.md} §5.4。
  */
 public class SettingsActivity extends AppCompatActivity {
 

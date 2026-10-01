@@ -18,26 +18,21 @@ import java.util.List;
 /**
  * 曲线页用到的全部口径参数。<b>只能在后台线程构造</b>（{@link #load} 内有同步 File IO）。
  *
- * <p>两类来源：
+ * <p>两类来源（口径见 app/逻辑说明.md §7.1）：
  * <ol>
- *   <li>{@code UI_GAP_SEC} / {@code UI_LABEL_MERGE_PX} / {@code UI_RPM_AXIS_MIN} /
- *       {@code UI_CURVE_FILTER}，以及右轴上限口径所需的 {@code COLD_RPM_MAP} /
- *       {@code PID_COLD_RANGE} / {@code PERF_ENABLED} —— 一律经 {@link ConfigStore} 读
- *       （口径清单 §13）。字段缺项（如只写 {@code UI_CURVE_FILTER=15}）回落该字段在
+ *   <li>{@code UI_GAP_SEC} / {@code UI_RPM_AXIS_MIN} / {@code UI_CURVE_FILTER}，
+ *       以及右轴上限口径所需的 {@code COLD_RPM_MAP} /
+ *       {@code PID_COLD_RANGE} / {@code PERF_ENABLED} —— 一律经 {@link ConfigStore} 读。
+ *       字段缺项（如只写 {@code UI_CURVE_FILTER=15}）回落该字段在
  *       {@code assets/params.json} 里声明的默认值。</li>
- *   <li>{@code params.json} 的 {@code chart} 块（窗口档位/默认档位/滚动行数目标——
- *       文案作「目标」与 {@link #notes} 上屏的说法同源；代码里它仍是环形保留的硬上限）——
- *       {@link ConfigStore} 只暴露 {@code groups()/keys()/key()}，{@code chart} 不是键，
- *       故本类直接读该 asset（<b>本页唯一允许碰 assets 的地方，只读</b>）。
- *       读失败时回落已确认的常量，并把回落事实写进 {@link #notes}，不静默。</li>
+ *   <li>{@code params.json} 的 {@code chart} 块（窗口档位/默认档位/滚动行数）——{@link ConfigStore}
+ *       只暴露 {@code groups()/keys()/key()}，{@code chart} 不是键，故本类直接读该 asset
+ *       （<b>本页唯一允许碰 assets 的地方，只读</b>）。读失败回落常量并把事实写进 {@link #notes}，不静默。</li>
  * </ol>
  *
- * <p><b>进程级缓存</b>：{@link #load} 的结果按 {@link ConfigStore#configFingerprint()} 缓存。
- * {@code chart} 块是 APK 内资产（进程存活期间不可能变），上面那批口径键则随 {@code profile.conf}
- * 的指纹变化自动失效。曲线页每次重新可见都要重读一次口径（用户可能刚在配置页改过），本条缓存
- * 把那轮的 47KB JSON 重解与整份配置重读一并消掉。失效判据只此一处（指纹），本类不自己 stat 文件；
- * 指纹一致就是同一份输入，故回落/读不到之类的降级结果也一并留档（降级原因已进 {@link #notes}）。
- * 因此返回的对象<b>可能被多处共用</b>：只读，谁都不许改它的字段。
+ * <p><b>进程级缓存</b>：{@link #load} 的结果按 {@link ConfigStore#configFingerprint()} 缓存，失效判据
+ * 只此一处、降级结果也一并留档。返回的对象<b>可能被多处共用</b>：只读，谁都不许改它的字段。
+ * 见 app/逻辑说明.md §7.1。
  */
 final class ChartConfig {
 
@@ -50,8 +45,6 @@ final class ChartConfig {
     int gapDetectSec = 2;
     /** 空白封顶（秒）——{@code UI_GAP_SEC} 第 2 值。 */
     int gapMaxSec = 15;
-    /** 标注合并阈值（配置 px，使用时按 density 换算）——{@code UI_LABEL_MERGE_PX}。 */
-    int labelMergePx = 9;
     /** 左轴转速下限（RPM）——{@code UI_RPM_AXIS_MIN}；0 = 关闭。 */
     int rpmAxisMin = 3000;
     /** 双向 EMA 每遍权重 α = 第 1 值/100。 */
@@ -114,22 +107,19 @@ final class ChartConfig {
             notes.add("读取 profile.conf 失败（" + t.getClass().getSimpleName() + "），曲线参数全部使用默认值");
             return;
         }
-        // 断联：两个字段都要求 > 0，否则各自回落 2 / 15（口径见 逻辑说明.md 的「曲线」一节〈断联空白〉）
+        // 断联：两个字段都要求 > 0，否则各自回落 2 / 15（口径见 app/逻辑说明.md §7.2〈断联空白〉）
         int detect = field(store, snap, "UI_GAP_SEC", 0, 2);
         int maxSec = field(store, snap, "UI_GAP_SEC", 1, 15);
         gapDetectSec = detect > 0 ? detect : 2;
         gapMaxSec = maxSec > 0 ? maxSec : 15;
-        // 合并阈值：≥ 0 合法（0 = 不合并以外全合并），负值回落 9（口径见 逻辑说明.md 的「可配置参数一览」UI_LABEL_MERGE_PX）
-        int merge = field(store, snap, "UI_LABEL_MERGE_PX", 0, 9);
-        labelMergePx = merge >= 0 ? merge : 9;
-        // 转速下限：负值一律归 0 = 关闭（口径见 逻辑说明.md 的「曲线」一节〈双纵轴〉）
+        // 转速下限：负值一律归 0 = 关闭（口径见 app/逻辑说明.md §7.3〈双纵轴〉）
         rpmAxisMin = Math.max(0, field(store, snap, "UI_RPM_AXIS_MIN", 0, 3000));
-        // 滤波：两个子值 0 都合法（= 关闭该级），负值回落默认（口径见 逻辑说明.md 的「曲线」一节〈滤波关闭语义〉）
+        // 滤波：两个子值 0 都合法（= 关闭该级），负值回落默认（口径见 app/逻辑说明.md §7.2〈滤波关闭语义〉）
         int a = field(store, snap, "UI_CURVE_FILTER", 0, 15);
         int s = field(store, snap, "UI_CURVE_FILTER", 1, 5);
         alpha = a >= 0 ? a / 100f : 0.15f;
         quantStep = s >= 0 ? s / 100f : 0.05f;
-        // 右轴口径：总开关未开启时两端都回落代码默认（口径见 逻辑说明.md 的「曲线」一节〈双纵轴〉）
+        // 右轴口径：总开关未开启时两端都回落代码默认（口径见 app/逻辑说明.md §7.3〈双纵轴〉）
         boolean perfOn = isOn(snap, "PERF_ENABLED");
         coldMapStart = perfOn ? clamp(single(store, snap, "COLD_RPM_MAP", 0, 40), 0, 194) : 40;
         int coldHigh = perfOn ? single(store, snap, "PID_COLD_RANGE", 1, 190) : 190;

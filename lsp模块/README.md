@@ -205,7 +205,7 @@ TARGET_TEMP=180     ← 18.0°C
 | `tempctrl_deploy_stamp` | 同上 | service.d 脚本（核对通过后写）；界面卸载时清理 |
 | `tempctrl_wd_spawn` | 同上 | daemon（每次拉起看门狗时写一行时间戳，作拉起冷却用，详见上文反向保活） |
 
-> 卸载自清的清理清单与「清除数据」的已知代价见 [daemon/逻辑说明.md](daemon/逻辑说明.md)「参数落点」注记。
+> 卸载自清的清理清单与「清除数据」的已知代价见 [app/逻辑说明.md](app/逻辑说明.md) §2.5。
 
 ---
 

@@ -19,33 +19,26 @@ import java.util.Collections;
 import java.util.List;
 
 /**
- * 曲线自绘控件（D2）。口径逐条对齐 {@code lsp模块/daemon/逻辑说明.md} 的「曲线」一节。
+ * 曲线自绘控件。口径逐条对齐 {@code app/逻辑说明.md} §7。
  *
- * <p><b>性能硬约束</b>：{@code onDraw} 只做 drawLine / drawPath / drawCircle / drawText。全部几何量（轴与刻度、每系列 {@link Path}、标注位置与文本宽度、
- * 断联空白）都在 {@link #rebuild()} 里算好并缓存；rebuild 只在数据/窗口/系列开关/尺寸/配色
- * 变化时触发，<b>绝不在 onDraw 内重建 Path</b>。
+ * <p><b>性能硬约束</b>：{@code onDraw} 只画，全部几何量（轴与刻度、每系列 {@link Path}、标注位置与文本宽度、
+ * 断联空白）都在 {@link #rebuild()} 里算好并缓存，<b>绝不在 onDraw 内重建 Path</b>（口径见 app/逻辑说明.md §7）。
  *
  * <p><b>本控件不读文件</b>：数据由 {@link ChartLoader} 在后台线程读好后经
  * {@link #setData(ChartWindow, ChartConfig)} 送上主线程。
  *
- * <p><b>配色</b>：全部运行时按当前主题取（{@code getColor(id, theme)}），深色由
- * {@code values-night/colors.xml} 同名覆盖；本类不出现任何十六进制色值。
- * 底色须与卡片底色一致（{@code app_surface_container}，即本类所在的卡片色）、网格线走主题的
- * 分隔线色（{@code app_outline_variant}），其余曲线配色走 {@code chart_*}。
+ * <p><b>配色</b>：全部运行时按当前主题取（{@code getColor(id, theme)}），本类不出现任何十六进制色值；
+ * 底色 / 网格线 / 曲线配色的取色口径见 app/逻辑说明.md §7.5。
  */
 public class ChartView extends View {
 
     // ---- 口径常量（CSS px → dp，绘制时乘 density）----
-    // 左右内边距不是定值：按本次刻度文字实测宽 + TICK_GAP_DP 现算（见 applyAxisPads），
-    // 两侧不留固定空白，绘图区能多宽就多宽
+    // 左右内边距不是定值：按本次刻度文字实测宽 + TICK_GAP_DP 现算（见 applyAxisPads）。
+    // 上下内边距与接缝的推导见 app/逻辑说明.md §7.3。
     private static final int TICK_GAP_DP = 4;        // 刻度数字与绘图区左沿 / 画布右沿之间的间隙
-    // 上内边距 17。17 是硬下限，不能再小：两个轴标题的 baseline 画在 fPadT − 7dp，
-    // 而 10dp 文字的 ascent ≈ 9.3dp（onDraw 末段画标题处），要保证标题整体留在画布内须
-    // fPadT − 7 ≥ 9.3 → fPadT ≥ 16.3，取整即 17dp；再低标题会被画到画布外裁掉。
+    // 上内边距 17：硬下限，不能再小（再低轴标题会被画到画布外裁掉）
     private static final int PAD_T_DP = 17;
-    // 下内边距 4：与 PAD_T 合计 21（原为 24 + 8 = 32），省下的 11dp 全给绘图区。
-    // 再小则最低一条网格线几乎贴住画布下沿，且画布下沿的拖柄横条（fragment_chart.xml）紧贴下沿，
-    // 两者会挨到一起。绘图区高度的 8dp 保护下限见 rebuild。
+    // 下内边距 4：与 PAD_T 合计 21；再小则网格线贴下沿、且与画布下沿的拖柄横条相碰
     private static final int PAD_B_DP = 4;
     private static final float LINE_WIDTH_DP = 1.6f; // 折线
     private static final float GRID_WIDTH_DP = 1f;   // 网格
@@ -59,8 +52,7 @@ public class ChartView extends View {
     private static final float LABEL_GAP_DP = 6f;    // 标签与端点的水平间距
     // 标签落在簇上方时相对簇顶端的抬升量（原 WebUI 同名口径：top − 4）；落下方的间距见 LABEL_H_DP + 1dp
     private static final float LABEL_LIFT_DP = 4f;
-    // 标注行高：webui 的同名常量 LABEL_H（其注释写「标签近似高度（10px 字体）」）。取常量而不用
-    // 实测 descent − ascent（≈ 11.7dp），是为了与 webui 逐项对齐时同一个量同名同值。
+    // 标注行高：取 webui 同名常量 LABEL_H，不用实测 descent − ascent（见 app/逻辑说明.md §7.4）
     private static final float LABEL_H_DP = 11f;
 
     private final Paint gridPaint = new Paint();
@@ -209,11 +201,9 @@ public class ChartView extends View {
     private void loadColors() {
         Resources res = getResources();
         Theme theme = getContext().getTheme();
-        // 底色 = 卡片底色（themes.xml 的 cardBackgroundColor = @color/app_surface_container）：
-        // halo 与圆点外圈靠它把穿过的曲线遮住，两者不同色就会露出异色描边
+        // 底色 = 卡片底色（halo 与圆点外圈靠它遮住穿过的曲线）；见 app/逻辑说明.md §7.5
         colorBg = res.getColor(R.color.app_surface_container, theme);
-        // 网格线：底色由纯白变为浅灰的卡片色后，原网格色与底色的明度差几乎减半（ΔRGB 34 → 16），
-        // 故改用主题的分隔线色（= 卡片描边色）保住可见度；深色下同样比原网格色更清楚
+        // 网格线走主题分隔线色（可见度论证见 app/逻辑说明.md §7.5）
         colorGrid = res.getColor(R.color.app_outline_variant, theme);
         colorAxis = res.getColor(R.color.chart_axis, theme);
         if (seriesColors.length != series.length) {
@@ -256,10 +246,7 @@ public class ChartView extends View {
         if (fH <= 8f * density) {
             return;
         }
-        // 接缝（转速圆点允许下越界的下限）：以绘图区下沿为基准外扩，但再被画布下沿收住，
-        // 否则圆点会画出画布（原来的 h−1 上限不够：圆点半径 3.2 + 外圈 0.5）。
-        // 注：PAD_B_DP 缩到 4 后上式第一项（fPadT + fH + 4dp = h）已高于第二项，实际恒取 h − 5dp，
-        // 故接缝位置不随 PAD_B 变化——圆点最低仍距画布下沿 5dp，不会被裁。
+        // 接缝（转速圆点允许下越界的下限）：以绘图区下沿外扩、再被画布下沿收住，圆点才不被裁（见 §7.3）
         fSeamY = Math.min(fPadT + fH + SEAM_EXTRA_DP * density, h - SEAM_BOTTOM_DP * density);
 
         titleLeft = getContext().getString(R.string.chart_axis_left);
@@ -284,7 +271,7 @@ public class ChartView extends View {
         }
 
         int rpmMin = config != null ? config.rpmAxisMin : 0;
-        // 左轴：先按"排除低于转速下限的样本"求范围；全被滤掉时退回不过滤（口径见 逻辑说明.md 的「曲线」一节〈双纵轴〉）
+        // 左轴：先按"排除低于转速下限的样本"求范围；全被滤掉时退回不过滤（口径见 app/逻辑说明.md §7.3〈双纵轴〉）
         ChartAxis lAxis = null;
         float[] ext = extent(left, win, rpmMin, true);
         if (ext == null) {
@@ -326,14 +313,8 @@ public class ChartView extends View {
     }
 
     /**
-     * 定左右内边距与两个轴标题的绘制位置：<b>两侧只留刻度数字的宽度</b>。
-     *
-     * <p>padL = 最宽的那条左轴刻度数字 + {@value #TICK_GAP_DP}dp，padR 同理取右侧制冷数字；
-     * 没有右轴时不占宽。原来两侧各写死 36dp，比数字实际所需宽出一截，白占绘图区。
-     *
-     * <p>两个轴标题都收进"数字块"里：左标题左沿与最左那条数字的左沿平齐、右标题右沿与最右那条
-     * 数字的右沿平齐（纵向仍在绘图区上方，横向允许向右/左越进曲线区，口径见 逻辑说明.md 的
-     * 「曲线」一节〈双纵轴〉——标题不挤压曲线空间）。
+     * 定左右内边距与两个轴标题的绘制位置：<b>两侧只留刻度数字的宽度</b>，标题收进"数字块"里、
+     * 不挤压曲线空间（口径见 app/逻辑说明.md §7.3）。
      *
      * <p>量的都是绘制用字号（{@value #TICK_TEXT_DP}sp），故这里对两支画笔先设一次字号，
      * 免得量到 onDraw 上一帧留下的字号（占位文字用的是 {@value #EMPTY_TEXT_DP}sp）。
@@ -420,7 +401,7 @@ public class ChartView extends View {
         }
     }
 
-    /** 每条开启系列一条 Path；断联处 moveTo 断开、不连桥（口径见 逻辑说明.md 的「曲线」一节〈断联空白〉）。 */
+    /** 每条开启系列一条 Path；断联处 moveTo 断开、不连桥（口径见 app/逻辑说明.md §7.2〈断联空白〉）。 */
     private void buildPaths(ChartWindow win, ChartAxis lAxis, ChartAxis rAxis) {
         paths = new Path[series.length];
         for (int si = 0; si < series.length; si++) {
@@ -458,7 +439,9 @@ public class ChartView extends View {
     }
 
     /**
-     * 头部标注：每条系列的最后一个有效样本；垂直近者合并成一行（与簇首比距离）。
+     * 头部标注：每条系列取最后一个有效样本作锚点，锚点文字**纵向占位盒相交即合并成一行**——判据挂在
+     * 标注的实际显示位置，不再看锚点圆点之间的距离。合并会改变落点、可能又压上邻居，故迭代
+     * 「落位 → 合并」直到无相交（每次合并至少少一个簇，必然终止）。
      *
      * <p><b>选边</b>：比较「簇顶端到上方最近障碍物」与「下方最近障碍物到簇底端」的空隙，空隙更大的一侧
      * 放标签；障碍物 = 同页其它曲线的端点圆点（即相邻簇的圆点边缘）与绘图区上下沿，<b>不含曲线中段</b>。
@@ -516,44 +499,85 @@ public class ChartView extends View {
         }
         Collections.sort(entries, (a, b) -> Float.compare(a.y, b.y));
 
-        float mergeY = (config != null ? config.labelMergePx : 9) * density;
-        List<List<ChartLabelOp>> clusters = new ArrayList<>();
-        List<ChartLabelOp> cur = null;
-        for (ChartLabelOp e : entries) {
-            if (cur != null && e.y - cur.get(0).y < mergeY) {
-                cur.add(e);
-            } else {
-                cur = new ArrayList<>();
-                cur.add(e);
-                clusters.add(cur);
-            }
-        }
-
         Paint.FontMetrics fm = tickPaint.getFontMetrics();
-        // 行高取 webui 同名常量（11dp），不用实测 descent − ascent（≈ 11.7dp，差 0.7dp）；
-        // fm 仍要留：下面「画布下沿 − descent」那条钳制要用实测值。
+        // 落位公式里的行高取 webui 同名常量（11dp）；判据用的真实文字占位走实测 descent − ascent
+        // （≈ 11.7dp，比常量多 0.7dp）。两者口径不同是有意的，见 app/逻辑说明.md §7.4。
         float labelH = LABEL_H_DP * density;
-        // 标注基线允许的最低位置：绘图区下沿 + 一行高（原口径）再被「画布下沿 − descent」收住，
-        // 否则最低那条标注的文字会越出画布被裁。
-        // 注：PAD_B_DP 缩到 4 后上式第一项（fPadT + fH + 一行高 = h − 4 + 11）已高于第二项，
-        // 实际恒取 h − descent，故这条上限位置不随 PAD_B 变化；但画布下沿的拖柄横条贴到了下沿，
-        // 最低那条标注现在与横条之间没有余量（原先隔着触控带居中留出的 4dp），真机需看是否打架。
+        // 标注基线允许的最低位置：绘图区下沿 + 一行高再被「画布下沿 − descent」收住，否则最低那条标注
+        // 会越出画布被裁。PAD_B_DP 缩到 4 后第一项恒高于第二项，实际恒取 h − descent（口径不变）。
         // 上侧不用额外钳制：ly 下限是 fPadT（17dp），已大于 10dp 文字的 ascent(≈9.3dp)
         float labelMaxY = Math.min(fPadT + fH + labelH, getHeight() - fm.descent);
-        List<ChartLabelOp> textOps = new ArrayList<>();
-        List<ChartDotOp> dotOps = new ArrayList<>();
         // 标注要占的高度：上方 = 抬升量 + 文字 ascent（负值取反）；下方 = 一行高 + 1dp 间隙 + 文字 descent
         float dotR = (DOT_RADIUS_DP + DOT_HALO_DP) * density;
         float needAbove = LABEL_LIFT_DP * density - fm.ascent;
         float needBelow = labelH + 1f * density + fm.descent;
+
+        // 起始：每个锚点各自一个簇——不再按锚点距离预合并，合并与否由落位后的盒相交决定
+        List<List<ChartLabelOp>> clusters = new ArrayList<>();
+        for (ChartLabelOp e : entries) {
+            List<ChartLabelOp> one = new ArrayList<>(1);
+            one.add(e);
+            clusters.add(one);
+        }
+        // 落位产物按簇下标存，每轮迭代重算；结束时它对应的就是最后那次 placeClusters 的簇集合
+        float[] clTx = new float[entries.size()];
+        float[] clLy = new float[entries.size()];
+        // 迭代「落位 → 相交即合并」直到无相交。每次合并至少少一个簇，故必然终止；
+        // mergeBudget 只是防御性上界（正常用不到：只剩一个簇时不可能再有相交对）。
+        int mergeBudget = entries.size();
+        while (true) {
+            placeClusters(clusters, clTx, clLy, labelH, labelMaxY, dotR, needAbove, needBelow);
+            if (mergeBudget-- <= 0) {
+                break;
+            }
+            List<List<ChartLabelOp>> merged = mergeOverlapping(clusters, clLy, fm);
+            if (merged == null) {
+                break;
+            }
+            clusters = merged;
+        }
+
+        List<ChartLabelOp> textOps = new ArrayList<>();
+        List<ChartDotOp> dotOps = new ArrayList<>();
+        for (int ci = 0; ci < clusters.size(); ci++) {
+            List<ChartLabelOp> cl = clusters.get(ci);
+            float ly = clLy[ci];
+            if (cl.size() == 1) {
+                ChartLabelOp e = cl.get(0);
+                textOps.add(new ChartLabelOp(e.text, clTx[ci], ly, e.color));
+                dotOps.add(new ChartDotOp(e.x, e.y, e.color));
+                continue;
+            }
+            float sep = tickPaint.measureText(" / ");
+            float tx = clTx[ci];
+            for (int i = 0; i < cl.size(); i++) {
+                ChartLabelOp e = cl.get(i);
+                textOps.add(new ChartLabelOp(e.text, tx, ly, e.color));
+                tx += e.w;
+                if (i < cl.size() - 1) {
+                    textOps.add(new ChartLabelOp(" / ", tx, ly, colorAxis));
+                    tx += sep;
+                }
+            }
+            for (ChartLabelOp e : cl) {
+                dotOps.add(new ChartDotOp(e.x, e.y, e.color));
+            }
+        }
+        labels = textOps.toArray(new ChartLabelOp[0]);
+        dots = dotOps.toArray(new ChartDotOp[0]);
+    }
+
+    /** 给一组簇算最终落点（纵向选边 + 横向起点），按下标写进 clTx/clLy。幂等，可在合并迭代里反复调用。 */
+    private void placeClusters(List<List<ChartLabelOp>> clusters, float[] clTx, float[] clLy,
+                               float labelH, float labelMaxY, float dotR,
+                               float needAbove, float needBelow) {
         for (int ci = 0; ci < clusters.size(); ci++) {
             List<ChartLabelOp> cl = clusters.get(ci);
             float top = cl.get(0).y;
             float bot = cl.get(cl.size() - 1).y;
-            // 空隙只量到最近的那个障碍物：同页其它曲线的端点圆点（上一个/下一个簇的圆点边缘），
-            // 该侧没有别的簇时就量到绘图区上沿/下沿。簇按 y 升序且两两不重叠（合并判据是"与簇首
-            // 的距离 < 阈值"，故前一簇的所有点必然在后一簇之上），所以只取相邻的那个簇就够。
-            // 障碍物不含曲线中段：标签压在某条曲线腰部这种情况本口径不判（只算端点圆点与画布上下沿）。
+            // 空隙只量到最近的那个障碍物：同页其它曲线的端点圆点（相邻簇的圆点边缘），该侧没有别的簇时
+            // 就量到绘图区上沿/下沿。簇按 y 升序且两两不重叠，故只取相邻的那个簇就够。
+            // 障碍物不含曲线中段：标签压在某条曲线腰部这种情况本口径不判。
             float obstacleAbove = fPadT;
             if (ci > 0) {
                 List<ChartLabelOp> prev = clusters.get(ci - 1);
@@ -577,11 +601,10 @@ public class ChartView extends View {
             if (ly > labelMaxY) {
                 ly = labelMaxY;
             }
+            clLy[ci] = ly;
 
             if (cl.size() == 1) {
-                ChartLabelOp e = cl.get(0);
-                textOps.add(new ChartLabelOp(e.text, e.tx, ly, e.color));
-                dotOps.add(new ChartDotOp(e.x, e.y, e.color));
+                clTx[ci] = cl.get(0).tx;   // 单簇：沿用该锚点先前算好的水平起点（含翻边与左界）
                 continue;
             }
             float cx = 0f;
@@ -602,21 +625,66 @@ public class ChartView extends View {
             if (tx < 2f * density) {
                 tx = 2f * density;
             }
-            for (int i = 0; i < cl.size(); i++) {
-                ChartLabelOp e = cl.get(i);
-                textOps.add(new ChartLabelOp(e.text, tx, ly, e.color));
-                tx += e.w;
-                if (i < cl.size() - 1) {
-                    textOps.add(new ChartLabelOp(" / ", tx, ly, colorAxis));
-                    tx += sep;
+            clTx[ci] = tx;
+        }
+    }
+
+    /**
+     * 标签**纵向**占位盒两两相交的簇归为一组（并查集）；无相交对时返回 null，调用方据此停止迭代。
+     * 只判纵向、横向不参与——横向取舍见 app/逻辑说明.md §7.4。
+     */
+    private static List<List<ChartLabelOp>> mergeOverlapping(List<List<ChartLabelOp>> clusters,
+                                                             float[] clLy, Paint.FontMetrics fm) {
+        int n = clusters.size();
+        int[] parent = new int[n];
+        for (int i = 0; i < n; i++) {
+            parent[i] = i;
+        }
+        boolean any = false;
+        for (int i = 0; i < n; i++) {
+            float lo = clLy[i] + fm.ascent;
+            float hi = clLy[i] + fm.descent;
+            for (int j = i + 1; j < n; j++) {
+                if (clLy[j] + fm.ascent < hi && lo < clLy[j] + fm.descent) {
+                    union(parent, i, j);
+                    any = true;
                 }
             }
-            for (ChartLabelOp e : cl) {
-                dotOps.add(new ChartDotOp(e.x, e.y, e.color));
-            }
         }
-        labels = textOps.toArray(new ChartLabelOp[0]);
-        dots = dotOps.toArray(new ChartDotOp[0]);
+        if (!any) {
+            return null;
+        }
+        // 按下标升序归组：组内保持 y 序，组间也保持 y 序
+        List<List<ChartLabelOp>> out = new ArrayList<>();
+        int[] slot = new int[n];
+        for (int i = 0; i < n; i++) {
+            slot[i] = -1;
+        }
+        for (int i = 0; i < n; i++) {
+            int r = find(parent, i);
+            if (slot[r] < 0) {
+                slot[r] = out.size();
+                out.add(new ArrayList<>());
+            }
+            out.get(slot[r]).addAll(clusters.get(i));
+        }
+        return out;
+    }
+
+    private static int find(int[] parent, int i) {
+        while (parent[i] != i) {
+            parent[i] = parent[parent[i]];
+            i = parent[i];
+        }
+        return i;
+    }
+
+    private static void union(int[] parent, int a, int b) {
+        int ra = find(parent, a);
+        int rb = find(parent, b);
+        if (ra != rb) {
+            parent[Math.max(ra, rb)] = Math.min(ra, rb);
+        }
     }
 
     // ==================== 绘制（无计算、无分配） ====================

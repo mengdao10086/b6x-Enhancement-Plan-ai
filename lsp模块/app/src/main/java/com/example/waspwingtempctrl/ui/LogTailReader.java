@@ -17,22 +17,13 @@ import java.util.Locale;
  * 日志尾读 + 截断 + 分级 + 过滤。**全部在后台线程调用**（唯一入口是
  * {@link #read(Context, File, String, String, String)}）。
  *
- * <p>三条硬约束：
- * <ol>
- *   <li>只读文件末尾 {@link #TAIL_BYTES} 字节，语义等价 {@code tail -c 400KB}
- *       （口径见 {@code lsp模块/daemon/逻辑说明.md} 的「日志页」一节），绝不整文件读入。</li>
- *   <li>读取一律走 {@link AppFiles}（{@link AppFiles#readTailText(File, int)}），
- *       不自己开 {@code FileInputStream}，失败信息才不会丢。</li>
- *   <li>渲染行数上限 {@link #MAX_LINES}：400KB 全量上屏会卡死，只保留尾部这么多行，
- *       界面必须显式写出这个截断；<b>只切/只解析尾部这一段</b>，不把整个窗口切成数组。</li>
- * </ol>
- *
- * <p><b>过滤顺序</b>：先按 {@link #MAX_LINES} 截出「最近 N 行」，再在其中做关键词匹配。
- * 因此界面上的「最近 N 行」就是匹配分母，含义与显示一致（命中范围仅限该窗口）。
+ * <p>三条硬约束（只读末尾 {@link #TAIL_BYTES} 字节 / 一律走 {@link AppFiles} 的
+ * {@link AppFiles#readTailText(File, int)} / 渲染行数上限 {@link #MAX_LINES}）与过滤顺序：
+ * 见 {@code app/逻辑说明.md} §8.3。
  */
 final class LogTailReader {
 
-    /** 尾读上限：等价 {@code tail -c 400KB}（口径见 {@code 逻辑说明.md} 的「日志页」一节）。 */
+    /** 尾读上限：等价 {@code tail -c 400KB}（口径见 {@code app/逻辑说明.md} §8.3）。 */
     static final int TAIL_BYTES = 400 * 1024;
 
     /** 单次渲染的行数上限（性能硬约束）。 */

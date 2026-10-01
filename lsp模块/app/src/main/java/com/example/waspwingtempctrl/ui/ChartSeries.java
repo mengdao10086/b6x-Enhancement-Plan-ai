@@ -7,14 +7,14 @@ import java.util.Locale;
 /**
  * 一条曲线的静态定义与会话内开关状态。
  *
- * <p>图例顺序与默认开关（口径见 {@code 逻辑说明.md} 的「曲线」一节〈系列开关〉）：6 条曲线，
+ * <p>图例顺序与默认开关（口径见 {@code app/逻辑说明.md} §7.6〈系列开关〉）：6 条曲线，
  * 默认除「冷端℃」「CPU℃」外全开；左轴 5 条（温度 ℃ 与风扇百 rpm 共轴），右轴恒 1 条（制冷）。
  *
  * <p>取值分两种口径，<b>不可混用</b>：
  * <ul>
- *   <li>{@link #value} —— 绘图与标注用，风扇折算为百 rpm（{@code 逻辑说明.md} 的「曲线」一节〈双纵轴〉）。</li>
+ *   <li>{@link #value} —— 绘图与标注用，风扇折算为百 rpm（{@code app/逻辑说明.md} §7.3〈双纵轴〉）。</li>
  *   <li>{@link #axisValue} —— 仅纵轴上下限计算用，低于 {@code UI_RPM_AXIS_MIN} 的转速样本
- *       返回无效（按原始整数 rpm 比较），故低速段允许画到图外（{@code 逻辑说明.md} 的「曲线」一节〈双纵轴〉）。</li>
+ *       返回无效（按原始整数 rpm 比较），故低速段允许画到图外（{@code app/逻辑说明.md} §7.3〈双纵轴〉）。</li>
  * </ul>
  */
 final class ChartSeries {
@@ -71,9 +71,8 @@ final class ChartSeries {
     /**
      * 图例是否在该条之前另起一行（经 {@link WrapRowLayout#setBreakBefore} 施加）。
      *
-     * <p>{@code true} 的是「冷端℃ / CPU℃」这一行——两条<b>可选</b>温度传感器，与第一行的
-     * 电池/制冷/风扇/热端不是一类；默认关闭（见 {@link #createAll}），排到第二行后图例不再
-     * 随各项自然宽随机掉行。图例顺序即 {@link #createAll} 的数组顺序，故此处只需判定行首项。
+     * <p>{@code true} 的是「冷端℃ / CPU℃」这一行——两条可选温度传感器，与第一行不是一类；默认关闭、
+     * 排到第二行后图例不再随机掉行（见 app/逻辑说明.md §7.6）。图例顺序即 {@link #createAll} 的数组顺序。
      */
     static boolean startsLegendRow(ChartSeries s) {
         return "cold".equals(s.id);

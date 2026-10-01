@@ -12,15 +12,12 @@ import java.nio.charset.Charset;
 import java.nio.charset.StandardCharsets;
 
 /**
- * 界面直读守护进程产物的统一入口（曲线数据 / 日志页共用）。
+ * 界面直读守护进程产物的统一入口（曲线数据 / 日志页共用）。两个数据文件都落在 app 私有目录，
+ * 同 uid 普通 File IO 即可读，<b>不需要 root</b>。
  *
- * <p><b>不需要 root</b>：两个数据文件都落在 app 私有目录，同 uid 普通 File IO 即可读。
- *
- * <p><b>但这是一个未真机验证的假设</b>：文件由 <b>root 的守护进程</b>创建，SELinux 标签层面 app 能否直读
- * 尚未验证。因此本类<b>不吞异常</b>：读取失败一律抛出带「路径 + 异常类型 + errno 文案」的
- * {@link IOException}，界面必须把 {@link #diagnose(File)} 的结果原样展示，不许静默留白。
- *
- * <p>本类不做任何 root 读取兜底（先用直读，真机验证后再说）。
+ * <p><b>未经真机验证</b>：文件由 root 的守护进程创建，SELinux 标签层面 app 能否直读尚未验证。
+ * 因此本类<b>不吞异常</b>，读取失败一律抛出带「路径 + 异常类型 + errno 文案」的 {@link IOException}，
+ * 界面必须把 {@link #diagnose(File)} 的结果原样展示，不许静默留白。详见 app/逻辑说明.md §3.6。
  */
 public final class AppFiles {
 
@@ -105,9 +102,8 @@ public final class AppFiles {
     }
 
     /**
-     * 多行诊断串。<b>读取失败时界面必须展示这一段</b>，不要用「暂无数据」之类的话盖过去。
-     *
-     * <p>包含：具体路径、stat 结果、errno、以及与本文件落点相关的两条已知风险提示。
+     * 多行诊断串，包含具体路径、stat 结果、errno 与两条已知风险提示。
+     * <b>读取失败时界面必须展示这一段</b>，不要用「暂无数据」之类的话盖过去。详见 app/逻辑说明.md §3.6。
      */
     public static String diagnose(File file) {
         Probe p = probe(file);

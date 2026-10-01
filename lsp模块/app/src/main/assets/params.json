@@ -95,13 +95,12 @@
       "master": null,
       "keys": [
         "UI_GAP_SEC",
-        "UI_LABEL_MERGE_PX",
         "UI_RPM_AXIS_MIN",
         "UI_CURVE_FILTER",
         "UI_BACK_HIDE",
         "UI_START_PAGE",
-        "UI_DEPLOY_ENTRY",
-        "UI_AUTO_UPDATE"
+        "UI_AUTO_UPDATE",
+        "UI_DEPLOY_ENTRY"
       ]
     }
   ],
@@ -1602,23 +1601,6 @@
         }
       ]
     },
-    "UI_LABEL_MERGE_PX": {
-      "key": "UI_LABEL_MERGE_PX",
-      "group": "webui",
-      "role": "setting",
-      "type": "int",
-      "label": "标注合并阈值(px)",
-      "desc": "两条及以上曲线头部垂直相距不超过此值时合并为一个标签行；默认 9=0.8×标签高",
-      "unit": "px（像素）",
-      "unitNote": "",
-      "default": 9,
-      "factory": 9,
-      "min": 1,
-      "max": 40,
-      "requires": [],
-      "daemonConsumes": false,
-      "fields": null
-    },
     "UI_RPM_AXIS_MIN": {
       "key": "UI_RPM_AXIS_MIN",
       "group": "webui",
@@ -1723,23 +1705,6 @@
         }
       ]
     },
-    "UI_DEPLOY_ENTRY": {
-      "key": "UI_DEPLOY_ENTRY",
-      "group": "webui",
-      "role": "setting",
-      "type": "switch",
-      "label": "需重新部署时进状态页",
-      "desc": "需重新部署时先进入状态页并给出提示；关闭则照常进入默认页面",
-      "unit": "",
-      "unitNote": "布尔开关，取值 0/1，无单位",
-      "default": 1,
-      "factory": 1,
-      "min": 0,
-      "max": 1,
-      "requires": [],
-      "daemonConsumes": false,
-      "fields": null
-    },
     "UI_AUTO_UPDATE": {
       "key": "UI_AUTO_UPDATE",
       "group": "webui",
@@ -1755,6 +1720,26 @@
       "max": 1,
       "requires": [],
       "daemonConsumes": false,
+      "fields": null
+    },
+    "UI_DEPLOY_ENTRY": {
+      "key": "UI_DEPLOY_ENTRY",
+      "group": "webui",
+      "role": "setting",
+      "type": "switch",
+      "label": "需重新部署时进状态页",
+      "desc": "需重新部署时先进入状态页并给出提示；关闭则照常进入默认页面（自动更新开启时本项隐藏并按关闭处理）",
+      "unit": "",
+      "unitNote": "布尔开关，取值 0/1，无单位",
+      "default": 1,
+      "factory": 1,
+      "min": 0,
+      "max": 1,
+      "requires": [],
+      "daemonConsumes": false,
+      "hiddenWhen": [
+        "UI_AUTO_UPDATE"
+      ],
       "fields": null
     }
   }

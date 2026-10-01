@@ -11,15 +11,9 @@ import com.example.waspwingtempctrl.R;
 import com.example.waspwingtempctrl.StartupTiming;
 
 /**
- * 建表取视图的<b>唯一入口</b>：先问预制造器要（见 {@link ConfigPreInflater}），要不到才现场 inflate。
- *
- * <p>两条路造出来的是同一种控件：同一份布局、同一个带视图工厂的 inflater 上下文、同一类型的父容器
- * （预制造时用同类型的空壳父容器生成 LayoutParams，见 {@link ConfigPreInflater#produceAll}），
- * 故"取到预制造件"与"现场造"在功能与像素上没有区别，只差那一段 inflate 花在哪根线程上。
- *
- * <p><b>取不到是常态而非异常</b>：预制造没赶上、件数不够、本页压根不启用预制造（设置页传 null），
- * 都走"现场造"这一路，行为与不做预制造时逐字一致。故调用方不需要为本类写任何降级分支——
- * 这是"预制造与消费不要求数量一致"这条不变量的落点（见 {@link ConfigPreInflater} 的〈备料口径〉）。
+ * 建表取视图的<b>唯一入口</b>：先问预制造器要（见 {@link ConfigPreInflater}），要不到才现场 inflate ——
+ * 两条路造出的是同一种控件（只差 inflate 花在哪根线程），<b>取不到是常态而非异常</b>。
+ * 设计见 {@code app/逻辑说明.md} §6.2。
  */
 final class ViewSource {
 
@@ -55,12 +49,10 @@ final class ViewSource {
     }
 
     /**
-     * 未命中计数落到哪个槽：按布局 id 分到 {@link StartupTiming} 的七个槽之一。
-     *
-     * <p>只服务诊断区"缺的是哪几种件"这一个问题（见方案 §1）。<b>写成 if/else 而不是 switch</b>：
-     * 本工程的 R 字段不是编译期常量（{@code android.nonTransitiveRClass}），做不了 {@code case} 标签。
-     * 认不出来（将来新增的布局）一律落到"字段"槽——这是记账口径的兜底，不参与取件路径的任何判断，
-     * 取件结果与本方法无关。
+     * 未命中计数落到哪个槽：按布局 id 分到 {@link StartupTiming} 的七个槽之一，只服务诊断区
+     * 「缺的是哪几种件」这一问题（记账口径见 {@code app/逻辑说明.md} §5.3）。<b>写成 if/else 而不是
+     * switch</b>：本工程的 R 字段不是编译期常量（{@code android.nonTransitiveRClass}），做不了
+     * {@code case} 标签。认不出来（将来新增的布局）一律落到"字段"槽——记账口径的兜底，不参与取件路径。
      */
     private static int missSlot(int layoutId) {
         if (layoutId == R.layout.item_config_group) {

@@ -14,19 +14,9 @@ import java.util.Map;
 import java.util.concurrent.ExecutorService;
 
 /**
- * 「改即存」的防抖写入队列。
- *
- * <h3>为什么必须防抖</h3>
- * C 端每 5 秒 {@code stat()} + {@code st_mtime} 轮询热重载，而 {@code st_mtime} 只有<b>秒级</b>精度：
- * 两次写入间隔 &lt; 1 秒时 C 端可能不重载。故连续改动合并成一次落盘，窗口 {@link #DEBOUNCE_MS}
- * 取 1200ms（&gt; 1000ms，留出写盘与时钟粒度余量）。
- *
- * <h3>为什么批量</h3>
- * 多个键的改动合并为一次 {@link ConfigStore#setAll}，只触发一次临时文件 + rename，只碰一次 mtime。
- *
- * <h3>线程</h3>
- * 本类只在<b>主线程</b>调用（Handler 定时 + {@code pending} 表）；落盘跑在外部传入的单线程
- * executor 上，结果回主线程回调。{@code pending} 保留到写结果返回为止，避免写盘期间界面回退到旧值。
+ * 「改即存」的防抖写入队列：连续改动合并成一次 {@link ConfigStore#setAll}，只触发一次临时文件
+ * + rename。本类只在<b>主线程</b>调用（Handler 定时 + {@code pending} 表），落盘跑在外部传入的
+ * 单线程 executor 上、结果回主线程回调。防抖窗口与线程模型详见 app/逻辑说明.md §3.2。
  */
 final class ConfigWriteQueue {
 
@@ -83,8 +73,9 @@ final class ConfigWriteQueue {
     }
 
     /**
-     * 立即冲刷待写项。<b>onPause / onDestroyView / 页面隐藏时必须调</b>：
-     * 被隐藏的 Fragment 生命周期仍是 RESUMED，onPause 不会来，不主动冲刷就会把改动留在内存里。
+     * 立即冲刷待写项。<b>onPause / onDestroyView / 页面隐藏时必须调</b>
+     * （被隐藏的 Fragment 生命周期仍是 RESUMED，不主动冲刷就会把改动留在内存里）。
+     * 详见 app/逻辑说明.md §3.2。
      */
     void flushNow() {
         main.removeCallbacks(flushTask);

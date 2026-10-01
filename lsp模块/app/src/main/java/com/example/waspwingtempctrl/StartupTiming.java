@@ -9,33 +9,8 @@ import java.util.concurrent.atomic.AtomicLongArray;
  * 启动耗时的<b>旁路记账</b>：进程级几张静态槽位，量出"启动那一刻各段各花了多少毫秒"，供诊断区展示
  * （真机排障用，不参与任何判断，也不影响任何逻辑）。
  *
- * <h3>口径</h3>
- * <ul>
- *   <li><b>原点</b> = {@link #begin()} 被调的那一刻（{@code SetupActivity.onCreate} 首行）。故所有数字都是
- *       "相对 onCreate 首行"的毫秒数，同一进程内可比，跨启动也可比；但<b>不能</b>与 logcat 的
- *       {@code Displayed} 之类直接相减（那些从进程 fork 起算）。</li>
- *   <li><b>每槽只记第一次</b>（首次写入胜出，见 {@link #span}/{@link #mark}）：报文说的就是"本次进程冷启动
- *       那一次"。故进程内第二次进 Activity（暖启动）不会把这些数字刷成别的含义。<b>例外</b>是两个计数槽
- *       （{@link #count}）：它们就是"每来一次加一"，故报的是"到此刻为止一共几次"。</li>
- *   <li><b>计时贴在"干活的地方"</b>：并行之后同一份活可能由这根线程干、也可能由那根干（谁先到谁干，
- *       后到的命中缓存），若在"调用的地方"计时，先干的那条会把耗时算走、后到的只报 0——数字随调度翻脸。
- *       故各调用方把计时点放在真正读盘/解析的那几行上。</li>
- * </ul>
- *
- * <h3>为什么放在主包</h3>
- * 记账点既在 {@link ConfigStore}（核心）也在 {@code ui} 各页里：放主包则两边一致地
- * {@code import com.example.waspwingtempctrl.StartupTiming}，方向是 {@code ui → 主包}（既有约定）；
- * 若放 {@code ui} 包，就会多出一条"核心反向依赖界面包"的边。
- *
- * <h3>开销</h3>
- * 每个记账点只有一到两次 {@code CAS}（记一段是"起点 + 耗时"两次；失败即放弃，<b>不重试、不自旋、
- * 不阻塞</b>）或一次 volatile 读 + 一次减法；建表细分的累计槽（{@link #accBegin}/{@link #accEnd}）更轻
- * ——只在建表的主线程上对一块普通 {@code long[]} 做两次数组访问与一次加法，<b>无锁、无 CAS</b>，
- * 一整轮建表收尾才写一次展示槽位。全部记账<b>无 IO、不建线程、不轮询、不分配对象</b>
- * （只有 {@link #report()} 拼文本时分配一个 StringBuilder）。除两个计数槽外，每槽在进程内只可能被写
- * 一次，故竞争窗口只存在于启动那一瞬；计数槽会一直被写，但它每次只有两次原子数组操作，且只由主线程写。
- * 所有方法都<b>无抛点</b>（无 IO、无解析、无数组增长、无除零），故它在链上调用
- * 不可能改变原有逻辑。
+ * <p>口径（原点 / 每槽首写胜出 / 计时贴干活处）、放主包的理由、开销论证与各槽位判读，
+ * 见 {@code app/逻辑说明.md} §5.3。
  */
 public final class StartupTiming {
 
@@ -56,12 +31,7 @@ public final class StartupTiming {
      * 末尾就置「就绪」——建表两段的里程碑之一）。
      */
     public static final int FORM_BUILD_HEAD = 5;
-    /**
-     * 建表<b>可见后段</b>：建各行与全部字段 + 值上屏 + 自检 + 诊断。
-     *
-     * <p>两段之和≈原先那一个"主线程建表"槽（总工作量没变），拆开是为了看清"用户实际等了多久"
-     * （= 首屏段）与"用户不用等的活有多重"（= 可见后段）。
-     */
+    /** 建表<b>可见后段</b>：建各行与全部字段 + 值上屏 + 自检 + 诊断（与首屏段的拆并口径见 {@code app/逻辑说明.md} §5.3）。 */
     public static final int FORM_BUILD_ROWS = 6;
     // ---- 建表内部的 8 个累计槽（见 {@link #accBegin}/{@link #accEnd}）：只在建表的主线程上写 ----
     /** 累计：控件制造（inflate + 构造 + LayoutParams 样式解析）。 */
@@ -104,19 +74,14 @@ public final class StartupTiming {
     public static final int MARK_FORM_DATA = 21;
     /** 时间点：首轮 {@code onPageSelected}。 */
     public static final int MARK_PAGE_SELECTED = 22;
-    /**
-     * 时间点：参数区<b>露出之后</b>的第一次 pre-draw。
-     *
-     * <p>与建表两段的接缝相减，即"参数区露出之后到真正绘制之前"那一段（vsync 与布局，还是队列里的
-     * 别的活）。露出点落在"建表·首屏"末尾。
-     */
+    /** 时间点：参数区<b>露出之后</b>的第一次 pre-draw（与建表两段接缝相减的读法见 {@code app/逻辑说明.md} §5.3）。 */
     public static final int MARK_AFTER_BUILD_FRAME = 23;
     /** 时间点：曲线首次上数据完成。 */
     public static final int MARK_CHART_DATA = 24;
     /** 时间点：诊断正文上屏（收起态下不上屏，故通常为"—"；展开那一刻才有值）。 */
     public static final int MARK_DIAG_APPLY = 25;
     // ---- 预制造（B）的埋点：2 个累计计数 + 6 个成因 ----
-    // 全部只记账，不改变任何既有分支；判读口径见方案文件 §5 的那张表。
+    // 全部只记账，不改变任何既有分支；判读口径见 app/逻辑说明.md §5.3。
 
     /** 累计计数：取件命中（{@code ViewSource} 从池子里拿到了件）。 */
     public static final int PRE_HIT = 26;
@@ -134,13 +99,13 @@ public final class StartupTiming {
     public static final int MARK_PRE_OWNER_MISMATCH = 32;
     /** 时间点：预制造闸门已置位（本轮不是进程内第一次打开，备料不会重跑）。 */
     public static final int MARK_PRE_ALREADY_STARTED = 33;
-    // ---- 建表首读那趟后台任务的两端（只服务"数据到位为什么晚"这一个问题，见方案 §2） ----
+    // ---- 建表首读那趟后台任务的两端（只服务"数据到位为什么晚"这一个问题，见 app/逻辑说明.md §5.3） ----
 
     /** 时间点：首读后台任务开工（走的是降级路；就地取快照那条快路上本槽不记）。 */
     public static final int MARK_CFG_IO_BEGIN = 34;
     /** 时间点：首读后台任务算完、即将回主线程那一刻。 */
     public static final int MARK_CFG_IO_DONE = 35;
-    // ---- 未命中构成：按布局 id 各一个累计计数（把"缺的是哪几种件"一次定死，见方案 §1） ----
+    // ---- 未命中构成：按布局 id 各一个累计计数（把"缺的是哪几种件"一次定死，见 app/逻辑说明.md §5.3） ----
 
     /** 未命中计数：分组卡。 */
     public static final int MISS_GROUP = 36;
@@ -156,7 +121,7 @@ public final class StartupTiming {
     public static final int MISS_FIELD_SWITCH = 41;
     /** 未命中计数：字段。 */
     public static final int MISS_FIELD = 42;
-    // ---- 备料"结构性缺件 vs 没赶上"的判据（见方案 §3.2）：两个数字快照 ----
+    // ---- 备料"结构性缺件 vs 没赶上"的判据（见 app/逻辑说明.md §5.3）：两个数字快照 ----
 
     /**
      * 数字快照：段二<b>开跑那一刻</b>池子里已经取走了多少件（即 {@link #PRE_HIT} 的当前值）。
@@ -178,12 +143,8 @@ public final class StartupTiming {
     private static final AtomicLong ORIGIN = new AtomicLong();
 
     /**
-     * 累计槽的进行态：{@code [i]} = 该槽首次计入的时刻（相对原点；{@code -1} = 没计入过）、
-     * 各次计入的毫秒合计。
-     *
-     * <p>普通 {@code long[]} 而非原子数组：<b>只有建表的主线程会写</b>（{@code accBegin}/{@code accEnd}/
-     * {@code accReset}/{@code accFlush} 全部由建表那条链调用），故不需要任何同步；写进展示槽位的那一步
-     * （{@link #accFlush}）才用 {@link AtomicLongArray} 的 CAS，读它的诊断区因此永远看到一份定值。
+     * 累计槽的进行态：{@code [i]} = 首次计入时刻（相对原点；{@code -1} = 没计入过）与各次计入的毫秒合计。
+     * 普通 {@code long[]}（只建表主线程写、无需同步；{@link #accFlush} 才用 CAS）——理由见 {@code app/逻辑说明.md} §5.3。
      */
     private static final long[] ACC_FIRST = new long[SUB_COUNT];
     private static final long[] ACC_MS = new long[SUB_COUNT];
@@ -289,9 +250,7 @@ public final class StartupTiming {
 
     /**
      * 把累计槽写进展示槽位（每轮建表收尾调一次）：沿用"首次写入胜出"，没计入过的槽留空。
-     *
-     * <p>写在建表末行而不是每次 {@link #accEnd} 之后：一是省掉 134 次同步开销，二是这一轮建表没跑完时
-     * 诊断区读到的仍是上一轮的定值（不出现"只填了一半"的中间态）。
+     * 为何写在建表末行而非每次 {@link #accEnd} 之后，见 {@code app/逻辑说明.md} §5.3。
      */
     public static void accFlush() {
         for (int i = 0; i < SUB_COUNT; i++) {
@@ -329,7 +288,7 @@ public final class StartupTiming {
             appendSpan(sb, "建表·首屏", FORM_BUILD_HEAD);
             appendSpan(sb, "建表·可见后", FORM_BUILD_ROWS);
             appendSubs(sb);
-            // 预制造（B）：命中/未命中看"池子里有没有件"，六个成因看"谁是死因"（判读口径见方案文件 §5）
+            // 预制造（B）：命中/未命中看"池子里有没有件"，六个成因看"谁是死因"（判读口径见 app/逻辑说明.md §5.3）
             sb.append("\n预制造 · 命中 ").append(counter(PRE_HIT))
                     .append(" · 未命中 ").append(counter(PRE_MISS))
                     .append(" · 段二起已备 ").append(moment(POOL_AT_ROWS_BEGIN))
@@ -340,7 +299,7 @@ public final class StartupTiming {
                     .append(" · 已关门 ").append(moment(MARK_PRE_CLOSED))
                     .append(" · 身份不符 ").append(moment(MARK_PRE_OWNER_MISMATCH))
                     .append(" · 已启动 ").append(moment(MARK_PRE_ALREADY_STARTED));
-            // 未命中构成：把"缺的是哪几种件"按布局 id 摊开（判读见方案 §1）
+            // 未命中构成：把"缺的是哪几种件"按布局 id 摊开（判读见 app/逻辑说明.md §5.3）
             sb.append("\n未命中构成 · 卡 ").append(counter(MISS_GROUP))
                     .append(" · 行 ").append(counter(MISS_ROW))
                     .append(" · 开关 ").append(counter(MISS_KEY_SWITCH))
@@ -374,13 +333,8 @@ public final class StartupTiming {
     }
 
     /**
-     * 建表细分的八项（每行三项，紧跟在两个建表段之后）+ 八项合计。
-     *
-     * <p>读法：<b>八项合计与"建表·首屏 + 建表·可见后"相减，差额就是没埋到点上的胶水代码</b>；
-     * 某一项占比高就说明那一类活是瓶颈（判据见方案文件 §4.3）。一项都没计入过就整段不显示。
-     *
-     * <p>"自检 / 徽标 / 诊断提交"三项原先合成一项"自检对齐"：拆开是为了看清诊断自身占多少
-     * （诊断区收起时"诊断提交"应≈0，见 {@link #FORM_SUB_DIAG_SUBMIT}）。
+     * 建表细分的八项（每行三项，紧跟两个建表段之后）+ 八项合计。读法与拆并史见 {@code app/逻辑说明.md} §5.3。
+     * 一项都没计入过就整段不显示。
      */
     private static void appendSubs(StringBuilder sb) {
         if (!anySubRecorded()) {

@@ -21,27 +21,12 @@ import java.util.concurrent.RejectedExecutionException;
 
 /**
  * 配置页的诊断区（<b>只读展示</b>）：{@link ConfigStore#describeState(ConfigStore.Snapshot)}
- * （含配置文件路径与大小、落点是否与守护进程一致、参数定义加载情况（键数或失败原因）、
- * 文件里的未定义键与读取提示）与配置 mtime。调用方已读过盘时把那份快照传进来
- * （{@link #refresh(Snapshot)}），本区不再多读一次 {@code profile.conf}。
+ * （含配置文件路径与大小、落点是否与守护进程一致、参数定义加载情况、未定义键与读取提示）与配置 mtime。
+ * 调用方已读过盘时把那份快照传进来（{@link #refresh(Snapshot)}），本区不再多读一次 {@code profile.conf}。
  *
- * <p>本区整块默认折叠（{@code config_diag_body} 初始 gone）：数据文件信息、键渲染自检
- * （由 {@link ConfigFormFragment} 写进 {@code config_diag_selfcheck}）与本节正文都在折叠体内，
- * 展开才占高度。本类只管自己的两个 TextView，不碰自检那份（它每次刷新都会被整段覆盖）。
- *
- * <p>本区不提供任何写动作：出厂配置由 {@link com.example.waspwingtempctrl.Deployer} 在部署时写出
- * （{@code ConfigStore.writeFactoryIfAbsent()} 的 javadoc 明确"界面不要自己调"），
- * 界面另开一个写入口就是绕过 I5 的重复写入路径。
- *
- * <p><b>启动耗时是追加在正文之后的</b>（见 {@link StartupTiming}）：既有的诊断正文一个字不动，只在
- * 其后空一行接一段"启动各段耗时"。它落在本折叠体内（默认收起），故不新增开关也不会常驻界面；
- * 展开时重算一次，好让比"建表"更晚的时间点也现出来。真机排障用，不参与任何判断。
- *
- * <p><b>收起态下不上屏</b>：本区整块默认收起，收起期间的刷新只登记一笔欠账（见 {@link #refresh(Snapshot)}），
- * 展开那一刻才现算现上屏——启动链上那一次"建表触发的刷新"因此不再落在关键路径上；数字一个都不少
- * （展开即见），只是"何时算、何时上屏"推迟到用户真的看得见的时候。
- *
- * <p>只调 {@link ConfigStore} 的公开接口，不碰文件、不拼 shell；读取在后台线程，主线程只做渲染。
+ * <p>整块默认折叠（收起态下只登记欠账、不上屏）；启动耗时追加在正文之后；不提供任何写动作（I5）。
+ * 只调 {@link ConfigStore} 的公开接口，读取在后台线程、主线程只做渲染。
+ * 设计口径（收起欠账 / 在途排队 / 复用快照）见 app 逻辑说明.md §6.5。
  */
 final class ConfigDiagnostics {
 
@@ -69,11 +54,8 @@ final class ConfigDiagnostics {
     /** 排队请求里最近一次带来的快照（有"自读盘"的请求时以自读盘为准）。 */
     private Snapshot queuedKnown;
     /**
-     * 收起期间欠下的一次刷新（见 {@link #refresh(Snapshot)} 与 {@link #setExpanded(boolean)}）。
-     *
-     * <p>本区整块默认收起，收起时它一个字都看不见：为它跑一趟后台、再往三个不可见的 TextView 里
-     * setText（正文那次还会把整块标脏、连带一次整页重排），在启动链上是纯开销。故收起时只登记这一笔，
-     * 展开那一刻再补。多次请求合并成一笔，口径与"在途排队"那三个字段一致（自读盘优先、否则取最新快照）。
+     * 收起期间欠下的一次刷新（见 {@link #refresh(Snapshot)} 与 {@link #setExpanded(boolean)}）：
+     * 收起时只登记、不上屏，展开那一刻再补；多次请求合并成一笔。见 app 逻辑说明.md §6.5。
      */
     private boolean pendingRefresh;
     private boolean pendingSelfRead;
@@ -106,22 +88,19 @@ final class ConfigDiagnostics {
         if (!value) {
             return;
         }
-        // 展开那一刻才是用户看它的时候。两种情况都走"现算现上屏"：一是收起期间欠下的那一笔
-        // （见 refresh），二是压根没上过屏（例如定义没到位那条路，或页面刚建好就展开）
+        // 展开那一刻才是用户看它的时候：欠账或压根没上过屏，都走"现算现上屏"（见 app 逻辑说明.md §6.5）
         if (pendingRefresh || lastState == null) {
             flushPending();
             return;
         }
-        // 有现成正文：用最近一次那份重算追加段，好让比"建表"更晚的时间点（首帧 / 撤占位层）也现出来。
+        // 有现成正文：用最近一次那份重算追加段，好让比"建表"更晚的时间点（首帧 / 段二收尾）也现出来。
         // 只读几个静态槽位，无 IO、无后台线程
         stateView.setText(lastState + timingBlock());
     }
 
     /**
-     * 补上收起期间欠下的那一笔刷新（没有欠账时按"自读盘"补一次，用于"一次都没上过屏"）。
-     *
-     * <p>与 {@link #refresh(Snapshot)} 的在途排队同构：合并规则一致，只是触发时机从"这一轮结束后"
-     * 换成"展开那一刻"。
+     * 补上收起期间欠下的那一笔刷新（没有欠账时按"自读盘"补一次，用于"一次都没上过屏"）；
+     * 与 {@link #refresh(Snapshot)} 的在途排队同构。
      */
     private void flushPending() {
         final Snapshot next = pendingSelfRead ? null : pendingKnown;
@@ -146,19 +125,9 @@ final class ConfigDiagnostics {
     }
 
     /**
-     * 后台刷新诊断信息，复用调用方刚读到的快照。
-     *
-     * <p>配置页每次刷新都是「读一次盘 → 上屏值 → 上屏诊断」：把那份快照传进来，
-     * 本类与 {@link ConfigStore#describeState(Snapshot)} 都不再各读一次 {@code profile.conf}。
-     * mtime 也取快照自己的字段。
-     *
-     * <p><b>在途期间到达的请求排队重跑，不丢</b>：一次刷新要跑一趟后台（自读盘时还要读文件），
-     * 期间的请求若直接丢掉，写盘刚触发的刷新就可能被吞掉，诊断区一直停在改盘之前的状态。
-     * 故在途时只登记"还欠一次刷新"（{@link #queuedKnown} 记下最新的快照），本轮上屏后立刻再刷一次。
-     * 两路请求合一时以"自读盘"为准：它读的是磁盘当下状态，而快照可能正是写盘之前的那一份。
-     *
-     * <p><b>收起态下只登记、不上屏</b>（见 {@link #pendingRefresh}）：收起时整块都看不见，为它跑一趟
-     * 后台 + 三次 setText 在启动链上是纯开销；展开那一刻由 {@link #setExpanded(boolean)} 补上。
+     * 后台刷新诊断信息，复用调用方刚读到的快照（与本类、{@link ConfigStore#describeState(Snapshot)}
+     * 都不再各读一次 {@code profile.conf}；mtime 也取快照自己的字段）。在途期间到达的请求排队重跑、不丢；
+     * 收起态下只登记、不上屏。见 app 逻辑说明.md §6.5。
      *
      * @param known 调用方刚读到的快照；null = 本类自己读一次
      */

@@ -141,6 +141,10 @@ def build_params_json(definition):
             "requires": list(entry.get("requires", [])),
             "daemonConsumes": bool(entry.get("daemonConsumes", True)),
         }
+        # 反向依赖：这些键中任一为 1 时本行在界面上隐藏（仅界面渲染用，不给 C 端）。
+        # 只有定义里写了才输出，未写则产物与改动前逐字节一致。
+        if entry.get("hiddenWhen"):
+            item["hiddenWhen"] = list(entry["hiddenWhen"])
         for opt in ("defaultNote", "factoryNote", "rangeNote"):
             if entry.get(opt):
                 item[opt] = entry[opt]

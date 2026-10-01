@@ -30,9 +30,9 @@ final class ChartSample {
     /** 实际制冷强度（制冷档位）。 */
     final float cool;
 
-    /** 电池滤波后的曲线值（仅该条参与滤波，{@code 逻辑说明.md} 的「曲线」一节〈热端与电池曲线滤波〉）。 */
+    /** 电池滤波后的曲线值（仅该条参与滤波，{@code app/逻辑说明.md} §7.2〈热端与电池曲线滤波〉）。 */
     float battF = INVALID;
-    /** 热端滤波后的曲线值（{@code 逻辑说明.md} 的「曲线」一节〈热端与电池曲线滤波〉）。 */
+    /** 热端滤波后的曲线值（{@code app/逻辑说明.md} §7.2〈热端与电池曲线滤波〉）。 */
     float hotF = INVALID;
 
     ChartSample(long t, float batt, float cpu, float hot, float cold, float rpm, float cool) {

@@ -24,38 +24,17 @@ import com.google.android.material.snackbar.Snackbar;
  * 配置 + 曲线合并页（页签「配置 · 曲线」）：由 {@link ConfigStore}（背后是 assets/params.json）
  * <b>动态生成</b>原生 Material 表单。
  *
- * <h3>结构</h3>
- * 自上而下三段（见 {@code fragment_config.xml}）：曲线区（{@link ChartFragment} 作为子
- * Fragment 挂在 {@code config_chart_container}，曲线自己不再单独占一个页签）→ 参数区
- * （分组卡片，键行由 {@link WrapRowLayout} 流式排列）→ 诊断区。曲线把「数据文件信息」经
- * {@link ChartFragment.Host} 交给本页，渲染在诊断折叠体内（原曲线页顶部的那条信息条），
- * 键渲染自检同样在折叠体内，默认都不可见。
+ * <p>自上而下三段（见 {@code fragment_config.xml}）：曲线区（{@link ChartFragment} 子 Fragment）→
+ * 参数区（分组卡片，键行由 {@link WrapRowLayout} 流式排列）→ 诊断区。本页只管壳与自己独有的块
+ * （挂曲线子页、摆诊断折叠体里的内容、把用户反馈落到 Snackbar）；表单数据流只有一份实现，在
+ * {@link ConfigFormController} 里、与设置页共用。{@code webui} 组不由本页渲染（见
+ * {@link UiSettingsFragment}），但自检口径仍要把它算进来（见 {@link #renderSelfCheck}）。
  *
- * <p>{@code webui} 组（「[4] 界面」）不由本页渲染：它在顶栏设置按钮打开的独立设置页
- * （{@link UiSettingsFragment}）里，但自检口径仍要把它算进来（见 {@link #renderSelfCheck}）。
+ * <p><b>边界（I3）</b>：界面读写 {@code profile.conf} 只经 {@link ConfigStore}，不自己拼 shell、
+ * 不直接碰文件、不自己解析 assets/params.json。
  *
- * <h3>职责：本页只管壳与自己独有的块</h3>
- * 表单数据流（读快照、建卡建行、上屏、写盘回执、冲刷、诊断刷新）<b>只有一份实现</b>，在
- * {@link ConfigFormController} 里，与设置页共用；本页只做控制器不做的事：挂曲线子页、摆诊断
- * 折叠体里的内容（数据文件信息条 + 键渲染自检）、把用户反馈落到本页的 Snackbar 上。
- *
- * <h3>加载：与预读并行，看得见的部分先出现</h3>
- * 定义与首份快照在后台读（{@link ConfigFormController#start()}，{@code onCreate} 即起），读完
- * 主线程先建各组卡头、把组头开关与卡头徽标摆正，随即让参数区露面；那几十行折叠体里的键行随后
- * （撤层那一帧之后）才建。在那之前 {@code config_group_container} 一直是 {@code gone}
- * （布局里就是这么定的），故打开本页不会看到"先空、再逐组冒出来"的一闪。
- * <b>展开/收起只切可见性</b>，既不现场 inflate + 测量，也不等用户展开才建行（见
- * {@link ConfigFormController} 的建表两段）。
- *
- * <h3>边界（I3）</h3>
- * 界面读写 {@code profile.conf} 只经 {@link ConfigStore}，不自己拼 shell、不直接碰文件、
- * 不自己解析 assets/params.json。
- *
- * <h3>生命周期</h3>
- * 外壳用 ViewPager2 切页，<b>页面生命周期不再随切页暂停/恢复</b>（非当前页被压到 STARTED，
- * 不派发 {@code onPause}，也没有 hide/show 的 {@code onHiddenChanged}）：
- * 故 {@link #onPageVisible(boolean)} 在离开本页时冲刷待写项、停掉曲线区刷新，回到本页时重新读盘；
- * {@link #onPause()} 与 {@link #onDestroyView()} 也各自冲刷一次，不丢改动。
+ * <p>加载两段、露面闸门与展开/收起只切可见性的口径见 app 逻辑说明.md §5.2 与 §6.1；
+ * 生命周期（ViewPager2 切页不派发 {@code onPause}，靠 {@link #onPageVisible}）见 §9.1。
  */
 public class ConfigFormFragment extends Fragment
         implements ConfigKeyRow.Host, ConfigFormController.Page, ChartFragment.Host, PageAware {
@@ -108,12 +87,9 @@ public class ConfigFormFragment extends Fragment
     }
 
     /**
-     * 挂上曲线区（子 Fragment）。
-     *
-     * <p>宿主在事务提交前接上：子页第一次回调就有落点；页面重建（config change / 进程恢复）
-     * 时 {@code getChildFragmentManager()} 里已有恢复出来的实例，只重新接宿主，不重复添加。
-     * 用异步 {@code commit()}：本方法在父页的 onCreateView 里跑，此时子 FragmentManager
-     * 可能正在派发自己的状态，{@code commitNow()} 会抛"already executing transactions"。
+     * 挂上曲线区（子 Fragment）。页面重建时 {@code getChildFragmentManager()} 里已有恢复出来的实例，
+     * 只重新接宿主、不重复添加。用异步 {@code commit()}：本方法在父页的 onCreateView 里跑，
+     * {@code commitNow()} 会抛"already executing transactions"。
      */
     private void ensureChartFragment() {
         FragmentManager cfm = getChildFragmentManager();
@@ -212,11 +188,8 @@ public class ConfigFormFragment extends Fragment
     }
 
     /**
-     * 定义没到位（加载失败或预热抛异常）：错误卡摆在参数区的位置——那里没有可编辑的键，
-     * 诊断串（含失败原因）一并摆出来，不给静默空列表。
-     *
-     * <p>这条路<b>不会</b>经过 {@link #onFormBuilt}（见 {@code ConfigFormController.buildIfNeeded}
-     * 的分支），而它同样是本页内容的终态（此后不会再有任何东西建出来）。
+     * 定义没到位（加载失败或预热抛异常）：错误卡摆在参数区的位置，诊断串（含失败原因）一并摆出来，
+     * 不给静默空列表。这条路<b>不会</b>经过 {@link #onFormBuilt}，但同样是本页内容的终态。
      */
     @Override
     public void showDefinitionError(@NonNull String message) {
@@ -226,12 +199,8 @@ public class ConfigFormFragment extends Fragment
     }
 
     /**
-     * 参数区露面（本页内容的终态之一）。
-     *
-     * <p>调用点在"可见结构已就位"那一刻（各组卡头、组头开关、卡头徽标都摆好了，行还没建——
-     * 本页默认全部折叠，行本来就看不见），故此刻起用户看到的就是最终界面。配置页没有别的建表后
-     * 收尾动作（曲线子页与诊断折叠体在 {@code onCreateView} 里已挂好），故这里不做任何事；
-     * 设置页用 {@code groupCount} 给自己的空态提示。
+     * 参数区露面（本页内容的终态之一）：调用点在"可见结构已就位"那一刻（见 app 逻辑说明.md §5.2）。
+     * 本页没有别的建表后收尾动作（曲线子页与诊断折叠体在 {@code onCreateView} 里已挂好），故不做任何事。
      */
     @Override
     public void onFormBuilt(int groupCount) {
@@ -239,10 +208,8 @@ public class ConfigFormFragment extends Fragment
     }
 
     /**
-     * 建表的"可见后段"失败：卡片与卡头已经露出来了，用那个错误位补一句实话。
-     *
-     * <p>用参数区末尾那张错误卡（它与"定义没到位"共用一处落点，是页面上唯一一处常驻的错误位），
-     * 故失败原因<b>不需要用户展开任何东西就能看见</b>。不回退已露出的卡头：留着半张表比整块不露
+     * 建表的"可见后段"失败：用参数区末尾那张错误卡（与"定义没到位"共用一处落点）补一句实话，
+     * 失败原因<b>不需要用户展开任何东西就能看见</b>。不回退已露出的卡头：留着半张表比整块不露
      * 更接近用户预期，也留住了"哪些键存在"这个信息。
      */
     @Override
@@ -261,13 +228,8 @@ public class ConfigFormFragment extends Fragment
 
     /**
      * 键渲染自检：<b>每个定义键都要有可编辑入口</b>——本页键行（role=setting）、设置页的键
-     * （{@code webui} 组）或组头开关（role=master）。顺带把未定义键与读取提示摆出来。
-     *
-     * <p>口径说明：{@code params.json} 里 role=master 的键（总开关）不出现在任何
-     * {@code group.keys} 里，它们是分组卡头上的开关；{@code webui} 组的键在本页不渲染，
-     * 故只数本页键行会恒少于定义数。三个分项在建表时一次算定（键行数取各分组"整组"的键，
-     * 见 {@link ConfigFormController#rowKeyCount()}），不会因展开先后而变。
-     * 自检文本渲染在诊断区（折叠体内），默认不可见。
+     * （{@code webui} 组）或组头开关（role=master）；顺带把未定义键与读取提示摆出来。三个分项在建表时
+     * 一次算定（见 {@link ConfigFormController#rowKeyCount()}），不会因展开先后而变。见 app 逻辑说明.md §6.1。
      */
     private void renderSelfCheck(Snapshot snapshot) {
         ConfigStore store = form.store();

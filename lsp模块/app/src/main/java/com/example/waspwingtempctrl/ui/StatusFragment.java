@@ -31,48 +31,19 @@ import java.util.Locale;
 /**
  * 状态页：部署状态 / 一键部署 / 卸载部署 / 拉起daemon / 停止daemon / su 诊断。
  *
- * <p>逻辑与线 C 接线时完全一致，只是从 Activity 挪进 Fragment、并套上 Material 外观：
- * <b>I5 调用边界原样保留</b> —— 本类只调 {@link Deployer} 的
+ * <p><b>调用边界（I5 的另一半）</b>：本类只调 {@link Deployer} 的
  * {@code probe() / deploy() / uninstall() / startDaemon() / stopDaemon() / buildDiagnostics() /
  * ensureRoot() / updateScript()}，不拼 shell、不碰文件、不绕过 {@code Deployer}。
+ * {@link Deployer} 的方法都阻塞，故一律放后台线程；结果回主线程渲染。
  *
- * <p>{@link Deployer} 的方法都阻塞，故一律放后台线程；结果回主线程渲染。
- *
- * <p><b>首次启动的 root 尝试</b>：{@code root_tried} 标记落盘，只试一次；被拒或失败都不再
- * 自动重试（否则每次冷启动都弹系统授权框）。成功则弹窗问是否立即一键部署。
- *
- * <p><b>脚本自动纠正</b>：{@code service.d} 脚本是纯文本、可无损重推，故探测到它与 APK 内
- * 资源哈希不一致时自动重推一次。重推<b>会连带重启守护进程</b>（脚本与二进制是同一份部署产物，
- * 且脚本本身就是常驻的看门狗 shell，只换盘上文件它那一层仍跑旧映像）——见
- * {@link Deployer#updateScript()}。二进制不一致则代价高得多（要重装 + 重启），走
- * {@link #armDeployPrompt} 的判定：自动更新开着就直接重装，否则弹窗请求用户部署。
- *
- * <h3>刷新分两条路径（消闪烁）</h3>
- * 状态区是<b>单个 TextView</b>、卡片 {@code wrap_content}，一旦把约 8 行的结果换成 1 行忙文本，
- * 状态卡立刻变矮、其下两张卡整体上跳再回落 —— 这是"每次回状态页闪一下"的根因。故：
- * <ul>
- *   <li><b>静默路径</b>（首次探测在 {@code onViewCreated}、其余刷新在 {@code onResume}）：不碰状态区
- *       文本、不写操作记录、不做动画，结果先比后写（内容没变就一个字都不动）；30 秒内不重复跑 su 探测。</li>
- *   <li><b>手动路径</b>（用户点按钮）：写操作记录 + 结果文本淡出→换文本（带高度补间）→淡入。</li>
- * </ul>
- * <b>进度条两条路径都显示</b>（它是刷新唯一的反馈），且它在布局里常占位、可见性只影响绘制，
- * 故开关它不引起任何高度变化 —— 高度变化只来自手动路径的文本补间，那是要的效果而非闪烁。
- * 切页时外壳（{@code SetupActivity}）广播可见性，本类据此收掉在跑的动画（{@link PageAware}）。
- *
- * <p><b>首次探测（含那一次 root 尝试）为什么在 {@code onViewCreated} 而不在 {@code onResume}</b>：
- * 三页被外壳的 {@code FragmentStateAdapter} 在启动时一并建出来（{@code offscreenPageLimit = 2}），故
- * 本页的 {@code onViewCreated} 在冷启动那一刻就到了 —— 与"进 app"等价，首次滑到本页时结果通常已就绪，
- * 不必现场等一趟 su（原先挂在 {@code onResume}，那是 Activity 时代的接线：换成 ViewPager2 后非当前页
- * 只到 STARTED，等于"滑到才探"）。依赖：三页须仍在启动时全部建出来，将来改成懒加载就要挪回
- * {@code onResume}。
+ * <p>刷新两条路径（消闪烁）、首次探测的时机、忙态与代号纪律、部署请求的武装与去重、
+ * 部署后自动接拉起：均见 {@code app/逻辑说明.md} §8.1。
  */
 public class StatusFragment extends Fragment implements PageAware {
 
     /**
-     * 一次性落盘标记的 prefs 文件名与键都定义在 {@link Deployer}（跨包收口，键名只有一处）：
-     * {@link Deployer#PREFS_ROOT_PROBE} 文件里放首次 root 尝试（{@link Deployer#KEY_ROOT_TRIED}）、
-     * 哈希提示去重（{@link Deployer#KEY_HASH_PROMPTED_MD5}）与设备侧二进制 md5
-     * （{@link Deployer#KEY_BIN_DEPLOYED_MD5}，本页只写不读）。
+     * 一次性落盘标记的 prefs 文件名与键都定义在 {@link Deployer}（跨包收口，键名只有一处）——
+     * 见 {@code app/逻辑说明.md} §2.5 与 §8.1。
      */
 
     /** 一副图标两种状态：图标本身指向右，展开时顺时针转 90° 指向下（同配置页分组卡头）。 */
@@ -88,12 +59,8 @@ public class StatusFragment extends Fragment implements PageAware {
     private static final int PROMPT_NOT_RUNNING = 3;
 
     /**
-     * 三种「待弹」情形的去重标记前缀。
-     *
-     * <p>都写进 {@link Deployer#KEY_HASH_PROMPTED_MD5} 这同一个键（值形如 {@code notdeployed:&lt;md5&gt;}）：
-     * 每种情形各占一个前缀，故同一个 APK 版本里每种最多问一次；装了新 APK（指纹变了）会重新武装。
-     * 沿用旧键是为了不给升级再加一个一次性标记 —— 旧值（裸 md5）与新格式对不上，
-     * 升级后至多每个情形多问一次。
+     * 三种「待弹」情形的去重标记前缀（各占 {@link Deployer#KEY_HASH_PROMPTED_MD5} 的一个前缀，
+     * 同一 APK 每种最多问一次）——设计见 {@code app/逻辑说明.md} §8.1。
      */
     private static final String MARK_NOT_DEPLOYED = "notdeployed:";
     private static final String MARK_HASH_MISMATCH = "hash:";
@@ -130,12 +97,7 @@ public class StatusFragment extends Fragment implements PageAware {
     private volatile int pendingPrompt = PROMPT_NONE;
     /** 后台任务里置位、主线程回调读取：自动更新开着且内容不一致 → 静默重新部署（不弹窗）。 */
     private volatile boolean autoDeployPending;
-    /**
-     * 用户在本页点过「停止daemon」（主线程写、后台探测读）。
-     *
-     * <p>只用于抑制「守护进程没在跑」那条提示：刚停完马上又被问"要不要拉起来"很烦，
-     * 而且看门狗会在下一轮 tick 自己把它拉回来。部署 / 拉起会把这一位清掉。
-     */
+    /** 用户在本页点过「停止daemon」（主线程写、后台探测读）：仅用于抑制「守护进程没在跑」那条提示。 */
     private boolean daemonStoppedByUser;
     /** 后台任务里置位、主线程回调读取：本次部署<b>盘面是否已就位</b>（据此决定要不要接着自动拉起）。 */
     private volatile boolean deployPlaced;
@@ -145,29 +107,13 @@ public class StatusFragment extends Fragment implements PageAware {
     private long lastProbeAtMs;
     /** 淡入淡出代号：每次新动画递增，回调里对不上号即作废（连续刷新时两段动画不交叠）。 */
     private int fadeGeneration;
-    /**
-     * 动作代号：每次起跑自增，收尾复位忙态时对不上号即作废（同 {@link #fadeGeneration} 的手法）。
-     *
-     * <p>为什么需要：{@code onDestroyView} 会无条件放开占用位，若视图随即重建、期间又起了新动作，
-     * 旧动作的收尾回调就会把<b>新动作</b>的忙态清掉（同时守卫短暂失效）。代号一变，旧回调只认
-     * 自己那一次，不动别人的忙态。
-     */
+    /** 动作代号：每次起跑自增，收尾复位忙态时对不上号即作废（同 {@link #fadeGeneration} 的手法）。见 {@code app/逻辑说明.md} §8.1。 */
     private int actionGeneration;
 
-    /**
-     * 主线程 Handler：只在「拿不到 Activity」的收尾路径上用（那一刻不能借 Activity 回主线程）。
-     * 类加载发生在主线程（Fragment 由外壳在主线程建出来），且 {@code new Handler(Looper)} 本身
-     * 可在任意线程调用，故静态持有是安全的。
-     */
+    /** 主线程 Handler：只在「拿不到 Activity」的收尾路径上用（那一刻不能借 Activity 回主线程）。见 {@code app/逻辑说明.md} §8.1。 */
     private static final Handler MAIN = new Handler(Looper.getMainLooper());
 
-    /**
-     * 是否有动作在跑（结果还没回到主线程）；为 true 时拒绝并发触发。
-     *
-     * <p><b>为什么不是"那条线程还活着"</b>：结果上屏后紧接着还要接一段（部署→自动拉起，见
-     * {@link #deploy()}），而那一刻线程刚 post 完、往往还没真正结束——按"线程存活"判会把该接的一段
-     * 挡在门外。这里只管"本页同时只有一个动作"：主线程置位于开跑，结果上屏时清除。
-     */
+    /** 是否有动作在跑（结果还没回到主线程）；为 true 时拒绝并发触发。见 {@code app/逻辑说明.md} §8.1。 */
     private boolean actionRunning;
 
     private static final SimpleDateFormat TIME_FMT =
@@ -299,10 +245,8 @@ public class StatusFragment extends Fragment implements PageAware {
     /**
      * 探测部署状态；脚本哈希不一致且 su 可用时自动重推脚本（重推会连带重启守护进程），再复探一次。
      *
-     * <p>副作用两条：①按最终状态武装部署请求（三种情形见 {@link #armDeployPrompt}）；
-     * ②顺手刷新「同步清单」（见 {@link Deployer#writeSyncManifestIfNeeded()}，脚本侧在没有可用
-     * 解压工具时的降级来源；APK 没换时只是一次 stat）。两条无论走静默还是手动路径都执行 ——
-     * 它们正是"探测才发现的事"，且同一个 APK 版本最多发作一次。
+     * <p>副作用两条：①按最终状态武装部署请求；②顺手刷新「同步清单」（见 {@link Deployer#writeSyncManifestIfNeeded()}）。
+     * 详与理由见 {@code app/逻辑说明.md} §8.1。
      *
      * @return 可直接上屏的文本
      */
@@ -312,10 +256,7 @@ public class StatusFragment extends Fragment implements PageAware {
         final String head;
         // su 不可用时不尝试（否则每次进页面都白撞一次授权框）
         if (status.suOk && status.scriptPresent && !status.scriptHashOk) {
-            // 三选一，判据取自**紧随其后的那次 probe**（更晚、更权威，且不额外增加 su 往返）：
-            //   动作失败 → 失败文案；动作成功但探测显示守护进程没在跑 → 第三条文案
-            //   （重推本身成功了，说"失败"不实；说"已自动重推脚本"又把"进程没起来"盖掉，同样与事实不符）；
-            //   其余 → 成功文案。
+            // 三选一，判据取自紧随其后的那次 probe（更晚、更权威，且不额外增加 su 往返）——见 app/逻辑说明.md §8.1
             Deployer.Result r = deployer.updateScript();
             status = deployer.probe();
             int res;
@@ -334,15 +275,14 @@ public class StatusFragment extends Fragment implements PageAware {
         final String manifestNote = deployer.writeSyncManifestIfNeeded();
         armDeployPrompt(app, status);
         rememberDeployedBinMd5(app, status);
+        // 顺手记下本次探测的 root 可用性：落页判定下次冷启动据此判"root 尚未取得"（见 app/逻辑说明.md §5.1）
+        Deployer.rememberRootState(app, status.suOk);
         return head + (manifestNote == null ? "" : manifestNote + "\n") + status.describe();
     }
 
     /**
      * 探测确认设备上二进制与 APK 内一致时，把设备侧 md5 落盘 —— 这是「需要重新部署」判定的缓存，
-     * 供下次冷启动落页用（见 {@link Deployer#needsRedeploy}）。
-     *
-     * <p>判据与提示判据互补、互不重叠：一致才记，不一致留给 {@link #armDeployPrompt} 的部署请求；
-     * 没部署过（二进制不存在）时探测到的 md5 为空，{@link Deployer#rememberDeployedBinMd5} 会拒写。
+     * 供下次冷启动落页用（判据互补与不重叠见 {@code app/逻辑说明.md} §8.1 与 §2.1）。
      */
     private static void rememberDeployedBinMd5(Context app, Deployer.Status status) {
         if (status.binExists && status.binHashOk) {
@@ -351,25 +291,9 @@ public class StatusFragment extends Fragment implements PageAware {
     }
 
     /**
-     * 部署：直接上屏 {@link Deployer#deploy()} 自己带回的状态——<b>不再补一次 probe</b>：
-     * deploy 末尾已经探过一次并把结果放进 {@link Deployer.Result#status}，再探一次就是整整一轮
-     * 多余的 su 往返 + 2 份资产 MD5（probe 的开销见 {@code Deployer}）。也不把部署动作日志
-     * （含步骤列表）灌进状态区：部署成没成看状态文本就够，步骤细节在「诊断信息」里。
-     * 早退失败（{@code status} 为 null）时退回动作描述——那里有失败原因与已走过的步骤。
-     *
-     * <p><b>随后自动「点」一次拉起daemon</b>（{@link #startDaemon()}）：{@link Deployer#deploy()}
-     * 只把新二进制换到盘上，不重启进程它就一直跑旧映像。这一段是<b>独立的一份</b>——自己的忙态文案、
-     * 自己的操作记录、自己的一次进度条起停，与手动点「拉起daemon」完全是同一条路径，
-     * 不是把部署那一趟拉长。
-     *
-     * <p><b>接不接这一段的判据是「盘面是否已就位」（{@link Deployer.Result#placementsOk}），
-     * 不是「部署是否整体成功」</b>：收尾自检是一次读回，会因 su 往返超时、或与设备侧另一个写者
-     * （脚本的自动更新）撞窗而为假，那时盘上其实已经换了新二进制——只按整体成败决定，一次读回失败
-     * 就会把旧映像永久留在设备上（旧进程照旧"运行中"，界面也看不出异常），且没有任何补偿。
-     * 盘面真没就位时仍<b>不接</b>：那时重启旧映像没有意义。
-     *
-     * <p><b>部署失败时清掉一次性去重标记</b>（见 {@link #clearPromptMark()}）：不清就等于把
-     * "下次进页面自动补上"这条路也一起封死——而失败恰恰是最需要再试一次的时候。
+     * 部署：直接上屏 {@link Deployer#deploy()} 自己带回的状态（不再补一次 probe），随后按
+     * {@link Deployer.Result#placementsOk} 决定要不要自动「点」一次拉起daemon；部署失败时清掉一次性去重标记。
+     * 判据与理由见 {@code app/逻辑说明.md} §8.1 与 §2.2。
      */
     private void deploy() {
         daemonStoppedByUser = false;   // 部署结束会接着拉起（见本方法的 after 回调）
@@ -390,18 +314,8 @@ public class StatusFragment extends Fragment implements PageAware {
     }
 
     /**
-     * 清掉「本 APK 版本已经自动装过 / 已经问过」的一次性去重标记（{@link Deployer#KEY_HASH_PROMPTED_MD5}）。
-     *
-     * <p><b>只在部署失败时调</b>：标记是"这一版已经尝试过"的记录，失败却留着它，等于把"下次进页面
-     * 自动补上"这条路也封死了。
-     *
-     * <p><b>边界（"反复"到哪一步为止）</b>：清一次只换来"下次进页面的一次动作"——部署类情形在自动
-     * 更新开着时是静默重装一次、关着时是把确认框再弹一次；失败一次清一次，故一直失败就一直"每进一次
-     * 页面动作一次"。不是自转的循环（每次都要用户再进页面，静默刷新另有
-     * {@link #PROBE_MIN_INTERVAL_MS} 节流）；收敛条件是"盘面就位且进程在跑"——那时探测不武装任何
-     * 请求，自然不再动作（见 {@link #armDeployPrompt}）。
-     *
-     * <p>读的是已加载过的 prefs（探测阶段读过同一份），写入走 {@code apply()} 异步落盘。
+     * 清掉「本 APK 版本已经自动装过 / 已经问过」的一次性去重标记（{@link Deployer#KEY_HASH_PROMPTED_MD5}），
+     * <b>只在部署失败时调</b>；「反复」的边界见 {@code app/逻辑说明.md} §8.1。
      */
     private void clearPromptMark() {
         Context context = getContext();
@@ -475,13 +389,11 @@ public class StatusFragment extends Fragment implements PageAware {
     /**
      * 后台跑一次阻塞任务，把结果写进状态区。
      *
-     * @param busyText 忙态文案。<b>不进状态区</b>（把约 8 行的结果整段换成 1 行忙文本会让状态卡
-     *                 高度塌陷、下面两张卡上跳再回落 —— 那是闪烁的根因），只在手动路径下
-     *                 作为「操作记录」的一条
+     * @param busyText 忙态文案。<b>不进状态区</b>（理由见 {@code app/逻辑说明.md} §8.1），
+     *                 只在手动路径下作为「操作记录」的一条
      * @param asDialog true 时结果弹对话框（诊断类文本较长，状态区放不下）
      * @param manual   true = 用户主动触发：写操作记录 + 结果文本淡入淡出（含高度补间）；
-     *                 false = 非手动刷新：不写记录、不碰文本（结果先比后写）、不做动画。
-     *                 进度条两条路径都显示，且因常占位而不引起任何高度变化
+     *                 false = 非手动刷新：不写记录、不碰文本（结果先比后写）、不做动画
      */
     private void runAsync(final String busyText, final Task task, final boolean asDialog,
                           final boolean manual) {
@@ -495,9 +407,8 @@ public class StatusFragment extends Fragment implements PageAware {
      *              它在主线程、与用户下一次点击同一时机被调用，故里面可以直接调
      *              {@link #startDaemon()} 这类动作入口，不必自己绕开并发守卫
      *
-     * <p><b>忙态与占用位的收尾只有一处</b>（{@link #finishAction}）：正常上屏、视图已销毁、
-     * 以及<b>拿不到 Activity</b> 三条路都要走它——最后那条尤其不能省（那时进度条还在屏上，
-     * 早退会把它永久留在"忙"上，此后本页所有动作都被守卫挡下）。
+     * <p>忙态与占用位的收尾只有一处（{@link #finishAction}），三条收尾路径都必须走它 —— 见
+     * {@code app/逻辑说明.md} §8.1。
      */
     private void runAsync(final String busyText, final Task task, final boolean asDialog,
                           final boolean manual, @Nullable final Runnable after) {
@@ -562,10 +473,8 @@ public class StatusFragment extends Fragment implements PageAware {
                 }
                 if (rootJustGranted) {
                     rootJustGranted = false;
-                    // 刚拿到授权：状态区已显示"root 可用"，这里只问要不要顺势部署。
-                    // 这一支优先于「自动更新」的静默部署 —— 用户刚授权，给他一次明确的确认。
-                    // 同一次探测武装的另一条请求就地作废：否则紧随其后的部署回调会把它当成
-                    // 这次探测刚发现的再弹一遍（实测路径：首启授权→部署成功→又弹"尚未部署"）。
+                    // 刚拿到授权：这一支优先于「自动更新」的静默部署，同批武装的另一条请求就地作废
+                    // （见 app/逻辑说明.md §8.1）
                     pendingPrompt = PROMPT_NONE;
                     showDeployPrompt();
                 } else if (autoDeployPending) {
@@ -595,13 +504,9 @@ public class StatusFragment extends Fragment implements PageAware {
     }
 
     /**
-     * 收尾复位：放掉占用位并关掉进度条。<b>只在代号未变时动</b>——期间若已起了新动作
-     * （视图销毁重建那条路），忙态归它管，本回调不得越俎代庖（否则会把新动作的进度条关掉、
-     * 并让并发守卫短暂失效）。必须在主线程调。
-     *
-     * <p><b>三条收尾路径都必须走它</b>：正常上屏、视图已销毁、以及拿不到 Activity
-     * （见 {@link #runAsync}）。少走一条就会留下"永久忙"——进度条一直转，且此后本页每次点击
-     * 都被 {@code actionRunning} 守卫拒绝。
+     * 收尾复位：放掉占用位并关掉进度条，只在代号未变时动。<b>三条收尾路径都必须走它</b>
+     * （正常上屏、视图已销毁、以及拿不到 Activity，见 {@link #runAsync}）。必须在主线程调。
+     * 理由见 {@code app/逻辑说明.md} §8.1。
      */
     private void finishAction(int generation) {
         if (generation != actionGeneration) {
@@ -616,33 +521,10 @@ public class StatusFragment extends Fragment implements PageAware {
     }
 
     /**
-     * 判定这次探测要不要弹部署请求（三种情形），或（开关开着时）改为静默重新部署。
-     *
-     * <p><b>三种情形互斥，按此优先级取一条</b>：
-     * <ol>
-     *   <li>{@link #PROMPT_HASH_MISMATCH}：二进制在、内容与 APK 内不一致（原有行为）。</li>
-     *   <li>{@link #PROMPT_NOT_DEPLOYED}：二进制不在 = 从没部署过。</li>
-     *   <li>{@link #PROMPT_NOT_RUNNING}：二进制在且一致，但守护进程没在跑。</li>
-     * </ol>
-     *
-     * <p><b>为什么三种都要 su 可用</b>：su 不通时 {@code probe()} 里 {@code binExists} 必为 false
-     * （它来自同一趟 su 往返的输出），不加这一条会让未 root 的设备也弹一次部署请求
-     * （去重标记只保证不重复问，第一次仍会弹；且 su 不通时点「一键部署」注定失败）。
-     * 首启那次拿 root 的提示另有其路（见 {@link #firstProbe}）。
-     * {@code binExpectedMd5} 为空＝APK 内资源缺失，同样无从判定。
-     *
-     * <p><b>「自动更新」开着时的分工</b>（见 {@link Deployer#isAutoUpdateEnabled}）：
-     * 第 1 种属于"设备上的内容旧了"，正是开关的语义 → 不弹，改为在回调里静默重新部署
-     * （{@link #autoDeployPending}）。第 2、3 种<b>永远只弹</b>：用户从没同意过部署（或刚主动停过
-     * 进程），替他决定不合适；设备端脚本那一侧也是同一分工（从未部署过不自动装）。
-     *
-     * <p><b>去重</b>：把「情形前缀 + 该情形下的指纹」落盘，同一个值最多提示一次
-     * （指纹取 APK 侧 expected md5 或设备侧 bin md5，都随 APK 更新而变 →
-     * 装了新 APK 会重新武装；重装同一个 APK 不会重复打扰）。
-     * <b>先落标记再动作</b>（同 {@code KEY_ROOT_TRIED}）：弹窗还没显示就已落盘，
-     * 中途进程被杀也不会下次再弹。
-     * <b>唯一例外</b>：部署失败时调用方会把标记清掉（见 {@link #deploy()} 的收尾与
-     * {@link #clearPromptMark()}）——否则一次失败就等于把"自动重部署"这条路也一并停掉。
+     * 判定这次探测要不要弹部署请求（三种情形，互斥、按 {@link #PROMPT_HASH_MISMATCH} →
+     * {@link #PROMPT_NOT_DEPLOYED} → {@link #PROMPT_NOT_RUNNING} 的优先级取一条），或（自动更新
+     * 开着时）改为静默重新部署。三情形、su 可用前提、自动更新分工、去重与唯一例外见
+     * {@code app/逻辑说明.md} §8.1。
      */
     private void armDeployPrompt(Context app, Deployer.Status status) {
         pendingPrompt = PROMPT_NONE;   // 每次探测重新判定，不留上一次的残留
@@ -698,12 +580,9 @@ public class StatusFragment extends Fragment implements PageAware {
     // ==================== 渲染小工具 ====================
 
     /**
-     * 忙态指示：所有刷新路径（手动与静默）都开它——它是刷新唯一的反馈。
-     *
-     * <p><b>为什么只切 {@code VISIBLE}/{@code INVISIBLE}、绝不用 {@code GONE}</b>：进度条在
-     * 布局里是<b>常占位</b>的（{@code fragment_status.xml} 里初值即为 {@code invisible}），
-     * 占的高度恒定不变，可见性只影响绘制。用 {@code GONE} 会让它参与测量，
-     * 出现/消失就要改状态卡高度，下面两张卡跟着上下跳——那正是要消掉的现象。
+     * 忙态指示：所有刷新路径（手动与静默）都开它——它是刷新唯一的反馈。只切
+     * {@code VISIBLE}/{@code INVISIBLE}、绝不用 {@code GONE}（进度条常占位，理由见
+     * {@code app/逻辑说明.md} §8.1）。
      */
     private void setBusy(boolean busy) {
         if (progress != null) {
@@ -712,15 +591,8 @@ public class StatusFragment extends Fragment implements PageAware {
     }
 
     /**
-     * 手动刷新的结果上屏：文本淡出 → 换文本（顺带把高度变化补间）→ 淡入。
-     *
-     * <p><b>串行</b>：每次自增 {@link #fadeGeneration}，连点刷新不会让两段动画交叠。
-     * 开头先复位 alpha，故中途打断也不残留半透明态。
-     * <p><b>打断不丢结果</b>：淡出期间被打断（连点、切页）时只跳过动画与补间，
-     * 文本照样上屏——否则这 150ms 里刷出来的结果会凭空消失。
-     *
-     * <p><b>只碰本页视图树</b>：窗口级设置（{@code softInputMode}）是 Activity 级的、
-     * 由 {@code LogFragment} 的软键盘逻辑接管，此处一概不动。
+     * 手动刷新的结果上屏：文本淡出 → 换文本（顺带补间高度）→ 淡入；代号保证串行、打断不丢结果，
+     * 只碰本页视图树。见 {@code app/逻辑说明.md} §8.1。
      */
     private void swapStatusTextAnimated(final String text) {
         final TextView view = statusView;

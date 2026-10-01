@@ -31,24 +31,18 @@ import java.util.Locale;
 /**
  * 曲线区：档位选择 + 图例 + 自绘画布 + 失败可诊断。
  *
- * <p><b>布局</b>：档位行、图例（按自然宽排布、放不下换行）与画布同处一张卡内，全部按自然尺寸排布——
- * 不整体缩放、也不改写容器高度（原「超宽时整块缩放到 0.5 并覆写裁切框高度」的做法会把图例裁掉、
- * 高度塌成一条）。画布高度初值由 {@code fragment_chart.xml} 给出（本区在配置页的
- * {@code ScrollView} 里，{@code layout_weight} 会被量成 0，不能用），运行时可用画布下沿的
- * 拖柄在 {@code chart_canvas_min_height}～{@code chart_canvas_max_height} 之间改。改的是运行时
- * {@code LayoutParams}，不落盘：视图重建（重进页面/重启 App）后回到默认高。
+ * <p><b>布局</b>：档位行、图例（按自然宽排布、放不下换行）与画布同处一张卡内，全部按自然尺寸排布
+ * ——不整体缩放、也不改写容器高度。画布高度初值由 {@code fragment_chart.xml} 给出，运行时可用画布
+ * 下沿的拖柄在 {@code chart_canvas_min_height}～{@code chart_canvas_max_height} 之间改（改的是运行时
+ * {@code LayoutParams}，不落盘）。见 app/逻辑说明.md §7.6。
  *
- * <p><b>现在是配置页（{@code ConfigFormFragment}）的子 Fragment</b>（合并成「配置 · 曲线」一页，
- * 页签由 4 个减为 3 个），本类不再由 {@code SetupActivity} 直接挂载。因此：
- * <ul>
- *   <li>「数据文件信息」（路径/大小/修改时间/解析量/断联/回落说明）不再画在曲线卡里，
- *       经 {@link Host#onChartInfo(String)} 交给配置页渲染到「诊断信息」头部，避免两处重复。</li>
- *   <li>外壳切页不再 hide/show（ViewPager2 只把非当前页压到 STARTED，不派发 {@code onPause}），
- *       故由父页显式调用 {@link #setPageHidden(boolean)}，与独立成页时的刷新节奏一致。</li>
- * </ul>
+ * <p><b>本类是配置页（{@code ConfigFormFragment}）的子 Fragment</b>（页签 4 → 3），不再由
+ * {@code SetupActivity} 直接挂载：「数据文件信息」经 {@link Host#onChartInfo(String)} 交配置页渲染
+ * 到「诊断信息」头部；外壳切页不 hide/show，由父页显式 {@link #setPageHidden(boolean)} 转达可见性。
+ * 见 app/逻辑说明.md §7.6。
  *
  * <p>绘制口径在 {@link ChartView}（自绘）与 {@link ChartAxis}/{@link ChartDataset}/
- * {@link ChartWindow} 内，逐条对齐 {@code lsp模块/daemon/逻辑说明.md} 的「曲线」一节。
+ * {@link ChartWindow} 内，逐条对齐 {@code app/逻辑说明.md} §7。
  *
  * <p><b>线程</b>：文件读取、{@code profile.conf} 与 {@code params.json} 的读取全部在后台线程
  * （{@link ChartLoader}/{@link ChartConfig}）；主线程只做渲染。Context 一律在主线程取出后
@@ -154,9 +148,8 @@ public class ChartFragment extends Fragment {
         // 失败诊断可按住滚动条拖动（滚动条常显，见布局）
         ScrollbarDrag.attach(failureScroll);
         resizeHandle.setOnTouchListener(this::onHandleTouch);
-        // 本带上开始的纵向拖动让给拖柄（页面容器不接管），横向仍归外层 ViewPager2 翻页。
-        // 延到下一帧再登记：onViewCreated 时本页视图还没挂进父页的视图树（父链走到本 Fragment 的
-        // 根就断了），那里找不到页面根 PageScrollView。post 在未挂载时会排队、挂上后再执行。
+        // 本带上开始的纵向拖动让给拖柄（横向仍归外层 ViewPager2 翻页）。登记延到下一帧：onViewCreated
+        // 时视图树走不到页面根，post 未挂载时排队、挂上后再执行（见 app/逻辑说明.md §7.6）
         resizeHandle.post(() -> PageScrollView.yieldVerticalDragTo(resizeHandle));
         touchSlop = ViewConfiguration.get(context).getScaledTouchSlop();
 
@@ -290,9 +283,8 @@ public class ChartFragment extends Fragment {
     /**
      * 首次加载曲线口径，并记账（旁路）。
      *
-     * <p>这是 {@link ChartConfig#load} 的<b>另一个</b>调用点（另一个是 {@code ChartLoader.warmUp}）：
-     * 预热线程是后台优先级，争抢时可能晚于本线程，只记预热那一处就会永远报"命中"的零头。两处记同一个
-     * 槽位、首次写入胜出 —— 谁先真正加载完这份口径，耗时就算谁的真实成本。
+     * <p>这是 {@link ChartConfig#load} 的<b>另一个</b>调用点（另一个是 {@code ChartLoader.warmUp}），
+     * 两处记同一槽位、首次写入胜出（理由见 app/逻辑说明.md §7.1）。
      */
     private static ChartConfig loadConfigTimed(Context appContext) {
         long startedAt = StartupTiming.now();
@@ -400,7 +392,7 @@ public class ChartFragment extends Fragment {
     // ==================== 控件构建 ====================
 
     /**
-     * 图例：6 条曲线，默认开关照 {@code 逻辑说明.md} 的「曲线」一节〈系列开关〉；勾选框着色 = 该曲线的
+     * 图例：6 条曲线，默认开关照 {@code app/逻辑说明.md} §7.6〈系列开关〉；勾选框着色 = 该曲线的
      * chart_series_* 色（着色统一交给 {@link #applyLegendTints()}）。容器是可换行的 WrapRowLayout：
      * 按自然宽依次排布，放不下自动换行，窄屏也不会被裁；行首由 {@link ChartSeries#startsLegendRow} 决定
      * ——「冷端℃」「CPU℃」两条可选温度传感器固定另起第二行。
@@ -482,18 +474,12 @@ public class ChartFragment extends Fragment {
     // ==================== 画布拖动 ====================
 
     /**
-     * 拖柄触摸：<b>只有纵向拖动</b>才改画布高，横向一律不动（交给外层 ViewPager2 翻页）。
+     * 拖柄触摸：<b>只有纵向拖动</b>才改画布高，横向一律交给外层 ViewPager2 翻页。
      *
-     * <p>按下先只记起点，等手指走出 touch slop 再定方向——判据与页面纵向滚动同一套：同一个
-     * {@code ViewConfiguration} 的 touch slop，且纵向位移要压过横向。定为纵向时才把<b>当下</b>
-     * 的位置与画布高记成拖动起点，画布不会因为多走的这一小段 slop 先跳一下。
-     *
-     * <p>纵向拖动没被页面滚动抢走，靠的是页面根 {@link PageScrollView#yieldVerticalDragTo}：
-     * 本带子上开始的纵向拖动页面容器不接管。所以这里不再（也不能）按下就
+     * <p>按下先只记起点、等走出 touch slop 再定方向；纵向拖动没被页面滚动抢走，靠页面根
+     * {@link PageScrollView#yieldVerticalDragTo}。所以这里不再（也不能）按下就
      * {@code requestDisallowInterceptTouchEvent(true)}——那个开关沿父链设上去，会把 ViewPager2
-     * 的横向拦截一并封掉，横向就再也翻不了页。
-     *
-     * <p>不写盘——视图重建即回默认高。
+     * 的横向拦截一并封掉。不写盘——视图重建即回默认高。（理由见 app/逻辑说明.md §7.6）
      */
     private boolean onHandleTouch(View handle, MotionEvent e) {
         switch (e.getActionMasked()) {

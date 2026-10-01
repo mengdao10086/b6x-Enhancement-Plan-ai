@@ -34,19 +34,7 @@ import java.util.Locale;
  *
  * <p>读文件统一走 {@link AppFiles}（{@link LogTailReader} 内部调用），本类只负责渲染与刷新节奏。
  *
- * <p><b>线程</b>：所有 File IO 在后台线程（{@link LogTailReader#read}）；主线程只做渲染。
- * Context 一律在主线程取出后捕获进闭包，后台线程不再调 {@code requireContext()}。
- *
- * <p><b>刷新</b>：页面可见时每 {@link #REFRESH_INTERVAL_MS} 毫秒重读一次。外壳用 ViewPager2
- * 切页（见 {@code SetupActivity}），页面生命周期不再随切页暂停/恢复，故除了
- * {@code onPause}/{@code onResume}，{@link #onPageVisible(boolean)} 也必须停/启刷新——
- * 三个入口都走幂等的 {@link #startRefresh()} / {@link #stopRefresh()}。
- *
- * <p><b>无变化跳过</b>：内容指纹（size:mtime）与关键词都没变时，{@link LogTailReader} 直接返回
- * {@code unchanged}，不触碰 UI —— 否则每 2 秒重建一次 2000 行列表会白白抖动。
- *
- * <p><b>软键盘</b>：键盘弹出时不顶起页面（只覆盖）。窗口的
- * softInputMode 是 Activity 级设置，故本页可见时接管、离开时还原，入口与刷新同一套。
+ * <p>线程纪律、刷新节奏、无变化跳过、软键盘接管、自动跟随：见 {@code app/逻辑说明.md} §8.3。
  */
 public class LogFragment extends Fragment implements PageAware {
 

@@ -4,12 +4,8 @@ import java.util.Arrays;
 import java.util.Locale;
 
 /**
- * 纵轴定标（口径见 {@code 逻辑说明.md} 的「曲线」一节〈双纵轴〉）。
- *
- * <p>档位梯：1、2、3，加所有 ≥5 的 5 的整数倍（无亚单位档位）。候选档位限定在
- * {@code [跨度/5, 跨度)} 内（该区间枚举完备：步长 ≥ 跨度时段数 ≤2、步长 < 跨度/5 时
- * 段数 ≥6，都不合格）；在能形成 3~5 段的候选里取离 {@code 跨度/4} 最近者，无候选则
- * 取离目标最近的档位。上下限按档位 floor/ceil 扩张，<b>绝不裁点</b>。
+ * 纵轴定标。档位梯（1/2/3 + ≥5 的 5 倍数）、候选区间 [跨度/5, 跨度)、3~5 段取离跨度/4 最近、
+ * floor/ceil 扩张不一裁点的口径见 app/逻辑说明.md §7.3（双纵轴亦见该节）。
  */
 final class ChartAxis {
 
@@ -53,7 +49,7 @@ final class ChartAxis {
                 (float) Math.ceil(dmax / step) * step, step);
     }
 
-    /** 值 → 画布 y（口径见 {@code 逻辑说明.md} 的「曲线」一节〈双纵轴〉）。 */
+    /** 值 → 画布 y（口径见 {@code app/逻辑说明.md} §7.3〈双纵轴〉）。 */
     float y(float v, float padT, float h) {
         return padT + h * (1f - (v - min) / (max - min));
     }
@@ -120,13 +116,10 @@ final class ChartAxis {
     }
 
     /**
-     * 按 step 分出的段数 = {@code ticksOf(lo, hi, step).length - 1}，<b>但只计数、不落数组</b>。
-     * {@link #pickStep} 要对每个候选档位问一次，走 {@code ticksOf} 每次都要造一个 float[256]
-     * 加一份拷贝（一次 rebuild 十几个），而这里只要一个数。
+     * 按 step 分出的段数 = {@code ticksOf(lo, hi, step).length - 1}，<b>但只计数、不落数组</b>
+     * （{@link #pickStep} 要对每个候选档位问一次，走 {@code ticksOf} 每次都要造一个 float[256]）。
      *
-     * <p>逐项沿用 {@link #ticksOf} 的算式与容量护栏（先补原点刻度、再逐档累加、末档回补）：
-     * 浮点累加的舍入、{@code 1e-9} 与 {@code 1e-6} 两个容差、{@link #TICK_CAP} 截断都靠这层
-     * 同构才与画出来的刻度一致，故 <b>改 ticksOf 必须同步改这里</b>。
+     * <p>逐项沿用 {@link #ticksOf} 的算式与容量护栏，故 <b>改 ticksOf 必须同步改这里</b>（见 app/逻辑说明.md §7.3）。
      */
     private static int segmentsOf(float lo, float hi, float step) {
         if (!(step > 0f)) {

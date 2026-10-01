@@ -28,30 +28,11 @@ import java.util.Map;
 
 /**
  * 设置页（顶栏设置按钮 → {@code SettingsActivity} 挂载）：只渲染 {@code params.json} 里
- * {@code webui} 组（「[4] 界面」）的那几个键。
- *
- * <h3>为什么单独一页</h3>
- * 这几个键是"曲线怎么画、界面怎么显示"的自用参数（{@code daemonConsumes=false}），
- * 与配置页那些会被守护进程读取的运维参数不是一类东西；搬到设置页后配置页只剩要调的参数。
- * 本页不重复实现表单：键行、开关、落盘规则全在本页与配置页共用的
- * {@link ConfigFormController} 与 {@link ConfigKeyRow} / {@link ConfigGroupBinder} /
- * {@link ConfigWriteQueue} 里，本页只提供自己的壳、错误位与重置栏。
- * <b>本页的键数也是配置页键渲染自检的一个分项</b>，故键清单只由 {@link #webuiKeys} 给出，
- * 自检与渲染同源，不会各写一份数字。
- *
- * <h3>布局</h3>
- * 页面本身只是「@dimen/page_padding 内边距 + 一张分组卡 + 重置栏」，没有单独的布局文件：
- * 分组卡由 {@link ConfigGroupBinder} 从 {@code item_config_group.xml} 生成，重置栏是
- * {@link ConfigResetBar}（自带布局），页面壳在 {@link #onCreateView} 里直接搭。
- * 重置栏按分组整体恢复出厂值，故放在参数卡之后——先调参数、再整组回退，
- * 且表单的空态提示（无分组卡时）也在它上面。
- *
- * <p>边界同配置页（I3）：只经 {@link ConfigStore} 读写 {@code profile.conf}，不自己解析 assets。
- *
- * <h3>加载：与预读并行，建完才出现</h3>
- * 定义与首份快照在后台读（{@link ConfigFormController#start()}，{@code onCreate} 即起），读完
- * 主线程一次把卡与键行建满、值也上屏，{@link #onFormBuilt} 里再追加重置栏，最后才让内容露面；
- * 在那之前内容容器一直是 {@code GONE}，故打开本页不会看到"先空、再逐段冒出来"的一闪。
+ * {@code webui} 组（「[4] 界面」）的那几个键。本页不重复实现表单——键行/开关/落盘规则全在共用的
+ * {@link ConfigFormController} 与 {@link ConfigKeyRow}/{@link ConfigGroupBinder}/{@link ConfigWriteQueue}
+ * 里，本页只提供自己的壳、错误位与重置栏；键清单只由 {@link #webuiKeys} 给出（自检与渲染同源）。
+ * 边界同配置页（I3）：只经 {@link ConfigStore} 读写 {@code profile.conf}，不自己解析 assets。
+ * 设计理由见 app 逻辑说明.md §9.3。
  */
 public class UiSettingsFragment extends Fragment
         implements ConfigResetBar.Host, ConfigFormController.Page {
@@ -73,12 +54,8 @@ public class UiSettingsFragment extends Fragment
     }
 
     /**
-     * 分组标题去掉段标编号（「[4] 界面」→「界面」）。
-     *
-     * <p>编号是给 {@code profile.conf} 的段标对齐用的，定义里必须留着
-     * （{@code check_params.py} 断言分组标题带「[N]」，且 profile.conf 段标由它派生）；
-     * 但显示时它只是噪音，故剥掉。<b>本页卡头与重置栏按钮共用这一份实现</b>
-     * （见 {@link ConfigResetBar}），显示口径只有一处。
+     * 分组标题去掉段标编号（「[4] 界面」→「界面」）：编号是给 {@code profile.conf} 段标对齐用的，
+     * 显示时只是噪音。<b>本页卡头与重置栏按钮共用这一份实现</b>。见 app 逻辑说明.md §6.4。
      */
     static String stripSectionNumber(@NonNull String title) {
         return title.replaceFirst("^\\[\\d+\\]\\s*", "");
@@ -109,8 +86,7 @@ public class UiSettingsFragment extends Fragment
     @Override
     public void onCreate(@Nullable Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
-        // 建表一律现场 inflate：本页按需打开、不在启动链上，且它是另一个 Activity 的上下文——
-        // 启动期那份预制造件（为配置页准备的，带的是配置页 Activity 的上下文）不该跨页取用
+        // 建表一律现场 inflate：本页按需打开、不在启动链上，且是另一个 Activity 的上下文（预制造件不该跨页取用）
         form = new ConfigFormController(this, requireContext().getApplicationContext(), null);
         // 与首帧并行：定义与首份快照在后台读，读完主线程一次建满（建满之前内容不露面）
         form.start();
@@ -247,11 +223,8 @@ public class UiSettingsFragment extends Fragment
     }
 
     /**
-     * 建满之后的收尾：定义里没有本组（或本组的键一个都对不上）时给空态提示，
-     * 然后把重置栏追加到参数卡之后——进页面要看的是参数本身，整组回退是调完再退的收尾动作；
-     * 且空态提示须留在它上面，故等表单铺完再追加。它与上方卡的间隙由该卡自带的上间距给出
-     * （{@code view_config_reset_bar.xml}，与分组卡同一标尺），此处不再补。
-     * 它不放键行（只有按钮），故配置页的键渲染自检不受影响。
+     * 建满之后的收尾：定义里没有本组时给空态提示，然后把重置栏追加到参数卡之后（先调参数、再整组回退，
+     * 空态提示须留在它上面）。它不放键行（只有按钮），故配置页的键渲染自检不受影响。
      */
     @Override
     public void onFormBuilt(int groupCount) {

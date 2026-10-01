@@ -10,35 +10,13 @@ import androidx.recyclerview.widget.RecyclerView;
 /**
  * 给任意可垂直滚动的 View 接上「按住滚动条拖动」。
  *
- * <p><b>为什么必须自己实现</b>：Android 框架的滚动条只有绘制能力，没有触摸拖动实现——
- * {@code androidx.recyclerview.widget.ScrollbarHelper} 全文只有滚动量计算
- * （{@code computeScrollOffset/Extent/Range}），零触摸代码；框架另有一套
- * {@code fastScrollEnabled} API 专做这件事，正说明默认滚动条不响应拖动。
+ * <p>挂在视图的 {@code OnTouchListener} 上（不是包一层容器，不影响现有层次）：命中区 = 右边缘一条窄带
+ * （滚动条宽 + 8dp，且不小于 20dp）；按下落在滑块上就抓着拖、落在轨道空白处滑块先跟到手指；拖动映射成
+ * 按比例的滚动位置、用 {@code scrollBy} 落地（对 {@code ScrollView} 与 {@code RecyclerView} 都有效）。
+ * 不命中的触摸一律返回 false，正常滚动、点击、长按全部照旧。
  *
- * <p>挂在视图的 {@code OnTouchListener} 上（不是包一层容器，故不影响现有层次）：
- * <ul>
- *   <li>命中区 = 右边缘一条窄带（滚动条宽度 + 8dp，且不小于 20dp）：细滚动条也能按住；</li>
- *   <li>按下点落在滑块上 → 按「抓着滑块拖动」算；落在轨道空白处 → 滑块先跟到手指再拖；</li>
- *   <li>拖动映射成按比例的滚动位置，用 {@code scrollBy} 落地——它对 {@code ScrollView} 与
- *       {@code RecyclerView} 都有效（后者走 {@code scrollByInternal}，直接 {@code scrollTo} 无效）。</li>
- * </ul>
- *
- * <p>不命中的触摸一律返回 false，正常滚动、点击、长按全部照旧。
- *
- * <p><b>抓住滑块前先结束正在进行的惯性滑动</b>：滚动中的 {@code ScrollView} 每帧都在
- * {@code computeScroll} 里把 fling 自己算出的位置写回去（{@code RecyclerView} 同理，由
- * {@code ViewFlinger} 每帧回写），本类同一帧里的 {@code scrollBy} 随即被覆盖——表现就是
- * "按着滚动条不动，得等它自己滑完才跟手"。故按下的那一下先停掉在跑的滚动：
- * {@code ScrollView} 用零速度 {@code fling} （位移为 0、动画当帧即结束，是公开 API 里唯一
- * 能中止它的入口）、{@code RecyclerView} 用 {@code stopScroll}。
- *
- * <p><b>抓住滑块拖动期间禁用父容器拦截</b>（{@code requestDisallowInterceptTouchEvent}）：
- * 页面根在外层 ViewPager2 的横向 RecyclerView 里，纵向拖动只要带一点横向位移，就可能被它当成
- * "用户在翻页"把事件流拦走——表现为"按着滚动条拖，页面却横着翻了过去"。按下命中窄带时禁掉，
- * 抬起/取消时恢复；不命中的触摸不动这个开关。
- *
- * <p>代价（真机需确认）：右边缘窄带内的普通拖拽会被吃掉；系统手势导航若占用了最外侧边缘，
- * 实际可按住的区域会从窄带内侧开始。
+ * <p>为什么必须自己实现、按下时为什么先结束惯性滑动、拖动期间为什么禁用父容器拦截，以及真机未验证的
+ * 代价，见 app/逻辑说明.md §7.6。本类按下的那一下先停掉在跑的滚动（见 {@link #stopOngoingScroll}）。
  */
 public final class ScrollbarDrag {
 
@@ -117,11 +95,9 @@ public final class ScrollbarDrag {
     /**
      * 结束该视图正在进行的滚动（惯性滑动 / 平滑滚动），使其不再逐帧回写滚动位置。
      *
-     * <p>两种类型各用各的公开入口：{@code RecyclerView#stopScroll} 一次停掉 fling 与平滑滚动；
-     * {@code ScrollView} 没有等效 API，用零速度 {@code fling(0)}——它同样走 {@code mScroller.fling}，
-     * 位移为 0 故动画在当帧就结束，效果等于中止上一个 fling（且当前滚动位置不动）。
-     *
-     * <p>本身不在滚动时调用也无害（零位移、无副作用）。
+     * <p>两种类型各用各的公开入口：{@code RecyclerView#stopScroll}；{@code ScrollView} 无等效 API，
+     * 用零速度 {@code fling(0)}（位移为 0、动画当帧即结束）。不在滚动时调用也无害。
+     * 为什么必须先停见 app/逻辑说明.md §7.6。
      */
     private static void stopOngoingScroll(View v) {
         if (v instanceof RecyclerView) {
@@ -135,8 +111,8 @@ public final class ScrollbarDrag {
      * 一次取齐当前滚动量（偏移 / 范围 / 可视）。
      *
      * <p>{@code computeVerticalScrollOffset/Extent/Range} 在 {@code View} 里是 <b>protected</b>，
-     * 外部类不能调；{@code RecyclerView} 把这三个重写成了 public，故按类型分流：
-     * RecyclerView 直接取，其余（ScrollView 一类）用 {@code getScrollY()} 与内容高度自己算。
+     * {@code RecyclerView} 才重写成 public，故按类型分流：RecyclerView 直接取，其余用
+     * {@code getScrollY()} 与内容高度自己算。
      */
     private static final class Metrics {
         final int offset;

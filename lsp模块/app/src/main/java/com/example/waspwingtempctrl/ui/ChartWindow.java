@@ -1,14 +1,10 @@
 package com.example.waspwingtempctrl.ui;
 
 /**
- * 显示窗口：按档位/行数上限切片，并算好断联空白（口径清单 §4/§8）。
+ * 显示窗口：按档位/行数上限切片，并算好断联空白。
  *
- * <p><b>时间轴口径</b>：x 不是"按真实时间等比"，而是
- * {@code x = padL + W * ((序号 + 累计gap) / totalUnits)}（口径见 {@code 逻辑说明.md} 的「曲线」一节〈断联空白〉）——
- * 正常段 1 行 = 1 格（与 dt 无关），只有断联处按 {@code min(dt, gapMaxSec)} 的封顶量补偿。
- * 时间戳只用于两件事：窗口裁剪（{@code t < lastT - winSec} 丢弃）与断联判定（{@code dt > detectSec}）。
- *
- * <p>窗口裁剪顺序照原实现：先按条数 {@code 尾部 winSec 行}，再按时间收紧（保留 ≥ 1 个样本）。
+ * <p>时间轴口径（x 公式、正常段 1 行 = 1 格、断联处按 {@code min(dt, gapMaxSec)} 封顶补偿、时间戳只用于
+ * 裁剪与断联判定、裁剪先按条数再按时间收紧）见 app/逻辑说明.md §7.2。
  */
 final class ChartWindow {
 

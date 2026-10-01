@@ -19,31 +19,11 @@ import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 
 /**
- * <b>I4（已冻结）：部署完成判定</b> + <b>I5 的一半：界面 ↔ 部署的调用边界</b>。
+ * 部署链路核心。界面只允许调 {@link #probe()}、{@link #deploy()}、{@link #uninstall()}、
+ * {@link #startDaemon()}、{@link #stopDaemon()}、{@link #buildDiagnostics()}，不得自己拼 shell、不得直接碰文件；
+ * root 调用一律走 {@link RootShell}（I2）。本类方法全部阻塞，<b>禁止在主线程调用</b>。
  *
- * <p>界面（线 D）只允许调本类的 {@link #probe()}、{@link #deploy()}、{@link #uninstall()}、
- * {@link #startDaemon()}、{@link #stopDaemon()}、{@link #buildDiagnostics()}，
- * <b>不得自己拼 shell、不得直接碰文件</b>。
- *
- * <h3>I4 的判据（只用 APK 侧可得的信息，因此不许要求 C 端加 --version 之类开关）</h3>
- * <pre>
- * deployed = su 通道可用
- *          ∧ /data/local/tmp/tempctrl 存在
- *          ∧ 可执行
- *          ∧ md5 与 APK 内 assets/tempctrl-arm64 一致
- *          ∧ service.d 脚本存在
- *          ∧ md5 与 APK 内 assets/deploy/b6x-tempctrl.sh 一致    ← 脚本逐字节部署，故可直接比哈希
- * </pre>
- * 配置存在、守护进程在跑<b>不算</b>完成判据（配置允许缺失、进程允许未起），只作状态展示。
- *
- * <h3>root 调用一律走 {@link RootShell}（I2）</h3>
- * 本类不拼 {@code Runtime.exec("su ...")}。全部方法阻塞，<b>禁止在主线程调用</b>。
- *
- * <h3>为什么二进制/脚本要经过私有目录中转</h3>
- * {@code /data/local/tmp} 与 {@code /data/adb} 都不是 app 能写的目录，
- * 因此先用 Framework 的 File API 把 APK 内资源落到私有目录并授权（照 Scene 的做法），
- * 再由 root 的 {@code cp} 就位。{@code chmod} 只出现在 root 侧、作用于 root 拥有的路径，
- * 不用于 app 自己的落盘（app 侧一律 {@code setExecutable(true,false)} + 沿父目录链逐级向上）。
+ * <p>I4 部署完成判据、二进制/脚本为何经私有目录中转 —— 详见 app/逻辑说明.md §2.1、§2.5。
  */
 public final class Deployer {
 
@@ -63,14 +43,9 @@ public final class Deployer {
     public static final int KSU_MODERN_VER_CODE = 10683;
 
     /**
-     * 看门狗候选进程的 comm 白名单：常见 shell 的进程映像名。
-     *
-     * <p><b>它只是快筛、不是判据</b>：身份判据只有一条——「某个参数<b>整等于</b>候选脚本路径」
-     * （见 {@code pidsPreamble()/wd_pids()}，与 C 侧 {@code cmdline_has_script_arg()} 同口径）。
-     * 名单用来省 fork：真机上 service.d 拉起的看门狗 comm 是 {@code busybox}
-     * （{@code /data/adb/ksu/bin/busybox sh <脚本>}），app 自己拉起的是 {@code sh} ——
-     * 曾经只认 {@code sh} 就把前者整条漏掉（「停止daemon」静默失效且假报成功）。
-     * 而枚举必然再撞墙（换个 root 方案就换个壳），故未命中时由 {@code wd_pids()} 全量兜底一轮。
+     * 看门狗候选进程的 comm 白名单。**它只是省 fork 的快筛、不是判据**：身份判据只有「某参数整等于脚本路径」；
+     * 真机 service.d 拉起的看门狗 comm 是 {@code busybox}、app 拉起的是 {@code sh} —— 曾只认 {@code sh} 漏掉后者
+     * （「停止daemon」静默失效），白名单含它即为此。详见 app/逻辑说明.md §2.3。
      */
     private static final String WD_COMM_WHITELIST = "sh|ash|busybox|mksh|dash|toybox";
     /** C 端单实例锁退出码：已有实例在运行。 */
@@ -82,19 +57,14 @@ public final class Deployer {
     private static final String MANIFEST_KEY_APK_MTIME = "APK_MTIME";
 
     /**
-     * 「自动更新」开关的配置键。
-     *
-     * <p>键定义在 {@code params.def.json} 的 webui 组（{@code daemonConsumes=false}，界面自用），
-     * 值落在 {@code profile.conf}：之所以不另写一份标记文件，是为了让<b>脚本侧读同一个键</b>
-     * （{@code b6x-tempctrl.sh} 直接 grep profile.conf），避免"界面写一处、脚本读另一处"的双份真相。
+     * 「自动更新」开关的配置键（定义在 {@code params.def.json} 的 webui 组；值落 {@code profile.conf}，
+     * 脚本侧 grep 同一个键 —— 避免双份真相）。详见 app/逻辑说明.md §2.5。
      */
     public static final String KEY_UI_AUTO_UPDATE = "UI_AUTO_UPDATE";
 
     /**
-     * root 探测的一次性落盘标记所在的 prefs 文件名与键。
-     *
-     * <p><b>为什么集中在 {@code Deployer}</b>：写读这两处的类分处两个包（{@code Deployer} 在根包、
-     * {@code ui/StatusFragment} 在 ui 包），键名与文件名只在根包收口，避免同一字面量写两份。
+     * root 探测的一次性落盘标记所在的 prefs 文件名与键。键名与文件名只在根包收口
+     * （读写的类分处两个包），避免同一字面量写两份。详见 app/逻辑说明.md §2.5。
      */
     public static final String PREFS_ROOT_PROBE = "root_probe";
     /** 首次启动的 root 尝试标记（只试一次，被拒/失败都不再重试）。 */
@@ -103,14 +73,15 @@ public final class Deployer {
     public static final String KEY_HASH_PROMPTED_MD5 = "bin_hash_prompted_md5";
     /** 设备侧上次已知的二进制 md5（部署成功或探测确认一致时写入）。 */
     public static final String KEY_BIN_DEPLOYED_MD5 = "bin_deployed_md5";
+    /**
+     * 上次探测时 root 是否可用（{@code suOk} 的落盘快照）。落页判定用
+     * {@link #rootNotYetGranted} 读它，据此决定自动更新开着时是否仍要把用户导向状态页。
+     */
+    public static final String KEY_ROOT_OK = "root_ok";
 
     private static final long START_COOLDOWN_MS = 10_000L;
-    /**
-     * 发 {@code kill}（SIGTERM）后轮询等进程退出的秒数。
-     *
-     * <p>C 端装了 SIGTERM 处理器——收到只置退出标志，要等当前一轮跑完，一轮最长约 5 秒
-     * （同部署脚本 {@code WAIT_LOOPS} 的注记），5 轮即够；实测用不到那么久，原为 30 轮。
-     */
+    /** {@code kill}（SIGTERM）后等进程退出的轮数：C 端要等当前一轮跑完（≤5s，同脚本 {@code WAIT_LOOPS}），5 轮即够。
+     *  详见 app/逻辑说明.md §2.2。 */
     private static final long KILL_WAIT_LOOPS = 5L;
     /** 强杀（{@code kill -9}）后的等待轮数：-9 已不可被忽略，只需一小段收尾时间。 */
     private static final long KILL9_WAIT_LOOPS = 3L;
@@ -118,30 +89,14 @@ public final class Deployer {
     private static final long RETRY_PAUSE_MS = 2_000L;
     private static final long EXEC_TIMEOUT_MS = 120_000L;
     /**
-     * {@link #probe()} 那一趟 su 往返的超时。
-     *
-     * <p>probe 只跑只读脚本（存在性 / md5sum / 扫 /proc 判活），不等任何进程退出，故远短于
-     * {@link #EXEC_TIMEOUT_MS} —— 那个长度是 deploy / uninstall 轮询等进程退出才需要的。
-     * 取 15 秒：给慢设备上 su 冷启动与首次授权框留余量，又不再让状态区干等两分钟。
+     * {@link #probe()} 那趟 su 往返的超时：probe 只跑只读脚本、不等进程退出，故远短于 {@link #EXEC_TIMEOUT_MS}。
+     * 取 15s 给慢设备 su 冷启动与首次授权框留余量。详见 app/逻辑说明.md §2.1。
      */
     private static final long PROBE_EXEC_TIMEOUT_MS = 15_000L;
 
     /**
-     * asset 哈希的进程级 memo（key = asset 路径）。
-     *
-     * <p>APK 内的 asset 在进程存活期间不可能变，故一次算过的哈希可以一直用；而两处调用点的代价都不轻：
-     * {@link #needsRedeploy} 是冷启动落页判定的必经一步（{@code SetupActivity} 把它连判定一起放在
-     * {@code ww-preload} 预热线程上，见 {@code SetupActivity#preload}），{@link #probe()} 每次要算两份、
-     * 而 probe 是每个动作的收尾（一次部署要跑好几次）。asset 无 {@code noCompress}，
-     * 每次都要实时解压再哈希，memo 于是把「每动作数份」降成「每进程各一份」。
-     *
-     * <p>用 {@link ConcurrentHashMap} 而非 HashMap：probe 与 needsRedeploy 各自在自己的后台线程上调用
-     * （后者是预热线程），两侧都会写。并发撞上同一路径时只是重复算一次（结果幂等），故不加锁互斥。
-     *
-     * <p><b>只在成功时写</b>：asset 缺失/读错误照旧抛 {@link IOException}、不进表 ——
-     * 否则一次瞬时失败会被永久记住，此后连重试的机会都没有。
-     *
-     * <p>不随 APK 更新失效：覆盖安装会杀掉本进程，新进程自然是空表。
+     * asset 哈希的进程级 memo（key = asset 路径）。只在成功时写（否则瞬时失败会被永久记住）；
+     * 不随 APK 更新失效（覆盖安装会杀进程）。详见 app/逻辑说明.md §2.1。
      */
     private static final Map<String, String> ASSET_MD5_MEMO = new ConcurrentHashMap<>();
 
@@ -152,10 +107,8 @@ public final class Deployer {
     private final ConfigStore configStore;
 
     /**
-     * 拉起冷却（内存态，进程重启即失效）。
-     *
-     * <p>只由 {@link #startDaemon()} 写入（成功失败都写，防连点）；{@link #deploy()} 成功时清零 ——
-     * 那时候盘上刚换过二进制，紧随其后的自动拉起必须能起（见 {@link #deploy()}）。
+     * 拉起冷却（内存态，进程重启即失效）。只由 {@link #startDaemon()} 写（成功失败都写，防连点）；
+     * {@link #deploy()} 成功时清零。详见 app/逻辑说明.md §2.2。
      */
     private volatile long lastStartAtMs;
 
@@ -180,36 +133,20 @@ public final class Deployer {
     }
 
     /**
-     * 是否需要重新部署 —— <b>只读缓存，不跑 su</b>，供启动落页判定调用（{@code SetupActivity} 已把整个
-     * 判定连它一起放在 {@code ww-preload} 预热线程上，见 {@code SetupActivity#preload}，故不在主线程）。
-     *
-     * <p>判据：设备上上次已知的二进制 md5（{@link #KEY_BIN_DEPLOYED_MD5}）与 APK 内
-     * {@code assets/tempctrl-arm64} 的 md5 不一致。缓存来自「部署成功」或「探测确认一致」两条路径
-     * （见 {@link #rememberDeployedBinMd5}），因此它表达的是"上次看到的设备侧内容"，
-     * 不保证此刻设备上仍是这个值 —— 实时状态仍以 {@link #probe()} 为准。
-     *
-     * <p>无缓存时退化为「首启判据」{@code !root_tried}：从没部署过（也没试过 root）＝需要去状态页，
-     * 让首次授权/部署入口仍可达；已经试过 root 却仍无缓存（被拒、或部署从未成功）
-     * ＝不再自动引导，落回用户设定的起始页。
-     *
-     * <p>APK 内取不到二进制（本地构建没有 CI 注入的 asset）→ 无从比对，一律 false。
-     *
-     * <p><b>求值顺序</b>：先读 {@code SharedPreferences}、后算资产哈希 —— 只调换顺序，判据逐分支不变。
-     * 资产哈希（解压 + 哈希）是这里有同步 IO 的一步，且它是落页判定那条路上最贵的一步；而"已试过
-     * root 却无缓存"这一支的结果与资产无关，故那条路上不再白算它。
+     * 是否需要重新部署 —— <b>只读缓存，不跑 su</b>，供启动落页判定调用（在 {@code ww-preload} 预热线程上）。
+     * 判据：设备侧上次已知的二进制 md5（{@link #KEY_BIN_DEPLOYED_MD5}）与 APK 内 {@code assets/tempctrl-arm64}
+     * 不一致；无缓存时退化为「首启判据」{@code !root_tried}。详见 app/逻辑说明.md §2.1。
      */
     public static boolean needsRedeploy(Context context) {
         Context app = context.getApplicationContext();
-        // 先读 SharedPreferences：下面这一支（从没部署过）的判据只有"试过 root 没有"，与资产是否可比
-        // 无关，故不再为它白算一遍资产 MD5（解压 + 哈希）。这是落页判定那条路上最贵的一步。
+        // 先读 prefs：下面这一支与资产无关，故不为它白算资产 MD5（落页判定那条路上最贵的一步）。见 §2.1
         SharedPreferences prefs = app.getSharedPreferences(PREFS_ROOT_PROBE, Context.MODE_PRIVATE);
         String cached = prefs.getString(KEY_BIN_DEPLOYED_MD5, null);
         if (cached == null || cached.isEmpty()) {
             if (prefs.getBoolean(KEY_ROOT_TRIED, false)) {
-                return false;   // 已试过 root 却仍无缓存：不再自动引导（见上一段"无缓存时退化"的判据）
+                return false;   // 已试过 root 却仍无缓存：不再自动引导（见 §2.1）
             }
-            // 未试过 root：仍要"资产取不到 → 一律 false"这条既有护栏，故资产可比性还是得问一次
-            // （本地构建没有 CI 注入的 asset 时，正是靠它不把用户引到状态页去）
+            // 未试过 root：仍要"资产取不到 → 一律 false"这条护栏，故资产可比性还得问一次
             return !md5OfAssetOrEmpty(app, BIN_ASSET).isEmpty();
         }
         String expected = md5OfAssetOrEmpty(app, BIN_ASSET);
@@ -220,10 +157,8 @@ public final class Deployer {
     }
 
     /**
-     * 记下设备侧当前已知的二进制 md5（{@link #needsRedeploy} 的唯一数据来源）。
-     *
-     * <p>两处调用：{@link #deploy()} 成功就位并读回设备侧哈希之后；状态页探测到
-     * {@link Status#binHashOk} 为真时。空值不写（宁可保留旧值，也不把缓存清成"从没部署过"）。
+     * 记下设备侧当前已知的二进制 md5（{@link #needsRedeploy} 的唯一数据来源）。空值不写。
+     * 详见 app/逻辑说明.md §2.1。
      */
     public static void rememberDeployedBinMd5(Context context, String deviceBinMd5) {
         if (deviceBinMd5 == null || deviceBinMd5.isEmpty()) {
@@ -235,18 +170,33 @@ public final class Deployer {
     }
 
     /**
-     * 「自动更新」开关当前是否开启（<b>默认开</b>）。
-     *
-     * <p>键是 {@link #KEY_UI_AUTO_UPDATE}，值落在 {@code profile.conf}；<b>脚本侧读的是同一个键</b>
-     * （{@code b6x-tempctrl.sh} 直接 grep 该文件），故界面与脚本不会各有一份真相。
-     * 读不到（键还没落到设备上的 profile.conf、或定义尚未发布）即按默认值【开】处理，
-     * 与定义的 {@code default} 一致 —— 口径与 {@code SetupActivity#isDeployEntryEnabled} 相同。
-     *
-     * <p>不阻塞（读的是 {@link ConfigStore} 的内存快照）。
+     * 「自动更新」开关当前是否开启（<b>默认开</b>）。读的是 {@link ConfigStore} 的内存快照、不阻塞；
+     * 读不到即按默认值【开】处理。详见 app/逻辑说明.md §2.5。
      */
     public static boolean isAutoUpdateEnabled(Context context) {
         ConfigStore.Value value = ConfigStore.get(context).get(KEY_UI_AUTO_UPDATE);
         return value == null || value.intAt(0) != 0;
+    }
+
+    /**
+     * 记下「本次探测 root 是否可用」（{@link #KEY_ROOT_OK} 的唯一写处），由探测路径在拿到
+     * {@link Status#suOk} 后调一次。root 一旦消失（su 不通）也会被写成 false，于是"尚未取得 root"
+     * 这个状态可再次成立——这正是"root 丢失后可再回状态页"的依据。
+     */
+    public static void rememberRootState(Context context, boolean suOk) {
+        context.getApplicationContext()
+                .getSharedPreferences(PREFS_ROOT_PROBE, Context.MODE_PRIVATE)
+                .edit().putBoolean(KEY_ROOT_OK, suOk).apply();
+    }
+
+    /**
+     * root 是否<b>尚未取得</b>（= 需要申请）。只读缓存、不跑 su，供启动落页判定在预热线程上调用。
+     * 读不到（从未探测成功）即视为尚未取得。语义见 app/逻辑说明.md §5.1。
+     */
+    public static boolean rootNotYetGranted(Context context) {
+        return !context.getApplicationContext()
+                .getSharedPreferences(PREFS_ROOT_PROBE, Context.MODE_PRIVATE)
+                .getBoolean(KEY_ROOT_OK, false);
     }
 
     // ==================== 状态 / 判定 ====================
@@ -346,7 +296,7 @@ public final class Deployer {
         }
 
         /**
-         * 「看门狗 shell」一行的取值（P3-G7 的补救）：在此之前状态区只有前四项，看门狗既不在
+         * 「看门狗 shell」一行的取值（为让看门狗在界面上可见）：在此之前状态区只有前四项，看门狗既不在
          * "在跑"里也不在"没跑"里——「停机时它仍在跑」「同时有两个」都只能在 root shell 里才看得见。
          *
          * <p>个数直出，不做"正常/异常"判断：0 个在「刚点过停止daemon」和「首次部署前」都是正常的。
@@ -473,14 +423,8 @@ public final class Deployer {
     public static final class Result {
         public final boolean ok;
         /**
-         * <b>盘面是否已就位</b>（只有 {@link Deployer#deploy()} 会置真）：二进制与脚本都已落盘、
-         * 且与 APK 内资源逐字节一致。它比 {@link #ok} 弱——{@code ok} 还要求收尾自检也通过。
-         *
-         * <p><b>为什么单列</b>：部署只动盘（见 {@link Deployer#deploy()} 的 javadoc），让新二进制
-         * "生效"要靠随后那次「停旧起新」。而收尾自检是一次<b>读回</b>——su 往返超时、或与设备侧另一个
-         * 写者（脚本的自动更新）撞窗都会让它为假。若调用方只按 {@code ok} 决定要不要接着换进程，
-         * 一次读回失败就会留下「盘上已换新、进程还在跑旧映像」且<b>没有任何补偿</b>的状态
-         * （旧映像会一直跑到下次手动动作）。故单列这一位：<b>盘面已就位就仍值得尝试换进程</b>。
+         * <b>盘面是否已就位</b>（只有 {@link Deployer#deploy()} 会置真）：二进制与脚本都已落盘且与 APK 内一致。
+         * 比 {@link #ok} 弱；为什么必须单列 —— 详见 app/逻辑说明.md §2.2。
          */
         public final boolean placementsOk;
         public final String action;
@@ -535,23 +479,10 @@ public final class Deployer {
     }
 
     /**
-     * 一次性部署：资源落盘与授权 → 二进制就位 → service.d 脚本 → 配置保留写入 →
-     * 省电白名单（下发给已安装的散热器控制 app，见 {@link #powerAllowlistScript()}）。
-     *
-     * <p><b>配置保留</b>：{@code profile.conf} 不存在时才写出厂值（取自 params.json 的
-     * {@code factory}），已存在则一个字都不覆盖。
-     *
-     * <p><b>本方法只动盘、不重启守护进程</b>：盘上换了新二进制，不重启进程它就一直在跑旧映像、
-     * 等于没更新。"换完盘立刻拉起一次"接在部署之后，由调用方负责——状态页在部署结果上屏后
-     * 自动调一次 {@link #startDaemon()}，与手动点「拉起daemon」走的是同一条路径。
-     *
-     * <p><b>调用方该看哪一个位</b>：{@link Result#placementsOk}（盘面已就位）而不是 {@link Result#ok}
-     * （还含收尾自检）。自检是一次读回、可能为假，而"盘上已经换了新二进制"这件事在硬判据过完就已成立；
-     * 只按 {@code ok} 决定接不接拉起，一次读回失败就会把旧映像永久留下（无补偿）。
-     *
-     * <p>任一硬步骤失败即返回 {@code ok=false}（配置与白名单失败不算硬失败，记在 steps 里）；
-     * 走到末尾仍自检不过时 {@code ok=false} 但 {@code placementsOk=true}。
-     * <b>阻塞</b>（root 往返 3 次 + 落盘 + 若干次 probe）。
+     * 一次性部署：资源落盘与授权 → 二进制就位 → service.d 脚本 → 配置保留写入 → 省电白名单。
+     * <b>只动盘、不重启守护进程</b>（"换完盘立刻拉起一次"由调用方接在部署之后）；
+     * 调用方该看 {@link Result#placementsOk} 而非 {@link Result#ok}。<b>阻塞</b>。
+     * 详见 app/逻辑说明.md §2.1、§2.2。
      */
     public Result deploy() {
         List<String> steps = new ArrayList<>();
@@ -617,42 +548,23 @@ public final class Deployer {
         steps.add(pr.isOk() ? "省电白名单批处理已执行（仅对已安装的散热器控制 app 生效）"
                 : "省电白名单下发失败（不影响部署）：" + pr.describe());
 
-        // 盘上确实换了新二进制（本行之前三条硬判据都过了）：清掉拉起冷却，让紧随其后的自动拉起
-        // 不被「防连点」挡下 —— 挡下的后果是旧进程继续跑旧映像，正是本方法 javadoc 警告的
-        // 「等于没更新」，且没有任何自动补偿。防连点的语义只对「手动点拉起daemon」成立，那条路径一个字不动。
-        // （清冷却不看后面的自检结果：自检是读回，可能为假，而"盘上刚换过"这件事已经成立。）
+        // 盘上确实换了新二进制：清掉拉起冷却，让紧随其后的自动拉起不被「防连点」挡下（否则旧进程继续跑旧映像）。
+        // 防连点的语义只对「手动点拉起daemon」成立。见 §2.2。
         lastStartAtMs = 0L;
-        // 到位即止：拉起daemon 不在本方法里做（见 javadoc）——界面在部署上屏后再自动调一次
-        // startDaemon()，那是独立的一段（自己的忙态、操作记录与进度条）。
+        // 到位即止：拉起daemon 由界面在部署上屏后另调一次 startDaemon()（见 javadoc）。
         Status st = probe();
         steps.add(st.deployed ? "部署后自检通过"
                 : "部署后自检未通过（" + (st.suOk ? "内容或进程未符合判据" : "root 通道本次未通")
                 + "）——盘面已就位，仍交由随后的拉起动作换进程");
-        // placementsOk 恒真是因为走到了这里：三条硬判据（BIN_OK / SCRIPT_OK / 双侧哈希一致）都过了。
-        // 自检未通过也照回吐，调用方据此仍会补一次「停旧起新」（见 Result#placementsOk）。
+        // placementsOk 恒真：三条硬判据（BIN_OK / SCRIPT_OK / 双侧哈希一致）都过了；自检未过也照回吐。
         return new Result(st.deployed, true, "部署", steps,
                 st.deployed ? "" : "部署后自检未通过（盘面已就位）", st);
     }
 
     /**
-     * 只重推 service.d 脚本：不动二进制、不碰配置，<b>但会重启守护进程</b>。<b>阻塞</b>（root 往返 1 次）。
-     *
-     * <p>用途：{@link #probe()} 发现设备上的脚本与 APK 内资源哈希不一致时自动纠正。脚本是纯文本、
-     * 无运行态，重推无损；二进制若不一致仍须走完整 {@link #deploy()}。
-     *
-     * <p><b>为什么要连守护进程一起重启</b>：脚本与二进制同属"部署产物"、按同一份 APK 配套发布，
-     * 脚本变了就等于这次部署产物变了；且 service.d 脚本本身就是常驻的看门狗 shell（每
-     * {@code RESTART_INTERVAL} 秒一轮），只换盘上文件、不重起它，那一层仍然跑旧脚本的内存映像
-     * ——新脚本里改掉的判别逻辑要等重启手机才生效。故这里<b>先把看门狗 shell 停掉</b>，再由
-     * {@link #restartScript()} 的同一段逻辑用<b>磁盘上的新脚本</b>把它拉起来。
-     *
-     * <p>守护进程的停旧起新<b>不靠脚本</b>：{@code restartCore()} 在决定是否拉起脚本之前就已经把旧
-     * 实例停稳（含 {@code kill -9} 升级），脚本只负责把新的拉起来（脚本自身已不再先杀守护进程——见
-     * {@code tempctrl.c} 的「看门狗反向保活」：两侧统一为"先查后拉、存在即不重复拉起"）。
-     * 代价与「拉起daemon」同级：温控空窗 ≤{@value #KILL_WAIT_LOOPS}+{@value #KILL9_WAIT_LOOPS} 秒。
-     *
-     * <p><b>不探测</b>：返回的 {@link Result#status} 恒为 null（多一趟 su 往返不划算）。
-     * 重启的成败写在 {@link Result#steps} 里，调用方据此上屏。
+     * 只重推 service.d 脚本：不动二进制、不碰配置，<b>但会重启守护进程</b>（脚本是常驻看门狗，
+     * 只换盘上文件不重起，新判别逻辑要等重启手机才生效）。<b>不探测</b>（{@link Result#status} 恒为 null）。
+     * <b>阻塞</b>。详见 app/逻辑说明.md §2.2。
      */
     public Result updateScript() {
         List<String> steps = new ArrayList<>();
@@ -703,26 +615,8 @@ public final class Deployer {
 
     /**
      * 卸载部署：停进程 → 删脚本/二进制/锁/status 双文件 → 删私有目录里的运行时产物。
-     *
-     * <p>清完之后 {@code /data/local/tmp/} 侧不再有本次部署的残留；私有目录里只剩
-     * {@code profile.conf}（用户配置）。
-     *
-     * <p><b>故意不清的东西</b>（每条都有理由）：
-     * <ul>
-     *   <li>私有目录的 {@code profile.conf} —— 用户配置，卸载部署≠删配置；重装后仍在。</li>
-     *   <li>省电白名单（deviceidle / appops / standby bucket）—— 下发对象是<b>散热器控制 app</b>
-     *       （见 {@link #powerAllowlistScript()}，不是本界面 app）。对它仍然有益：钩子跑在散热器
-     *       app 进程里，那个进程被冻结/回收即断链；且用户可在系统设置里自行撤销。</li>
-     *   <li>{@code tempctrl_last_dev} 的<b>新落点</b>（飞智 app 自己的私有目录
-     *       {@code /data/data/<飞智包名>/files/}，各包各记）—— 既不属本次部署的产物，
-     *       也不在我们有权清理的目录里，<b>本类不碰</b>。</li>
-     * </ul>
-     *
-     * <p>唯一例外是 {@code tempctrl_last_dev} 的<b>旧落点</b>
-     * {@code /data/local/tmp/tempctrl_last_dev}：它是老版本的迁移残留（daemon 侧的预创建已删、
-     * 现已无人读写），不会自己消失，所以卸载时顺手清掉 —— 这与上面「不碰新落点」并不矛盾。
-     *
-     * <p><b>阻塞</b>。
+     * <b>故意不清</b> {@code profile.conf}、省电白名单、{@code tempctrl_last_dev} 的新落点；
+     * 唯一例外是它的旧落点残留。<b>阻塞</b>。详见 app/逻辑说明.md §2.4。
      */
     public Result uninstall() {
         List<String> steps = new ArrayList<>();
@@ -767,25 +661,9 @@ public final class Deployer {
     // ==================== 拉起（界面手动入口） ====================
 
     /**
-     * 重启守护进程（界面入口）。<b>先停再起</b>：C 端用非阻塞 {@code flock} 做单实例锁，
-     * 旧实例还在时新实例会立刻以退出码 {@value #EXIT_ALREADY_RUNNING} 退出，
-     * 所以"已在运行"不能当作"无需拉起"——那正是"点了没反应"的原因。
-     *
-     * <p>停止序列照 {@link #uninstall()} 的口径：{@code kill} → 轮询等 ≤{@value #KILL_WAIT_LOOPS} 秒
-     * → {@code kill -9} → 再轮询 ≤{@value #KILL9_WAIT_LOOPS} 秒；仍未退出则<b>放弃启动</b>
-     * 并如实回吐（抢锁必然失败，静默失败比报错更难查）。
-     *
-     * <p><b>失败自动重试一次</b>：等 {@value #RETRY_PAUSE_MS} ms 再跑一遍完整序列。确定性失败
-     * 不重试——冷却是拒绝而非失败（先于重试返回）、二进制不存在重试必然同样失败；其余
-     * （root 通道失败、旧实例未退出、新实例没起来）都再试一次。
-     *
-     * <p><b>代价</b>：只等旧实例退出的最多 {@value #KILL_WAIT_LOOPS} + {@value #KILL9_WAIT_LOOPS} 秒
-     * （C 端已无启动延时），即一次点击约 0~8 秒温控空窗；失败重试会再叠一次，步骤里都会写明。
-     * 冷却 {@value #START_COOLDOWN_MS} ms 保留（防连点）；但 {@link #deploy()} 成功后会把它清零
-     * ——那时候盘上刚换过二进制，这条自动拉起必须能起（见 {@link #deploy()}）。
-     *
-     * <p><b>阻塞</b>。注意：这条路起的进程仍在该 app 的 cgroup 内，
-     * 常驻仍以 {@code service.d} 为主（见 {@link #deploy()}）。
+     * 重启守护进程（界面入口）。<b>先停再起</b>：C 端用非阻塞 {@code flock} 做单实例锁，"已在运行"不能当作
+     * "无需拉起"。失败自动重试一次；冷却 {@value #START_COOLDOWN_MS} ms 保留（{@link #deploy()} 成功清零）。
+     * <b>阻塞</b>。详见 app/逻辑说明.md §2.2。
      */
     public Result startDaemon() {
         List<String> steps = new ArrayList<>();
@@ -805,13 +683,8 @@ public final class Deployer {
         return new Result(a.ok, "拉起daemon", steps, a.ok ? "" : a.error, probe());
     }
 
-    /**
-     * 跑一次完整的「先停再起」，把可读步骤追加进 {@code steps}。
-     *
-     * <p>不判冷却（由调用方管），只回吐这一次的成败、失败原因、以及是否值得再试一次——
-     * 可重试＝root 通道失败 / 旧实例未退出 / 未探测到新进程；不可重试＝二进制不存在
-     * （重试必然同样失败）。
-     */
+    /** 跑一次完整的「先停再起」，把可读步骤追加进 {@code steps}。不判冷却（由调用方管）。
+     *  详见 app/逻辑说明.md §2.2。 */
     private Attempt restartOnce(List<String> steps) {
         RootShell.Result r = shell.exec(restartScript(), EXEC_TIMEOUT_MS);
         if (!r.isOk()) {
@@ -879,15 +752,9 @@ public final class Deployer {
     }
 
     /**
-     * 停止守护进程（界面入口）：<b>先停看门狗 shell、再停 daemon</b>，只杀进程，不删任何文件。
-     *
-     * <p><b>为什么必须连看门狗一起停</b>：它每 {@code RESTART_INTERVAL} 秒检查一次「daemon 不在就
-     * 拉起」，只杀 daemon 的话最多 5 分钟就被它拉回来，「停止」不成立。代价是看门狗要重启手机
-     * （由 {@code service.d} 拉起）才会回到常驻；期间恢复靠 {@link #startDaemon()}——它会发现
-     * 看门狗不在并把看门狗一起拉起来——或重新 {@link #deploy()}。
-     *
-     * <p>与 {@link #uninstall()} 的区别：两者停的是同一对进程（共用 {@link #killAndWaitSnippet}），
-     * 但卸载停稳之后还要删文件，这里什么都不删。<b>阻塞</b>。
+     * 停止守护进程（界面入口）：<b>先停看门狗 shell、再停 daemon</b>，只杀进程、不删任何文件
+     * （看门狗会每 {@code RESTART_INTERVAL} 秒把 daemon 拉回，故必须连它一起停）。
+     * 与 {@link #uninstall()} 共用停止片段、区别是这里什么都不删。<b>阻塞</b>。详见 app/逻辑说明.md §2.2。
      */
     public Result stopDaemon() {
         List<String> steps = new ArrayList<>();
@@ -1019,18 +886,8 @@ public final class Deployer {
 
     /**
      * <b>防御性预创建</b>私有目录里的两个运行时文件（{@code tempctrl.log} / {@code tempctrl_webui.data}）。
-     *
-     * <p><b>标注：防御性、未经真机验证</b>。前提是一个未经验证的假设：这两个文件原本由 root 的守护进程
-     * 在 app 私有目录里创建，权限层面 app 大概率读得到（0644 / 目录 0771），
-     * 但 <b>SELinux 标签层面未必</b>（非 app 域创建的文件不一定是 {@code app_data_file}）。
-     * 由 app 用自己的 uid 先建，属主与标签就是对的；守护进程之后是<b>追加写既有文件</b>
-     * （{@code fopen(path,"a")}）与<b>原地 ftruncate 轮转</b>（不 rename、不重建），
-     * 因此不会把标签改回 root。
-     *
-     * <p>边界：只在<b>不存在时</b>创建，已存在一个字都不碰；创建失败<b>不阻断部署</b>（非必需品），
-     * 只在步骤里记一行。二进制被改名或 {@code LOG_FILE} 被改成别的名字时，本条不覆盖那个名字。
-     *
-     * <p>刻意不用 {@link RootShell}：由 root 创建就回到了要规避的那个标签问题上。
+     * <b>标注：防御性、未经真机验证</b>（SELinux 标签假设）。只在不存在时创建；失败不阻断部署。
+     * 刻意不用 {@link RootShell}。详见 app/逻辑说明.md §2.5、§10。
      */
     private String preCreateRuntimeFiles() {
         List<String> created = new ArrayList<>();
@@ -1065,24 +922,9 @@ public final class Deployer {
     }
 
     /**
-     * 刷新「同步清单」—— service.d 脚本在设备上找不到可用解压工具时的<b>降级来源</b>。
-     *
-     * <p>正常路径下脚本自己解 APK 取资源（`busybox/toybox/unzip` 三选一），用不到本清单；
-     * 三个都不可用时它才退而读这份清单。清单是一份 {@code KEY=VALUE}：
-     * <pre>
-     * APK_MTIME=&lt;base.apk 的 mtime，秒&gt;        ← 与脚本侧 {@code stat -c %Y} 同口径
-     * BIN_MD5 / SCRIPT_MD5=&lt;期望内容哈希&gt;
-     * BIN_SRC / SCRIPT_SRC=&lt;私有目录里中转副本的绝对路径&gt;
-     * </pre>
-     * <b>时间戳是这份清单的保鲜期</b>：脚本只在「清单里的 APK_MTIME 与当前 APK 文件一致」时才用它
-     * —— 否则清单描述的是旧 APK，照它装就是装旧内容（宁可不动，也不能装错）。
-     *
-     * <p><b>只在 APK 换了才做</b>：判据是一次 {@code stat}（比较清单里记的 mtime 与当前 APK 文件的
-     * mtime），所以每次进状态页顺手调都不亏；真刷新时才解压两份 asset 并复刻到中转副本。
-     * <b>清单不存在</b>（老版本升上来 / 用户刚清过数据）也走刷新，故降级路不会因为"从没写过清单"而瞎。
-     *
-     * <p>清单与副本都在私有目录（随系统卸载连目录一起删，不需要动卸载清理清单）。
-     * <b>阻塞</b>（解压 + 写盘），只在后台线程调；失败不抛异常，记在返回值里。
+     * 刷新「同步清单」—— service.d 脚本找不到解压工具时的降级来源（一份 {@code KEY=VALUE}，
+     * 见 §2.5；时间戳是保鲜期）。只在 APK 换了才做。<b>阻塞</b>，只在后台线程调；失败记在返回值里。
+     * 详见 app/逻辑说明.md §2.5。
      *
      * @return 需要上屏的失败说明；无需刷新或刷新成功时返回 null
      */
@@ -1092,8 +934,7 @@ public final class Deployer {
             // 取不到 APK 文件时间戳：无从判定清单是否过期，也就不写（脚本侧会退化为"不动作"）
             return null;
         }
-        // APK 内资源不完整（本地构建没有 CI 注入的 asset）：probe() 已有"APK 内资源不完整"的提示行，
-        // 这里静默跳过，不重复报一遍（两份哈希的 memo 命中，代价只是一次查表）
+        // APK 内资源不完整（本地构建没有 CI 注入的 asset）：probe() 已有提示行，此处静默跳过
         if (md5OfAssetOrEmpty(appContext, BIN_ASSET).isEmpty()
                 || md5OfAssetOrEmpty(appContext, SCRIPT_ASSET).isEmpty()) {
             return null;
@@ -1176,11 +1017,8 @@ public final class Deployer {
     }
 
     /**
-     * 删私有目录里的运行时产物；返回删除成功的文件名。{@code profile.conf} 不在列（用户配置）。
-     *
-     * <p>清单与时间戳记录（{@link #MANIFEST_NAME} / {@code tempctrl_deploy_stamp}）也在列：
-     * 它们描述的是"部署产物当前是什么样"。卸载之后不清掉，脚本侧那份「上次核对通过」的记录
-     * 会让 {@code service.d} 脚本认为"本机部署过"，下次开机把刚卸载掉的东西又装回来。
+     * 删私有目录里的运行时产物（{@code profile.conf} 不在列，属用户配置）。清单/时间戳/看门狗标记也在列
+     * （否则脚本会认为"本机部署过"、下次开机把卸载掉的重装回来）。详见 app/逻辑说明.md §2.5。
      */
     private List<String> cleanPrivateRuntime() {
         List<String> removed = new ArrayList<>();
@@ -1208,47 +1046,22 @@ public final class Deployer {
     // ==================== 内部：shell 片段 ====================
 
     /**
-     * 两个「按 pid 找目标进程」的 shell 函数（跑在设备端 su shell 里、toybox 环境）。
-     *
-     * <p><b>为什么替掉 {@code pgrep -f}</b>：那是 cmdline 子串匹配，凡命令行里出现过该串的进程都被
-     * 算进来。对 {@code $BIN} 尤其糟——该路径同时是 {@code tempctrl_service.log} / {@code tempctrl_uiprefs} /
-     * {@code tempctrl_*.status} 等一串兄弟文件名的前缀，而后果不只是"多杀一个无关进程"：等待循环会
-     * 永远等不到"已退出"（无关进程不受我们的 signal 影响），{@code <TAG>_STOPPED} 恒 0，
-     * 「拉起daemon」直接判「旧实例未退出，已放弃启动」——一次无关进程就能让该功能硬失败。
-     *
-     * <p><b>判据只剩这一处</b>：{@link #killAndWaitSnippet}（停）与 {@link #restartCore()}（判活 / 取 PID）
-     * 共用这两个函数，故"判有没有在跑"与"判停没停稳"不可能给出不同结论。判据与 service.d 脚本的
-     * {@code running()} 同源（{@code /proc/<pid>/exe} 的指向），并且<b>两侧对 {@code (deleted)} 必须同口径
-     * （都算"在跑"）</b>：部署是 {@code rm -f} 后 {@code cp}，旧实例此时 exe 显示成
-     * {@code <路径> (deleted)} 却仍持着单实例锁；任一侧漏判它，"这个实例谁也替换不掉"就成立
-     * （脚本会以为没在跑、反复起新实例又被锁以退出码 2 顶掉，盘上的新二进制永不生效）。
-     *
-     * <p><b>看门狗那一半与 C 侧同口径</b>：{@code wd_pids()} 与 {@code tempctrl.c} 的
-     * {@code cmdline_has_script_arg()} 都只认「某个参数整等于候选脚本路径」，两侧都不拿 comm 定身份
-     * （那份名单只做省 fork 的快筛，见 {@code WD_COMM_WHITELIST}）。
+     * 两个「按 pid 找目标进程」的 shell 函数（设备端 su shell、toybox 环境）：{@code bin_pids()}（二进制实例）
+     * 与 {@code wd_pids()}（看门狗 shell）。<b>身份判据只此一处</b>，{@link #killAndWaitSnippet} 与
+     * {@code restartCore()} 共用；与 C 侧 {@code cmdline_has_script_arg()}、脚本 {@code running()} 同口径
+     * （对 {@code (deleted)} 都算"在跑"）。详见 app/逻辑说明.md §2.3。
      */
     private static String pidsPreamble() {
         return "BIN=" + BIN_DEST + "\n"
-                // 二进制实例＝/proc/<pid>/exe 的指向**恰好**是 $BIN（末端锚定，故不会命中
-                // tempctrl_service.log / tempctrl_*.status 那些兄弟文件）。
-                // 末尾允许 " (deleted)"：部署流程是 rm -f 后 cp（`deployScript()`），而旧实例可能正跑着
-                // 那个被 unlink 的 inode —— 此时它的 exe 显示成 "<路径> (deleted)"，但它**仍持着单实例锁**，
-                // 必须仍算"在跑"、仍要能被停掉；否则新实例以退出码 2 退出，盘上的新二进制永远不生效
-                // （正是 deploy() 警告过的"等于没更新"）。二元括号写成 [(] [)]，不在 ERE 里用转义括号。
+                // 二进制实例＝/proc/<pid>/exe 末端锚定 $BIN（不命中 tempctrl_service.log 等兄弟文件）；
+                // 末尾允许 " (deleted)"：部署是 rm -f 后 cp，旧实例仍持单实例锁，必须仍算"在跑"。见 §2.3
                 + "bin_pids() {\n"
                 + "    ls -l /proc/[0-9]*/exe 2>/dev/null"
                 + " | grep -E -- \"-> $BIN( [(]deleted[)])?$\""
                 + " | sed -n \"s#.* /proc/\\([0-9]*\\)/exe ->.*#\\1#p\"\n"
                 + "}\n"
-                // 看门狗 shell：exe 判不出来（一切 shell 的 exe 都是 /system/bin/sh），故身份只由一件事定：
-                // 它的某个**参数恰好等于**候选脚本路径（不是子串：cp/rm/md5sum 的实参、部署中转副本
-                // <staging>/b6x-tempctrl.sh、".new" 后缀、只是提到过该文件名的进程，一概不算）。
-                // 命中的就是"另一个正在跑本脚本的实例"（含 `busybox sh <路径>`、`sh <路径>`、
-                // shebang 直 exec、`sh -c '<路径>'` 四种形态；本 app 自己的 su shell 参数为空，天然不命中）。
-                // 分两步：② 用 NUL→换行的文本管道 + grep -qx 做整行相等（不依赖 grep 的二进制文件语义，
-                // 也不用 -z），③ 先按 comm 白名单一次 grep 快筛（每 pid 省掉后面的 fork）。
-                // comm 只做快筛：它枚举不全（开机那条约是 busybox），而漏判的代价是「停止daemon 静默失效」，
-                // 故白名单一个都没命中时再全量扫一轮（不筛 comm）——那才是兜底，代价见 wd_pids 的注释。
+                // 看门狗 shell 的 exe 都是 /system/bin/sh，身份只由「某参数恰好等于候选脚本路径」定
+                // （整行相等、非子串；binary 语义不依赖 grep）。见 §2.3
                 + "wd_match() {\n"
                 + "    a=$(tr '\\000' '\\n' < \"/proc/$1/cmdline\" 2>/dev/null)\n"
                 + "    case \"$a\" in *" + SCRIPT_NAME + "*) ;; *) return 1 ;; esac\n"
@@ -1256,9 +1069,7 @@ public final class Deployer {
                 + " || printf '%s\\n' \"$a\" | grep -qx -- \""
                 + SERVICE_D_KSU_LEGACY + "/" + SCRIPT_NAME + "\"\n"
                 + "}\n"
-                // 常态走快筛（两三个候选，代价约每次三四个 fork）；一个都没命中才全量兜底
-                // （约每个进程一次 fork 的 tr）——所以「确实没有看门狗」时每次调用会付这一轮扫描，
-                // 而 killAndWaitSnippet 的等待循环只在首轮有 pid 时才继续，兜底至多被多付一次。
+                // 先用 comm 白名单快筛（省 fork），一个不命中再全量兜底。见 §2.3
                 + "wd_pids() {\n"
                 + "    _wd_hit=0\n"
                 + "    for c in $(grep -l -E '^(" + WD_COMM_WHITELIST + ")$' /proc/[0-9]*/comm 2>/dev/null); do\n"
@@ -1288,9 +1099,9 @@ public final class Deployer {
                 + "[ -n \"$BIN_LIST\" ] && echo RUNNING=1 || echo RUNNING=0\n"
                 + "set -- $BIN_LIST\n"
                 + "echo \"DAEMON_PIDS=$*\"\n"
-                // 看门狗同样上屏（P3-G7：不输出它，「停机时看门狗仍在跑」「两个看门狗并存」在界面上
-                // 就完全不可观测）。先落到变量再一次取用：wd_pids 要扫全部 pid，不能为了计数再跑一次。
-                // set -- 借位置参数数个数、并用 $* 把多行折成一行，省掉 wc/tr 各一次 fork。
+                // 看门狗同样上屏（不输出它，「停机时它仍在跑」「两个并存」在界面上完全不可观测）。
+                // 先落到变量再一次取用：wd_pids 要扫全部 pid，不能为了计数再跑一次。
+                // set -- 借位置参数数个数、$* 折成一行，省掉 wc/tr 各一次 fork。
                 + "WD_LIST=$(wd_pids)\n"
                 + "set -- $WD_LIST\n"
                 + "echo \"WD_COUNT=$#\"\n"
@@ -1315,13 +1126,9 @@ public final class Deployer {
                 + "echo \"KSU_VER=$ver\"\n";
     }
 
-    /**
-     * 把脚本装到 $svcd 并回吐 SCRIPT_OK 的片段（部署与单独更新脚本共用）。
-     *
-     * <p><b>先落 {@code .new} 再 {@code mv}</b>：这个脚本自己就是常驻的看门狗 shell，
-     * 覆写它正在读的那个文件会让 sh "边写边读"读到半截内容；{@code mv} 换的是目录项，
-     * 正在跑的那个 shell 继续持旧 inode，读写两边互不干扰。失败路径顺手清掉半个 {@code .new}。
-     */
+    /** 把脚本装到 $svcd 并回吐 SCRIPT_OK（部署与单独更新脚本共用）。<b>先落 {@code .new} 再 {@code mv}</b>：
+     *  脚本自己是常驻看门狗，覆写它在读的文件会读到半截；mv 换目录项，正在跑的 shell 继续持旧 inode。
+     *  详见 app/逻辑说明.md §2.2。 */
     private static String scriptInstallSnippet(File stagedScript) {
         return "cp -f " + quote(stagedScript.getAbsolutePath()) + " \"$svcd/" + SCRIPT_NAME + ".new\" "
                 + "&& chmod 0755 \"$svcd/" + SCRIPT_NAME + ".new\" "
@@ -1330,13 +1137,8 @@ public final class Deployer {
                 + "rm -f \"$svcd/" + SCRIPT_NAME + ".new\" 2>/dev/null\n";
     }
 
-    /**
-     * 只重推脚本时的 shell（完全不碰 $BIN）。
-     *
-     * <p>脚本换完要连看门狗与守护进程一起换：<b>先停看门狗 shell</b>（{@link #killAndWaitSnippet}），
-     * 再由 {@link #restartCore()} 走"看门狗不在"那条路——它会用磁盘上的<b>新脚本</b>把看门狗拉起来，
-     * 由它把守护进程停旧起新。只重启守护进程是不够的，原因见 {@link #updateScript()} 的 javadoc。
-     */
+    /** 只重推脚本时的 shell（完全不碰 $BIN）。先停看门狗 shell，再由 {@link #restartCore()} 用磁盘上的
+     *  新脚本把它拉起来。详见 app/逻辑说明.md §2.2。 */
     private String updateScriptScript(File stagedScript) {
         return pidsPreamble()
                 + serviceDirPreamble()
@@ -1361,25 +1163,9 @@ public final class Deployer {
                 + "echo \"SCRIPT_MD5=$(md5sum \"$svcd/" + SCRIPT_NAME + "\" 2>/dev/null | cut -d' ' -f1)\"\n";
     }
 
-    /**
-     * 省电白名单批处理：<b>逐包</b>下发给已安装的散热器控制 app，四段命令共处同一个 su 会话。
-     *
-     * <p><b>为什么目标不是本 app</b>：本 app 是纯界面（manifest 里零 service / receiver / provider），
-     * 没有任何后台职责；控制链路两端是守护进程与<b>跑在散热器 app 进程里的钩子</b>，
-     * 那个进程被冻结/回收才是真会断链的事。故目标改为散热器控制 app，且不再包含本 app。
-     *
-     * <p><b>包名从哪来</b>：{@code R.array.xposed_scope}（老 B6X / 新 B6X / B7X-farsef）。
-     * Java 侧就这一份：{@code MainHook} 里的同名常量是 private，且那个类只由 LSPosed 在宿主进程里
-     * 加载（本进程引用它会 NoClassDefFoundError）；C 端另有自己的 {@code APP_PKG_*} 宏。
-     * 故复用作用域数组而不另写字面量 —— 作用域增删与此处目标同步，正是想要的对应关系。
-     *
-     * <p><b>只对装了的下发</b>：未安装的包跑这 4 条会白起两个 {@code app_process} 并往输出里灌报错。
-     * 判据取 {@code [ -d /data/data/$PKG ]}（零 fork 的廉价判据，与守护进程自己判「已安装」的一级
-     * stat 判据同源，见 {@code tempctrl.c} 的 {@code HOST_DATA_DIR}）；为此起一次 {@code pm} 不划算。
-     *
-     * <p><b>每次部署照旧无条件下发</b>（不做"先判后发"）：用户撤销白名单后再部署会重新加回，
-     * 这与 {@link #uninstall()} 不清理白名单的口径一致。
-     */
+    /** 省电白名单批处理：<b>逐包</b>下发给已安装的散热器控制 app（包名取自 {@code R.array.xposed_scope}），
+     *  四段命令共处同一个 su 会话；未安装的包跳过（判据 {@code [ -d /data/data/$PKG ]}）。
+     *  每次部署照旧无条件下发。详见 app/逻辑说明.md §2.5。 */
     private String powerAllowlistScript() {
         StringBuilder sb = new StringBuilder();
         for (String pkg : appContext.getResources().getStringArray(R.array.xposed_scope)) {
@@ -1413,9 +1199,7 @@ public final class Deployer {
                 + "# c-daemon 转写给钩子的界面开关快照（钩子每次返回键读一次；删掉后钩子回退默认值）\n"
                 + "rm -f /data/local/tmp/tempctrl_uiprefs\n"
                 + "rm -f /data/local/tmp/tempctrl_service.log\n"
-                + "# 旧版迁移残留：老版本把 tempctrl_last_dev 放在这里（daemon 侧的预创建已删、现已无人读写），\n"
-                + "# 它不会自己消失，故卸载时一并清掉。\n"
-                + "# 与新落点区分：新落点是飞智 app 自己的私有目录（各包各记），不属本次部署产物，本脚本不碰。\n"
+                + "# 旧版迁移残留 tempctrl_last_dev（daemon 侧预创建已删、无人读写）：顺手清掉。见 app/逻辑说明.md §2.4\n"
                 + "rm -f /data/local/tmp/tempctrl_last_dev\n"
                 + "# 私有目录不可用时 c-daemon 的兜底日志落点（/cache/<二进制名>.log），可能残留\n"
                 + "rm -f /cache/tempctrl.log\n";
@@ -1423,34 +1207,21 @@ public final class Deployer {
 
     /**
      * 「先停再起」的完整 shell = {@code BIN=} + 目录定位 + {@link #restartCore()}。
-     *
-     * <p>不含 {@code exit}：{@link RootShell#exec} 靠脚本末尾的结束标记回传退出码，
-     * 脚本自己退出会让标记丢失、整次调用被判成通道失败（见 {@code RootShell} 的说明）。
+     * <b>末尾不含 {@code exit}</b>：{@link RootShell#exec} 靠末尾结束标记回传退出码，脚本自退会让标记丢失、
+     * 判通道失败。详见 app/逻辑说明.md §4.1。
      */
     private String restartScript() {
         return pidsPreamble() + serviceDirPreamble() + restartCore();
     }
 
     /**
-     * 「先停再起」的核心片段（调用方负责备好 {@code BIN=} 与 {@code $svcd}），<b>按看门狗在不在分两条路</b>：
-     * <ul>
-     *   <li>看门狗 shell 存活（常态）→ 只停/起 {@code $BIN}：看门狗自己的 tick 会兜住后续的进程级
-     *       死亡，不必也不该动它（杀了它常驻保障就没了）。</li>
-     *   <li>看门狗 shell 不在（例如刚点过「停止daemon」，或 {@link #updateScript()} 刚把它停掉）
-     *       → 把 service.d 脚本拉起来，由它把 daemon 带回来（脚本启动时<b>不再</b>先杀 daemon：
-     *       "先杀"由上一步 {@link #killAndWaitSnippet} 负责，脚本内部是"存在即不重复拉起"，
-     *       见 {@code tempctrl.c} 的「看门狗反向保活」）——这是
-     *       「停止daemon」之后唯一能恢复常驻的路（service.d 脚本平时只由系统在开机时拉起），
-     *       也是「换了新脚本」之后让新脚本立刻生效的路。</li>
-     * </ul>
-     *
-     * <p>看门狗脚本第一步是<b>等亮屏</b>，灭屏时它会一直等到亮屏才启动 daemon，故第二条路要等；
-     * 调用方据此区分「看门狗还没轮到」与「新实例真的没起来」（见 {@code restartOnce}）。
+     * 「先停再起」的核心片段（调用方负责备好 {@code BIN=} 与 {@code $svcd}），按看门狗在不在分两条路：
+     * 看门狗在（常态）→ 只停/起 {@code $BIN}；看门狗不在 → 先拉起 service.d 脚本、由它把 daemon 带回来
+     * （脚本不再先杀 daemon，见 C 侧「看门狗反向保活」）。详见 app/逻辑说明.md §2.2。
      */
     private static String restartCore() {
         return "WD=\"$svcd/" + SCRIPT_NAME + "\"\n"
-                // 1) 看门狗在不在：用 wd_pids（exe 判不出来——一切 shell 的 exe 都是 /system/bin/sh，
-                //    改判「某个参数恰好等于候选脚本路径」，见 pidsPreamble）
+                // 1) 看门狗在不在：用 wd_pids（见 pidsPreamble）
                 + "[ -n \"$(wd_pids)\" ] && WD_ALIVE=1 || WD_ALIVE=0\n"
                 + "echo \"WD_ALIVE=$WD_ALIVE\"\n"
                 // 2) 两条路都要先把在跑的旧实例停稳（flock 的持有者必须先消失）
@@ -1503,18 +1274,9 @@ public final class Deployer {
 
     /**
      * 「按 pid 停进程 + 轮询等它真退出」的 shell 片段——<b>停止序列的唯一出处</b>：
-     * {@code kill}（SIGTERM）→ 轮询 ≤{@value #KILL_WAIT_LOOPS} 秒 → {@code kill -9}
-     * → 再轮询 ≤{@value #KILL9_WAIT_LOOPS} 秒。等它真退出是必须的：C 端用非阻塞 {@code flock}
-     * 做单实例锁，旧实例还在时新实例会立刻以退出码 {@value #EXIT_ALREADY_RUNNING} 退出。
-     *
-     * <p>目标 pid 由 {@code pidSource} 提供（{@code bin_pids} / {@code wd_pids}，见
-     * {@link #pidsPreamble()}）：<b>不再用 {@code pkill -f}</b>——子串匹配会牵连无关进程，且"杀"
-     * 与"等"会用两套判据。等待期内每轮重新取一次 pid 并再杀一遍（保留旧 {@code pkill} 的语义：
-     * 等待期内新冒出来的同类进程也一并停掉）。
-     *
-     * <p>回吐 {@code <TAG>_PID} / {@code <TAG>_STOPPED} / {@code <TAG>_KILLED}；
-     * PID 为空串表示本来就没在跑，此时 STOPPED=1（没在跑也算已停稳）。{@code <TAG>_PID} 取首次
-     * 快照的第一个（供上屏与 {@code restartCore()} 的"新 PID 不得等于旧 PID"判据用）。
+     * {@code kill}(SIGTERM) → 轮询 ≤{@value #KILL_WAIT_LOOPS} 秒 → {@code kill -9} → 再轮询 ≤{@value #KILL9_WAIT_LOOPS} 秒。
+     * 目标 pid 由 {@code pidSource}（{@code bin_pids}/{@code wd_pids}）提供；<b>不再用 {@code pkill -f}</b>。
+     * 详见 app/逻辑说明.md §2.2。
      *
      * @param pidSource 打印目标 pid（每行一个）的 shell 函数名，调用方传字面量
      * @param tag       回吐键前缀，必须是合法的 shell 变量名片段（调用方传字面量）

@@ -19,14 +19,13 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 
 /**
- * root 通道封装。零第三方依赖，只用 {@link Runtime#exec(String[])}。
- *
- * <p>做法照 Scene（`a/a70.java`）：`su -v` 嗅探 → 命令行选型 → 持久化 →
- * 判活看通道连通性（不看进程）→ 退避重连。改进项：结束标记 + 读超时 + 退出码回传。
+ * root 通道封装。零第三方依赖，只用 {@link Runtime#exec(String[])}；做法照 Scene（{@code a/a70.java}）。
  *
  * <p><b>线程模型</b>：除 {@link #getSuCommand()}、{@link #getRecommendedSuCommand()}、
- * {@link #isSuCommandManual()}、{@link #isAlive()} 这四个纯读缓存的方法外，其余公开方法都会阻塞 I/O，
+ * {@link #isSuCommandManual()}、{@link #isAlive()} 四个纯读缓存的方法外，其余公开方法都会阻塞 I/O，
  * <b>禁止在主线程调用</b>。
+ *
+ * <p>通道协议、超时与「脚本自退会被判成通道失败」—— 详见 app/逻辑说明.md §4.1。
  */
 public final class RootShell {
 
@@ -206,9 +205,8 @@ public final class RootShell {
 
     /**
      * 用 root 通道执行脚本（多行 sh 脚本，按行顺序在同一 shell 内执行）。
-     * 脚本不得为空，也不得包含 `exit`（会导致结束标记丢失，判为通道失败）。
-     *
-     * <p>不退避：调用方显式要求执行就真执行；失败会更新退避窗口，供 {@link #checkAlive()} 使用。
+     * 脚本不得为空，也<b>不得包含 {@code exit}</b>（会导致结束标记丢失，判为通道失败）。
+     * <b>不退避</b>：调用方显式要求执行就真执行；失败只更新退避窗口。详见 app/逻辑说明.md §4.1、§4.2。
      */
     public Result exec(String script, long timeoutMs) {
         detectSuType(false);

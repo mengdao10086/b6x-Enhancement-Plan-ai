@@ -24,23 +24,8 @@ import java.util.Map;
 
 /**
  * 参数重置栏：按分组把参数恢复成<b>出厂值</b>（{@code factory}，不是定义默认值 {@code default}）。
- *
- * <h3>职责边界：本类只出界面与确认，落盘归宿主</h3>
- * 分组清单、组内键、出厂值全部取自 {@link ConfigStore}（本类不手抄任何分组名或键名）；
- * 真正的写入由宿主完成（{@link Host#onResetConfirmed}）——重置必须"先冲刷待写队列，
- * 再借页面的落盘线程一次原子写入，最后重刷本页"，这三件事都握在页面手上（队列与线程都是页面的），
- * 组件不另起第二条写入口。
- *
- * <h3>重置一组 = 组内键 + 组头总开关</h3>
- * 组键清单含 {@link GroupMeta#master}：总开关为 0 时整组不生效，漏掉它等于"重置了却没生效"。
- * master 为 null 的组（设置页的 {@code webui} 组）自然跳过。
- *
- * <h3>按钮文案去掉段标编号</h3>
- * 与设置页卡头同一口径（复用 {@link UiSettingsFragment#stripSectionNumber}）：编号是给
- * {@code profile.conf} 段标对齐用的，摆在按钮上只是噪音。
- *
- * <h3>按钮顺序</h3>
- * 用本栏自己的展示顺序（{@link #DISPLAY_ORDER}），<b>与定义里的组顺序不同</b>——理由见该常量。
+ * 本类只出界面与确认，落盘归宿主（见 {@link Host#onResetConfirmed}）；重置一组 = 组内键 + 组头总开关。
+ * 设计理由与按钮顺序口径见 app 逻辑说明.md §6.4。
  */
 final class ConfigResetBar {
 
@@ -60,15 +45,8 @@ final class ConfigResetBar {
     }
 
     /**
-     * 本栏按钮的<b>展示顺序</b>（group id）。它与参数定义里的组顺序<b>不同</b>，是有意为之：
-     * 用户指定「界面」紧随「性能参数」（重置界面参数比重置 sysfs 路径更常用）；而定义里的组顺序
-     * 决定 {@code profile.conf} 的段标顺序，不能为了本栏的观感去动它。
-     *
-     * <p>写成显式表，而不是"照定义顺序排一遍"：这个顺序是需求本身，不是巧合，也不是排序结果。
-     * 表外的组由 {@link #orderedGroups} 追加到末尾；表里已失效的 id 静默跳过。
-     *
-     * <p>只列 id，不列组名：组标题正在被改（{@code [2] sysfs 路径与缩放} → {@code [2] 路径与缩放}
-     * 等），按钮文案一律从 {@link GroupMeta#title} 取并去段标，不在这里手抄一遍。
+     * 本栏按钮的<b>展示顺序</b>（group id）。<b>与定义里的组顺序不同，是有意为之</b>（理由见
+     * app 逻辑说明.md §6.4）。表外的组由 {@link #orderedGroups} 追加到末尾；表里已失效的 id 静默跳过。
      */
     private static final List<String> DISPLAY_ORDER =
             Collections.unmodifiableList(Arrays.asList("debug", "perf", "webui", "sysfs", "launch"));
@@ -102,10 +80,7 @@ final class ConfigResetBar {
 
     /**
      * 取要出按钮的分组，按 {@link #DISPLAY_ORDER} 排；表外的一律追加到末尾。
-     *
-     * <p>两级降级都不报错、也不留空按钮：表里列了而定义里已删的 id 静默跳过；定义里有而表里
-     * 没列的组追加到末尾（顺序退化为定义顺序）——将来定义新增分组时按钮一定会出现，
-     * 不会因为忘了改这张表而少一个。
+     * 两级降级都不报错、也不留空按钮（口径见 app 逻辑说明.md §6.4）。
      */
     @NonNull
     private static List<GroupMeta> orderedGroups(@NonNull List<GroupMeta> groups) {

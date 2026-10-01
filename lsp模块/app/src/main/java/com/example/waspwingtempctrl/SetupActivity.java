@@ -37,40 +37,16 @@ import java.util.concurrent.atomic.AtomicInteger;
  *
  * <p>本类<b>不含任何业务</b>：部署动作在 {@link StatusFragment}（I5 边界在那里），配置与曲线
  * 在 {@code ConfigFormFragment}（曲线是它的子 Fragment），日志在 {@code LogFragment}，
- * 界面参数（原「[4] 界面」组）在 {@link SettingsActivity}。
+ * 界面参数（「[4] 界面」组）在 {@link SettingsActivity}。
  *
- * <p><b>为什么在 onCreate 里 setTheme</b>：{@code AndroidManifest.xml} 无 {@code android:theme}，
- * 而 {@link AppCompatActivity} 要求 AppCompat/Material 主题。故在 {@code super.onCreate()}
- * 之前手动应用 {@code R.style.Theme_B6XTempCtrl}。代价：onCreate 之前的一瞬仍是系统默认窗口背景（无碍）。
- *
- * <p><b>预热</b>：{@code onCreate} 首行就把"落页判定"与"曲线首帧"的重活交给后台线程（{@link #preload}），
- * 主线程不再为"落哪一页"读 {@code params.json} 与 {@code profile.conf}、算资产 MD5、首读
- * {@code SharedPreferences}。落页判定另有 {@link #LANDING_WAIT_MS} 的有界等待：拿到判定就直接落定
- * 最终那一页（无纠正动作，也就不会闪），拿不到才先用占位页、由 {@link #applyLanding} 事后纠正。
- * <b>两件事各在自己那根线程上同时起跑</b>（判定在 {@link #PRELOAD}、曲线预热在 {@link #WARMUP}）：
- * 放行主线程的那次 {@code countDown} 只可能由判定任务发出，判定那根线程上除判定外也别无他活 ——
- * 这是"判定仍最先唤醒主线程"的结构性保证（不靠调度让路）。预热线程降为后台优先级，但它碰<b>共享</b>的
- * 配置单例（那一段带锁）时仍在默认优先级（见 {@link #preload}）；剩下的只有纯粹的 CPU 争抢 ——
- * 设备有空闲核时不成立，单核或核被占满时判定可能被拉长（真机未测）。
- *
- * <p><b>参数区的露面时机</b>：真页面的内容（尤其配置页那份几十行表单）要几百毫秒才建出来，
- * 建好之前配置页的参数区一直 {@code GONE}（见 {@link ConfigFormFragment} 的建表两段）——空窗里不会
- * 出现"半成品"，页面区是空的。
- * （2026-09-26：原先还有一层"骨架占位层"盖这段空窗，已按实测<b>整套删除</b>——它盖不到首帧，
- * 当前形状下只剩十几毫秒的遮盖窗口，成本却要一次解码 + 一层常驻视图 + 一次重截；见
- * {@code 启动与界面加载全流程梳理与优化方案.md} §9。）
+ * <p>启动时序（落页判定 / 预热的并行结构与有界等待、参数区露面闸门）与界面外壳（三页结构、
+ * {@link PageAware} 广播口径）见 {@code app/逻辑说明.md} §5.1 / §5.2 / §9.1。
  *
  * <p><b>页签数量与顺序必须与 {@link #MENU_IDS} 一一对应</b>（同为 3 个、同序），菜单顺序声明在
  * {@code res/menu/menu_bottom.xml}。
  *
- * <p><b>切页 = ViewPager2</b>：手指跟随滑动、松手 fling 吸附到最近页，都由它给（页面容器是
- * {@code androidx.viewpager2.widget.ViewPager2}）。三页由 {@link FragmentStateAdapter} 持有，
- * {@code offscreenPageLimit = 2} 让三页都留在 FragmentManager 里（页面状态与滚动位置保住）。
- *
- * <p>代价：<b>页面生命周期不再随切页变化</b>（非当前页被压到 STARTED，不派发 onPause，
- * 也没有 hide/show 的 onHiddenChanged）。需要在"离开本页"时停定时器/归还软键盘设置的页面，
- * 实现 {@link PageAware}，由本类在切页后广播可见性。页序号经 {@link #ARG_PAGE} 写进 Fragment
- * 的 arguments：进程恢复后重建的实例也照样能算出自己是第几页。
+ * <p>配置页参数区露出前的那段空窗不出现"半成品"；曾用于遮盖它的"骨架占位层"已整套删除
+ * （2026-09-26，见 {@code app/逻辑说明.md} §5.2）。
  */
 public class SetupActivity extends AppCompatActivity {
 
@@ -96,12 +72,7 @@ public class SetupActivity extends AppCompatActivity {
         thread.setDaemon(true);
         return thread;
     });
-    /**
-     * 曲线预热线程：进程级一个，与判定<b>同时</b>起跑（见 {@link #preload}）。
-     *
-     * <p>单独一根而不与 {@link #PRELOAD} 共用：判定是"主线程在等它"，预热只是纯优化，两者的优先级
-     * 完全不同；共用一根就是串行，共用一个池则将来有人再塞任务进来就可能把"判定不能等"的保证破坏。
-     */
+    /** 曲线预热线程：进程级一个，与判定同时起跑、单独一根（理由见 {@code app/逻辑说明.md} §5.1）。 */
     private static final ExecutorService WARMUP = Executors.newSingleThreadExecutor(runnable -> {
         Thread thread = new Thread(runnable, "ww-chart-warmup");
         thread.setDaemon(true);
@@ -113,16 +84,7 @@ public class SetupActivity extends AppCompatActivity {
     private static final AtomicInteger LANDING_INDEX = new AtomicInteger(-1);
     private static final Handler MAIN = new Handler(Looper.getMainLooper());
 
-    /**
-     * 落页判定的等待上界（毫秒）：见 {@link #settleInitialPage}。
-     *
-     * <p>取 50ms 是因为两头的余量都够：判定这一步只有建 {@link ConfigStore} 单例、读一次配置、
-     * 一次资产哈希（都在 {@code assets} 与私有小文件上），正常设备是十几到几十毫秒量级；而主线程
-     * 在 {@code onCreate} 里已经先做掉 {@code setContentView} / adapter / 监听器那一串，给了预热线程
-     * 一段真实的前置时间。等到了就与"当场判定"等价 —— 没有纠正动作，也就不会闪。等不到也<b>不是
-     * 无界等</b>：满 50ms 一定返回，超时后由占位页先顶上、判定回来再 {@link #applyLanding} 纠正，
-     * 故不会把主线程卡在首帧上。
-     */
+    /** 落页判定的等待上界（毫秒）：超时即由占位页顶上、判定回来再纠正（取值理由见 {@code app/逻辑说明.md} §5.1）。 */
     private static final long LANDING_WAIT_MS = 50L;
 
     private BottomNavigationView nav;
@@ -137,9 +99,7 @@ public class SetupActivity extends AppCompatActivity {
         StartupTiming.begin();
         // 必须在 super.onCreate() 之前：AppCompatActivity 会在自己的 onCreate 里校验主题。
         setTheme(R.style.Theme_B6XTempCtrl);
-        // 首行预热：越早提交，后台越能吃到下面这些主线程工作的空档。只用到 Application Context
-        // 与静态执行器，故放在 super.onCreate() 之前是安全的（见 preload）。
-        // 同步点也在这里建好交给预热线程：落页判定算完即唤醒（见 settleInitialPage 的有界等待）
+        // 首行预热（只用 Application Context 与静态执行器，故 super.onCreate() 之前安全）；同步点在此建好交给预热线程，见 app/逻辑说明.md §5.1
         CountDownLatch landingDone = savedInstanceState == null ? new CountDownLatch(1) : null;
         preload(this, landingDone);
         super.onCreate(savedInstanceState);
@@ -172,7 +132,7 @@ public class SetupActivity extends AppCompatActivity {
             }
         });
 
-        // 界面参数（原「[4] 界面」组）的入口：标题栏右侧设置按钮
+        // 界面参数（「[4] 界面」组）的入口：标题栏右侧设置按钮
         findViewById(R.id.action_settings).setOnClickListener(v ->
                 startActivity(new Intent(this, SettingsActivity.class)));
 
@@ -202,49 +162,21 @@ public class SetupActivity extends AppCompatActivity {
     // ==================== 预热 ====================
 
     /**
-     * 提交"控件预制造"（{@link ConfigPreInflater}）：与落页判定、曲线预热并列的第三件后台活，
-     * 趁主线程忙首帧的时候把配置页要 inflate 的键行控件先造出来放着（主线程取不到就现场造，
-     * 故它失败或没赶上都没有副作用）。
-     *
-     * <p><b>为什么提交点在这里，而不在 {@link #preload} 里</b>：预制造要用的 inflater 必须带上
-     * AppCompat/Material 装好的视图工厂（否则 {@code <TextView>} 造出来的是基类而不是
-     * {@code MaterialTextView}，预制造件就与现场造的不是同一种控件、也不是同一套样式），
-     * 而那个工厂是 {@code AppCompatActivity.onCreate} 里装的——{@code preload} 在
-     * {@code super.onCreate()} 之前跑，那时还没有工厂。故提交点放在 {@code super.onCreate()} 之后
-     * （约第 25ms），到建表起点仍有三百多毫秒的余量。
-     *
-     * <p>本方法只交"这是谁的件"（{@code this}）：克隆 inflater、归属比对、关门都在
-     * {@link ConfigPreInflater} 里做。克隆的来源是 Activity 自己那一份（与页面的
-     * {@code getLayoutInflater()} 同源、同一个 Context 与主题），故造出来的控件与现场造的逐像素一致；
-     * 那份 inflater 只许后台那一根线程用（LayoutInflater 不能跨线程共用）。与主线程共用 AppCompat
-     * 视图工厂这一层的边界与警告，写在 {@link ConfigPreInflater} 的类注释里。
+     * 提交"控件预制造"（与落页判定、曲线预热并列的第三件后台活，失败或没赶上均无副作用）：
+     * 提交点须在 {@code super.onCreate()} 之后（那时才有 AppCompat 视图工厂），理由见
+     * {@code app/逻辑说明.md} §5.1；本方法只交 {@code this}，克隆与关门在 {@link ConfigPreInflater}。
      */
     private void preInflate() {
         ConfigPreInflater.start(getApplicationContext(), this);
     }
 
     /**
-     * 进程级预热：<b>两件事各在自己那根线程上同时起跑</b>，互不阻塞。
-     *
-     * <ol>
-     *   <li><b>落页判定</b>（{@link #landingPageIndex}，{@link #PRELOAD}）：要建 {@link ConfigStore}
-     *       单例（读并解析 {@code assets/params.json}）、整份读 {@code profile.conf}、算资产 MD5，
-     *       还要首读 {@code SharedPreferences}。这四件原先全在 {@code onCreate} 的主线程链上，只为定
-     *       "落哪一页"；</li>
-     *   <li><b>曲线首帧</b>（{@link ChartLoader#warmUp}，{@link #WARMUP}）：曲线口径与数据文件的第一次
-     *       读取 + 解析。原先它与判定串在同一根线程上、排在判定之后，被白白推迟一个判定的时长。</li>
-     * </ol>
-     * 判定算完就 {@code countDown} 放行等它的主线程（{@link #settleInitialPage} 的有界等待），再回主线程
-     * {@link #applyLanding} 兜底纠正。判定那根线程上<b>除判定外再无别的活</b>，且预热线程在预热的其余部分
-     * 都是后台优先级 —— 剩下的只有纯粹的 CPU 争抢（口径见类注释的〈预热〉一段）。
-     *
-     * <p>预热<b>失败无副作用</b>：{@link ChartLoader#warmUp} 自己吞掉一切异常且什么都留不下，曲线页随后
-     * 照旧自己读一次、失败时照旧把诊断原文铺在曲线区（既有路径逐字不变）。
+     * 进程级预热：落页判定与曲线预热各在自己那根线程上同时起跑、互不阻塞；"判定最先唤醒主线程"
+     * 的结构性保证、优先级处理与失败无副作用，见 {@code app/逻辑说明.md} §5.1。
      *
      * @param landingDone 本次冷启动等落页判定的同步点；判定算完即 {@code countDown}。<b>只覆盖判定
      *                    这一步</b>（曲线预热在另一根线程上，主线程不必也不该等它）。进程重建（saved
-     *                    state 非空）不需要判定 —— 落页取回上次那一页即可，传 {@code null}（判定任务
-     *                    整个不提交，免得白等满上界）
+     *                    state 非空）不需要判定 —— 落页取回上次那一页即可，传 {@code null}
      */
     private static void preload(SetupActivity activity, CountDownLatch landingDone) {
         Context app = activity.getApplicationContext();
@@ -271,11 +203,7 @@ public class SetupActivity extends AppCompatActivity {
         // 曲线预热：进程级只跑一次（判定不在此列，每次 onCreate 都要跑）
         if (WARMED.compareAndSet(false, true)) {
             WARMUP.execute(() -> {
-                // 先在默认优先级下把配置单例碰出来：它内部有一段 synchronized 构造（读并解析 45KB
-                // params.json），而判定那根线程要的第一件东西就是它（landingPageIndex 先取起始页开关）。
-                // 若降到后台优先级之后才触发构造，就可能出现"nice=10 的预热线程持锁解析、nice=0 的判定
-                // 线程在监视器上等它"——后台线程被限流时，等的就是被拉长的整段解析，与"让判定先跑"
-                // 正好相反。这一步不比原有路径多做任何事：ChartConfig.load 下面本来也要碰它。
+                // 先在默认优先级下碰一次配置单例（它内部有 synchronized 构造；降优先级后再构造会让低优先级线程持锁挡住判定，见 app/逻辑说明.md §5.1）
                 try {
                     ConfigStore.get(app);
                 } catch (Throwable ignored) {
@@ -301,13 +229,8 @@ public class SetupActivity extends AppCompatActivity {
     }
 
     /**
-     * 记账（旁路）：量第一页 / 第三页的视图各自何时建好（{@link StartupTiming#MARK_PAGE_VIEW_1} /
-     * {@link StartupTiming#MARK_PAGE_VIEW_ALL}），用来切分 `[onCreate 结束, 首帧]` 那一段：外壳布局
-     * 与类加载占多少、三页的构造又占多少。
-     *
-     * <p>{@code recursive=false}：只收本页三个页签，不把配置页的子 Fragment（曲线区）算进来。
-     * 回调体里只有一次计数与最多两次静态 mark，无 IO、无锁、不建线程；不改变任何 Fragment 生命周期
-     * ——只是多挂一个观察者。
+     * 记账（旁路）：量第一页 / 第三页视图建好的时刻（{@code recursive=false}，只收三个页签、不算子
+     * Fragment）；含义见 {@code app/逻辑说明.md} §5.3。
      */
     private void armPageViewMarks() {
         getSupportFragmentManager().registerFragmentLifecycleCallbacks(
@@ -328,12 +251,7 @@ public class SetupActivity extends AppCompatActivity {
     }
 
     /**
-     * 记账（旁路）：量"页面区第一次绘制之前"这个时间点（{@link StartupTiming#MARK_FIRST_DRAW}）。
-     * 一次性回调，记完即摘（{@link #detach}），故只吃一帧。
-     *
-     * <p>挂在 pager 的视图树上而不是别处：它是页面区的根，它要画了就意味着这一屏内容要上屏了。
-     * pre-draw 在绘制<b>之前</b>派发，故本时刻是"即将画出第一帧"，与用户看到第一帧几乎同一瞬间。
-     * 回调体内只有两个不会抛的静态调用与一次摘除，故不可能影响绘制。
+     * 记账（旁路）：量"页面区第一次绘制之前"（一次性回调，记完即摘）；含义见 {@code app/逻辑说明.md} §5.3。
      */
     private void markFirstDraw() {
         final ViewTreeObserver observer = pager.getViewTreeObserver();
@@ -350,17 +268,8 @@ public class SetupActivity extends AppCompatActivity {
     // ==================== 启动落页 ====================
 
     /**
-     * 落页（{@code onCreate} 调一次）：把页序号落到页容器与底栏上。判据见 {@link #landingPageIndex}，
-     * 只有两条路：
-     * <ol>
-     *   <li>进程重建（{@code savedInstanceState} 非空）→ 回到上次那一页（纯内存，当场落定）；</li>
-     *   <li>冷启动 → 判定由预热线程算（见 {@link #preload}）：<b>有界等</b>它一手，等到了就按判定
-     *       当场落页 —— 落的就是最终那一页，没有后续纠正动作，也就不会闪；等不到则用
-     *       {@link #awaitLanding} 手头已有的那个占着（{@link #LANDING_INDEX} 是进程级的：本进程早先
-     *       算过就落在<b>上次算出的那页</b>上，一次都没算过才是 {@link #DEFAULT_START_TAB}），
-     *       判定到达后 {@link #applyLanding} 纠正。</li>
-     * </ol>
-     * <b>不播放入场动画</b>：冷启动直接落在那一页，不从第 0 页滑过去。
+     * 落页（{@code onCreate} 调一次）：进程重建取回上次那一页；冷启动有界等判定一手，等不到先用
+     * 占位页、判定到达后 {@link #applyLanding} 纠正。不播放入场动画。见 {@code app/逻辑说明.md} §5.1。
      *
      * @param landingDone 预热线程的落页判定同步点；{@code null} = 本次不需要判定（进程重建）
      */
@@ -382,12 +291,8 @@ public class SetupActivity extends AppCompatActivity {
     }
 
     /**
-     * 取落页判定：本进程早先已算过（{@link #LANDING_INDEX} 有值）就直接用，一秒不等；否则
-     * 有界等预热线程一手（{@link #LANDING_WAIT_MS} 是硬上界：超时、被中断、判定抛异常都照样返回）。
-     * 返回 {@code -1} = 没等到，调用方用占位页顶上，判定到达后再纠正。
-     *
-     * <p>{@code landingDone} 只由"算完判定"那一步放行，后面的曲线预热不在它的覆盖范围内 ——
-     * 曲线再慢也不会拖住落页。
+     * 取落页判定：本进程早先已算过就直接用、一秒不等；否则有界等预热线程一手（{@link #LANDING_WAIT_MS}
+     * 是硬上界）。返回 {@code -1} = 没等到，调用方用占位页顶上。见 {@code app/逻辑说明.md} §5.1。
      */
     private static int awaitLanding(CountDownLatch landingDone) {
         // 记账（旁路）：主线程进有界等待那一刻（与"判定放行"相减 = onCreate 里白等的那段）
@@ -421,14 +326,9 @@ public class SetupActivity extends AppCompatActivity {
     }
 
     /**
-     * 落页判定的判据（<b>只在后台线程调</b>，见 {@link #preload}）：三级优先里去掉"进程重建取回上次
-     * 那一页"那一级（它不需要 IO，留在 {@link #settleInitialPage} 里判），剩两级：
-     * <ol>
-     *   <li>部署入口开关为开、且 {@link Deployer#needsRedeploy} 为真 → 落状态页
-     *       （首次部署与 root 授权的入口都在那里）；</li>
-     *   <li>{@link #KEY_UI_START_PAGE} 设定的起始页（读不到或值非法即出厂 {@code config}）。</li>
-     * </ol>
-     * <b>不跑 su 真探测、不自动跳页</b>：第 1 级只看缓存比对。
+     * 落页判定的判据（<b>只在后台线程调</b>）：部署入口开关为开且 {@link Deployer#needsRedeploy} 为真
+     * → 落状态页；否则 {@link #KEY_UI_START_PAGE} 的起始页。不跑 su 真探测、不自动跳页。
+     * 见 {@code app/逻辑说明.md} §5.1。
      */
     private static int landingPageIndex(Context context) {
         if (isDeployEntryEnabled(context) && Deployer.needsRedeploy(context)) {
@@ -455,8 +355,19 @@ public class SetupActivity extends AppCompatActivity {
         }
     }
 
-    /** {@link #KEY_UI_DEPLOY_ENTRY} 是否开：switch 型在定义里是 0/1 数值（见 params.json）。读不到 → 出厂 1。 */
+    /**
+     * {@link #KEY_UI_DEPLOY_ENTRY} 是否开：switch 型在定义里是 0/1 数值（见 params.json）。读不到 → 出厂 1。
+     *
+     * <p><b>自动更新开着时本项按"关"处理（压制，不写回配置文件）</b>——静默重部署本就由状态页在
+     * 后台探测里完成（三页启动即建，见 {@code app/逻辑说明.md} §5.1 / §8.1），不必再导用户去状态页。
+     * <b>唯 root 尚未取得时例外</b>：那一次仍按存值生效，好让用户落到状态页去拿 root 授权与首次部署；
+     * root 取得后不再例外，root 丢失（探测到 su 不通）后自动恢复为例外。
+     * 见 {@code app/逻辑说明.md} §5.1 与 §9.3。
+     */
     private static boolean isDeployEntryEnabled(Context context) {
+        if (Deployer.isAutoUpdateEnabled(context) && !Deployer.rootNotYetGranted(context)) {
+            return false;
+        }
         ConfigStore.Value value = ConfigStore.get(context).get(KEY_UI_DEPLOY_ENTRY);
         return value == null || value.intAt(0) != 0;
     }
@@ -487,11 +398,8 @@ public class SetupActivity extends AppCompatActivity {
     }
 
     /**
-     * 广播页面可见性：只有当前页收 true。
-     *
-     * <p>遍历 FragmentManager 里的实例，而不是按页序号反查——FragmentStateAdapter 用内部 tag
-     * （{@code "f" + itemId}）持有页面，依赖那条约定太脆；页序号由本类写进 arguments，故凡是
-     * {@link PageAware} 的页面都能自己算出第几页（进程恢复后重建的实例也一样）。
+     * 广播页面可见性：只有当前页收 true；遍历 FragmentManager 实例、按 {@link #ARG_PAGE} 反查页序号
+     * （不依赖 FragmentStateAdapter 内部 tag）。见 {@code app/逻辑说明.md} §9.1。
      */
     private void broadcastVisibility() {
         int current = pager == null ? 0 : pager.getCurrentItem();

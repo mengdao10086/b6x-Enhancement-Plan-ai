@@ -2,14 +2,10 @@
 // tempctrl.c — 飞智 WaspWing 散热器智能温控守护程序
 // ================================================================
 //
-// 运行环境：root 常驻守护进程，由 APK 部署的 service.d 脚本拉起并守护
-// App 进程检测：直读 /proc/<pid>/cmdline 精确比对包名
-// 控制指令：am broadcast → LSPosed 模块 → WaspWingManager.setRunMode
-//
-// 温度单位：整型 0.1°C（电池原生单位，CPU m°C ÷ 100）
-//   例：350 = 35.0°C, 753 = 75.3°C
-//
-// 编译：参数与工具链约束见同目录 build_tempctrl.sh（唯一来源，勿在此复制命令行）
+// 运行环境 / 架构 / 进程检测 / 控制指令见 逻辑说明.md「整体架构」。
+// 温度单位：整型 0.1°C（电池原生单位；CPU m°C ÷ 100），如 350 = 35.0°C。
+// 已删除机制（Gear / PID 方差门控等）见 逻辑说明.md「已删除机制索引」。
+// 编译：参数与工具链约束见同目录 build_tempctrl.sh（唯一来源，勿在此复制命令行）。
 //
 // ================================================================
 
@@ -43,10 +39,7 @@
 #define EMA(new_val, old_val, alpha_pct) \
     (((new_val) * (alpha_pct) + (old_val) * (100 - (alpha_pct))) / 100)
 
-/** 带方向取整的 EMA：平滑值向原始值方向取整，解决渐进无法到达的问题
- *  上升（_nv>_ov）：向上取整 → 向新值方向
- *  下降（_nv<_ov）：_num/100 截断已是向下取整（向新值方向），无需再调整
- */
+/** 带方向取整的 EMA（平滑值向原始值方向取整，解决渐进无法到达的问题）；原理见 逻辑说明.md「EMA 方向取整」 */
 #define EMA_DIR(new_val, old_val, alpha_pct) \
     ({ \
         int _nv = (new_val); \
@@ -59,14 +52,8 @@
 
 // ======================== 运行模式与参数映射 ========================
 //
-// ⚠️ 不推荐智能温控模式（mode=0）：实测其风扇转速配置疑似非强制生效，常突破上限（尤在刚切换的瞬间），噪音突然变大体验差。本实现固定下发 mode=1（固定功率），规避此问题。
-//
-//setRunMode(mode, targetTemperature,windLevelOverclock, coldLevelOverclock,windLevel, modeCustom, extra)
-//
-// 参数映射：mode=0(智能温控)：targetTemperature, windLevel(风扇转速上限)
-//          mode=1（固定功率）：windLevelOverclock(风扇固定转速), coldLevelOverclock(制冷片强度)
-
-// ----（Gear 档位表 / init_gear_table / sort_vals / gear_label 已随 Gear 删除）----
+// 本实现固定下发 mode=1（固定功率）：不用 mode=0 的理由见 逻辑说明.md「实测说明」；
+// setRunMode 参数序、mode 取值与参数映射见 README「广播协议」（唯一规范处）。
 
 // ======================== 常量与边界 ========================
 #define COLD_MIN             1
@@ -81,17 +68,12 @@ static int b7_pid_cold_max = 190;   // PID_COLD_RANGE 第三值（B7X），默�
 static int b7_fan_rpm_max  = 6000;  // FAN_RPM_RANGE 第三值（B7X），默认同 B6X
 
 // ======================== 私有目录（配置/日志/曲线数据落点） ========================
-// status 双文件仍留 /data/local/tmp/（与 MainHook.java 共享，原样不动）
-// tempctrl_last_dev 归宿主 app 私有目录，由 MainHook 独用，daemon 不参与
-// 此路径必须与 lsp模块/app/build.gradle.kts 的 applicationId 一致：
-// 安装后的包名由 applicationId 决定，数据目录名即等于它，改任一处都要同步另一处
+// 此路径必须与 lsp模块/app/build.gradle.kts 的 applicationId 一致（数据目录名 = 包名，改任一处须同步另一处）。
+// status 双文件仍留 /data/local/tmp/（与 MainHook.java 共享，原样不动）；落点分工见 README「文件落点」，app 侧私有目录落点与清理清单见 app/逻辑说明.md §2.5。
 #define PRIVATE_DIR "/data/data/com.example.waspwingtempctrl/files"
 
-/** 确保私有目录存在（守护进程以 root 运行，但目录可能尚未创建）。返回 1=可用，0=不可用
- *  只 mkdir 这一层：父目录 /data/data/<包名> 不存在时 ENOENT 直接失败，绝不逐级创建
- *  （父目录须由系统 installd 创建并打 SELinux 标签，root 抢建会坏事）
- *  新建时把属主改为父目录（=app 数据目录）的属主，与系统建 files/ 一致：
- *  否则 root 先建会使 app 自身（写配置走 Framework File API）无写权限 */
+/** 确保私有目录存在。只 mkdir 这一层（父目录须由 installd 创建并打标签、不可 root 抢建），
+ *  新建时 chown 为父目录属主。返回 1=可用，0=不可用；理由见 逻辑说明.md「配置文件系统」。 */
 static int ensure_private_dir(void) {
     if (mkdir(PRIVATE_DIR, 0771) == 0) {
         char parent[256];
@@ -110,9 +92,7 @@ static int ensure_private_dir(void) {
 }
 
 // ======================== 系统命令路径 ========================
-// 一律用绝对路径：daemon 由 service.d 拉起，环境 PATH 未必含 /system/bin；
-// 裸命令名会静默失败（system() 只返回非零，execlp 子进程 _exit(127)）。
-// 路径不含空格/元字符，与后续参数用空格分隔拼进同一 shell 词即可，无需引号。
+// 一律用绝对路径：daemon 的 PATH 未必含 /system/bin，裸命令名会静默失败。
 #define AM_BIN      "/system/bin/am"
 #define PM_BIN      "/system/bin/pm"
 #define DUMPSYS_BIN "/system/bin/dumpsys"
@@ -135,18 +115,14 @@ static int CPU_ZONE_MAX = 99;
 static int cpu_zone_rescan_sec = 60;   // CPU thermal_zone 全量重扫间隔（秒，CPU_ZONE_RESCAN 第一值，默认 60）
 static int cpu_zone_keep = 10;         // 保留温度值个数（CPU_ZONE_RESCAN 第二值，默认 10）
 
-// --- CPU 亲和核集合（可配置；单一输入位，两种语法：簇 c0/c123 与核号 0 / 0-1 / 0,2-3）---
-// 静态初值必须写字面量：默认值核对按字面量逐位比对它与定义 default，写成宏会被当成
-// "C 内未找到初值"而跳过核对（洞会变哑）。运行期的"回落默认"用生成头的 CFG_DEFAULT_CPU_AFFINITY
-//（由定义 default/factory 派生），故改默认值时只须同步这两处（本行字面量 + 定义）。
+// --- CPU 亲和核集合（可配置；单一输入位：簇 c0/c123 或核号 0 / 0-1 / 0,2-3）---
+// 静态初值必须写字面量（默认值审计按字面量比对，写成宏会被跳过）；理由见 逻辑说明.md「CPU_AFFINITY 的生效时机」。
 static char affinity_spec[64] = "c0";   // CPU_AFFINITY 原样字符串（解析在 apply_cpu_affinity）
 static int affinity_cfg_seen = 0; // 本次加载是否读到该键（缺键时回落默认，见 load_config）
 
 // ======================== 通用参数 ========================
 // --- 基准温度 ---
 static int BATT_BASELINE = 350;     // 基准温度 35.0°C
-
-// --- 控制模式：本实现仅保留 PID（Gear 已删除）---
 
 // --- 冷端→风扇映射 ---
 static int cold_map_start = 40;     // COLD_RPM_MAP 第一值=映射起始强度，低于此值时线性外推下限
@@ -178,7 +154,7 @@ static int cached_batt_raw = -1;   // 电池温度（0.1°C），保留上次成
 static int cached_cpu_now  = -1;   // CPU 最高温度（0.1°C），保留上次成功值抗抖
 
 // ======================== 实际值 ========================
-// 始终向目标档位的表格值靠拢，每周期最多变动速率限制的量
+// 始终向目标值（PID 目标制冷 / 风扇目标）靠拢，每周期最多变动速率限制的量
 static int actual_rpm = -1;            // 当前实际风扇转速（RPM）
 static int actual_cold = -1;           // 当前实际制冷片强度
 
@@ -211,15 +187,13 @@ static int debug_launch = 0;    // [自动拉起] 目标选择/回退/跳过（�
 static char config_path[256] = "";
 // 配置文件的最后修改时间（用于热重载检测）
 static time_t config_mtime = 0;
-// 是否已成功加载过配置（0 = 尚未加载成功）。为 0 时 main_loop 按 CONFIG_RETRY_INTERVAL 周期重试，
-// 这是"开机那一刻私有目录不可访问 → 整个生命周期都用默认值"那个缺陷的唯一自愈途径。
+// 0 = 尚未加载成功：main_loop 按 CONFIG_RETRY_INTERVAL 周期重试（唯一自愈途径，见 逻辑说明.md「配置路径自动检测」）。
 static int config_loaded = 0;
 // --config 显式指定过路径（1）还是自动探测（0）。重试时沿用同一条来源，不中途改换落点。
 static int config_explicit = 0;
 // 上次重试探测的时刻（节流用；0 = 尚未重试过，首次重试不额外等待）
 static time_t config_retry_at = 0;
-// 未加载状态下重新探测/加载配置的间隔（秒）。取值与 WD_KEEPALIVE_INTERVAL 同量级：
-// 配置对温控是有意义的输入，晚 1 分钟内补上不影响控制正确性，而探测本身只是一次 access+stat。
+// 未加载状态下重新探测/加载配置的间隔（秒）；取值理由见 逻辑说明.md「配置路径自动检测」。
 #define CONFIG_RETRY_INTERVAL 60
 
 // ======================== PID 控制（单累积器） ========================
@@ -299,7 +273,6 @@ static int pid_batt_filtered = -1;        // 滤波后电池温度（0.1°C）�
 static int pid_batt_last_update_cycle = -1; // 上次温度更新的控制周期（动态α间隔计算用）
 static int pid_batt_snap_done = 0;        // 停机后是否已做一次"恢复原始值"snap（1=已做）
 
-// ----（Gear 温度预测 / gear_predict_* / gear_input_batt 已随 Gear 删除）----
 // --- 输出映射与对齐 ---
 static int pid_align_rpm = 2000;          // PID 目标 RPM（仅初始化对齐与日志使用；风扇下发已由 compute_fan_target 独立计算）
 static int pid_align_cold = 1;            // PID 目标制冷强度
@@ -316,12 +289,7 @@ static int cooler_cold_temp = -1;         // 冷端温度（0.1°C）
 static int cooler_rpm_real = -1;          // 实际风扇转速
 static int cooler_cold_real = -1;         // 实际制冷强度
 
-// --- 回传可信就绪 + 启动/重连对齐（不拿 -1/占位1 兜底，等真实回传再定基线）---
-// LSP 端 COLD_REAL/RPM_REAL 只在 lastWaspWingInfo 就绪时随 RUN_MODE 一起写入；重启/重连瞬间
-// lastWaspWingInfo 为空 → 这些行缺失（读到 -1）或设备未下发前回占位 1。若此时拿它初始化
-// actual_cold 会被兜底成 1（WebUI 显示 1），且后续快速限速一步拉到 PID 目标（125/4500）。
-// 因此启动/长断连重置后不直接采用瞬时回传，改为等待 REPORT_OK_N 帧连续真实回传（RUN_MODE
-// 存在 + 冷/rpm 值合法）再对齐，超时用保守值起步防停摆。
+// --- 回传可信就绪 + 启动/重连对齐（不拿 -1/占位 1 兜底，等真实回传再定基线；理由见 逻辑说明.md「启动流程」）---
 #define REPORT_OK_N 2                      // 连续 N 帧读到真实回传才判可信（1 帧=1s）
 #define ALIGN_WAIT_TIMEOUT 15              // 等待真实回传上限（秒），超时用保守值起步防永久停摆
 static int report_ok = 0;                  // 1=已连续 REPORT_OK_N 帧读到真实回传（RUN_MODE 存在 + 冷/rpm 值合法）
@@ -347,10 +315,8 @@ static int app_was_alive = 0;
 static char status_file_path_b6[512] = "/data/local/tmp/tempctrl_b6x.status";
 static char status_file_path_b7[512] = "/data/local/tmp/tempctrl_b7x.status";
 
-// status 文件协议：行格式「字段名=值」，由 LSP 侧写入、本进程只读。
-// 协议的唯一规范处是 lsp模块/README.md（改了这里必须同步改 LSP 侧与那份说明）。
-// 字段名集中在此声明：字段名、比较长度、取值偏移三者由一处推导，
-// 避免改名字却漏改长度/偏移（原先三处各自硬编码，是同一缺陷的三个面）。
+// status 文件协议（行格式「字段名=值」/字段名/编码）的唯一规范处是 lsp模块/README.md；
+// 字段名集中在此声明，比较长度由字段名推得（避免改名字却漏改长度）。
 #define STF_BLE            "BLE="
 #define STF_CONNECTED_AT   "CONNECTED_AT="
 #define STF_BLE_OWNER_LAST "BLE_OWNER_LAST="
@@ -366,7 +332,7 @@ static const char *status_field_value(const char *line, const char *field) {
     return strncmp(line, field, n) == 0 ? line + n : NULL;
 }
 
-// WebUI 曲线数据文件（每 1 秒一行，滚动保留最大曲线窗口秒数）
+// WebUI 曲线数据文件（每 1 秒一行，滚动保留 720 行）；行格式与语义见 app/逻辑说明.md §7.1
 #define WEBUI_DATA_PATH       PRIVATE_DIR "/tempctrl_webui.data"
 #define WEBUI_DATA_MAX_LINES  720   // = 曲线最大时间挡位（秒）
 
@@ -398,28 +364,19 @@ static int app_launch_screen_dozing_on  = 0;    // 第二值：Dozing 是否算�
 static time_t last_probe_off_at = 0;     // 上次确认息屏（并完成屏检）的时刻：息屏退避锚点，见 APP_LAUNCH_PROBE_OFF_INTERVAL
 static int last_screen_off = 0;          // 上次观察到的屏幕状态：1=息屏（含按配置算灭的 Dozing），0=亮屏/未知。初值=亮屏
 
-// 息屏时整条探测链的最小间隔（秒，硬编码常量，不是配置键）。
-// 用户拍板值 10s：屏灭时探测链注定下发不了（屏幕门禁会拦），却每轮仍要付 pm 冷启动 + 全量 /proc 扫描，
-// 外加一次 is_screen_awake()（一次 fork 一个 dumpsys，dumpsys power 的活还在 system_server
-// 里干）—— 屏检本身就在整条链最贵之列，故退避必须连屏检一起节流，否则最贵的一环一次没省。
-// 亮屏节奏不变（仍由调用方 5s 一轮驱动）。
-// 不做成配置键：新增键要连带动 params.def.json → 生成头文件 → profile.conf → 界面，超出本次修改范围。
+// 息屏时整条探测链的最小间隔（秒，硬编码常量，不是配置键）；为何连屏检一起节流见 逻辑说明.md「自动拉起→开销收敛」。
 #define APP_LAUNCH_PROBE_OFF_INTERVAL 10
 
 // --- 界面开关转写（UI_BACK_HIDE）---
-// 界面与 Xposed 钩子分属两个进程、不共享内存：本机不消费该值，只把它写进一个双方都能访问的文件，
-// 由钩子读取。这是界面 → 钩子的唯一通道（钩子 → 守护进程走 status 文件，方向相反）。
+// 界面 → 钩子的唯一通道（两进程不共享内存，方向与 status 文件相反）；见 README「界面开关文件协议」。
 #define UIPREFS_PATH "/data/local/tmp/tempctrl_uiprefs"
 static int back_hide_enabled     = 1;    // UI_BACK_HIDE：1=返回键收后台（默认），0=恢复系统默认退出
 static int uiprefs_last_back_hide = -1;  // 上次已写出的值（-1 = 尚未写过，首轮必写一次）
 static int uiprefs_fail_logged    = 0;   // 写失败只记一条日志，避免每轮重复刷屏
 
 // --- 看门狗反向保活开关（WD_KEEPALIVE）---
-// 声明点必须在 load_config 之前（那里第一遍读它）；实现与其余状态在文件末尾的
-// 「看门狗反向保活」小节。**默认关**（与定义 default/factory 一致，由 check_params.py 审计核对：
-// 开关类键没有生成头宏，一致性靠该审计逐键核对，改一侧不改另一侧直接红）。
-// 默认开（2026-09-29 由用户指定）：判活口径与拉起方式见 TECH_DEBT 已解决区 §7/§8；关掉可退回单向模式。
-// 注意 profile.conf 里已写入的旧值优先于默认值——存量设备不会被这次改默认值翻动。
+// 声明点必须在 load_config 之前（那里第一遍读它）；实现与其余状态在文件末尾的「看门狗反向保活」小节。
+// 默认开：默认值来源、审计口径与"旧值优先"见 逻辑说明.md「看门狗反向保活」；判活口径与拉起方式同见该节。
 static int wd_keepalive_enabled = 1;     // WD_KEEPALIVE：1=守护进程反过来看护 service.d 看门狗（默认 1=开）
 
 // 双设备 BLE 连接状态
@@ -442,8 +399,6 @@ static time_t b7_last_at = 0;
 static int last_owner = 0;       // 全局最近连接者（合并后：1/2/6/7，0=无）
 static time_t last_owner_at = 0; // 对应连接时间
 
-// ----（档位模式自动风扇 gear_auto_fan / gear_config_enabled 已随 Gear 删除）----
-
 // ======================== 双设备仲裁 ========================
 typedef enum { DEVICE_NONE = 0, DEVICE_B6X, DEVICE_B7X } DeviceType;
 static DeviceType active_device = DEVICE_NONE;      // 当前控制的设备
@@ -453,18 +408,13 @@ static int active_fan_max  = 6000;          // 当前设备风扇上限
 static int active_pid_cold_max = 190;       // 当前设备 PID 制冷上限
 
 // ======================== 热端过温制冷削减 ========================
-// 热端温度 > 阈值 → 削低制冷上限 (热端-阈值)×倍率：首次削减把生效上限压到「当前实际制冷值 − 削减量」，
-//   之后每次触发在当前生效上限上继续累减（不回看历史触发值），削减后 5 周期内不再削减；
-// 热端温度 ≤ 阈值 → 生效上限每次 +5（复用倍率值）逐级上爬，封顶配置上限，恢复后 5 周期内不再恢复；
-// 削减与恢复的冷却独立（不共用）。hot_derate = 相对配置上限的削减量（0=无削减）
+// 热端 > 阈值 → 削低制冷上限（首削/累减）；≤ 阈值 → 逐级上爬封顶；冷却独立。规则见 逻辑说明.md「热端过温制冷削减」
 static int HOT_DERATE_THRESHOLD = 450;   // 热端阈值（0.1°C，450=45.0°C）
 static int HOT_DERATE_MULT = 5;          // 削减倍率 = 单次恢复值（削减量=(热端-阈值)×mult/10）
 static int HOT_DERATE_COOLDOWN = 5;      // 削减/恢复后冷却周期数（5 个 5s 周期）
 static int hot_derate = 0;               // 当前削减量（相对配置上限；累减，恢复归零=封顶）
 static int hot_derate_cooldown = 0;      // 削减冷却剩余周期（独立）
 static int hot_recover_cooldown = 0;     // 恢复冷却剩余周期（独立）
-
-// 活动档位表切换（select_gear_table）已随 Gear 删除
 
 // --- 发送去重缓存 ---
 static int last_bcast_valid = 0;
@@ -489,8 +439,6 @@ static void reset_cpu_affinity_defaults(void);   // parse_sysfs_cfg/load_config 
     do { if (debug_mode && debug_pid) \
         write_log("[PID] " fmt, ##__VA_ARGS__); \
     } while(0)
-
-// Gear 档位表配置解析（parse_gear_config_line / collect_gear_config / rebuild_gear_table）已随 Gear 删除
 
 /** 去除首尾空白，返回修剪后的起始指针 */
 static inline char *trim_line(char *line) {
@@ -750,8 +698,6 @@ static int parse_pid_cfg(const char *key, int val, const char *val_str) {
     return 0;
 }
 
-// Gear 专属配置解析（parse_gear_cfg）已随 Gear 删除
-
 /** 通用多值配置（PERF 层） */
 static int parse_common_cfg(const char *key, int val, const char *val_str) {
     if (strcmp(key, "HOT_RPM_MAP") == 0) {
@@ -838,11 +784,9 @@ static void publish_uiprefs(void) {
 }
 
 // ======================== 层开关关闭 → 该层参数回落默认值 ========================
-// 语义：PERF_ENABLED / SYSFS_ENABLED 由 1→0 时，把该层的**运行时参数**批量赋回代码默认值
-// （等同该层配置不存在）；配置文件内容不动，开关再打开时文件里的值在下一次重载立刻恢复。
-// 总开关自身不复位——PERF_ENABLED 代码默认值是 1，复位它会让该层立刻自我重开，等于没复位。
-// 「首次加载不触发」：-1 表示"尚无上一轮状态"。首轮加载时这些配置变量本就是 static 初值
-// （= 代码默认值），复位是恒等操作，故直接跳过；哨兵只在下方的 load_config 内更新。
+// 语义：PERF_ENABLED / SYSFS_ENABLED 由 1→0 时把该层运行时参数批量赋回代码默认值（配置文件不动）；总开关自身不复位。
+// -1 表示"尚未加载过"（首轮复位本是恒等操作，故跳过）。为什么这样设计与总开关不复位的理由见
+// 逻辑说明.md「PERF_ENABLED / DEBUG_ENABLED / SYSFS_ENABLED 开关」。
 static int last_perf_enabled  = -1;   // -1=未加载过；否则=上一轮 PERF_ENABLED（0/1）
 static int last_sysfs_enabled = -1;   // -1=未加载过；否则=上一轮 SYSFS_ENABLED（0/1）
 
@@ -1005,22 +949,12 @@ static int load_config(const char *path) {
 
     fclose(f);
 
-    // （CTRL_MODE 模式切换过渡 / GEAR 档位表后处理 已随 Gear 删除）
     return 1;   // 已读完并解析
 }
 
 // ======================== CPU 亲和（把配置落到进程上） ========================
-// 时机：启动一次（main）、配置热重载各一次（main_loop 的重载块）；等待设备循环不查 mtime，
-// 故那段时间改配置不会立即生效。
-// 取值语法（单一输入位，按首字符是否 c 分派）：
-//   · 首字符 c（只认小写）→ 簇模式：c 后每一位数字是一个簇号，c0 = 只用 0 号簇、c123 = 簇 1/2/3 的并集；
-//     簇边界从内核拓扑现算（含 cpu0 的簇是 c0，其余按各簇首核号升序），不写死任何机型的核数表；
-//   · 否则按核号：单值 0、区间 0-1、列表 0,2-3；旧写法 "0 5"（两个空格分隔的十进制核号）仍按区间 0~5。
-// 顺序固定为「先迁 cpuset 组、后设亲和」：cgroup v1 的 cpuset 组 cpus 是硬上限，任务可运行的核
-// = 组 cpus ∩ 自身亲和，组内只能收窄不能放宽。本进程若落在 cpus 很窄的组里（真机
-// cpuset:/top-app/main 只给 CPU7），直接 sched_setaffinity 会被夹回。
-// 边界：只写 cgroup.procs 迁移自身，绝不改任何组的 cpus（那会连带影响前台 app 的线程）；
-// 不碰 cpu/blkio/memcg 控制器，也不碰 cgroup v2 层级（真机 0::/ 是冻结器所在层）。
+// 时机（启动 + 配置热重载）、取值语法（c0/c123 或核号）、顺序（先迁 cpuset 组后设亲和）、
+// 边界（只迁自身、不改组的 cpus）见 逻辑说明.md「CPU_AFFINITY 的生效时机」。
 #define CPUSET_DIR "/dev/cpuset"   // 本机 cpuset v1 挂载点（mountinfo：/dev/cpuset rw,cpuset,noprefix）
 #define CPU_CLUSTER_MAX 8          // 簇数上限（手机 SoC 实际 ≤4；簇号只取单个十进制数字）
 
@@ -1092,14 +1026,9 @@ static int hex_digit(char ch) {
 }
 
 /**
- * 解析核集合文本。两种用法：
- *   · allow_mask=1（内核侧：present / cpuset 的 cpus / cpufreq 的 related_cpus）—— cpulist（"0-3,5"）、
- *     空白分隔（"0 1 2 3"）、十六进制位掩码（"0f"，右侧最低位 = cpu0）三种形态都认；
- *   · allow_mask=0（用户配置值）—— 只认核号（cpulist 与空白分隔），字母一律判非法，
- *     免得"a0"这种笔误被当成掩码悄悄变成另一组核。
- * 掩码与十进制核号在**纯数字**时无法区分（"7" 既可能是 cpu7、也可能是掩码 {0,1,2}），故只把
- * **含 a~f 的 token** 认作掩码；纯数字掩码若被误读，上层的"各簇并集必须等于 present"校验会
- * 拒掉这一级探测源（见 clusters_accept），不会拿错误划分去设亲和。
+ * 解析核集合文本。allow_mask=1（内核侧）认 cpulist / 空白分隔 / 十六进制掩码三种形态；
+ * allow_mask=0（配置值）只认核号，字母一律判非法。纯数字掩码与核号无法区分，故只把含 a~f 的
+ * token 认作掩码，误读由上层「各簇并集必须等于 present」校验挡掉（见 逻辑说明.md「CPU_AFFINITY 的已知限制」②）。
  * 返回 1=解析出至少一个核；0=空串或形态不符。
  */
 static int cpu_list_parse(const char *s, cpu_set_t *set, int allow_mask) {
@@ -1241,7 +1170,7 @@ static int cpuset_migrate_self(const cpu_set_t *want, char *landed, size_t size)
 }
 
 // ---- 簇探测（从内核拓扑现算，不写死机型核数表）----
-// 编号规则：含 cpu0 的簇 = c0，其余按各簇首核号升序 = c1、c2…（故无需给探测结果排序，簇号由核号推出）。
+// 编号规则（含 cpu0 的簇 = c0，其余按首核号升序）见 逻辑说明.md「CPU_AFFINITY 的生效时机」。
 #define CLUSTER_SRC_POLICY   "cpufreq/policy"                 // 每 policy 一个频率域 = 一个簇（日志出处）
 #define CLUSTER_SRC_CAPACITY "cpu_capacity"                   // 同容量 = 同簇（兼作 sysfs 叶子名与日志出处）
 #define CLUSTER_SRC_PACKAGE  "topology/physical_package_id"   // 同封装 = 同簇（兼作 sysfs 叶子名与日志出处）
@@ -1564,20 +1493,9 @@ static int detect_config_path(void) {
 }
 
 /**
- * 配置的"延迟加载"重试：未加载成功时按 CONFIG_RETRY_INTERVAL 周期重新探测并加载，已加载则直接返回。
- *
- * 为什么必须有它：启动阶段那次探测只跑一次，而开机早期（CE 未解锁、私有目录或 profile.conf
- * 尚未就位）它会失败。旧实现失败即置空路径并永久放弃 → 该实例**整个生命周期**都只跑代码默认值：
- * 界面改配置永不生效，且一切配置派生的行为（界面开关转写、WD_KEEPALIVE 等）全按默认值走
- * （缺陷记录见 TECH_DEBT.md 已解决区 §6）。两个调用点各覆盖一段：[main 的等设备循环] 覆盖"开机后
- * 还没连设备"那段（此时也可能已经很久），[main_loop] 覆盖已进入控制循环之后。
- *
- * **本函数只做"探测 + 加载 + 记一条日志"，刻意不碰 update_active_limits()** —— 那是"按当前设备
- * 刷新上限"的活，在没有有效设备时调用会按 DEVICE_NONE 刷坏上限。配置派生的后处理由调用方
- * 按自己所处的状态决定（见两处调用点）。load_config() 自身的副作用（如界面开关文件转写）
- * 在该函数内，照旧生效。
- *
- * 返回 1 = 本次刚刚加载成功（调用方据此做后处理），0 = 早已加载过 / 未到间隔 / 仍加载不上。
+ * 配置的"延迟加载"重试：未加载成功时按 CONFIG_RETRY_INTERVAL 周期重新探测并加载，已加载则返回 0。
+ * 为什么必须有它、两个调用点各覆盖哪段、为何刻意不碰 update_active_limits() 见 逻辑说明.md「配置路径自动检测」。
+ * 返回 1 = 本次刚加载成功（调用方据此做后处理）。
  */
 static int config_retry_if_needed(void) {
     if (config_loaded) return 0;                 // 已加载：交回调用方原有的 mtime 热重载路径
@@ -1731,10 +1649,9 @@ static void create_status_files(void) {
 // ======================== 双文件状态读取 ========================
 
 /**
- * 读取单个 status 文件的 BLE 连接状态和连接时间戳
- * is_b6_file=1：B6X 文件，BLE=0/1/2（0=未连接, 1=老 app 连接, 2=新 app 连接），ble 即 b6_owner
- * is_b6_file=0：B7X 文件，BLE=0/6/7（0=未连接, 6=B6X 型号, 7=B7X 型号）
- * 两文件均解析 BLE_OWNER_LAST=<owner> <at>（B6X 文件 1/2，B7X 文件 6/7），存入全局 b6/b7_last_*
+ * 读取单个 status 文件的 BLE 状态与连接时间戳（编码语义见 README「status 文件协议」）。
+ * is_b6_file=1：B6X 文件（BLE=1/2 即 b6_owner）；=0：B7X 文件（BLE=6/7 即型号）。
+ * 两文件均解析 BLE_OWNER_LAST=<owner> <at>，存入全局 b6/b7_last_*。
  */
 static void read_single_status(const char *path, int is_b6_file,
                                int *out_connected, time_t *out_connected_at,
@@ -1786,14 +1703,7 @@ static void read_status_ble_both(void) {
     else { last_owner = b6_last_owner; last_owner_at = b6_last_at; }
 }
 
-/**
- * 仲裁：根据 BLE 状态决定当前控制哪台设备
- *
- * 规则：
- *   仅一台连 → 控制那台
- *   两台都连 → 选先连者（CONNECTED_AT 小者优先）
- *   都断连   → DEVICE_NONE
- */
+/** 设备仲裁：仅一台连→那台；两台都连→先连者优先（CONNECTED_AT 小者）；都断→DEVICE_NONE。 */
 static DeviceType select_active_device(void) {
     if (b6_connected && !b7_connected) return DEVICE_B6X;
     if (!b6_connected && b7_connected) return DEVICE_B7X;
@@ -1908,7 +1818,7 @@ static int read_thermal_zone_raw(int zone_id) {
  * 失败返回 -1
  */
 static int read_battery_temp(void) {
-    // Scene 式：值比较为主判据，mtime 更新也视为数据刷新（补充信号，部分内核 mtime 不可靠）。
+    // 值比较为主 + mtime 更新作为补充刷新信号（部分内核 mtime 不可靠）；见 逻辑说明.md「温度变化检测」。
     int raw = read_sysfs_int(BATT_TEMP_PATH);
     if (raw < 0) {
         batt_temp_updated = 0;
@@ -1949,11 +1859,8 @@ static int cmp_zone_desc(const void *a, const void *b) {
 }
 
 /**
- * 扫描 thermal_zone 并保留最高温的 cpu_zone_keep 个。
- * 首次（!cpu_zone_scanned）真全量扫描 CPU_ZONE_MIN~MAX，把有效 zone 记为固定候选名单；
- * 后续只在候选名单内读值重排。首次由 read_cpu_temp_max 同步触发（保证首个读数可用）；
- * 周期重扫由 5s 控制块 maybe_rescan_cpu_zones 触发——全量扫描 ~100 个 zone 阻塞近 1s，
- * 不能放在 1s 采集热路径内。
+ * 扫描 thermal_zone，保留最高温的 cpu_zone_keep 个。首次真全量（建固定候选名单），后续只在名单内重排。
+ * 全量扫描 ~100 个 zone 阻塞近 1s，故周期重扫放 5s 控制块（见 逻辑说明.md「注意事项」）。
  */
 static void rescan_cpu_zones(void) {
     time_t now = time(NULL);
@@ -2056,13 +1963,7 @@ static inline int eff_cold_max(int base_max, int cold_min) {
 static int active_cold_eff_min = 1;    // 有效制冷下限（PID=pid_cold_min）
 static int active_cold_eff_max = 190;  // 有效制冷上限（含热端过温削减）
 
-/**
- * 每 5s 周期调用：根据散热器热端温度更新制冷上限削减量。
- * 热端 > 阈值 → 单次削减 (热端-阈值)×倍率：首次削减把生效上限压到「当前实际制冷值 − 削减量」，
- *   之后每次触发在当前生效上限上继续累减（不回看历史触发值），削减后 HOT_DERATE_COOLDOWN 周期内不再削减；
- * 热端 ≤ 阈值 → 生效上限每次 +5（=倍率值）逐级上爬，归零即封顶配置上限，恢复后冷却周期内不再恢复；
- * 削减/恢复冷却独立。热端数据无效（<0）时保持当前削减量。原始直算不加滤波。
- */
+/** 每 5s 周期按热端温度更新制冷上限削减量（热端无效时保持）。规则见 逻辑说明.md「热端过温制冷削减」。 */
 static void update_hot_derate(void) {
     if (hot_derate_cooldown > 0) hot_derate_cooldown--;
     if (hot_recover_cooldown > 0) hot_recover_cooldown--;
@@ -2110,10 +2011,8 @@ static void update_active_cold_range(void) {
 
 // ======================== 控制参数计算与下发 ========================
 
-// 档位查表参数构造（build_params）已随 Gear 删除
-
 // ======================== 广播协议（须与 MainHook.java 侧一致） ========================
-// Action / extra 名的唯一权威名单，改此处须同步 lsp模块/app/ 内 MainHook.java
+// Action / extra 名单（改此处须同步 MainHook.java）；完整协议见 README「广播协议」（唯一规范处）。
 #define BROADCAST_ACTION_B6X  "com.flydigi.SET_TEMPERATURE"
 #define BROADCAST_ACTION_B7X  "com.flydigi.SET_TEMPERATURE_B7"
 // extra 名按下发顺序排列，与 send_am_broadcast 的取值数组逐项对应
@@ -2149,9 +2048,7 @@ static void send_am_broadcast(int mode, int target, int windOC, int coldOC, int 
         const char *action = (active_device == DEVICE_B7X)
             ? BROADCAST_ACTION_B7X
             : BROADCAST_ACTION_B6X;
-        // 用绝对路径执行 am：daemon 环境 PATH 若缺 /system/bin，execlp 会静默失败
-        // （子进程 _exit(127)，父进程 waitpid 正常返回，故障不可见）。
-        // execv 不依赖 PATH；argv 由 extra 名单驱动，避免形参序与 --ei 序错位。
+        // 用绝对路径 execv（不依赖 PATH；execlp 会静默失败）；argv 由 extra 名单驱动，避免形参序与 --ei 序错位。
         char *argv[6 + 3 * BROADCAST_EXTRAS_N + 1];
         int ai = 0;
         argv[ai++] = (char *)"am";
@@ -2169,11 +2066,8 @@ static void send_am_broadcast(int mode, int target, int windOC, int coldOC, int 
         execv(AM_BIN, argv);
         _exit(127);
     }
-    // 父进程：限时等待子进程（3 秒超时）。
-    // 坑（改回去必复现，2026-09-28 修）：本文件的 signal() 是 BSD 语义（bionic 下 = bsd_signal，
-    // 带 SA_RESTART）—— 用它装 SIGALRM 会让被中断的 waitpid **自动重启**，3s 闹钟永远打不断它，
-    // 下面 `r == -1` 的超时分支就成了死代码；am 一旦不退（system_server 卡住），主循环永久停摆，
-    // 与「看门狗拉起」那个缺陷同型。故这里显式用 sigaction 且 sa_flags = 0（刻意不置 SA_RESTART）。
+    // 父进程：限时等待子进程（3 秒超时）。必须显式 sigaction 且 sa_flags=0——
+    // 本文件 signal() 是 BSD 语义带 SA_RESTART，会重启 waitpid 使超时分支成死代码（详见 逻辑说明.md「看门狗反向保活」）。
     struct sigaction sa;
     memset(&sa, 0, sizeof(sa));
     sa.sa_handler = alarm_handler;
@@ -2247,7 +2141,7 @@ static int rate_limit_fan(int desired_rpm) {
     int ref_room = rising ? (active_fan_max - actual_rpm)    // 升速：距最高转速（现场读，active_fan_max 为运行时量）
                           : (actual_rpm - fan_rpm_min);      // 降速：距最低转速
     int delta = abs(desired_rpm - actual_rpm);
-    // 阈值 ×1.5 必须先乘后除（* 3 / 2）：写成 /2*3 时阈值 51 得 75 而非 76，差 1 RPM 即移动 >= 边界
+    // 阈值 ×1.5 必须先乘后除（写成 /2*3 会有 1 RPM 偏差）；见 逻辑说明.md「主循环逻辑」
     int hold = delta > 0 &&
                ref_room >= RATE_LIMIT_FAN_DEBOUNCE * 3 / 2 &&
                delta <= RATE_LIMIT_FAN_DEBOUNCE;
@@ -2257,8 +2151,7 @@ static int rate_limit_fan(int desired_rpm) {
 
     // 单键语义：两个实参必须同值
     rate_limit(&actual_rpm, desired_rpm, fan_step, fan_step);
-    // 下限钳制：内部 actual_rpm 与 send_rpm 对齐，恒不低于 fan_rpm_min。
-    // 否则风扇目标偏低时 actual_rpm 跌破 fan_rpm_min，rate_limited_execute 的就绪守卫会误判"未就绪"而永久跳过下发（死锁）。
+    // 下限钳制（否则 fan_rpm_min 下穿会让就绪守卫误判"未就绪"永久跳过下发）；见 逻辑说明.md「主循环逻辑」
     actual_rpm = clamp(actual_rpm, fan_rpm_min, active_fan_max);
 
     // ---- 就近取整到 RATE_LIMIT_FAN 第三值的倍数（默认 10：2044→2040、2045→2050）----
@@ -2270,15 +2163,7 @@ static int rate_limit_fan(int desired_rpm) {
     return send_rpm;
 }
 
-/**
- * 下发去重 + 制冷变化死区判定：返回 1 表示跳过本次下发。
- *
- * 去重以散热器实际回传为准：要播发值与实际值一致视为已到位，跳过下发；
- * 回传异常（实际值 < 0）时退化用 last_* 缓存对比。
- *
- * 制冷变化死区：目标与制冷实际 |差值| 少于设定则上升下降都不下发；
- * 距最高/最低制冷强度 < 阈值×2 时死区失效（接近极值必须允许精确到位）。
- */
+/** 下发去重 + 制冷变化死区（以散热器实际回传为准）；规则见 逻辑说明.md「注意事项→去重逻辑」。返回 1=跳过下发。 */
 static int should_skip_dispatch(int mode, int target, int windOC, int cold, int windLevel) {
     int send_rpm = (mode == 0) ? windLevel : windOC;
 
@@ -2327,8 +2212,6 @@ static int should_skip_dispatch(int mode, int target, int windOC, int cold, int 
     return skip;
 }
 
-// Gear 档位下发（apply_gear）已随 Gear 删除
-
 // ======================== App 进程 + 心跳检测 ========================
 
 /**
@@ -2345,13 +2228,11 @@ static int is_app_alive(void) {
 }
 
 // ======================== 双 app 存活仲裁 ========================
-// 需求：B6X 两个 app 最多一个后台存活，保留 BLE 连接者（b6_owner），无法区分时保留老 app。
-// farsef（B7X app）仅在最近连接的是 B6X 散热器（BLE_OWNER_LAST==6）时参与；B7X 设备由 select_active_device 单独处理。
+// 需求与保留优先级见 逻辑说明.md「三方 app 存活仲裁」（farsef 仅在最近连 B6X 时参与）。
 
 /**
- * 单次遍历 /proc，同时检测多个包名存活状态（合并扫描，替代逐包名全量遍历，省 2/3 开销）。
- * 直读 /proc/<pid>/cmdline 做精确比对，不经 shell：整参等于包名，或 --nice-name=<包名>；
- * 避免 system("pgrep -f <pkg>") 时临时 shell 自身命令行含包名造成的自匹配误判。
+ * 单次遍历 /proc 同时检测多包存活（合并扫描）。直读 /proc/<pid>/cmdline 精确比对、不经 shell
+ * （避免 pgrep 自匹配误判）；理由见 逻辑说明.md「自动拉起」。
  */
 static void app_process_scan(const char *pkgs[], int alive[], int count) {
     for (int i = 0; i < count; i++) alive[i] = 0;
@@ -2388,19 +2269,7 @@ static void app_process_scan(const char *pkgs[], int alive[], int count) {
     closedir(d);
 }
 
-/**
- * 从一行 dumpsys 输出里取出 mWakefulness 的值。命中返回 1 并写入 out（out 恒以 '\0' 结尾）。
- *
- * 与旧 awk（-F'=' 取 $2、排除含 Override 的行）核对为等价的点：作用于整行、含 "mWakefulness=" 且不含
- * "Override" 才入选、Override 行继续往下扫、超 31 字符的截断、以及 1/2/0/-1 的取值映射。
- *
- * 两处**有意**偏离（都只在 dumpsys 输出非标准格式时显形：AOSP 每字段独占一行、且用 println 拼接，
- * 故实际不可达）：
- *   1. 取值起点以 "mWakefulness=" 之后为界；旧 awk 取全行第 1、2 个 '=' 之间 —— 仅当该行在标记之前
- *      还有 '=' 时不同，而那种情况下旧实现取到的是别人的值。
- *   2. 首尾空白（空格/制表符/\r）一并裁掉；旧 awk 只裁行尾的 \n —— 仅当值两侧带空白时不同，
- *      裁掉更贴近字段真实值（旧实现会把 " Awake" 判成灭屏，白跳过一轮拉起）。
- */
+/** 从一行 dumpsys 取 mWakefulness 的值。与旧 awk 的两处有意偏离见 逻辑说明.md「自动拉起」。命中返回 1。 */
 static int wakefulness_value(const char *line, char *out, size_t outSize) {
     if (outSize == 0) return 0;   // 防下面 outSize-1 下溢（当前调用点不会传 0，留着免以后踩）
     const char *hit = strstr(line, "mWakefulness=");
@@ -2421,16 +2290,9 @@ static int wakefulness_value(const char *line, char *out, size_t outSize) {
 }
 
 /**
- * 屏幕状态（读 dumpsys power 的 mWakefulness）：仅 Awake 算亮屏。
- * 返回：1=Awake(亮屏)、2=Dozing(息屏常显)、0=Asleep/其余(灭屏)、-1=读取失败。
- *
- * 不走 shell 管线：只 fork 一个 dumpsys 子进程，父进程边读边解析、命中即关管道 ——
- * 子进程随即因 SIGPIPE 提前退出（等效旧写法里 awk 的 exit；本文件未忽略 SIGPIPE，
- * 故 execv 出来的 dumpsys 保持默认处置，会真的死）。旧写法 sh -c 'dumpsys | awk …'
- * 一次探测起 3 个进程、两段管道，现在 1 个进程、一段。
- * 一分没省的是 dumpsys 的 binder 往返与 system_server 侧那次 dump —— 那才是真正的成本。
- *
- * 行缓冲 512 字节：dumpsys 里 mWakefulness 行只有几十字节，超长行会被截断（只可能丢本行后半段）。
+ * 屏幕状态（dumpsys power 的 mWakefulness）：仅 Awake 亮屏。
+ * 返回 1=Awake / 2=Dozing / 0=Asleep或其余 / -1=读取失败。不走 shell 管线（1 进程一段），
+ * 为何省在进程数而非 binder 往返见 逻辑说明.md「自动拉起→开销收敛」。行缓冲 512 字节。
  */
 static int is_screen_awake(void) {
     int fds[2];
@@ -2519,33 +2381,24 @@ static int run_cmd_silent(const char *fmt, const char *arg) {
 }
 
 /**
- * 包安装状态实时探测（走 pm path）。
- * 返回：1=已安装、0=未安装（pm 明确报"包未找到"，退出码 1）、-1=无法判定（pm 没给出明确回答）。
- * 每次调用都要 fork+exec 一次 pm（ART 冷启动，约 100~300ms，同 is_foreground_pkg 处 dumpsys 量级），
- * 故探测链上不要直接调用本函数，一律走带缓存的 app_installed()；只有需要实时结论的宿主卸载探测才直接用它。
+ * 包安装实时探测（pm path）：1=已安装、0=未安装（pm 明确报"包未找到"，退出码 1）、-1=无法判定。
+ * 退出码口径（只有 rc=1 算不存在）见 逻辑说明.md「自动拉起」；每次 fork+exec pm（~100~300ms），
+ * 故探测链上走带缓存的 app_installed()，只有宿主卸载探测直接用它。
  */
 static int app_installed_probe(const char *pkg) {
     int st = run_cmd_silent(PM_BIN " path %s > /dev/null 2>&1", pkg);
     if (st == 0) return 1;
     // system() 返回的是 wait 状态而不是退出码：-1=fork/exec 失败；WIFEXITED 假=进程被信号杀死（pm 没跑完）。
     if (st == -1 || !WIFEXITED(st)) return -1;
-    // 只有退出码 1（pm 自己报"包未找到"）才算「确实不存在」，其余非 0 一律「无法判定」：
-    //   126=无执行权限、127=shell 找不到 pm  —— 命令跑不起来
-    //   2=Failure calling service package（binder 调用失败）
-    //   20=cmd: Can't find service: package（package 服务还没起来）
-    // 后两类是 2026-09-30 真机实测（开机未解锁窗口里六种调用**全部** rc=20）——那是"服务未就绪"，
-    // 不是"包不存在"。把它当"不存在"会在开机早期凑满 host_miss_hits 判成已卸载 → 清产物 + 自删
-    // 二进制（不可逆）；而 pm 长期不可用的最坏后果只是"永不自动清理"，那是安全的降级方向。
+    // 只有退出码 1（pm 自己报"包未找到"）才算「确实不存在」，其余非 0（命令跑不起来 / 服务未就绪等）
+    // 一律「无法判定」——误判成"不存在"会在开机早期触发不可逆的卸载自清。各退出码含义与后果见
+    // 逻辑说明.md「三方 app 存活仲裁」的「包安装探测的退出码口径」。
     if (WEXITSTATUS(st) == 1) return 0;
     return -1;
 }
 
 // —— 包安装状态缓存 ——
-// 生命周期：进程启动时为空，随本进程（≈一次开机周期）一直有效，不设过期、不做失效机制。
-//   理由：包安装状态在一次开机周期内极少变化 —— 用户重装 APK 时包名不变、结论依旧成立；
-//   卸载（罕见）最多让缓存多留一条过期结论，也不会导致误拉起（拉起前还有「已安装」与「未运行」两道门）。
-//   可清理性：无落盘、无配置项，不需要清理；重启 daemon 或重启设备即回到实时探测。
-// 不缓存的情形：无法判定（probe 返回 -1）—— 那是环境故障，缓存住会把故障固化到下次开机。
+// 生命周期（≈一次开机周期、无过期、不落盘）与「无法判定不缓存」见 逻辑说明.md「自动拉起」。
 #define INSTALL_CACHE_SLOTS 3   // 探测链只会问这三个包（老/新 B6X app、farsef），容量取 3
 static const char *install_cache_pkg[INSTALL_CACHE_SLOTS];   // 缓存键：包名指针（调用方传入的都是 #define 字面量，静态存储期；若将来传栈上缓冲须改为拷贝）
 static int install_cache_val[INSTALL_CACHE_SLOTS];           // 缓存值：1=已确认安装，0=已确认未安装
@@ -2595,8 +2448,7 @@ static const char *resolve_launch_pkg(void) {
 
 /** 构建并执行 am start 拉起指定包名（显式组件优先，未知 launcher 回退 -p），返回 system() 退出码 */
 static int am_start_app(const char *pkg) {
-    // 优先显式组件：这些 app 的 launcher 未导出/非标准 filter，隐式启动解析不到
-    // （报 "unable to resolve Intent"），须用显式组件 -n <包名>/<类名>；未知 launcher 回退 -p
+    // 优先显式组件 -n（这些 app 的 launcher 未导出/非标准 filter，隐式启动解析不到）；未知 launcher 回退 -p
     const char *act = NULL;
     if (strcmp(pkg, APP_PKG_B6X_OLD) == 0 || strcmp(pkg, APP_PKG_B6X_NEW) == 0)
         act = "com.example.extool.MainActivity";
@@ -2633,11 +2485,8 @@ static void launch_last_app(int pkg_known_dead) {
         return;
     }
 
-    // —— 屏幕门禁 + 息屏退避（APP_LAUNCH_SCREEN_GATE）——
-    // 位置前移到最贵的一环（pm 冷启动、全量 /proc 扫描）之前：屏灭时本链注定下发不了（门禁会拦），
-    // 却每轮仍要付 1~3 次 pm + 一次全量扫描 + 日志，是断联期探测风暴的主因。
-    // 屏幕状态只取一次，退避与门禁共用 —— 屏检要 fork 一个 dumpsys、活还在 system_server 里干，是本链最贵的一环之一，不可为退避再取一次。
-    // 门禁关闭时不进本块：那时屏灭也允许下发，退避只会把真实下发推迟最多 10s，且要多付一次屏检。
+    // —— 屏幕门禁 + 息屏退避（APP_LAUNCH_SCREEN_GATE）：前移到最贵探测之前，屏检只取一次 ——
+    // 代价与决策见 逻辑说明.md「自动拉起→开销收敛」。
     if (app_launch_screen_gate_enabled) {
         // 息屏退避闸门（用户拍板 10s）：上次已判定息屏且未到间隔 → 本次连屏检都不做，
         // 不打日志、什么都不做。否则 10s 只能砍掉一行 debug，最贵的屏检照旧每 5s 一次。
@@ -2697,13 +2546,8 @@ static void force_kill_and_relaunch(void) {
 }
 
 /**
- * 锁死自动重启检测（watchdog）：每次实际下发制冷变化时判定一次（调用点在 rate_limited_execute 之后、且仅在其返回已下发时）。
- * 双条件都满足才计数：①本周期实际 = 上周期实际（停滞）②本周期实际 ≠ 上周期下发（未达目标），
- * 连续计数 ≥ APP_WATCHDOG 次 → 判定设备锁死/无响应（App 进程内坏状态，重启散热器无效）
- * → 强制重启散热器 app（重建连接栈）。
- * 实际值用 COLD_REAL（status 文件 cooler_cold_real）；上周期下发 = watchdog_last_cmd
- * （上次实际下发后保存的 last_cold，供本周期"未达目标"判定）。
- * 仅 BLE 已连接、实际回传可用、watchdog 开启时启用；kill 后冷却 300s 防风暴。
+ * 锁死自动重启检测：实际停滞且未达目标连续 N 次 → kill 散热器 app 重新拉起（重建连接栈）。
+ * 判定细节见 逻辑说明.md「主循环逻辑→锁死自动重启」。
  */
 static void watchdog_check(void) {
     if (app_watchdog_cycles <= 0)      { watchdog_stall_count = 0; return; }  // 关闭
@@ -2762,14 +2606,7 @@ static void evict_app_if_eligible(int alive, const char *keep, const char *pkg) 
     }
 }
 
-/**
- * 三方 app 存活仲裁：主循环每 5s 判断、ARBITRATE_INTERVAL 秒节流执行，read_status_ble_both 之后。
- * 老/新 B6X app 始终参与；farsef 只在最近连接的是 B6X 散热器（BLE_OWNER_LAST==6）时参与，
- * 连 B7X 设备（==7）时不参与（控制另一台设备，不应被杀）。
- * 优先保留 BLE_OWNER_LAST 值代表的 app（1→老, 2→新, 6→farsef）；保留者涉及 farsef 时，
- * 与另一方（B6X app）的连接时间比较，保留更晚者。无 last_owner 时回退当前连接者 b6_owner。
- * 被淘汰者非 top-app/foreground 时 am force-stop（在前台则等下一周期）。
- */
+/** 三方 app 存活仲裁（保留优先级与 farsef 参与条件见 逻辑说明.md「三方 app 存活仲裁」）。 */
 static void arbitrate_apps(void) {
     // 单次遍历 /proc 同时检测 3 个包名（合并扫描，不再逐包名全量遍历）
     const char *pkgs[3] = { APP_PKG_B6X_OLD, APP_PKG_B6X_NEW, APP_PKG_B7X };
@@ -2810,47 +2647,20 @@ static void arbitrate_apps(void) {
     evict_app_if_eligible(far_in, keep, APP_PKG_B7X);
 }
 
-// ======================== 电池温度控制 ========================
+// ======================== 已删除机制（Gear / PID 方差门控） ========================
+// 原「电池温度分档控制 / 紧急恢复期推进 / CPU 紧急干预 / 电流-挡位映射 / Gear 温度预测 /
+// PID 方差门控」等成套机制已删除，函数名与职责见 逻辑说明.md「已删除机制索引」。
 
 /**
  * 紧急退出恢复期阶段推进：冷却周期递减，到期推进 P1→P2→P3→正常。
  * 不受电池温度读取失败影响（battery_control 入口先调用，冷却期也能走完各阶段）。
  */
-// Gear 模式（紧急恢复期推进）已随 Gear 删除
-
-// 过冲反补 + 趋势豁免（rev_comp_and_trend）已随 Gear 删除
-
-// 电池温度调档（battery_control）已随 Gear 删除
-
-// ======================== 紧急干预（CPU 温度） ========================
-
-// CPU 温度紧急干预（emergency_intervention）已随 Gear 删除
-
-// ======================== 电流-挡位映射 + 温度调整融合 ========================
-
-// 电流-挡位映射 + 温度融合（gear_from_current）已随 Gear 删除
-
-// ======================== PID 方差门控 ========================
-
-/**
- * 推入方差采样（对齐 PID 计算时机）。
- * @param value 原始电池温度（0.1°C）——固定推原始值，不做滤波/预测
- * @param cycle 当前控制周期计数（pid_ctrl_cycles）
- * 两次推入间若有周期被跳过（无滤波跳过周期不推入），在缺档处线性插值补样本，
- * 保证方差窗口覆盖连续控制周期，反映真实温度变化率。
- */
-// PID 方差门控（pid_var_push / pid_var_compute）已随补丁删除
-
-// Gear 温度预测（gear_predict_push / gear_predict_compute）已随 Gear 删除
 
 // ======================== 输入补偿 ========================
 
 /**
- * CPU 补偿值（0.1°C）：comp=(cpu滤波温度 − 电池 − 偏移)/divisor，clamp≥0，
- * 再按补偿专属滤波系数 EMA 平滑（首次上次值用 0，从 0 平滑爬升而非直取）。
- * 门控滞回：条件满足（raw>0）进入补偿；条件消失（raw=0）后不立即退出，
- * 平滑值归零后才关闭补偿
- * 始终生效，无开关（门控由条件自触发）。
+ * CPU 补偿值（0.1°C）：comp=(cpu滤波温度 − 电池 − 偏移)/divisor，clamp≥0，按专属系数 EMA 平滑；
+ * 门控滞回、始终生效无开关（细节见 逻辑说明.md「CPU 补偿」）。
  * @param batt 当前电池温度（0.1°C，用原始电池温度口径）
  */
 static int cpu_comp_now(int batt) {
@@ -2875,10 +2685,7 @@ static int cpu_comp_now(int batt) {
 }
 
 // ======================== 逻辑2：冷值动态倍率 ========================
-// 冷值（上次 PID 重算算出的目标制冷强度 pid_align_cold）→ 抽象值 s ∈ [−1,0]（两段线性 + 两端平台）
-// → 统一指数映射得倍率（只降不升）→ 三个作用点各乘权重：KDP / KI 升速率 / KI 降速率。
-// 更新门控与 pid_kdp 一致（温度窗口变化才重算）；两次重算之间沿用同一取样值。
-// 单位：冷值三点为码；输出轴拐点值 / 权重 / U / γ 为配置整数（×100），内部按浮点算。
+// 冷值 → 抽象值 → 倍率 → 三作用点（KDP / KI 升 / KI 降）；门控与取样、单位见 逻辑说明.md「冷值动态倍率」。
 
 /**
  * 归一化辅助：v ≤ base → 0；den ≤ 0（配置乱序，纯钳位不拦）→ 1。
@@ -2934,12 +2741,8 @@ static void cold_dyn_reset(void) {
 // ======================== PID 控制函数 ========================
 
 /**
- * 速度非线性映射（v → v'）：小幅速度按幂曲线降权，幅度到位后严格恒等。
- * - 阈值 L = PID_SPEED 第二值/100（°C/周期）、强度 q = PID_SPEED 第三值/100。
- * - |v| ≥ L → 输出 = v（恒等，1:1，无恒定偏置）。
- * - |v| < L → t = |v|/L；s = t²(3−2t)（平滑阶跃）；输出 = sign(v)·|v|·s^q。
- * 性质：保号（奇函数）、处处 |输出| ≤ |v|、随 |v| 单调不减、v = ±L 处连续（s=1、s^q=1）。
- * 护栏：v = 0 → 0（避开 0^0）；q = 0 → 位精确恒等（完全线性）；L ≤ 0（手改配置）→ 恒等，不除零。
+ * 速度非线性映射（v → v'）：|v| ≥ L 恒等，|v| < L 按平滑阶跃取 q 次幂降权（保号、|输出|≤|v|、
+ * 在 ±L 连续）；性质与三条护栏见 逻辑说明.md「单累积器公式」。
  */
 static float pid_spd_nl_map(float v) {
     if (v == 0.0f) return 0.0f;                  // 护栏①：0 无符号，直接 0
@@ -2954,16 +2757,8 @@ static float pid_spd_nl_map(float v) {
 }
 
 /**
- * PID 计算（单累积器）：OUTPUT = clamp(acc + kdp, 0, 1)。
- * - error 为纯电池误差（不含 CPU 补偿）；cpu_comp 与速度同地位，算 ch 时加入。
- * - 速度 v = (error − 上次error)/dt（倍率系数缩放，不乘 dt）。
- * - 速度非线性映射（pid_spd_nl_map）：|v| ≥ L 严格恒等（1:1）、|v| < L 按「平滑阶跃的幂」降权，
- *   保号且 |输出| ≤ |v|；L/q 见 PID_SPEED 第二值 / 第三值。
- *   回溯注入的 v（recall_on）与常规 v 汇聚到同一处映射，各恰好施加一次，映射后的 v 共用给 ch 与 ch_kdp。
- * - ch 用于积分（acc += ki_rate×(ch − target_f)，ki_rate 按被积项符号取升/降速率），ch_kdp 用于 KDP（速度按 0.33 衰减，无记忆）。
- * - 动态目标 target_f（EMA 平滑），使积分逼近"误差×目标系数"包络，防静态过冲。
- * - 逻辑2 冷值动态倍率（cold_dyn_*）：重算门控与 kdp 同处（温度窗口变化），三倍率分别作用于 kdp / KI 升 / KI 降。
- * - 温度未变（batt_window_changed=0）时 kdp 沿用上次值（跳过①），避免补偿突变带动 KDP 跳变。
+ * PID 计算（单累积器 OUTPUT = clamp(acc + kdp, 0, 1)）。公式与各步（error/速度/KDP/动态目标/逻辑2/
+ * 跳过①）见 逻辑说明.md「单累积器公式」。
  * @param batt_10  原始电池温度（0.1°C，纯电池，不含补偿）
  * @param dt       距上次重算以来的 5 秒周期数（钳位 0.6~6，1 = 5s）
  * @param cpu_comp CPU 补偿（°C，已 EMA 平滑）
@@ -3042,14 +2837,8 @@ static float pid_compute(int batt_10, float dt, float cpu_comp, int batt_window_
 }
 
 /**
- * 热端温度线性映射 + EMA 平滑 + 双向滞回：无上下限，低于 HOT_RPM_MAP 最低温度或高于最高温度时线性外推
- * 最终钳制在下发阶段（apply_gear_direct 内部）
- *
- * 平滑：输入先经 MAP_INPUT_SMOOTH_ALPHA EMA 平滑（与冷端共用系数）
- * 滞回（基于平滑后的值）：
- *   降温（hot_s < prev_hot）→ 有效温度 = 实际 + 1°C，钳位 ≤ 上次 RPM
- *   升温（hot_s > prev_hot）→ 正常映射，但 RPM 不低于上次值
- *   平滑值不变             → 保持上次输出
+ * 热端温度线性映射 + 输入 EMA + 双向滞回（无上下限，最终钳制在下发阶段）。
+ * 输入先经 MAP_INPUT_SMOOTH_ALPHA 平滑；滞回规则见 逻辑说明.md「制冷→RPM 映射引擎」。
  */
 static int rpm_from_hot_end(int hot_10) {
     static int prev_hot = -1;   // 上一轮平滑后的温度
@@ -3099,10 +2888,8 @@ static int rpm_from_hot_end(int hot_10) {
 }
 
 /**
- * 冷强度指数映射：n^exp，无上下限
- * cold < cold_map_start 时线性外推下限（powf 负数底数→NaN）
- * 输入（制冷强度）先经 MAP_INPUT_SMOOTH_ALPHA EMA 平滑（与热端映射共用系数，首次直取）
- * 最终钳制在下发阶段（apply_gear_direct 内部）
+ * 冷强度指数映射（n^exp，无上下限；cold < cold_map_start 时线性外推下限以避免 powf 负数底数）。
+ * 输入先经 MAP_INPUT_SMOOTH_ALPHA 平滑，最终钳制在下发阶段。见 逻辑说明.md「制冷→RPM 映射引擎」。
  */
 static int rpm_from_cold_exp(int cold) {
     static int cold_in_smoothed = -1;   // 输入侧 EMA 平滑后的制冷强度
@@ -3219,8 +3006,6 @@ static void pid_reset_core(void) {
     cold_dyn_reset();
 }
 
-// Gear 模式切换对齐（pid_align_from_gear）已随 Gear 删除
-
 /**
  * 按制冷强度参考值对齐 PID 初始输出。
  * @param cold_ref 制冷强度参考值（LSP 回传实际值，低于 pid_cold_min 时已由调用方兜底）
@@ -3240,11 +3025,8 @@ static float pid_ratio_from_cold(int cold_ref, int cold_max) {
 }
 
 // ======================== 宿主 APK 卸载自清理 ========================
-// 需求：本 APK 被卸载后，daemon 必须自己停止并把落盘产物删干净（连二进制与 service.d 脚本一起删）。
-// 代价（用户已拍板）：重装 APK 后必须重新「一键部署」——这是设计意图，不是缺陷。
-// 落点分工：C 端为主（5s 节拍、root、能删 /data/local/tmp · /data/adb · /cache），
-// service.d 脚本看门狗兜底（能删自己，覆盖「daemon 已死但脚本还在」「启动后 30s 延迟窗口」
-// 「C 端被 SELinux 拒删 /data/adb」三类）。判据与清理清单两侧必须保持一致，改一处同步另一处。
+// 需求 / 代价（重装须重新一键部署，设计意图）/ 落点分工（C 端为主 + 脚本兜底）见 app/逻辑说明.md §2.4。
+// 判据与清理清单两侧必须保持一致，改一处同步另一处。
 
 #define HOST_PKG             "com.example.waspwingtempctrl"
 #define HOST_DATA_DIR        "/data/data/" HOST_PKG
@@ -3258,31 +3040,8 @@ static int    host_probe_gone = 0;   // 上次二级探测结论：1=包已不�
 static int    host_probe_unknown = 0;// 上次二级探测结论：1=无法判定（pm 跑不起来）；与上面互斥
 
 /**
- * 判断宿主 APK 是否已卸载。返回 1=确认已卸载（可清理），0=仍在 / 无法确认。
- *
- * 两级判据，必须都过：
- *   一级 stat(HOST_DATA_DIR) —— 用【父目录】而非 files/：app「清除数据」只清 contents
- *     （files/ 内容），父目录 /data/data/<包名> 由系统保留 → 可抗"清除数据"误判。
- *     该代价已记录在 逻辑说明.md 的「参数落点」注记处（清除数据会清掉私有目录产物）。
- *     每轮可跑、零成本。
- *   二级 app_installed_probe(HOST_PKG)（走 pm path，实时不缓存）—— 一级命中后才跑，且按 HOST_PROBE_INTERVAL
- *     节流（fork+exec pm 的开销不能进每轮热路径）。**只有 pm 明确回答"包未找到"（退出码 1）才算已卸载**；
- *     其余一切非 0 —— 命令跑不起来、被信号杀死、binder 调用失败（rc=2）、package 服务未就绪（rc=20，
- *     2026-09-30 真机实测于开机未解锁窗口）—— 一律按「无法确认」处理，不计数。
- * 再叠「连续 HOST_CONFIRM_HITS 次命中才判真」：单次 stat 失败可能来自瞬时挂载抖动、
- * app 正在被 installd 重装（目录短暂消失）等瞬态，连续两次（间隔 ≥5s 一轮）可滤掉。
- *
- * 为什么"无法判定"必须与"包不存在"分开（2026-09-28 修）：一级判据在开机早期会**必然**失败——
- * 首次解锁前 /data/data 整体不可访问，那是持续状态而不是瞬态，两个计数也滤不掉。此时若把
- * pm 的"无法判定"也算成命中，就会凑满 HOST_CONFIRM_HITS 判成「已卸载」→ 清理产物并自删二进制。
- * 而 pm 在开机早期确实会不可用（部署脚本为此专门写了 3 次重试，见 b6x-tempctrl.sh 的 apk_path）。
- * 分开之后最坏情况退化为「pm 长期不可用时永不自动清理」，那是安全的降级方向：
- * 卸载还有系统卸载与脚本侧自清两道兜底，而误删是不可逆的。
- *
- * 2026-09-30 真机把"pm 不可用"的确切形态钉死了：开机未解锁窗口里 `pm path`（已安装/不存在/对照组）、
- * `pm list`、`cmd package path`（原生 binary）、`env -i pm path`（清环境）**六种调用全部 rc=20 +
- * "cmd: Can't find service: package"** —— 是 package 服务未就绪，与域权限、环境变量、app_process 均无关。
- * 故二级判据收紧为「只有 rc=1 才算不存在」（见 app_installed_probe）。
+ * 判断宿主 APK 是否已卸载：1=确认已卸载（可清理），0=仍在 / 无法确认。
+ * 两级判据（父目录 stat + pm 实时探测，只有 rc=1 算不存在）+ 连续 2 次命中才判真；细节见 app/逻辑说明.md §2.4。
  */
 static int host_app_uninstalled(void) {
     struct stat st;
@@ -3316,19 +3075,8 @@ static int host_app_uninstalled(void) {
 }
 
 /**
- * 检测到宿主 APK 已卸载 → 清理全部落盘产物并置 running=0（走既有 exit: 收尾）。
- * 用 read_self_exe() 取自身实测路径再 unlink，防二进制被改名/换路径后按约定路径漏删。
- *
- * 清理范围与**已知局限**（如实记录，不假装清干净了）：
- *   1) /data/local/tmp/tempctrl_b6x.status 与 tempctrl_b7x.status —— 只要飞智 app 进程还活着，
- *      其 LSPosed 钩子会每秒重写这两个文件，本处 unlink 之后可能被立刻重建。
- *      只有重启飞智 app 或重启设备，这两个文件才会彻底消失。**此处删不干净是已知局限。**
- *   2) 私有目录（profile.conf / tempctrl.log / tempctrl_webui.data / tempctrl.lock）不显式删：
- *      系统卸载会连带删掉整个 /data/data/<包名>，显式删只是多一条可能被 SELinux 拒的路径。
- *      与工程既有「卸载部署 ≠ 删配置」口径一致（不显式删 profile.conf）。
- *   3) /data/adb 下脚本能否 unlink 取决于 daemon 所在 SELinux 域：由 service.d 拉起时继承
- *      magisk 域一般可写，app 内 nohup 拉起则可能被拒。被拒时由脚本看门狗自尽兜底，
- *      故此处按"尽力而为"处理：失败不重试、不报错（用户已卸载，无人看 stderr）。
+ * 检测到宿主已卸载 → 清理落盘产物并置 running=0（走 exit: 收尾）；自身路径用 read_self_exe() 实测。
+ * 清理范围与已知局限（status 双文件删不干净、私有目录不显式删、/data/adb 视域而定）见 app/逻辑说明.md §2.5。
  */
 static void cleanup_artifacts_on_uninstall(void) {
     // 先留痕再删（日志文件本身随后可能被一起删掉，但这正是"清理"的预期结果）
@@ -3401,14 +3149,8 @@ static int try_align_actual(void) {
 }
 
 /**
- * 重连安全对齐：以散热器实际回传值为准初始化实际制冷/转速，
- * 由 rate_limited_execute 按正常限速逐步调节，抑制重连突变。
- * 此处不立即下发（分段执行）。
- *
- * 改动：不直接用瞬时 cooler_cold_real 覆盖 actual_cold——重连瞬间 lastWaspWingInfo
- * 未就绪，COLD_REAL 可能缺失(-1)或设备未下发前回占位 1，拿它初始化会被兜底成 1，
- * 且后续快速限速一步拉到 PID 目标（125/4500）。改为：长断连由 try_align_actual 等
- * 真实回传就绪后对齐；短断连保留 PID 状态、沿用内存实际值（断联期间未被改仍准确）。
+ * 重连对齐：长断连等真实回传就绪后对齐 actual_cold/rpm，短断连保留 PID 状态、
+ * 沿用内存实际值；不立即下发（由 rate_limited_execute 限速）。见 逻辑说明.md「主循环逻辑→短断联保留状态」。
  */
 static void reconnect_align(void) {
     // 清空温度窗口累积标志
@@ -3603,15 +3345,15 @@ static void main_loop(void) {
 // ======================== 程序入口 ========================
 
 // ======================== WebUI 曲线数据 ========================
-// 每 1s 追加 1 行，行格式见 WEBUI_ROW_FMT / WEBUI_DATA_COLS（上方声明处）。
-// 每 WEBUI_COMPACT_EVERY 行压缩一次（删最旧行，文件 720~780 行）
+// 每 1s 追加 1 行（行格式见 WEBUI_ROW_FMT / WEBUI_DATA_COLS，语义见 app/逻辑说明.md §7.1）；
+// 每 WEBUI_COMPACT_EVERY 行压缩一次（删最旧行，文件 720~780 行）。
 #define WEBUI_COMPACT_EVERY 60   // 每追加 60 行（≈60s）压缩一次，文件最多膨胀到 720+60=780 行
 static int webui_lines_since_compact = 0;   // 自上次压缩以来追加的行数
 
 /**
  * 每 1 秒采集一次并写入 WebUI 曲线数据文件（滚动保留 720 行）。
- * 断联（BLE 未连 或 app 进程失活）时停止写入：数据文件留下真实时间空洞，
- * WebUI 端按相邻采样时间戳差 > 5s 断开曲线并留出 5s 宽空白。
+ * 断联（BLE 未连 或 app 进程失活）时停止写入、留真实时间空洞；界面按 `UI_GAP_SEC`
+ * （第一值判断联、第二值封顶空白）断开曲线并等比留白，见 app/逻辑说明.md §7.2。
  */
 static void write_webui_data(void) {
     int batt = read_battery_temp();
@@ -3661,34 +3403,8 @@ static void write_webui_data(void) {
 }
 
 // ======================== 看门狗反向保活（WD_KEEPALIVE）========================
-// 需求：除既有的「service.d 脚本（看门狗）守护守护进程」之外，再加反方向——守护进程每
-// WD_KEEPALIVE_INTERVAL 秒探测看门狗是否存活，不在就把它拉起来（开关 WD_KEEPALIVE，**默认关**：
-// 见声明处的理由；本机制尚未真机验证，先留作显式开启）。
-//
-// 破环设计（本节全部理由都在前两条，缺一条就会成环：守护进程拉起看门狗 → 看门狗杀掉守护进程 →
-// 新守护进程又发现没看门狗 → 每分钟自杀重启一次）：
-//   1) 先查后拉：拉起前先扫 /proc 确认没有看门狗实例（存在即不重复拉起，见 watchdog_alive）；
-//      对侧对称：脚本启动时**不再先杀守护进程**（见 b6x-tempctrl.sh 第 2 节），两半缺一不可。
-//   2) 连续两次未见才拉（WD_MISS_CONFIRM）：单次采样可能撞上瞬态（/proc 抖动、看门狗正在启动或
-//      正在重部署），而误判的代价是白拉一个站岗实例；两轮 60s 也顺带让「app 先杀看门狗、再杀
-//      守护进程」那类窗口（约 8~13 秒）不可能凑齐两次——即「停止daemon」不会被这条新链路顶回来。
-//   3) 拉起冷却（WD_SPAWN_MIN_INTERVAL，且跨进程重启持久化到私有目录小文件）：把最坏情况
-//      （两侧判据同时假阴）从「每分钟多一个」压到「每 5 分钟多一个」。
-//
-// 判据为何是 cmdline 逐参数整等、而不是 /proc/<pid>/exe 也不是子串：脚本的 exe 是 /system/bin/sh，
-// 与一切 shell 共享，无法据此识别；子串（无论对整段还是对第一个参数）都不对，理由是两条各错一半的坑，
-// 详见 cmdline_has_script_arg() 的注释。
-//
-// 两个曾经踩过的坑（2026-09-28 修，都是"看着对、真机必然错"的那类，改动时别退回去）：
-//   · 判活用 strstr 搜 cmdline 缓冲区 → 只搜到 argv[0]（NUL 截断）→ 对 `sh <脚本>` 形态恒判「未见」
-//     → 冷却与去抖全被绕开，"拉起"每次都会发生。现按 NUL 逐参数整等。
-//   · 拉起时直接 exec 脚本 + 父进程 waitpid 回收 → 脚本第 3 节是常驻循环，子进程永不退出，
-//     而 3s 定时因 SA_RESTART 打不断 waitpid → 父进程永久阻塞 = 主循环停摆（进程还在、日志与曲线
-//     停更、不下发 BLE，且两个方向的判活都看不出来）。现改 double-fork，只回收必然速退的中间层。
-//
-// 降级（全部只记日志、不影响温控主链）：/proc 读不到 → 按未见处理但受冷却约束；两条候选路径都不
-// 存在 → 记日志（节流）且不重建脚本内容（等 app 重新部署）；拉起失败 → 记日志 + 连续失败退避；
-// 拉起成功但下一轮仍未见 → 记一条日志（exec 结果在 double-fork 下只能这样观测，见 spawn_watchdog）。
+// 需求 / 破环设计（先查后拉 + 连续两次未见 + 拉起冷却）/ 判据为何逐参数整等 / 两个踩过的坑 / 降级
+// 见 逻辑说明.md「看门狗反向保活」。开关 WD_KEEPALIVE 默认开（2026-09-29 用户指定）。
 #define WD_KEEPALIVE_INTERVAL   60    // 检查间隔（秒）
 #define WD_MISS_CONFIRM         2     // 连续未见次数阈值（≥ 此值才拉起）
 #define WD_SPAWN_MIN_INTERVAL   300   // 拉起冷却（秒）：冷却窗内即使判定缺失也只记日志、不动作
@@ -3719,22 +3435,7 @@ static int    wd_spawn_pending = 0; // 1=上一轮已交出控制权、这一轮
 
 /**
  * cmdline 里是否有**某个参数恰好等于**脚本路径（两条候选之一）或脚本名。
- *
- * 为什么必须逐参数整等（两个各错一半的坑，2026-09-28 修）：
- *   ① `/proc/<pid>/cmdline` 是 **NUL 分隔**的参数序列，而 `strstr()` 按 C 字符串工作——搜索在
- *      第一个 NUL 处就结束了，实际**只搜到了 argv[0]**。看门狗的真实形态是 `sh <脚本路径>`
- *      （app 的 `nohup sh <路径>`、本文件的 execv、各 root 方案的启动方式都如此），脚本路径落在
- *      argv[1] → 子串搜索恒不命中 → 判活恒为「未见」→ 去抖与冷却全被绕开、"拉起"每次都会发生。
- *   ② 若改成对整段字节做子串搜索，`cp`/`rm`/`md5sum <脚本>` 这类命令行里出现过路径名的临时进程
- *      又会被认成看门狗（假阳 → 该轮不拉，若长期存在就永远不拉）。
- * 逐参数整等同时避开这两者。**口径与 app 侧 `wd_pids()` 只是相近、并不相同**（别当成可互换）：
- * app 侧先按 `comm` 筛掉一切非 shell（读 /proc 下每个 pid 的 comm），再用 `grep -qx` 只比对两条
- * **完整**候选路径；本侧不筛 comm，且额外接受裸脚本名 `b6x-tempctrl.sh`。两个可观察差异：
- * `md5sum`/`cp <完整路径>` 这类临时进程在本侧算「在」（app 侧不算），相对调用
- * `sh b6x-tempctrl.sh` 在本侧也算「在」（app 侧不算）。两者都只让该轮不拉，无停摆风险。
- * 代价：非常规包装（如 `sh -c 'sh <路径>'`，参数不是裸路径）会漏 → 假阴 → 多拉一个
- * 站岗实例（受冷却与"存在即不重复拉起"约束，代价可控）。脚本名同样按整等，不再用子串，
- * 免得 `<路径>.new` 这类中转副本被算进来。
+ * 为何必须逐参数整等（两个各错一半的坑）、与 app 侧 `wd_pids()` 的口径差异见 逻辑说明.md「看门狗反向保活」。
  */
 static int cmdline_has_script_arg(const char *buf, ssize_t n) {
     for (ssize_t pos = 0; pos < n; ) {
@@ -3804,20 +3505,8 @@ static void wd_spawn_stamp_write(time_t now) {
 }
 
 /**
- * 拉起看门狗脚本：**double-fork** —— 父 → 中间层（setsid 后立刻退出）→ 孙层（真正的看门狗：
- * stdio 全重定向 /dev/null → execv(SH_BIN, {sh, <脚本路径>})；**绝对路径 + 不经 PATH**，同
- * am / dumpsys 那条的既有教训）。
- *
- * 为什么要 double-fork（2026-09-28 修）：脚本第 3 节是 `while true; do sleep 300; …` 常驻循环，
- * 子进程**永不退出**。旧实现让父进程直接 `waitpid` 这个子进程，而 3s 定时打不断它（本文件的
- * `signal()` 是 BSD 语义带 SA_RESTART，`waitpid` 会被自动重启）→ 父进程永久阻塞在 wait4，
- * 主循环停摆（进程还在、日志与曲线停更、不下发 BLE，且两个方向的判活都是"按进程在不在"判，
- * 谁也看不出来）。改成只回收"必然速退的中间层"后，父进程的等待有确定上界。
- *
- * exec 是否成功无法在本函数内观测（父进程不再回收孙层，也就拿不到它的退出码）——由下一轮
- * `watchdog_alive()` 复查：仍为「未见」时由 maybe_keepalive_watchdog() 记一条日志。这是刻意的
- * 取舍：不为了一条更早的日志引入阻塞或额外复杂度。
- * 孙层被 init 收养（无僵尸）；`setsid` 保留，与父进程会话解耦。
+ * 拉起看门狗脚本：**double-fork**（父 → 中间层 setsid 后立刻退出 → 孙层 execv(sh, <脚本>)）。
+ * 为何必须 double-fork、exec 结果为何只能下一轮观测见 逻辑说明.md「看门狗反向保活」。
  * 返回 1=已交出控制权（中间层已回收），0=未交出去（已记日志）。
  */
 static int spawn_watchdog(const char *path) {
@@ -3927,15 +3616,10 @@ static void maybe_keepalive_watchdog(void) {
 }
 
 // ======================== 单实例锁 ========================
-// service.d 开机拉起 + app 内手动拉起两条路径都直接执行启动命令，由本锁保证幂等。
-// 主锁与配置/日志/曲线数据同处私有目录，另加一把 /data/local/tmp 的兜底锁（见下）。
-// 残留后果（不美化）：app「清除数据」会把锁文件一起删掉，运行中的实例与新实例随即锁到
-// 不同 inode，那一次锁失效；兜底靠部署脚本的开机自检。
+// 两条拉起路径都直接执行启动命令，由本锁保证幂等：两把锁都持有才放行、任一把被占即退出码 2。
+// 「清除数据」会让那一次锁失效（锁到不同 inode）；理由与残留后果见 逻辑说明.md「部署与 Root 调用」。
 #define LOCK_FILE_PATH        PRIVATE_DIR "/tempctrl.lock"
-// 兜底锁：/data/local/tmp 属 DE 存储，首次解锁前也可写。只靠私有目录那把锁时，私有目录不可用
-// 就等于单实例保护整段消失（开机早期被拉起 + 随后 app 手动拉起 → 两个实例并存、各写各的状态）。
-// 故再加一把任何时刻都能拿到的锁：两把都持有时才放行，任一把被别人持有即判"已有实例"。
-// 落点沿用三份清理清单里已有的 /data/local/tmp/tempctrl.lock（旧版残留项），不新增文件。
+// 兜底锁：/data/local/tmp 属 DE 存储，首次解锁前也可写（私有目录不可用时单实例保护不消失，落点沿用三份清理清单已有项）。
 #define LOCK_FALLBACK_PATH    "/data/local/tmp/tempctrl.lock"
 #define EXIT_ALREADY_RUNNING  2     // 退出码 2：已有实例在跑（其它启动失败路径均返回 0）
 static int lock_fd = -1;            // 私有目录锁（不可用时保持 -1）
@@ -3967,10 +3651,8 @@ static int acquire_single_instance_lock(void) {
     if (r < 0) {
         fprintf(stderr, "tempctrl: 锁文件 %s 不可用（该路单实例检查跳过）\n", LOCK_FALLBACK_PATH);
     }
-    // 私有目录这一路先确保目录存在：本函数在 main 里排在 set_default_log_path() 之前，
-    // 而目录可能尚未被创建（首次安装、系统刚清过数据）——不先建就会 open 到 ENOENT，
-    // 那样即便目录紧接着被 set_default_log_path() 建出来，本进程也永远不持有私有目录锁。
-    // 建不出来（开机早期 /data/data 整体不可见）不是错误，只是这一路降级，互斥由兜底锁保证。
+    // 私有目录这一路先确保目录存在（本函数排在 set_default_log_path() 之前，不先建会 open 到 ENOENT）；
+    // 建不出来只让这一路降级，互斥由兜底锁保证。
     if (ensure_private_dir()) {
         r = try_flock_path(LOCK_FILE_PATH, &lock_fd);
         if (r == 0) {

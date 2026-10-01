@@ -19,11 +19,9 @@ import java.util.Arrays;
  * <h3>三种子视图</h3>
  * <ul>
  *   <li><b>leading</b>（缺省）：从行左界起依次排，列距 {@code wrapColGap}，放不下换行。</li>
- *   <li><b>trailing</b>：连续的一串 trailing 构成「尾段」，每行都贴本行<b>行尾（右界）</b>对齐。
- *       分配按「换行偏好顺序」逐档尝试，取第一个可行的（详见 {@link #placeTailRun}）：
- *       ①全部字段与参数名同行 → ②全部字段占一整行（参数名独占一行）→ ③同行放得下的先放、
- *       其余占一整行 → ④占两整行 → ⑤同行 + 两整行，依此类推。
- *       一句话：<b>能用整行解决就不混排，混排只在连整行都放不下时才用</b>。</li>
+ *   <li><b>trailing</b>：连续的一串 trailing 构成「尾段」，每行都贴本行<b>行尾（右界）</b>对齐；
+ *       分配按「换行偏好顺序」逐档尝试（详见 {@link #placeTailRun}）——<b>能用整行解决就不混排，
+ *       混排只在连整行都放不下时才用</b>（① ~ ⑤ 明细见 app/逻辑说明.md §7.7）。</li>
  *   <li><b>fullLine</b>：独占一行且铺满可用宽（measure 用 {@code EXACTLY}），不与其他子视图同行。</li>
  * </ul>
  * 另有 {@code breakBefore}：在其之前强制换行（对 trailing 者，本串尾段就此断开、另起一串）。
@@ -32,13 +30,11 @@ import java.util.Arrays;
  *
  * <h3>标记存在子视图自己的 LayoutParams 上</h3>
  * 这些标记是子视图 {@link LayoutParams} 的字段，<b>容器不持有任何子视图引用</b>（不另建
- * {@code List<View>}/{@code Map}）——因此 {@code removeAllViews()} 之后不残留任何标记，
- * 重新添加即从零开始。标记也可直接写在子标签的 {@code app:} 属性上：
- * {@code inflate(xml, parent, false)} 走 {@code parent.generateLayoutParams(attrs)}，由本容器读出。
+ * {@code List<View>}/{@code Map}）——因此 {@code removeAllViews()} 之后不残留任何标记。
+ * 标记也可直接写在子标签的 {@code app:} 属性上（{@code inflate(xml, parent, false)} 由本容器读出）。
  *
  * <h3>为什么不引第三方</h3>
- * FlexboxLayout 为浏览器级的 flex 语义（收缩/增长/基线/顺序）付成本，本容器只需要上面几条规则，
- * 百来行的排布即可覆盖；调用方量级（每页几十个）也不需要虚拟化。
+ * 见 app/逻辑说明.md §7.7。
  *
  * <h3>量摆同源</h3>
  * 量（{@link #onMeasure}）与摆（{@link #onLayout}）走<b>同一个</b> {@link Pass}，
@@ -164,10 +160,8 @@ public final class WrapRowLayout extends ViewGroup {
     /**
      * 本子视图的垂直中心固定在本行行顶之下 offsetPx 处（不按行高居中）；未标记 -1 时行为不变。
      *
-     * <p>只改这一个子视图的纵向落点；同行其他子视图的位置不动。行高按<b>占用下沿</b>
-     * {@code offsetPx + 高/2} 与其余子视图一起取最大（见 {@link #occupiedHeight}）——标记项可能比本行
-     * 原行高更低，行高不跟着算就会盖住下一行。落点可以为负（子视图上沿越出行顶），不钳位；
-     * 向上越出的部分不为它加高，也不平移本行。
+     * <p>只改这一个子视图的纵向落点；行高按<b>占用下沿</b>与其余子视图一起取最大（见 {@link #occupiedHeight}，
+     * 否则会盖住下一行）；落点可为负、不钳位，向上越出的部分不为它加高、也不平移本行（见 app/逻辑说明.md §7.7）。
      */
     public void setVerticalCenterAt(@NonNull View child, int offsetPx) {
         LayoutParams lp = paramsOf(child);
@@ -295,19 +289,10 @@ public final class WrapRowLayout extends ViewGroup {
 
     /**
      * 尾段（从 {@code start} 起连续的一串 trailing）的分配：按「换行偏好顺序」逐档尝试，取第一个可行的
-     * ——<b>能用整行解决就不混排，混排只在连整行都放不下时才用</b>：
-     * <ol>
-     *   <li>全部字段与参数名同行；</li>
-     *   <li>全部字段占一整行（参数名独占一行）；</li>
-     *   <li>参数名同行放得下的先放，其余占一整行；</li>
-     *   <li>全部字段占两整行；</li>
-     *   <li>同行放得下的先放，其余占两整行。</li>
-     * </ol>
-     * 依此类推（k 整行 → 同行 + k 整行）。每一行（含与参数名同行的那一段）都贴行右界。
-     * 返回下一个待处理子视图的下标。
+     * ——<b>能用整行解决就不混排，混排只在连整行都放不下时才用</b>（① ~ ⑤ 明细见 app/逻辑说明.md §7.7）。
+     * 每一行（含与参数名同行的那一段）都贴行右界；返回下一个待处理子视图的下标。
      *
-     * <p>段内再声明 {@code breakBefore} 者另起一串（本段到此为止）：强制换行对每个子视图都算数；
-     * 段首声明 {@code breakBefore} 时本段不与参数名同行。
+     * <p>段内再声明 {@code breakBefore} 者另起一串；段首声明 {@code breakBefore} 时本段不与参数名同行。
      */
     private int placeTailRun(Pass pass, int start, LayoutParams first) {
         if (pass.rowClosed) {
@@ -322,8 +307,7 @@ public final class WrapRowLayout extends ViewGroup {
         }
         // 能与本行参数名同行的最大前缀（段首 breakBefore 者一项都不与之同行）
         int fit = first.breakBefore ? 0 : tailPrefixFit(pass, pass.rowWidth, start, end);
-        // 判"放几项"一律用可见项数：区间内夹着的 GONE 兄弟不占宽、不落位，
-        // 而 collectTail 会把它们收进区间，用下标差（end - start）会恒大于 fit，第①档于是永不命中
+        // 判"放几项"一律用可见项数（GONE 会被收进区间，用下标差恒大于 fit、第①档永不命中，见 §7.7）
         int visible = visibleCount(start, end);
         if (fit == visible) {                            // ① 全部字段与参数名同行
             placeTailOnRow(pass, start, end);
@@ -398,9 +382,8 @@ public final class WrapRowLayout extends ViewGroup {
     /**
      * 区间 {@code [from,to)} 内可见子视图（{@code getVisibility() != GONE}）的个数。
      *
-     * <p>尾段区间由 {@link #collectTail} 收集，而它<b>会把 GONE 的子视图也收进区间</b>（GONE 分支
-     * 在标记判定之前），因此下标差 {@code to - from} 并不等于"区间里有几项要摆"。凡是要与
-     * {@link #tailPrefixFit}（逐项前缀累加，只数可见项）比大小的地方，都走这一个数。
+     * <p>{@link #collectTail} <b>会把 GONE 的子视图也收进区间</b>，故下标差 {@code to - from} 并不等于
+     * "区间里有几项要摆"；凡要与 {@link #tailPrefixFit} 比大小的地方都走这一个数（见 app/逻辑说明.md §7.7）。
      */
     private int visibleCount(int from, int to) {
         int n = 0;
@@ -453,7 +436,7 @@ public final class WrapRowLayout extends ViewGroup {
 
     /**
      * 尾段贪婪切行：每行尽量多装（行宽 ≤ {@code pass.rowLimit}，且一行至少留一项），返回各行的结束下标。
-     * <b>"要几行"的判定与真摆放共用这一份切分</b>——否则"判可行"与"实际切"又会分家。
+     * <b>"要几行"的判定与真摆放共用这一份切分</b>，否则"判可行"与"实际切"又会分家（见 app/逻辑说明.md §7.7）。
      */
     private int[] tailLineEnds(Pass pass, int from, int to) {
         int[] ends = new int[Math.max(1, to - from)];
@@ -658,10 +641,7 @@ public final class WrapRowLayout extends ViewGroup {
     /**
      * "参数名段 + 尾段并排同行"所需的行宽 = 两段宽 + 一个列距。
      *
-     * <p><b>唯一口径</b>：判"能否同行"（{@link #placeTailRun}、{@link #tailPrefixFit}）、
-     * 量"本行有多宽"（{@link #flushRow}）都走这一个数，杜绝再次分家——曾出现判据用
-     * "两段 + 列距"而测量期用"两段取较大"，wrap_content 容器于是自报宽偏小（比并排所需小），
-     * 落位后（它的行宽就是自报宽）判据必然为真：尾段折到第二行，而高度只按一行算 → 第二行被裁。
+     * <p><b>唯一口径</b>：判"能否同行"与量"本行有多宽"都走这一个数，杜绝分家（踩坑史见 app/逻辑说明.md §7.7）。
      */
     private int sideBySideWidth(int leadingWidth, int tailWidth) {
         return leadingWidth + colGap + tailWidth;
@@ -678,12 +658,9 @@ public final class WrapRowLayout extends ViewGroup {
     /**
      * 子视图在本行里占用的高（行高按它取各子视图的最大值）。
      *
-     * <p>未标记者 = 自身高 + 上下外边距。已标记者 = 它占据的<b>下沿</b>
-     * {@code offsetPx + 高/2}（= 行顶到它下沿的距离）——标记只钉垂直中心、落点可越出本行下沿，
-     * 行高必须按这个下沿算，否则它会盖住下一行。
-     *
-     * <p>下沿为负（子视图整体落在本行上方）时按 0 计：<b>有意不为越出上方的部分加高，也不平移本行</b>
-     * ——向上越出是调用方自己给的偏移，容器不代它兜底（下方越出则必须兜，否则会相碰）。
+     * <p>未标记者 = 自身高 + 上下外边距；已标记者 = 它占据的<b>下沿</b> {@code offsetPx + 高/2}
+     * （标记只钉垂直中心、落点可越出本行下沿，行高必须按下沿算否则会盖住下一行）。下沿为负时按 0 计——
+     * <b>有意不为越出上方的部分加高、也不平移本行</b>（下方越出则必须兜）。见 app/逻辑说明.md §7.7。
      */
     private static int occupiedHeight(View child, LayoutParams lp) {
         if (lp.verticalCenterAt == LayoutParams.VERTICAL_CENTER_UNSET) {
@@ -694,8 +671,8 @@ public final class WrapRowLayout extends ViewGroup {
 
     /**
      * 一趟排布的进行态。只活在一次 {@link #onMeasure}/{@link #onLayout} 内（局部对象），
-     * 因此容器本身<b>不持有任何子视图引用</b>：{@code removeAllViews()} 之后不残留任何标记。
-     * 行与尾段都用<b>子视图下标区间</b>表示，连临时的 {@code List} 都不需要。
+     * 因此容器本身<b>不持有任何子视图引用</b>；行与尾段都用<b>子视图下标区间</b>表示，连临时的
+     * {@code List} 都不需要（见 app/逻辑说明.md §7.7）。
      */
     private static final class Pass {
 

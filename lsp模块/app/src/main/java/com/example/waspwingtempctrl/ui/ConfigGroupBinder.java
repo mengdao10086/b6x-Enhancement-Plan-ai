@@ -21,25 +21,11 @@ import java.util.List;
 /**
  * 一个分组卡片：卡头（标题 + "未生效"徽标 + 组头开关 + 展开箭头）+ 分隔线 + 键行容器。
  *
- * <p>组头开关就是 {@code role=master} 的那个键（<b>也是普通键</b>，改它同样走"改即存"），
- * 故绑定逻辑与行内开关完全共用 {@link ConfigKeyRow#commitSwitch}。master 为 null 的组
- * （"未分组"兜底组、设置页的 {@code webui} 组）卡头不放开关键。
- *
- * <p>"未生效"徽标只在本组卡头显示一次（行内不再逐键标注）：本组只要有一个键的依赖未满足就显示，
- * 并在组内逐行压暗，指向关系靠"压暗的行 + 组头一个徽标"表达，避免每行都挂一枚徽标。
- *
- * <p>"界面自用，守护进程不读取"同属"整组一句话"的标注，也只在卡头出现一次：本组只要有键的
- * {@code daemonConsumes} 为 false（设置页的界面组即如此）就在卡头显示，行内这些键不再逐条重复。
- *
- * <p>默认全部折叠：配置页 4 组 43 键（另加 4 个组头开关），全展开时长列表滚到目标键要翻很久；
- * 折叠态一屏能看清全部分组与总开关，先开总开关再进组的顺序也更贴合参数之间的依赖关系。
- * 「[4] 界面」那 6 个键在独立设置页（{@link UiSettingsFragment}），不在本页渲染。
- *
- * <h3>键行全建、展开只切可见性</h3>
- * 卡头（标题、徽标、总开关、箭头、分隔线）在构造时建好；<b>本组全部键行</b>由 {@link #buildRows()}
- * 一次建满（控制器在"可见结构已就位"之后调它，见 {@code ConfigFormController} 的建表两段）。
- * {@link #setExpanded} 只切 {@code config_group_body} 的可见性——<b>展开从不现场建控件</b>。
- * 行的存在不依赖展开状态，故徽标、压暗、静默刷新与"值未变不写"的判定都只看行（键行与定义一一对应）。
+ * <p>组头开关即 {@code role=master} 的键（<b>也是普通键</b>，改它同样走"改即存"），走
+ * {@link ConfigKeyRow#commitSwitch}；master 为 null 的组（"未分组"兜底组、设置页的 {@code webui} 组）
+ * 卡头不放开关键。两个"整组一句话"的标注（未生效 / 界面自用）都只在卡头出现一次。
+ * <b>键行全建、展开只切可见性</b>：行由 {@link #buildRows()} 一次建满，{@link #setExpanded} 只切可见性，
+ * 展开从不现场建控件。设计理由见 app 逻辑说明.md §6.1。
  */
 final class ConfigGroupBinder {
 
@@ -108,9 +94,8 @@ final class ConfigGroupBinder {
             });
         }
 
-        // 组里有"界面自用"的键（如设置页的界面组）→ 这句只在卡头标一次，行内不再重复。
-        // 判据是"有任何一个键不被守护进程读取"而不是"全部都不被读取"：界面组里
-        // UI_BACK_HIDE 是要被 C 端读的，按"全部"判就一次都标不出来。
+        // "有任一"键界面自用（daemonConsumes=false）就在卡头标一次，行内不再重复；
+        // 判据是"有任一"而非"全部"——界面组里 UI_BACK_HIDE 是要被 C 端读的（见 app 逻辑说明.md §6.1）
         boolean hasUiOnly = false;
         for (KeyMeta keyMeta : keyMetas) {
             if (!keyMeta.daemonConsumes) {
@@ -170,14 +155,9 @@ final class ConfigGroupBinder {
     /**
      * 刷新组内各行的压暗，并把"有键未生效"汇总成卡头上的一枚徽标。
      *
-     * <p>行与定义里的键一一对应（见 {@link #buildRows}），故收起态与展开态用的是同一份判据、
-     * 同一批行：徽标在收起态照样是对的（行会顺带把压暗落到自己的控件上）。
-     *
-     * <p><b>行没"建全"时不能走这条路</b>（判据是行数与键数不等，不是"行表为空"）：建表两段之间的
-     * 窗口里行还没有，段二中途抛异常时行只有一半——两种情况下按不完整的行表算出的"未生效 0 个"都会把
-     * 卡头徽标错误地隐藏掉，而那枚徽标在收起态是<b>唯一</b>可见的依赖提示（用户在这个窗口里拨一下
-     * 组头开关就会触发 {@code onPendingChange}；段二失败时则是永久错下去）。故没建全就转走同源判据的
-     * 另一条路（{@link #refreshHeaderBadge}，直接问 store，不经过行）。
+     * <p><b>行没"建全"时不能走这条路</b>（判据是行数与键数不等，不是"行表为空"）：按不完整的行表算出的
+     * "未生效 0 个"会把卡头徽标错误隐藏，而那枚徽标在收起态是<b>唯一</b>可见的依赖提示。故没建全就转走
+     * 同源判据的另一条路（{@link #refreshHeaderBadge}）。见 app 逻辑说明.md §6.1。
      */
     void refreshBadges() {
         if (rows.size() != keyMetas.size()) {   // 行与键一一对应，不等即没建全
@@ -195,11 +175,7 @@ final class ConfigGroupBinder {
 
     /**
      * 只刷卡头徽标（<b>行还没建时的那条路</b>）：判据与行内压暗同源（{@link ConfigKeyRow#isUnsatisfied}），
-     * 只是直接问 store 的当前值，不经过行。
-     *
-     * <p>用于"先建卡头、行稍后再建"的时序（见 {@code ConfigFormController.buildIfNeeded}）：那时行还
-     * 不存在，而卡头徽标是<b>收起态下唯一可见的依赖提示</b>，必须在参数区露出来之前就算出来。
-     * 行建好之后走 {@link #refreshBadges()}，两条路算的是同一个数（同一份判据 + 同一份值）。
+     * 直接问 store 的当前值、不经过行。用于"先建卡头、行稍后再建"的时序（见 §5.2）。见 app 逻辑说明.md §6.1。
      */
     void refreshHeaderBadge() {
         int unsatisfied = 0;
@@ -236,14 +212,12 @@ final class ConfigGroupBinder {
     }
 
     /**
-     * 建本组键行（收起态也留着；由 {@code ConfigFormController} 在建表时调一次，见那里的两段拆分）。
+     * 建本组键行（收起态也留着；由 {@code ConfigFormController} 在建表时调一次）。
      *
      * <p><b>这里不铺值、也不刷徽标</b>：行建起来之后一定紧跟一次
-     * {@code ConfigFormController.applySnapshot}（建行与上屏是同一次调用里相邻的两行，中间不插别的活），
-     * 值、组头开关、徽标、压暗由它一次铺满。原先"建行时铺一遍、上屏时又铺一遍"是同一份值的两遍，
-     * 其中字段宽与说明画笔那一段尤其贵。
-     *
-     * <p>卡头（标题、徽标、组头开关、箭头、分隔线）在构造时就建好了；本方法只补行。
+     * {@code ConfigFormController.applySnapshot}（建行与上屏是同一次调用里相邻的两行），值、组头开关、
+     * 徽标、压暗由它一次铺满——原先"建行时铺一遍、上屏时又铺一遍"是同一份值的两遍（字段宽与说明画笔
+     * 那一段尤其贵）。
      */
     void buildRows() {
         for (KeyMeta meta : keyMetas) {

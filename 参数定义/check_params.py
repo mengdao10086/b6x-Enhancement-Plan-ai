@@ -7,7 +7,7 @@
 
 断言（任一不过即非 0 退出）：
   A 产物可复现：重跑生成逻辑，与落盘的 4 个产物必须一致（比较按换行归一化） → 退出 1
-  B 产物自洽：57 键齐全、必需字段完整、min ≤ default/factory ≤ max、分组可解析 → 退出 1
+  B 产物自洽：56 键齐全、必需字段完整、min ≤ default/factory ≤ max、分组可解析 → 退出 1
   C 三源无漂移：与 profile.conf / 逻辑说明.md 参数表 / tempctrl.c 对账（含包名） → 退出 2
   D 产物形态自检：C 头括号配平、X 宏实参个数、tempctrl.c 格式串转换符 vs 实参、
     **层默认值表覆盖面**（PERF/SYSFS 每个守护进程取值位要么在表里、要么在显式白名单里；
@@ -39,7 +39,7 @@ sys.dont_write_bytecode = True   # 不在 参数定义/ 里留 __pycache__（.gi
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import gen_params  # noqa: E402  同目录模块，标准库路径规则即可导入
 
-EXPECTED_KEY_COUNT = 57
+EXPECTED_KEY_COUNT = 56
 VALID_TYPES = ("switch", "int", "multi", "path", "enum")
 
 
@@ -115,6 +115,9 @@ def fail_check_b(definition):
         for req in k.get("requires", []):
             if req not in keys:
                 problems.append("%s 的前置键 %r 不存在" % (name, req))
+        for hid in k.get("hiddenWhen", []):
+            if hid not in keys:
+                problems.append("%s 的隐藏条件键 %r 不存在" % (name, hid))
         if k.get("role") == "master" and master_of.get(name) != k.get("group"):
             problems.append("%s 标记为组头开关，但分组 %r 的 master 不是它"
                             % (name, k.get("group")))

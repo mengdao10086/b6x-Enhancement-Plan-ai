@@ -23,14 +23,12 @@ import java.io.File;
  *       {@link AppFiles#diagnose(File)} 的原文（路径 + stat 结果 + errno + 提示），
  *       由界面原样铺在曲线区。</li>
  *   <li>直读失败是<b>正常路径</b>：SELinux 直读未真机验证，errno=13 就可能发生，
- *       界面必须给得出可诊断文本。</li>
+ *       界面必须给得出可诊断文本（见 app/逻辑说明.md §7.1）。</li>
  * </ol>
  *
- * <p><b>进程级缓存</b>：最近一次成功读取的结果（含解析产物）按数据文件指纹（{@code size:mtime}）
- * 留一份。曲线页每次重新可见都会强制重读（口径可能变，指纹一并作废），那时文件往往根本没变
- * —— 命中即复用解析产物，不再读 256KB 也不再逐行解析。<b>只缓存解析产物</b>（{@code ChartDataset}），
- * 不缓存原始文本；失败一律不进缓存（下次照旧重读，诊断信息绝不陈旧）。
- * 返回的 {@link Snapshot} 因此<b>可能被多处共用</b>：只读。
+ * <p><b>进程级缓存</b>：最近一次成功读取的结果按数据文件指纹（{@code size:mtime}）留一份，命中即复用
+ * 解析产物；<b>只缓存解析产物</b>、不缓存原始文本，失败一律不进缓存（诊断绝不陈旧）。返回的
+ * {@link Snapshot} 因此<b>可能被多处共用</b>：只读。见 app/逻辑说明.md §7.1。
  */
 public final class ChartLoader {
 
@@ -60,8 +58,8 @@ public final class ChartLoader {
      * （解析产物进 {@link #read} 的进程级缓存），曲线页第一次刷新即可命中。冷启动时由
      * {@code SetupActivity} 的预热线程调，<b>只在后台线程调</b>（内有同步 IO）。
      *
-     * <p>纯优化，故失败不抛也不再报：读不到就什么都留不下，各入口随后照旧自己读一次、失败时
-     * 照旧把诊断原文铺在曲线区（既有路径不受本方法影响）。不新增定时器 —— 它只跑这一次。
+     * <p>纯优化：读不到就什么都留不下，各入口随后照旧自己读一次；不新增定时器 —— 它只跑这一次。
+     * 结构见 app/逻辑说明.md §5.1，缓存口径见 §7.1。
      */
     public static void warmUp(Context context) {
         try {
@@ -181,20 +179,10 @@ public final class ChartLoader {
     }
 
     /**
-     * 交给解析器的文本：窗口行数明显超出保留量时只取尾部，否则原样返回。
+     * 交给解析器的文本：窗口行数超过 {@code 2 × 保留量} 时只取尾部（按行边界切割），否则原样返回。
      *
-     * <p>环形缓冲只留 {@code rollingMaxLines} 行（口径见 {@code 逻辑说明.md} 的「状态页数据源」
-     * 一节），文件被撑大时再多行也留不下，却要在每秒的循环里逐行切分/解析一遍——所以解析量的
-     * 上界必须跟着保留量走。
-     *
-     * <p>截断只在窗口行数超过 {@code 2 × 保留量} 时发生，因为界面「解析 / 跳过」
-     * （见 {@code chart_info_parse_fmt}）报的是解析器实际扫过的行数，是给用户看数据文件的诊断；
-     * 而 C 端文件最多膨胀到 780 行（{@code tempctrl.c} 的 {@code WEBUI_DATA_MAX_LINES} 720
-     * 加 {@code WEBUI_COMPACT_EVERY} 60），远不到这个上界，故常规文件的诊断数字与截断前逐字
-     * 一致，只有别的写入方撑大文件时才截尾。
-     *
-     * <p>按行边界切割，只动交给解析器的那段文本；{@link #TAIL_BYTES} 的读取上界（「绝不整文件
-     * 无界读」的护栏）与文件的读取方式都不变。
+     * <p>解析量的上界跟着环形保留量（{@code rollingMaxLines}）走；{@link #TAIL_BYTES} 的读取上界
+     * （「绝不整文件无界读」的护栏）与文件的读取方式都不变。（理由见 app/逻辑说明.md §7.2）
      */
     private static String tailForParse(String text, int maxLines) {
         int cap = Math.max(1, maxLines);

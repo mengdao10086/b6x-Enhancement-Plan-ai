@@ -14,22 +14,11 @@ import androidx.annotation.Nullable;
 /**
  * 页面用的 ScrollView：允许把「从某个子视图上开始的纵向拖动」整个让给那个子视图。
  *
- * <h3>为什么需要它</h3>
- * 曲线的画布下沿拖柄要「纵向拖动改画布高、横向滑动照旧翻页」，而按下时
- * {@code requestDisallowInterceptTouchEvent(true)} 做不到这件事：那个开关是沿父链一路设上去的，
- * 一旦按下就设，外层 ViewPager2 的横向拦截也被一并封掉（横向再也翻不了页）；而等到手指走起来
- * 才设又已经太晚——同一帧里 {@link ScrollView#onInterceptTouchEvent} 先于子视图的
- * {@code onTouchEvent} 判定，纵向那一抖早就被它当成"用户在滚页面"把事件流接管了。
+ * <p>由本类在<b>按下那一刻</b>判定「这一下是不是落在指定的子视图上」，是则本次手势全程不接管：纵向归该
+ * 子视图（没人跟拖柄抢，拖柄照常收到全部 MOVE）、横向仍归外层 ViewPager2（本类不接管、它照常翻页）。
+ * 代价是：从该子视图上开始的纵向拖动不再滚动页面。没指定子视图时与普通 {@code ScrollView} 完全一致。
  *
- * <p>所以改成由本类在<b>按下那一刻</b>判定「这一下是不是落在指定的子视图上」，是则本次手势
- * 全程不接管：
- * <ul>
- *   <li>纵向 → 没人跟拖柄抢，拖柄照常收到全部 MOVE；</li>
- *   <li>横向 → 本类不接管，但外层 ViewPager2 的横向拦截不受影响（它照常能收到完整事件流），翻页照旧。</li>
- * </ul>
- * 代价是：从该子视图上开始的纵向拖动不再滚动页面（这是"让给拖柄"的必然含义）。
- *
- * <p>没指定子视图（{@link #setVerticalDragCaptor} 没被调用）时，本类与普通 {@code ScrollView} 完全一致。
+ * <p>为什么不能改用 {@code requestDisallowInterceptTouchEvent}，见 app/逻辑说明.md §7.6。
  */
 public final class PageScrollView extends ScrollView {
 
