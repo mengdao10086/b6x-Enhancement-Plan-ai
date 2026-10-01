@@ -85,11 +85,20 @@ public final class Deployer {
     private static final long KILL_WAIT_LOOPS = 5L;
     /** 强杀（{@code kill -9}）后的等待轮数：-9 已不可被忽略，只需一小段收尾时间。 */
     private static final long KILL9_WAIT_LOOPS = 3L;
-    /** 拉起失败后重试前的停顿（毫秒）：给旧实例收尾、单实例锁释放留一点时间。 */
-    private static final long RETRY_PAUSE_MS = 2_000L;
-    private static final long EXEC_TIMEOUT_MS = 120_000L;
     /**
-     * {@link #probe()} 那趟 su 往返的超时：probe 只跑只读脚本、不等进程退出，故远短于 {@link #EXEC_TIMEOUT_MS}。
+     * 兜底超时（毫秒）。<b>只留给不在这条部署主链上的动作</b>（{@link #uninstall()}、{@link #stopDaemon()}）。
+     * 主链各步按耗时分级（见下）——一刀切 120s 会把"某一步在设备上挂住"整体拖成分钟级等待。
+     */
+    private static final long EXEC_TIMEOUT_MS = 120_000L;
+    /** 部署写盘趟：落盘 + 双侧 md5 + 状态回吐，全是文件操作，60s 对任何正常设备都绰绰有余。 */
+    private static final long DEPLOY_WRITE_TIMEOUT_MS = 60_000L;
+    /** 停旧起新趟（含设备侧最多一次重试）：等旧实例退出 ≤5s + 起新 sleep 2s，30s 足够。 */
+    private static final long RESTART_TIMEOUT_MS = 30_000L;
+    /** 省电白名单（已移出主链、后台 best-effort）：3 个包 × 几条 am/appops。取 20s 还有个作用——
+     *  它一旦拿到串行锁就持有到本趟结束，故这也是"用户点击最多排在它后面多久"的上界。 */
+    private static final long ALLOWLIST_TIMEOUT_MS = 20_000L;
+    /**
+     * {@link #probe()} 那趟 su 往返的超时：probe 只跑只读脚本、不等进程退出，故远短于兜底超时。
      * 取 15s 给慢设备 su 冷启动与首次授权框留余量。详见 app/逻辑说明.md §2.1。
      */
     private static final long PROBE_EXEC_TIMEOUT_MS = 15_000L;
@@ -360,11 +369,24 @@ public final class Deployer {
         }
 
         RootShell.Result r = shell.exec(probeScript(), PROBE_EXEC_TIMEOUT_MS);
-        Map<String, String> kv = parseKv(r.stdout);
-        boolean suOk = r.isOk();
-        if (!suOk) {
+        if (!r.isOk()) {
             notes.add("root 通道不可用：" + r.describe());
         }
+        return buildStatus(parseKv(r.stdout), r.isOk(), expectedBin, expectedScript, notes);
+    }
+
+    /**
+     * 由一趟 su 回吐的 {@code KEY=VALUE} 组装 {@link Status}。三条路径共用：{@link #probe()}（探测趟）、
+     * {@link #deploy()}（写盘趟末尾自带回吐）、{@link #startDaemon()}（拉起趟末尾自带回吐）——
+     * 后两者不再"另起一趟 su 再探一次"（见 app/逻辑说明.md §2.1、§8.1）。
+     *
+     * @param suOk           该趟是否拿到正常退出码
+     * @param expectedBin    APK 内二进制期望 md5（空串=不可比）
+     * @param expectedScript APK 内脚本期望 md5（空串=不可比）
+     * @param notes          调用方已有的提示行（本方法继续追加）
+     */
+    private Status buildStatus(Map<String, String> kv, boolean suOk, String expectedBin,
+                               String expectedScript, List<String> notes) {
         if (kv.containsKey("MD5TOOL") && "0".equals(kv.get("MD5TOOL"))) {
             notes.add("设备缺少 md5sum，无法比对内容哈希（判定退化为存在性检查）");
         }
@@ -479,13 +501,16 @@ public final class Deployer {
     }
 
     /**
-     * 一次性部署：资源落盘与授权 → 二进制就位 → service.d 脚本 → 配置保留写入 → 省电白名单。
+     * 一次性部署：资源落盘与授权 → 二进制就位 → service.d 脚本 → 配置保留写入 → 状态自检（与写盘同一趟 su 回吐）。
+     * 省电白名单已移出主链（后台 best-effort，见 {@link #submitPowerAllowlistAsync()}）。
      * <b>只动盘、不重启守护进程</b>（"换完盘立刻拉起一次"由调用方接在部署之后）；
      * 调用方该看 {@link Result#placementsOk} 而非 {@link Result#ok}。<b>阻塞</b>。
      * 详见 app/逻辑说明.md §2.1、§2.2。
      */
     public Result deploy() {
         List<String> steps = new ArrayList<>();
+        // 用户主动动作：清掉上一次的失败退避与缓存的 su 命令，等价于"重启 app"对通道的复位（不必真重启）
+        shell.resetChannel();
 
         File stagedBin;
         File stagedScript;
@@ -506,7 +531,7 @@ public final class Deployer {
             return new Result(false, "部署", steps, e.getMessage(), null);
         }
 
-        RootShell.Result r = shell.exec(deployScript(stagedBin, stagedScript), EXEC_TIMEOUT_MS);
+        RootShell.Result r = shell.exec(deployScript(stagedBin, stagedScript), DEPLOY_WRITE_TIMEOUT_MS);
         Map<String, String> kv = parseKv(r.stdout);
         if (!r.isOk()) {
             return new Result(false, "部署", steps, "root 执行失败：" + r.describe(), null);
@@ -543,19 +568,21 @@ public final class Deployer {
         steps.add(cfg.describe());
         steps.add(preCreateRuntimeFiles());
 
-        RootShell.Result pr = shell.exec(powerAllowlistScript(), EXEC_TIMEOUT_MS);
-        // 文案不写"已下发"：没装散热器控制 app 时脚本整段跳过、什么也没下发，退出码同样是 0。
-        steps.add(pr.isOk() ? "省电白名单批处理已执行（仅对已安装的散热器控制 app 生效）"
-                : "省电白名单下发失败（不影响部署）：" + pr.describe());
+        // 省电白名单与部署结果无关（代码自陈"不影响部署"），移出主链：后台 best-effort 补跑，
+        // 通道忙/用户在操作就跳过本轮（下次部署或开机脚本补），不再阻塞这次部署的返回。
+        submitPowerAllowlistAsync();
+        steps.add("省电白名单已移交后台补跑（best-effort，仅对已安装的散热器控制 app 生效）");
 
         // 盘上确实换了新二进制：清掉拉起冷却，让紧随其后的自动拉起不被「防连点」挡下（否则旧进程继续跑旧映像）。
         // 防连点的语义只对「手动点拉起daemon」成立。见 §2.2。
         lastStartAtMs = 0L;
-        // 到位即止：拉起daemon 由界面在部署上屏后另调一次 startDaemon()（见 javadoc）。
-        Status st = probe();
+        // 状态与写盘同会话回吐：不再另起一趟 su 探测（见 §2.1/§8.1 与 buildStatus）。
+        // 回吐缺失（脚本被截断等）则退回独立探测一趟 —— 行为等同提速前，不会因缺键误判"不存在"。
+        Status st = kv.containsKey("BIN_EXISTS")
+                ? buildStatus(kv, true, binMd5, scriptMd5, new ArrayList<>())
+                : probe();
         steps.add(st.deployed ? "部署后自检通过"
-                : "部署后自检未通过（" + (st.suOk ? "内容或进程未符合判据" : "root 通道本次未通")
-                + "）——盘面已就位，仍交由随后的拉起动作换进程");
+                : "部署后自检未通过（内容或进程未符合判据）——盘面已就位，仍交由随后的拉起动作换进程");
         // placementsOk 恒真：三条硬判据（BIN_OK / SCRIPT_OK / 双侧哈希一致）都过了；自检未过也照回吐。
         return new Result(st.deployed, true, "部署", steps,
                 st.deployed ? "" : "部署后自检未通过（盘面已就位）", st);
@@ -581,7 +608,7 @@ public final class Deployer {
         }
         steps.add("脚本已落到私有目录并授权：" + stagedScript + "（md5=" + scriptMd5 + "）");
 
-        RootShell.Result r = shell.exec(updateScriptScript(stagedScript), EXEC_TIMEOUT_MS);
+        RootShell.Result r = shell.exec(updateScriptScript(stagedScript), RESTART_TIMEOUT_MS);
         Map<String, String> kv = parseKv(r.stdout);
         if (!r.isOk()) {
             return new Result(false, "更新脚本", steps, "root 执行失败：" + r.describe(), null);
@@ -667,6 +694,8 @@ public final class Deployer {
      */
     public Result startDaemon() {
         List<String> steps = new ArrayList<>();
+        // 用户主动动作：复位上一次的失败退避与缓存的 su 命令（与 deploy() 同一语义）
+        shell.resetChannel();
         long now = System.currentTimeMillis();
         if (now - lastStartAtMs < START_COOLDOWN_MS) {
             long remain = (START_COOLDOWN_MS - (now - lastStartAtMs)) / 1000;
@@ -675,38 +704,46 @@ public final class Deployer {
         }
         lastStartAtMs = now;
 
+        // 重试已在设备侧同一次 su 会话内做完（restartCore），故这里只跑一趟；
+        // 状态由本趟回吐就地构造，不再另起一趟 probe()（见 app/逻辑说明.md §2.2）。
         Attempt a = restartOnce(steps);
-        if (a.retryable && pauseBeforeRetry()) {
-            steps.add("拉起未成功（" + a.error + "），自动重试一次");
-            a = restartOnce(steps);
+        Status st;
+        if (!a.suOk) {
+            st = null;                       // 通道都没通：没有现状可探（与旧版 probe 失败同效）
+        } else if (a.kv.containsKey("BIN_EXISTS")) {
+            st = buildStatus(a.kv, true, md5OfAssetOrEmpty(appContext, BIN_ASSET),
+                    md5OfAssetOrEmpty(appContext, SCRIPT_ASSET), new ArrayList<>());
+        } else {
+            st = probe();                    // 回吐缺失：退回独立探测（等同提速前的一次 su 往返）
         }
-        return new Result(a.ok, "拉起daemon", steps, a.ok ? "" : a.error, probe());
+        return new Result(a.ok, "拉起daemon", steps, a.ok ? "" : a.error, st);
     }
 
     /** 跑一次完整的「先停再起」，把可读步骤追加进 {@code steps}。不判冷却（由调用方管）。
+     *  <b>重试已在设备侧同一次 su 会话内完成</b>（见 {@link #restartCore()}），故调用方只跑一趟。
      *  详见 app/逻辑说明.md §2.2。 */
     private Attempt restartOnce(List<String> steps) {
-        RootShell.Result r = shell.exec(restartScript(), EXEC_TIMEOUT_MS);
-        if (!r.isOk()) {
-            return new Attempt(false, true, "root 执行失败：" + r.describe());
-        }
+        RootShell.Result r = shell.exec(restartScript(), RESTART_TIMEOUT_MS);
         Map<String, String> kv = parseKv(r.stdout);
+        if (!r.isOk()) {
+            return new Attempt(false, r.isOk(), kv, "root 执行失败：" + r.describe());
+        }
         boolean viaWatchdog = "0".equals(kv.get("WD_ALIVE"));
         String oldPid = nvl(kv.get("OLD_PID"));
         if (viaWatchdog) {
             if (!"1".equals(kv.get("WD_STARTED"))) {
                 steps.add("sh-watchdog 不在，且 service.d 脚本缺失（两个候选目录都没找到）");
-                return new Attempt(false, false, "看门狗脚本不存在（需先重新部署）");
+                return new Attempt(false, true, kv, "看门狗脚本不存在（需先重新部署）");
             }
             steps.add("sh-watchdog 不在（如刚点过「停止daemon」），已重新拉起，由它停旧起新");
         } else if (!"1".equals(kv.get("OLD_STOPPED"))) {
             steps.add("检测到 c-daemon 在运行（PID " + oldPid + "），先停止它");
             steps.add(KILL_WAIT_LOOPS + " 秒内未退出，kill -9 后仍未退出");
-            return new Attempt(false, true,
+            return new Attempt(false, true, kv,
                     "旧实例未退出，已放弃启动（否则新实例抢单实例锁必然失败）");
         } else if ("1".equals(kv.get("NOBIN"))) {
             steps.add(oldPid.isEmpty() ? "未检测到运行中的 c-daemon" : "已停止旧实例（PID " + oldPid + "）");
-            return new Attempt(false, false, "二进制不存在（需先部署）：" + BIN_DEST);
+            return new Attempt(false, true, kv, "二进制不存在（需先部署）：" + BIN_DEST);
         } else {
             steps.add(oldPid.isEmpty() ? "未检测到运行中的 c-daemon，直接启动"
                     : "已停止旧实例（PID " + oldPid + "）");
@@ -717,37 +754,29 @@ public final class Deployer {
         if (!"1".equals(kv.get("STARTED"))) {
             steps.add(viaWatchdog
                     ? "看门狗已拉起，但尚未探测到 daemon（它启动前要等亮屏，灭屏时会等到亮屏才起）"
-                    : "启动命令已执行，但未探测到新进程（未起或起后立即退出）");
-            return new Attempt(false, true, "未启动");
+                    : "启动命令已执行，但未探测到新进程（未起或起后立即退出；设备侧已重试过一次）");
+            return new Attempt(false, true, kv, "未启动");
         }
         steps.add((viaWatchdog ? "已由看门狗启动 tempctrl（PID " : "已拉起新实例（PID ")
                 + nvl(kv.get("NEW_PID")) + "，已 renice -20）");
         steps.add("温控空窗约 0~" + (KILL_WAIT_LOOPS + KILL9_WAIT_LOOPS)
                 + " 秒（只等旧实例退出；C 端无启动延时）");
-        return new Attempt(true, false, "");
+        return new Attempt(true, true, kv, "");
     }
 
-    /** 一次拉起尝试的结果：{@code ok}=新实例已起来；{@code retryable}=值得再试一次。 */
+    /** 一次拉起尝试的结果：{@code ok}=新实例已起来；{@code kv}=该趟 su 回吐（用于就地构造 {@link Status}）。 */
     private static final class Attempt {
         final boolean ok;
-        final boolean retryable;
+        /** 该趟 su 是否正常返回（供 {@link #buildStatus} 的 {@code suOk}；只读，不影响 {@link #ok}）。 */
+        final boolean suOk;
+        final Map<String, String> kv;
         final String error;
 
-        Attempt(boolean ok, boolean retryable, String error) {
+        Attempt(boolean ok, boolean suOk, Map<String, String> kv, String error) {
             this.ok = ok;
-            this.retryable = retryable;
+            this.suOk = suOk;
+            this.kv = kv;
             this.error = error;
-        }
-    }
-
-    /** 重试前的停顿；被中断则不重试（恢复中断标志，按上一次的结果返回）。 */
-    private static boolean pauseBeforeRetry() {
-        try {
-            Thread.sleep(RETRY_PAUSE_MS);
-            return true;
-        } catch (InterruptedException ie) {
-            Thread.currentThread().interrupt();
-            return false;
         }
     }
 
@@ -1054,7 +1083,8 @@ public final class Deployer {
     private static String pidsPreamble() {
         return "BIN=" + BIN_DEST + "\n"
                 // 二进制实例＝/proc/<pid>/exe 末端锚定 $BIN（不命中 tempctrl_service.log 等兄弟文件）；
-                // 末尾允许 " (deleted)"：部署是 rm -f 后 cp，旧实例仍持单实例锁，必须仍算"在跑"。见 §2.3
+                // 末尾允许 " (deleted)"：部署用 mv 原子替换 $BIN，旧实例的 exe 随即显示成删除态、
+                // 却仍持单实例锁，必须仍算"在跑"。见 §2.3
                 + "bin_pids() {\n"
                 + "    ls -l /proc/[0-9]*/exe 2>/dev/null"
                 + " | grep -E -- \"-> $BIN( [(]deleted[)])?$\""
@@ -1077,16 +1107,26 @@ public final class Deployer {
                 + "        if wd_match \"$p\"; then echo \"$p\"; _wd_hit=1; fi\n"
                 + "    done\n"
                 + "    [ \"$_wd_hit\" = 1 ] && return 0\n"
-                + "    for d in /proc/[0-9]*; do\n"
-                + "        p=${d#/proc/}\n"
+                // 全量兜底：一次 grep 扫全部 cmdline（原来逐 pid fork 一次 tr，真机数百~上千次，会把探测预算吃光）。
+                // 命中候选再逐个 wd_match 精确确认；head -50 给候选数封顶，避免异常环境下无界。
+                + "    for c in $(grep -l -- \"" + SCRIPT_NAME + "\" /proc/[0-9]*/cmdline 2>/dev/null | head -50); do\n"
+                + "        p=${c#/proc/}; p=${p%/cmdline}\n"
                 + "        wd_match \"$p\" && echo \"$p\"\n"
                 + "    done\n"
                 + "}\n";
     }
 
     private String probeScript() {
-        return pidsPreamble()
-                + "[ -e \"$BIN\" ] && echo BIN_EXISTS=1 || echo BIN_EXISTS=0\n"
+        return pidsPreamble() + probeTail();
+    }
+
+    /**
+     * 探测的状态回吐段（<b>不含</b> {@link #pidsPreamble()}）：存在性 / 可执行 / md5 工具 / 二进制与脚本 md5 /
+     * c-daemon 与看门狗 PID。与 {@link #probe()} 共用；部署趟与拉起趟也把它接在末尾——
+     * "写完盘顺便报状态"，省掉一场独立的 su 往返（见 app/逻辑说明.md §2.1、§8.1）。
+     */
+    private static String probeTail() {
+        return "[ -e \"$BIN\" ] && echo BIN_EXISTS=1 || echo BIN_EXISTS=0\n"
                 + "[ -x \"$BIN\" ] && echo BIN_EXEC=1 || echo BIN_EXEC=0\n"
                 + "if command -v md5sum > /dev/null 2>&1; then echo MD5TOOL=1; else echo MD5TOOL=0; fi\n"
                 + "echo \"BIN_MD5=$(md5sum \"$BIN\" 2>/dev/null | cut -d' ' -f1)\"\n"
@@ -1150,33 +1190,53 @@ public final class Deployer {
     }
 
     private String deployScript(File stagedBin, File stagedScript) {
-        return "BIN=" + BIN_DEST + "\n"
+        return pidsPreamble()
                 + serviceDirPreamble()
                 + "mkdir -p \"$svcd\" 2>&1\n"
-                // 先删再落：旧实例可能正跑着这个文件，直接 cp 覆写会 ETXTBSY（unlink 则不受影响，
-                // 在跑的进程继续持旧 inode 跑完自己那一轮）。随后的自动拉起会把新二进制换上去。
-                + "rm -f \"$BIN\"\n"
-                + "cp -f " + quote(stagedBin.getAbsolutePath()) + " \"$BIN\" && chmod 0755 \"$BIN\" "
-                + "&& echo BIN_OK=1 || echo BIN_OK=0\n"
+                // 原子替换：先写 $BIN.new 再 mv。既避开"覆写正在运行的二进制 ETXTBSY"，也避开
+                // "先删后落"被打断留下"二进制不存在"的半成品；在跑的旧进程继续持旧 inode 跑完自己那一轮。
+                + "cp -f " + quote(stagedBin.getAbsolutePath()) + " \"$BIN.new\" && chmod 0755 \"$BIN.new\" "
+                + "&& mv -f \"$BIN.new\" \"$BIN\" && echo BIN_OK=1 || echo BIN_OK=0\n"
+                + "rm -f \"$BIN.new\" 2>/dev/null\n"
                 + scriptInstallSnippet(stagedScript)
-                + "echo \"BIN_MD5=$(md5sum \"$BIN\" 2>/dev/null | cut -d' ' -f1)\"\n"
-                + "echo \"SCRIPT_MD5=$(md5sum \"$svcd/" + SCRIPT_NAME + "\" 2>/dev/null | cut -d' ' -f1)\"\n";
+                // 末尾接探测尾段：md5 与运行状态随本趟一起回吐，不再另起一趟 su 探测
+                + probeTail();
+    }
+
+    /**
+     * 把省电白名单移到后台 best-effort 补跑：它自陈"不影响部署"，却要跑 3 个包 × 数条 am/appops，
+     * 系统繁忙时可能挂住并拖满一整趟 su 上限。改用 {@link RootShell#tryExec} —— 拿不到通道就跳过本轮
+     * （下次部署时补），既不阻塞部署返回，也不会在"部署刚返回、界面紧接着拉起 daemon"的空档里抢锁。
+     */
+    private void submitPowerAllowlistAsync() {
+        Thread t = new Thread(() -> {
+            try {
+                shell.tryExec(powerAllowlistScript(), ALLOWLIST_TIMEOUT_MS);
+            } catch (RuntimeException ignored) {
+                // best-effort：失败不影响任何部署结果，也不上屏
+            }
+        }, "ww-power-allowlist");
+        t.setDaemon(true);
+        t.start();
     }
 
     /** 省电白名单批处理：<b>逐包</b>下发给已安装的散热器控制 app（包名取自 {@code R.array.xposed_scope}），
      *  四段命令共处同一个 su 会话；未安装的包跳过（判据 {@code [ -d /data/data/$PKG ]}）。
-     *  每次部署照旧无条件下发。详见 app/逻辑说明.md §2.5。 */
+     *  可能挂住的命令用 {@code toybox timeout} 包一层（拿不到 toybox 则前缀为空，等同现状）。
+     *  该整段已移出部署主链，见 {@link #submitPowerAllowlistAsync()}。详见 app/逻辑说明.md §2.5。 */
     private String powerAllowlistScript() {
         StringBuilder sb = new StringBuilder();
+        sb.append("TOOL_TW=\"\"\n")
+                .append("command -v toybox > /dev/null 2>&1 && TOOL_TW=\"toybox timeout 5\"\n");
         for (String pkg : appContext.getResources().getStringArray(R.array.xposed_scope)) {
             // 每包一段 if：$PKG 逐段重设，四段仍在同一个脚本里跑完（不拆成多次 su exec）
             sb.append("PKG=").append(pkg).append('\n')
                     .append("if [ -d \"/data/data/$PKG\" ]; then\n")
                     .append("  echo \"-- $PKG --\"\n")
-                    .append("  echo \"-- deviceidle --\"; dumpsys deviceidle whitelist +$PKG 2>&1\n")
-                    .append("  echo \"-- appops --\"; appops set $PKG RUN_IN_BACKGROUND allow 2>&1\n")
-                    .append("  echo \"-- standby --\"; am set-standby-bucket $PKG active 2>&1\n")
-                    .append("  echo \"-- unfreeze --\"; am unfreeze --sticky $PKG 2>&1 || am unfreeze $PKG 2>&1\n")
+                    .append("  echo \"-- deviceidle --\"; $TOOL_TW dumpsys deviceidle whitelist +$PKG 2>&1\n")
+                    .append("  echo \"-- appops --\"; $TOOL_TW appops set $PKG RUN_IN_BACKGROUND allow 2>&1\n")
+                    .append("  echo \"-- standby --\"; $TOOL_TW am set-standby-bucket $PKG active 2>&1\n")
+                    .append("  echo \"-- unfreeze --\"; $TOOL_TW am unfreeze --sticky $PKG 2>&1 || $TOOL_TW am unfreeze $PKG 2>&1\n")
                     .append("fi\n");
         }
         return sb.toString();
@@ -1211,7 +1271,7 @@ public final class Deployer {
      * 判通道失败。详见 app/逻辑说明.md §4.1。
      */
     private String restartScript() {
-        return pidsPreamble() + serviceDirPreamble() + restartCore();
+        return pidsPreamble() + serviceDirPreamble() + restartCore() + probeTail();
     }
 
     /**
@@ -1248,9 +1308,17 @@ public final class Deployer {
                 + "  echo NOBIN=1\n"
                 + "  NEW_PID=\"\"\n"
                 + "else\n"
-                + "  nohup \"$BIN\" >> /data/local/tmp/tempctrl_service.log 2>&1 < /dev/null &\n"
-                + "  sleep 2\n"
-                + "  NEW_PID=$(bin_pids | head -1)\n"
+                // 设备侧重试：起一次没等到就再起一次（原先是 app 侧整趟重来才做到 —— 多一趟 su + 多等 2s）。
+                // 每轮先 sleep 2 再查 bin_pids；若第一轮其实起了只是慢，第二轮会因单实例锁立刻退出、不影响结果。
+                + "  attempt=0\n"
+                + "  NEW_PID=\"\"\n"
+                + "  while [ $attempt -lt 2 ]; do\n"
+                + "    attempt=$((attempt + 1))\n"
+                + "    nohup \"$BIN\" >> /data/local/tmp/tempctrl_service.log 2>&1 < /dev/null &\n"
+                + "    sleep 2\n"
+                + "    NEW_PID=$(bin_pids | head -1)\n"
+                + "    [ -n \"$NEW_PID\" ] && break\n"
+                + "  done\n"
                 + "fi\n"
                 + "if [ -n \"$NEW_PID\" ]; then renice -n -20 -p \"$NEW_PID\" > /dev/null 2>&1; fi\n"
                 // 4) 新 PID 必须与旧的不同，否则只是"读到了同一个残留进程"

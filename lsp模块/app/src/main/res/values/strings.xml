@@ -12,6 +12,10 @@
     <string name="status_section_deploy">部署状态</string>
     <string name="status_section_device">设备与版本</string>
     <string name="status_section_actions">操作记录</string>
+    <!-- 操作记录归档提示行：只展示归档在哪、几份、占多大，不提供翻看。上限是软口径（单次记录自身超限时留最新一份），故只陈述规则、不写成比例 -->
+    <string name="status_archive_hint">归档：%1$s（%2$d 份，共 %3$s）｜超 64 KB 从最旧删，单份超限时只保留最新</string>
+    <string name="status_archive_hint_none">归档：%1$s（暂无历史记录）</string>
+    <string name="status_archive_hint_unavailable">归档：不可用（%1$s）</string>
     <string name="status_loading">读取中…</string>
     <string name="status_action_refresh">刷新状态</string>
     <string name="status_action_deploy">一键部署</string>

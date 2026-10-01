@@ -16,6 +16,7 @@ import android.widget.TextView;
 import androidx.annotation.NonNull;
 import androidx.annotation.Nullable;
 import androidx.appcompat.app.AlertDialog;
+import androidx.core.content.ContextCompat;
 import androidx.fragment.app.Fragment;
 import androidx.transition.AutoTransition;
 import androidx.transition.TransitionManager;
@@ -82,6 +83,10 @@ public class StatusFragment extends Fragment implements PageAware {
     private TextView logView;
     /** 操作记录的正文容器（自适应高、无内部滚动，同诊断卡）；展开/收起切的是它的可见性。 */
     private View logBody;
+    /** 操作记录的落盘归档（私有目录 oplog/ 子目录，本会话一个文件；见 {@link OpLog}）。 */
+    private OpLog archive;
+    /** 「归档在哪/几份」提示行（代码插入：操作记录卡的布局文件被冻结，不能改，见 {@link #installArchiveHint}）。 */
+    private TextView archiveHintView;
     private ImageView arrowView;
     private View progress;
     /** 三张卡的共同父容器：文本行数变化时的高度补间在这个范围内做。 */
@@ -140,6 +145,12 @@ public class StatusFragment extends Fragment implements PageAware {
         view.findViewById(R.id.action_log_header).setOnClickListener(
                 v -> setLogExpanded(!logExpanded));
         setLogExpanded(false);
+
+        // 操作记录归档：每进程起一次会话（淘汰旧归档 + 记住起点），并把提示行插到卡头下
+        archive = OpLog.get(requireContext().getFilesDir());
+        archive.beginSession();
+        installArchiveHint(view);
+        refreshArchiveHint();
 
         infoView.setText(buildInfo());
         loadVersionLineAsync();
@@ -570,6 +581,10 @@ public class StatusFragment extends Fragment implements PageAware {
             // 切的是正文容器（自适应高、无内部滚动）；展开与否决定这块高度占不占位
             logBody.setVisibility(value ? View.VISIBLE : View.GONE);
         }
+        if (value) {
+            // 展开时重算一次：本会话首条记录落盘后份数会变
+            refreshArchiveHint();
+        }
         if (arrowView != null) {
             arrowView.setRotation(value ? ARROW_EXPANDED_ROTATION : 0f);
             arrowView.setContentDescription(getString(value
@@ -665,17 +680,75 @@ public class StatusFragment extends Fragment implements PageAware {
                 .show();
     }
 
-    /** 追加一条操作记录，带秒级时间戳（新的在上）。 */
+    /** 追加一条操作记录，带秒级时间戳（新的在上），并同步落盘归档（写通，杀进程不丢）。 */
     private void appendLog(String text) {
         if (logView == null) {
             return;
         }
+        String line = "[" + TIME_FMT.format(new Date()) + "] " + text;
         String old = logView.getText().toString();
-        String merged = "[" + TIME_FMT.format(new Date()) + "] " + text + "\n\n" + old;
+        String merged = line + "\n\n" + old;
         if (merged.length() > 8000) {
             merged = merged.substring(0, 8000) + "\n…（已截断）";
         }
         logView.setText(merged);
+        if (archive != null) {
+            archive.append(line);
+            // 落盘后立刻重算：折叠态下份数/占用不再停在进页面时的旧值。
+            // 代价可控——OpLog.snapshot() 是 O(1)（进页面时缓存既有归档基数，本会话文件只按当前长度累加），不做目录扫描。
+            refreshArchiveHint();
+        }
+    }
+
+    /**
+     * 在操作记录卡内插入「归档提示行」。操作记录卡的布局文件被冻结（首行注释明写不要改），
+     * 故以代码插到卡内层竖向容器的卡头之下、正文之前 —— 默认折叠时也看得见。
+     * 只展示、不提供翻看（用户口径）。
+     */
+    private void installArchiveHint(View root) {
+        if (logBody == null || !(logBody.getParent() instanceof ViewGroup)) {
+            return;
+        }
+        final ViewGroup card = (ViewGroup) logBody.getParent();
+        final Context context = root.getContext();
+        TextView hint = new TextView(context);
+        hint.setTextAppearance(context, R.style.TextAppearance_B6XTempCtrl_Caption);
+        hint.setTextColor(ContextCompat.getColor(context, R.color.app_on_surface_variant));
+        hint.setTextIsSelectable(true);
+        final int padH = context.getResources().getDimensionPixelSize(R.dimen.card_padding);
+        final int padV = context.getResources().getDimensionPixelSize(R.dimen.space_s);
+        hint.setPadding(padH, 0, padH, padV);
+        card.addView(hint, card.indexOfChild(logBody));
+        archiveHintView = hint;
+    }
+
+    /** 刷新归档提示行（进入本页、展开操作记录时各刷一次）。 */
+    private void refreshArchiveHint() {
+        if (archiveHintView == null || archive == null) {
+            return;
+        }
+        OpLog.Info info = archive.snapshot();
+        final String text;
+        if (!info.available) {
+            text = getString(R.string.status_archive_hint_unavailable, info.reason);
+        } else if (info.count == 0) {
+            text = getString(R.string.status_archive_hint_none, info.dir.getAbsolutePath());
+        } else {
+            text = getString(R.string.status_archive_hint,
+                    info.dir.getAbsolutePath(), info.count, formatBytes(info.bytes));
+        }
+        // 文本没变就不动视图：逐条刷新时避免无谓的重排
+        if (!text.contentEquals(archiveHintView.getText())) {
+            archiveHintView.setText(text);
+        }
+    }
+
+    /** 归档占用的人话格式（<1 KB 给字节数，其余一位小数 KB）。 */
+    private static String formatBytes(long bytes) {
+        if (bytes < 1024L) {
+            return bytes + " B";
+        }
+        return String.format(Locale.US, "%.1f KB", bytes / 1024.0);
     }
 
     /** 拿到 root 后问是否立即部署（文案见 strings.xml；不需要则不打扰）。 */

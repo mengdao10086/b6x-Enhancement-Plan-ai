@@ -17,6 +17,7 @@ import java.util.Locale;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.locks.ReentrantLock;
 
 /**
  * root 通道封装。零第三方依赖，只用 {@link Runtime#exec(String[])}；做法照 Scene（{@code a/a70.java}）。
@@ -45,6 +46,12 @@ public final class RootShell {
     private static final long BACKOFF_MIN_MS = 1_000L;
     private static final long BACKOFF_MAX_MS = 60_000L;
 
+    /** 后台 best-effort（{@link #tryExec}）的门禁：距最近一次交互式 {@code exec} 至少空闲这么久才取锁让路。 */
+    private static final long BG_IDLE_MS = 5_000L;
+    /** 后台 best-effort 取不到锁时最多等这么久（其间每 {@value #BG_RETRY_MS}ms 重试一次）后放弃本轮。 */
+    private static final long BG_WAIT_MAX_MS = 60_000L;
+    private static final long BG_RETRY_MS = 1_000L;
+
     /** root shell 里 PATH 的补充段（只追加，不覆盖 su 自带的 PATH）。 */
     private static final String PATH_SUFFIX = "/data/adb/magisk:/data/adb/ksu/bin:/data/adb/ap/bin";
 
@@ -52,6 +59,11 @@ public final class RootShell {
 
     private final SharedPreferences prefs;
     private final AtomicInteger seq = new AtomicInteger();
+
+    /** 串行锁：同一时刻只允许一个 su 会话。交互动作（{@code exec}/{@code checkAlive}）阻塞等待；后台用 tryLock。 */
+    private final ReentrantLock execLock = new ReentrantLock();
+    /** 最近一次交互式 {@code exec} 的时刻（毫秒）。{@link #tryExec} 据此给交互动作让路。 */
+    private volatile long lastInteractiveAtMs;
 
     /** 嗅探结果缓存（持久化，重启后免重嗅探）。 */
     private volatile SuType suType = SuType.UNKNOWN;
@@ -166,24 +178,21 @@ public final class RootShell {
      * 自动模式下会依次尝试「选型命令 → 裸 `su`」，把跑通的那个记为 {@link #workingCommand}。
      */
     public boolean checkAlive() {
+        execLock.lock();
+        try {
+            return checkAliveLocked();
+        } finally {
+            execLock.unlock();
+        }
+    }
+
+    private boolean checkAliveLocked() {
         if (!alive && System.currentTimeMillis() < nextProbeAtMs) {
             return false;
         }
         detectSuType(false);
 
-        List<String> candidates = new ArrayList<>();
-        if (workingCommand != null) {
-            candidates.add(workingCommand);
-        }
-        String primary = getSuCommand();
-        if (!candidates.contains(primary)) {
-            candidates.add(primary);
-        }
-        if (!isSuCommandManual() && !candidates.contains("su")) {
-            candidates.add("su");
-        }
-
-        for (String candidate : candidates) {
+        for (String candidate : suCandidates()) {
             Result r = runOnce(candidate, "id", PROBE_TIMEOUT_MS);
             if (r.isOk() && r.stdout.contains("uid=0")) {
                 workingCommand = candidate;
@@ -196,6 +205,26 @@ public final class RootShell {
         return false;
     }
 
+    /**
+     * 依次要尝试的 su 命令行：实测可用 → 当前推荐 → 裸 {@code su}（去重；被手动覆盖过则不追加裸 su）。
+     * {@link #checkAlive()} 与 {@link #exec} 共用，保证"选型表推出来的命令不灵时还能退回裸 su" —
+     * 这正是"通道在进程内坏掉只能重启 app"的恢复路径（缓存命令失效时不再卡死）。
+     */
+    private List<String> suCandidates() {
+        List<String> candidates = new ArrayList<>();
+        if (workingCommand != null) {
+            candidates.add(workingCommand);
+        }
+        String primary = getSuCommand();
+        if (!candidates.contains(primary)) {
+            candidates.add(primary);
+        }
+        if (!isSuCommandManual() && !candidates.contains("su")) {
+            candidates.add("su");
+        }
+        return candidates;
+    }
+
     // ==================== 执行 ====================
 
     /** 用 root 通道执行脚本，默认超时 {@value #DEFAULT_TIMEOUT_MS} ms。 */
@@ -206,26 +235,104 @@ public final class RootShell {
     /**
      * 用 root 通道执行脚本（多行 sh 脚本，按行顺序在同一 shell 内执行）。
      * 脚本不得为空，也<b>不得包含 {@code exit}</b>（会导致结束标记丢失，判为通道失败）。
-     * <b>不退避</b>：调用方显式要求执行就真执行；失败只更新退避窗口。详见 app/逻辑说明.md §4.1、§4.2。
+     * <b>不退避</b>：调用方显式要求执行就真执行；失败只更新退避窗口。
+     *
+     * <p><b>通道自愈</b>：按 {@link #suCandidates()} 依次尝试；<b>只在该命令"通道失败且非超时"时</b>换下一条
+     * （脚本自己返回非 0 与超时都不换 —— 前者说明命令没问题、重跑是重复执行，后者换命令不会更快）。
+     * 这也顺带清掉了"缓存的实测命令失效后 exec 永远失败"这一处无自愈路径。详见 app/逻辑说明.md §4.1、§4.2。
      */
     public Result exec(String script, long timeoutMs) {
-        detectSuType(false);
-        String command = workingCommand != null ? workingCommand : getSuCommand();
-        Result r = runOnce(command, script, timeoutMs);
-        if (r.isOk()) {
-            markAlive();
-        } else if (r.channelFailed) {
-            markDead();
-            lastError = command + " → " + r.describe();
+        execLock.lock();
+        try {
+            detectSuType(false);
+            Result last = null;
+            for (String candidate : suCandidates()) {
+                Result r = runOnce(candidate, script, timeoutMs);
+                if (r.isOk()) {
+                    workingCommand = candidate;
+                    markAlive();
+                    return r;
+                }
+                last = r;
+                if (!r.channelFailed || r.timedOut) {
+                    break;
+                }
+            }
+            if (last != null && last.channelFailed) {
+                markDead();
+                lastError = last.command + " → " + last.describe();
+            }
+            if (last == null) {
+                return Result.channelFailure(getSuCommand(), "无可用 su 命令", 0L);
+            }
+            return last;
+        } finally {
+            // 记"交互动作**结束**时刻"：若记开始时刻，一趟跑了 8s 的部署刚返回就会让后台任务
+            // 立刻满足"空闲 ≥5s"，与紧随其后的拉起 daemon 抢锁。
+            lastInteractiveAtMs = System.currentTimeMillis();
+            execLock.unlock();
         }
-        return r;
+    }
+
+    /**
+     * 后台 best-effort 执行（省电白名单这类"不影响动作结果"的收尾工作专用）。
+     * 只在「串行锁空闲 <b>且</b> 距最近一次交互式 {@code exec} ≥{@value #BG_IDLE_MS}ms」时取锁执行 ——
+     * 这条门禁保证它不会在"部署刚返回、界面紧接着要拉起 daemon"的空档里抢到锁、把交互动作堵在后面。
+     * 取不到就每 {@value #BG_RETRY_MS}ms 重试，超过 {@value #BG_WAIT_MAX_MS}ms 放弃本轮（返回 {@code channelFailed}）。
+     * <b>不改动 alive/退避状态</b>：后台失败不该污染交互路径的通道判断。
+     */
+    public Result tryExec(String script, long timeoutMs) {
+        long deadline = System.currentTimeMillis() + BG_WAIT_MAX_MS;
+        while (true) {
+            if (System.currentTimeMillis() - lastInteractiveAtMs >= BG_IDLE_MS && execLock.tryLock()) {
+                try {
+                    detectSuType(false);
+                    String command = workingCommand != null ? workingCommand : getSuCommand();
+                    Result r = runOnce(command, script, timeoutMs);
+                    if (r.isOk()) {
+                        markAlive();
+                    }
+                    return r;
+                } finally {
+                    execLock.unlock();
+                }
+            }
+            if (System.currentTimeMillis() >= deadline) {
+                return Result.channelFailure(getSuCommand(),
+                        "后台任务跳过：通道忙或交互动作仍在进行", 0L);
+            }
+            try {
+                Thread.sleep(BG_RETRY_MS);
+            } catch (InterruptedException ie) {
+                Thread.currentThread().interrupt();
+                return Result.channelFailure(getSuCommand(), "后台任务已取消", 0L);
+            }
+        }
+    }
+
+    /**
+     * 复位进程内的通道状态：清掉「失败计数 + 退避窗口」与缓存的实测命令，让下一次 {@code exec}
+     * 重新按推荐命令选型。用于<b>用户主动发起</b>的动作入口（部署 / 拉起）——语义是"现在就要，
+     * 别被上一次的失败退避挡着"。这些状态都是内存态，故本方法等价于"用户重启 app"对通道的效果，
+     * 只是不必真的重启。不会主动发起 su 往返（不触发授权框）。
+     */
+    public void resetChannel() {
+        failures = 0;
+        nextProbeAtMs = 0L;
+        workingCommand = null;
     }
 
     // ==================== 诊断 ====================
 
     /** 诊断串（当前模式 / SU CMD / 通道状态 / 当前用户）。会阻塞探测一次。 */
     public String buildDiagnostics() {
-        Result who = runOnce(getSuCommand(), "id", PROBE_TIMEOUT_MS);
+        Result who;
+        execLock.lock();
+        try {
+            who = runOnce(getSuCommand(), "id", PROBE_TIMEOUT_MS);
+        } finally {
+            execLock.unlock();
+        }
         StringBuilder sb = new StringBuilder();
         sb.append("模式: ").append(suType).append(suTypeDetected ? "（已探测）" : "（未探测）").append('\n');
         sb.append("SU CMD: ").append(getSuCommand())
@@ -493,7 +600,17 @@ public final class RootShell {
             }
 
             if (timedOut) {
+                // 超时只 destroy() 会留下"客户端已死、su 会话可能仍在设备侧跑"的窗口：
+                // 先给 500ms 收尾，仍在就 destroyForcibly()（SIGKILL），尽早把会话槽位还回去。
                 process.destroy();
+                try {
+                    if (!process.waitFor(500L, TimeUnit.MILLISECONDS)) {
+                        process.destroyForcibly();
+                    }
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    process.destroyForcibly();
+                }
             }
             drainTo(stdout, out);
             drainTo(stderr, err);
