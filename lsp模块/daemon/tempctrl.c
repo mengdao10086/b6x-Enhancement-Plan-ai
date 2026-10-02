@@ -146,8 +146,8 @@ static int RATE_LIMIT_COLD = 25;   // 制冷强度升降速基础值：升速=ba
 
 // --- 动态值（根据电池温差自动调整）---
 static int RATE_LIMIT_COLD_MULT = 10;  // 制冷强度倍率：升速/降速 = base ± dev(0.1°C) × mult / 10
-static int COLD_DEADZONE = 3;          // 制冷最小变化幅度（RATE_LIMIT_COLD 第三值）：与散热器实际 |差值| < 该值时不升不降
-static int RATE_LIMIT_FAN_DEBOUNCE = 50;   // RATE_LIMIT_FAN 第二值：防抖阈值（RPM/周期，0=关闭防抖）；变化量 ≤ 阈值且距方向端点（升=最高/降=最低）≥ 阈值×1.5 时保持不动
+static int COLD_DEADZONE = 3;          // 制冷最小变化幅度（RATE_LIMIT_COLD 第三值）：与散热器实际 |差值| < 该值时不升不降；豁免有方向（升只看距上限、降只看距下限，余量 < ceil(死区×1.5) 才豁免）
+static int RATE_LIMIT_FAN_DEBOUNCE = 50;   // RATE_LIMIT_FAN 第二值：防抖阈值（RPM/周期，0=关闭防抖）；变化量 ≤ 阈值且距方向端点（升=最高/降=最低）≥ 阈值×1.5（向上取整）时保持不动
 static int cycle_batt_temp = -1;       // 本周期电池温度（-1=未就绪）
 // --- 1s 采集缓存：5s 控制块直接读缓存，不再重复读 sysfs/状态文件 ---
 static int cached_batt_raw = -1;   // 电池温度（0.1°C），保留上次成功值抗抖
@@ -2141,9 +2141,10 @@ static int rate_limit_fan(int desired_rpm) {
     int ref_room = rising ? (active_fan_max - actual_rpm)    // 升速：距最高转速（现场读，active_fan_max 为运行时量）
                           : (actual_rpm - fan_rpm_min);      // 降速：距最低转速
     int delta = abs(desired_rpm - actual_rpm);
-    // 阈值 ×1.5 必须先乘后除（写成 /2*3 会有 1 RPM 偏差）；见 逻辑说明.md「主循环逻辑」
+    // 阈值 ×1.5 先乘后除且向上取整 ((x*3+1)/2；写成 /2*3 或截断式 x*3/2 都会少 1 RPM)；
+    // 与冷端死区豁免带宽 ceil(死区×1.5) 同一取整口径；见 逻辑说明.md「主循环逻辑」
     int hold = delta > 0 &&
-               ref_room >= RATE_LIMIT_FAN_DEBOUNCE * 3 / 2 &&
+               ref_room >= (RATE_LIMIT_FAN_DEBOUNCE * 3 + 1) / 2 &&
                delta <= RATE_LIMIT_FAN_DEBOUNCE;
     if (hold) desired_rpm = actual_rpm;   // 防抖：变化量不超阈值 → 本周期保持不动
     int drop_hold = hold && !rising;      // 降速防抖命中
@@ -2163,8 +2164,11 @@ static int rate_limit_fan(int desired_rpm) {
     return send_rpm;
 }
 
-/** 下发去重 + 制冷变化死区（以散热器实际回传为准）；规则见 逻辑说明.md「注意事项→去重逻辑」。返回 1=跳过下发。 */
-static int should_skip_dispatch(int mode, int target, int windOC, int cold, int windLevel) {
+/**
+ * 下发去重 + 制冷变化死区（以散热器实际回传为准）；规则见 逻辑说明.md「注意事项→去重逻辑」。返回 1=跳过下发。
+ * @param force_dispatch 本轮 cold 是否被热端过温削减「硬钳制」下压（=最高优先级，死区不拦；由 apply_gear_direct 传入）
+ */
+static int should_skip_dispatch(int mode, int target, int windOC, int cold, int windLevel, int force_dispatch) {
     int send_rpm = (mode == 0) ? windLevel : windOC;
 
     if (cooler_cold_real >= 0 && cooler_rpm_real >= 0) {
@@ -2186,16 +2190,28 @@ static int should_skip_dispatch(int mode, int target, int windOC, int cold, int 
 
         int diff = cold - cooler_cold_real;
         if (diff != 0) {
-            // 最小变化幅度：目标与制冷实际 |差值| < 死区 → 上升下降都不变；接近极值处死区失效允许到位。
+            // 最小变化幅度：|目标 − 回传| < 死区 → 不升不降；豁免有方向（升只看距上限、降只看距下限），
+            // 该方向余量 < ceil(死区×1.5) 才豁免（与风扇防抖同一取整口径），否则回到死区跳过。
             int cmin = active_cold_eff_min;   // 当前模式有效范围（main_loop 统一计算）
             int cmax = active_cold_eff_max;
             int adiff = abs(diff);
-            int near_extreme = (cmax - cooler_cold_real) < COLD_DEADZONE * 2
-                            || (cooler_cold_real - cmin) < COLD_DEADZONE * 2;
-            if (adiff < COLD_DEADZONE && !near_extreme) {
-                debug_log(debug_exec, "skip 制冷变化死区：目标冷%d 回传冷%d |diff|=%d <%d死区，升降都不变",
-                          cold, cooler_cold_real, adiff, COLD_DEADZONE);
-                return 1;   // |差值| < 最小变化幅度 → 上升下降都不下发
+            int band = (COLD_DEADZONE * 3 + 1) / 2;   // ceil(死区×1.5)
+            int room = (diff > 0) ? (cmax - cooler_cold_real)    // 要升：只看距上限
+                                  : (cooler_cold_real - cmin);   // 要降：只看距下限
+            if (adiff < COLD_DEADZONE) {
+                if (force_dispatch) {
+                    // 热端过温削减下压：最高优先级，死区一律放行（判据可解释：本轮 cold 确被硬钳制下压）
+                    debug_log(debug_exec, "豁免 死区（过温削减下压）：目标冷%d 回传冷%d |diff|=%d <%d，强制下发",
+                              cold, cooler_cold_real, adiff, COLD_DEADZONE);
+                } else if (room < band) {
+                    debug_log(debug_exec, "豁免 死区（%s 余量%d<%d）：目标冷%d 回传冷%d 放行",
+                              diff > 0 ? "升" : "降", room, band, cold, cooler_cold_real);
+                } else {
+                    debug_log(debug_exec, "skip 制冷变化死区：目标冷%d 回传冷%d |diff|=%d <%d死区（%s 余量%d≥%d）",
+                              cold, cooler_cold_real, adiff, COLD_DEADZONE,
+                              diff > 0 ? "升" : "降", room, band);
+                    return 1;   // |差值| < 最小变化幅度且该方向未贴近端点 → 不下发
+                }
             }
         }
         return 0;
@@ -2951,9 +2967,11 @@ static int apply_gear_direct(int mode, int target,
         int cold_cap = active_cold_eff_max;
         if (cold > cold_cap) cold = cold_cap;
     }
+    // 削减触发的下压判据（写死、可解释、不依赖越界巧合）：过温削减生效 且 本轮 cold 确被钳制压低
+    int hot_forced_down = (hot_derate > 0 && cold < cold_pre_clamp);
 
     // ---- 去重检测 + 制冷变化死区（以散热器实际回传为准）----
-    if (should_skip_dispatch(mode, target, send_rpm, cold, wl)) {
+    if (should_skip_dispatch(mode, target, send_rpm, cold, wl, hot_forced_down)) {
         debug_log(debug_exec, "apply_gear_direct 跳过下发（目标冷%d RPM%d == 回传冷%d RPM%d）",
                   cold, send_rpm, cooler_cold_real, cooler_rpm_real);
         return 0;

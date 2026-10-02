@@ -41,6 +41,8 @@ final class ConfigDiagnostics {
     private final ImageView arrowView;
     private final TextView mtimeView;
     private final TextView stateView;
+    /** 同体上方的「数据文件信息」行（曲线区经 ChartFragment.Host 写）：只读来判它此刻是不是还停在占位。 */
+    private final TextView datafileView;
 
     private boolean expanded;
     /** 最近一次上屏的配置诊断正文（不含启动耗时段）：展开时用它重算一次追加段（见 {@link #setExpanded}）。 */
@@ -72,6 +74,7 @@ final class ConfigDiagnostics {
         arrowView = pageRoot.findViewById(R.id.config_diag_arrow);
         mtimeView = pageRoot.findViewById(R.id.config_diag_mtime);
         stateView = pageRoot.findViewById(R.id.config_diag_text);
+        datafileView = pageRoot.findViewById(R.id.config_diag_datafile_text);
 
         pageRoot.findViewById(R.id.config_diag_header).setOnClickListener(v -> setExpanded(!expanded));
         pageRoot.findViewById(R.id.config_diag_refresh).setOnClickListener(v -> refresh());
@@ -80,23 +83,41 @@ final class ConfigDiagnostics {
 
     void setExpanded(boolean value) {
         expanded = value;
-        Motion.animateHeight(body, value);
         // 一副图标两种状态：图标本身指向右，展开时顺时针转 90° 指向下（同分组卡头）；
         // 200ms ease-out 转过去（系统关动画时由 Motion 直落）
         Motion.rotate(arrowView, value ? ARROW_EXPANDED_ROTATION : 0f);
         arrowView.setContentDescription(body.getContext().getString(
                 value ? R.string.config_action_collapse : R.string.config_action_expand));
         if (!value) {
+            Motion.animateHeight(body, false);
             return;
         }
         // 展开那一刻才是用户看它的时候：欠账或压根没上过屏，都走"现算现上屏"（见 app 逻辑说明.md §6.5）
         if (pendingRefresh || lastState == null) {
+            // 正文还要读盘才回来：先只放一行「读取中…」占位、动画展开到占位高（不露旧正文、不闪帧），
+            // 正文上屏时再由 apply() 从当前高度续动画到最终实高——两段动画，见 app 逻辑说明.md §8.4
+            stateView.setText(placeholderText());
+            Motion.animateHeight(body, true);
             flushPending();
             return;
         }
-        // 有现成正文：用最近一次那份重算追加段，好让比"建表"更晚的时间点（首帧 / 段二收尾）也现出来。
+        // 有现成正文：**先上屏、再量高**——量高发生在正文之上，展开时长与终点才是最终实高（末尾不跳）。
         // 只读几个静态槽位，无 IO、无后台线程
         stateView.setText(lastState + timingBlock());
+        Motion.animateHeight(body, true);
+    }
+
+    /**
+     * 正文位该放的占位文本：同体上方的「数据文件信息」行此刻若仍停在「读取中…」（曲线区首份数据还没
+     * 回来，它的 XML 初值就是这个），就让它当这一屏<b>唯一</b>的占位、正文位留空——否则一屏会同时出现
+     * 两行一模一样的「读取中…」。两行都回来后各自照常上屏，故只在占位这一步去重。
+     */
+    private CharSequence placeholderText() {
+        String loading = body.getContext().getString(R.string.chart_loading);
+        if (datafileView != null && loading.contentEquals(datafileView.getText())) {
+            return "";
+        }
+        return loading;
     }
 
     /**
@@ -179,6 +200,10 @@ final class ConfigDiagnostics {
                             @Override
                             public void run() {
                                 refreshInFlight = false;
+                                if (released) {
+                                    return;   // 页面已销毁：连失败文案也不写（与 apply 同构）
+                                }
+                                showLoadFailure(e);
                                 runQueued();
                             }
                         });
@@ -188,6 +213,18 @@ final class ConfigDiagnostics {
         } catch (RejectedExecutionException e) {
             // 页面已销毁：这一轮不成立，同样别把在途标记留在 true 上
             refreshInFlight = false;
+        }
+    }
+
+    /**
+     * 读盘失败：正文位立刻给出真实失败文案（<b>不留「读取中…」占位</b>），展开态下从当前高度动画过去。
+     * 复用曲线区已有的「读取失败：…」前缀，不新增字符串资源；失败后 {@link #lastState} 保持 null，
+     * 下次展开会重新走占位 + 取数。
+     */
+    private void showLoadFailure(RuntimeException e) {
+        stateView.setText(stateView.getContext().getString(R.string.chart_fail_read, e.toString()));
+        if (expanded) {
+            Motion.animateHeight(body, true);
         }
     }
 
@@ -207,6 +244,11 @@ final class ConfigDiagnostics {
             mtimeView.setText(mtimeView.getContext().getString(R.string.config_diag_mtime, time));
         } else {
             mtimeView.setText(mtimeView.getContext().getString(R.string.config_diag_mtime_missing));
+        }
+        // 正文已就绪：此刻展开着就**从当前高度续动画到最终实高**——既补上"占位→正文"的第二段，
+        // 也让展开态下的内容变化走动画。量高发生在正文已定之后，故终点即最终实高（末尾不跳）
+        if (expanded) {
+            Motion.animateHeight(body, true);
         }
         runQueued();
     }

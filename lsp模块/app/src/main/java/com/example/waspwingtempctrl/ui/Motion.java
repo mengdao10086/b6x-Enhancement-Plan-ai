@@ -9,6 +9,7 @@ import android.provider.Settings;
 import android.util.TypedValue;
 import android.view.View;
 import android.view.ViewGroup;
+import android.view.ViewParent;
 import android.view.animation.Interpolator;
 import android.view.animation.PathInterpolator;
 import android.widget.TextView;
@@ -161,8 +162,12 @@ public final class Motion {
     /**
      * 展开/收起一个 {@code wrap_content} 容器：按逻辑 2 的时长逐帧改其高度。
      *
+     * <p><b>两向同一把尺子</b>：终点都取"实高"——收起读已布局实高，展开在**最终宽度**上量自然高
+     * （{@code GONE} 折叠体无已布局高度，量宽与最终宽一致时量到的高即实高）。<b>不再用"是否已排版"
+     * 作门</b>：{@code GONE} 子视图永不参与父容器排版，那道门会让首次展开恒为"直接落位"（零动画）。
+     *
      * <p>打断即换向——同一次调用先取消本视图在跑的高度补间，再从**当前高度**接着动，连点不排队、不卡住。
-     * 系统关掉动效、或视图尚未布局（各构造器里的初始折叠）时直接落位。
+     * 系统关掉动效、或展开时宽度不可知（父容器尚未排版，只能退回屏幕宽）时直接落位。
      *
      * @param expand true = 展开（量出内容高并从当前高度长过去）；false = 收起（收到 0 再置 {@code GONE}）
      */
@@ -180,7 +185,6 @@ public final class Motion {
             content.setVisibility(expand ? View.VISIBLE : View.GONE);
             return;
         }
-        boolean animate = enabled(content.getContext()) && content.isLaidOut();
         // 起点取"当前真实高"：可见时优先用动画中的 lp.height（打断时的中间值），否则用已布局高度
         int from = content.getVisibility() == View.VISIBLE
                 ? (lp.height >= 0 ? lp.height : content.getHeight()) : 0;
@@ -194,7 +198,12 @@ public final class Motion {
         } else {
             to = 0;
         }
-        if (!animate || from == to) {
+        // 起点/终点都定下来才判能不能动画。展开必须有"量得出的最终宽"：量不到宽时只能退回屏幕宽，
+        // 那量出来的高不是实高（末尾会跳），宁可直接落位也不按错高动画；收起不用量目标（恒为 0）。
+        boolean animate = enabled(content.getContext())
+                && (!expand || widthKnown(content))
+                && from != to;
+        if (!animate) {
             lp.height = ViewGroup.LayoutParams.WRAP_CONTENT;
             content.setVisibility(expand ? View.VISIBLE : View.GONE);
             content.requestLayout();
@@ -227,22 +236,17 @@ public final class Motion {
     }
 
     /**
-     * 量出容器在 {@code wrap_content} 下的完整高（展开前的预判）。
+     * 量出容器在 {@code wrap_content} 下的完整高——展开时它就是**最终实高**（在最终宽度上量）。
      *
      * <p><b>绕开"GONE 下测量为 0"的经典坑</b>：调用前须已置 {@code VISIBLE}；这里用
      * {@code height=UNSPECIFIED} 直接测内容，不受当前 {@code lp.height}（可能为 0 或动画中间值）影响。
+     * 量宽见 {@link #measuredWidthFor(View)}——若最终宽不可知（只能退回屏幕宽），量出的高不是实高，
+     * {@link #animateHeight(View, boolean)} 会因此放弃动画、直接落位。
      */
     private static int measureHeight(View content) {
         ViewGroup.LayoutParams lp = content.getLayoutParams();
         int oldHeight = lp != null ? lp.height : ViewGroup.LayoutParams.WRAP_CONTENT;
-        int width = content.getWidth();
-        if (width <= 0 && content.getParent() instanceof View) {
-            View parent = (View) content.getParent();
-            width = parent.getWidth() - parent.getPaddingLeft() - parent.getPaddingRight();
-        }
-        if (width <= 0) {
-            width = content.getResources().getDisplayMetrics().widthPixels;
-        }
+        int width = measuredWidthFor(content);
         if (lp != null) {
             lp.height = ViewGroup.LayoutParams.WRAP_CONTENT;
         }
@@ -253,6 +257,69 @@ public final class Motion {
             lp.height = oldHeight;
         }
         return measured;
+    }
+
+    /**
+     * 量高该用的宽：孩子填满父宽（{@code match_parent}）时优先"父内容宽"（扣掉折叠体自身左右外边距），
+     * 否则用"已布局实宽"，最后才退回屏幕宽。<b>屏幕宽是兜底、不是实宽</b>——按它量出的换行会与最终
+     * 不符，故 {@link #widthKnown(View)} 不认它。
+     *
+     * <p><b>为什么父宽优先</b>：自身宽是上次排版留下的值，{@code GONE} 期间父宽若变了它就是陈旧的；
+     * 父内容宽则永远是这一趟的最终宽。对不填满父宽的孩子"父内容宽"不成立，故先看
+     * {@link #fillsParentWidth(View)}。
+     */
+    private static int measuredWidthFor(View content) {
+        if (fillsParentWidth(content)) {
+            int fromParent = widthFromParent(content);
+            if (fromParent > 0) {
+                return fromParent;
+            }
+        }
+        int width = content.getWidth();
+        if (width > 0) {
+            return width;
+        }
+        int fromParent = widthFromParent(content);
+        if (fromParent > 0) {
+            return fromParent;
+        }
+        return content.getResources().getDisplayMetrics().widthPixels;
+    }
+
+    /** 孩子是否按"填满父内容宽"排版（{@code match_parent}）——只有这种孩子，"父内容宽"才是它的最终宽。 */
+    private static boolean fillsParentWidth(View content) {
+        ViewGroup.LayoutParams lp = content.getLayoutParams();
+        return lp != null && lp.width == ViewGroup.LayoutParams.MATCH_PARENT;
+    }
+
+    /**
+     * 展开能不能按"实高"计时：宽度必须来自实宽（自身已布局宽或父内容宽），不能来自屏幕宽兜底。
+     * 三者（自身宽 / 父宽−内边距 / 屏幕宽）里前两个都准，最后一个不准——它的到来意味着父容器
+     * 尚未排版，此刻量出的高不是最终高。见 {@link #measuredWidthFor(View)}。
+     */
+    private static boolean widthKnown(View content) {
+        return content.getWidth() > 0 || widthFromParent(content) > 0;
+    }
+
+    /** 折叠体的最终可用宽（父内容宽扣掉它自身的左右外边距）；父不是 View 或尚未排版时返回 ≤0。 */
+    private static int widthFromParent(View content) {
+        ViewParent parent = content.getParent();
+        if (!(parent instanceof View)) {
+            return 0;
+        }
+        View p = (View) parent;
+        return p.getWidth() - p.getPaddingLeft() - p.getPaddingRight()
+                - horizontalMarginsOf(content);
+    }
+
+    /** 折叠体自身的左右外边距（量宽时须扣掉，否则宽会偏大、换行与最终不符）。 */
+    private static int horizontalMarginsOf(View content) {
+        ViewGroup.LayoutParams lp = content.getLayoutParams();
+        if (lp instanceof ViewGroup.MarginLayoutParams) {
+            ViewGroup.MarginLayoutParams mlp = (ViewGroup.MarginLayoutParams) lp;
+            return mlp.leftMargin + mlp.rightMargin;
+        }
+        return 0;
     }
 
     /**

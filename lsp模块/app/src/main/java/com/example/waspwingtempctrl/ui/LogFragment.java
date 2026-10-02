@@ -1,6 +1,5 @@
 package com.example.waspwingtempctrl.ui;
 
-import android.app.Activity;
 import android.content.Context;
 import android.os.Bundle;
 import android.os.Handler;
@@ -10,8 +9,6 @@ import android.text.TextWatcher;
 import android.view.LayoutInflater;
 import android.view.View;
 import android.view.ViewGroup;
-import android.view.Window;
-import android.view.WindowManager;
 import android.widget.EditText;
 import android.widget.TextView;
 
@@ -34,7 +31,8 @@ import java.util.Locale;
  *
  * <p>读文件统一走 {@link AppFiles}（{@link LogTailReader} 内部调用），本类只负责渲染与刷新节奏。
  *
- * <p>线程纪律、刷新节奏、无变化跳过、软键盘接管、自动跟随：见 {@code app/逻辑说明.md} §8.3。
+ * <p>线程纪律、刷新节奏、无变化跳过、自动跟随：见 {@code app/逻辑说明.md} §8.3。
+ * 键盘"只覆盖、不顶起"与聚焦兜底由 {@link EdgeToEdge} 全 app 统一负责，本页不再自行接管窗口设置。
  */
 public class LogFragment extends Fragment implements PageAware {
 
@@ -72,8 +70,6 @@ public class LogFragment extends Fragment implements PageAware {
     private String lastKeyword;
     /** 上次自动跟随滚到的行数；相同且已在底部就不再滚，避免反复唤醒滚动条。 */
     private int lastFollowCount = -1;
-    /** 接管前的窗口 softInputMode；null 表示未接管。 */
-    private Integer savedSoftInputMode;
 
     private final Runnable tick = new Runnable() {
         @Override
@@ -170,35 +166,29 @@ public class LogFragment extends Fragment implements PageAware {
         super.onResume();
         if (pageVisible) {
             startRefresh();
-            pinImeOverlap();
         }
     }
 
     @Override
     public void onPause() {
         stopRefresh();
-        restoreImeMode();
         super.onPause();
     }
 
     @Override
     public void onPageVisible(boolean visible) {
         pageVisible = visible;
-        // 非当前页只是被压到 STARTED（不派发 onPause），不在这里停就一直后台刷；
-        // 同理软键盘设置是 Activity 级的，离开本页必须还回去
+        // 非当前页只是被压到 STARTED（不派发 onPause），不在这里停就一直后台刷
         if (visible) {
             startRefresh();
-            pinImeOverlap();
         } else {
             stopRefresh();
-            restoreImeMode();
         }
     }
 
     @Override
     public void onDestroyView() {
         stopRefresh();
-        restoreImeMode();
         mainHandler.removeCallbacksAndMessages(null);
         listView = null;
         adapter = null;
@@ -229,39 +219,6 @@ public class LogFragment extends Fragment implements PageAware {
     private void stopRefresh() {
         refreshing = false;
         mainHandler.removeCallbacks(tick);
-    }
-
-    // ==================== 软键盘：只覆盖、不顶起 ====================
-
-    /**
-     * 接管窗口 softInputMode：键盘弹出时窗口不重排（日志窗口保持原高度，被键盘盖住即可）。
-     * 幂等：已接管时无副作用。窗口设置是 Activity 级的，所以必须与 {@link #restoreImeMode()} 成对。
-     */
-    private void pinImeOverlap() {
-        if (savedSoftInputMode != null) {
-            return;
-        }
-        Activity activity = getActivity();
-        Window window = activity == null ? null : activity.getWindow();
-        if (window == null) {
-            return;
-        }
-        savedSoftInputMode = window.getAttributes().softInputMode;
-        window.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_NOTHING
-                | WindowManager.LayoutParams.SOFT_INPUT_STATE_UNCHANGED);
-    }
-
-    /** 幂等：未接管时无副作用，还原后其他页面（配置页输入框）恢复原来的键盘行为。 */
-    private void restoreImeMode() {
-        if (savedSoftInputMode == null) {
-            return;
-        }
-        Activity activity = getActivity();
-        Window window = activity == null ? null : activity.getWindow();
-        if (window != null) {
-            window.setSoftInputMode(savedSoftInputMode);
-        }
-        savedSoftInputMode = null;
     }
 
     /** 起一次后台读取（已有读取在跑就跳过，靠 2 秒定时补上）。 */

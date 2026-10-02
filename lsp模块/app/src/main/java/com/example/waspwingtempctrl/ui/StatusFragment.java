@@ -591,14 +591,14 @@ public class StatusFragment extends Fragment implements PageAware {
 
     private void setLogExpanded(boolean value) {
         logExpanded = value;
+        if (value) {
+            // 展开时先重算一次（本会话首条记录落盘后份数会变）：正文定下来再量高动画，终点才是最终实高
+            refreshArchiveHint();
+        }
         if (logBody != null) {
             // 切的是正文容器（自适应高、无内部滚动）；展开/收起按逻辑 2 做高度补间
-            // （系统关动画或尚未布局时由 Motion 直接落位）
+            // （系统关动画或宽度不可知时由 Motion 直接落位）
             Motion.animateHeight(logBody, value);
-        }
-        if (value) {
-            // 展开时重算一次：本会话首条记录落盘后份数会变
-            refreshArchiveHint();
         }
         if (arrowView != null) {
             // 200ms ease-out 转过去（系统关动画时由 Motion 直落）；无障碍描述即时切换，不等动画

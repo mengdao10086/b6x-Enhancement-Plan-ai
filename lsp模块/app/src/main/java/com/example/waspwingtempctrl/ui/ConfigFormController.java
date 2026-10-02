@@ -478,6 +478,9 @@ final class ConfigFormController implements ConfigKeyRow.Host, ConfigWriteQueue.
         container.addView(binder.card());
         StartupTiming.accEnd(StartupTiming.FORM_SUB_ATTACH, startedAt);
         groups.add(binder);
+        // 默认展开（设置页）这一句发生在容器仍 GONE 时（revealBuiltForm() 排在 buildRowsPhase() 之后才露），
+        // 故 Motion 量不到宽 → 直接落位、不播入场动画。若哪天把容器提前置可见（或改成 INVISIBLE，它会被
+        // 排版），此处就会带着"键行尚未建满"的矮高进动画、行一建起来即跳——届时须同时保证键行已建满。
         binder.setExpanded(page.expandsByDefault());
     }
 
