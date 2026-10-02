@@ -15,7 +15,7 @@
     "fields[].cVar 指向 tempctrl.c 内的 C 变量名，供 gen_params.py --audit 自动核对默认值与 clamp 范围；null 表示该字段无需核对或无法自动核对。",
     "禁止手改 gen_params.py 的任何产物（app/src/main/assets/params.json、lsp模块/daemon/profile.conf、params_generated.h、逻辑说明.md 的参数表段）—— 手改会被 check_params.py 判红。",
     "【内部溯源，不进产物】本文件是唯一允许写内部来源的地方；desc / unitNote / defaultNote / factoryNote / rangeNote 等**会进产物**的字段只写用户可读的事实，禁止出现源文件名、宏名、C 符号名或历史沿革（产物是界面直接渲染的文本，用户读不到仓库）。",
-    "【内部溯源】WebUI 组 7 键（UI_*）中除 UI_BACK_HIDE 外只有界面读取；范围与语义无 C 端依据，须人工在 逻辑说明.md 的「曲线」/「状态页」两节核对。",
+    "【内部溯源】WebUI 组 8 键（UI_*）中除 UI_BACK_HIDE 外只有界面读取；范围与语义无 C 端依据，须人工在 逻辑说明.md 的「曲线」/「状态页」两节核对。",
     "【内部溯源】chart 段：档位上限 720 = tempctrl.c 的 WEBUI_DATA_MAX_LINES（crossChecks 自动核对）；默认档位 360 为界面默认值，须落在档位表内。",
     "【内部溯源】PERF_ENABLED 的 factory=0 沿用合并前 profile.conf 的出厂值，非代码默认（代码默认见 default=1）。",
     "【字段用途】docOrder/docDesc 决定 逻辑说明.md 参数表（docOrder = 表序，docDesc = 说明列，按功能重排）。",
@@ -1333,6 +1333,29 @@
       ]
     },
     {
+      "key": "UI_ANIM_SPEED",
+      "group": "webui",
+      "role": "setting",
+      "type": "int",
+      "label": "动画速度",
+      "desc": "动画速度倍率（值 ×100：50 = 0.5×，时长加倍；100 = 1× 不变；200 = 2×，时长减半）。独立于系统「动画时长缩放」再乘一层：系统缩放为 0 时本项无效果",
+      "docOrder": 53,
+      "docDesc": "动画速度倍率（×100，50~200，默认 100=1.0×）：50 = 0.5×（时长加倍），100 = 1×，200 = 2×（时长减半）。**速度是倍率**，独立于系统「动画时长缩放」再乘一层，系统缩放为 0 时本项无效果。**仅界面读取，守护进程忽略**",
+      "confNote": [
+        "动画速度倍率（×100，50~200，默认 100=1.0×）：50=0.5× 时长加倍，200=2× 时长减半",
+        "  独立于系统「动画时长缩放」再乘一层；系统缩放为 0 时本项无效果"
+      ],
+      "unit": "×100（存储值 100 = 1.0×）",
+      "unitNote": "独立于系统「动画时长缩放」再乘一层，系统缩放为 0 时本项无效果",
+      "default": 100,
+      "factory": 100,
+      "min": 50,
+      "max": 200,
+      "requires": [],
+      "daemonConsumes": false,
+      "fields": null
+    },
+    {
       "key": "UI_RPM_AXIS_MIN",
       "group": "webui",
       "role": "setting",
@@ -1598,6 +1621,7 @@
       "APP_LAUNCH_SCREEN_GATE": ["app_launch_screen_gate_enabled", "app_launch_screen_dozing_on"],
       "APP_WATCHDOG": ["app_watchdog_cycles"],
       "UI_GAP_SEC": [],
+      "UI_ANIM_SPEED": [],
       "UI_RPM_AXIS_MIN": [],
       "UI_CURVE_FILTER": [],
       "UI_BACK_HIDE": ["back_hide_enabled"],

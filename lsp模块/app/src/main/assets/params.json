@@ -95,6 +95,7 @@
       "master": null,
       "keys": [
         "UI_GAP_SEC",
+        "UI_ANIM_SPEED",
         "UI_RPM_AXIS_MIN",
         "UI_CURVE_FILTER",
         "UI_BACK_HIDE",
@@ -1600,6 +1601,23 @@
           "default": 15
         }
       ]
+    },
+    "UI_ANIM_SPEED": {
+      "key": "UI_ANIM_SPEED",
+      "group": "webui",
+      "role": "setting",
+      "type": "int",
+      "label": "动画速度",
+      "desc": "动画速度倍率（值 ×100：50 = 0.5×，时长加倍；100 = 1× 不变；200 = 2×，时长减半）。独立于系统「动画时长缩放」再乘一层：系统缩放为 0 时本项无效果",
+      "unit": "×100（存储值 100 = 1.0×）",
+      "unitNote": "独立于系统「动画时长缩放」再乘一层，系统缩放为 0 时本项无效果",
+      "default": 100,
+      "factory": 100,
+      "min": 50,
+      "max": 200,
+      "requires": [],
+      "daemonConsumes": false,
+      "fields": null
     },
     "UI_RPM_AXIS_MIN": {
       "key": "UI_RPM_AXIS_MIN",

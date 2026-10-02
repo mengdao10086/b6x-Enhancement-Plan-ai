@@ -203,10 +203,11 @@ final class ConfigGroupBinder {
      */
     void setExpanded(boolean value) {
         expanded = value;
-        body.setVisibility(value ? View.VISIBLE : View.GONE);
+        // 展开/收起按逻辑 2 做高度补间（系统关动画或尚未布局时由 Motion 直接落位）
+        Motion.animateHeight(body, value);
         divider.setVisibility(value ? View.VISIBLE : View.GONE);
-        // 一副图标两种状态：图标本身指向右，展开时顺时针转 90° 指向下
-        arrowView.setRotation(value ? ARROW_EXPANDED_ROTATION : 0f);
+        // 一副图标两种状态：图标本身指向右，展开时顺时针转 90° 指向下；走统一动效口径
+        Motion.rotate(arrowView, value ? ARROW_EXPANDED_ROTATION : 0f);
         arrowView.setContentDescription(card.getContext().getString(
                 value ? R.string.config_action_collapse : R.string.config_action_expand));
     }

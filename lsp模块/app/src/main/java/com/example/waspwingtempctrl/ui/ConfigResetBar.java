@@ -113,13 +113,17 @@ final class ConfigResetBar {
     /** 确认后才动手：重置不可撤销，且会连带把该组的组头总开关一起改掉。 */
     private void confirm(GroupMeta group, String label) {
         Context context = card.getContext();
-        new AlertDialog.Builder(context)
+        // 点弹窗外部即取消（AppCompat AlertDialog 默认不随点外触摸取消，须显式设置）；
+        // 取消 = 什么都不做，重置只在肯定按钮里发生
+        AlertDialog dialog = new AlertDialog.Builder(context)
                 .setTitle(context.getString(R.string.config_reset_dialog_title, label))
                 .setMessage(R.string.config_reset_dialog_message)
                 .setPositiveButton(R.string.config_reset_confirm,
-                        (dialog, which) -> host.onResetConfirmed(label, factoryValues(group)))
+                        (d, which) -> host.onResetConfirmed(label, factoryValues(group)))
                 .setNegativeButton(R.string.config_reset_cancel, null)
-                .show();
+                .create();
+        dialog.setCanceledOnTouchOutside(true);
+        dialog.show();
     }
 
     /**

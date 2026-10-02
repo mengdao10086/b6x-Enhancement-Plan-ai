@@ -22,6 +22,7 @@ import com.example.waspwingtempctrl.ui.ConfigFormFragment;
 import com.example.waspwingtempctrl.ui.ConfigPreInflater;
 import com.example.waspwingtempctrl.ui.EdgeToEdge;
 import com.example.waspwingtempctrl.ui.LogFragment;
+import com.example.waspwingtempctrl.ui.Motion;
 import com.example.waspwingtempctrl.ui.StatusFragment;
 import com.google.android.material.bottomnavigation.BottomNavigationView;
 
@@ -56,6 +57,8 @@ public class SetupActivity extends AppCompatActivity {
     private static final String KEY_UI_START_PAGE = "UI_START_PAGE";
     /** 「需要重新部署时先落状态页」开关（界面参数键，type=switch）：出厂 1（开）。 */
     private static final String KEY_UI_DEPLOY_ENTRY = "UI_DEPLOY_ENTRY";
+    /** 动画速度倍率（界面参数键，type=int×100，0.5×–2×）：出厂 100（=1.0×）。 */
+    private static final String KEY_UI_ANIM_SPEED = "UI_ANIM_SPEED";
 
     /** 页序号参数名（写进各页 Fragment 的 arguments，可见性广播时反查用）。 */
     static final String ARG_PAGE = "ww_page";
@@ -209,6 +212,8 @@ public class SetupActivity extends AppCompatActivity {
                 } catch (Throwable ignored) {
                     // 建不起来也无所谓：下面 warmUp 自己还会再试一次，失败照旧无副作用
                 }
+                // 界面动效速度倍率：进程一次、后台线程读界面参数后喂给 Motion（读不到退回 1.0）
+                applyMotionSpeed(app);
                 try {
                     // 降为后台优先级：主线程那次有界等待（≤50ms）优先于"把曲线缓存备好"。
                     // 设备有空闲核时两者并不冲突；争抢时让判定先跑，预热晚一点完成（最坏即退回现状）。
@@ -352,6 +357,19 @@ public class SetupActivity extends AppCompatActivity {
                 return R.id.tab_log;
             default:
                 return DEFAULT_START_TAB;
+        }
+    }
+
+    /**
+     * 读 {@link #KEY_UI_ANIM_SPEED}（int×100）并喂给 {@link Motion} 的速度倍率；键缺失/未定义（返回
+     * {@code null}）、读盘异常、非法值一律退回 1.0。倍率在进程内只于启动时读一次（改设置需重启生效）。
+     */
+    private static void applyMotionSpeed(Context context) {
+        try {
+            ConfigStore.Value value = ConfigStore.get(context).get(KEY_UI_ANIM_SPEED);
+            Motion.setSpeedMultiplier(value == null ? 1f : value.intAt(0) / 100f);
+        } catch (Throwable t) {
+            Motion.setSpeedMultiplier(1f);
         }
     }
 

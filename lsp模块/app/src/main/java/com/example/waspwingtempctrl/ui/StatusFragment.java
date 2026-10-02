@@ -17,8 +17,6 @@ import androidx.annotation.NonNull;
 import androidx.annotation.Nullable;
 import androidx.appcompat.app.AlertDialog;
 import androidx.fragment.app.Fragment;
-import androidx.transition.AutoTransition;
-import androidx.transition.TransitionManager;
 
 import com.example.waspwingtempctrl.Deployer;
 import com.example.waspwingtempctrl.PageAware;
@@ -80,6 +78,8 @@ public class StatusFragment extends Fragment implements PageAware {
     private static volatile String versionLine;
 
     private TextView statusView;
+    /** 换字交叉淡入的"旧文本"层（{@code status_text_stack} 内的装饰层，默认 GONE）。 */
+    private TextView statusOutgoingView;
     private TextView infoView;
     private TextView logView;
     /** 操作记录的正文容器（自适应高、无内部滚动，同诊断卡）；展开/收起切的是它的可见性。 */
@@ -136,6 +136,7 @@ public class StatusFragment extends Fragment implements PageAware {
     public void onViewCreated(@NonNull View view, @Nullable Bundle savedInstanceState) {
         super.onViewCreated(view, savedInstanceState);
         statusView = view.findViewById(R.id.status_text);
+        statusOutgoingView = view.findViewById(R.id.status_text_outgoing);
         infoView = view.findViewById(R.id.info_text);
         logView = view.findViewById(R.id.action_log_text);
         logBody = view.findViewById(R.id.action_log_body);
@@ -204,6 +205,7 @@ public class StatusFragment extends Fragment implements PageAware {
         // 先收掉动画并复位透明度：回调里判空就返回，不给已销毁的视图留半透明残影
         cancelFade();
         statusView = null;
+        statusOutgoingView = null;
         infoView = null;
         logView = null;
         logBody = null;
@@ -378,12 +380,21 @@ public class StatusFragment extends Fragment implements PageAware {
         if (!isAdded()) {
             return;
         }
-        new AlertDialog.Builder(requireContext())
+        showDismissOnOutside(new AlertDialog.Builder(requireContext())
                 .setTitle(titleRes)
                 .setMessage(messageRes)
                 .setPositiveButton(confirmRes, (d, w) -> action.run())
                 .setNegativeButton(R.string.status_dialog_cancel, null)
-                .show();
+                .create());
+    }
+
+    /**
+     * 统一弹窗口径：点弹窗外部即取消（AppCompat {@code AlertDialog} 默认不随点外触摸取消，须显式设置）。
+     * 取消一律"什么都不做"——动作只挂在肯定按钮上，取消不触发任何动作。
+     */
+    private static void showDismissOnOutside(AlertDialog dialog) {
+        dialog.setCanceledOnTouchOutside(true);
+        dialog.show();
     }
 
     /** 「卸载部署」的确认入口（动作本身见 {@link #uninstall()}）。 */
@@ -473,12 +484,12 @@ public class StatusFragment extends Fragment implements PageAware {
                     appendLog(result);
                 }
                 if (asDialog || isFailure) {
-                    new AlertDialog.Builder(appContext)
+                    showDismissOnOutside(new AlertDialog.Builder(appContext)
                             .setTitle(isFailure ? R.string.status_dialog_failed
                                     : R.string.status_dialog_diag)
                             .setMessage(result)
                             .setPositiveButton(R.string.status_dialog_close, null)
-                            .show();
+                            .create());
                 } else if (manual) {
                     swapStatusTextAnimated(result);
                 } else if (!result.contentEquals(statusView.getText())) {
@@ -581,15 +592,16 @@ public class StatusFragment extends Fragment implements PageAware {
     private void setLogExpanded(boolean value) {
         logExpanded = value;
         if (logBody != null) {
-            // 切的是正文容器（自适应高、无内部滚动）；展开与否决定这块高度占不占位
-            logBody.setVisibility(value ? View.VISIBLE : View.GONE);
+            // 切的是正文容器（自适应高、无内部滚动）；展开/收起按逻辑 2 做高度补间
+            // （系统关动画或尚未布局时由 Motion 直接落位）
+            Motion.animateHeight(logBody, value);
         }
         if (value) {
             // 展开时重算一次：本会话首条记录落盘后份数会变
             refreshArchiveHint();
         }
         if (arrowView != null) {
-            // 150ms ease-out 转过去（系统关动画时由 Motion 直落）；无障碍描述即时切换，不等动画
+            // 200ms ease-out 转过去（系统关动画时由 Motion 直落）；无障碍描述即时切换，不等动画
             Motion.rotate(arrowView, value ? ARROW_EXPANDED_ROTATION : 0f);
             arrowView.setContentDescription(getString(value
                     ? R.string.config_action_collapse : R.string.config_action_expand));
@@ -610,18 +622,20 @@ public class StatusFragment extends Fragment implements PageAware {
     }
 
     /**
-     * 手动刷新的结果上屏：文本淡出 → 换文本（顺带补间高度）→ 淡入；代号保证串行、打断不丢结果，
-     * 只碰本页视图树。<b>退出比进入快</b>（100/150ms），进出均用强 ease-out；系统关掉动画时
-     * 直接上屏（不淡、不补间），结果照常呈现。见 {@code app/逻辑说明.md} §8.1。
+     * 手动刷新的结果上屏：<b>业务上屏零延迟</b>——新文本立刻写上去（不再等淡出结束），视觉上做
+     * 「旧文本淡出、新文本淡入」的交叉淡入（旧的在下、新的在上叠放，时长沿用 100/150ms，均强 ease-out）。
+     * 高度变化按逻辑 2 的时长补间（位移量由换字前预测）。代号保证串行、<b>打断不丢结果</b>（打断后
+     * 当前文本即最新结果）；系统关掉动画时直接上屏。见 {@code app/逻辑说明.md} §8.1。
      */
     private void swapStatusTextAnimated(final String text) {
         final TextView view = statusView;
+        final TextView outgoing = statusOutgoingView;
         if (view == null || !isAdded()) {
             return;
         }
-        if (!Motion.enabled(view.getContext())) {
-            // 系统关掉动画：直接换文本，信息先可读
-            view.animate().cancel();
+        if (outgoing == null || !Motion.enabled(view.getContext())) {
+            // 系统关掉动画（或叠放层缺失）：直接换文本，信息先可读
+            cancelFade();
             view.setAlpha(1f);
             view.setText(text);
             return;
@@ -629,33 +643,50 @@ public class StatusFragment extends Fragment implements PageAware {
         final int generation = ++fadeGeneration;
         final ViewGroup root = contentRoot;
         view.animate().cancel();
-        view.setAlpha(1f);
-        view.animate().alpha(0f).setDuration(FADE_OUT_MS).setInterpolator(Motion.easeOut())
+        outgoing.animate().cancel();
+        // 旧的 = 上一次换字的落点（打断时即当前可见的那段）；预测换字后的高度差用于补间时长
+        final CharSequence old = view.getText();
+        final int oldHeight = view.getHeight();
+        final int newHeight = Motion.measureTextHeight(view, text);
+        outgoing.setText(old);
+        outgoing.setAlpha(1f);
+        outgoing.setVisibility(View.VISIBLE);
+        if (newHeight > oldHeight) {
+            // 新文本更高：先开一段过渡，再把新文本写上去（卡片平滑长高）
+            Motion.beginLayoutChange(root, newHeight - oldHeight);
+        }
+        // 业务上屏：立即，不等动画
+        view.setText(text);
+        view.setAlpha(0f);
+        view.animate().alpha(1f).setDuration(FADE_IN_MS).setInterpolator(Motion.easeOut()).start();
+        outgoing.animate().alpha(0f).setDuration(FADE_OUT_MS).setInterpolator(Motion.easeOut())
                 .withEndAction(() -> {
-            if (statusView == null || !isAdded()) {
-                return;   // 视图已销毁，无处上屏（onDestroyView 已复位）
+            if (generation != fadeGeneration) {
+                return;   // 已被新一次换字 / cancelFade 接管：叠放层归它们管，这里什么都不动
             }
-            final boolean interrupted = generation != fadeGeneration;
-            if (!interrupted && root != null) {
-                // 行数变化会改状态卡高度；不补间，下面两张卡就会"跳一下"
-                TransitionManager.beginDelayedTransition(root, new AutoTransition());
+            if (statusOutgoingView == null || !isAdded()) {
+                return;   // 视图已销毁，无处收尾（onDestroyView 已复位）
             }
-            statusView.setText(text);
-            if (interrupted) {
-                statusView.setAlpha(1f);
-            } else {
-                statusView.animate().alpha(1f).setDuration(FADE_IN_MS)
-                        .setInterpolator(Motion.easeOut()).start();
+            if (newHeight < oldHeight) {
+                // 新文本更矮：旧文本退了再收（此刻新文本已不透明，收缩平滑）
+                Motion.beginLayoutChange(root, oldHeight - newHeight);
             }
+            outgoing.setVisibility(View.GONE);
+            outgoing.setAlpha(1f);
         }).start();
     }
 
-    /** 作废在跑的淡入淡出并把文本复位到不透明（离开本页 / 视图销毁时收尾）。 */
+    /** 作废在跑的淡入淡出、复位两层文本的透明度并收起叠放层（离开本页 / 视图销毁时收尾）。 */
     private void cancelFade() {
         fadeGeneration++;
         if (statusView != null) {
             statusView.animate().cancel();
             statusView.setAlpha(1f);
+        }
+        if (statusOutgoingView != null) {
+            statusOutgoingView.animate().cancel();
+            statusOutgoingView.setAlpha(1f);
+            statusOutgoingView.setVisibility(View.GONE);
         }
     }
 
@@ -686,12 +717,12 @@ public class StatusFragment extends Fragment implements PageAware {
         if (!isAdded()) {
             return;
         }
-        new AlertDialog.Builder(requireContext())
+        showDismissOnOutside(new AlertDialog.Builder(requireContext())
                 .setTitle(titleRes)
                 .setMessage(messageRes)
                 .setPositiveButton(confirmRes, (d, w) -> action.run())
                 .setNegativeButton(R.string.status_root_later, null)
-                .show();
+                .create());
     }
 
     /** 追加一条操作记录，带秒级时间戳（新的在上），并同步落盘归档（写通，杀进程不丢）。 */
@@ -748,12 +779,12 @@ public class StatusFragment extends Fragment implements PageAware {
         if (!isAdded()) {
             return;
         }
-        new AlertDialog.Builder(requireContext())
+        showDismissOnOutside(new AlertDialog.Builder(requireContext())
                 .setTitle(R.string.status_root_ok_title)
                 .setMessage(R.string.status_root_ok_message)
                 .setPositiveButton(R.string.status_action_deploy, (d, w) -> deploy())
                 .setNegativeButton(R.string.status_root_later, null)
-                .show();
+                .create());
     }
 
     /** 设备与版本：不显示本应用包名，版本按「模块版本」标注，不显示 targetSdk。 */

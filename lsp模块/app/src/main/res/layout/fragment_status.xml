@@ -43,14 +43,37 @@
                     android:text="@string/status_section_deploy"
                     android:textAppearance="@style/TextAppearance.B6XTempCtrl.SectionTitle" />
 
-                <TextView
-                    android:id="@+id/status_text"
+                <!--
+                    换字叠放层：新旧两段文本重叠放，业务上屏零延迟、视觉上旧的在下淡出新字在上淡入
+                    （交叉淡入）。外层本可省去，但叠加必须有一个 FrameLayout 承载。
+                    两段各自带 marginTop（保持与原 status_text 完全一致的排版：本层自身不加 margin，
+                    高度 = 文本高 + marginTop）；status_text 在后 = 绘制在上层。
+                    outgoing 是纯装饰层：默认 gone、不可选、不参与无障碍朗读，仅在换字那 100ms 露出。
+                -->
+                <FrameLayout
+                    android:id="@+id/status_text_stack"
                     android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:layout_marginTop="@dimen/space_s"
-                    android:text="@string/status_loading"
-                    android:textAppearance="@style/TextAppearance.B6XTempCtrl.Mono"
-                    android:textIsSelectable="true" />
+                    android:layout_height="wrap_content">
+
+                    <TextView
+                        android:id="@+id/status_text_outgoing"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="@dimen/space_s"
+                        android:alpha="0"
+                        android:importantForAccessibility="no"
+                        android:textAppearance="@style/TextAppearance.B6XTempCtrl.Mono"
+                        android:visibility="gone" />
+
+                    <TextView
+                        android:id="@+id/status_text"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="@dimen/space_s"
+                        android:text="@string/status_loading"
+                        android:textAppearance="@style/TextAppearance.B6XTempCtrl.Mono"
+                        android:textIsSelectable="true" />
+                </FrameLayout>
 
                 <!--
                     进度条常占位：从首帧起就占住这块高度（invisible 不是 gone），
