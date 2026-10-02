@@ -83,28 +83,27 @@ final class ConfigDiagnostics {
 
     void setExpanded(boolean value) {
         expanded = value;
-        // 一副图标两种状态：图标本身指向右，展开时顺时针转 90° 指向下（同分组卡头）；
-        // 200ms ease-out 转过去（系统关动画时由 Motion 直落）
-        Motion.rotate(arrowView, value ? ARROW_EXPANDED_ROTATION : 0f);
-        arrowView.setContentDescription(body.getContext().getString(
-                value ? R.string.config_action_collapse : R.string.config_action_expand));
+        // 正文先定、再量高、最后箭头用同一次返回的时长转——箭头与面板同生共灭，不另设箭头常量
+        final long duration;
         if (!value) {
-            Motion.animateHeight(body, false);
-            return;
-        }
-        // 展开那一刻才是用户看它的时候：欠账或压根没上过屏，都走"现算现上屏"（见 app 逻辑说明.md §6.5）
-        if (pendingRefresh || lastState == null) {
-            // 正文还要读盘才回来：先只放一行「读取中…」占位、动画展开到占位高（不露旧正文、不闪帧），
+            duration = Motion.animateHeight(body, false);
+        } else if (pendingRefresh || lastState == null) {
+            // 正文还要读盘才回来：先只放一行占位、动画展开到占位高（不露旧正文、不闪帧），
             // 正文上屏时再由 apply() 从当前高度续动画到最终实高——两段动画，见 app 逻辑说明.md §8.4
             stateView.setText(placeholderText());
-            Motion.animateHeight(body, true);
+            duration = Motion.animateHeight(body, true);
             flushPending();
-            return;
+        } else {
+            // 有现成正文：**先上屏、再量高**——量高发生在正文之上，展开时长与终点才是最终实高（末尾不跳）。
+            // 只读几个静态槽位，无 IO、无后台线程
+            stateView.setText(lastState + timingBlock());
+            duration = Motion.animateHeight(body, true);
         }
-        // 有现成正文：**先上屏、再量高**——量高发生在正文之上，展开时长与终点才是最终实高（末尾不跳）。
-        // 只读几个静态槽位，无 IO、无后台线程
-        stateView.setText(lastState + timingBlock());
-        Motion.animateHeight(body, true);
+        // 一副图标两种状态：图标本身指向右，展开时顺时针转 90° 指向下（同分组卡头）；
+        // 时长来自上面那一次面板计算（面板直接落位时 duration<0，箭头也直接落位）
+        Motion.rotate(arrowView, value ? ARROW_EXPANDED_ROTATION : 0f, duration);
+        arrowView.setContentDescription(body.getContext().getString(
+                value ? R.string.config_action_collapse : R.string.config_action_expand));
     }
 
     /**

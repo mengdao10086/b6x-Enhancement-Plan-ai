@@ -7,9 +7,11 @@ import android.content.Context;
 import android.os.Build;
 import android.provider.Settings;
 import android.util.TypedValue;
+import android.view.Display;
 import android.view.View;
 import android.view.ViewGroup;
 import android.view.ViewParent;
+import android.view.WindowManager;
 import android.view.animation.Interpolator;
 import android.view.animation.PathInterpolator;
 import android.widget.TextView;
@@ -20,20 +22,28 @@ import androidx.transition.TransitionManager;
 import java.util.WeakHashMap;
 
 /**
- * 界面动效的统一口径：曲线、时长模型、速度倍率与无障碍门控三件事只有这一处。
+ * 界面动效的统一口径：曲线、时长模型与无障碍门控只有这一处。
  *
- * <p><b>曲线</b>：{@link #EASE_OUT} 是 Android 对 Web 侧
- * {@code cubic-bezier(0.23, 1, 0.32, 1)} 的照抄（{@link PathInterpolator} 与 cubic-bezier 同义），
- * 进入/退出类 UI 过渡一律用它；不用平台内置曲线（太弱），也不用 ease-in。
+ * <p><b>曲线（两条，按用途分家）</b>：<b>面板高度及随之同步的展开箭头</b>（{@link #animateHeight} 的展开/收起、
+ * {@link #beginLayoutChange} 的内容驱动高度变化、{@link #rotate(View, float, long)} 的角度旋转）用
+ * {@link #EASE_IN_OUT}——对称 {@code cubic-bezier(0.39, 0.04, 0.61, 0.96)}，缓入缓出但两端不"黏"。箭头必须与
+ * 它所在面板<b>同曲线同时长</b>：只同时长不换曲线时，强 ease-out 会在四分之一处就把 90° 转完 78%，
+ * 剩下四分之三的时间箭头原地等面板。{@code StatusFragment} 状态卡的<b>交叉淡入</b>用 {@link #EASE_OUT}
+ * ——强 ease-out，照抄 Web 侧 {@code cubic-bezier(0.23, 1, 0.32, 1)}；透明度这类"瞬时状态切换"要前倾、快到位。
+ * {@link PathInterpolator} 与 cubic-bezier 同义；不用平台内置曲线（太弱）。
  *
- * <p><b>时长模型（逻辑 2：时长随位移量）</b>：不再用固定时长，而是「每 dp 位移对应固定时长」——
- * {@link #MS_PER_DP} 为基准速率，按位移算出原始时长后钳到 {@code [MIN_DISTANCE_MS, MAX_DISTANCE_MS]}
- * 防极端尺寸；这样大窗口多花一点、小窗口少花一点，观感上「展开速度」一致。箭头这类位移恒定的动画
- * 在本模型下退化为常量（{@link #DURATION_STATE_MS}），仍走同一套钳制与倍率。
+ * <p><b>时长模型（逻辑 2：起步时间 + 按位移递增，两个参数可调）</b>：
+ * {@code 时长 = (位移(dp) ÷ 速率 + 起步ms) ÷ 2}。<b>公式来历</b>：把「纯按位移递增」与「固定起步」
+ * 取平均——{@code (位移(dp) ÷ 3.2 + 240) / 2}，兼顾短窗口（纯递增下 30dp 只有约 9ms，一闪而过）与
+ * 长窗口。两个参数由界面参数喂入（见 {@link #setAnimTuning(float, long)}，默认 3.2 dp/ms / 240ms）。
+ * <b>上界护栏 {@link #HARD_MAX_MS}</b>（600ms）默认参数下位移 > 3072dp 才咬到；另有一道<b>帧数下限</b>
+ * {@link #MIN_FRAMES}（折算见 {@link #minFramesMs(Context)}）——**默认参数下最小 120ms，它从不生效，
+ * 保留作安全网**。箭头这类位移恒定的动画<b>不套用本公式</b>：其时长直接取自同一次
+ * {@link #animateHeight} 的返回值（见 {@link #rotate(View, float, long)}）。
  *
- * <p><b>速度倍率</b>：{@link #setSpeedMultiplier(float)} 叠一层用户可调的速度倍率（2× = 时长减半，
- * 0.5× = 时长加倍），与平台上自动施加的系统动画缩放相互独立（本类是额外那一层，倍率层之后再做一次
- * 硬钳制 {@code [HARD_MIN_MS, HARD_MAX_MS]} 兜底）。倍率由 app 启动路径读界面参数后喂入，非法值退回 1.0。
+ * <p><b>与系统动画缩放的关系</b>：上述时长与平台上自动施加的系统动画缩放相互独立（本类是额外那一层，
+ * 之后再压一道上限 {@link #HARD_MAX_MS} 与一道 {@link #MIN_FRAMES} 帧下限兜底）；参数由 app 启动路径
+ * 读界面参数后喂入，非法值分别退回各自的默认值。
  *
  * <p><b>无障碍</b>：系统「动画时长缩放」关掉时，{@link #enabled(Context)} 为假，调用方须降级为
  * 瞬间完成——这是 Web 侧 {@code prefers-reduced-motion} 在本平台的对应物：动效更少更温和，
@@ -44,27 +54,54 @@ import java.util.WeakHashMap;
  */
 public final class Motion {
 
-    /** 逻辑 2 的基准速率：每 dp 位移对应的时长（毫秒）。 */
-    private static final float MS_PER_DP = 1.5f;
+    /**
+     * 时长公式 {@code 时长 = (位移(dp) ÷ 速率 + 起步ms) ÷ 2} 的两个参数默认值（速率单位 dp/ms）。
+     * 由界面参数 {@code UI_ANIM_TUNING}（值形如 {@code 32 240}）喂入——速率 {@code 32 ÷ 10 = 3.2}
+     * dp/ms、起步 {@code 240} ms。<b>公式来历</b>：把「纯按位移递增」与「固定起步」取平均——
+     * {@code (位移(dp) ÷ 3.2 + 240) / 2}。
+     */
+    private static final float DEFAULT_RATE_DP_PER_MS = 3.2f;
+    private static final long DEFAULT_START_MS = 240L;
 
-    /** 位移类时长的下限：位移再小也不快于此（防"一闪而过"）。 */
-    private static final long MIN_DISTANCE_MS = 120L;
+    /** 速率（dp/ms）：界面参数 {@code UI_ANIM_TUNING} 第 1 值 ÷ 10；非法值退回 {@link #DEFAULT_RATE_DP_PER_MS}。 */
+    private static volatile float rateDpPerMs = DEFAULT_RATE_DP_PER_MS;
 
-    /** 位移类时长的上限：位移再大也不慢于此（落在 UI 动效 300ms 预算内，防极端尺寸拖沓）。 */
-    private static final long MAX_DISTANCE_MS = 300L;
+    /** 起步时间（毫秒）：界面参数 {@code UI_ANIM_TUNING} 第 2 值；非法值退回 {@link #DEFAULT_START_MS}。 */
+    private static volatile long startMs = DEFAULT_START_MS;
 
-    /** 倍率层之后的硬钳制：任何倍率下都不越出，作为最终兜底。 */
-    private static final long HARD_MIN_MS = 60L;
+    /**
+     * 时长<b>上限</b>护栏（毫秒）：只有算出的时长超过它才咬到——默认参数下位移 > 3072dp 才够得着
+     * （{@code (3072 ÷ 3.2 + 240) ÷ 2 = 600}），现实里只有「操作记录」拉满那种超长体。保留的理由：
+     * 超长体若仍按位移线性放大，动画会长到拖沓；这一道只做"防极端"，不参与日常观感。
+     */
     private static final long HARD_MAX_MS = 600L;
 
-    /** 位移恒定类（展开箭头 0↔90°）的基准时长：200ms（比原先的 150ms 慢三分之一）。 */
-    private static final long DURATION_STATE_MS = 200L;
+    /**
+     * 动画时长的<b>帧数下限</b>：再短的位移也至少走这么多帧，避免"不足一帧 = 直接到位"。
+     * 折算见 {@link #minFramesMs(Context)}——帧长按设备实际刷新率取（不是写死 16.7ms）。
+     */
+    private static final int MIN_FRAMES = 2;
 
-    /** 强 ease-out，照抄 cubic-bezier(0.23, 1, 0.32, 1)；先建一次复用。 */
+    /** 取不到刷新率时的缺省（Hz）：按 60Hz 折算下限，绝不因此抛异常。 */
+    private static final float FALLBACK_REFRESH_HZ = 60f;
+
+    /**
+     * 强 ease-out，照抄 cubic-bezier(0.23, 1, 0.32, 1)；先建一次复用。用于<b>状态卡交叉淡入</b>
+     * （由 {@link #easeOut()} 供 {@code StatusFragment} 的透明度补间）——这类"瞬时状态切换"要前倾、快到位。
+     * <b>箭头旋转不走这条</b>：箭头与面板同步，必须同用 {@link #EASE_IN_OUT}（见类注释）。
+     */
     private static final Interpolator EASE_OUT = new PathInterpolator(0.23f, 1f, 0.32f, 1f);
 
-    /** 速度倍率（叠在平台上自动施加的系统缩放之外）。启动时由 app 读界面参数喂入；默认 1.0。 */
-    private static volatile float speedMultiplier = 1f;
+    /**
+     * 对称缓入缓出，cubic-bezier(0.39, 0.04, 0.61, 0.96)；先建一次复用。用于<b>面板高度类</b>补间
+     * （{@link #animateHeight(View, boolean)} 与 {@link #beginLayoutChange(ViewGroup, float)} 里的尺寸变化）
+     * 与<b>展开箭头旋转</b>（{@link #rotate(View, float, long)}）——大位移用强 ease-out 会前倾过猛
+     * （25% 时间走完约 78% 位移）。控制点按两个"时间/高度"锚点定：t=0.10→y≈0.030、t=0.25→y≈0.150；
+     * 比 (0.65, 0, 0.35, 1) 两端不"黏"（同点位从 0.9%/7.1% 提到 3.0%/15.0%），展开/收起更像"推开门"
+     * 而不是"弹一下"。箭头与所在面板<b>同曲线同时长</b>才锁得死，故箭头也用这条；
+     * 状态卡交叉淡入仍用 {@link #EASE_OUT}。
+     */
+    private static final Interpolator EASE_IN_OUT = new PathInterpolator(0.39f, 0.04f, 0.61f, 0.96f);
 
     /** 正在跑的折叠体高度补间，按 content 视图记账：下一次调用据此先取消（打断即换向，不排队）。 */
     private static final WeakHashMap<View, ValueAnimator> HEIGHT_ANIMS = new WeakHashMap<>();
@@ -73,14 +110,20 @@ public final class Motion {
     }
 
     /**
-     * 设置速度倍率（叠在系统动画缩放之外的额外一层）：2× = 时长减半，0.5× = 时长加倍。
-     * <b>{@code ≤0} 或 {@code NaN} 一律退回 1.0</b>（冻结接口，另一个包依赖此签名）。
+     * 设置时长公式的两个参数：{@code 时长 = (位移(dp) ÷ 速率 + 起步ms) ÷ 2}。
+     * <b>非法值分别退回各自的默认值</b>（{@code ≤0/NaN} 的速率 → {@link #DEFAULT_RATE_DP_PER_MS}；
+     * 负数的起步 → {@link #DEFAULT_START_MS}）。启动时由 app 读界面参数 {@code UI_ANIM_TUNING} 喂入。
+     *
+     * @param rateDpPerMs 速率（dp/ms，{@code UI_ANIM_TUNING} 第 1 值 ÷ 10）
+     * @param startMs 起步时间（毫秒，{@code UI_ANIM_TUNING} 第 2 值）
      */
-    public static void setSpeedMultiplier(float speed) {
-        speedMultiplier = (speed > 0f && !Float.isNaN(speed)) ? speed : 1f;
+    public static void setAnimTuning(float rateDpPerMs, long startMs) {
+        Motion.rateDpPerMs = (rateDpPerMs > 0f && !Float.isNaN(rateDpPerMs))
+                ? rateDpPerMs : DEFAULT_RATE_DP_PER_MS;
+        Motion.startMs = startMs >= 0L ? startMs : DEFAULT_START_MS;
     }
 
-    /** 进入/退出类 UI 过渡的曲线（强 ease-out）。 */
+    /** 状态卡交叉淡入的透明度曲线（强 ease-out）；箭头旋转不走这条（它用 {@link #EASE_IN_OUT}）。 */
     static Interpolator easeOut() {
         return EASE_OUT;
     }
@@ -108,7 +151,8 @@ public final class Motion {
     }
 
     /**
-     * 位移量（像素）对应的时长：px → dp × {@link #MS_PER_DP} → 钳 {@code [MIN,MAX]} → ÷ 倍率 → 硬钳。
+     * 位移量（像素）对应的时长：{@code round((位移dp ÷ 速率 + 起步ms) ÷ 2)} → 上限
+     * {@link #HARD_MAX_MS} → 帧数下限 {@link #MIN_FRAMES}。
      */
     static long durationForPixels(Context context, float pixels) {
         float density = 1f;
@@ -118,44 +162,69 @@ public final class Motion {
                 density = 1f;
             }
         }
-        long base = clamp(Math.round(pixels / density * MS_PER_DP), MIN_DISTANCE_MS, MAX_DISTANCE_MS);
-        return scaled(base);
+        double dp = pixels / density;
+        long base = Math.round((dp / rateDpPerMs + startMs) / 2.0);
+        return clampDuration(base, context);
     }
 
-    /** 位移恒定类（箭头）的时长：常量过同一套钳制与倍率。 */
-    static long durationForState() {
-        return scaled(clamp(DURATION_STATE_MS, MIN_DISTANCE_MS, MAX_DISTANCE_MS));
-    }
-
-    /** 先钳位移区间、再除倍率、最后硬钳：三段只有这一处。 */
-    private static long scaled(long base) {
-        float speed = speedMultiplier;
-        if (speed <= 0f || Float.isNaN(speed)) {
-            speed = 1f;
-        }
-        return clamp(Math.round(base / speed), HARD_MIN_MS, HARD_MAX_MS);
-    }
-
-    private static long clamp(long value, long min, long max) {
-        return Math.max(min, Math.min(max, value));
+    /** 只此一处：压上限 {@link #HARD_MAX_MS}，再压 {@link #MIN_FRAMES} 帧下限（默认参数下后者从不咬到）。 */
+    private static long clampDuration(long ms, Context context) {
+        return Math.max(Math.min(ms, HARD_MAX_MS), minFramesMs(context));
     }
 
     /**
-     * 把视图转到给定角度：系统允许动效时平滑转过去（可被下一次调用打断并从当前位置接着转）；
-     * 关掉动效时直接落位。箭头位移恒定，时长走 {@link #durationForState()}。
+     * {@link #MIN_FRAMES} 帧对应的毫秒数：{@code round(MIN_FRAMES × 1000 / 刷新率)}。
+     * 刷新率取设备实际值（API 30+ 走 {@link Context#getDisplay()}，更低版本走
+     * {@link WindowManager#getDefaultDisplay()}）；<b>取不到或值异常（≤0）退回 60Hz</b>，任何异常都吞掉。
      */
-    static void rotate(View view, float degrees) {
+    private static long minFramesMs(Context context) {
+        float hz = FALLBACK_REFRESH_HZ;
+        if (context != null) {
+            try {
+                Display display = null;
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                    display = context.getDisplay();
+                } else {
+                    Object service = context.getSystemService(Context.WINDOW_SERVICE);
+                    if (service instanceof WindowManager) {
+                        display = ((WindowManager) service).getDefaultDisplay();
+                    }
+                }
+                if (display != null) {
+                    float rate = display.getRefreshRate();
+                    if (rate > 0f && !Float.isNaN(rate)) {
+                        hz = rate;
+                    }
+                }
+            } catch (Throwable t) {
+                hz = FALLBACK_REFRESH_HZ;
+            }
+        }
+        return Math.round(MIN_FRAMES * 1000f / hz);
+    }
+
+    /**
+     * 把视图转到给定角度，时长由调用方给出（<b>不另设常量</b>）：三个展开箭头都用同一次
+     * {@link #animateHeight} 的返回值驱动，与所在面板同生共灭——面板走动画就是同一时长，
+     * 面板直接落位（系统关动效 / {@code from == to}，此时 {@code durationMs < 0}）箭头也直接落位。
+     * 系统关动效、时长非法（{@code ≤0}）或已在目标角时直接落位。曲线用 {@link #EASE_IN_OUT}——与面板那条
+     * 相同，故任一时刻的角度进度与面板的高度进度<b>逐点相等</b>（换用强 ease-out 会让箭头在四分之一处
+     * 就转完 78%、剩下时间原地等面板）。
+     *
+     * @param durationMs 与所在面板同一次的动画时长（毫秒）；{@code <0} = 该面板本次未走动画
+     */
+    static void rotate(View view, float degrees, long durationMs) {
         if (view == null) {
             return;
         }
         view.animate().cancel();
-        if (!enabled(view.getContext()) || view.getRotation() == degrees) {
+        if (!enabled(view.getContext()) || durationMs <= 0L || view.getRotation() == degrees) {
             view.setRotation(degrees);
             return;
         }
         view.animate().rotation(degrees)
-                .setDuration(durationForState())
-                .setInterpolator(EASE_OUT)
+                .setDuration(durationMs)
+                .setInterpolator(EASE_IN_OUT)
                 .start();
     }
 
@@ -170,10 +239,12 @@ public final class Motion {
      * 系统关掉动效、或展开时宽度不可知（父容器尚未排版，只能退回屏幕宽）时直接落位。
      *
      * @param expand true = 展开（量出内容高并从当前高度长过去）；false = 收起（收到 0 再置 {@code GONE}）
+     * @return 本次动画的时长（毫秒）；<b>本次直接落位（未走动画）时返回 {@code -1}</b>——调用方据此驱动
+     *         同一次交互里的箭头，做到"面板动画＝箭头动画、面板落位＝箭头落位"
      */
-    static void animateHeight(View content, boolean expand) {
+    static long animateHeight(View content, boolean expand) {
         if (content == null) {
-            return;
+            return -1L;
         }
         final ValueAnimator running = HEIGHT_ANIMS.remove(content);
         if (running != null) {
@@ -183,7 +254,7 @@ public final class Motion {
         final ViewGroup.LayoutParams lp = content.getLayoutParams();
         if (lp == null) {
             content.setVisibility(expand ? View.VISIBLE : View.GONE);
-            return;
+            return -1L;
         }
         // 起点取"当前真实高"：可见时优先用动画中的 lp.height（打断时的中间值），否则用已布局高度
         int from = content.getVisibility() == View.VISIBLE
@@ -207,11 +278,12 @@ public final class Motion {
             lp.height = ViewGroup.LayoutParams.WRAP_CONTENT;
             content.setVisibility(expand ? View.VISIBLE : View.GONE);
             content.requestLayout();
-            return;
+            return -1L;   // 本次未走动画
         }
         final ValueAnimator anim = ValueAnimator.ofInt(from, to);
-        anim.setDuration(durationForPixels(content.getContext(), Math.abs(to - from)));
-        anim.setInterpolator(EASE_OUT);
+        final long duration = durationForPixels(content.getContext(), Math.abs(to - from));
+        anim.setDuration(duration);
+        anim.setInterpolator(EASE_IN_OUT);
         anim.addUpdateListener(a -> {
             lp.height = (int) (Integer) a.getAnimatedValue();
             content.requestLayout();
@@ -233,6 +305,7 @@ public final class Motion {
         HEIGHT_ANIMS.put(content, anim);
         lp.height = from;
         anim.start();
+        return duration;
     }
 
     /**
@@ -353,7 +426,7 @@ public final class Motion {
         }
         AutoTransition transition = new AutoTransition();
         transition.setDuration(durationForPixels(root.getContext(), Math.abs(deltaPx)));
-        transition.setInterpolator(EASE_OUT);
+        transition.setInterpolator(EASE_IN_OUT);
         TransitionManager.beginDelayedTransition(root, transition);
     }
 

@@ -595,14 +595,12 @@ public class StatusFragment extends Fragment implements PageAware {
             // 展开时先重算一次（本会话首条记录落盘后份数会变）：正文定下来再量高动画，终点才是最终实高
             refreshArchiveHint();
         }
-        if (logBody != null) {
-            // 切的是正文容器（自适应高、无内部滚动）；展开/收起按逻辑 2 做高度补间
-            // （系统关动画或宽度不可知时由 Motion 直接落位）
-            Motion.animateHeight(logBody, value);
-        }
+        // 切的是正文容器（自适应高、无内部滚动）；展开/收起按逻辑 2 做高度补间
+        // （系统关动画或宽度不可知时由 Motion 直接落位）；箭头用同一次返回的时长，两者同生共灭
+        final long duration = logBody != null ? Motion.animateHeight(logBody, value) : -1L;
         if (arrowView != null) {
-            // 200ms ease-out 转过去（系统关动画时由 Motion 直落）；无障碍描述即时切换，不等动画
-            Motion.rotate(arrowView, value ? ARROW_EXPANDED_ROTATION : 0f);
+            // 时长来自上面那一次面板计算（面板直接落位时 duration<0，箭头也直接落位）
+            Motion.rotate(arrowView, value ? ARROW_EXPANDED_ROTATION : 0f, duration);
             arrowView.setContentDescription(getString(value
                     ? R.string.config_action_collapse : R.string.config_action_expand));
         }
