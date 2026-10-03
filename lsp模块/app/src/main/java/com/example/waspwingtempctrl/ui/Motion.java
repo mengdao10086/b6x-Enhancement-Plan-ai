@@ -26,16 +26,18 @@ import java.util.WeakHashMap;
  *
  * <p><b>曲线（两条，按用途分家）</b>：<b>面板高度及随之同步的展开箭头</b>（{@link #animateHeight} 的展开/收起、
  * {@link #beginLayoutChange} 的内容驱动高度变化、{@link #rotate(View, float, long)} 的角度旋转）用
- * {@link #EASE_IN_OUT}——对称 {@code cubic-bezier(0.39, 0.04, 0.61, 0.96)}，缓入缓出但两端不"黏"。箭头必须与
+ * {@link SlowEndsCurve}——{@code y = t − (强度/2π)·sin(2πt)}，两端慢、中段稳，强度由界面参数喂入
+ * （见 {@link #setAnimTuning(float, long, float)}）。箭头必须与
  * 它所在面板<b>同曲线同时长</b>：只同时长不换曲线时，强 ease-out 会在四分之一处就把 90° 转完 78%，
  * 剩下四分之三的时间箭头原地等面板。{@code StatusFragment} 状态卡的<b>交叉淡入</b>用 {@link #EASE_OUT}
  * ——强 ease-out，照抄 Web 侧 {@code cubic-bezier(0.23, 1, 0.32, 1)}；透明度这类"瞬时状态切换"要前倾、快到位。
- * {@link PathInterpolator} 与 cubic-bezier 同义；不用平台内置曲线（太弱）。
+ * 不用平台内置曲线（太弱）。
  *
- * <p><b>时长模型（逻辑 2：起步时间 + 按位移递增，两个参数可调）</b>：
+ * <p><b>时长模型（逻辑 2：起步时间 + 按位移递增，两个值可调）</b>：
  * {@code 时长 = (位移(dp) ÷ 速率 + 起步ms) ÷ 2}。<b>公式来历</b>：把「纯按位移递增」与「固定起步」
  * 取平均——{@code (位移(dp) ÷ 3.2 + 240) / 2}，兼顾短窗口（纯递增下 30dp 只有约 9ms，一闪而过）与
- * 长窗口。两个参数由界面参数喂入（见 {@link #setAnimTuning(float, long)}，默认 3.2 dp/ms / 240ms）。
+ * 长窗口。时长与曲线都由界面参数喂入（见 {@link #setAnimTuning(float, long, float)}，默认
+ * 3.2 dp/ms · 240ms · 强度 0.63）。
  * <b>上界护栏 {@link #HARD_MAX_MS}</b>（600ms）默认参数下位移 > 3072dp 才咬到；另有一道<b>帧数下限</b>
  * {@link #MIN_FRAMES}（折算见 {@link #minFramesMs(Context)}）——**默认参数下最小 120ms，它从不生效，
  * 保留作安全网**。箭头这类位移恒定的动画<b>不套用本公式</b>：其时长直接取自同一次
@@ -55,19 +57,26 @@ import java.util.WeakHashMap;
 public final class Motion {
 
     /**
-     * 时长公式 {@code 时长 = (位移(dp) ÷ 速率 + 起步ms) ÷ 2} 的两个参数默认值（速率单位 dp/ms）。
-     * 由界面参数 {@code UI_ANIM_TUNING}（值形如 {@code 32 240}）喂入——速率 {@code 32 ÷ 10 = 3.2}
-     * dp/ms、起步 {@code 240} ms。<b>公式来历</b>：把「纯按位移递增」与「固定起步」取平均——
-     * {@code (位移(dp) ÷ 3.2 + 240) / 2}。
+     * 时长公式 {@code 时长 = (位移(dp) ÷ 速率 + 起步ms) ÷ 2} 的两个默认值（速率单位 dp/ms）与面板曲线的
+     * 默认强度。由界面参数 {@code UI_ANIM_TUNING}（值形如 {@code 32 240 63}）喂入——速率
+     * {@code 32 ÷ 10 = 3.2} dp/ms、起步 {@code 240} ms、强度 {@code 63 ÷ 100 = 0.63}。<b>公式来历</b>：
+     * 把「纯按位移递增」与「固定起步」取平均——{@code (位移(dp) ÷ 3.2 + 240) / 2}。
      */
     private static final float DEFAULT_RATE_DP_PER_MS = 3.2f;
     private static final long DEFAULT_START_MS = 240L;
+    private static final float DEFAULT_EASE_STRENGTH = 0.63f;
 
     /** 速率（dp/ms）：界面参数 {@code UI_ANIM_TUNING} 第 1 值 ÷ 10；非法值退回 {@link #DEFAULT_RATE_DP_PER_MS}。 */
     private static volatile float rateDpPerMs = DEFAULT_RATE_DP_PER_MS;
 
     /** 起步时间（毫秒）：界面参数 {@code UI_ANIM_TUNING} 第 2 值；非法值退回 {@link #DEFAULT_START_MS}。 */
     private static volatile long startMs = DEFAULT_START_MS;
+
+    /**
+     * 面板高度与展开箭头共用的曲线：强度取自界面参数 {@code UI_ANIM_TUNING} 第 3 值 ÷ 100
+     * （见 {@link #setAnimTuning(float, long, float)}）。只在启动时整体换新，故一次动画读到的必是完整一条。
+     */
+    private static volatile Interpolator panelCurve = new SlowEndsCurve(DEFAULT_EASE_STRENGTH);
 
     /**
      * 时长<b>上限</b>护栏（毫秒）：只有算出的时长超过它才咬到——默认参数下位移 > 3072dp 才够得着
@@ -88,20 +97,33 @@ public final class Motion {
     /**
      * 强 ease-out，照抄 cubic-bezier(0.23, 1, 0.32, 1)；先建一次复用。用于<b>状态卡交叉淡入</b>
      * （由 {@link #easeOut()} 供 {@code StatusFragment} 的透明度补间）——这类"瞬时状态切换"要前倾、快到位。
-     * <b>箭头旋转不走这条</b>：箭头与面板同步，必须同用 {@link #EASE_IN_OUT}（见类注释）。
+     * <b>箭头旋转不走这条</b>：箭头与面板同步，必须同用 {@link #panelCurve}（见类注释）。
      */
     private static final Interpolator EASE_OUT = new PathInterpolator(0.23f, 1f, 0.32f, 1f);
 
     /**
-     * 对称缓入缓出，cubic-bezier(0.39, 0.04, 0.61, 0.96)；先建一次复用。用于<b>面板高度类</b>补间
-     * （{@link #animateHeight(View, boolean)} 与 {@link #beginLayoutChange(ViewGroup, float)} 里的尺寸变化）
-     * 与<b>展开箭头旋转</b>（{@link #rotate(View, float, long)}）——大位移用强 ease-out 会前倾过猛
-     * （25% 时间走完约 78% 位移）。控制点按两个"时间/高度"锚点定：t=0.10→y≈0.030、t=0.25→y≈0.150；
-     * 比 (0.65, 0, 0.35, 1) 两端不"黏"（同点位从 0.9%/7.1% 提到 3.0%/15.0%），展开/收起更像"推开门"
-     * 而不是"弹一下"。箭头与所在面板<b>同曲线同时长</b>才锁得死，故箭头也用这条；
-     * 状态卡交叉淡入仍用 {@link #EASE_OUT}。
+     * 面板高度类与展开箭头共用的曲线形状：{@code y = t − (强度/2π)·sin(2πt)}。强度由界面参数喂入
+     * （{@link #panelCurve}），本类只管形状——<b>强度 0</b> = 匀速直线；<b>强度越大</b>两端越慢、中段越快
+     * （三点斜率 {@code 1−强度 → 1+强度 → 1−强度}，天然左右对称）。强度 ≤1 时斜率恒 ≥0，故永不回退、不越界。
+     * 默认强度 0.63 等效「时间/进度」锚点 {@code t=0.10→y≈0.041}、{@code t=0.25→y≈0.150}。
+     * 用于<b>面板高度类</b>补间（{@link #animateHeight(View, boolean)} 与
+     * {@link #beginLayoutChange(ViewGroup, float)} 里的尺寸变化）与<b>展开箭头旋转</b>
+     * （{@link #rotate(View, float, long)}）——大位移用强 ease-out 会前倾过猛（25% 时间走完约 78% 位移）。
+     * 箭头与所在面板<b>同曲线同时长</b>才锁得死，故箭头也用这条；状态卡交叉淡入仍用 {@link #EASE_OUT}。
      */
-    private static final Interpolator EASE_IN_OUT = new PathInterpolator(0.39f, 0.04f, 0.61f, 0.96f);
+    private static final class SlowEndsCurve implements Interpolator {
+
+        private final float strength;
+
+        SlowEndsCurve(float strength) {
+            this.strength = strength;
+        }
+
+        @Override
+        public float getInterpolation(float input) {
+            return (float) (input - strength / (2 * Math.PI) * Math.sin(2 * Math.PI * input));
+        }
+    }
 
     /** 正在跑的折叠体高度补间，按 content 视图记账：下一次调用据此先取消（打断即换向，不排队）。 */
     private static final WeakHashMap<View, ValueAnimator> HEIGHT_ANIMS = new WeakHashMap<>();
@@ -110,20 +132,25 @@ public final class Motion {
     }
 
     /**
-     * 设置时长公式的两个参数：{@code 时长 = (位移(dp) ÷ 速率 + 起步ms) ÷ 2}。
+     * 设置时长公式的两个值（{@code 时长 = (位移(dp) ÷ 速率 + 起步ms) ÷ 2}）与面板曲线的强度。
      * <b>非法值分别退回各自的默认值</b>（{@code ≤0/NaN} 的速率 → {@link #DEFAULT_RATE_DP_PER_MS}；
-     * 负数的起步 → {@link #DEFAULT_START_MS}）。启动时由 app 读界面参数 {@code UI_ANIM_TUNING} 喂入。
+     * 负数的起步 → {@link #DEFAULT_START_MS}；{@code NaN} 或不在 {@code [0, 1]} 的强度 →
+     * {@link #DEFAULT_EASE_STRENGTH}——<b>老配置只有两个值时走的正是这一条</b>）。启动时由 app 读界面参数
+     * {@code UI_ANIM_TUNING} 喂入。
      *
      * @param rateDpPerMs 速率（dp/ms，{@code UI_ANIM_TUNING} 第 1 值 ÷ 10）
      * @param startMs 起步时间（毫秒，{@code UI_ANIM_TUNING} 第 2 值）
+     * @param easeStrength 两端减速强度（0~1，{@code UI_ANIM_TUNING} 第 3 值 ÷ 100；0 = 匀速直线）
      */
-    public static void setAnimTuning(float rateDpPerMs, long startMs) {
+    public static void setAnimTuning(float rateDpPerMs, long startMs, float easeStrength) {
         Motion.rateDpPerMs = (rateDpPerMs > 0f && !Float.isNaN(rateDpPerMs))
                 ? rateDpPerMs : DEFAULT_RATE_DP_PER_MS;
         Motion.startMs = startMs >= 0L ? startMs : DEFAULT_START_MS;
+        Motion.panelCurve = new SlowEndsCurve(easeStrength >= 0f && easeStrength <= 1f
+                ? easeStrength : DEFAULT_EASE_STRENGTH);
     }
 
-    /** 状态卡交叉淡入的透明度曲线（强 ease-out）；箭头旋转不走这条（它用 {@link #EASE_IN_OUT}）。 */
+    /** 状态卡交叉淡入的透明度曲线（强 ease-out）；箭头旋转不走这条（它用 {@link #panelCurve} 那条）。 */
     static Interpolator easeOut() {
         return EASE_OUT;
     }
@@ -207,7 +234,7 @@ public final class Motion {
      * 把视图转到给定角度，时长由调用方给出（<b>不另设常量</b>）：三个展开箭头都用同一次
      * {@link #animateHeight} 的返回值驱动，与所在面板同生共灭——面板走动画就是同一时长，
      * 面板直接落位（系统关动效 / {@code from == to}，此时 {@code durationMs < 0}）箭头也直接落位。
-     * 系统关动效、时长非法（{@code ≤0}）或已在目标角时直接落位。曲线用 {@link #EASE_IN_OUT}——与面板那条
+     * 系统关动效、时长非法（{@code ≤0}）或已在目标角时直接落位。曲线用 {@link #panelCurve}——与面板那条
      * 相同，故任一时刻的角度进度与面板的高度进度<b>逐点相等</b>（换用强 ease-out 会让箭头在四分之一处
      * 就转完 78%、剩下时间原地等面板）。
      *
@@ -224,7 +251,7 @@ public final class Motion {
         }
         view.animate().rotation(degrees)
                 .setDuration(durationMs)
-                .setInterpolator(EASE_IN_OUT)
+                .setInterpolator(panelCurve)
                 .start();
     }
 
@@ -283,7 +310,7 @@ public final class Motion {
         final ValueAnimator anim = ValueAnimator.ofInt(from, to);
         final long duration = durationForPixels(content.getContext(), Math.abs(to - from));
         anim.setDuration(duration);
-        anim.setInterpolator(EASE_IN_OUT);
+        anim.setInterpolator(panelCurve);
         anim.addUpdateListener(a -> {
             lp.height = (int) (Integer) a.getAnimatedValue();
             content.requestLayout();
@@ -426,7 +453,7 @@ public final class Motion {
         }
         AutoTransition transition = new AutoTransition();
         transition.setDuration(durationForPixels(root.getContext(), Math.abs(deltaPx)));
-        transition.setInterpolator(EASE_IN_OUT);
+        transition.setInterpolator(panelCurve);
         TransitionManager.beginDelayedTransition(root, transition);
     }
 

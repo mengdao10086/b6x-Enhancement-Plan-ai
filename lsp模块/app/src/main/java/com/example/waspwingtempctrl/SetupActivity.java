@@ -361,24 +361,31 @@ public class SetupActivity extends AppCompatActivity {
     }
 
     /**
-     * 读 {@link #KEY_UI_ANIM_TUNING}（双值：速率 ×10 = dp/ms · 起步毫秒）并喂给 {@link Motion} 的时长公式。
-     * 键在配置文件中缺失时由 {@link ConfigStore} 补出厂默认值；值的个数不足两个、读盘异常、非法值一律
-     * **分别退回各自的默认值**（由 {@code Motion} 统一裁决）。参数在进程内只于启动时读一次（改设置需重启生效）。
+     * 读 {@link #KEY_UI_ANIM_TUNING}（三值：速率 ×10 = dp/ms · 起步毫秒 · 两端减速强度%）并喂给 {@link Motion}。
+     * 键在配置文件中缺失时由 {@link ConfigStore} 补出厂默认值；值的个数不足、读盘异常、非法值一律
+     * **分别退回各自的默认值**（由 {@code Motion} 统一裁决）。**老配置只有前两个值**（该键原为双值）时，
+     * 强度按 {@link Float#NaN} 交给 {@code Motion} 退回默认——<b>不能按 0</b>（0 = 匀速，等于把动效关掉）。
+     * 参数在进程内只于启动时读一次（改设置需重启生效）。
      */
     private static void applyMotionTuning(Context context) {
-        float rate = Float.NaN;   // 缺键/异常 → 交给 Motion 退回默认速率
-        long startMs = -1L;       // 缺键/异常 → 交给 Motion 退回默认起步
+        float rate = Float.NaN;     // 缺键/异常 → 交给 Motion 退回默认速率
+        long startMs = -1L;         // 缺键/异常 → 交给 Motion 退回默认起步
+        float strength = Float.NaN; // 缺键/异常/老配置缺第三值 → 交给 Motion 退回默认强度
         try {
             ConfigStore.Value tuning = ConfigStore.get(context).get(KEY_UI_ANIM_TUNING);
             if (tuning != null && tuning.size() >= 2) {
                 rate = tuning.intAt(0) / 10f;
                 startMs = tuning.intAt(1);
+                if (tuning.size() >= 3) {
+                    strength = tuning.intAt(2) / 100f;
+                }
             }
         } catch (Throwable t) {
             rate = Float.NaN;
             startMs = -1L;
+            strength = Float.NaN;
         }
-        Motion.setAnimTuning(rate, startMs);
+        Motion.setAnimTuning(rate, startMs, strength);
     }
 
     /**

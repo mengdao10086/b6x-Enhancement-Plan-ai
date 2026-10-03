@@ -517,12 +517,16 @@ final class ConfigKeyRow {
     /**
      * 把值写进各字段（屏蔽回调），并按新值重算一次字段宽（只在回填/提交时算，不随每次按键重排）。
      * 见 app 逻辑说明.md §6.1。
+     *
+     * <p><b>值里没有第 i 个字段时（老配置的行比字段少，如某键后来加过字段）</b>：按本键定义里的默认值
+     * 回填，<b>不是 0</b>——否则界面显示 0，用户随手保存一次就把那一项悄悄改写成 0。
      */
     private void applyFieldValues(@NonNull List<Field> fields, @NonNull Value value) {
         suppressChange = true;
         try {
             for (int i = 0; i < fields.size(); i++) {
-                fields.get(i).setValue(value.intAt(i));   // 记账在 Field.setValue（值回填槽）
+                int filled = i < value.size() ? value.intAt(i) : meta.defaultValue.intAt(i);
+                fields.get(i).setValue(filled);   // 记账在 Field.setValue（值回填槽）
             }
         } finally {
             suppressChange = false;
