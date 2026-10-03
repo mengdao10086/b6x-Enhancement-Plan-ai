@@ -37,7 +37,7 @@ import java.util.WeakHashMap;
  * {@code 时长 = (位移(dp) ÷ 速率 + 起步ms) ÷ 2}。<b>公式来历</b>：把「纯按位移递增」与「固定起步」
  * 取平均——{@code (位移(dp) ÷ 3.2 + 240) / 2}，兼顾短窗口（纯递增下 30dp 只有约 9ms，一闪而过）与
  * 长窗口。时长与曲线都由界面参数喂入（见 {@link #setAnimTuning(float, long, float)}，默认
- * 3.2 dp/ms · 240ms · 强度 0.63）。
+ * 3.2 dp/ms · 240ms · 强度 0.60）。
  * <b>上界护栏 {@link #HARD_MAX_MS}</b>（600ms）默认参数下位移 > 3072dp 才咬到；另有一道<b>帧数下限</b>
  * {@link #MIN_FRAMES}（折算见 {@link #minFramesMs(Context)}）——**默认参数下最小 120ms，它从不生效，
  * 保留作安全网**。箭头这类位移恒定的动画<b>不套用本公式</b>：其时长直接取自同一次
@@ -58,13 +58,13 @@ public final class Motion {
 
     /**
      * 时长公式 {@code 时长 = (位移(dp) ÷ 速率 + 起步ms) ÷ 2} 的两个默认值（速率单位 dp/ms）与面板曲线的
-     * 默认强度。由界面参数 {@code UI_ANIM_TUNING}（值形如 {@code 32 240 63}）喂入——速率
-     * {@code 32 ÷ 10 = 3.2} dp/ms、起步 {@code 240} ms、强度 {@code 63 ÷ 100 = 0.63}。<b>公式来历</b>：
+     * 默认强度。由界面参数 {@code UI_ANIM_TUNING}（值形如 {@code 32 240 60}）喂入——速率
+     * {@code 32 ÷ 10 = 3.2} dp/ms、起步 {@code 240} ms、强度 {@code 60 ÷ 100 = 0.60}。<b>公式来历</b>：
      * 把「纯按位移递增」与「固定起步」取平均——{@code (位移(dp) ÷ 3.2 + 240) / 2}。
      */
     private static final float DEFAULT_RATE_DP_PER_MS = 3.2f;
     private static final long DEFAULT_START_MS = 240L;
-    private static final float DEFAULT_EASE_STRENGTH = 0.63f;
+    private static final float DEFAULT_EASE_STRENGTH = 0.60f;
 
     /** 速率（dp/ms）：界面参数 {@code UI_ANIM_TUNING} 第 1 值 ÷ 10；非法值退回 {@link #DEFAULT_RATE_DP_PER_MS}。 */
     private static volatile float rateDpPerMs = DEFAULT_RATE_DP_PER_MS;
@@ -105,7 +105,7 @@ public final class Motion {
      * 面板高度类与展开箭头共用的曲线形状：{@code y = t − (强度/2π)·sin(2πt)}。强度由界面参数喂入
      * （{@link #panelCurve}），本类只管形状——<b>强度 0</b> = 匀速直线；<b>强度越大</b>两端越慢、中段越快
      * （三点斜率 {@code 1−强度 → 1+强度 → 1−强度}，天然左右对称）。强度 ≤1 时斜率恒 ≥0，故永不回退、不越界。
-     * 默认强度 0.63 等效「时间/进度」锚点 {@code t=0.10→y≈0.041}、{@code t=0.25→y≈0.150}。
+     * 默认强度 0.60 等效「时间/进度」锚点 {@code t=0.10→y≈0.044}、{@code t=0.25→y≈0.155}。
      * 用于<b>面板高度类</b>补间（{@link #animateHeight(View, boolean)} 与
      * {@link #beginLayoutChange(ViewGroup, float)} 里的尺寸变化）与<b>展开箭头旋转</b>
      * （{@link #rotate(View, float, long)}）——大位移用强 ease-out 会前倾过猛（25% 时间走完约 78% 位移）。
