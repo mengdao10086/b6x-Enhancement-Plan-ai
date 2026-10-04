@@ -130,7 +130,12 @@ public class MainHook implements IXposedHookLoadPackage {
     private static volatile int setRunModeLogCount = 0;    // "setRunMode 已下发"当前连接已记录条数（markConnected 清零）
     private static final int DIAG_CONN_LOG_MAX = 1;        // 连接诊断日志每连最多条数（connect 进/出、断联等风暴源）
     private static volatile int diagConnLogCount = 0;      // 连接诊断日志计数（markConnected 清零）
-    private static volatile boolean loggedReconnectAttempt = false; // "后台重连尝试"每断联只记一次（markConnected 清零）
+    // ========== 后台重连日志限频（方案 3；节奏为用户拍板值 5 分钟） ==========
+    // 使「零输出 ≠ 无尝试」：断连期间即使重连块跑了成百上千次，日志里也能看到周期性的尝试/心跳。
+    private static final long RECONNECT_LOG_INTERVAL_MS = 5 * 60 * 1000; // 重连类日志限频间隔（5 分钟）
+    private static volatile long lastReconnectAttemptLogAt = 0;  // 上次"后台重连尝试"日志时间（markConnected 清零）
+    private static volatile long lastReconnectHeartbeatAt = 0;   // 上次重连循环心跳日志时间（markConnected 清零）
+    private static volatile long lastConnEventLogAt = 0;         // 上次关键连接事件日志时间（markConnected 清零）
     private static volatile boolean paramMissingLogged = false;     // 参数回传缺失：状态翻转才打（进入一条/恢复一条）
     private static volatile boolean statusWriteFailLogged = false;  // 状态文件写入失败：状态翻转才打（进入一条/恢复一条）
     private static volatile boolean loggedResolveFallback = false;  // resolveWaspWingManager 兜底失败仅记一次（进程内）
@@ -186,6 +191,18 @@ public class MainHook implements IXposedHookLoadPackage {
     private static boolean diagConnLogAllowed() {
         if (diagConnLogCount >= DIAG_CONN_LOG_MAX) return false;
         diagConnLogCount++;
+        return true;
+    }
+
+    /**
+     * 关键连接事件日志门控（方案 3）：豁免 DIAG_CONN_LOG_MAX 的"每连 1 条"预算，
+     * 改为按时间限频（RECONNECT_LOG_INTERVAL_MS）。用于"真发起连接 / 连接失败"这类关键事件——
+     * 它们跨重连周期都必须可见，否则会被一次性预算吃掉、把真实进度掩盖成"零输出"。
+     */
+    private static boolean diagConnEventLogAllowed() {
+        long now = System.currentTimeMillis();
+        if (now - lastConnEventLogAt < RECONNECT_LOG_INTERVAL_MS) return false;
+        lastConnEventLogAt = now;
         return true;
     }
 
@@ -326,44 +343,11 @@ public class MainHook implements IXposedHookLoadPackage {
                     // 设备锁死（多次重连无回传）时停止自动重连，等用户强制重启 App
                     if (!bleConnected && lastDevice != null && !deviceLockedAlerted
                             && tick % reconnectIntervalTicks(tick) == 0) {
-                        try {
-                            if (appKind == 7) {
-                                // B7X 无 connectGattWith，等价入口 t9.j.E(device)（见 app/逻辑说明.md §1.2）
-                                if (appClassLoader == null) {
-                                    if (!loggedReconnectSkip) {
-                                        loggedReconnectSkip = true;
-                                        XposedBridge.log(TAG + " 后台重连跳过: appClassLoader 为 null（B7X findClass 无法进行）");
-                                    }
-                                } else {
-                                    Class<?> mgrCls7 = XposedHelpers.findClass("t9.j", appClassLoader);
-                                    XposedHelpers.callStaticMethod(mgrCls7, "E", lastDevice);
-                                    // 尝试仅记一次（每断联，markConnected 清零）
-                                    if (!loggedReconnectAttempt) {
-                                        loggedReconnectAttempt = true;
-                                        XposedBridge.log(TAG + " 后台重连尝试(b7x E) -> " + lastDevice.getAddress());
-                                    }
-                                }
-                            } else {
-                                if (appClassLoader == null) {
-                                    if (!loggedReconnectSkip) {
-                                        loggedReconnectSkip = true;
-                                        XposedBridge.log(TAG + " 后台重连跳过: appClassLoader 为 null（B6X findClass 无法进行）");
-                                    }
-                                } else {
-                                    Class<?> mgrCls = XposedHelpers.findClass(
-                                            "com.flydigi.sdk.waspwing.WaspWingManager", appClassLoader);
-                                    XposedHelpers.callStaticMethod(mgrCls, "connectGattWith", lastDevice);
-                                    // 尝试仅记一次（每断联，markConnected 清零）
-                                    if (!loggedReconnectAttempt) {
-                                        loggedReconnectAttempt = true;
-                                        XposedBridge.log(TAG + " 后台重连尝试 -> " + lastDevice.getAddress());
-                                    }
-                                }
-                            }
-                        } catch (Throwable t2) {
-                            // 重连失败静默跳过（仅"尝试"首次输出），等下一周期
-                        }
+                        tryReconnectOnce();   // 发令 + 验收 + 自愈（见 app/逻辑说明.md §1.2）
                     }
+
+                    // ═══ 重连循环心跳（方案 3）：仅断连时每 5 分钟一条，使「循环在跑」在日志上可见 ═══
+                    if (!bleConnected) logReconnectHeartbeat();
 
                     Thread.sleep(1000);
                 } catch (InterruptedException e) {
@@ -378,6 +362,130 @@ public class MainHook implements IXposedHookLoadPackage {
         });
         t.setDaemon(true);
         t.start();
+    }
+
+    /** 后台重连管理器类名：B6X=WaspWingManager，B7X 混淆=t9.j */
+    private static String reconnectMgrClassName() {
+        return (appKind == 7) ? "t9.j" : "com.flydigi.sdk.waspwing.WaspWingManager";
+    }
+
+    /** 后台重连接口名：B6X=connectGattWith，B7X=t9.j.E */
+    private static String reconnectMethodName() {
+        return (appKind == 7) ? "E" : "connectGattWith";
+    }
+
+    /**
+     * 后台重连一次（方案 1：发令 + 验收 + 自愈）。
+     * 发令后延迟约 1s 复查 SDK 控制器状态：若判定"本次未发起"（调用抛异常、发令后仍空闲=0、
+     * 或发令前后状态纹丝不动），说明 SDK 被自身状态门禁静默挡住 → 清状态、断 gatt，等下一周期重试。
+     * 任一反射失败只记录并按时间限频输出，退回现有行为，绝不向 tick 循环抛出；
+     * 中断（InterruptedException）原样上抛，由 tick 循环退出（语义与重构前一致）。
+     */
+    private static void tryReconnectOnce() throws InterruptedException {
+        try {
+            if (appClassLoader == null) {
+                if (!loggedReconnectSkip) {
+                    loggedReconnectSkip = true;
+                    XposedBridge.log(TAG + " 后台重连跳过: appClassLoader 为 null（findClass 无法进行）");
+                }
+                return;
+            }
+            Class<?> mgrCls = XposedHelpers.findClass(reconnectMgrClassName(), appClassLoader);
+            // 取 static 控制器实例（字段缺失时 dic 为 null，仍继续发令，只是无法验收/自愈）
+            Object dic = null;
+            try {
+                dic = XposedHelpers.getStaticObjectField(mgrCls, dicFieldName());
+            } catch (Throwable ignored) { /* dic 保持 null */ }
+
+            int stateBefore = readConnectState(dic);      // 发令前读状态（-1=不可读）
+
+            boolean calledOk = true;
+            Throwable callErr = null;
+            try {
+                XposedHelpers.callStaticMethod(mgrCls, reconnectMethodName(), lastDevice);
+            } catch (Throwable t) {
+                calledOk = false;
+                callErr = t;
+            }
+
+            // "真发起连接"按时间限频记录一条（方案 3；每断连不再只记一次）
+            if (reconnectAttemptLogAllowed()) {
+                XposedBridge.log(TAG + " 后台重连尝试 -> " + lastDevice.getAddress()
+                        + " state=" + stateDesc(stateBefore));
+            }
+
+            Thread.sleep(1000);   // 延迟约 1s 复查（给 SDK 状态机推进时间）
+            int stateAfter = readConnectState(dic);
+
+            // 判定"本次未发起"：调用抛异常 / 发令后仍空闲(0) / 发令前后状态纹丝不动（被门禁卡死）
+            boolean readable = (stateBefore >= 0 && stateAfter >= 0);
+            boolean notInitiated = !calledOk
+                    || (readable && (stateAfter == 0 || stateAfter == stateBefore));
+            if (notInitiated) {
+                healStuckController(dic, stateBefore, stateAfter, callErr);
+            }
+        } catch (InterruptedException ie) {
+            throw ie;   // 保留中断语义，交给 tick 循环 break
+        } catch (Throwable t) {
+            // 反射/未知异常一律吞掉：保持原"重连失败静默跳过，等下一周期"的行为
+        }
+    }
+
+    /** 读控制器连接状态：B6X=mDataConnectState，B7X=E；dic 为 null 或读取失败 → -1。 */
+    private static int readConnectState(Object dic) {
+        if (dic == null) return -1;
+        try {
+            return XposedHelpers.getIntField(dic, stateFieldName());
+        } catch (Throwable t) {
+            return -1;
+        }
+    }
+
+    /** 状态值的人类可读描述（-1=不可读），仅用于日志。 */
+    private static String stateDesc(int state) {
+        return (state < 0) ? "?" : String.valueOf(state);
+    }
+
+    /**
+     * 自愈（方案 1）：把被门禁卡住的控制器状态清成 0 并断开其 gatt（字段缺失/断开失败均忽略），
+     * 使下一次重连能真正发起。清状态与断 gatt 都吞异常，绝不让重连块整体抛异常。
+     */
+    private static void healStuckController(Object dic, int stateBefore, int stateAfter, Throwable callErr) {
+        try {
+            if (dic != null) {
+                XposedHelpers.setIntField(dic, stateFieldName(), 0);
+                try {
+                    Object gatt = XposedHelpers.getObjectField(dic, gattFieldName());
+                    if (gatt instanceof BluetoothGatt) ((BluetoothGatt) gatt).disconnect();
+                } catch (Throwable ignored) { /* gatt 取不到/断开失败忽略 */ }
+            }
+        } catch (Throwable ignored) { /* 字段不可写 → 退回现有行为 */ }
+        if (diagConnEventLogAllowed()) {
+            String why = (callErr != null)
+                    ? ("调用异常=" + callErr.getMessage())
+                    : ("state " + stateDesc(stateBefore) + "→" + stateDesc(stateAfter) + " 未推进");
+            XposedBridge.log(TAG + " 后台重连自愈: " + why + "，已清状态并断 gatt，下一周期重试");
+        }
+    }
+
+    /** "后台重连尝试"日志限频（RECONNECT_LOG_INTERVAL_MS 一条）；返回本次是否输出。 */
+    private static boolean reconnectAttemptLogAllowed() {
+        long now = System.currentTimeMillis();
+        if (now - lastReconnectAttemptLogAt < RECONNECT_LOG_INTERVAL_MS) return false;
+        lastReconnectAttemptLogAt = now;
+        return true;
+    }
+
+    /**
+     * 重连循环心跳（方案 3）：仅在断连时、每 RECONNECT_LOG_INTERVAL_MS 输出一条，
+     * 让「循环在跑但没发起」与「循环停了」在日志上可区分。只在 tick 线程调用，读 screenInteractive 无并发问题。
+     */
+    private static void logReconnectHeartbeat() {
+        long now = System.currentTimeMillis();
+        if (now - lastReconnectHeartbeatAt < RECONNECT_LOG_INTERVAL_MS) return;
+        lastReconnectHeartbeatAt = now;
+        XposedBridge.log(TAG + " 重连循环心跳: 仍断连（屏幕 " + (screenInteractive ? "亮" : "灭")
+                + "），tick 线程持续推进");
     }
 
     /**
@@ -588,7 +696,7 @@ public class MainHook implements IXposedHookLoadPackage {
                     new XC_MethodHook() {
                         @Override
                         protected void beforeHookedMethod(MethodHookParam param) {
-                            if (!diagConnLogAllowed()) return;
+                            if (!diagConnEventLogAllowed()) return;
                             Object ctrl = param.thisObject;
                             Object dev = XposedHelpers.callMethod(ctrl, "getMBluetoothDevice");
                             int state = XposedHelpers.getIntField(ctrl, "mDataConnectState");
@@ -598,7 +706,7 @@ public class MainHook implements IXposedHookLoadPackage {
                         }
                         @Override
                         protected void afterHookedMethod(MethodHookParam param) {
-                            if (!diagConnLogAllowed()) return;
+                            if (!diagConnEventLogAllowed()) return;
                             Object ctrl = param.thisObject;
                             Object gatt = XposedHelpers.getObjectField(ctrl, "mBluetoothGatt");
                             XposedBridge.log(TAG + " [诊断] connect() 退出"
@@ -628,7 +736,7 @@ public class MainHook implements IXposedHookLoadPackage {
                             int newState = (int) param.args[2];
                             if (newState == 0) {  // BluetoothProfile.STATE_DISCONNECTED
                                 markDisconnected((BluetoothGatt) param.args[0]);
-                                if (diagConnLogAllowed())
+                                if (diagConnEventLogAllowed())
                                     XposedBridge.log(TAG + " BLE 断联（onConnectionStateChange）"
                                             + " device=" + (lastDevice != null ? lastDevice.getAddress() : "null"));
                                 writeStatusFile();  // 远程断连立刻写 status 文件
@@ -724,7 +832,7 @@ public class MainHook implements IXposedHookLoadPackage {
                             // 断连保留 CONNECTED_AT / BLE_OWNER_LAST（上次连接信息供仲裁）
                             markDisconnected((BluetoothGatt) param.thisObject);
                             // [底层]：本地 disconnect；权威在 onConnectionStateChange
-                            if (diagConnLogAllowed())
+                            if (diagConnEventLogAllowed())
                                 XposedBridge.log(TAG + " [底层] BLE 断联 device="
                                         + (lastDevice != null ? lastDevice.getAddress() : "null"));
                             writeStatusFile();  // 断连事件立刻写 status 文件
@@ -1048,7 +1156,7 @@ public class MainHook implements IXposedHookLoadPackage {
                     protected void afterHookedMethod(MethodHookParam param) {
                         try {
                             markDisconnected((BluetoothGatt) param.args[0]);
-                            if (diagConnLogAllowed())
+                            if (diagConnEventLogAllowed())
                                 XposedBridge.log(TAG + " b7x BLE 断联（a.T1） device="
                                         + (lastDevice != null ? lastDevice.getAddress() : "null"));
                             writeStatusFile();
@@ -1850,7 +1958,9 @@ public class MainHook implements IXposedHookLoadPackage {
         diagLogCount = 0;            // 新连接：重置广播接收诊断计数（每连最多记录 DIAG_LOG_MAX_PER_CONN 对）
         setRunModeLogCount = 0;      // 新连接：重置"setRunMode 已下发"计数（每连最多 3 条）
         diagConnLogCount = 0;        // 新连接：重置连接诊断日志计数（每连最多 DIAG_CONN_LOG_MAX 条）
-        loggedReconnectAttempt = false;  // 新连接：重置"后台重连尝试"一次性标记
+        lastReconnectAttemptLogAt = 0;   // 新连接：重置"后台重连尝试"限频计时（下条断连后首试立即可见）
+        lastReconnectHeartbeatAt = 0;    // 新连接：重置重连心跳计时
+        lastConnEventLogAt = 0;          // 新连接：重置关键连接事件限频计时
         bleConnectedTimestamp = System.currentTimeMillis() / 1000L;
         if (connectedModel != 6 && connectedModel != 7)
             connectedModel = (appKind == 7) ? 7 : 6;  // 型号未知按包名兜底
