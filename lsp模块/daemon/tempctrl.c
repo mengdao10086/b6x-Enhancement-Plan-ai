@@ -356,7 +356,8 @@ static int watchdog_stall_count = 0;    // 当前连续停滞次数（按实际�
 static int watchdog_last_cold = -1;     // 上周期实际制冷值（停滞判定基准）
 static int watchdog_last_cmd  = -1;     // 上周期下发制冷值（未达目标判定基准）
 static long watchdog_last_kill_at = 0;  // 上次 kill 时间戳（冷却防风暴）
-static time_t last_launch_attempt = 0;  // 上次拉起尝试时间（冷却用）
+static time_t last_launch_attempt = 0;  // 上次「真正 am start」时刻（拉起冷却用；仅发出 am start 时推进）
+static time_t last_launch_probe_at = 0; // 上次「探测链」（屏检+进程扫描）执行时刻：独立节流，见 APP_LAUNCH_PROBE_INTERVAL
 static time_t last_arbitrate = 0;       // 上次 app 存活仲裁时间（ARBITRATE_INTERVAL 节流）
 static int app_launch_cooldown = 60;    // APP_LAUNCH_COOLDOWN：两次拉起最小间隔（秒，默认 60）
 static int app_launch_screen_gate_enabled = 1;  // APP_LAUNCH_SCREEN_GATE 第一值：屏幕门禁开关
@@ -366,6 +367,18 @@ static int last_screen_off = 0;          // 上次观察到的屏幕状态：1=�
 
 // 息屏时整条探测链的最小间隔（秒，硬编码常量，不是配置键）；为何连屏检一起节流见 逻辑说明.md「自动拉起→开销收敛」。
 #define APP_LAUNCH_PROBE_OFF_INTERVAL 10
+
+// 存活态下整条探测链（屏检 + 进程扫描）的最小间隔（秒，硬编码常量）。
+// 用途：app 存活时 launch_last_app 会被反复调用（断连路径 5s/次、仲裁），若不节流则每次都要
+// fork 一次 dumpsys + 全量扫 /proc。本间隔把整链限到 ≤1 次/此值。**代价（必须知道）**：
+// 它同时是「app 死亡后重新拉起的检测延迟上限」——app 死亡后最晚本间隔才被拉起（改前 ≤5s）。
+// 与 am start 冷却（APP_LAUNCH_COOLDOWN=60s）无关、也不参与其判定；取 12s 使其显著短于 60s、
+// 且与 APP_LAUNCH_PROBE_OFF_INTERVAL=10 同量级。
+#define APP_LAUNCH_PROBE_INTERVAL 12
+
+// 说明：屏检不再单独缓存。is_screen_awake() 唯一调用点在 launch_last_app 的屏幕门禁内，其频率已由
+// 上面的 APP_LAUNCH_PROBE_INTERVAL（+ 息屏时的 APP_LAUNCH_PROBE_OFF_INTERVAL）统一限流；
+// 曾加过的 4s 屏检缓存在 ≥5s 的调用间隔下恒 miss（且小于 12s 间隔，更无意义），故移除，保持限流点唯一。
 
 // --- 界面开关转写（UI_BACK_HIDE）---
 // 界面 → 钩子的唯一通道（两进程不共享内存，方向与 status 文件相反）；见 README「界面开关文件协议」。
@@ -431,6 +444,7 @@ static void alarm_handler(int sig);
 static int compute_fan_target(void);
 static void set_default_log_path(void);   // 层开关复位用（定义在 write_log 之后）
 static void reset_cpu_affinity_defaults(void);   // parse_sysfs_cfg/load_config 在前，定义在复位函数区
+static void install_cache_mark(const char *pkg);   // /proc 命中正向标记（定义在安装缓存区，供 app_process_scan 调用）
 
 /* 调试日志宏：总开关 debug_mode=1 且对应分区开关=1 时才输出。
  * 必须单行（NDK clang + CRLF 多行续行失效） */
@@ -1629,7 +1643,7 @@ static void update_cpu_filtered(int cpu_now) {
  * 创建（或触摸）状态文件，设 0666 权限
  *
  * 模块（App 进程）通过此文件向 daemon 发送 BLE 连接状态和心跳。
- * daemon 创建后模块每 5 秒覆写一次 BLE 状态（B6X=0/1/2, B7X=0/6/7）。
+ * daemon 创建后模块每 1 秒覆写一次 BLE 状态（B6X=0/1/2, B7X=0/6/7）。
  * open("a") 不会截断已有内容，仅创建/更新时间戳。
  */
 static void create_status_files(void) {
@@ -1849,6 +1863,61 @@ static int cpu_zone_count = 0;
 static int cpu_zone_scanned = 0;
 static time_t cpu_zone_last_scan = 0;        // 上次全量扫描时间（每 cpu_zone_rescan_sec 秒重扫一次）
 
+// —— 保留 zone 的常驻 fd（性能优化）——
+// 稳态每秒读取 cpu_zone_cache 里保留的 zone 时不再反复 fopen：各持一个常驻 fd，
+// 读前 lseek(fd,0,SEEK_SET) 复位后 read 解析。rescan_cpu_zones() 更新保留列表后由
+// refresh_cpu_zone_fds() 先关旧 fd 再按新列表打开，保证 fd 与列表一致、无陈旧 fd。
+// 打开失败或运行时失效回落原 fopen 路径（read_thermal_zone_raw），读值语义不变。
+#define CPU_ZONE_FD_INVALID (-1)
+static int cpu_zone_fd[CPU_ZONE_MAX_CACHE];
+static int cpu_zone_fd_inited = 0;   // 数组是否已初始化为 -1（静态零初值是 0=stdin，绝不能当有效 fd 关闭）
+
+/** 关闭全部常驻 zone fd 并置无效；首次调用先初始化数组（避免误关 fd 0） */
+static void close_cpu_zone_fds(void) {
+    if (!cpu_zone_fd_inited) {
+        for (int i = 0; i < CPU_ZONE_MAX_CACHE; i++) cpu_zone_fd[i] = CPU_ZONE_FD_INVALID;
+        cpu_zone_fd_inited = 1;
+        return;
+    }
+    for (int i = 0; i < CPU_ZONE_MAX_CACHE; i++) {
+        if (cpu_zone_fd[i] >= 0) close(cpu_zone_fd[i]);
+        cpu_zone_fd[i] = CPU_ZONE_FD_INVALID;
+    }
+}
+
+/** 按当前 cpu_zone_cache[0..cpu_zone_count-1] 重建常驻 fd（先关旧再开新）；单个打开失败留无效由读取回落 */
+static void refresh_cpu_zone_fds(void) {
+    close_cpu_zone_fds();
+    for (int i = 0; i < cpu_zone_count && i < CPU_ZONE_MAX_CACHE; i++) {
+        char path[128];
+        snprintf(path, sizeof(path), CPU_TEMP_PATH_FMT, cpu_zone_cache[i]);
+        cpu_zone_fd[i] = open(path, O_RDONLY | O_CLOEXEC);   // O_CLOEXEC：不被 fork 出的子进程（am/dumpsys/看门狗孙进程）继承；失败=-1，读取时回落 fopen
+    }
+}
+
+/**
+ * 读取保留 zone（cpu_zone_cache[idx]）的原始温度（m°C），优先走常驻 fd。
+ * 常驻 fd 无效或 lseek/read 失败 → 回落 read_thermal_zone_raw（原 fopen 路径）；异常值过滤口径一致。
+ */
+static int read_kept_zone_raw(int idx) {
+    if (idx >= 0 && idx < CPU_ZONE_MAX_CACHE && cpu_zone_fd[idx] >= 0) {
+        char rbuf[32];
+        if (lseek(cpu_zone_fd[idx], 0, SEEK_SET) != (off_t)-1) {
+            ssize_t n = read(cpu_zone_fd[idx], rbuf, sizeof(rbuf) - 1);
+            if (n > 0) {
+                rbuf[n] = '\0';
+                int raw = atoi(rbuf);
+                if (raw <= 0 || raw > 150000) return -1;   // 与 read_thermal_zone_raw 同口径
+                return raw;
+            }
+        }
+        // lseek/read 失败：关闭失效 fd，回落 fopen
+        close(cpu_zone_fd[idx]);
+        cpu_zone_fd[idx] = CPU_ZONE_FD_INVALID;
+    }
+    return read_thermal_zone_raw(cpu_zone_cache[idx]);
+}
+
 // 初始扫描时暂存 zone 编号 + 温度（用于排序筛选）
 typedef struct { int id; int raw; } ZoneReading;
 
@@ -1900,6 +1969,7 @@ static void rescan_cpu_zones(void) {
     for (int i = 0; i < keep; i++)
         cpu_zone_cache[i] = readings[i].id;
     cpu_zone_count = keep;
+    refresh_cpu_zone_fds();   // 保留列表已变：关旧 fd、按新列表重开，保证 fd 与列表一致
     cpu_zone_scanned = 1;
     cpu_zone_last_scan = now;
 
@@ -1934,10 +2004,10 @@ static int read_cpu_temp_max(void) {
     // 周期重扫已迁至 5s 控制块：全量扫描 ~100 个 zone 阻塞近 1s，不能放 1s 采集热路径。
     if (!cpu_zone_scanned) rescan_cpu_zones();
 
-    // 后续调用 → 只扫描已保留的 zone
+    // 后续调用 → 只扫描已保留的 zone（走常驻 fd，不再逐个 fopen）
     int max_temp = -1;
     for (int j = 0; j < cpu_zone_count; j++) {
-        int raw = read_thermal_zone_raw(cpu_zone_cache[j]);
+        int raw = read_kept_zone_raw(j);
         if (raw < 0) continue;
 
         int decic = raw / CPU_TEMP_DIVISOR;
@@ -2273,8 +2343,10 @@ static void app_process_scan(const char *pkgs[], int alive[], int count) {
                 for (int i = 0; i < count; i++) {
                     if (!alive[i] &&
                         (strcmp(tok, pkgs[i]) == 0 ||
-                         (strncmp(tok, "--nice-name=", 12) == 0 && strcmp(tok + 12, pkgs[i]) == 0)))
+                         (strncmp(tok, "--nice-name=", 12) == 0 && strcmp(tok + 12, pkgs[i]) == 0))) {
                         alive[i] = 1;
+                        install_cache_mark(pkgs[i]);   // 进程在跑 ⇒ 必然已安装：正向标记缓存=1（只写 1，不改 alive/found_all 语义）
+                    }
                 }
             }
             tok += len + 1;
@@ -2309,6 +2381,8 @@ static int wakefulness_value(const char *line, char *out, size_t outSize) {
  * 屏幕状态（dumpsys power 的 mWakefulness）：仅 Awake 亮屏。
  * 返回 1=Awake / 2=Dozing / 0=Asleep或其余 / -1=读取失败。不走 shell 管线（1 进程一段），
  * 为何省在进程数而非 binder 往返见 逻辑说明.md「自动拉起→开销收敛」。行缓冲 512 字节。
+ * 调用频率由 launch_last_app 的 APP_LAUNCH_PROBE_INTERVAL / APP_LAUNCH_PROBE_OFF_INTERVAL
+ * 统一限流（唯一调用点即在该门禁内），本函数自身不做结果缓存。
  */
 static int is_screen_awake(void) {
     int fds[2];
@@ -2444,6 +2518,69 @@ static int app_installed(const char *pkg) {
 }
 
 /**
+ * 只查安装缓存、不触发 pm 探测：1=缓存确认已安装、0=缓存确认未安装、-1=无缓存/无法判定。
+ * 供 /proc 扫描列表过滤使用——绝不能为此额外 fork pm；未探测过或无法判定的包一律返回 -1（保留扫描）。
+ */
+static int app_installed_cached(const char *pkg) {
+    for (int i = 0; i < install_cache_used; i++)
+        if (strcmp(install_cache_pkg[i], pkg) == 0) return install_cache_val[i];
+    return -1;
+}
+
+/**
+ * 把某包标记为「已安装」（缓存值 1）——只用于 /proc 命中的正向证据（进程在跑 ⇒ 必已安装）。
+ * 规则：**只写 1，永不写 0，unknown 不写**。若该包此前缓存为 0（探测为未安装）后又被命中，
+ * 说明期间被重装 → 改写为 1 自纠。不改变任何决策语义（found_all/alive[] 均不依赖缓存）。
+ */
+static void install_cache_mark(const char *pkg) {
+    for (int i = 0; i < install_cache_used; i++) {
+        if (strcmp(install_cache_pkg[i], pkg) == 0) { install_cache_val[i] = 1; return; }
+    }
+    int slot = install_cache_used;
+    if (slot >= INSTALL_CACHE_SLOTS) {   // 表满：淘汰最旧一条（三包三槽，正常不会走到）
+        slot = 0;
+        for (int i = 1; i < INSTALL_CACHE_SLOTS; i++)
+            if (install_cache_at[i] < install_cache_at[slot]) slot = i;
+    } else {
+        install_cache_used++;
+    }
+    install_cache_pkg[slot] = pkg;
+    install_cache_val[slot] = 1;
+    install_cache_at[slot]  = time(NULL);
+}
+
+// —— 启动预热：让「已确认未安装」的结论在默认配置（APP_LAUNCH_ENABLED=0）下也能建立 ——
+// 默认配置下拉起链全程不跑，安装缓存永不填充 → arbitrate_apps 的 /proc 过滤恒为空、不生效。
+// 故在等待设备循环内预热：对三个候选包各探一次；对仍「无法判定」的包有界重试，随后放弃。
+// **绝不周期性重试**——app_installed() 在 unknown 时返回 0 且不写缓存，无界重试＝每轮 fork pm。
+#define INSTALL_WARMUP_MAX_TRIES 3
+static const char *const INSTALL_WARMUP_PKGS[] = { APP_PKG_B6X_OLD, APP_PKG_B6X_NEW, APP_PKG_B7X };
+#define INSTALL_WARMUP_PKGS_N ((int)(sizeof(INSTALL_WARMUP_PKGS) / sizeof(INSTALL_WARMUP_PKGS[0])))
+static int install_warmup_tries = 0;   // 已尝试轮数
+static int install_warmup_done  = 0;   // 已完成（全部有结论或达上限）→ 之后不再探测
+
+/**
+ * 预热安装缓存（有界、幂等）：等待设备循环每轮调用一次；已有结论的包跳过，未判定的各探一次。
+ * 全部有结论、或达 INSTALL_WARMUP_MAX_TRIES 上限后置 done，之后立即返回（不再 fork pm）。
+ * 只影响 /proc 过滤能否生效；对存活判断本身是 no-op（unknown 保留在扫描列表）。
+ */
+static void install_cache_warmup(void) {
+    if (install_warmup_done) return;
+    int pending = 0;
+    for (int i = 0; i < INSTALL_WARMUP_PKGS_N; i++) {
+        if (app_installed_cached(INSTALL_WARMUP_PKGS[i]) >= 0) continue;   // 已有结论
+        app_installed(INSTALL_WARMUP_PKGS[i]);   // 探一次：confirmed 写入缓存，unknown 不写
+        if (app_installed_cached(INSTALL_WARMUP_PKGS[i]) < 0) pending++;   // 仍无法判定
+    }
+    if (pending == 0) { install_warmup_done = 1; return; }
+    if (++install_warmup_tries >= INSTALL_WARMUP_MAX_TRIES) {
+        install_warmup_done = 1;
+        write_log("安装缓存预热 %d 次后仍有 %d 个包无法判定，放弃（/proc 过滤对这些包按「保留」处理）",
+                  install_warmup_tries, pending);
+    }
+}
+
+/**
  * 解析自动拉起的包名：优先 BLE_OWNER_LAST 记录的上次连接者；
  * 目标 B6X app 未安装时回退另一个 B6X app（老 app 未安装→新 app，反之亦然）。
  */
@@ -2501,21 +2638,29 @@ static void launch_last_app(int pkg_known_dead) {
         return;
     }
 
+    // 独立探测节流：整条链（屏检 + 进程扫描 + 拉起判定）限到 ≤1 次/APP_LAUNCH_PROBE_INTERVAL。
+    // 只限频、不参与 am start 冷却（后者只由 last_launch_attempt 管）。**代价**：app 死亡后的
+    // 检测延迟上限 = 本间隔（12s，改前 ≤5s）——这是「存活态也降频」的必然代价。
+    if (now - last_launch_probe_at < APP_LAUNCH_PROBE_INTERVAL) return;
+    last_launch_probe_at = now;
+
     // —— 屏幕门禁 + 息屏退避（APP_LAUNCH_SCREEN_GATE）：前移到最贵探测之前，屏检只取一次 ——
     // 代价与决策见 逻辑说明.md「自动拉起→开销收敛」。
     if (app_launch_screen_gate_enabled) {
-        // 息屏退避闸门（用户拍板 10s）：上次已判定息屏且未到间隔 → 本次连屏检都不做，
-        // 不打日志、什么都不做。否则 10s 只能砍掉一行 debug，最贵的屏检照旧每 5s 一次。
+        // 息屏退避闸门（用户拍板 10s）：上次已判定息屏且未到间隔 → 本次连屏检都不做。
+        // 注：本闸门的 10s 现已**被函数入口的 APP_LAUNCH_PROBE_INTERVAL(12s) 涵盖**（入口更严，
+        // 恒定先挡），实际不再单独触发；保留作防御——若将来把入口间隔调到 <10s，本闸门即重新生效。
         if (last_screen_off && now - last_probe_off_at < APP_LAUNCH_PROBE_OFF_INTERVAL) return;
 
         int sc = is_screen_awake();
         if (sc == 2) sc = app_launch_screen_dozing_on ? 1 : 0;   // Dozing 按配置是否算亮屏（默认 0=算灭）
         if (sc < 0) sc = 1;                                      // 读取失败一律按可拉起兜底（防探测坏掉后永久不拉起）
         if (sc != 1) {
-            // 息屏：记下锚点与「上次已知息屏」，此后每 APP_LAUNCH_PROBE_OFF_INTERVAL 秒只留一次屏检复核
-            //（不屏检就永远发现不了屏幕已变亮），中间各轮全部在上一道闸门被挡掉 —— 省掉的是整条链，含屏检。
-            // 代价（必须知道，不绕开）：息屏→亮屏最长滞后 APP_LAUNCH_PROBE_OFF_INTERVAL 秒（从前 ≤5s），
-            // 故息屏期间若散热器 app 被系统回收，自动拉起最晚 10s 后才开始 —— 这是「息屏 10s」的必然代价。
+            // 息屏：记下锚点与「上次已知息屏」，此后只留低频屏检复核（不屏检就永远发现不了屏幕
+            // 已变亮），中间各轮在上一道闸门与函数入口的探测节流被挡掉 —— 省掉的是整条链，含屏检。
+            // 代价（必须知道，不绕开）：上界由函数入口的 APP_LAUNCH_PROBE_INTERVAL(12s) 与本闸门
+            // 的 APP_LAUNCH_PROBE_OFF_INTERVAL(10s) 中较大者决定，即息屏→亮屏最长滞后 ≈12s
+            //（从前 ≤5s）；故息屏期间若散热器 app 被系统回收，自动拉起也最晚 ~12s 后才开始。
             last_screen_off = 1;
             last_probe_off_at = now;
             debug_log(debug_launch, "自动拉起 屏幕未亮（mWakefulness 非 Awake），本周期跳过");
@@ -2535,7 +2680,7 @@ static void launch_last_app(int pkg_known_dead) {
         app_process_scan(&pkg, &pkg_alive, 1);   // 单包扫描（复用合并遍历逻辑）
         if (pkg_alive) {
             debug_log(debug_launch, "自动拉起 目标已在运行 %s，跳过", pkg);
-            return;
+            return;   // 存活态降频由函数入口的 APP_LAUNCH_PROBE_INTERVAL 负责，不推进 am start 冷却
         }
     }
 
@@ -2624,10 +2769,26 @@ static void evict_app_if_eligible(int alive, const char *keep, const char *pkg) 
 
 /** 三方 app 存活仲裁（保留优先级与 farsef 参与条件见 逻辑说明.md「三方 app 存活仲裁」）。 */
 static void arbitrate_apps(void) {
-    // 单次遍历 /proc 同时检测 3 个包名（合并扫描，不再逐包名全量遍历）
-    const char *pkgs[3] = { APP_PKG_B6X_OLD, APP_PKG_B6X_NEW, APP_PKG_B7X };
-    int alive[3];
-    app_process_scan(pkgs, alive, 3);
+    // 单次遍历 /proc 同时检测 3 个包名（合并扫描，不再逐包名全量遍历）。
+    // 扫描列表剔除「安装缓存已确认未安装」的包（未安装必不存活，剔除不改变仲裁结论），
+    // 使列表缩到仅剩可能存活的包，app_process_scan 的 found_all 得以提前退出。
+    // 「无缓存 / 无法判定」（app_installed_cached<0）一律保留，避免漏判存活；且不得为此 fork pm。
+    const char *cand[3] = { APP_PKG_B6X_OLD, APP_PKG_B6X_NEW, APP_PKG_B7X };
+    const char *scan_pkgs[3];
+    int scan_orig[3];
+    int scan_n = 0;
+    for (int i = 0; i < 3; i++) {
+        if (app_installed_cached(cand[i]) == 0) continue;   // 仅剔除「已确认未安装」
+        scan_pkgs[scan_n] = cand[i];
+        scan_orig[scan_n] = i;
+        scan_n++;
+    }
+    int alive[3] = { 0, 0, 0 };
+    if (scan_n > 0) {
+        int scan_alive[3];
+        app_process_scan(scan_pkgs, scan_alive, scan_n);
+        for (int k = 0; k < scan_n; k++) alive[scan_orig[k]] = scan_alive[k];
+    }
     int old_alive = alive[0];
     int new_alive = alive[1];
     int far_alive = alive[2];
@@ -3744,6 +3905,9 @@ int main(int argc, char *argv[]) {
         }
         // 看门狗反向保活：与卸载自清理同理必须放在本循环内（无 BLE、一直停在等待设备时也不漏检）
         maybe_keepalive_watchdog();
+        // 安装缓存预热：默认配置下拉起链不跑、缓存永不填充，/proc 过滤会失效；此处有界预热
+        //（随等待循环迭代重试，达上限即止，绝不周期性 fork pm）。进主循环前完成。
+        install_cache_warmup();
         // 配置延迟加载：同样必须放在本循环内 —— 开机后"还没连上设备"那段可能很久，
         // 而配置没加载时一切配置派生的行为（界面开关转写、WD_KEEPALIVE 等）都按默认值走。
         // 此处**不调** update_active_limits()：本循环里 active_device 还是 DEVICE_NONE，
@@ -3759,7 +3923,12 @@ int main(int argc, char *argv[]) {
             read_cooler_params();
             break;
         }
-        arbitrate_apps();   // 等待设备期间无 app 存活则自动拉起上次使用的 app（冷却节流）
+        // 等待设备期间无 app 存活则自动拉起上次使用的 app；复用 ARBITRATE_INTERVAL 节流
+        // （与主循环同口径：进程扫描由每 5s 一次降到每 15s 一次，拉起/清理响应上限随之为 15s）
+        if (time(NULL) - last_arbitrate >= ARBITRATE_INTERVAL) {
+            arbitrate_apps();
+            last_arbitrate = time(NULL);
+        }
         sleep(5);
     }
     if (!running) goto exit;
@@ -3906,6 +4075,7 @@ int main(int argc, char *argv[]) {
     }
 
 exit:
+    close_cpu_zone_fds();   // 释放 thermal zone 常驻 fd（进程退出本会回收，显式关闭便于自查无泄漏）
     if (log_fp) fclose(log_fp);
     return 0;
 }
