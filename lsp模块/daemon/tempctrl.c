@@ -391,7 +391,17 @@ static int last_screen_off = 0;          // 上次观察到的屏幕状态：1=�
 #define UIPREFS_PATH "/data/local/tmp/tempctrl_uiprefs"
 static int back_hide_enabled     = 1;    // UI_BACK_HIDE：1=返回键收后台（默认），0=恢复系统默认退出
 static int uiprefs_last_back_hide = -1;  // 上次已写出的值（-1 = 尚未写过，首轮必写一次）
+static int uiprefs_last_bt_sec    = -2147483647;  // 同上的 BT_ON_SEC 记录（哨兵=尚未写过）
 static int uiprefs_fail_logged    = 0;   // 写失败只记一条日志，避免每轮重复刷屏
+
+// --- 断连自动开蓝牙（BT_AUTO_ENABLE_SEC）---
+// 钩子在「确认蓝牙未开启」时把请求写进 BT_REQ_PATH（REQ=<epoch秒>）；本进程 1s 拍读取，
+// token 变大才执行一次开蓝牙命令链。限频（两次之间至少间隔 N 秒、0=关闭）在钩子侧完成，
+// 这里只负责「新请求即执行」。文件由本进程预建 0666（方向是 app 写 / daemon 读，同 status 文件）。
+#define BT_REQ_PATH "/data/local/tmp/tempctrl_bt_req"
+static int bt_auto_enable_sec = 300;     // BT_AUTO_ENABLE_SEC：两次自动开蓝牙最小间隔（秒，默认 300，0=关闭）
+static long long bt_req_handled = -1;    // 已处理的最大请求 token；-1=尚未处理
+static int bt_req_primed = 0;            // 首拍只记下当前 token（不执行），避免重启后对旧请求补执行
 
 // --- 看门狗反向保活开关（WD_KEEPALIVE）---
 // 声明点必须在 load_config 之前（那里第一遍读它）；实现与其余状态在文件末尾的「看门狗反向保活」小节。
@@ -746,13 +756,14 @@ static int parse_common_cfg(const char *key, int val, const char *val_str) {
 }
 
 /**
- * 把界面侧开关转写成 /data/local/tmp 标志文件（BACK_HIDE=0/1），供宿主进程里的钩子读取。
+ * 把界面侧开关转写成 /data/local/tmp 标志文件（BACK_HIDE=0/1、BT_ON_SEC=<秒>），供宿主进程里的钩子读取。
  *
  * <p>只在值变化时写；写失败不更新「已写出」记录，下一轮配置重载会重试，且只记一条日志。
  * 先写 .tmp 再 rename，避免钩子读到半行。
  */
 static void publish_uiprefs(void) {
-    if (back_hide_enabled == uiprefs_last_back_hide) {
+    if (back_hide_enabled == uiprefs_last_back_hide
+            && bt_auto_enable_sec == uiprefs_last_bt_sec) {
         return;
     }
     char tmp[64];
@@ -766,6 +777,7 @@ static void publish_uiprefs(void) {
         return;
     }
     fprintf(f, "BACK_HIDE=%d\n", back_hide_enabled ? 1 : 0);
+    fprintf(f, "BT_ON_SEC=%d\n", bt_auto_enable_sec);
     fclose(f);
     if (rename(tmp, UIPREFS_PATH) != 0) {
         if (!uiprefs_fail_logged) {
@@ -776,6 +788,7 @@ static void publish_uiprefs(void) {
         return;
     }
     uiprefs_last_back_hide = back_hide_enabled;
+    uiprefs_last_bt_sec = bt_auto_enable_sec;
     uiprefs_fail_logged = 0;
 }
 
@@ -869,6 +882,9 @@ static int load_config(const char *path) {
             // 反向保活开关：与 UI_BACK_HIDE 同理必须在第一遍读掉（它是基础设施，不受 PERF/DEBUG/SYSFS 层开关管辖，
             // 三层全关时本函数会提前 return，那时也必须已生效）。
             wd_keepalive_enabled = (atoi(val_str) != 0);
+        } else if (strcmp(key, "BT_AUTO_ENABLE_SEC") == 0) {
+            // 断连自动开蓝牙间隔（秒，0=关闭）：同 UI_BACK_HIDE，必须第一遍读掉以便转写进 uiprefs。
+            bt_auto_enable_sec = clamp(atoi(val_str), 0, 3600);
         }
     }
 
@@ -1634,6 +1650,15 @@ static void create_status_files(void) {
         } else {
             write_log("状态文件 创建失败 %s", paths[i]);
         }
+    }
+    // 开蓝牙请求文件：方向 app 写 / daemon 读（同 status 文件），预建 0666 供钩子覆盖写
+    FILE *bf = fopen(BT_REQ_PATH, "a");
+    if (bf) {
+        fclose(bf);
+        chmod(BT_REQ_PATH, 0666);
+        write_log("开蓝牙请求文件 就绪 %s", BT_REQ_PATH);
+    } else {
+        write_log("开蓝牙请求文件 创建失败 %s", BT_REQ_PATH);
     }
 }
 
@@ -3588,6 +3613,54 @@ static void write_coldmax_hint(void) {
     close(fd);
 }
 
+// ======================== 断连自动开蓝牙（BT_AUTO_ENABLE_SEC）========================
+/**
+ * 读取钩子写入的开蓝牙请求（BT_REQ_PATH，一行 REQ=<epoch秒>），token 变大才执行一次命令链。
+ * 限频（两次之间至少间隔 N 秒）在钩子侧完成；0=关闭在本侧也再挡一道（消费请求但不执行）。
+ * 首拍只记下当前 token、不执行，避免守护进程重启后对文件里的旧请求补执行；畸形 token 不采信。
+ * 命令回退链（root 上下文，成功即停）：svc → cmd。
+ */
+static void poll_bt_request(void) {
+    FILE *f = fopen(BT_REQ_PATH, "r");
+    if (!f) return;                       // 文件缺失（尚未预建）或不可读：下拍再试
+    long long tok = -1;
+    char line[64];
+    if (fgets(line, sizeof(line), f)) {
+        const char *p = strstr(line, "REQ=");
+        if (p) tok = atoll(p + 4);
+    }
+    fclose(f);
+
+    // token 合法性：须为正、且贴合当前墙钟（±366 天）。空/畸形/超大值一律无效——
+    // 极大值写进 bt_req_handled 后会大于此后一切真实 epoch，把真请求永久顶掉。
+    long long now = (long long)time(NULL);
+    int tok_valid = (tok > 0 && tok >= now - 366LL * 86400 && tok <= now + 366LL * 86400);
+
+    if (!bt_req_primed) {
+        bt_req_primed = 1;
+        bt_req_handled = tok_valid ? tok : -1;  // 首拍只记基准不执行；畸形值不采信，置 -1 让后续真请求可执行
+        return;
+    }
+    if (!tok_valid) return;                     // 畸形：忽略本条，不消费、不更新 handled
+    if (tok <= bt_req_handled) return;          // 非新请求
+
+    // 0=关闭：消费掉这条新请求但不执行命令，避免开关再打开时被补执行
+    if (bt_auto_enable_sec <= 0) { bt_req_handled = tok; return; }
+
+    static const char *const cmds[] = {
+        "/system/bin/svc bluetooth enable > /dev/null 2>&1",
+        "/system/bin/cmd bluetooth_manager enable > /dev/null 2>&1",
+    };
+    int hit = 0;
+    for (int i = 0; i < (int)(sizeof(cmds) / sizeof(cmds[0])); i++) {
+        int st = system(cmds[i]);
+        if (st != -1 && WIFEXITED(st) && WEXITSTATUS(st) == 0) { hit = i + 1; break; }
+    }
+    bt_req_handled = tok;
+    if (hit) write_log("自动开蓝牙 已执行（命令%d）req=%lld", hit, tok);
+    else     write_log("自动开蓝牙 命令链全部失败（svc/cmd）req=%lld", tok);
+}
+
 // ======================== 看门狗反向保活（WD_KEEPALIVE）========================
 // 需求 / 破环设计（先查后拉 + 连续两次未见 + 拉起冷却）/ 判据为何逐参数整等 / 两个踩过的坑 / 降级
 // 见 逻辑说明.md「看门狗反向保活」。开关 WD_KEEPALIVE 默认开（2026-09-29 用户指定）。
@@ -3923,6 +3996,9 @@ int main(int argc, char *argv[]) {
         // 那是"按当前设备刷新上限"的活，选到设备时 select_active_device 之后自会刷一次。
         // CPU 亲和与设备无关（apply_cpu_affinity 只读配置与自身），故这里补一次即可。
         if (config_retry_if_needed()) apply_cpu_affinity();
+        // 断连自动开蓝牙：与卸载自清理同理必须放在本循环内——蓝牙未开时正好停在本循环（连不上设备），
+        // 若不在此处轮询，钩子写的开蓝牙请求将永远得不到执行。
+        poll_bt_request();
         read_status_ble_both();
         DeviceType dev = select_active_device();
         if (dev != DEVICE_NONE) {
@@ -3983,6 +4059,7 @@ int main(int argc, char *argv[]) {
     while (running) {
         write_webui_data();   // 每 1s 采集写数据文件（刚需热数据，WebUI 直接读）
         write_coldmax_hint(); // 每 1s 核对生效制冷上限，变了才写给 app（定 KI 曲线横轴）
+        poll_bt_request();    // 每 1s 查开蓝牙请求，有新请求才执行一次命令链
 
         if (last_ctrl == 0 || time(NULL) - last_ctrl >= 5) {
             last_ctrl = time(NULL);

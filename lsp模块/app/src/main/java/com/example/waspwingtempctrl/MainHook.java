@@ -141,6 +141,17 @@ public class MainHook implements IXposedHookLoadPackage {
     private static volatile boolean scanInFlight = false;  // 自扫进行中（回调线程与 tick 线程共享）
     private static volatile long lastScanReconnectAt = 0;  // 上次自扫发起时刻（冷却计时，markConnected 清零）
 
+    // ========== 断连自动开蓝牙（BT_AUTO_ENABLE_SEC）==========
+    // 触发点：maybeScanReconnect 的「蓝牙未开启」分支（tick 线程）。一律交守护进程（root）执行，
+    // 钩子只写请求；限频＝两次之间至少间隔 N 秒（0=关闭），时间戳落盘以跨宿主进程重启有效。
+    // 仅在 tick 线程读写，无跨线程共享，故缓存字段无需 volatile。
+    private static final String BT_REQ_FILE = "/data/local/tmp/tempctrl_bt_req";
+    private static String btOnAtFile = null;      // 限频时间戳落点（宿主私有目录，各包各记）
+    private static int btSecCache = -1;           // BT_ON_SEC 缓存值（-1=未读）
+    private static long btSecReadAt = 0;          // 上次读 uiprefs 的时刻
+    private static final long BT_SEC_CACHE_MS = 30000;  // 配置缓存时长（避免每 tick 读文件）
+    private static final int BT_SEC_DEFAULT = 300;      // 读不到配置时按默认 300（功能开启）
+
     // ========== 广播接收诊断（每次连接最多 3 对日志） ==========
     private static final int DIAG_LOG_MAX_PER_CONN = 3;   // 每次连接最多记录的对数
     private static volatile int diagLogCount = 0;          // 当前连接已记录的对数（markConnected 清零）
@@ -457,7 +468,11 @@ public class MainHook implements IXposedHookLoadPackage {
             if (ctx == null) { logScanSkip("appContext 未就绪"); return; }
             BluetoothManager bm = (BluetoothManager) ctx.getSystemService(Context.BLUETOOTH_SERVICE);
             BluetoothAdapter adapter = (bm != null) ? bm.getAdapter() : null;
-            if (adapter == null || !adapter.isEnabled()) { logScanSkip("蓝牙未开启"); return; }
+            if (adapter == null || !adapter.isEnabled()) {
+                logScanSkip("蓝牙未开启");
+                maybeAutoEnableBtOnce();   // 断连自动开蓝牙（限频；0=关闭），见 app/逻辑说明.md §1.2
+                return;
+            }
             final BluetoothLeScanner scanner = adapter.getBluetoothLeScanner();
             if (scanner == null) { logScanSkip("扫描器不可用"); return; }
 
@@ -589,10 +604,12 @@ public class MainHook implements IXposedHookLoadPackage {
             currentStatusFile = STATUS_FILE_B6;
             isNewB6App = lpparam.packageName.equals(PACKAGE_B6X_NEW);
             lastDevFile = lastDevFileFor(isNewB6App ? PACKAGE_B6X_NEW : PACKAGE_B6X);
+            btOnAtFile = btOnAtFileFor(isNewB6App ? PACKAGE_B6X_NEW : PACKAGE_B6X);
         } else if (lpparam.packageName.equals(PACKAGE_B7X)) {
             appKind = 7;
             currentStatusFile = STATUS_FILE_B7;
             lastDevFile = lastDevFileFor(PACKAGE_B7X);
+            btOnAtFile = btOnAtFileFor(PACKAGE_B7X);
         } else {
             XposedBridge.log(TAG + " 跳过非目标包: " + lpparam.packageName);
             return;
@@ -1296,6 +1313,11 @@ public class MainHook implements IXposedHookLoadPackage {
         return "/data/data/" + pkg + "/files/tempctrl_last_dev";
     }
 
+    /** 断连自动开蓝牙的限频时间戳落点（宿主 app 私有目录，各包各记；钩子自建自用） */
+    private static String btOnAtFileFor(String pkg) {
+        return "/data/data/" + pkg + "/files/tempctrl_bt_on_at";
+    }
+
     /** 持久化上次连接的散热器 MAC（供冷启动自动连接 / 自动拉起使用） */
     private static void saveLastDeviceAddress(String addr) {
         if (lastDevFile == null) return;
@@ -1445,6 +1467,81 @@ public class MainHook implements IXposedHookLoadPackage {
             br.close();
         } catch (Throwable ignored) {
             // 文件不存在属正常（守护进程尚未写过），走默认值
+        }
+        return true;
+    }
+
+    /**
+     * 断连自动开蓝牙的间隔秒数（读守护进程写的 {@code BT_ON_SEC=}；带 30s 缓存）。
+     * 读不到按默认 300（功能开启）；≤0 表示关闭本功能。只在 tick 线程调用。
+     */
+    private static int btAutoEnableSec() {
+        long now = System.currentTimeMillis();
+        if (btSecCache >= 0 && now - btSecReadAt < BT_SEC_CACHE_MS) return btSecCache;
+        int v = BT_SEC_DEFAULT;
+        try {
+            BufferedReader br = new BufferedReader(new java.io.FileReader(UIPREFS_FILE));
+            String line;
+            while ((line = br.readLine()) != null) {
+                if (line.startsWith("BT_ON_SEC=")) {
+                    v = Integer.parseInt(line.substring("BT_ON_SEC=".length()).trim());
+                    break;
+                }
+            }
+            br.close();
+        } catch (Throwable ignored) {
+            // 文件不存在（守护进程尚未写过）或解析失败：按默认值
+        }
+        btSecCache = v;
+        btSecReadAt = now;
+        return v;
+    }
+
+    /**
+     * 断连自动开蓝牙：限频通过则写一次请求，交守护进程（root）执行。只在 tick 线程调用。
+     * 限频时间戳落盘（宿主私有目录），跨宿主进程重启有效（进程被杀重启也不清零）。
+     */
+    private static void maybeAutoEnableBtOnce() {
+        try {
+            int sec = btAutoEnableSec();
+            if (sec <= 0) return;                    // 0=关闭本功能
+            if (!btCooldownPassed(sec)) return;
+            try {
+                FileOutputStream fos = new FileOutputStream(BT_REQ_FILE);
+                fos.write(("REQ=" + (System.currentTimeMillis() / 1000L) + "\n").getBytes());
+                fos.close();
+                XposedBridge.log(TAG + " 自动开蓝牙: 已请求守护进程开启（间隔 " + sec + "s）");
+            } catch (Throwable t) {
+                // 文件缺失（守护进程未运行/未预建）或不可写：记一条，下个冷却窗再试
+                XposedBridge.log(TAG + " 自动开蓝牙: 写请求失败（守护进程未运行？）: " + t.getMessage());
+            }
+        } catch (Throwable t) {
+            XposedBridge.log(TAG + " 自动开蓝牙异常: " + t.getMessage());
+        }
+    }
+
+    /** 限频判定：距上次已过 ≥sec 秒才放行，放行即刻把当前时间落盘。读/写失败一律放行。 */
+    private static boolean btCooldownPassed(int sec) {
+        if (btOnAtFile == null) return true;
+        long now = System.currentTimeMillis();
+        long last = 0;
+        try {
+            BufferedReader br = new BufferedReader(new java.io.FileReader(btOnAtFile));
+            String line = br.readLine();
+            br.close();
+            if (line != null && !line.trim().isEmpty()) last = Long.parseLong(line.trim());
+        } catch (Throwable ignored) {
+            // 无记录 / 读失败：视为可放行
+        }
+        if (last > 0 && now - last < sec * 1000L) return false;
+        try {
+            File parent = new File(btOnAtFile).getParentFile();
+            if (parent != null) parent.mkdirs();
+            FileOutputStream fos = new FileOutputStream(btOnAtFile);
+            fos.write((now + "\n").getBytes());
+            fos.close();
+        } catch (Throwable ignored) {
+            // 落盘失败：本次仍放行，下轮按无记录重判
         }
         return true;
     }

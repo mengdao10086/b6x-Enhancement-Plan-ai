@@ -84,7 +84,8 @@
         "APP_LAUNCH_COOLDOWN",
         "APP_LAUNCH_SCREEN_GATE",
         "APP_WATCHDOG",
-        "WD_KEEPALIVE"
+        "WD_KEEPALIVE",
+        "BT_AUTO_ENABLE_SEC"
       ]
     },
     {
@@ -1464,6 +1465,23 @@
       "factory": 1,
       "min": 0,
       "max": 1,
+      "requires": [],
+      "daemonConsumes": true,
+      "fields": null
+    },
+    "BT_AUTO_ENABLE_SEC": {
+      "key": "BT_AUTO_ENABLE_SEC",
+      "group": "launch",
+      "role": "setting",
+      "type": "int",
+      "label": "断连自动开蓝牙间隔(秒)",
+      "desc": "后台重连发现蓝牙未开启时自动打开蓝牙，两次之间至少间隔此秒数；0=关闭该功能",
+      "unit": "秒",
+      "unitNote": "",
+      "default": 300,
+      "factory": 300,
+      "min": 0,
+      "max": 3600,
       "requires": [],
       "daemonConsumes": true,
       "fields": null

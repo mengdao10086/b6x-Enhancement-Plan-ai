@@ -133,15 +133,16 @@ TARGET_TEMP=180     ← 18.0°C
 
 ## 界面开关文件协议（daemon → 钩子）
 
-`UI_BACK_HIDE`（「返回隐藏后台」，设置页可关）是唯一需要送达宿主编进程的界面开关。
-界面与钩子分属两个进程、不共享内存，故由 daemon 转写成一行标志文件，钩子每次返回键读一次：
+需要送达宿主编进程的界面开关有两个：`UI_BACK_HIDE`（「返回隐藏后台」，返回键每次读取）与
+`BT_AUTO_ENABLE_SEC`（断连自动开蓝牙间隔，钩子按 tick 读取、带 30s 缓存）。
+界面与钩子分属两个进程、不共享内存，故由 daemon 转写成标志文件：
 
 | 项 | 值 |
 |---|---|
 | 路径 | `/data/local/tmp/tempctrl_uiprefs` |
-| 内容 | `BACK_HIDE=0/1`（换行结尾；`.tmp` + `rename` 原子替换） |
-| 写入方 | tempctrl daemon（root），每次配置重载时按需写（值未变不写） |
-| 读取方 | `MainHook.readBackHideEnabled()`（宿主 app 进程），**读不到按 1（开启）处理** |
+| 内容 | `BACK_HIDE=0/1` 与 `BT_ON_SEC=<秒>`（各一行，换行结尾；`.tmp` + `rename` 原子替换） |
+| 写入方 | tempctrl daemon（root），每次配置重载时按需写（两值都没变才不写） |
+| 读取方 | `MainHook.readBackHideEnabled()` 与 `btAutoEnableSec()`（宿主 app 进程）；前者**读不到按 1（开启）**、后者**读不到按 300 秒（开启）**处理 |
 
 > 方向与 status 文件相反：status 是「钩子写、daemon 读」，本文件是「daemon 写、钩子读」。
 
@@ -200,6 +201,8 @@ TARGET_TEMP=180     ← 18.0°C
 | `tempctrl.lock`（兜底） | `/data/local/tmp/` | daemon（第二把单实例锁，DE 存储、开机解锁前也可用；两把任一被占即以**退出码 2** 退出，故私有目录不可用时单实例保护不消失） |
 | `tempctrl_b6x.status` / `tempctrl_b7x.status` | `/data/local/tmp/`（**原样未动**） | daemon 预创建 + `chmod 0666`；LSPosed 侧每秒覆写（详见上文 status 文件协议） |
 | `tempctrl_uiprefs` | `/data/local/tmp/` | daemon（按需转写，详见上文界面开关文件协议） |
+| `tempctrl_bt_req` | `/data/local/tmp/` | daemon 预创建 + `chmod 0666`；LSPosed 侧按需覆写 `REQ=<epoch秒>`（断连自动开蓝牙请求，daemon 读出后执行开蓝牙命令链） |
+| `tempctrl_bt_on_at` | `/data/data/<飞智包名>/files/`（**各包各记**） | LSPosed 侧（`MainHook`）自建自用（断连自动开蓝牙限频时间戳），daemon 不参与 |
 | `tempctrl_last_dev` | `/data/data/<飞智包名>/files/`（**各包各记**） | LSPosed 侧（`MainHook`）自建自用，daemon 不参与 |
 | `tempctrl`（二进制） | `/data/local/tmp/tempctrl`（沿用 noexec 规避） | 部署时由 root 从 APK assets 落盘 + `chmod 0755` |
 | `b6x-tempctrl.sh` | `/data/adb/service.d/`（KSU <10683 为 `/data/adb/ksu/service.d/`） | 同上 |

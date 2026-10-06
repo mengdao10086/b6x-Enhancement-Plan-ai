@@ -6,7 +6,7 @@
 #define PARAMS_GENERATED_H
 
 /* 键数：守护进程消费 / 仅界面读取 */
-#define CFG_DAEMON_KEY_COUNT 48
+#define CFG_DAEMON_KEY_COUNT 49
 #define CFG_WEBUI_KEY_COUNT 7
 
 /* 性能层单值键表（PERF_ENABLED=1）→ INT_CFG_KEYS[]：X(键名, C 变量, min, max) */
@@ -137,6 +137,8 @@
 #define CFG_MAX_APP_LAUNCH_COOLDOWN 3600
 #define CFG_MIN_APP_WATCHDOG 0  /* C 变量 app_watchdog_cycles */
 #define CFG_MAX_APP_WATCHDOG 120
+#define CFG_MIN_BT_AUTO_ENABLE_SEC 0  /* C 变量 bt_auto_enable_sec */
+#define CFG_MAX_BT_AUTO_ENABLE_SEC 3600
 
 /* 路径键默认值（C 端同名变量初值；LOG_FILE 运行期由 PRIVATE_DIR + 二进制名派生）*/
 #define CFG_DEFAULT_BATT_TEMP_PATH "/sys/class/power_supply/battery/temp"

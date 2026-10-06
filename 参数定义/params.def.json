@@ -1253,6 +1253,30 @@
       "fields": null
     },
     {
+      "key": "BT_AUTO_ENABLE_SEC",
+      "group": "launch",
+      "role": "setting",
+      "type": "int",
+      "label": "断连自动开蓝牙间隔(秒)",
+      "desc": "后台重连发现蓝牙未开启时自动打开蓝牙，两次之间至少间隔此秒数；0=关闭该功能",
+      "docOrder": 62,
+      "docDesc": "断连自动开蓝牙间隔（秒，0~3600，默认 300，0=关闭）。后台重连确认蓝牙未开启时自动打开；两次之间至少间隔此秒数。**独立于性能总开关，任何模式生效**",
+      "confNote": [
+        "断连自动开蓝牙（0~3600，默认 300，0=关闭）：后台重连发现蓝牙未开启时自动打开，两次之间至少间隔此秒数",
+        "  独立于性能总开关，任何模式生效；0=关闭本功能"
+      ],
+      "unit": "秒",
+      "unitNote": "",
+      "default": 300,
+      "factory": 300,
+      "min": 0,
+      "max": 3600,
+      "requires": [],
+      "daemonConsumes": true,
+      "cTable": "pre",
+      "fields": null
+    },
+    {
       "key": "UI_GAP_SEC",
       "group": "webui",
       "role": "setting",
@@ -1577,7 +1601,8 @@
       "UI_RPM_AXIS_MIN": [],
       "UI_CURVE_FILTER": [],
       "UI_BACK_HIDE": ["back_hide_enabled"],
-      "WD_KEEPALIVE": ["wd_keepalive_enabled"]
+      "WD_KEEPALIVE": ["wd_keepalive_enabled"],
+      "BT_AUTO_ENABLE_SEC": ["bt_auto_enable_sec"]
     }
   }
 }
