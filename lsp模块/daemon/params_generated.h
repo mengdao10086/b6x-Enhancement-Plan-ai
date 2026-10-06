@@ -6,7 +6,7 @@
 #define PARAMS_GENERATED_H
 
 /* 键数：守护进程消费 / 仅界面读取 */
-#define CFG_DAEMON_KEY_COUNT 50
+#define CFG_DAEMON_KEY_COUNT 48
 #define CFG_WEBUI_KEY_COUNT 7
 
 /* 性能层单值键表（PERF_ENABLED=1）→ INT_CFG_KEYS[]：X(键名, C 变量, min, max) */
@@ -16,7 +16,8 @@
     X("CPU_FILTER_ALPHA", CPU_FILTER_ALPHA, 1, 100) \
     X("MAP_INPUT_SMOOTH_ALPHA", rpm_smooth_alpha, 1, 99) \
     X("PID_KDP", pid_kdp_coef, 1, 1000) \
-    X("PID_CH_THRESHOLD", pid_ch_threshold, 1, 100)
+    X("PID_CH_THRESHOLD", pid_ch_threshold, 1, 100) \
+    X("KI_CUT_SMOOTH", ki_cut_smooth, 0, 100)
 
 /* sysfs 层键表（SYSFS_ENABLED=1）→ SYSFS_CFG_KEYS[]：
  *   X(键名, kind, ivar, imin, imax, svar, ssize)
@@ -114,24 +115,8 @@
 #define CFG_MAX_PID_COLD_RANGE_2 194
 #define CFG_MIN_PID_COLD_RANGE_3 1  /* C 变量 b7_pid_cold_max */
 #define CFG_MAX_PID_COLD_RANGE_3 255
-#define CFG_MIN_PID_COLD_DYN_IN_1 0  /* C 变量 cold_dyn_in_lo */
-#define CFG_MAX_PID_COLD_DYN_IN_1 255
-#define CFG_MIN_PID_COLD_DYN_IN_2 0  /* C 变量 cold_dyn_in_mid */
-#define CFG_MAX_PID_COLD_DYN_IN_2 255
-#define CFG_MIN_PID_COLD_DYN_IN_3 0  /* C 变量 cold_dyn_in_hi */
-#define CFG_MAX_PID_COLD_DYN_IN_3 255
-#define CFG_MIN_PID_COLD_DYN_OUT 0  /* C 变量 cold_dyn_out_mid_p100 */
-#define CFG_MAX_PID_COLD_DYN_OUT 100
-#define CFG_MIN_PID_COLD_DYN_W_1 0  /* C 变量 cold_dyn_w_kdp_p100 */
-#define CFG_MAX_PID_COLD_DYN_W_1 200
-#define CFG_MIN_PID_COLD_DYN_W_2 0  /* C 变量 cold_dyn_w_up_p100 */
-#define CFG_MAX_PID_COLD_DYN_W_2 200
-#define CFG_MIN_PID_COLD_DYN_W_3 0  /* C 变量 cold_dyn_w_dn_p100 */
-#define CFG_MAX_PID_COLD_DYN_W_3 200
-#define CFG_MIN_PID_COLD_DYN_MAP_1 100  /* C 变量 cold_dyn_u_p100 */
-#define CFG_MAX_PID_COLD_DYN_MAP_1 400
-#define CFG_MIN_PID_COLD_DYN_MAP_2 10  /* C 变量 cold_dyn_gamma_p100 */
-#define CFG_MAX_PID_COLD_DYN_MAP_2 400
+#define CFG_MIN_KI_CUT_SMOOTH 0  /* C 变量 ki_cut_smooth */
+#define CFG_MAX_KI_CUT_SMOOTH 100
 #define CFG_MIN_BATT_TEMP_DIVISOR 1  /* C 变量 BATT_TEMP_DIVISOR */
 #define CFG_MAX_BATT_TEMP_DIVISOR 10000
 #define CFG_MIN_BATT_CURRENT_DIVISOR 1  /* C 变量 BATT_CURRENT_DIVISOR */
@@ -159,6 +144,17 @@
 #define CFG_DEFAULT_CPU_TEMP_PATH_FMT "/sys/class/thermal/thermal_zone%d/temp"
 #define CFG_DEFAULT_CPU_AFFINITY "c0"
 #define CFG_DEFAULT_LOG_FILE "/data/data/com.example.waspwingtempctrl/files/tempctrl.log"
+
+/* 表键（type=table）：行前缀、逐字段 clamp 边界与默认行。解析代码在 tempctrl.c
+ * 手写，用这些宏取前缀/边界/默认行，避免与定义各写一份（行数可变，故不进上方逐键边界表）。 */
+#define CFG_ROW_PREFIX_KI_CUT "KI_CUT_"
+#define CFG_MIN_KI_CUT_F1 0
+#define CFG_MAX_KI_CUT_F1 255
+#define CFG_MIN_KI_CUT_F2 0
+#define CFG_MAX_KI_CUT_F2 200
+#define CFG_MIN_KI_CUT_F3 0
+#define CFG_MAX_KI_CUT_F3 200
+#define CFG_DEFAULT_KI_CUT_1 "1,100,50,40,100,100,100,71,78,190,50,62"
 
 /* 各层 int 取值位的**代码默认值**表：层开关由 1→0 时，tempctrl.c 展开本表把该层
  * 运行时参数批量赋回代码默认值（= 等同该层配置不存在）。行格式 X(C 变量, 默认值)。
@@ -207,15 +203,7 @@
     X(pid_cold_min, 1) \
     X(pid_cold_max, 190) \
     X(b7_pid_cold_max, 190) \
-    X(cold_dyn_in_lo, 40) \
-    X(cold_dyn_in_mid, 100) \
-    X(cold_dyn_in_hi, 190) \
-    X(cold_dyn_out_mid_p100, 50) \
-    X(cold_dyn_w_kdp_p100, 100) \
-    X(cold_dyn_w_up_p100, 100) \
-    X(cold_dyn_w_dn_p100, 70) \
-    X(cold_dyn_u_p100, 200) \
-    X(cold_dyn_gamma_p100, 100)
+    X(ki_cut_smooth, 15)
 
 #define CFG_SYSFS_DEFAULTS(X) \
     X(BATT_TEMP_DIVISOR, 1) \

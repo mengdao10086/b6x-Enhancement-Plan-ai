@@ -7,6 +7,7 @@
 ## 功能
 
 - **内置原生配置界面**：状态 / 配置 · 曲线 / 日志三页（底部页签，左右跟手滑动切页），取代原 WebUI；标题栏右侧设置按钮进入界面参数设置页
+- **KI 分段削减表可视化编辑**：配置页按「簇/点」编辑分段削减表，表下方随编辑即时重绘升/降倍率曲线并标出此刻目标冷值；改动即存（口径见 [app/逻辑说明.md](app/逻辑说明.md) §6.6）
 - **返回键收后台**：宿主内任意页面按返回都把散热器 app 收进后台而不退出，并从最近任务列表隐藏（可在设置页关闭）
 - **一键部署守护进程**：C 守护程序（`daemon/tempctrl.c`）随 APK 打包，装好 APK 后在状态页一键部署，**无需刷 Magisk 模块**；配置与日志存 APK 私有目录，卸载即清
 - **BLE 修复**：修复 Android 16 上飞智散热器工具（B6X + B7X）无法连接的 4 层连环 Bug（[完整修复历程](../参考资料/完整修复历程.md)）
@@ -194,6 +195,7 @@ TARGET_TEMP=180     ← 18.0°C
 | `profile.conf` | `/data/data/com.example.waspwingtempctrl/files/` | 界面（部署时**仅当不存在**才按 `params.json` 的 `factory` 写入，已存在一律不覆盖） |
 | `tempctrl.log` | 同上（`LOG_FILE`） | daemon（root）；部署时由 app 以自身 uid 预创建空文件，**仅不存在时建** |
 | `tempctrl_webui.data` | 同上（曲线时序数据） | daemon（root）；同上预创建 |
+| `tempctrl_coldmax` | 同上（生效制冷上限，一行 `COLD_MAX=<int>`，供 KI 曲线横轴） | daemon（root）；同上预创建 |
 | `tempctrl.lock` | 同上（daemon 单实例锁） | daemon（`flock` 非阻塞；第二个实例以**退出码 2** 自行退出） |
 | `tempctrl.lock`（兜底） | `/data/local/tmp/` | daemon（第二把单实例锁，DE 存储、开机解锁前也可用；两把任一被占即以**退出码 2** 退出，故私有目录不可用时单实例保护不消失） |
 | `tempctrl_b6x.status` / `tempctrl_b7x.status` | `/data/local/tmp/`（**原样未动**） | daemon 预创建 + `chmod 0666`；LSPosed 侧每秒覆写（详见上文 status 文件协议） |

@@ -35,6 +35,9 @@
 // static 变量声明之后（见 params_generated.h 头部说明）。
 #include "params_generated.h"
 
+// 「KI 分段削减表」求值算法（无外部依赖的纯头，与参数定义/check_params.py 的跨端对拍程序共用）
+#include "ki_cut.h"
+
 // --- 通用宏 ---
 #define EMA(new_val, old_val, alpha_pct) \
     (((new_val) * (alpha_pct) + (old_val) * (100 - (alpha_pct))) / 100)
@@ -233,20 +236,13 @@ static int pid_cpu_comp_offset = 100;           // PID_CPU_COMP 第三值：偏�
 static int pid_cold_min = 1;              // PID_COLD_RANGE 第一值：制冷强度下限
 static int pid_cold_max = 190;            // PID_COLD_RANGE 第二值：制冷强度上限（B6X）
 
-// --- 逻辑2「冷值动态倍率」参数（配置值为整数；冷值三点零换算，其余 ×100 换算进内部）---
-// PID_COLD_DYN_IN  = 输入轴 下界 拐点 上界（冷值，零换算；默认 40 100 190）
-// PID_COLD_DYN_OUT = 输出轴拐点值（正数 ×100；默认 50 → 抽象值 −0.50，两端固定 0 与 −1）
-// PID_COLD_DYN_W   = KDP / KI升 / KI降 三作用点权重（各自 ×100；默认 100 100 70 = 1.00 / 1.00 / 0.70）
-// PID_COLD_DYN_MAP = 倍率上界 U / 形状指数 γ（各自 ×100；默认 200 100 = 2.00 / 1.00）
-static int cold_dyn_in_lo = 40;           // 输入轴下界（冷值；≤ 此处不干预）
-static int cold_dyn_in_mid = 100;         // 输入轴拐点（冷值；过此点转第二段）
-static int cold_dyn_in_hi = 190;          // 输入轴上界（冷值；≥ 此处最大降幅）
-static int cold_dyn_out_mid_p100 = 50;    // 输出轴拐点值（正数 ×100；C 内取负成抽象值）
-static int cold_dyn_w_kdp_p100 = 100;     // KDP 作用点权重（×100；0 = 该处不受影响）
-static int cold_dyn_w_up_p100  = 100;     // KI 升速率作用点权重（×100）
-static int cold_dyn_w_dn_p100  = 70;      // KI 降速率作用点权重（×100）
-static int cold_dyn_u_p100     = 200;     // 倍率上界 U（×100）；下界自动 = 1/U
-static int cold_dyn_gamma_p100 = 100;     // 形状指数 γ（×100）
+// --- 「KI 分段削减表」参数（配置值为整数；倍率 ×100 换算进内部）---
+// KI_CUT_<簇号> = 重复三元组「冷值,升倍率,降倍率,...」（冷值 0~255；升/降倍率 ×100，100=不削）
+// KI_CUT_SMOOTH = 平滑系数（×100，0/100=关闭平滑）；簇内按冷值升序折线插值、多簇取最小
+static int ki_cut_smooth = 15;            // KI_CUT_SMOOTH：零相位平滑系数（×100；0 或 100 = 关闭）
+#define KI_CUT_MAX_CLUSTERS 8             // 支持的簇数上限（簇号 1~KI_CUT_MAX_CLUSTERS）
+static KiCutPoint ki_cut_rows[KI_CUT_MAX_CLUSTERS][KI_CUT_MAX_POINTS];  // 各簇原始点（求值内部排序去重）
+static int ki_cut_cnt[KI_CUT_MAX_CLUSTERS];   // 各簇点数（0 = 未配置）
 
 // --- PID 运行时状态（单累积器）---
 static float pid_ki = 0.0f;               // 积分累积值（acc；float：限幅赋小数需保留）
@@ -277,11 +273,9 @@ static int pid_batt_snap_done = 0;        // 停机后是否已做一次"恢复�
 static int pid_align_rpm = 2000;          // PID 目标 RPM（仅初始化对齐与日志使用；风扇下发已由 compute_fan_target 独立计算）
 static int pid_align_cold = 1;            // PID 目标制冷强度
 
-// --- 逻辑2「冷值动态倍率」运行状态（复位值 = 不干预：抽象值 0、三倍率 1.0）---
-static float cold_dyn_s         = 0.0f;   // 抽象值 s ∈ [−1,0]（未加权；0 = 不干预）
-static float cold_dyn_mult_kdp  = 1.0f;   // KDP 作用点最终倍率（∈ [1/U, 1]）
-static float cold_dyn_mult_up   = 1.0f;   // KI 升速率作用点最终倍率
-static float cold_dyn_mult_dn   = 1.0f;   // KI 降速率作用点最终倍率
+// --- 「KI 分段削减表」运行状态（复位值 = 不削减：倍率 = KI_CUT_NONE）---
+static float ki_cut_mult_up = (float)KI_CUT_NONE;   // KI 升速率倍率（×100；100 = 不削）
+static float ki_cut_mult_dn = (float)KI_CUT_NONE;   // KI 降速率倍率（×100；100 = 不削）
 
 // ======================== 散热器回传参数 ========================
 static int cooler_hot_temp = -1;          // 热端温度（0.1°C）
@@ -341,6 +335,9 @@ static const char *status_field_value(const char *line, const char *field) {
 #define WEBUI_DATA_COLS       8
 #define WEBUI_ROW_FMT         "%ld,%d,%d,%d,%d,%d,%d,%d\n"
 
+// 生效制冷上限提示文件（写给 app 定 KI 分段削减曲线横轴）；行格式与降级见 app/逻辑说明.md §6.6
+#define COLDMAX_HINT_PATH     PRIVATE_DIR "/tempctrl_coldmax"
+
 // 三方 app 包名（farsef 在最近连 B6X 散热器时也参与仲裁）
 #define APP_PKG_B6X_OLD "com.flydigi.waspwing.experimental"
 #define APP_PKG_B6X_NEW "com.flydigi.waspwing.experimentanliuliu"
@@ -358,6 +355,8 @@ static int watchdog_last_cmd  = -1;     // 上周期下发制冷值（未达目�
 static long watchdog_last_kill_at = 0;  // 上次 kill 时间戳（冷却防风暴）
 static time_t last_launch_attempt = 0;  // 上次「真正 am start」时刻（拉起冷却用；仅发出 am start 时推进）
 static time_t last_launch_probe_at = 0; // 上次「探测链」（屏检+进程扫描）执行时刻：独立节流，见 APP_LAUNCH_PROBE_INTERVAL
+static time_t last_disconnect_time = 0; // 最近一次断联时间戳（0=未处于断联）。定义上移至此：launch_last_app
+                                        // 的断联初期探测节流要读它，故须先于其声明；清零仍在 reconnect_align
 static time_t last_arbitrate = 0;       // 上次 app 存活仲裁时间（ARBITRATE_INTERVAL 节流）
 static int app_launch_cooldown = 60;    // APP_LAUNCH_COOLDOWN：两次拉起最小间隔（秒，默认 60）
 static int app_launch_screen_gate_enabled = 1;  // APP_LAUNCH_SCREEN_GATE 第一值：屏幕门禁开关
@@ -375,6 +374,13 @@ static int last_screen_off = 0;          // 上次观察到的屏幕状态：1=�
 // 与 am start 冷却（APP_LAUNCH_COOLDOWN=60s）无关、也不参与其判定；取 12s 使其显著短于 60s、
 // 且与 APP_LAUNCH_PROBE_OFF_INTERVAL=10 同量级。
 #define APP_LAUNCH_PROBE_INTERVAL 12
+
+// 断联初期的探测加速（见 launch_last_app 入口）：断联后 APP_LAUNCH_PROBE_FAST_WINDOW 秒内，探测间隔
+// 收窄到 APP_LAUNCH_PROBE_FAST_INTERVAL；计时起点是 last_disconnect_time（断联起点，重连由 reconnect_align
+// 清零）。**只加快既有探测节奏**：该链只在 App 进程已死时才真正 am start，本改动不新增任何拉起/重启动作。
+// 息屏不受影响——屏幕门禁的 APP_LAUNCH_PROBE_OFF_INTERVAL(10s) 在入口之后生效，故息屏实际仍 10s。
+#define APP_LAUNCH_PROBE_FAST_INTERVAL 5    // 断联初期探测间隔（秒）
+#define APP_LAUNCH_PROBE_FAST_WINDOW   60   // 断联初期窗口（秒）
 
 // 说明：屏检不再单独缓存。is_screen_awake() 唯一调用点在 launch_last_app 的屏幕门禁内，其频率已由
 // 上面的 APP_LAUNCH_PROBE_INTERVAL（+ 息屏时的 APP_LAUNCH_PROBE_OFF_INTERVAL）统一限流；
@@ -444,6 +450,8 @@ static void alarm_handler(int sig);
 static int compute_fan_target(void);
 static void set_default_log_path(void);   // 层开关复位用（定义在 write_log 之后）
 static void reset_cpu_affinity_defaults(void);   // parse_sysfs_cfg/load_config 在前，定义在复位函数区
+static void ki_cut_parse_row(const char *idx_str, const char *val_str);  // parse_pid_cfg 调用，定义在 KI 削减区
+static void reset_ki_cut_defaults(void);   // reset_perf_layer_defaults 与 main 调用，定义在 KI 削减区
 static void install_cache_mark(const char *pkg);   // /proc 命中正向标记（定义在安装缓存区，供 app_process_scan 调用）
 
 /* 调试日志宏：总开关 debug_mode=1 且对应分区开关=1 时才输出。
@@ -549,7 +557,7 @@ struct IntCfgKey { const char *key; int *var; int min; int max; };
 static const struct IntCfgKey INT_CFG_KEYS[] = {
     // 表行由 params_generated.h 的 CFG_PERF_INT_KEYS 展开，键序与 clamp 边界随定义，勿在此手抄。
     // 多值键（PID_SPEED / PID_KI_RATE / PID_TARGET / PID_TARGET_DIR / PID_COLD_RANGE / PID_CPU_COMP / PID_SPEED_RECALL）
-    // 与冷值动态倍率四键（PID_COLD_DYN_IN/_OUT/_W/_MAP，含单值键 _OUT）均在 parse_pid_cfg 分段解析，不进本表
+    // KI 分段削减表（KI_CUT_<簇号>）在 parse_pid_cfg 按行前缀分段解析，不进本表
 #define CFG_ROW(k, var, lo, hi) { k, &var, lo, hi },
     CFG_PERF_INT_KEYS(CFG_ROW)
 #undef CFG_ROW
@@ -676,37 +684,11 @@ static int parse_pid_cfg(const char *key, int val, const char *val_str) {
         if (n >= 2) pid_spd_recall_weight = clamp(w, 100, 1000);
         return 1;
     }
-    // PID_COLD_DYN_IN = 输入轴 下界 拐点 上界（冷值，零换算；默认 40 100 190）
-    // 纯钳位：乱序配置不拦，除零保护放在 cold_dyn_t()（保证输出恒落 [−1,0]）
-    if (strcmp(key, "PID_COLD_DYN_IN") == 0) {
-        int a = cold_dyn_in_lo, b = cold_dyn_in_mid, c = cold_dyn_in_hi;
-        int n = sscanf(val_str, "%d %d %d", &a, &b, &c);
-        if (n >= 1) cold_dyn_in_lo  = clamp(a, 0, 255);
-        if (n >= 2) cold_dyn_in_mid = clamp(b, 0, 255);
-        if (n >= 3) cold_dyn_in_hi  = clamp(c, 0, 255);
-        return 1;
-    }
-    // PID_COLD_DYN_OUT = 输出轴拐点值（正数 ×100；默认 50 = 拐点处降幅 0.50）
-    if (strcmp(key, "PID_COLD_DYN_OUT") == 0) {
-        int a = cold_dyn_out_mid_p100;
-        if (sscanf(val_str, "%d", &a) >= 1) cold_dyn_out_mid_p100 = clamp(a, 0, 100);
-        return 1;
-    }
-    // PID_COLD_DYN_W = KDP / KI升 / KI降 三作用点权重（各自 ×100；默认 100 100 70 = 1.00 / 1.00 / 0.70）
-    if (strcmp(key, "PID_COLD_DYN_W") == 0) {
-        int a = cold_dyn_w_kdp_p100, b = cold_dyn_w_up_p100, c = cold_dyn_w_dn_p100;
-        int n = sscanf(val_str, "%d %d %d", &a, &b, &c);
-        if (n >= 1) cold_dyn_w_kdp_p100 = clamp(a, 0, 200);
-        if (n >= 2) cold_dyn_w_up_p100  = clamp(b, 0, 200);
-        if (n >= 3) cold_dyn_w_dn_p100  = clamp(c, 0, 200);
-        return 1;
-    }
-    // PID_COLD_DYN_MAP = 倍率上界 U / 形状指数 γ（各自 ×100；默认 200 100 = 2.00 / 1.00）
-    if (strcmp(key, "PID_COLD_DYN_MAP") == 0) {
-        int a = cold_dyn_u_p100, b = cold_dyn_gamma_p100;
-        int n = sscanf(val_str, "%d %d", &a, &b);
-        if (n >= 1) cold_dyn_u_p100     = clamp(a, 100, 400);
-        if (n >= 2) cold_dyn_gamma_p100 = clamp(b, 10, 400);
+    // KI 分段削减表：KI_CUT_<簇号> = 重复三元组「冷值,升倍率,降倍率,...」。
+    // 行前缀与逐字段 clamp 边界取自生成头（CFG_ROW_PREFIX_KI_CUT / CFG_MIN|MAX_KI_CUT_F*），
+    // 解析本体见 ki_cut_parse_row（支持任意簇号，故不是精确 strcmp）。
+    if (strncmp(key, CFG_ROW_PREFIX_KI_CUT, sizeof(CFG_ROW_PREFIX_KI_CUT) - 1) == 0) {
+        ki_cut_parse_row(key + sizeof(CFG_ROW_PREFIX_KI_CUT) - 1, val_str);
         return 1;
     }
     return 0;
@@ -815,6 +797,8 @@ static void reset_perf_layer_defaults(void) {
     hot_derate = 0;
     hot_derate_cooldown = 0;
     hot_recover_cooldown = 0;
+    // KI 分段削减表不是 int 取值位（行数可变），其默认表另行复位（复用默认行字符串）
+    reset_ki_cut_defaults();
 }
 
 /** SYSFS 层取值位 → 代码默认值（int 位见 CFG_SYSFS_DEFAULTS；文本键另行处理） */
@@ -849,7 +833,8 @@ static int load_config(const char *path) {
         return 0;   // 打不开 = 未加载成功，调用方据此保留"待重试"状态（见 config_loaded）
     }
     // --- 第一遍：预读 PERF_ENABLED 和 DEBUG_ENABLED（全扫描，不受配置顺序影响）---
-    char line[256];
+    // 须容纳最长配置行 KI_CUT_<n> 满 32 点（≈393 字节），故取 512
+    char line[512];
     int perf_enabled = 1;
     int found_debug = 0;
     int found_sysfs = 0;
@@ -1596,14 +1581,6 @@ static void write_log(const char *fmt, ...) {
 }
 
 static inline int clamp(int val, int lo, int hi) {
-    if (val < lo) return lo;
-    if (val > hi) return hi;
-    return val;
-}
-
-/** 浮点钳制；lo > hi 时把 hi 提到 lo，防调用方给错区间时返回越界值 */
-static inline float clampf(float val, float lo, float hi) {
-    if (hi < lo) hi = lo;
     if (val < lo) return lo;
     if (val > hi) return hi;
     return val;
@@ -2638,18 +2615,25 @@ static void launch_last_app(int pkg_known_dead) {
         return;
     }
 
-    // 独立探测节流：整条链（屏检 + 进程扫描 + 拉起判定）限到 ≤1 次/APP_LAUNCH_PROBE_INTERVAL。
+    // 独立探测节流：整条链（屏检 + 进程扫描 + 拉起判定）限到 ≤1 次/probe_interval。
     // 只限频、不参与 am start 冷却（后者只由 last_launch_attempt 管）。**代价**：app 死亡后的
-    // 检测延迟上限 = 本间隔（12s，改前 ≤5s）——这是「存活态也降频」的必然代价。
-    if (now - last_launch_probe_at < APP_LAUNCH_PROBE_INTERVAL) return;
+    // 检测延迟上限 = 本间隔——这是「存活态也降频」的必然代价。
+    // 断联初期（last_disconnect_time 起 APP_LAUNCH_PROBE_FAST_WINDOW 秒内）收窄到 5s，使「App 真死了」
+    // 更快被发现并拉起；之后、或未处于断联时回到 12s。息屏退避（下方屏幕门禁的 10s）在此之后仍生效。
+    int probe_interval = APP_LAUNCH_PROBE_INTERVAL;                 // 12s（冷淡期）
+    if (last_disconnect_time > 0
+            && now - last_disconnect_time < APP_LAUNCH_PROBE_FAST_WINDOW)
+        probe_interval = APP_LAUNCH_PROBE_FAST_INTERVAL;            // 5s（断联初期）
+    if (now - last_launch_probe_at < probe_interval) return;
     last_launch_probe_at = now;
 
     // —— 屏幕门禁 + 息屏退避（APP_LAUNCH_SCREEN_GATE）：前移到最贵探测之前，屏检只取一次 ——
     // 代价与决策见 逻辑说明.md「自动拉起→开销收敛」。
     if (app_launch_screen_gate_enabled) {
         // 息屏退避闸门（用户拍板 10s）：上次已判定息屏且未到间隔 → 本次连屏检都不做。
-        // 注：本闸门的 10s 现已**被函数入口的 APP_LAUNCH_PROBE_INTERVAL(12s) 涵盖**（入口更严，
-        // 恒定先挡），实际不再单独触发；保留作防御——若将来把入口间隔调到 <10s，本闸门即重新生效。
+        // 注：入口节流现为 12s（冷淡期）或 5s（断联初期 60s 内）。冷淡期入口更严（12s>10s），本闸门
+        // 不单独触发；断联初期入口放宽到 5s，本闸门的 10s 即成为实际生效者——这正是「息屏仍按 10s
+        // 退避、不被 5s 快探测覆盖」的落点，保留作防御。
         if (last_screen_off && now - last_probe_off_at < APP_LAUNCH_PROBE_OFF_INTERVAL) return;
 
         int sc = is_screen_awake();
@@ -2861,58 +2845,59 @@ static int cpu_comp_now(int batt) {
     return (int)(pid_cpu_comp_smooth * 10 + 0.5f);
 }
 
-// ======================== 逻辑2：冷值动态倍率 ========================
-// 冷值 → 抽象值 → 倍率 → 三作用点（KDP / KI 升 / KI 降）；门控与取样、单位见 逻辑说明.md「冷值动态倍率」。
+// ======================== KI 分段削减表 ========================
+// 冷值 → 各簇折线插值（可平滑）→ 多簇取最小 → KI 升/降倍率；算法、取样与单位见 逻辑说明.md「KI 分段削减表」。
+// 求值核心（排序/去重/插值/平滑/多簇取最小）在只依赖自身的 ki_cut.h 内，与 CI 跨端对拍程序共用同一实现。
 
 /**
- * 归一化辅助：v ≤ base → 0；den ≤ 0（配置乱序，纯钳位不拦）→ 1。
- * den ≤ 0 分支即除零保护，保证任何配置下 s 都落在 [−1,0]、不产生 NaN/Inf。
+ * 解析一行 KI_CUT_<簇号>：逗号分隔的重复三元组「冷值,升倍率,降倍率」。逐字段按生成头给出的边界钳位；
+ * 值个数非 3 的整数倍或簇号非法时整行忽略（保持该簇上次值）。排序与同冷值取舍在求值时做（ki_cut_normalize）。
  */
-static inline float cold_dyn_t(int v, int base, int den) {
-    if (v <= base) return 0.0f;
-    if (den <= 0)  return 1.0f;
-    return clampf((float)(v - base) / (float)den, 0.0f, 1.0f);
+static void ki_cut_parse_row(const char *idx_str, const char *val_str) {
+    char *endp = NULL;
+    long idx = strtol(idx_str, &endp, 10);
+    if (endp == idx_str || idx < 1 || idx > KI_CUT_MAX_CLUSTERS) {
+        write_log("配置 KI_CUT 簇号非法（%s），已忽略该行", idx_str);
+        return;
+    }
+    int vals[KI_CUT_MAX_POINTS * 3];
+    int cnt = 0;
+    const char *s = val_str;
+    while (*s && cnt < KI_CUT_MAX_POINTS * 3) {
+        char *e = NULL;
+        long v = strtol(s, &e, 10);
+        if (e == s) break;                       // 非数字：停止取数
+        vals[cnt++] = (int)v;
+        s = e;
+        while (*s == ',' || *s == ' ' || *s == '\t') s++;
+    }
+    if (cnt == 0 || cnt % 3 != 0) {
+        write_log("配置 KI_CUT_%ld 值个数 %d 非三元组整数倍，已忽略整行", idx, cnt);
+        return;
+    }
+    int np = cnt / 3;
+    for (int i = 0; i < np; i++) {
+        ki_cut_rows[idx - 1][i].cold = clamp(vals[3 * i],     CFG_MIN_KI_CUT_F1, CFG_MAX_KI_CUT_F1);
+        ki_cut_rows[idx - 1][i].up   = clamp(vals[3 * i + 1], CFG_MIN_KI_CUT_F2, CFG_MAX_KI_CUT_F2);
+        ki_cut_rows[idx - 1][i].dn   = clamp(vals[3 * i + 2], CFG_MIN_KI_CUT_F3, CFG_MAX_KI_CUT_F3);
+    }
+    ki_cut_cnt[idx - 1] = np;
 }
 
-/** 冷值（码）→ 抽象值 s ∈ [−1,0]：两段线性 + 两端平台（下界以下 0、上界以上 −1） */
-static float cold_dyn_abs(int cold) {
-    float om = cold_dyn_out_mid_p100 * 0.01f;   // 输出轴拐点值（正数）→ 拐点处降幅
-    float s;
-    if (cold <= cold_dyn_in_mid)
-        s = -om * cold_dyn_t(cold, cold_dyn_in_lo, cold_dyn_in_mid - cold_dyn_in_lo);
-    else
-        s = -om - (1.0f - om) * cold_dyn_t(cold, cold_dyn_in_mid, cold_dyn_in_hi - cold_dyn_in_mid);
-    return clampf(s, -1.0f, 0.0f);
+/** 复位为代码默认表：清空全部簇，再把生成头给出的默认行（CFG_DEFAULT_KI_CUT_n）按同一解析路径装入 */
+static void reset_ki_cut_defaults(void) {
+    memset(ki_cut_cnt, 0, sizeof(ki_cut_cnt));
+    ki_cut_parse_row("1", CFG_DEFAULT_KI_CUT_1);
 }
 
-/** 抽象值 → 倍率 U^(−(−s)^γ)，取整三位小数（s = 0 → 1.0；s = −1 → 1/U） */
-static float cold_dyn_map(float s) {
-    if (s >= 0.0f) return 1.0f;                 // 不干预
-    float u = cold_dyn_u_p100 * 0.01f;
-    float g = cold_dyn_gamma_p100 * 0.01f;
-    return roundf(powf(u, -powf(-s, g)) * 1000.0f) / 1000.0f;
-}
-
-/** 重算：取样冷值 → 抽象值 → 三作用点（各乘权重、钳 [−1,0]、映射），并打诊断日志 */
-static void cold_dyn_update(int cold) {
-    cold_dyn_s = cold_dyn_abs(cold);
-    float sk = clampf(cold_dyn_s * (cold_dyn_w_kdp_p100 * 0.01f), -1.0f, 0.0f);
-    float su = clampf(cold_dyn_s * (cold_dyn_w_up_p100  * 0.01f), -1.0f, 0.0f);
-    float sd = clampf(cold_dyn_s * (cold_dyn_w_dn_p100  * 0.01f), -1.0f, 0.0f);
-    cold_dyn_mult_kdp = cold_dyn_map(sk);
-    cold_dyn_mult_up  = cold_dyn_map(su);
-    cold_dyn_mult_dn  = cold_dyn_map(sd);
-    pid_log("冷值动态 in=%d om=%.2f s=%.3f | 加权 sk=%.3f su=%.3f sd=%.3f | 倍率 rkdp=%.3f rup=%.3f rdn=%.3f",
-            cold, cold_dyn_out_mid_p100 * 0.01f, cold_dyn_s, sk, su, sd,
-            cold_dyn_mult_kdp, cold_dyn_mult_up, cold_dyn_mult_dn);
-}
-
-/** 复位为「不干预」：抽象值 0、三倍率 1.0（启动 / 长断连复位） */
-static void cold_dyn_reset(void) {
-    cold_dyn_s = 0.0f;
-    cold_dyn_mult_kdp = 1.0f;
-    cold_dyn_mult_up  = 1.0f;
-    cold_dyn_mult_dn  = 1.0f;
+/** 重算：按取样冷值求各簇最小倍率（升/降各一），并打诊断日志 */
+static void ki_cut_refresh(int cold) {
+    KiCutCluster cs[KI_CUT_MAX_CLUSTERS];
+    int n = 0;
+    for (int i = 0; i < KI_CUT_MAX_CLUSTERS; i++)
+        if (ki_cut_cnt[i] > 0) { cs[n].pts = ki_cut_rows[i]; cs[n].n = ki_cut_cnt[i]; n++; }
+    ki_cut_eval(cs, n, ki_cut_smooth, cold, &ki_cut_mult_up, &ki_cut_mult_dn);
+    pid_log("KI削减 冷值=%d 升=%.1f 降=%.1f 簇=%d", cold, ki_cut_mult_up, ki_cut_mult_dn, n);
 }
 
 // ======================== PID 控制函数 ========================
@@ -2934,7 +2919,7 @@ static float pid_spd_nl_map(float v) {
 }
 
 /**
- * PID 计算（单累积器 OUTPUT = clamp(acc + kdp, 0, 1)）。公式与各步（error/速度/KDP/动态目标/逻辑2/
+ * PID 计算（单累积器 OUTPUT = clamp(acc + kdp, 0, 1)）。公式与各步（error/速度/KDP/动态目标/KI 削减/
  * 跳过①）见 逻辑说明.md「单累积器公式」。
  * @param batt_10  原始电池温度（0.1°C，纯电池，不含补偿）
  * @param dt       距上次重算以来的 5 秒周期数（钳位 0.6~6，1 = 5s）
@@ -2978,22 +2963,22 @@ static float pid_compute(int batt_10, float dt, float cpu_comp, int batt_window_
         pid_target_f += ta * (raw_target - pid_target_f);
     }
 
-    // 逻辑2 冷值动态倍率重算：门控与下面的 KDP 一致（温度窗口变化），
-    // 取样 = 上次重算算出的目标冷值 pid_align_cold；本轮三倍率同时供 KI 与 KDP 使用。
+    // KI 分段削减表重算：门控与下面的 KDP 一致（温度窗口变化），
+    // 取样 = 上次重算算出的目标冷值 pid_align_cold；本轮升/降倍率只作用于 KI 升/降速率（不作用于 KDP）。
     if (batt_window_changed)
-        cold_dyn_update(pid_align_cold);
+        ki_cut_refresh(pid_align_cold);
 
-    // 积分累积（acc；不乘 dt）：被积项为正走升速率、为负走降速率，各自乘逻辑2 对应倍率
+    // 积分累积（acc；不乘 dt）：被积项为正走升速率、为负走降速率，各自乘 KI 削减对应倍率
     {
         float integrand = ch - pid_target_f;
-        float ki_rate = (integrand >= 0.0f) ? pid_ki_up_coef * cold_dyn_mult_up
-                                            : pid_ki_down_coef * cold_dyn_mult_dn;
+        float ki_rate = (integrand >= 0.0f) ? pid_ki_up_coef * (ki_cut_mult_up / 100.0f)
+                                            : pid_ki_down_coef * (ki_cut_mult_dn / 100.0f);
         pid_ki += (ki_rate / 1000.0f) * integrand;
     }
 
-    // KDP（融合 P+D）：温度变了才更新；温度未变沿用上次值（跳过①）
+    // KDP（融合 P+D）：温度变了才更新；温度未变沿用上次值（跳过①）；不乘任何冷值倍率
     if (batt_window_changed)
-        pid_kdp = (pid_kdp_coef / 1000.0f) * chkdp * cold_dyn_mult_kdp;
+        pid_kdp = (pid_kdp_coef / 1000.0f) * chkdp;
 
     // 预算钳制：acc ≥0 且 ≤ max(0, 1−kdp)（防 acc+kdp 超 1 被末端硬截断，即抗 windup）
     float budget = 1.0f - pid_kdp;
@@ -3182,7 +3167,9 @@ static void pid_reset_core(void) {
     recall_anchor = 0;
     recall_prev_batt = 0;
     recall_cycles = 0;
-    cold_dyn_reset();
+    // KI 削减倍率复位为「不削减」（下次重算再按新冷值求；簇配置本身是配置项，不动）
+    ki_cut_mult_up = (float)KI_CUT_NONE;
+    ki_cut_mult_dn = (float)KI_CUT_NONE;
 }
 
 /**
@@ -3298,8 +3285,8 @@ static void alarm_handler(int sig) {
     (void)sig;  // 仅用于中断 waitpid，不做事
 }
 
-/** 记录最近一次断联时间戳（重连汇总行用；0=未处于断联） */
-static time_t last_disconnect_time = 0;
+/* last_disconnect_time（断联起点）的定义已上移到文件前部「自动拉起」小节的静态区
+   （launch_last_app 的断联初期探测节流要在其定义之前读它）；此处不再重复定义。 */
 
 /**
  * 对齐实际制冷/转速到散热器真实回传（启动/长断连重置后"待对齐"时调用）。
@@ -3579,6 +3566,26 @@ static void write_webui_data(void) {
             }
         }
     }
+}
+
+/**
+ * 把「当前生效制冷上限」（active_pid_cold_max）写给 app，定 KI 曲线横轴。
+ * 值未变不写；断联也照写（横轴上限与连接状态无关）。
+ * 只写**已存在**的文件（open 不带 O_CREAT、原地截断、不 rename）：该文件由 app 部署时预建，
+ * 属主与 SELinux 标签才正确；daemon 若自行新建会建成 root 属主，app 大概率读不到。
+ * 文件缺失时每拍重试一次（廉价 ENOENT），待 app 建好即恢复写入；期间 app 侧按取不到降级。
+ */
+static int coldmax_hint_written = -1;   // 上次写出的上限值；-1 = 尚未写出（含文件尚未被 app 预建）
+
+static void write_coldmax_hint(void) {
+    if (active_pid_cold_max == coldmax_hint_written) return;
+    int fd = open(COLDMAX_HINT_PATH, O_WRONLY | O_TRUNC | O_CLOEXEC);
+    if (fd < 0) return;   // 文件缺失（app 尚未预建）或不可写：不新建，下拍重试
+    char buf[32];
+    int n = snprintf(buf, sizeof(buf), "COLD_MAX=%d\n", active_pid_cold_max);
+    if (n > 0 && write(fd, buf, (size_t)n) == n)
+        coldmax_hint_written = active_pid_cold_max;
+    close(fd);
 }
 
 // ======================== 看门狗反向保活（WD_KEEPALIVE）========================
@@ -3862,6 +3869,8 @@ int main(int argc, char *argv[]) {
     // 由 main_loop 按 CONFIG_RETRY_INTERVAL 周期重试（开机早期私有目录尚未挂上时只能如此，
     // 见 config_loaded 声明处的说明）。--config 指定的路径同样保留，重试时沿用同一条来源。
     set_default_log_path();
+    // KI 分段削减表：先装入代码默认表（配置缺失或三层全关时也按默认生效），随后 load_config 的 KI_CUT_n 会覆盖
+    reset_ki_cut_defaults();
     if (argc >= 3 && strcmp(argv[1], "--config") == 0) {
         strncpy(config_path, argv[2], sizeof(config_path) - 1);
         config_path[sizeof(config_path) - 1] = '\0';
@@ -3973,6 +3982,7 @@ int main(int argc, char *argv[]) {
     time_t last_ctrl = 0;
     while (running) {
         write_webui_data();   // 每 1s 采集写数据文件（刚需热数据，WebUI 直接读）
+        write_coldmax_hint(); // 每 1s 核对生效制冷上限，变了才写给 app（定 KI 曲线横轴）
 
         if (last_ctrl == 0 || time(NULL) - last_ctrl >= 5) {
             last_ctrl = time(NULL);

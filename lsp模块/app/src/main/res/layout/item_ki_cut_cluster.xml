@@ -1,0 +1,58 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    KI 分段削减表的一个「簇」块：表头（"簇 N" + 删除簇）+ 点行容器 + "添加点"。
+    点行由 KiCutTableEditor 现场 inflate item_ki_cut_point.xml 后 addView 进 ki_cut_cluster_points。
+    块底色取 app_surface_container_high（比卡片底色亮一档），簇与簇之间自然分得开。
+-->
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:id="@+id/ki_cut_cluster"
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content"
+    android:background="@color/app_surface_container_high"
+    android:orientation="vertical"
+    android:padding="@dimen/space_s">
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:gravity="center_vertical"
+        android:orientation="horizontal">
+
+        <TextView
+            android:id="@+id/ki_cut_cluster_title"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:textAppearance="@style/TextAppearance.B6XTempCtrl.Caption" />
+
+        <com.google.android.material.button.MaterialButton
+            android:id="@+id/ki_cut_cluster_del"
+            style="@style/Widget.Material3.Button.TextButton"
+            android:layout_width="wrap_content"
+            android:layout_height="@dimen/ki_cut_del_size"
+            android:contentDescription="@string/config_ki_cut_del_cluster"
+            android:minWidth="0dp"
+            android:paddingStart="@dimen/space_s"
+            android:paddingEnd="@dimen/space_s"
+            android:text="@string/config_ki_cut_del_cluster_text"
+            android:textSize="@dimen/text_caption" />
+    </LinearLayout>
+
+    <LinearLayout
+        android:id="@+id/ki_cut_cluster_points"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="vertical" />
+
+    <com.google.android.material.button.MaterialButton
+        android:id="@+id/ki_cut_cluster_add_point"
+        style="@style/Widget.Material3.Button.TextButton"
+        android:layout_width="wrap_content"
+        android:layout_height="@dimen/ki_cut_del_size"
+        android:layout_marginTop="@dimen/space_xs"
+        android:minWidth="0dp"
+        android:paddingStart="@dimen/space_s"
+        android:paddingEnd="@dimen/space_s"
+        android:text="@string/config_ki_cut_add_point"
+        android:textSize="@dimen/text_caption" />
+</LinearLayout>

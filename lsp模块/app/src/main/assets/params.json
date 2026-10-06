@@ -54,10 +54,8 @@
         "PID_TARGET_DIR",
         "PID_SPEED_RECALL",
         "PID_COLD_RANGE",
-        "PID_COLD_DYN_IN",
-        "PID_COLD_DYN_OUT",
-        "PID_COLD_DYN_W",
-        "PID_COLD_DYN_MAP"
+        "KI_CUT",
+        "KI_CUT_SMOOTH"
       ]
     },
     {
@@ -1010,24 +1008,20 @@
         }
       ]
     },
-    "PID_COLD_DYN_IN": {
-      "key": "PID_COLD_DYN_IN",
+    "KI_CUT": {
+      "key": "KI_CUT",
       "group": "perf",
       "role": "setting",
-      "type": "multi",
-      "label": "冷值动态倍率 输入轴",
-      "desc": "三值为冷值三点（下界 拐点 上界，冷值码，零换算，默认 40 100 190，各 0~255）：低于下界不干预，下界→拐点→上界两段线性，上界处取到最大降幅",
+      "type": "table",
+      "label": "KI 分段削减表",
+      "desc": "按冷值分段削减 KI 升/降速率（倍率 ×100：100=不削、0=完全压死，各 0~200）。每行一个簇，行值为重复三元组「冷值,升倍率,降倍率,...」（冷值 0~255）：簇内按冷值升序折线插值、两端外平推，多簇取最小倍率",
       "unit": "",
-      "unitNote": "多值键，各字段单位见 fields",
+      "unitNote": "表键，各字段单位见 rowFields",
       "default": [
-        40,
-        100,
-        190
+        "1,100,50,40,100,100,100,71,78,190,50,62"
       ],
       "factory": [
-        40,
-        100,
-        190
+        "1,100,50,40,100,100,100,71,78,190,50,62"
       ],
       "min": null,
       "max": null,
@@ -1035,42 +1029,44 @@
         "PERF_ENABLED"
       ],
       "daemonConsumes": true,
-      "rangeNote": "范围逐字段见 fields（各 0~255）；低于下界不干预，上界及以上维持最大降幅",
-      "fields": [
+      "rangeNote": "范围逐字段见 rowFields（冷值 0~255、升/降倍率 0~200）",
+      "fields": null,
+      "rowPrefix": "KI_CUT_",
+      "rowFields": [
         {
-          "label": "下界(冷值码)",
-          "unit": "冷值码（零换算）",
+          "label": "冷值",
           "min": 0,
           "max": 255,
-          "default": 40
+          "unit": "制冷强度档位"
         },
         {
-          "label": "拐点(冷值码)",
-          "unit": "冷值码（零换算）",
+          "label": "KI 升倍率",
           "min": 0,
-          "max": 255,
-          "default": 100
+          "max": 200,
+          "unit": "×100（100=不削）"
         },
         {
-          "label": "上界(冷值码)",
-          "unit": "冷值码（零换算）",
+          "label": "KI 降倍率",
           "min": 0,
-          "max": 255,
-          "default": 190
+          "max": 200,
+          "unit": "×100（100=不削）"
         }
+      ],
+      "defaultRows": [
+        "1,100,50,40,100,100,100,71,78,190,50,62"
       ]
     },
-    "PID_COLD_DYN_OUT": {
-      "key": "PID_COLD_DYN_OUT",
+    "KI_CUT_SMOOTH": {
+      "key": "KI_CUT_SMOOTH",
       "group": "perf",
       "role": "setting",
       "type": "int",
-      "label": "冷值动态倍率 拐点降幅",
-      "desc": "输出轴拐点值，配置里存正数（默认 50 = 降幅 0.50）；两端固定：下界处 0（不干预）、上界处 1.00",
-      "unit": "×100（存储值 50 = 降幅 0.50）",
+      "label": "KI 分段削减 平滑系数",
+      "desc": "KI 分段削减表的零相位平滑系数（×100，0~100，默认 15=0.15）：对折线序列正向+反向各一遍 EMA，再按配置点残差线性回补（配置点上取值不变）；0 或 100 = 关闭平滑",
+      "unit": "×100（0 或 100 = 关闭平滑）",
       "unitNote": "",
-      "default": 50,
-      "factory": 50,
+      "default": 15,
+      "factory": 15,
       "min": 0,
       "max": 100,
       "requires": [
@@ -1078,97 +1074,6 @@
       ],
       "daemonConsumes": true,
       "fields": null
-    },
-    "PID_COLD_DYN_W": {
-      "key": "PID_COLD_DYN_W",
-      "group": "perf",
-      "role": "setting",
-      "type": "multi",
-      "label": "冷值动态倍率 权重",
-      "desc": "三值为 KDP / KI 升 / KI 降 的权重（各 ×100，默认 100 100 70 = 1.00 / 1.00 / 0.70，各 0~200）：0 = 该处不受本机制影响",
-      "unit": "",
-      "unitNote": "多值键，各字段单位见 fields",
-      "default": [
-        100,
-        100,
-        70
-      ],
-      "factory": [
-        100,
-        100,
-        70
-      ],
-      "min": null,
-      "max": null,
-      "requires": [
-        "PERF_ENABLED"
-      ],
-      "daemonConsumes": true,
-      "rangeNote": "范围逐字段见 fields（各 0~200）；权重 0 即该作用点不受本机制影响",
-      "fields": [
-        {
-          "label": "KDP 权重(×100)",
-          "unit": "×100",
-          "min": 0,
-          "max": 200,
-          "default": 100
-        },
-        {
-          "label": "KI 升权重(×100)",
-          "unit": "×100",
-          "min": 0,
-          "max": 200,
-          "default": 100
-        },
-        {
-          "label": "KI 降权重(×100)",
-          "unit": "×100",
-          "min": 0,
-          "max": 200,
-          "default": 70
-        }
-      ]
-    },
-    "PID_COLD_DYN_MAP": {
-      "key": "PID_COLD_DYN_MAP",
-      "group": "perf",
-      "role": "setting",
-      "type": "multi",
-      "label": "冷值动态倍率 映射",
-      "desc": "两值为倍率上界 U（×100，默认 200 = 2.00，范围 100~400）与形状指数 γ（×100，默认 100 = 1.00，范围 10~400）；倍率为 U 的 sign(s)×abs(s)^γ 次幂，上下界互为倒数",
-      "unit": "",
-      "unitNote": "多值键，各字段单位见 fields",
-      "default": [
-        200,
-        100
-      ],
-      "factory": [
-        200,
-        100
-      ],
-      "min": null,
-      "max": null,
-      "requires": [
-        "PERF_ENABLED"
-      ],
-      "daemonConsumes": true,
-      "rangeNote": "范围逐字段见 fields（U 100~400、γ 10~400）；上下界互为倒数（下界 = 1/上界）",
-      "fields": [
-        {
-          "label": "倍率上界 U(×100)",
-          "unit": "×100",
-          "min": 100,
-          "max": 400,
-          "default": 200
-        },
-        {
-          "label": "形状指数 γ(×100)",
-          "unit": "×100",
-          "min": 10,
-          "max": 400,
-          "default": 100
-        }
-      ]
     },
     "SYSFS_ENABLED": {
       "key": "SYSFS_ENABLED",

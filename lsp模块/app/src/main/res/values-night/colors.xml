@@ -47,6 +47,11 @@
     <color name="chart_series_cool">#4CAF50</color>
     <color name="chart_axis">#888888</color>
 
+    <!-- ===== KI 分段削减表曲线（与 values 同名、同值；口径见 values/colors.xml 同名段） ===== -->
+    <color name="ki_cut_up">#2196F3</color>
+    <color name="ki_cut_down">#4CAF50</color>
+    <color name="ki_cut_target">#E53935</color>
+
     <!-- ===== 日志分级 ===== -->
     <color name="log_level_debug">#9AA2A5</color>
     <color name="log_level_info">#7CB8F0</color>

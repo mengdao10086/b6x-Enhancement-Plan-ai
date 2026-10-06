@@ -39,6 +39,26 @@
     <string name="config_input_restored">输入为空或不可解析，已恢复为上一次的值</string>
     <string name="config_path_note">路径提示：%1$s</string>
 
+    <!--
+        ===== KI 分段削减表（type=table 的键） =====
+        表头/簇/点的文案只此一份；点行内三个框的浮起说明由 KiCutTableEditor 从定义 rowFields[].label 取，
+        不在这里另写一遍（否则定义一改，界面就与定义分家）。
+    -->
+    <string name="config_ki_cut_add_cluster">添加簇</string>
+    <string name="config_ki_cut_add_point">添加点</string>
+    <string name="config_ki_cut_del_cluster_text">删除簇</string>
+    <string name="config_ki_cut_del_cluster">删除本簇</string>
+    <string name="config_ki_cut_del_point">删除本点</string>
+    <string name="config_ki_cut_del_glyph">×</string>
+    <string name="config_ki_cut_cluster_title">簇 %1$d</string>
+    <string name="config_ki_cut_legend_up">KI 升倍率</string>
+    <string name="config_ki_cut_legend_down">KI 降倍率</string>
+    <string name="config_ki_cut_legend_target">此刻目标冷值</string>
+    <string name="config_ki_cut_axis_note">横轴：制冷档位 0~%1$d ｜ 纵轴：倍率 ×100（100 = 不削）</string>
+    <string name="config_ki_cut_target_unknown">目标冷值未知（数据文件未就绪）</string>
+    <string name="config_ki_cut_limit_cluster">已达上限：最多 %1$d 簇</string>
+    <string name="config_ki_cut_limit_point">已达上限：每簇最多 %1$d 点</string>
+
     <!-- ===== 设置页（[4] 界面 组的独立页，从顶栏设置按钮进入） ===== -->
     <string name="config_back_desc">返回上一页</string>
     <string name="config_settings_empty">参数定义里没有「界面」分组，本页暂无可调项</string>

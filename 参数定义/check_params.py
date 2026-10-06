@@ -7,12 +7,16 @@
 
 断言（任一不过即非 0 退出）：
   A 产物可复现：重跑生成逻辑，与落盘的 4 个产物必须一致（比较按换行归一化） → 退出 1
-  B 产物自洽：57 键齐全、必需字段完整、min ≤ default/factory ≤ max、分组可解析 → 退出 1
+  B 产物自洽：55 键齐全、必需字段完整、min ≤ default/factory ≤ max、分组可解析 → 退出 1
   C 三源无漂移：与 profile.conf / 逻辑说明.md 参数表 / tempctrl.c 对账（含包名） → 退出 2
   D 产物形态自检：C 头括号配平、X 宏实参个数、tempctrl.c 格式串转换符 vs 实参、
     **层默认值表覆盖面**（PERF/SYSFS 每个守护进程取值位要么在表里、要么在显式白名单里；
     表内默认值与定义一致；总开关不入表）→ 退出 1
     （本机与 CI 均无 C 编译器，D 是编译期错误的替代检查）
+  E 跨端对拍：编译 lsp模块/daemon/ki_cut.h 的宿主程序，比对 参数定义/ki_cut_golden.json
+    → 不一致退出 1；本机无 C 编译器时跳过（CI 的 ubuntu 有 gcc，必跑）
+  F 配置行缓冲护栏：load_config 的配置读行缓冲字节数 ≥ 「KI_CUT 满点数、最大字段宽」的单行
+    长度（含行尾换行）→ 不足退出 1。**静态字面比对，不执行 C、不验运行时行为**
 
 用法：
     python 参数定义/check_params.py
@@ -33,14 +37,17 @@ import io
 import json
 import os
 import re
+import shutil
+import subprocess
 import sys
+import tempfile
 
 sys.dont_write_bytecode = True   # 不在 参数定义/ 里留 __pycache__（.gitignore 未覆盖它）
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import gen_params  # noqa: E402  同目录模块，标准库路径规则即可导入
 
-EXPECTED_KEY_COUNT = 57
-VALID_TYPES = ("switch", "int", "multi", "path", "enum")
+EXPECTED_KEY_COUNT = 55
+VALID_TYPES = ("switch", "int", "multi", "path", "enum", "table")
 
 
 class Failure(Exception):
@@ -155,6 +162,50 @@ def fail_check_b(definition):
                 if not (f["min"] <= k["factory"][i] <= f["max"]):
                     problems.append("%s 第 %d 个出厂值 %r 越出字段范围"
                                     % (name, i + 1, k["factory"][i]))
+        elif k["type"] == "table":
+            # 表键：范围在 rowFields（逐字段），默认行在 defaultRows（逗号分隔，值个数须为字段数的整数倍）
+            if k["min"] is not None or k["max"] is not None:
+                problems.append("%s 为表键，min/max 应为 null（逐字段见 rowFields）" % name)
+            if not k.get("rangeNote"):
+                problems.append("%s 为表键但缺 rangeNote" % name)
+            if not isinstance(k.get("rowPrefix"), str) or not k.get("rowPrefix"):
+                problems.append("%s 为表键但缺 rowPrefix" % name)
+            fields = k.get("rowFields") or []
+            if not fields:
+                problems.append("%s 为表键但 rowFields 为空" % name)
+            for i, f in enumerate(fields):
+                if not f.get("label"):
+                    problems.append("%s 第 %d 字段缺 label" % (name, i + 1))
+                if not f.get("unit") and not f.get("unitNote"):
+                    problems.append("%s 第 %d 字段无单位且未写 unitNote" % (name, i + 1))
+                if not (_num_ok(f.get("min")) and _num_ok(f.get("max")) and f["min"] <= f["max"]):
+                    problems.append("%s 第 %d 字段 min/max 非法" % (name, i + 1))
+            rows = k.get("defaultRows") or []
+            if not rows:
+                problems.append("%s 为表键但 defaultRows 为空" % name)
+            nf = len(fields)
+            for ri, row in enumerate(rows):
+                if not isinstance(row, str) or not row.strip():
+                    problems.append("%s 第 %d 个默认行不是非空字符串" % (name, ri + 1))
+                    continue
+                toks = row.split(",")
+                if nf and len(toks) % nf != 0:
+                    problems.append("%s 第 %d 个默认行的值个数 %d 不是字段数 %d 的整数倍"
+                                    % (name, ri + 1, len(toks), nf))
+                for j, tok in enumerate(toks):
+                    s = tok.strip()
+                    if not re.fullmatch(r"-?\d+", s):
+                        problems.append("%s 第 %d 个默认行第 %d 值 %r 非整数"
+                                        % (name, ri + 1, j + 1, tok))
+                        continue
+                    if nf:
+                        fld = fields[j % nf]
+                        if not (fld["min"] <= int(s) <= fld["max"]):
+                            problems.append("%s 第 %d 个默认行第 %d 值 %s 越出字段范围 [%s,%s]"
+                                            % (name, ri + 1, j + 1, s, fld["min"], fld["max"]))
+            for f in ("default", "factory"):
+                if list(k[f] or []) != list(rows):
+                    problems.append("%s 的 %s 应与 defaultRows 一致" % (name, f))
         elif k["type"] == "path":
             if k["min"] is not None or k["max"] is not None:
                 problems.append("%s 为路径键，min/max 应为 null" % name)
@@ -532,6 +583,151 @@ def fail_check_d3(definition, h_text, c_text):
             % (" / ".join(counts), "、".join(DEFAULT_TABLE_EXEMPT)))
 
 
+# --------------------------------------------------------------------------
+# E 跨端对拍：lsp模块/daemon/ki_cut.h 求值实现 vs 参数定义/ki_cut_golden.json
+# --------------------------------------------------------------------------
+
+def _build_harness(cases):
+    """由 golden 用例现写一个宿主 C 程序（内含 ki_cut.h，逐条求值并按序打印）。"""
+    lines = ["#include <stdio.h>", '#include "ki_cut.h"', ""]
+    for ci, case in enumerate(cases):
+        clusters = case["clusters"]
+        for gi, cl in enumerate(clusters):
+            pts = ", ".join("{%d,%d,%d}" % (p[0], p[1], p[2]) for p in cl)
+            lines.append("static const KiCutPoint c{0}_{1}[] = {{{2}}};".format(ci, gi, pts))
+        if clusters:
+            inits = ", ".join("{{c{0}_{1}, {2}}}".format(ci, gi, len(cl))
+                              for gi, cl in enumerate(clusters))
+            lines.append("static const KiCutCluster cs{0}[] = {{{1}}};".format(ci, inits))
+    lines.append("")
+    lines.append("int main(void) {")
+    lines.append("    float up, dn;")
+    for ci, case in enumerate(cases):
+        clusters = case["clusters"]
+        ptr = "cs%d" % ci if clusters else "0"
+        lines.append("    ki_cut_eval({0}, {1}, {2}, {3}, &up, &dn);".format(
+            ptr, len(clusters), case["smooth"], case["cold"]))
+        lines.append('    printf("{0} %.6f %.6f\\n", up, dn);'.format(ci))
+    lines.append("    return 0;")
+    lines.append("}")
+    return "\n".join(lines) + "\n"
+
+
+def fail_check_e(definition):
+    """E 跨端对拍（CI 上运行）：编译 ki_cut.h 的宿主程序，逐条比对 golden 期望值。
+
+    本机无 C 编译器（cc/gcc/clang 全无）时**跳过、不失败**；CI（ubuntu 有 gcc）必跑。
+    对拍程序与临时文件都写在临时目录，不改动仓库任何文件。
+    """
+    golden_path = os.path.join(gen_params.REPO, "参数定义", "ki_cut_golden.json")
+    header_path = os.path.join(gen_params.REPO, "lsp模块", "daemon", "ki_cut.h")
+    if not os.path.exists(golden_path):
+        raise Failure("E 缺少 golden 文件：%s（跨端对拍需它）" % _rel(golden_path))
+    if not os.path.exists(header_path):
+        raise Failure("E 缺少求值头：%s" % _rel(header_path))
+
+    cc = next((shutil.which(c) for c in ("cc", "gcc", "clang") if shutil.which(c)), None)
+    if not cc:
+        return ("E 跨端对拍：本机无 C 编译器（cc/gcc/clang），已跳过"
+                "（CI 的 ubuntu 上由 gcc 执行；golden 见 %s）" % _rel(golden_path))
+
+    with io.open(golden_path, "r", encoding="utf-8") as fh:
+        golden = json.load(fh)
+    tol = float(golden.get("tolerance", 0.02))
+    cases = golden["cases"]
+
+    tmpd = tempfile.mkdtemp(prefix="kicut_")
+    try:
+        cfile = os.path.join(tmpd, "harness.c")
+        exe = os.path.join(tmpd, "harness")
+        with io.open(cfile, "w", encoding="utf-8", newline="\n") as fh:
+            fh.write(_build_harness(cases))
+        cp = subprocess.run([cc, "-O2", "-std=c99", "-I", os.path.dirname(header_path),
+                             "-o", exe, cfile], capture_output=True, text=True)
+        if cp.returncode != 0:
+            raise Failure("E 对拍程序编译失败：\n%s\n%s" % (cp.stdout, cp.stderr))
+        cp = subprocess.run([exe], capture_output=True, text=True)
+        if cp.returncode != 0:
+            raise Failure("E 对拍程序运行失败：\n%s\n%s" % (cp.stdout, cp.stderr))
+
+        bad = []
+        seen = 0
+        for line in cp.stdout.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            idx_s, up_s, dn_s = line.split()
+            case = cases[int(idx_s)]
+            seen += 1
+            if abs(float(up_s) - case["up"]) > tol or abs(float(dn_s) - case["dn"]) > tol:
+                bad.append("%s：C=(%s,%s) ≠ golden=(%s,%s)"
+                           % (case["name"], up_s, dn_s, case["up"], case["dn"]))
+        if seen != len(cases):
+            raise Failure("E 对拍程序输出 %d 行 ≠ 用例 %d 条" % (seen, len(cases)))
+        if bad:
+            raise Failure("E 跨端对拍失败 %d 条：\n  - %s" % (len(bad), "\n  - ".join(bad)))
+        return ("E 跨端对拍：%s 的求值与 %s 的 %d 组用例一致（容差 %g）"
+                % (_rel(header_path), _rel(golden_path), len(cases), tol))
+    finally:
+        shutil.rmtree(tmpd, ignore_errors=True)
+
+
+def fail_check_f(definition):
+    """F 配置行缓冲护栏（**静态字面比对，非运行时执行**）。
+
+    绑定两处字面量：`tempctrl.c` 中 `load_config` 的配置读行缓冲字节数，与 `ki_cut.h` 的
+    `KI_CUT_MAX_POINTS`；断言前者足以容纳「满点数、最大字段宽」的 `KI_CUT_<n>` 单行（含换行）。
+    目的是防止将来单独调大 `KI_CUT_MAX_POINTS`（或字段上限）而漏改缓冲，重演 fgets 截断。
+    抓取方式：从 `load_config` 函数起点之后取首个 `char line[N]`；任一字面量抓不到即**失败**（不静默放过）。
+    """
+    h_path = gen_params.product_path(gen_params.product_by_id("c-header"))
+    c_path = gen_params.source_path(
+        next(s for s in gen_params.SOURCES if s.id == "c"))
+    ki_path = os.path.join(gen_params.REPO, "lsp模块", "daemon", "ki_cut.h")
+    with io.open(h_path, "r", encoding="utf-8") as fh:
+        h_text = fh.read()
+    with io.open(c_path, "r", encoding="utf-8") as fh:
+        c_text = fh.read()
+    if not os.path.exists(ki_path):
+        raise Failure("F 未找到 ki_cut.h（%s）" % _rel(ki_path))
+    with io.open(ki_path, "r", encoding="utf-8") as fh:
+        ki_text = fh.read()
+
+    def _macro_int(name, text, where):
+        m = re.search(r"#define\s+%s\s+(\d+)" % re.escape(name), text)
+        if not m:
+            raise Failure("F 未找到宏 %s（%s；静态护栏依赖其字面量）" % (name, where))
+        return int(m.group(1))
+
+    max_points = _macro_int("KI_CUT_MAX_POINTS", ki_text, "ki_cut.h")
+
+    mfn = re.search(r"static\s+\w+\s+load_config\s*\([^)]*\)\s*\{", c_text)
+    if not mfn:
+        raise Failure("F 未找到 load_config 定义，无法取配置读行缓冲大小")
+    mbuf = re.search(r"char\s+line\s*\[\s*(\d+)\s*\]", c_text[mfn.end():])
+    if not mbuf:
+        raise Failure("F load_config 内未找到 char line[N] 配置行缓冲")
+    buf = int(mbuf.group(1))
+
+    mpfx = re.search(r'#define\s+CFG_ROW_PREFIX_KI_CUT\s+"([^"]*)"', h_text)
+    if not mpfx:
+        raise Failure("F 未找到 CFG_ROW_PREFIX_KI_CUT（params_generated.h）")
+    pfx = mpfx.group(1)
+    f1 = _macro_int("CFG_MAX_KI_CUT_F1", h_text, "params_generated.h")
+    f2 = _macro_int("CFG_MAX_KI_CUT_F2", h_text, "params_generated.h")
+    f3 = _macro_int("CFG_MAX_KI_CUT_F3", h_text, "params_generated.h")
+    max_cluster = _macro_int("KI_CUT_MAX_CLUSTERS", c_text, "tempctrl.c")
+
+    triple = "%d,%d,%d" % (f1, f2, f3)
+    need = len("%s%d=%s\n" % (pfx, max_cluster, ",".join([triple] * max_points)))
+    if buf - 1 < need:                     # fgets 最多读 buf-1 字节
+        raise Failure(
+            "F 配置行缓冲 char line[%d] 不足：KI_CUT 满 %d 点行最长 %d 字节（含换行），"
+            "load_config 会截断整行 → 请同步放宽其 char line[]" % (buf, max_points, need))
+    return ("F 配置行缓冲静态护栏：load_config char line[%d] ≥ KI_CUT 满 %d 点最长行 %d 字节"
+            "（静态字面比对，非运行时执行）" % (buf, max_points, need))
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description="B6X 参数定义 CI 校验")
     ap.add_argument("--no-audit", action="store_true",
@@ -548,6 +744,8 @@ def main(argv=None):
         print("[PASS] " + fail_check_a(definition))
         print("[PASS] " + fail_check_b(definition))
         print("[PASS] " + fail_check_d(definition))
+        print("[PASS] " + fail_check_e(definition))
+        print("[PASS] " + fail_check_f(definition))
     except Failure as exc:
         print("[FAIL] " + str(exc))
         return 1

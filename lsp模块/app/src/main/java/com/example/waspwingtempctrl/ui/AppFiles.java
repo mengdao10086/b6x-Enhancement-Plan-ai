@@ -12,8 +12,8 @@ import java.nio.charset.Charset;
 import java.nio.charset.StandardCharsets;
 
 /**
- * 界面直读守护进程产物的统一入口（曲线数据 / 日志页共用）。两个数据文件都落在 app 私有目录，
- * 同 uid 普通 File IO 即可读，<b>不需要 root</b>。
+ * 界面直读守护进程产物的统一入口（曲线数据 / 日志页 / KI 曲线横轴共用）。这几个文件都落在 app
+ * 私有目录，同 uid 普通 File IO 即可读，<b>不需要 root</b>。
  *
  * <p><b>未经真机验证</b>：文件由 root 的守护进程创建，SELinux 标签层面 app 能否直读尚未验证。
  * 因此本类<b>不吞异常</b>，读取失败一律抛出带「路径 + 异常类型 + errno 文案」的 {@link IOException}，
@@ -25,6 +25,8 @@ public final class AppFiles {
     public static final String LOG_NAME = "tempctrl.log";
     /** 曲线时序数据文件名（C 端 write_webui_data 落盘）。 */
     public static final String DATA_NAME = "tempctrl_webui.data";
+    /** 生效制冷上限文件名（C 端 write_coldmax_hint 落盘，一行 {@code COLD_MAX=<int>}）。 */
+    public static final String COLDMAX_NAME = "tempctrl_coldmax";
 
     private AppFiles() {
     }
@@ -40,6 +42,10 @@ public final class AppFiles {
 
     public static File dataFile(Context context) {
         return new File(privateDir(context), DATA_NAME);
+    }
+
+    public static File coldMaxFile(Context context) {
+        return new File(privateDir(context), COLDMAX_NAME);
     }
 
     /** 一次探测的原始结果，不抛异常（供诊断串使用）。 */

@@ -5,6 +5,8 @@ import android.content.res.Configuration;
 import android.content.res.Resources;
 import android.content.res.TypedArray;
 import android.graphics.Paint;
+import android.os.Handler;
+import android.os.Looper;
 import android.text.Editable;
 import android.text.InputType;
 import android.text.Layout;
@@ -21,6 +23,7 @@ import androidx.core.content.ContextCompat;
 
 import com.example.waspwingtempctrl.ConfigStore;
 import com.example.waspwingtempctrl.ConfigStore.Assessment;
+import com.example.waspwingtempctrl.ConfigStore.ConfText;
 import com.example.waspwingtempctrl.ConfigStore.FieldMeta;
 import com.example.waspwingtempctrl.ConfigStore.KeyMeta;
 import com.example.waspwingtempctrl.ConfigStore.OptionMeta;
@@ -40,8 +43,8 @@ import java.util.List;
 import java.util.Map;
 
 /**
- * 一个配置键的行：switch / int / multi / path / enum 五种 type 各由一个 {@link Renderer} 渲染，
- * 行骨架（参数名 + 键内控件 + 行级文本）与落盘规则五型共用。键的 label / desc / 单位 / 范围 / 依赖 /
+ * 一个配置键的行：switch / int / multi / path / enum / table 六种 type 各由一个 {@link Renderer} 渲染，
+ * 行骨架（参数名 + 键内控件 + 行级文本）与落盘规则六型共用。键的 label / desc / 单位 / 范围 / 依赖 /
  * 取值域全部来自 {@link KeyMeta}（背后是 assets/params.json），本类不手抄任何键定义。
  *
  * <p>形态（配合 {@link WrapRowLayout}：参数名 lead、键内控件 trailing、行级文本 fullLine）、
@@ -246,15 +249,18 @@ final class ConfigKeyRow {
      * 见 app 逻辑说明.md §6.1。
      */
     private void shiftLabelInNonSwitchRow() {
-        if (meta.isSwitch() || (meta.isMulti() && meta.fields.get(0).bool)) {
+        if (meta.isSwitch() || meta.isTable() || (meta.isMulti() && meta.fields.get(0).bool)) {
             return;
         }
         labelView.setTranslationY(
                 root.getResources().getDimensionPixelSize(R.dimen.config_label_shift));
     }
 
-    /** 按定义里的 type 选渲染器：一处判断，五种 type 各一份实现（定义里只有这五种，int 是其余情况）。 */
+    /** 按定义里的 type 选渲染器：一处判断，六种 type 各一份实现（定义里只有这六种，int 是其余情况）。 */
     private Renderer createRenderer() {
+        if (meta.isTable()) {
+            return new TableRenderer();
+        }
         if (meta.isSwitch()) {
             return new SwitchRenderer();
         }
@@ -280,9 +286,9 @@ final class ConfigKeyRow {
         return meta.key;
     }
 
-    // ==================== 五型渲染器 ====================
+    // ==================== 六型渲染器 ====================
 
-    /** 键内的渲染面：五种 type 各一份实现，行骨架只按它要控件与值。 */
+    /** 键内的渲染面：六种 type 各一份实现，行骨架只按它要控件与值。 */
     private interface Renderer {
 
         /** 建键内控件并挂到行骨架上（键内控件标 trailing，行级文本标 fullLine）。 */
@@ -648,6 +654,137 @@ final class ConfigKeyRow {
         }
     }
 
+    /**
+     * 表型键（{@code type:"table"}）：簇/点编辑器（{@link KiCutTableEditor}）+ 表下方实时倍率曲线
+     * （{@link KiCutChartView}）。值是<b>多行文本</b>（每行一簇），读写都经编辑器；写盘走既有防抖队列，
+     * 「值未变不写」与「待写值优先」两套语义原样复用（{@link #commit}）。
+     *
+     * <p>「此刻目标冷值」的红虚线由 1Hz 的轻量取数刷新（{@link KiCutData#targetCold}），
+     * 只在视图可见时读；取不到就不画线并在说明里如实标注，绝不画一个假位置。
+     */
+    private final class TableRenderer implements Renderer {
+
+        /** 与 KI 削减表配套的平滑系数键（契约固定为这个名字；定义里查不到时按 15 处理）。 */
+        private static final String SMOOTH_KEY = "KI_CUT_SMOOTH";
+        /** 平滑系数缺省值（与契约的 KI_CUT_SMOOTH 默认一致）。 */
+        private static final int SMOOTH_DEFAULT = 15;
+        /** 「此刻目标冷值」的刷新周期（与数据文件写入节奏同档）。 */
+        private static final long TARGET_REFRESH_MS = 1000L;
+
+        private View block;
+        private KiCutTableEditor editor;
+        private KiCutChartView chart;
+        private TextView axisNote;
+        private int targetCold = -1;
+
+        private final Handler ticker = new Handler(Looper.getMainLooper());
+        private final Runnable tick = new Runnable() {
+            @Override
+            public void run() {
+                refreshTargetCold(false);
+                ticker.postDelayed(this, TARGET_REFRESH_MS);
+            }
+        };
+
+        @Override
+        public void build() {
+            long startedAt = StartupTiming.accBegin(StartupTiming.FORM_SUB_INFLATE);
+            block = views.inflate(R.layout.item_config_ki_cut, root);
+            StartupTiming.accEnd(StartupTiming.FORM_SUB_INFLATE, startedAt);
+            addFullLine(block);
+            chart = block.findViewById(R.id.ki_cut_chart);
+            axisNote = block.findViewById(R.id.ki_cut_axis_note);
+            editor = new KiCutTableEditor(meta, block, new KiCutTableEditor.Listener() {
+                @Override
+                public void onEdited() {
+                    if (!suppressChange) {
+                        commit(false);
+                    }
+                    redrawChart();
+                }
+
+                @Override
+                public void notifyUser(String message) {
+                    host.notifyUser(message, false);
+                }
+            });
+            // 视图在窗口上才起取数：切页/收起/页面销毁时停掉，省下每秒一次的读盘
+            block.addOnAttachStateChangeListener(new View.OnAttachStateChangeListener() {
+                @Override
+                public void onViewAttachedToWindow(View v) {
+                    ticker.removeCallbacks(tick);
+                    ticker.post(tick);
+                }
+
+                @Override
+                public void onViewDetachedFromWindow(View v) {
+                    ticker.removeCallbacks(tick);
+                }
+            });
+        }
+
+        @Override
+        public void applyValue(@NonNull Value value) {
+            editor.setClusters(KiCutTable.parseRows(ConfText.splitLines(value.text())));
+            refreshTargetCold(true);
+            redrawChart();
+        }
+
+        @Override
+        @NonNull
+        public Value read(boolean fallbackForUnparsed) {
+            // 表随时有完整值（编辑器自己把非法输入收敛进定义范围），不存在"还没输完"的中间态
+            return Value.ofText(editor.getValueText());
+        }
+
+        @Override
+        public boolean writesWhileTyping() {
+            return true;
+        }
+
+        @Override
+        @NonNull
+        public List<View> dimTargets() {
+            return Collections.singletonList(block);
+        }
+
+        /** 依「此刻目标冷值」的当前值重绘曲线与说明。 */
+        private void redrawChart() {
+            if (chart == null || block == null) {
+                return;
+            }
+            Context context = block.getContext();
+            int coldMax = KiCutData.coldMax(context);
+            int smooth = smoothPct();
+            List<KiCutTable.Cluster> clusters = editor.getClusters();
+            chart.setCurves(KiCutTable.minCurve(clusters, smooth, coldMax, true),
+                    KiCutTable.minCurve(clusters, smooth, coldMax, false), coldMax, targetCold);
+            String note = context.getString(R.string.config_ki_cut_axis_note, coldMax);
+            if (targetCold < 0) {
+                note = note + " ｜ " + context.getString(R.string.config_ki_cut_target_unknown);
+            }
+            axisNote.setText(note);
+        }
+
+        /** 平滑系数（×100 口径之外直接就是 %）：取当前有效值，定义里没有这个键时按默认值。 */
+        private int smoothPct() {
+            Value value = host.effectiveValue(SMOOTH_KEY);
+            return value != null ? value.intAt(0) : SMOOTH_DEFAULT;
+        }
+
+        /** 读一次「此刻目标冷值」；只有值真的变了（或首次）才重绘。视图不可见时跳过读盘。 */
+        private void refreshTargetCold(boolean force) {
+            if (block == null || !block.isShown()) {
+                return;
+            }
+            int value = KiCutData.targetCold(block.getContext());
+            if (force || value != targetCold) {
+                targetCold = value;
+                redrawChart();
+            }
+        }
+    }
+
     // ==================== 键内控件：建、说明落位、量宽 ====================
 
     /** int / multi 的数值字段：说明 + 单位/范围说明，每次输入都排入防抖队列（失焦时钳制回写）。 */
@@ -729,6 +866,17 @@ final class ConfigKeyRow {
         long startedAt = StartupTiming.accBegin(StartupTiming.FORM_SUB_ATTACH);
         root.addView(child, ++tailCount);
         root.setTrailing(child, true);
+        StartupTiming.accEnd(StartupTiming.FORM_SUB_ATTACH, startedAt);
+    }
+
+    /**
+     * 挂一个整行独占的键内控件（表型键的表与曲线图）：排在参数名与其余行级文本之后、按整行宽排版。
+     * 与 {@link #addToTail} 的区别是不标 trailing——表是个大块，不该与参数名挤在同一行。
+     */
+    private void addFullLine(@NonNull View child) {
+        long startedAt = StartupTiming.accBegin(StartupTiming.FORM_SUB_ATTACH);
+        root.addView(child);
+        root.setFullLine(child, true);
         StartupTiming.accEnd(StartupTiming.FORM_SUB_ATTACH, startedAt);
     }
 

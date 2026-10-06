@@ -54,6 +54,13 @@
     <color name="chart_series_cool">#4CAF50</color>
     <color name="chart_axis">#888888</color>
 
+    <!-- ===== KI 分段削减表曲线 =====
+         两条倍率线 + 一条"此刻目标冷值"竖虚线。色号取 Material 500/600 标准色板，与上面曲线页同族；
+         红虚线用 Red 600(#E53935) 而非曲线页电池那条 Red 500(#F44336)，避免与本页红点混为一谈。 -->
+    <color name="ki_cut_up">#2196F3</color>
+    <color name="ki_cut_down">#4CAF50</color>
+    <color name="ki_cut_target">#E53935</color>
+
     <!-- ===== 日志分级（D3 用） ===== -->
     <color name="log_level_debug">#6B7275</color>
     <color name="log_level_info">#0F5FA8</color>

@@ -89,4 +89,17 @@
         行高与换行几何一个字都不变，观感不对只改这一个值。
     -->
     <dimen name="config_label_shift">3dp</dimen>
+
+    <!--
+        ===== KI 分段削减表 =====
+        点行里三个数字框高取共用 @dimen/field_height(36dp)（与配置页其余输入框同档）；
+        删除/添加按钮取 40dp（比行高略小、仍够点准，两张表里重复出现，不宜太占位）。
+        曲线高 150dp：够画清 0~200 的取值与刻度，又不至于把参数卡撑成一屏放不下。
+    -->
+    <dimen name="ki_cut_input_height">@dimen/field_height</dimen>
+    <!-- 紧凑输入框的描边宽（见 drawable/bg_ki_cut_input.xml）：1dp 是 Material 描边的常用档 -->
+    <dimen name="ki_cut_input_stroke">1dp</dimen>
+    <dimen name="ki_cut_del_size">40dp</dimen>
+    <dimen name="ki_cut_chart_height">150dp</dimen>
+    <dimen name="ki_cut_legend_swatch">10dp</dimen>
 </resources>

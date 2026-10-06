@@ -150,6 +150,18 @@ def build_params_json(definition):
                 item[opt] = entry[opt]
         fields = entry.get("fields")
         item["fields"] = [_field_product(f) for f in fields] if fields else None
+        # 表键（type=table）：界面按 rowPrefix 拼配置键、按 rowFields 校验逐字段、用 defaultRows 初始化表
+        if entry["type"] == "table":
+            item["rowPrefix"] = entry["rowPrefix"]
+            row_fields = []
+            for f in (entry.get("rowFields") or []):
+                fo = {"label": f["label"], "min": f["min"], "max": f["max"],
+                      "unit": f.get("unit", "")}
+                if f.get("unitNote"):
+                    fo["unitNote"] = f["unitNote"]
+                row_fields.append(fo)
+            item["rowFields"] = row_fields
+            item["defaultRows"] = list(entry.get("defaultRows") or [])
         # enum 的取值域（value = 落盘文本，label = 界面文案）与 fields 平级；
         # 只有 enum 键输出它，其余类型不带这个键。取值域的合法性由 check_params.py 校验。
         if entry["type"] == "enum":
@@ -251,6 +263,11 @@ def render_conf(definition):
             first = False
             for line in (entry.get("confNote") or []):
                 out.append(("# " + line).rstrip())
+            # 表键：一个簇一行，键名 = rowPrefix + 序号（从 1 起），行值 = defaultRows 对应项
+            if entry["type"] == "table":
+                for i, row in enumerate(entry.get("defaultRows") or []):
+                    out.append("%s%d=%s" % (entry["rowPrefix"], i + 1, row))
+                continue
             text = "%s=%s" % (entry["key"], _conf_value(entry))
             if entry.get("confInline"):
                 text = text.ljust(pads[entry["key"]]) + "# " + entry["confInline"]
@@ -274,6 +291,8 @@ def _doc_default_cell(entry):
     val = entry["default"]
     if entry["type"] == "multi":
         return " ".join(str(v) for v in val)
+    if entry["type"] == "table":
+        return " ".join(str(v) for v in (entry.get("defaultRows") or []))
     return str(val)
 
 
@@ -433,6 +452,21 @@ def build_c_header(definition):
     for e in paths:
         lines.append("#define CFG_DEFAULT_%s %s" % (e["key"], _c_default(e)))
     lines.append("")
+
+    tables = [e for e in daemon if e["type"] == "table"]
+    if tables:
+        lines.append("/* 表键（type=table）：行前缀、逐字段 clamp 边界与默认行。解析代码在 tempctrl.c")
+        lines.append(" * 手写，用这些宏取前缀/边界/默认行，避免与定义各写一份（行数可变，故不进上方逐键边界表）。 */")
+        for e in tables:
+            lines.append("#define CFG_ROW_PREFIX_%s %s"
+                         % (e["key"], json.dumps(e["rowPrefix"], ensure_ascii=False)))
+            for i, f in enumerate(e.get("rowFields") or []):
+                lines.append("#define CFG_MIN_%s_F%d %d" % (e["key"], i + 1, f["min"]))
+                lines.append("#define CFG_MAX_%s_F%d %d" % (e["key"], i + 1, f["max"]))
+            for i, row in enumerate(e.get("defaultRows") or []):
+                lines.append("#define CFG_DEFAULT_%s_%d %s"
+                             % (e["key"], i + 1, json.dumps(row, ensure_ascii=False)))
+        lines.append("")
 
     lines.append("/* 各层 int 取值位的**代码默认值**表：层开关由 1→0 时，tempctrl.c 展开本表把该层")
     lines.append(" * 运行时参数批量赋回代码默认值（= 等同该层配置不存在）。行格式 X(C 变量, 默认值)。")
@@ -861,6 +895,39 @@ def audit_app_package(definition, findings):
                              % (site["file"], site["name"], got, expected_dir)))
 
 
+def expected_conf_keys(entries):
+    """profile.conf 应有的键序列：table 键展开为 rowPrefix + 序号（1 起），其余为键名。"""
+    out = []
+    for e in entries:
+        if e.get("type") == "table":
+            for i in range(len(e.get("defaultRows") or [])):
+                out.append("%s%d" % (e["rowPrefix"], i + 1))
+        else:
+            out.append(e["key"])
+    return out
+
+
+def table_binding_problems(entry, c_text, h_text):
+    """table 键在生成头与 tempctrl.c 的绑定核对：行前缀、逐字段边界、默认行都必须单源引用。"""
+    probs = []
+    key = entry["key"]
+    pref_macro = "CFG_ROW_PREFIX_%s" % key
+    if ("#define %s %s" % (pref_macro, json.dumps(entry["rowPrefix"], ensure_ascii=False))) not in h_text:
+        probs.append("表键 %s 的生成头缺少行前缀宏 %s" % (key, pref_macro))
+    if pref_macro not in c_text:
+        probs.append("表键 %s 的解析未引用 %s（行前缀未单一来源）" % (key, pref_macro))
+    for i, f in enumerate(entry.get("rowFields") or []):
+        for kind in ("MIN", "MAX"):
+            mac = "CFG_%s_%s_F%d" % (kind, key, i + 1)
+            if mac not in c_text:
+                probs.append("表键 %s 第 %d 字段的边界未引用 %s" % (key, i + 1, mac))
+    for i in range(len(entry.get("defaultRows") or [])):
+        mac = "CFG_DEFAULT_%s_%d" % (key, i + 1)
+        if mac not in c_text:
+            probs.append("表键 %s 第 %d 个默认行未引用 %s（复位时无法取到默认行）" % (key, i + 1, mac))
+    return probs
+
+
 def audit(definition, verbose=True):
     """三源漂移审计。返回 findings 列表；每项 (级别, 文本)，级别 ∈ ERROR/INFO。"""
     paths = {s.id: source_path(s) for s in SOURCES}
@@ -892,11 +959,12 @@ def audit(definition, verbose=True):
     # ---- 1. 三份来源的键集合 ----
     if os.path.exists(conf_path):
         conf_keys = parse_conf_keys(read_text(conf_path))
-        if conf_keys != def_keys:
+        expect_conf = expected_conf_keys(entries)   # table 键在此展开为其 rowPrefix+序号 行
+        if conf_keys != expect_conf:
             err("profile.conf 键集合/顺序与定义不一致：多 %s / 少 %s / 顺序不同 %s"
-                % (sorted(set(conf_keys) - set(def_keys)),
-                   sorted(set(def_keys) - set(conf_keys)),
-                   conf_keys != def_keys and not (set(conf_keys) ^ set(def_keys))))
+                % (sorted(set(conf_keys) - set(expect_conf)),
+                   sorted(set(expect_conf) - set(conf_keys)),
+                   conf_keys != expect_conf and not (set(conf_keys) ^ set(expect_conf))))
     if os.path.exists(doc_path):
         doc_keys = parse_doc_keys(read_text(doc_path))
         doc_order = [e["key"] for e in sorted(
@@ -921,6 +989,16 @@ def audit(definition, verbose=True):
         adopted = _adopted_tables(c_text)
         for pid in adopted:
             table_keys.extend(e["key"] for e in entries if e.get("cTable") == pid)
+        # table 键（无 cTable）：解析由 tempctrl.c 手写，靠行前缀宏确认它被处理了，
+        # 并逐项核对逐字段边界/默认行宏的引用（绑定宏见生成头的「表键」段）。
+        h_text = read_text(product_path(product_by_id("c-header")))
+        for e in entries:
+            if e.get("type") != "table" or not e.get("daemonConsumes", True):
+                continue
+            for p in table_binding_problems(e, c_text, h_text):
+                err(p)
+            if ("CFG_ROW_PREFIX_%s" % e["key"]) in c_text:
+                table_keys.append(e["key"])
         if adopted and '#include "params_generated.h"' not in c_text:
             err("tempctrl.c 用 X 宏展开键表（%s）但未 #include \"params_generated.h\""
                 % ", ".join(C_TABLE_NAME[p] for p in adopted))
@@ -972,6 +1050,8 @@ def audit(definition, verbose=True):
             key = entry["key"]
             if not entry.get("daemonConsumes", True):
                 continue
+            if entry.get("type") == "table":
+                continue        # 表键行数可变、无固定取值位，其 C 绑定由 table_binding_problems 单独核对
             vars_ = c_vars.get(key)
             if vars_ is None:
                 err("audit.cVars 缺少 %s 的 C 变量映射" % key)

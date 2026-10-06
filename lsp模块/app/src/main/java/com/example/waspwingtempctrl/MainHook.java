@@ -5,6 +5,12 @@ import android.app.ActivityManager;
 import android.bluetooth.BluetoothAdapter;
 import android.bluetooth.BluetoothDevice;
 import android.bluetooth.BluetoothGatt;
+import android.bluetooth.BluetoothManager;
+import android.bluetooth.le.BluetoothLeScanner;
+import android.bluetooth.le.ScanCallback;
+import android.bluetooth.le.ScanFilter;
+import android.bluetooth.le.ScanResult;
+import android.bluetooth.le.ScanSettings;
 import android.content.BroadcastReceiver;
 import android.content.Context;
 import android.content.Intent;
@@ -17,6 +23,7 @@ import android.os.PowerManager;
 import java.io.BufferedReader;
 import java.io.File;
 import java.io.FileOutputStream;
+import java.util.Collections;
 import java.util.Iterator;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentLinkedQueue;
@@ -123,6 +130,16 @@ public class MainHook implements IXposedHookLoadPackage {
     private static final int SCREEN_PROBE_TICKS = 5;     // 探测间隔（秒）：isInteractive() 是一次到 system_server 的调用，不每秒问
     private static final int RECONNECT_INTERVAL_SCREEN_ON_TICKS = 5;    // 亮屏重连间隔（原节奏，秒）
     private static final int RECONNECT_INTERVAL_SCREEN_OFF_TICKS = 10;  // 息屏重连间隔（用户拍板值，秒）
+
+    // ========== 加固二：连续失败后自扫取新设备重连 ==========
+    // 重连是真实蓝牙连接尝试，失败/重试都只在 tick 线程发生，故下列字段无需 volatile（scanInFlight
+    // 除外：它由扫描回调线程读写）。语义与取舍见 app/逻辑说明.md §1.2「连续失败后自扫」。
+    private static volatile int reconnectFailStreak = 0;   // 连续重连尝试未连上的次数（markConnected 清零）
+    private static final int SCAN_AFTER_FAILURES = 3;      // 连续失败达此值才触发自扫（亮屏≈15s、息屏≈30s）
+    private static final long SCAN_RECONNECT_COOLDOWN_MS = 60 * 1000;  // 自扫重连冷却（秒级节流，防持续扫描）
+    private static final long SCAN_TIMEOUT_MS = 8 * 1000;              // 单次自扫上限（到点自动停扫）
+    private static volatile boolean scanInFlight = false;  // 自扫进行中（回调线程与 tick 线程共享）
+    private static volatile long lastScanReconnectAt = 0;  // 上次自扫发起时刻（冷却计时，markConnected 清零）
 
     // ========== 广播接收诊断（每次连接最多 3 对日志） ==========
     private static final int DIAG_LOG_MAX_PER_CONN = 3;   // 每次连接最多记录的对数
@@ -343,7 +360,7 @@ public class MainHook implements IXposedHookLoadPackage {
                     // 设备锁死（多次重连无回传）时停止自动重连，等用户强制重启 App
                     if (!bleConnected && lastDevice != null && !deviceLockedAlerted
                             && tick % reconnectIntervalTicks(tick) == 0) {
-                        tryReconnectOnce();   // 发令 + 验收 + 自愈（见 app/逻辑说明.md §1.2）
+                        tryReconnectOnce();   // 只发令 + 连续失败转自扫重连（见 app/逻辑说明.md §1.2）
                     }
 
                     // ═══ 重连循环心跳（方案 3）：仅断连时每 5 分钟一条，使「循环在跑」在日志上可见 ═══
@@ -375,13 +392,14 @@ public class MainHook implements IXposedHookLoadPackage {
     }
 
     /**
-     * 后台重连一次（方案 1：发令 + 验收 + 自愈）。
-     * 发令后延迟约 1s 复查 SDK 控制器状态：若判定"本次未发起"（调用抛异常、发令后仍空闲=0、
-     * 或发令前后状态纹丝不动），说明 SDK 被自身状态门禁静默挡住 → 清状态、断 gatt，等下一周期重试。
-     * 任一反射失败只记录并按时间限频输出，退回现有行为，绝不向 tick 循环抛出；
-     * 中断（InterruptedException）原样上抛，由 tick 循环退出（语义与重构前一致）。
+     * 后台重连一次（v2.7 语义：只发令、只按限频记日志，绝不在重连过程中动 SDK 状态或主动断 gatt）。
+     *
+     * 回归说明：此前（021a95c5）在发令后 ~1s 复查状态并「清状态 + 断 gatt」自愈，但 BLE 建连是异步的，
+     * 1s 窗口内状态常未推进 → 把正在建立的连接误判为「未发起」并拆掉，形成「发起即拆」的循环而永不重连。
+     * 本方法改回只发令；连续失败达阈值后改走「自扫取新设备重连」（见 maybeScanReconnect）。
+     * 任一反射失败只记录并按时间限频输出，绝不向 tick 循环抛出。
      */
-    private static void tryReconnectOnce() throws InterruptedException {
+    private static void tryReconnectOnce() {
         try {
             if (appClassLoader == null) {
                 if (!loggedReconnectSkip) {
@@ -390,22 +408,23 @@ public class MainHook implements IXposedHookLoadPackage {
                 }
                 return;
             }
+            reconnectFailStreak++;   // 每次尝试都先计一次（连接成功由 markConnected 清零）
+
+            // 连续失败达阈值 → 自扫取新设备对象再连（对齐手动路径）；冷却与超时见 maybeScanReconnect
+            if (reconnectFailStreak >= SCAN_AFTER_FAILURES) maybeScanReconnect();
+
             Class<?> mgrCls = XposedHelpers.findClass(reconnectMgrClassName(), appClassLoader);
-            // 取 static 控制器实例（字段缺失时 dic 为 null，仍继续发令，只是无法验收/自愈）
+            // 取 static 控制器实例（字段缺失时 dic 为 null）；只为把状态读进日志，不用于改状态
             Object dic = null;
             try {
                 dic = XposedHelpers.getStaticObjectField(mgrCls, dicFieldName());
             } catch (Throwable ignored) { /* dic 保持 null */ }
-
             int stateBefore = readConnectState(dic);      // 发令前读状态（-1=不可读）
 
-            boolean calledOk = true;
-            Throwable callErr = null;
             try {
                 XposedHelpers.callStaticMethod(mgrCls, reconnectMethodName(), lastDevice);
             } catch (Throwable t) {
-                calledOk = false;
-                callErr = t;
+                // 发令失败静默跳过，等下一周期（与 v2.7 一致）
             }
 
             // "真发起连接"按时间限频记录一条（方案 3；每断连不再只记一次）
@@ -413,22 +432,91 @@ public class MainHook implements IXposedHookLoadPackage {
                 XposedBridge.log(TAG + " 后台重连尝试 -> " + lastDevice.getAddress()
                         + " state=" + stateDesc(stateBefore));
             }
-
-            Thread.sleep(1000);   // 延迟约 1s 复查（给 SDK 状态机推进时间）
-            int stateAfter = readConnectState(dic);
-
-            // 判定"本次未发起"：调用抛异常 / 发令后仍空闲(0) / 发令前后状态纹丝不动（被门禁卡死）
-            boolean readable = (stateBefore >= 0 && stateAfter >= 0);
-            boolean notInitiated = !calledOk
-                    || (readable && (stateAfter == 0 || stateAfter == stateBefore));
-            if (notInitiated) {
-                healStuckController(dic, stateBefore, stateAfter, callErr);
-            }
-        } catch (InterruptedException ie) {
-            throw ie;   // 保留中断语义，交给 tick 循环 break
         } catch (Throwable t) {
             // 反射/未知异常一律吞掉：保持原"重连失败静默跳过，等下一周期"的行为
         }
+    }
+
+    /**
+     * 加固二：连续失败达 SCAN_AFTER_FAILURES 次后，模块自己扫一次，用扫描到的**新设备对象**发起连接
+     * （对齐「手动打开 App」那条有效路径——手动侧也是先 scan、再 connectGattWith(新 device)）。
+     * 冷却 SCAN_RECONNECT_COOLDOWN_MS 限频、单次上限 SCAN_TIMEOUT_MS 自动停扫；
+     * 权限/服务取不到或扫描失败一律吞掉并记一条，退回普通重连。只在 tick 线程调用。
+     */
+    private static void maybeScanReconnect() {
+        long now = System.currentTimeMillis();
+        if (scanInFlight) return;                                     // 已有一次自扫在进行
+        if (now - lastScanReconnectAt < SCAN_RECONNECT_COOLDOWN_MS) return;  // 冷却未到
+        final BluetoothDevice target = lastDevice;
+        if (target == null) return;
+        final String targetAddr = target.getAddress();
+        if (targetAddr == null) { logScanSkip("设备地址为空"); return; }
+        lastScanReconnectAt = now;
+        try {
+            Context ctx = appContext;
+            if (ctx == null) { logScanSkip("appContext 未就绪"); return; }
+            BluetoothManager bm = (BluetoothManager) ctx.getSystemService(Context.BLUETOOTH_SERVICE);
+            BluetoothAdapter adapter = (bm != null) ? bm.getAdapter() : null;
+            if (adapter == null || !adapter.isEnabled()) { logScanSkip("蓝牙未开启"); return; }
+            final BluetoothLeScanner scanner = adapter.getBluetoothLeScanner();
+            if (scanner == null) { logScanSkip("扫描器不可用"); return; }
+
+            final ScanCallback cb = new ScanCallback() {
+                @Override
+                public void onScanResult(int callbackType, ScanResult result) {
+                    try {
+                        BluetoothDevice dev = (result == null) ? null : result.getDevice();
+                        if (dev == null || targetAddr == null || !targetAddr.equals(dev.getAddress())) return;
+                        scanInFlight = false;
+                        try { scanner.stopScan(this); } catch (Throwable ignored) { }
+                        connectWithScannedDevice(dev);
+                    } catch (Throwable ignored) { /* 回调内异常吞掉，绝不外抛 */ }
+                }
+                @Override
+                public void onScanFailed(int errorCode) {
+                    scanInFlight = false;
+                    logScanSkip("扫描失败 code=" + errorCode);
+                }
+            };
+            ScanFilter filter = new ScanFilter.Builder().setDeviceAddress(targetAddr).build();
+            ScanSettings settings = new ScanSettings.Builder()
+                    .setScanMode(ScanSettings.SCAN_MODE_LOW_LATENCY).build();
+            scanInFlight = true;
+            scanner.startScan(Collections.singletonList(filter), settings, cb);
+            XposedBridge.log(TAG + " 后台重连硬自愈: 连续 " + reconnectFailStreak
+                    + " 次未连上，启动扫描取新设备对象重连 -> " + targetAddr);
+            // 超时兜底停扫（找到设备时已在回调里置 scanInFlight=false，这里只兜超时）
+            mainHandler().postDelayed(new Runnable() {
+                @Override
+                public void run() {
+                    if (!scanInFlight) return;
+                    scanInFlight = false;
+                    try { scanner.stopScan(cb); } catch (Throwable ignored) { }
+                }
+            }, SCAN_TIMEOUT_MS);
+        } catch (Throwable t) {
+            scanInFlight = false;
+            logScanSkip(t.getMessage());
+        }
+    }
+
+    /** 用扫描到的**新**设备对象发起连接（对齐手动路径）；成功发令后重置连续失败计数。 */
+    private static void connectWithScannedDevice(BluetoothDevice dev) {
+        try {
+            if (appClassLoader == null) { logScanSkip("appClassLoader 为 null"); return; }
+            Class<?> mgrCls = XposedHelpers.findClass(reconnectMgrClassName(), appClassLoader);
+            lastDevice = dev;             // 后续周期也用这个更"新鲜"的对象
+            reconnectFailStreak = 0;      // 换了设备对象，连续失败重新计数
+            XposedHelpers.callStaticMethod(mgrCls, reconnectMethodName(), dev);
+            XposedBridge.log(TAG + " 后台重连硬自愈: 已改用扫描设备重连 -> " + dev.getAddress());
+        } catch (Throwable t) {
+            logScanSkip(t.getMessage());
+        }
+    }
+
+    /** 自扫相关失败/跳过的一条日志（受冷却节流，实际 ≤1 条/SCAN_RECONNECT_COOLDOWN_MS）。 */
+    private static void logScanSkip(String msg) {
+        XposedBridge.log(TAG + " 后台重连硬自愈跳过: " + msg);
     }
 
     /** 读控制器连接状态：B6X=mDataConnectState，B7X=E；dic 为 null 或读取失败 → -1。 */
@@ -444,28 +532,6 @@ public class MainHook implements IXposedHookLoadPackage {
     /** 状态值的人类可读描述（-1=不可读），仅用于日志。 */
     private static String stateDesc(int state) {
         return (state < 0) ? "?" : String.valueOf(state);
-    }
-
-    /**
-     * 自愈（方案 1）：把被门禁卡住的控制器状态清成 0 并断开其 gatt（字段缺失/断开失败均忽略），
-     * 使下一次重连能真正发起。清状态与断 gatt 都吞异常，绝不让重连块整体抛异常。
-     */
-    private static void healStuckController(Object dic, int stateBefore, int stateAfter, Throwable callErr) {
-        try {
-            if (dic != null) {
-                XposedHelpers.setIntField(dic, stateFieldName(), 0);
-                try {
-                    Object gatt = XposedHelpers.getObjectField(dic, gattFieldName());
-                    if (gatt instanceof BluetoothGatt) ((BluetoothGatt) gatt).disconnect();
-                } catch (Throwable ignored) { /* gatt 取不到/断开失败忽略 */ }
-            }
-        } catch (Throwable ignored) { /* 字段不可写 → 退回现有行为 */ }
-        if (diagConnEventLogAllowed()) {
-            String why = (callErr != null)
-                    ? ("调用异常=" + callErr.getMessage())
-                    : ("state " + stateDesc(stateBefore) + "→" + stateDesc(stateAfter) + " 未推进");
-            XposedBridge.log(TAG + " 后台重连自愈: " + why + "，已清状态并断 gatt，下一周期重试");
-        }
     }
 
     /** "后台重连尝试"日志限频（RECONNECT_LOG_INTERVAL_MS 一条）；返回本次是否输出。 */
@@ -545,6 +611,7 @@ public class MainHook implements IXposedHookLoadPackage {
         if (appKind == 6) hookB6Activity(lpparam);       // 唤醒 + 自动进入设置界面（仅 B6X）
         hookWaspWingManagerCapture(lpparam);          // 捕获 WaspWingManager 实例（双设备）
         hookSyncConnectedController(lpparam);         // static controller 同步到已连接实例（仅 B6X）
+        hookGattConnectTimeoutClose(lpparam);         // 加固一：连接超时补 gatt.close（双设备）
         if (appKind == 7) hookB7Obfuscated(lpparam);     // c0.s1 + 混淆适配（仅 B7X）
         hookApplicationCreate(lpparam);               // 广播接收器 + 定时状态写入（双设备）
         hookAutoLaunch(lpparam);                      // 自动拉起标志 → Activity 后台化（双设备）
@@ -1085,6 +1152,40 @@ public class MainHook implements IXposedHookLoadPackage {
             }
         } catch (Throwable t) {
             XposedBridge.log(TAG + " 钩 onGattConnected 失败: " + t.getMessage());
+        }
+    }
+
+    /**
+     * 加固一：hook SDK 的连接超时路径，替 SDK 补上失败路径漏掉的 gatt.close()（堵句柄泄漏）。
+     *
+     * SDK 的 connect() 每发起一次连接就新建一个 mBluetoothGatt；5 秒未连上时，超时回调只把状态置回 0
+     * （B6X `onGattConnectTimeout` / B7X `c0.R1`），**不 close 该 gatt** —— 每次失败都漏一个 GATT 客户端
+     * 句柄，耗尽后再也连不上（长断联后"进程存活却不重连"的成因之一）。此处在其 after 回调里补 close()。
+     * 只关「已确认未连上」(state==0) 的当前句柄，不追正在建立的连接；hook 失配只记日志、退回现状。
+     */
+    private static void hookGattConnectTimeoutClose(XC_LoadPackage.LoadPackageParam lpparam) {
+        String clsName = (appKind == 7)
+                ? "com.flydigi.sdk.bluetooth.c0"                             // B7X 混淆基类
+                : "com.flydigi.sdk.bluetooth.LeDataInteractionController";   // B6X
+        String method = (appKind == 7) ? "R1" : "onGattConnectTimeout";
+        try {
+            Class<?> cls = lpparam.classLoader.loadClass(clsName);
+            XposedHelpers.findAndHookMethod(cls, method, BluetoothDevice.class, new XC_MethodHook() {
+                @Override
+                protected void afterHookedMethod(MethodHookParam param) {
+                    try {
+                        int st = XposedHelpers.getIntField(param.thisObject, stateFieldName());
+                        if (st != 0) return;   // 状态已非空闲：新一轮连接可能已在建，不碰
+                        Object gatt = XposedHelpers.getObjectField(param.thisObject, gattFieldName());
+                        if (gatt instanceof BluetoothGatt) {
+                            ((BluetoothGatt) gatt).close();   // 只关句柄；字段留给下次 connect() 覆盖
+                        }
+                    } catch (Throwable ignored) { /* 字段缺失/关闭失败忽略，绝不外抛 */ }
+                }
+            });
+            XposedBridge.log(TAG + " 已钩住 " + clsName + "." + method + "（超时补 close，堵句柄泄漏）");
+        } catch (Throwable t) {
+            XposedBridge.log(TAG + " 钩连接超时补 close 失败: " + t.getMessage());
         }
     }
 
@@ -1961,6 +2062,8 @@ public class MainHook implements IXposedHookLoadPackage {
         lastReconnectAttemptLogAt = 0;   // 新连接：重置"后台重连尝试"限频计时（下条断连后首试立即可见）
         lastReconnectHeartbeatAt = 0;    // 新连接：重置重连心跳计时
         lastConnEventLogAt = 0;          // 新连接：重置关键连接事件限频计时
+        reconnectFailStreak = 0;         // 新连接：连续失败归零（断开自扫的触发）
+        lastScanReconnectAt = 0;         // 新连接：重置自扫重连冷却（下次断连达阈值即可再扫）
         bleConnectedTimestamp = System.currentTimeMillis() / 1000L;
         if (connectedModel != 6 && connectedModel != 7)
             connectedModel = (appKind == 7) ? 7 : 6;  // 型号未知按包名兜底

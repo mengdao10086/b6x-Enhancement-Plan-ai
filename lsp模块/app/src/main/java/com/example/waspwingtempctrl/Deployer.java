@@ -914,15 +914,15 @@ public final class Deployer {
     }
 
     /**
-     * <b>防御性预创建</b>私有目录里的两个运行时文件（{@code tempctrl.log} / {@code tempctrl_webui.data}）。
-     * <b>标注：防御性、未经真机验证</b>（SELinux 标签假设）。只在不存在时创建；失败不阻断部署。
-     * 刻意不用 {@link RootShell}。详见 app/逻辑说明.md §2.5、§10。
+     * <b>防御性预创建</b>私有目录里的运行时文件（{@code tempctrl.log} / {@code tempctrl_webui.data} /
+     * {@code tempctrl_coldmax}）。<b>标注：防御性、未经真机验证</b>（SELinux 标签假设）。只在不存在时创建；
+     * 失败不阻断部署。刻意不用 {@link RootShell}。详见 app/逻辑说明.md §2.5、§10。
      */
     private String preCreateRuntimeFiles() {
         List<String> created = new ArrayList<>();
         List<String> kept = new ArrayList<>();
         List<String> failed = new ArrayList<>();
-        for (String name : new String[]{"tempctrl.log", "tempctrl_webui.data"}) {
+        for (String name : new String[]{"tempctrl.log", "tempctrl_webui.data", "tempctrl_coldmax"}) {
             File f = new File(configStore.getPrivateDir(), name);
             if (f.exists()) {
                 kept.add(name);

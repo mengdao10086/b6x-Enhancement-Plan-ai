@@ -1,0 +1,82 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    KI 分段削减表的一个「点」行：冷值 / KI 升倍率 / KI 降倍率三个紧凑数字框 + 一个删除按钮。
+    三个框等宽（0dp + weight=1）；标签不常驻——由 KiCutTableEditor 在行首之外以表头说明给出
+    （每簇一个表头会重复三遍同样的字，太吵）。框的背景见 drawable/bg_ki_cut_input.xml。
+-->
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content"
+    android:gravity="center_vertical"
+    android:orientation="horizontal">
+
+    <EditText
+        android:id="@+id/ki_cut_cold"
+        android:layout_width="0dp"
+        android:layout_height="@dimen/ki_cut_input_height"
+        android:layout_marginEnd="@dimen/space_xs"
+        android:layout_weight="1"
+        android:background="@drawable/bg_ki_cut_input"
+        android:gravity="center"
+        android:imeOptions="actionDone"
+        android:includeFontPadding="false"
+        android:inputType="number"
+        android:maxLines="1"
+        android:minHeight="0dp"
+        android:paddingStart="@dimen/space_xs"
+        android:paddingEnd="@dimen/space_xs"
+        android:textColor="@color/app_on_surface"
+        android:textColorHint="@color/app_on_surface_variant"
+        android:textSize="@dimen/text_body" />
+
+    <EditText
+        android:id="@+id/ki_cut_up"
+        android:layout_width="0dp"
+        android:layout_height="@dimen/ki_cut_input_height"
+        android:layout_marginEnd="@dimen/space_xs"
+        android:layout_weight="1"
+        android:background="@drawable/bg_ki_cut_input"
+        android:gravity="center"
+        android:imeOptions="actionDone"
+        android:includeFontPadding="false"
+        android:inputType="number"
+        android:maxLines="1"
+        android:minHeight="0dp"
+        android:paddingStart="@dimen/space_xs"
+        android:paddingEnd="@dimen/space_xs"
+        android:textColor="@color/app_on_surface"
+        android:textColorHint="@color/app_on_surface_variant"
+        android:textSize="@dimen/text_body" />
+
+    <EditText
+        android:id="@+id/ki_cut_dn"
+        android:layout_width="0dp"
+        android:layout_height="@dimen/ki_cut_input_height"
+        android:layout_marginEnd="@dimen/space_xs"
+        android:layout_weight="1"
+        android:background="@drawable/bg_ki_cut_input"
+        android:gravity="center"
+        android:imeOptions="actionDone"
+        android:includeFontPadding="false"
+        android:inputType="number"
+        android:maxLines="1"
+        android:minHeight="0dp"
+        android:paddingStart="@dimen/space_xs"
+        android:paddingEnd="@dimen/space_xs"
+        android:textColor="@color/app_on_surface"
+        android:textColorHint="@color/app_on_surface_variant"
+        android:textSize="@dimen/text_body" />
+
+    <com.google.android.material.button.MaterialButton
+        android:id="@+id/ki_cut_point_del"
+        style="@style/Widget.Material3.Button.TextButton"
+        android:layout_width="@dimen/ki_cut_del_size"
+        android:layout_height="@dimen/ki_cut_del_size"
+        android:contentDescription="@string/config_ki_cut_del_point"
+        android:minWidth="0dp"
+        android:padding="0dp"
+        android:text="@string/config_ki_cut_del_glyph"
+        android:textSize="@dimen/text_body"
+        app:iconPadding="0dp" />
+</LinearLayout>

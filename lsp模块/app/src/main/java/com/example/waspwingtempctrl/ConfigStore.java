@@ -20,6 +20,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.TreeMap;
 
 /**
  * <b>I3（已冻结）：配置读写归属</b> —— 界面只用本类读写 {@code profile.conf}，
@@ -66,6 +67,8 @@ public final class ConfigStore {
     /** params.json 顺序的键表。 */
     private final LinkedHashMap<String, KeyMeta> keys = new LinkedHashMap<>();
     private final List<GroupMeta> groups = new ArrayList<>();
+    /** 表型键（定义里 {@code type:"table"} 的那些）：读盘时按 {@code rowPrefix} 认领多行。 */
+    private final List<KeyMeta> tables = new ArrayList<>();
     private final String configFileNameFromDef;
     private String loadError = "";
 
@@ -280,6 +283,8 @@ public final class ConfigStore {
         List<String> notes = new ArrayList<>();
         Set<String> seenUnknown = new HashSet<>();
         LinkedHashMap<String, Value> fromFile = new LinkedHashMap<>();
+        // 表型键的行：逻辑键 → （行号 → 值片段），行号升序即簇号；同行号重复时后写覆盖（与 C 端按行顺序覆盖一致）
+        LinkedHashMap<String, TreeMap<Integer, String>> tableRows = new LinkedHashMap<>();
         for (String line : ConfText.splitLines(text)) {
             int eq = ConfText.configLineEq(line);
             if (eq < 0) {
@@ -289,6 +294,17 @@ public final class ConfigStore {
             String rawVal = line.substring(eq + 1);
             KeyMeta meta = keys.get(rawKey);
             if (meta == null) {
+                String tableKey = tableKeyOfRowKey(rawKey);
+                if (tableKey != null) {
+                    Integer row = rowNumberOf(rawKey);
+                    TreeMap<Integer, String> rows = tableRows.get(tableKey);
+                    if (rows == null) {
+                        rows = new TreeMap<>();
+                        tableRows.put(tableKey, rows);
+                    }
+                    rows.put(row, ConfText.trimRight(rawVal));
+                    continue;
+                }
                 if (seenUnknown.add(rawKey)) {
                     unknown.add(rawKey);
                 }
@@ -298,10 +314,71 @@ public final class ConfigStore {
         }
         // 对外按 params.json 顺序输出（与界面表单顺序一致）；文件中缺失的键用出厂默认值补齐
         for (KeyMeta meta : keys.values()) {
+            if (meta.isTable()) {
+                Value rows = joinTableRows(tableRows.get(meta.key));
+                values.put(meta.key, rows != null ? rows : meta.defaultValue);
+                continue;
+            }
             Value v = fromFile.get(meta.key);
             values.put(meta.key, v != null ? v : meta.defaultValue);
         }
         return new Snapshot(values, unknown, true, mtimeMs, notes);
+    }
+
+    /** 行键（{@code rowPrefix} + 数字）属于哪张表；不是任何表的行键时返回 null。 */
+    private String tableKeyOfRowKey(String rowKey) {
+        for (KeyMeta table : tables) {
+            String prefix = table.rowPrefix;
+            if (prefix.isEmpty() || rowKey.length() <= prefix.length()
+                    || !rowKey.startsWith(prefix)) {
+                continue;
+            }
+            if (isAllDigits(rowKey.substring(prefix.length()))) {
+                return table.key;
+            }
+        }
+        return null;
+    }
+
+    /** 行键的行号（1 起）：取键名末尾的数字段；已由 {@link #tableKeyOfRowKey} 保证末尾是数字。 */
+    private static Integer rowNumberOf(String rowKey) {
+        int end = rowKey.length();
+        int start = end;
+        while (start > 0 && Character.isDigit(rowKey.charAt(start - 1))) {
+            start--;
+        }
+        try {
+            return Integer.valueOf(rowKey.substring(start, end));
+        } catch (NumberFormatException e) {
+            return 0;
+        }
+    }
+
+    private static boolean isAllDigits(String s) {
+        if (s.isEmpty()) {
+            return false;
+        }
+        for (int i = 0; i < s.length(); i++) {
+            if (!Character.isDigit(s.charAt(i))) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /** 表的行集合 → 多行文本值；空/缺失时返回 null（调用方回退出厂默认行）。 */
+    private static Value joinTableRows(TreeMap<Integer, String> rows) {
+        if (rows == null || rows.isEmpty()) {
+            return null;
+        }
+        StringBuilder sb = new StringBuilder();
+        for (String row : rows.values()) {
+            if (sb.length() > 0) {
+                sb.append('\n');
+            }
+            sb.append(row);
+        }
+        return Value.ofText(sb.toString());
     }
 
     /**
@@ -406,11 +483,17 @@ public final class ConfigStore {
 
         LinkedHashMap<String, String> pending = new LinkedHashMap<>();
         LinkedHashMap<String, String> appendComments = new LinkedHashMap<>();
+        // 表型键的落点：逻辑键 → 行键前缀。它的值是多行文本，由 ConfText 展开成 rowPrefix1/2/… 多行
+        LinkedHashMap<String, String> families = new LinkedHashMap<>();
         for (Map.Entry<String, Value> e : changes.entrySet()) {
+            KeyMeta meta = keys.get(e.getKey());
             pending.put(e.getKey(), e.getValue().format());
-            appendComments.put(e.getKey(), keys.get(e.getKey()).label);
+            appendComments.put(e.getKey(), meta.label);
+            if (meta.isTable() && !meta.rowPrefix.isEmpty()) {
+                families.put(e.getKey(), meta.rowPrefix);
+            }
         }
-        ConfText.Edit edit = ConfText.apply(text, pending, appendComments);
+        ConfText.Edit edit = ConfText.apply(text, pending, appendComments, families);
         int replaced = edit.replaced;
         int appended = edit.appended;
 
@@ -449,8 +532,7 @@ public final class ConfigStore {
                 KeyMeta master = keys.get(group.master);
                 if (master != null && emitted.add(master.key)) {
                     sb.append("# 组总开关：=0 时本组多数键不生效\n");
-                    sb.append("# ").append(master.commentLine()).append('\n');
-                    sb.append(master.key).append('=').append(master.factoryValue.format()).append('\n');
+                    emitEntry(sb, master);
                 }
             }
             for (String key : group.keys) {
@@ -458,8 +540,7 @@ public final class ConfigStore {
                 if (meta == null || !emitted.add(key)) {
                     continue;
                 }
-                sb.append("# ").append(meta.commentLine()).append('\n');
-                sb.append(key).append('=').append(meta.factoryValue.format()).append('\n');
+                emitEntry(sb, meta);
             }
         }
         // 兜底：没被任何分组覆盖的键也要写出来（否则出厂配置静默缺键，C 端会退回代码默认值）
@@ -471,8 +552,7 @@ public final class ConfigStore {
             if (orphans == 0) {
                 sb.append('\n').append("# 未分组\n");
             }
-            sb.append("# ").append(meta.commentLine()).append('\n');
-            sb.append(meta.key).append('=').append(meta.factoryValue.format()).append('\n');
+            emitEntry(sb, meta);
             orphans++;
         }
         String text = sb.toString();
@@ -484,6 +564,25 @@ public final class ConfigStore {
         rememberWritten(text);
         return new WriteResult(true, false, true, 0, emitted.size() + orphans,
                 configFile.lastModified(), "", "");
+    }
+
+    /**
+     * 出厂配置里写一个键：注释行 + 取值行。表型键写多行（{@code rowPrefix1/2/…}），其余写
+     * {@code KEY=VALUE} 一行。见 app/逻辑说明.md〈KI 分段削减表（界面侧）〉。
+     */
+    private void emitEntry(StringBuilder sb, KeyMeta meta) {
+        sb.append("# ").append(meta.commentLine()).append('\n');
+        if (meta.isTable() && !meta.rowPrefix.isEmpty()) {
+            List<String> rows = ConfText.familyLines(meta.rowPrefix, meta.factoryValue.text());
+            for (String row : rows) {
+                sb.append(row).append('\n');
+            }
+            if (rows.isEmpty()) {
+                sb.append("# （定义里没有出厂行，未写出任何 ").append(meta.rowPrefix).append("N=… 行）\n");
+            }
+            return;
+        }
+        sb.append(meta.key).append('=').append(meta.factoryValue.format()).append('\n');
     }
 
     // ==================== 校验语义（P0 告警落地处） ====================
@@ -535,6 +634,11 @@ public final class ConfigStore {
             notes.add("取值「" + text + "」不在定义的可选项内，已回落到出厂值「"
                     + meta.factoryValue.text() + "」");
             return new Assessment(meta.factoryValue, true, notes);
+        }
+        if (meta.isTable()) {
+            // 表的值是多行文本：逐行逐字段的钳制在编辑器里做（失焦时按 rowFields 的 min/max 收敛），
+            // 这里原样放行；不走下面的数值切分（那会把整段文本当成一个越界数字）
+            return new Assessment(Value.ofText(raw.text()), false, notes);
         }
         int n = Math.max(1, meta.fieldCount());
         List<Integer> nums = new ArrayList<>();
@@ -621,10 +725,17 @@ public final class ConfigStore {
                 KeyMeta meta = new KeyMeta(name, o);
                 keys.put(name, meta);
             }
+            tables.clear();
+            for (KeyMeta meta : keys.values()) {
+                if (meta.isTable()) {
+                    tables.add(meta);
+                }
+            }
         } catch (Exception e) {
             loadError = "params.json 解析失败：" + e.getMessage();
             keys.clear();
             groups.clear();
+            tables.clear();
         }
     }
 
@@ -650,6 +761,13 @@ public final class ConfigStore {
         public final List<FieldMeta> fields;
         /** enum 键的取值域（{@code options[]}）；无选项时为空表，恒不为 null。 */
         public final List<OptionMeta> options;
+        /**
+         * 表的行键前缀（{@code type:"table"} 才有；其余为空串）。表在配置里占多行：
+         * {@code rowPrefix1=…}、{@code rowPrefix2=…}，行号即簇号（从 1 起、连续）。
+         */
+        public final String rowPrefix;
+        /** 表的行字段定义（{@code rowFields[]}；非表键为 null）：一行内按此顺序重复成组。 */
+        public final List<FieldMeta> rowFields;
 
         /** 单值键的范围（多值键见 {@link #fields}）；null = 无界。 */
         private final Integer rawMin;
@@ -704,12 +822,74 @@ public final class ConfigStore {
             this.options = Collections.unmodifiableList(opts);
             this.rawMin = o.isNull("min") ? null : Integer.valueOf(o.optInt("min"));
             this.rawMax = o.isNull("max") ? null : Integer.valueOf(o.optInt("max"));
-            this.defaultValue = parseValue(this, jsonValue(o, "default"));
-            this.factoryValue = parseValue(this, jsonValue(o, "factory"));
+            this.rowPrefix = o.optString("rowPrefix", "");
+            this.rowFields = parseRowFields(o);
+            if (isTable()) {
+                // 表没有单值 default/factory：两者都按「每项一簇的字符串数组」解，出厂行优先取 defaultRows
+                Value def = tableValueOf(o, "defaultRows");
+                if (def == null) {
+                    def = tableValueOf(o, "default");
+                }
+                Value fac = tableValueOf(o, "factory");
+                this.defaultValue = def != null ? def : Value.ofText("");
+                this.factoryValue = fac != null ? fac : this.defaultValue;
+            } else {
+                this.defaultValue = parseValue(this, jsonValue(o, "default"));
+                this.factoryValue = parseValue(this, jsonValue(o, "factory"));
+            }
+        }
+
+        /** 表键的行字段；非表键或定义里没写 rowFields 时为 null。 */
+        private static List<FieldMeta> parseRowFields(JSONObject o) {
+            JSONArray fa = o.optJSONArray("rowFields");
+            if (fa == null) {
+                return null;
+            }
+            List<FieldMeta> f = new ArrayList<>();
+            for (int i = 0; i < fa.length(); i++) {
+                JSONObject fo = fa.optJSONObject(i);
+                if (fo == null) {
+                    continue;
+                }
+                f.add(new FieldMeta(fo.optString("label", "字段" + (i + 1)),
+                        fo.optString("unit", ""),
+                        fo.isNull("min") ? null : Integer.valueOf(fo.optInt("min")),
+                        fo.isNull("max") ? null : Integer.valueOf(fo.optInt("max")),
+                        0, false));
+            }
+            return f.isEmpty() ? null : Collections.unmodifiableList(f);
+        }
+
+        /**
+         * 表的行值（{@code name} 指向"每项一簇"的字符串数组，或直接就是一整段多行文本）→ 多行文本值；
+         * 缺失/为空时返回 null。
+         */
+        private static Value tableValueOf(JSONObject o, String name) {
+            JSONArray a = o.optJSONArray(name);
+            if (a != null && a.length() > 0) {
+                StringBuilder sb = new StringBuilder();
+                for (int i = 0; i < a.length(); i++) {
+                    if (i > 0) {
+                        sb.append('\n');
+                    }
+                    sb.append(a.optString(i, ""));
+                }
+                return Value.ofText(sb.toString());
+            }
+            Object single = jsonValue(o, name);
+            return single instanceof String ? Value.ofText((String) single) : null;
         }
 
         public boolean isMulti() {
             return "multi".equals(type);
+        }
+
+        /**
+         * 表型键（{@code type:"table"}）：在配置里占多行（{@link #rowPrefix} + 行号），
+         * 值是多行文本（每行一簇，行内三元组重复）。渲染与写盘口径见 app/逻辑说明.md〈KI 分段削减表（界面侧）〉。
+         */
+        public boolean isTable() {
+            return "table".equals(type);
         }
 
         public boolean isSwitch() {
@@ -771,6 +951,19 @@ public final class ConfigStore {
             }
             if (isPath()) {
                 sb.append("：路径字符串");
+            } else if (isTable()) {
+                sb.append("：一行一簇（行号即簇号，从 1 起、连续），行内三元组重复");
+                if (rowFields != null) {
+                    sb.append("（");
+                    for (int i = 0; i < rowFields.size(); i++) {
+                        if (i > 0) {
+                            sb.append(" · ");
+                        }
+                        FieldMeta f = rowFields.get(i);
+                        sb.append(f.label).append(' ').append(f.min).append('~').append(f.max);
+                    }
+                    sb.append("）");
+                }
             } else if (fields != null) {
                 sb.append("：");
                 for (int i = 0; i < fields.size(); i++) {
@@ -962,57 +1155,114 @@ public final class ConfigStore {
          * 把 {@code changes}（键 → 已格式化的值字面量）应用到 {@code text}：
          * 命中的行只替换值片段，未命中的键追加到文件末尾（带一行注释头）。
          *
+         * <p><b>表族（{@code families}）</b>：逻辑键 → 行键前缀。这类键的值是<b>多行文本</b>
+         * （每行一簇），落盘要展开成 {@code rowPrefix1=…}、{@code rowPrefix2=…}… 且<b>行号连续</b>。
+         * 故命中的旧 {@code rowPrefix+数字} 行整族丢弃，由新块在首个旧行的位置一次写出；
+         * 族里一行都没有时整块追加到文件末尾。见 app/逻辑说明.md〈KI 分段削减表（界面侧）〉。
+         *
          * @param appendComments 追加时用的注释文本（键 → 说明），缺省时用键名
+         * @param families       逻辑键 → 行键前缀（只含本次要改的表键）；非表键不在其中
          */
         public static Edit apply(String text, Map<String, String> changes,
-                                 Map<String, String> appendComments) {
+                                 Map<String, String> appendComments, Map<String, String> families) {
             Map<String, String> pending = new LinkedHashMap<>(changes);
-            Set<String> matched = new HashSet<>();
-            StringBuilder out = new StringBuilder(text.length() + 256);
-            int replaced = 0;
-            int from = 0;
-            while (true) {
-                int nl = text.indexOf('\n', from);
-                int lineEnd = nl < 0 ? text.length() : nl;
-                String line = text.substring(from, lineEnd);
-                int eq = configLineEq(line);
-                String rewritten = null;
-                if (eq >= 0) {
-                    String rawKey = trimRight(line.substring(lineStartOf(line), eq));
-                    String newValue = pending.get(rawKey);
-                    if (newValue != null) {
-                        // 同键多行时每一行都替换：C 端按行顺序覆盖，只改一行会不生效
-                        rewritten = spliceValue(line, eq, newValue);
-                        replaced++;
-                        matched.add(rawKey);
+            // 前缀 → 逻辑键：逐行认领"这一行是不是本次要改的某张表的行"
+            Map<String, String> familyByPrefix = new LinkedHashMap<>();
+            if (families != null) {
+                for (Map.Entry<String, String> e : families.entrySet()) {
+                    // 只有"本次真要改"的族才认领该族已存在的行；否则传进来的族表等于误删别人的行
+                    if (e.getValue() != null && !e.getValue().isEmpty()
+                            && pending.containsKey(e.getKey())) {
+                        familyByPrefix.put(e.getValue(), e.getKey());
                     }
                 }
-                out.append(rewritten != null ? rewritten : line);
-                if (nl < 0) {
-                    break;
+            }
+            Set<String> matched = new HashSet<>();
+            Set<String> emittedFamilies = new HashSet<>();
+            List<String> lines = splitLines(text);
+            List<String> out = new ArrayList<>(lines.size() + 8);
+            int replaced = 0;
+            for (String line : lines) {
+                int eq = configLineEq(line);
+                if (eq < 0) {
+                    out.add(line);
+                    continue;
                 }
-                out.append('\n');
-                from = nl + 1;
+                String rawKey = trimRight(line.substring(lineStartOf(line), eq));
+                String familyKey = familyKeyOf(rawKey, familyByPrefix);
+                if (familyKey != null) {
+                    matched.add(familyKey);
+                    if (emittedFamilies.add(familyKey)) {
+                        out.addAll(familyLines(families.get(familyKey), pending.get(familyKey)));
+                        replaced++;   // 首个旧行被整块替换
+                    }
+                    // 同族其余旧行：整行丢弃（新块已含全部行号）
+                    continue;
+                }
+                String newValue = pending.get(rawKey);
+                if (newValue != null) {
+                    // 同键多行时每一行都替换：C 端按行顺序覆盖，只改一行会不生效
+                    out.add(spliceValue(line, eq, newValue));
+                    replaced++;
+                    matched.add(rawKey);
+                } else {
+                    out.add(line);
+                }
             }
 
+            StringBuilder sb = new StringBuilder(String.join("\n", out));
             int appended = 0;
             if (matched.size() < pending.size()) {
-                if (out.length() > 0 && out.charAt(out.length() - 1) != '\n') {
-                    out.append('\n');
+                if (sb.length() > 0 && sb.charAt(sb.length() - 1) != '\n') {
+                    sb.append('\n');
                 }
                 for (Map.Entry<String, String> e : pending.entrySet()) {
                     if (matched.contains(e.getKey())) {
                         continue;
                     }
                     String comment = appendComments == null ? null : appendComments.get(e.getKey());
-                    out.append('\n').append("# ")
+                    boolean family = familyByPrefix.containsValue(e.getKey());
+                    sb.append('\n').append("# ")
                             .append(comment == null ? e.getKey() : comment)
-                            .append("（本行由界面补写）\n");
-                    out.append(e.getKey()).append('=').append(e.getValue()).append('\n');
-                    appended++;
+                            .append(family ? "（本族由界面补写）\n" : "（本行由界面补写）\n");
+                    if (family) {
+                        List<String> block = familyLines(families.get(e.getKey()), e.getValue());
+                        for (String row : block) {
+                            sb.append(row).append('\n');
+                        }
+                        appended += block.size();
+                    } else {
+                        sb.append(e.getKey()).append('=').append(e.getValue()).append('\n');
+                        appended++;
+                    }
                 }
             }
-            return new Edit(out.toString(), replaced, appended);
+            return new Edit(sb.toString(), replaced, appended);
+        }
+
+        /** 这一行的键是不是本次要改的某表的行键（{@code prefix+数字}）；是则返回该表的逻辑键。 */
+        private static String familyKeyOf(String rawKey, Map<String, String> familyByPrefix) {
+            for (Map.Entry<String, String> e : familyByPrefix.entrySet()) {
+                String prefix = e.getKey();
+                if (rawKey.length() > prefix.length() && rawKey.startsWith(prefix)
+                        && isAllDigits(rawKey.substring(prefix.length()))) {
+                    return e.getValue();
+                }
+            }
+            return null;
+        }
+
+        /** 一个表值（多行文本）→ 该族的落盘行：{@code prefix1=row1}、{@code prefix2=row2}…（行号从 1 起）。 */
+        private static List<String> familyLines(String prefix, String value) {
+            List<String> block = new ArrayList<>();
+            if (prefix == null || prefix.isEmpty() || value == null || value.isEmpty()) {
+                return block;
+            }
+            String[] rows = value.split("\n", -1);
+            for (int i = 0; i < rows.length; i++) {
+                block.add(prefix + (i + 1) + "=" + rows[i]);
+            }
+            return block;
         }
 
         /** 行首非空白字符下标（C 端 {@code trim_line()} 同口径）。 */
@@ -1126,7 +1376,7 @@ public final class ConfigStore {
      * 取 trim 后原文）。
      */
     private static Value parseValue(KeyMeta meta, String raw) {
-        if (meta.isText()) {
+        if (meta.isText() || meta.isTable()) {
             return Value.ofText(trimValue(raw));
         }
         int n = Math.max(1, meta.fieldCount());

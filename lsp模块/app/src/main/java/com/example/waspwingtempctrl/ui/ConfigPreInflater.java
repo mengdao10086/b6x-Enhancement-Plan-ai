@@ -178,12 +178,16 @@ public final class ConfigPreInflater {
     /**
      * 备一个键的键内控件。
      *
-     * <p><b>清单与 {@code ConfigKeyRow} 五个 {@code Renderer#build} 的 inflate 一一对应</b>
-     * （定义里只有 switch / enum / path / multi / int 五种 type）：加一种 type 时这里要跟着加一条。
+     * <p><b>清单与 {@code ConfigKeyRow} 六个 {@code Renderer#build} 的 inflate 一一对应</b>
+     * （定义里只有 switch / enum / path / multi / table / int 六种 type）：加一种 type 时这里要跟着加一条；
+     * <b>表型键只备行骨架</b>——它的簇/点/曲线随编辑随时增删、结构不固定，现场造更省。
      */
     private void produceKey(@NonNull LayoutInflater inflater, @NonNull ViewGroup rowParent,
                             @NonNull KeyMeta meta) {
         put(inflater, R.layout.item_config_row, rowParent);
+        if (meta.isTable()) {
+            return;
+        }
         if (meta.isSwitch()) {
             put(inflater, R.layout.item_config_key_switch, rowParent);
             return;
