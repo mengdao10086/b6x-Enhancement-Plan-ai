@@ -11,7 +11,7 @@ import com.example.waspwingtempctrl.ConfigStore.Snapshot;
 import com.example.waspwingtempctrl.ConfigStore.Value;
 
 /**
- * KI 分段倍率曲线图的取数：<b>横轴上限</b>（当前设备的制冷上限）与<b>此刻目标冷值</b>（红虚线位置）。
+ * KI 分段倍率曲线图的取数：<b>横轴上限</b>（当前设备的制冷上限）与<b>当前冷值</b>（红虚线位置）。
  *
  * <p>两条都是<b>只读、可失败、失败有降级</b>的旁路数据，绝不影响编辑与落盘：
  * <ul>
@@ -55,7 +55,7 @@ final class KiCutData {
         }
     }
 
-    /** 此刻目标冷值（曲线数据文件最后一行的目标制冷）；取不到或为哨兵值时返回 -1。 */
+    /** 当前冷值（曲线数据文件最后一行的目标制冷）；取不到或为哨兵值时返回 -1。 */
     static int targetCold(@NonNull Context context) {
         try {
             String text = AppFiles.readTailText(AppFiles.dataFile(context), 4096);

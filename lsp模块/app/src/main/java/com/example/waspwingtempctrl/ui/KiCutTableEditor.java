@@ -6,7 +6,6 @@ import android.text.TextUtils;
 import android.text.TextWatcher;
 import android.view.LayoutInflater;
 import android.view.View;
-import android.view.ViewGroup;
 import android.widget.EditText;
 import android.widget.LinearLayout;
 import android.widget.TextView;
@@ -38,10 +37,21 @@ import java.util.List;
  */
 final class KiCutTableEditor {
 
-    /** 与宿主的交互面：任何一次改动（编辑、增删）都要重绘曲线并排入防抖写盘。 */
+    /** 与宿主的交互面：任何一次改动（编辑、增删、失焦）都要重绘曲线并排入写盘。 */
     interface Listener {
-        /** 用户改了表（编辑数字或增删簇/点）。 */
-        void onEdited();
+
+        /** 编辑事件类型（决定曲线重算与写盘的时机）。 */
+        enum EditKind {
+            /** 框内文本变化（编辑中）：曲线按 1 秒防抖重算；写盘仍走 1200ms 防抖队列。 */
+            TYPING,
+            /** 增删簇/点（值完整）：曲线立刻重算；写盘仍走防抖队列。 */
+            STRUCTURAL,
+            /** 失焦提交：取消未触发的定时器，收敛后立刻重算曲线并立刻写盘。 */
+            COMMIT
+        }
+
+        /** 用户改了表（编辑数字、增删簇/点，或失焦提交）。 */
+        void onEdited(@NonNull EditKind kind);
 
         /** 一句人话反馈（命中上限之类）。 */
         void notifyUser(@NonNull String message);
@@ -56,7 +66,6 @@ final class KiCutTableEditor {
     private final Listener listener;
     private final LayoutInflater inflater;
     private final LinearLayout clustersBox;
-    private final View addClusterButton;
     private final List<ClusterBlock> blocks = new ArrayList<>();
 
     /** true 时忽略控件回调：程序化回填不该被当成用户改动作业。 */
@@ -67,8 +76,6 @@ final class KiCutTableEditor {
         this.listener = listener;
         this.inflater = LayoutInflater.from(root.getContext());
         this.clustersBox = root.findViewById(R.id.ki_cut_clusters);
-        this.addClusterButton = root.findViewById(R.id.ki_cut_add_cluster);
-        addClusterButton.setOnClickListener(v -> onAddCluster());
     }
 
     // ==================== 值 ⇄ 控件 ====================
@@ -156,7 +163,8 @@ final class KiCutTableEditor {
 
     // ==================== 增删 ====================
 
-    private void onAddCluster() {
+    /** 在 {@code afterIndex} 簇之后插入一个新簇（其后的簇整体下移，行序同步）。 */
+    private void onAddCluster(int afterIndex) {
         if (blocks.size() >= MAX_CLUSTERS) {
             listener.notifyUser(clustersBox.getContext().getString(
                     R.string.config_ki_cut_limit_cluster, MAX_CLUSTERS));
@@ -165,9 +173,10 @@ final class KiCutTableEditor {
         List<KiCutTable.Cluster> model = getClustersRaw();
         KiCutTable.Cluster fresh = new KiCutTable.Cluster();
         fresh.points.add(newDefaultPoint());
-        model.add(fresh);
+        int at = Math.max(0, Math.min(afterIndex, model.size()));
+        model.add(at, fresh);
         rebuild(model);
-        listener.onEdited();
+        listener.onEdited(Listener.EditKind.STRUCTURAL);
     }
 
     private void onDeleteCluster(int index) {
@@ -177,7 +186,7 @@ final class KiCutTableEditor {
         }
         model.remove(index);
         rebuild(model);
-        listener.onEdited();
+        listener.onEdited(Listener.EditKind.STRUCTURAL);
     }
 
     private void onAddPoint(int index) {
@@ -192,7 +201,7 @@ final class KiCutTableEditor {
         }
         model.get(index).points.add(newDefaultPoint());
         rebuild(model);
-        listener.onEdited();
+        listener.onEdited(Listener.EditKind.STRUCTURAL);
     }
 
     private void onDeletePoint(int index, int rowIndex) {
@@ -206,7 +215,7 @@ final class KiCutTableEditor {
         }
         points.remove(rowIndex);
         rebuild(model);
-        listener.onEdited();
+        listener.onEdited(Listener.EditKind.STRUCTURAL);
     }
 
     /** 新增点的初值：冷值取定义下限（取不到为 0），升降都是 100（不削）。 */
@@ -221,9 +230,10 @@ final class KiCutTableEditor {
         ClusterBlock block = new ClusterBlock(view);
         boolean firstCluster = blocks.isEmpty();
         blocks.add(block);
-        final int index = blocks.size() - 1;
         block.deleteButton.setOnClickListener(v -> onDeleteCluster(indexOf(block)));
         block.addPointButton.setOnClickListener(v -> onAddPoint(indexOf(block)));
+        // 「添加簇」在每个簇块底部：新簇插在本块之后（不是追加到末尾），其后各簇整体下移
+        block.addClusterButton.setOnClickListener(v -> onAddCluster(indexOf(block) + 1));
         for (KiCutTable.Point point : cluster.points) {
             addPointRow(block, point, firstCluster && block.rows.isEmpty());
         }
@@ -243,20 +253,24 @@ final class KiCutTableEditor {
         row.dn.addTextChangedListener(watcher());
         row.deleteButton.setOnClickListener(v -> onDeletePoint(indexOf(block), block.rows.indexOf(row)));
         // 失焦才把数字收敛进定义范围（越界/空值都钳回来），免得把非法值写进配置；
-        // 聚焦时不动——否则刚点进框就把内容改掉、光标跳位
+        // 聚焦时不动——否则刚点进框就把内容改掉、光标跳位。收敛后交给宿主：取消防抖定时器、
+        // 立刻重算曲线并立刻写盘（见 Listener.EditKind.COMMIT）。
         row.cold.setOnFocusChangeListener((v, hasFocus) -> {
             if (!hasFocus) {
                 clampOnBlur(row.cold, 0);
+                listener.onEdited(Listener.EditKind.COMMIT);
             }
         });
         row.up.setOnFocusChangeListener((v, hasFocus) -> {
             if (!hasFocus) {
                 clampOnBlur(row.up, 1);
+                listener.onEdited(Listener.EditKind.COMMIT);
             }
         });
         row.dn.setOnFocusChangeListener((v, hasFocus) -> {
             if (!hasFocus) {
                 clampOnBlur(row.dn, 2);
+                listener.onEdited(Listener.EditKind.COMMIT);
             }
         });
         block.rows.add(row);
@@ -285,13 +299,13 @@ final class KiCutTableEditor {
         }
     }
 
-    /** 触底按钮置灰：只剩一簇/一点时不能删；到上限时不能再加。 */
+    /** 触底按钮置灰：只剩一簇/一点时不能删；到上限时不能再加（「添加簇」按钮每个簇块各一枚）。 */
     private void refreshButtons() {
         boolean multiCluster = blocks.size() > 1;
         boolean canAddCluster = blocks.size() < MAX_CLUSTERS;
-        addClusterButton.setEnabled(canAddCluster);
         for (ClusterBlock block : blocks) {
             block.deleteButton.setEnabled(multiCluster);
+            block.addClusterButton.setEnabled(canAddCluster);
             block.addPointButton.setEnabled(block.rows.size() < MAX_POINTS);
             boolean multiPoint = block.rows.size() > 1;
             for (PointRow row : block.rows) {
@@ -319,10 +333,29 @@ final class KiCutTableEditor {
             @Override
             public void afterTextChanged(Editable s) {
                 if (!suppress) {
-                    listener.onEdited();
+                    listener.onEdited(Listener.EditKind.TYPING);
                 }
             }
         };
+    }
+
+    /**
+     * 是否有任一数字框为空（编辑中的半截态）：有则曲线不重算、配置也不写盘（见 {@link Listener}）。
+     */
+    boolean hasEmptyField() {
+        for (ClusterBlock block : blocks) {
+            for (PointRow row : block.rows) {
+                if (isEmpty(row.cold) || isEmpty(row.up) || isEmpty(row.dn)) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    private static boolean isEmpty(@NonNull EditText field) {
+        Editable editable = field.getText();
+        return editable == null || editable.toString().trim().isEmpty();
     }
 
     /** 失焦把值收敛进 {@code rowFields[idx]} 的 min/max；空值按下限补。 */
@@ -395,12 +428,13 @@ final class KiCutTableEditor {
         }
     }
 
-    /** 一个簇块（表头 + 点行容器 + 添加点）。 */
+    /** 一个簇块（表头 + 点行容器 + 底部行：添加点 / 添加簇）。 */
     private final class ClusterBlock {
         final View view;
         final TextView title;
         final LinearLayout pointsBox;
         final MaterialButton addPointButton;
+        final MaterialButton addClusterButton;
         final MaterialButton deleteButton;
         final List<PointRow> rows = new ArrayList<>();
 
@@ -409,12 +443,8 @@ final class KiCutTableEditor {
             this.title = view.findViewById(R.id.ki_cut_cluster_title);
             this.pointsBox = view.findViewById(R.id.ki_cut_cluster_points);
             this.addPointButton = view.findViewById(R.id.ki_cut_cluster_add_point);
+            this.addClusterButton = view.findViewById(R.id.ki_cut_cluster_add_cluster);
             this.deleteButton = view.findViewById(R.id.ki_cut_cluster_del);
-            ViewGroup.LayoutParams lp = view.getLayoutParams();
-            if (lp instanceof ViewGroup.MarginLayoutParams) {
-                ((ViewGroup.MarginLayoutParams) lp).bottomMargin =
-                        view.getResources().getDimensionPixelSize(R.dimen.space_xs);
-            }
         }
     }
 }

@@ -659,7 +659,7 @@ final class ConfigKeyRow {
      * （{@link KiCutChartView}）。值是<b>多行文本</b>（每行一簇），读写都经编辑器；写盘走既有防抖队列，
      * 「值未变不写」与「待写值优先」两套语义原样复用（{@link #commit}）。
      *
-     * <p>「此刻目标冷值」的红虚线由 1Hz 的轻量取数刷新（{@link KiCutData#targetCold}），
+     * <p>「当前冷值」的红虚线由 1Hz 的轻量取数刷新（{@link KiCutData#targetCold}），
      * 只在视图可见时读；取不到就不画线，绝不画一个假位置。
      */
     private final class TableRenderer implements Renderer {
@@ -668,8 +668,10 @@ final class ConfigKeyRow {
         private static final String SMOOTH_KEY = "KI_CUT_SMOOTH";
         /** 平滑系数缺省值（与契约的 KI_CUT_SMOOTH 默认一致）。 */
         private static final int SMOOTH_DEFAULT = 15;
-        /** 「此刻目标冷值」的刷新周期（与数据文件写入节奏同档）。 */
+        /** 「当前冷值」（红虚线位置）的刷新周期（与数据文件写入节奏同档）。 */
         private static final long TARGET_REFRESH_MS = 1000L;
+        /** 编辑中曲线重算的防抖窗口：框内文本停 1 秒才重算（写盘仍走 {@link ConfigWriteQueue} 的 1200ms）。 */
+        private static final long REDRAW_DEBOUNCE_MS = 1000L;
 
         private View block;
         private KiCutTableEditor editor;
@@ -684,6 +686,15 @@ final class ConfigKeyRow {
                 ticker.postDelayed(this, TARGET_REFRESH_MS);
             }
         };
+        /** 编辑中曲线重算的防抖任务；到点时再查一次「是否有空框」，有则放弃（见 {@link KiCutTableEditor#hasEmptyField}）。 */
+        private final Runnable redrawTask = new Runnable() {
+            @Override
+            public void run() {
+                if (editor != null && !editor.hasEmptyField()) {
+                    redrawChart();
+                }
+            }
+        };
 
         @Override
         public void build() {
@@ -694,11 +705,37 @@ final class ConfigKeyRow {
             chart = block.findViewById(R.id.ki_cut_chart);
             editor = new KiCutTableEditor(meta, block, new KiCutTableEditor.Listener() {
                 @Override
-                public void onEdited() {
-                    if (!suppressChange) {
-                        commit(false);
+                public void onEdited(@NonNull KiCutTableEditor.Listener.EditKind kind) {
+                    if (suppressChange) {
+                        return;
                     }
-                    redrawChart();
+                    switch (kind) {
+                        case TYPING:
+                            // 编辑中：有框为空 → 曲线不重算、配置也不写盘；否则曲线按 1 秒防抖，
+                            // 写盘仍走队列的 1200ms 防抖
+                            if (editor.hasEmptyField()) {
+                                cancelRedraw();
+                                commit(false);
+                            } else {
+                                scheduleRedraw();
+                                commit(false);
+                            }
+                            break;
+                        case STRUCTURAL:
+                            // 增删簇/点：值完整，曲线立刻重算；写盘仍走防抖
+                            redrawChart();
+                            commit(false);
+                            break;
+                        case COMMIT:
+                            // 失焦：取消未触发的定时器，收敛后立刻重算曲线并立刻写盘
+                            // （写盘的"立刻"由 commit(true) 内部的 flushNow 完成，见 ConfigKeyRow#commit）
+                            cancelRedraw();
+                            redrawChart();
+                            commit(true);
+                            break;
+                        default:
+                            break;
+                    }
                 }
 
                 @Override
@@ -717,6 +754,7 @@ final class ConfigKeyRow {
                 @Override
                 public void onViewDetachedFromWindow(View v) {
                     ticker.removeCallbacks(tick);
+                    ticker.removeCallbacks(redrawTask);   // 编辑防抖任务随视图一起取消，不对已销毁视图重算
                 }
             });
         }
@@ -729,9 +767,13 @@ final class ConfigKeyRow {
         }
 
         @Override
-        @NonNull
+        @Nullable
         public Value read(boolean fallbackForUnparsed) {
-            // 表随时有完整值（编辑器自己把非法输入收敛进定义范围），不存在"还没输完"的中间态
+            if (!fallbackForUnparsed && editor.hasEmptyField()) {
+                // 有框为空 = 编辑中的半截态：不写盘（曲线也不重算，见 onEdited 的 TYPING 分支）
+                return null;
+            }
+            // 否则表随时有完整值（编辑器把非法输入收敛进定义范围）
             return Value.ofText(editor.getValueText());
         }
 
@@ -746,9 +788,9 @@ final class ConfigKeyRow {
             return Collections.singletonList(block);
         }
 
-        /** 依「此刻目标冷值」的当前值重绘曲线。 */
+        /** 依「当前冷值」的当前值重绘曲线。 */
         private void redrawChart() {
-            if (chart == null || block == null) {
+            if (chart == null || block == null || editor == null) {
                 return;
             }
             Context context = block.getContext();
@@ -759,13 +801,24 @@ final class ConfigKeyRow {
                     KiCutTable.minCurve(clusters, smooth, coldMax, false), coldMax, targetCold);
         }
 
+        /** 排一次编辑中的曲线重算（1 秒防抖，重置窗口）。 */
+        private void scheduleRedraw() {
+            ticker.removeCallbacks(redrawTask);
+            ticker.postDelayed(redrawTask, REDRAW_DEBOUNCE_MS);
+        }
+
+        /** 取消未触发的曲线重算（失焦提交、或框变空时调）。 */
+        private void cancelRedraw() {
+            ticker.removeCallbacks(redrawTask);
+        }
+
         /** 平滑系数（×100 口径之外直接就是 %）：取当前有效值，定义里没有这个键时按默认值。 */
         private int smoothPct() {
             Value value = host.effectiveValue(SMOOTH_KEY);
             return value != null ? value.intAt(0) : SMOOTH_DEFAULT;
         }
 
-        /** 读一次「此刻目标冷值」；只有值真的变了（或首次）才重绘。视图不可见时跳过读盘。 */
+        /** 读一次「当前冷值」；只有值真的变了（或首次）才重绘。视图不可见时跳过读盘。 */
         private void refreshTargetCold(boolean force) {
             if (block == null || !block.isShown()) {
                 return;
@@ -1146,6 +1199,7 @@ final class ConfigKeyRow {
         }
         if (!fromBlur && !renderer.writesWhileTyping()) {
             // 输入过程中不落盘：半截路径会被 C 端当真路径去 open()
+            // （这条理由对"空框不写盘"同样成立：半截值别送给 C 端）
             return;
         }
 
@@ -1155,6 +1209,10 @@ final class ConfigKeyRow {
                 restoreInputs();
                 setStatus(root.getContext().getString(R.string.config_input_restored),
                         R.color.state_warn);
+            } else {
+                // 空框（"还没输完"）不写盘：顺手撤掉可能已排入的旧待写值，免得它踩着 1200ms 窗口写出去
+                host.queue().cancel(meta.key);
+                host.onPendingChange();
             }
             return;
         }
@@ -1186,6 +1244,10 @@ final class ConfigKeyRow {
         }
         host.queue().schedule(meta.key, ui);
         host.onPendingChange();
+        if (fromBlur) {
+            // 失焦立刻写：提交后触发一次冲刷（冲刷"全部"待写键——见 app 逻辑说明.md §3.2 的口径与理由）
+            host.queue().flushNow();
+        }
     }
 
     /**

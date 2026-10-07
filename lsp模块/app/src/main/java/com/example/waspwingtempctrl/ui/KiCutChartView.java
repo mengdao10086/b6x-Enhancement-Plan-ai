@@ -17,7 +17,7 @@ import com.example.waspwingtempctrl.R;
 import java.util.Locale;
 
 /**
- * KI 分段倍率表的实时倍率曲线：两条线（KI 升倍率 / KI 降倍率，×100 口径）+ 一条红色竖虚线标「此刻目标冷值」。
+ * KI 分段倍率表的实时倍率曲线：两条线（KI 升倍率 / KI 降倍率，×100 口径）+ 一条红色竖虚线标「当前冷值」。
  *
  * <p>横轴 0…当前设备制冷上限（见 {@link KiCutData#coldMax}），纵轴<b>自适应定标</b>——与实时信息图同一套
  * {@link ChartAxis}（档位梯 1/2/3 + ≥5 的 5 倍数、3~5 段取离跨度/4 最近），<b>不额外加最小跨度兜底</b>；
@@ -220,7 +220,7 @@ final class KiCutChartView extends View {
         canvas.drawPath(path(up, plotL, plotR, plotT, plotB), upPaint);
         canvas.drawPath(path(dn, plotL, plotR, plotT, plotB), dnPaint);
 
-        // 此刻目标冷值：一条红色竖虚线
+        // 当前冷值：一条红色竖虚线
         if (target >= 0 && target <= xMax) {
             targetPaint.setColor(colorTarget);
             float px = gridX(target, plotL, plotR);

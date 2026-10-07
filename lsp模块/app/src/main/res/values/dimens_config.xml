@@ -93,15 +93,18 @@
     <!--
         ===== KI 分段倍率表 =====
         点行里三个数字框改用标准字段样式（item_config_field.xml，框高 @dimen/field_height 36dp）；
-        删除/添加按钮取 36dp（与框同高、仍够点准，两张表里重复出现，不宜太占位）。
-        曲线高 150dp：够画清倍率取值与动态刻度，又不至于把参数卡撑成一屏放不下。
+        删除/添加按钮取 30dp（比框略矮、仍够点准，两张表里重复出现，不宜太占位）。
+        曲线高 120dp：够画清倍率取值与动态刻度，又不至于把参数卡撑成一屏放不下。
     -->
-    <dimen name="ki_cut_del_size">36dp</dimen>
+    <dimen name="ki_cut_del_size">30dp</dimen>
     <!--
         点行删除按钮「×」字形的字号：比正文大 50%（正文 @dimen/text_body 14sp → 21sp）。
-        字形仍是「×」，只放大不改字，故 36dp 按钮内居中后仍留有余量。
+        字形仍是「×」，只放大不改字，故按钮内居中后仍留有余量。
     -->
     <dimen name="ki_cut_del_glyph_size">21sp</dimen>
-    <dimen name="ki_cut_chart_height">150dp</dimen>
-    <dimen name="ki_cut_legend_swatch">10dp</dimen>
+    <dimen name="ki_cut_chart_height">120dp</dimen>
+    <!-- 图例色块：压成单行紧凑后取 8dp（原 10dp） -->
+    <dimen name="ki_cut_legend_swatch">8dp</dimen>
+    <!-- 图例文字字号：压成单行紧凑后取 10sp（原为 Caption 的 12sp） -->
+    <dimen name="ki_cut_legend_text_size">10sp</dimen>
 </resources>

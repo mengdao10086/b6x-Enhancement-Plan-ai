@@ -1,16 +1,16 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!--
-    KI 分段倍率表的一个「簇」块：表头（"簇 N" + 删除簇）+ 点行容器 + "添加点"。
+    KI 分段倍率表的一个「簇」块：表头（"簇 N" + 删除簇）+ 点行容器 + 底部一行（"添加点" "添加簇"）。
     点行由 KiCutTableEditor 现场 inflate item_ki_cut_point.xml 后 addView 进 ki_cut_cluster_points。
     块底色取 app_surface_container_high（比卡片底色亮一档），簇与簇之间自然分得开。
+    去空气：块内不设内边距、底部行不设上距、块与块之间不留下外边距；「添加点」「添加簇」同一行。
 -->
 <LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
     android:id="@+id/ki_cut_cluster"
     android:layout_width="match_parent"
     android:layout_height="wrap_content"
     android:background="@color/app_surface_container_high"
-    android:orientation="vertical"
-    android:padding="@dimen/space_xs">
+    android:orientation="vertical">
 
     <LinearLayout
         android:layout_width="match_parent"
@@ -45,15 +45,33 @@
         android:layout_height="wrap_content"
         android:orientation="vertical" />
 
-    <com.google.android.material.button.MaterialButton
-        android:id="@+id/ki_cut_cluster_add_point"
-        style="@style/Widget.Material3.Button.TextButton"
-        android:layout_width="wrap_content"
-        android:layout_height="@dimen/ki_cut_del_size"
-        android:layout_marginTop="@dimen/space_xs"
-        android:minWidth="0dp"
-        android:paddingStart="@dimen/space_s"
-        android:paddingEnd="@dimen/space_s"
-        android:text="@string/config_ki_cut_add_point"
-        android:textSize="@dimen/text_caption" />
+    <!-- 底部行：添加点 / 添加簇 同一行，无上距（去空气） -->
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:gravity="center_vertical"
+        android:orientation="horizontal">
+
+        <com.google.android.material.button.MaterialButton
+            android:id="@+id/ki_cut_cluster_add_point"
+            style="@style/Widget.Material3.Button.TextButton"
+            android:layout_width="wrap_content"
+            android:layout_height="@dimen/ki_cut_del_size"
+            android:minWidth="0dp"
+            android:paddingStart="@dimen/space_s"
+            android:paddingEnd="@dimen/space_s"
+            android:text="@string/config_ki_cut_add_point"
+            android:textSize="@dimen/text_caption" />
+
+        <com.google.android.material.button.MaterialButton
+            android:id="@+id/ki_cut_cluster_add_cluster"
+            style="@style/Widget.Material3.Button.TextButton"
+            android:layout_width="wrap_content"
+            android:layout_height="@dimen/ki_cut_del_size"
+            android:minWidth="0dp"
+            android:paddingStart="@dimen/space_s"
+            android:paddingEnd="@dimen/space_s"
+            android:text="@string/config_ki_cut_add_cluster"
+            android:textSize="@dimen/text_caption" />
+    </LinearLayout>
 </LinearLayout>

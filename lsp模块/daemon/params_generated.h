@@ -156,7 +156,7 @@
 #define CFG_MAX_KI_CUT_F2 200
 #define CFG_MIN_KI_CUT_F3 0
 #define CFG_MAX_KI_CUT_F3 200
-#define CFG_DEFAULT_KI_CUT_1 "1,100,50,40,100,100,100,71,78,190,50,62"
+#define CFG_DEFAULT_KI_CUT_1 "1,100,50,40,100,100,100,70,80,190,50,65"
 
 /* 各层 int 取值位的**代码默认值**表：层开关由 1→0 时，tempctrl.c 展开本表把该层
  * 运行时参数批量赋回代码默认值（= 等同该层配置不存在）。行格式 X(C 变量, 默认值)。
