@@ -568,7 +568,7 @@ public final class ConfigStore {
 
     /**
      * 出厂配置里写一个键：注释行 + 取值行。表型键写多行（{@code rowPrefix1/2/…}），其余写
-     * {@code KEY=VALUE} 一行。见 app/逻辑说明.md〈KI 分段削减表（界面侧）〉。
+     * {@code KEY=VALUE} 一行。见 app/逻辑说明.md〈KI 分段倍率表（界面侧）〉。
      */
     private void emitEntry(StringBuilder sb, KeyMeta meta) {
         sb.append("# ").append(meta.commentLine()).append('\n');
@@ -886,7 +886,7 @@ public final class ConfigStore {
 
         /**
          * 表型键（{@code type:"table"}）：在配置里占多行（{@link #rowPrefix} + 行号），
-         * 值是多行文本（每行一簇，行内三元组重复）。渲染与写盘口径见 app/逻辑说明.md〈KI 分段削减表（界面侧）〉。
+         * 值是多行文本（每行一簇，行内三元组重复）。渲染与写盘口径见 app/逻辑说明.md〈KI 分段倍率表（界面侧）〉。
          */
         public boolean isTable() {
             return "table".equals(type);
@@ -1158,7 +1158,7 @@ public final class ConfigStore {
          * <p><b>表族（{@code families}）</b>：逻辑键 → 行键前缀。这类键的值是<b>多行文本</b>
          * （每行一簇），落盘要展开成 {@code rowPrefix1=…}、{@code rowPrefix2=…}… 且<b>行号连续</b>。
          * 故命中的旧 {@code rowPrefix+数字} 行整族丢弃，由新块在首个旧行的位置一次写出；
-         * 族里一行都没有时整块追加到文件末尾。见 app/逻辑说明.md〈KI 分段削减表（界面侧）〉。
+         * 族里一行都没有时整块追加到文件末尾。见 app/逻辑说明.md〈KI 分段倍率表（界面侧）〉。
          *
          * @param appendComments 追加时用的注释文本（键 → 说明），缺省时用键名
          * @param families       逻辑键 → 行键前缀（只含本次要改的表键）；非表键不在其中

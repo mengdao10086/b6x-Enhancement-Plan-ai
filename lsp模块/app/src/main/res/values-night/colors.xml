@@ -47,10 +47,12 @@
     <color name="chart_series_cool">#4CAF50</color>
     <color name="chart_axis">#888888</color>
 
-    <!-- ===== KI 分段削减表曲线（与 values 同名、同值；口径见 values/colors.xml 同名段） ===== -->
+    <!-- ===== KI 分段倍率表曲线（与 values 同名、同值；口径见 values/colors.xml 同名段） ===== -->
     <color name="ki_cut_up">#2196F3</color>
     <color name="ki_cut_down">#4CAF50</color>
     <color name="ki_cut_target">#E53935</color>
+    <!-- 删除按钮红：深底上取更亮的一档，保证可读（口径见 values/colors.xml 同名段） -->
+    <color name="ki_cut_del">#FF8A80</color>
 
     <!-- ===== 日志分级 ===== -->
     <color name="log_level_debug">#9AA2A5</color>

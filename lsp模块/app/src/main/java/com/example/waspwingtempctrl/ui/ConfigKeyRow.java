@@ -660,11 +660,11 @@ final class ConfigKeyRow {
      * 「值未变不写」与「待写值优先」两套语义原样复用（{@link #commit}）。
      *
      * <p>「此刻目标冷值」的红虚线由 1Hz 的轻量取数刷新（{@link KiCutData#targetCold}），
-     * 只在视图可见时读；取不到就不画线并在说明里如实标注，绝不画一个假位置。
+     * 只在视图可见时读；取不到就不画线，绝不画一个假位置。
      */
     private final class TableRenderer implements Renderer {
 
-        /** 与 KI 削减表配套的平滑系数键（契约固定为这个名字；定义里查不到时按 15 处理）。 */
+        /** 与 KI 倍率表配套的平滑系数键（契约固定为这个名字；定义里查不到时按 15 处理）。 */
         private static final String SMOOTH_KEY = "KI_CUT_SMOOTH";
         /** 平滑系数缺省值（与契约的 KI_CUT_SMOOTH 默认一致）。 */
         private static final int SMOOTH_DEFAULT = 15;
@@ -674,7 +674,6 @@ final class ConfigKeyRow {
         private View block;
         private KiCutTableEditor editor;
         private KiCutChartView chart;
-        private TextView axisNote;
         private int targetCold = -1;
 
         private final Handler ticker = new Handler(Looper.getMainLooper());
@@ -693,7 +692,6 @@ final class ConfigKeyRow {
             StartupTiming.accEnd(StartupTiming.FORM_SUB_INFLATE, startedAt);
             addFullLine(block);
             chart = block.findViewById(R.id.ki_cut_chart);
-            axisNote = block.findViewById(R.id.ki_cut_axis_note);
             editor = new KiCutTableEditor(meta, block, new KiCutTableEditor.Listener() {
                 @Override
                 public void onEdited() {
@@ -748,7 +746,7 @@ final class ConfigKeyRow {
             return Collections.singletonList(block);
         }
 
-        /** 依「此刻目标冷值」的当前值重绘曲线与说明。 */
+        /** 依「此刻目标冷值」的当前值重绘曲线。 */
         private void redrawChart() {
             if (chart == null || block == null) {
                 return;
@@ -759,11 +757,6 @@ final class ConfigKeyRow {
             List<KiCutTable.Cluster> clusters = editor.getClusters();
             chart.setCurves(KiCutTable.minCurve(clusters, smooth, coldMax, true),
                     KiCutTable.minCurve(clusters, smooth, coldMax, false), coldMax, targetCold);
-            String note = context.getString(R.string.config_ki_cut_axis_note, coldMax);
-            if (targetCold < 0) {
-                note = note + " ｜ " + context.getString(R.string.config_ki_cut_target_unknown);
-            }
-            axisNote.setText(note);
         }
 
         /** 平滑系数（×100 口径之外直接就是 %）：取当前有效值，定义里没有这个键时按默认值。 */

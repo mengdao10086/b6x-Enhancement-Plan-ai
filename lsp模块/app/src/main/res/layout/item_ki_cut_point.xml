@@ -1,8 +1,11 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!--
-    KI 分段削减表的一个「点」行：冷值 / KI 升倍率 / KI 降倍率三个紧凑数字框 + 一个删除按钮。
-    三个框等宽（0dp + weight=1）；标签不常驻——由 KiCutTableEditor 在行首之外以表头说明给出
-    （每簇一个表头会重复三遍同样的字，太吵）。框的背景见 drawable/bg_ki_cut_input.xml。
+    KI 分段倍率表的一个「点」行：冷值 / KI 升倍率 / KI 降倍率三个数字框 + 一个删除按钮。
+    三个框等宽（0dp + weight=1），用与 item_config_field.xml 同一套字段样式
+    （Widget.Material3.TextInputLayout.OutlinedBox + 同圆角 @dimen/field_radius + 同高
+    @dimen/field_height + 同内边距口径），值仍居中（textAlignment="center"）。
+    浮起说明（rowFields[].label）只由 KiCutTableEditor 设给「整张表的第一个点行」；
+    其余行不设 hint，OutlinedBox 无 hint 时渲染成普通圆角描边、无缺口。
 -->
 <LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:app="http://schemas.android.com/apk/res-auto"
@@ -11,62 +14,98 @@
     android:gravity="center_vertical"
     android:orientation="horizontal">
 
-    <EditText
-        android:id="@+id/ki_cut_cold"
+    <com.google.android.material.textfield.TextInputLayout
+        android:id="@+id/ki_cut_cold_box"
+        style="@style/Widget.Material3.TextInputLayout.OutlinedBox"
         android:layout_width="0dp"
-        android:layout_height="@dimen/ki_cut_input_height"
+        android:layout_height="@dimen/field_height"
         android:layout_marginEnd="@dimen/space_xs"
         android:layout_weight="1"
-        android:background="@drawable/bg_ki_cut_input"
-        android:gravity="center"
-        android:imeOptions="actionDone"
-        android:includeFontPadding="false"
-        android:inputType="number"
-        android:maxLines="1"
-        android:minHeight="0dp"
-        android:paddingStart="@dimen/space_xs"
-        android:paddingEnd="@dimen/space_xs"
-        android:textColor="@color/app_on_surface"
-        android:textColorHint="@color/app_on_surface_variant"
-        android:textSize="@dimen/text_body" />
+        app:boxCornerRadiusBottomEnd="@dimen/field_radius"
+        app:boxCornerRadiusBottomStart="@dimen/field_radius"
+        app:boxCornerRadiusTopEnd="@dimen/field_radius"
+        app:boxCornerRadiusTopStart="@dimen/field_radius"
+        app:expandedHintEnabled="false">
 
-    <EditText
-        android:id="@+id/ki_cut_up"
-        android:layout_width="0dp"
-        android:layout_height="@dimen/ki_cut_input_height"
-        android:layout_marginEnd="@dimen/space_xs"
-        android:layout_weight="1"
-        android:background="@drawable/bg_ki_cut_input"
-        android:gravity="center"
-        android:imeOptions="actionDone"
-        android:includeFontPadding="false"
-        android:inputType="number"
-        android:maxLines="1"
-        android:minHeight="0dp"
-        android:paddingStart="@dimen/space_xs"
-        android:paddingEnd="@dimen/space_xs"
-        android:textColor="@color/app_on_surface"
-        android:textColorHint="@color/app_on_surface_variant"
-        android:textSize="@dimen/text_body" />
+        <com.google.android.material.textfield.TextInputEditText
+            android:id="@+id/ki_cut_cold"
+            android:layout_width="match_parent"
+            android:layout_height="match_parent"
+            android:gravity="end|center_vertical"
+            android:imeOptions="actionDone"
+            android:includeFontPadding="false"
+            android:inputType="number"
+            android:maxLines="1"
+            android:minHeight="0dp"
+            android:paddingStart="@dimen/field_radius"
+            android:paddingTop="@dimen/config_field_pad_top"
+            android:paddingEnd="@dimen/field_radius"
+            android:paddingBottom="@dimen/config_field_pad_bottom"
+            android:textAlignment="center"
+            android:textSize="@dimen/config_field_text_size" />
+    </com.google.android.material.textfield.TextInputLayout>
 
-    <EditText
-        android:id="@+id/ki_cut_dn"
+    <com.google.android.material.textfield.TextInputLayout
+        android:id="@+id/ki_cut_up_box"
+        style="@style/Widget.Material3.TextInputLayout.OutlinedBox"
         android:layout_width="0dp"
-        android:layout_height="@dimen/ki_cut_input_height"
+        android:layout_height="@dimen/field_height"
         android:layout_marginEnd="@dimen/space_xs"
         android:layout_weight="1"
-        android:background="@drawable/bg_ki_cut_input"
-        android:gravity="center"
-        android:imeOptions="actionDone"
-        android:includeFontPadding="false"
-        android:inputType="number"
-        android:maxLines="1"
-        android:minHeight="0dp"
-        android:paddingStart="@dimen/space_xs"
-        android:paddingEnd="@dimen/space_xs"
-        android:textColor="@color/app_on_surface"
-        android:textColorHint="@color/app_on_surface_variant"
-        android:textSize="@dimen/text_body" />
+        app:boxCornerRadiusBottomEnd="@dimen/field_radius"
+        app:boxCornerRadiusBottomStart="@dimen/field_radius"
+        app:boxCornerRadiusTopEnd="@dimen/field_radius"
+        app:boxCornerRadiusTopStart="@dimen/field_radius"
+        app:expandedHintEnabled="false">
+
+        <com.google.android.material.textfield.TextInputEditText
+            android:id="@+id/ki_cut_up"
+            android:layout_width="match_parent"
+            android:layout_height="match_parent"
+            android:gravity="end|center_vertical"
+            android:imeOptions="actionDone"
+            android:includeFontPadding="false"
+            android:inputType="number"
+            android:maxLines="1"
+            android:minHeight="0dp"
+            android:paddingStart="@dimen/field_radius"
+            android:paddingTop="@dimen/config_field_pad_top"
+            android:paddingEnd="@dimen/field_radius"
+            android:paddingBottom="@dimen/config_field_pad_bottom"
+            android:textAlignment="center"
+            android:textSize="@dimen/config_field_text_size" />
+    </com.google.android.material.textfield.TextInputLayout>
+
+    <com.google.android.material.textfield.TextInputLayout
+        android:id="@+id/ki_cut_dn_box"
+        style="@style/Widget.Material3.TextInputLayout.OutlinedBox"
+        android:layout_width="0dp"
+        android:layout_height="@dimen/field_height"
+        android:layout_marginEnd="@dimen/space_xs"
+        android:layout_weight="1"
+        app:boxCornerRadiusBottomEnd="@dimen/field_radius"
+        app:boxCornerRadiusBottomStart="@dimen/field_radius"
+        app:boxCornerRadiusTopEnd="@dimen/field_radius"
+        app:boxCornerRadiusTopStart="@dimen/field_radius"
+        app:expandedHintEnabled="false">
+
+        <com.google.android.material.textfield.TextInputEditText
+            android:id="@+id/ki_cut_dn"
+            android:layout_width="match_parent"
+            android:layout_height="match_parent"
+            android:gravity="end|center_vertical"
+            android:imeOptions="actionDone"
+            android:includeFontPadding="false"
+            android:inputType="number"
+            android:maxLines="1"
+            android:minHeight="0dp"
+            android:paddingStart="@dimen/field_radius"
+            android:paddingTop="@dimen/config_field_pad_top"
+            android:paddingEnd="@dimen/field_radius"
+            android:paddingBottom="@dimen/config_field_pad_bottom"
+            android:textAlignment="center"
+            android:textSize="@dimen/config_field_text_size" />
+    </com.google.android.material.textfield.TextInputLayout>
 
     <com.google.android.material.button.MaterialButton
         android:id="@+id/ki_cut_point_del"
@@ -77,6 +116,7 @@
         android:minWidth="0dp"
         android:padding="0dp"
         android:text="@string/config_ki_cut_del_glyph"
-        android:textSize="@dimen/text_body"
+        android:textColor="@color/ki_cut_del"
+        android:textSize="@dimen/ki_cut_del_glyph_size"
         app:iconPadding="0dp" />
 </LinearLayout>

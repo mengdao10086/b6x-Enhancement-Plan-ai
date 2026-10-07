@@ -17,17 +17,18 @@ import com.example.waspwingtempctrl.R;
 import java.util.Locale;
 
 /**
- * KI 分段削减表的实时倍率曲线：两条线（KI 升倍率 / KI 降倍率，×100 口径）+ 一条红色竖虚线标「此刻目标冷值」。
+ * KI 分段倍率表的实时倍率曲线：两条线（KI 升倍率 / KI 降倍率，×100 口径）+ 一条红色竖虚线标「此刻目标冷值」。
  *
- * <p>横轴 0…当前设备制冷上限（见 {@link KiCutData#coldMax}），纵轴恒 0…200（100 = 不削）。数据由调用方
- * 用 {@link KiCutTable#minCurve} 本地重算好后经 {@link #setCurves} 送上主线程，<b>本控件不读文件、不做算法</b>。
+ * <p>横轴 0…当前设备制冷上限（见 {@link KiCutData#coldMax}），纵轴<b>自适应定标</b>——与实时信息图同一套
+ * {@link ChartAxis}（档位梯 1/2/3 + ≥5 的 5 倍数、3~5 段取离跨度/4 最近），<b>不额外加最小跨度兜底</b>；
+ * 定标仍按 ×100 口径喂值，只在刻度标签上 ÷100 显示成原始倍率（{@code 0.5} / {@code 1} / {@code 1.5} …）。
+ * 「100 = 不削」基准线恒画：中性值并入取值范围，故它总落在可视区内。
+ *
+ * <p>数据由调用方用 {@link KiCutTable#minCurve} 本地重算好后经 {@link #setCurves} 送上主线程，
+ * <b>本控件不读文件、不做算法</b>；纵轴定标与其刻度标签在 {@link #setCurves} 里算好并缓存，onDraw 只消费。
  */
 final class KiCutChartView extends View {
 
-    /** 纵轴满量程（倍率 ×100）：200 = 两倍增益。 */
-    private static final int Y_MAX = 200;
-    /** 纵轴网格线（含 100 这条"不削"基准线）。 */
-    private static final int[] Y_TICKS = {0, 50, 100, 150, 200};
     /** 横轴刻度段数（0 / 四分之一 … / 上限）。 */
     private static final int X_TICKS = 4;
 
@@ -58,6 +59,11 @@ final class KiCutChartView extends View {
     private float[] dn = new float[0];
     private int xMax = 190;
     private int target = -1;
+
+    // ---- setCurves 产物：纵轴定标与其刻度；onDraw 只消费 ----
+    private ChartAxis axis;
+    private float[] axisTicks = new float[0];
+    private String[] axisLabels = new String[0];
 
     public KiCutChartView(Context context) {
         super(context);
@@ -96,6 +102,7 @@ final class KiCutChartView extends View {
         this.dn = dn;
         this.xMax = Math.max(1, xMax);
         this.target = target;
+        fitAxis();
         invalidate();
     }
 
@@ -120,6 +127,41 @@ final class KiCutChartView extends View {
         colorsReady = true;
     }
 
+    /**
+     * 纵轴定标：取值范围 = 两条曲线的全部取值<b>并入中性值（100 = 不削）</b>，再照 {@link ChartAxis#fit}
+     * 求整档轴。并入中性值只为「基准线恒可见」，不改定标算法本身（无最小跨度兜底）。
+     */
+    private void fitAxis() {
+        float mn = Float.POSITIVE_INFINITY;
+        float mx = Float.NEGATIVE_INFINITY;
+        for (float[] arr : new float[][]{up, dn}) {
+            for (float v : arr) {
+                if (v < mn) {
+                    mn = v;
+                }
+                if (v > mx) {
+                    mx = v;
+                }
+            }
+        }
+        if (mn == Float.POSITIVE_INFINITY || mx == Float.NEGATIVE_INFINITY) {
+            mn = KiCutTable.NEUTRAL;
+            mx = KiCutTable.NEUTRAL;
+        }
+        if (KiCutTable.NEUTRAL < mn) {
+            mn = KiCutTable.NEUTRAL;
+        }
+        if (KiCutTable.NEUTRAL > mx) {
+            mx = KiCutTable.NEUTRAL;
+        }
+        axis = ChartAxis.fit(mn, mx);
+        axisTicks = ChartAxis.ticksOf(axis.min, axis.max, axis.step);
+        axisLabels = new String[axisTicks.length];
+        for (int i = 0; i < axisTicks.length; i++) {
+            axisLabels[i] = ratioLabel(axisTicks[i]);
+        }
+    }
+
     @Override
     protected void onDraw(Canvas canvas) {
         super.onDraw(canvas);
@@ -128,12 +170,16 @@ final class KiCutChartView extends View {
         }
         int w = getWidth();
         int h = getHeight();
-        if (w <= 0 || h <= 0) {
+        if (w <= 0 || h <= 0 || axis == null || axisLabels.length == 0) {
             return;
         }
         float pad = PAD_DP * density;
         float labelH = -textPaint.getFontMetrics().ascent + textPaint.getFontMetrics().descent;
-        float padL = textPaint.measureText(label(Y_MAX)) + pad;
+        float labelW = 0f;
+        for (String s : axisLabels) {
+            labelW = Math.max(labelW, textPaint.measureText(s));
+        }
+        float padL = labelW + pad;
         float plotL = padL;
         float plotR = w - pad;
         float plotT = pad;
@@ -142,17 +188,20 @@ final class KiCutChartView extends View {
             return;
         }
 
-        // 纵轴网格 + 刻度；100 那条是"不削"基准线，用轴色画得更实
+        // 纵轴网格 + 刻度（原始倍率标签）；y 由 ChartAxis 定标给出
         Paint.FontMetrics fm = textPaint.getFontMetrics();
         textPaint.setColor(colorAxis);
         textPaint.setTextAlign(Paint.Align.RIGHT);
         gridPaint.setColor(colorGrid);
-        refPaint.setColor(colorAxis);
-        for (int v : Y_TICKS) {
-            float y = valueY(v, plotT, plotB);
-            canvas.drawLine(plotL, y, plotR, y, v == KiCutTable.NEUTRAL ? refPaint : gridPaint);
-            canvas.drawText(label(v), plotL - pad / 2f, y - (fm.ascent + fm.descent) / 2f, textPaint);
+        for (int i = 0; i < axisTicks.length; i++) {
+            float y = axis.y(axisTicks[i], plotT, plotB - plotT);
+            canvas.drawLine(plotL, y, plotR, y, gridPaint);
+            canvas.drawText(axisLabels[i], plotL - pad / 2f, y - (fm.ascent + fm.descent) / 2f, textPaint);
         }
+        // 「100 = 不削」基准线：恒画（中性值已并入轴范围，故必在可视区内），比网格线更实
+        refPaint.setColor(colorAxis);
+        float refY = axis.y(KiCutTable.NEUTRAL, plotT, plotB - plotT);
+        canvas.drawLine(plotL, refY, plotR, refY, refPaint);
 
         // 横轴刻度 + 刻度数字
         textPaint.setTextAlign(Paint.Align.CENTER);
@@ -179,13 +228,13 @@ final class KiCutChartView extends View {
         }
     }
 
-    /** 逐格折线：{@code values[i]} 是 x=i 处的倍率。 */
+    /** 逐格折线：{@code values[i]} 是 x=i 处的倍率（×100）。 */
     private Path path(float[] values, float plotL, float plotR, float plotT, float plotB) {
         Path p = new Path();
         boolean started = false;
         for (int x = 0; x < values.length; x++) {
             float px = gridX(x, plotL, plotR);
-            float py = valueY(values[x], plotT, plotB);
+            float py = axis.y(values[x], plotT, plotB - plotT);
             if (started) {
                 p.lineTo(px, py);
             } else {
@@ -201,9 +250,21 @@ final class KiCutChartView extends View {
         return plotL + t * (plotR - plotL);
     }
 
-    private float valueY(float v, float plotT, float plotB) {
-        float clamped = v < 0f ? 0f : (v > Y_MAX ? Y_MAX : v);
-        return plotB - (clamped / (float) Y_MAX) * (plotB - plotT);
+    /** 纵轴刻度标签：原始倍率（×100 除以 100），最多两位小数、去掉多余尾零（50→0.5、100→1、150→1.5）。 */
+    private static String ratioLabel(float centi) {
+        // 轴首档 lo==0 时 ChartAxis.ticksOf 会给出 -0.0f（Math.ceil(-1e-9)*step），
+        // 不拦会经 %.2f 去尾零渲染成 "-0"；-0.0f == 0f 为真，这一句同时盖住 ±0。
+        if (centi == 0f) {
+            return "0";
+        }
+        String s = String.format(Locale.US, "%.2f", centi / 100f);
+        while (s.endsWith("0")) {
+            s = s.substring(0, s.length() - 1);
+        }
+        if (s.endsWith(".")) {
+            s = s.substring(0, s.length() - 1);
+        }
+        return s;
     }
 
     private static String label(int v) {

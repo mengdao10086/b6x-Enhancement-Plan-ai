@@ -1,8 +1,9 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!--
-    KI 分段削减表整块（挂在键行 WrapRowLayout 的 fullLine 位上）：
-      簇块容器（KiCutTableEditor 往里塞 item_ki_cut_cluster.xml）→「添加簇」→ 图例 → 实时倍率曲线 → 横轴说明。
+    KI 分段倍率表整块（挂在键行 WrapRowLayout 的 fullLine 位上）：
+      簇块容器（KiCutTableEditor 往里塞 item_ki_cut_cluster.xml）→「添加簇」→ 实时倍率曲线 → 图例。
     这里只摆静态骨架；簇/点全部由 KiCutTableEditor 现场增删。
+    图例（两条倍率线的色块 + 红色竖虚线色块）放在曲线下方、整行居中。
 -->
 <LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
     android:id="@+id/ki_cut_root"
@@ -27,12 +28,18 @@
         android:text="@string/config_ki_cut_add_cluster"
         android:textSize="@dimen/text_caption" />
 
-    <!-- 图例：两条线的颜色 + 红色竖虚线（此刻目标冷值） -->
+    <com.example.waspwingtempctrl.ui.KiCutChartView
+        android:id="@+id/ki_cut_chart"
+        android:layout_width="match_parent"
+        android:layout_height="@dimen/ki_cut_chart_height"
+        android:layout_marginTop="@dimen/space_xs" />
+
+    <!-- 图例：两条线的颜色 + 红色竖虚线（此刻目标冷值）；整行居中 -->
     <LinearLayout
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:layout_marginTop="@dimen/space_s"
-        android:gravity="center_vertical"
+        android:layout_marginTop="@dimen/space_xs"
+        android:gravity="center"
         android:orientation="horizontal">
 
         <View
@@ -73,17 +80,4 @@
             android:text="@string/config_ki_cut_legend_target"
             android:textAppearance="@style/TextAppearance.B6XTempCtrl.Caption" />
     </LinearLayout>
-
-    <com.example.waspwingtempctrl.ui.KiCutChartView
-        android:id="@+id/ki_cut_chart"
-        android:layout_width="match_parent"
-        android:layout_height="@dimen/ki_cut_chart_height"
-        android:layout_marginTop="@dimen/space_xs" />
-
-    <TextView
-        android:id="@+id/ki_cut_axis_note"
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:layout_marginTop="@dimen/space_xs"
-        android:textAppearance="@style/TextAppearance.B6XTempCtrl.Caption" />
 </LinearLayout>

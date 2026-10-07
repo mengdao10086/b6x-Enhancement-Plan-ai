@@ -8,7 +8,7 @@ import java.util.Comparator;
 import java.util.List;
 
 /**
- * KI 分段削减表的纯模型与求值（<b>无 Android 依赖</b>，可在桌面 JVM 上直接跑）。
+ * KI 分段倍率表的纯模型与求值（<b>无 Android 依赖</b>，可在桌面 JVM 上直接跑）。
  *
  * <p>落盘口径（一行一簇、行内三元组重复）与求值算法（逐簇折线 → 双向 EMA → 控制点残差回补 → 跨簇取最小）
  * 的唯一权威是 C 端 {@code daemon/ki_cut.h}；本类是与它<b>逐值对齐</b>的界面侧重算实现（对照

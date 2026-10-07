@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!--
-    KI 分段削减表的一个「簇」块：表头（"簇 N" + 删除簇）+ 点行容器 + "添加点"。
+    KI 分段倍率表的一个「簇」块：表头（"簇 N" + 删除簇）+ 点行容器 + "添加点"。
     点行由 KiCutTableEditor 现场 inflate item_ki_cut_point.xml 后 addView 进 ki_cut_cluster_points。
     块底色取 app_surface_container_high（比卡片底色亮一档），簇与簇之间自然分得开。
 -->
@@ -10,7 +10,7 @@
     android:layout_height="wrap_content"
     android:background="@color/app_surface_container_high"
     android:orientation="vertical"
-    android:padding="@dimen/space_s">
+    android:padding="@dimen/space_xs">
 
     <LinearLayout
         android:layout_width="match_parent"
@@ -35,6 +35,7 @@
             android:paddingStart="@dimen/space_s"
             android:paddingEnd="@dimen/space_s"
             android:text="@string/config_ki_cut_del_cluster_text"
+            android:textColor="@color/ki_cut_del"
             android:textSize="@dimen/text_caption" />
     </LinearLayout>
 

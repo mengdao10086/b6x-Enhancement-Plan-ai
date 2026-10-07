@@ -18,17 +18,19 @@ import com.example.waspwingtempctrl.ConfigStore.FieldMeta;
 import com.example.waspwingtempctrl.ConfigStore.KeyMeta;
 import com.example.waspwingtempctrl.R;
 import com.google.android.material.button.MaterialButton;
+import com.google.android.material.textfield.TextInputLayout;
 
 import java.util.ArrayList;
 import java.util.List;
 
 /**
- * KI 分段削减表的编辑器：以「簇」为块（{@code item_ki_cut_cluster.xml}），块内以「点」为行
+ * KI 分段倍率表的编辑器：以「簇」为块（{@code item_ki_cut_cluster.xml}），块内以「点」为行
  * （{@code item_ki_cut_point.xml}，每点三个数字：冷值 / KI 升倍率 / KI 降倍率）。支持增删簇与增删点。
  *
  * <p><b>数据是「值 = 多行文本」</b>（每行一簇、行内三元组重复，见 {@link KiCutTable}）：本类只管把
  * 文本渲染成控件、把控件读回文本；落盘与算法都在别处（{@link com.example.waspwingtempctrl.ConfigStore}
- * 与 {@link KiCutTable}）。点行里三个框的浮起说明直接取定义 {@code rowFields[].label}，不在界面另抄一份。
+ * 与 {@link KiCutTable}）。点行里三个框的浮起说明直接取定义 {@code rowFields[].label}，不在界面另抄一份；
+ * 且<b>只有整张表的第一个点行带说明</b>（第 1 簇第 1 点），其余行不带 hint。
  *
  * <p><b>不打扰正在编辑的用户</b>：{@link #setClusters} 先与控件当前内容比对，一致就什么都不做
  * （同 {@code ConfigKeyRow} 的 setTextIfChanged 口径）——否则每次快照上屏都会重建控件、把光标顶掉。
@@ -217,23 +219,25 @@ final class KiCutTableEditor {
     private void addClusterBlock(@NonNull KiCutTable.Cluster cluster) {
         View view = inflater.inflate(R.layout.item_ki_cut_cluster, clustersBox, false);
         ClusterBlock block = new ClusterBlock(view);
+        boolean firstCluster = blocks.isEmpty();
         blocks.add(block);
         final int index = blocks.size() - 1;
         block.deleteButton.setOnClickListener(v -> onDeleteCluster(indexOf(block)));
         block.addPointButton.setOnClickListener(v -> onAddPoint(indexOf(block)));
         for (KiCutTable.Point point : cluster.points) {
-            addPointRow(block, point);
+            addPointRow(block, point, firstCluster && block.rows.isEmpty());
         }
         clustersBox.addView(view);
     }
 
-    private void addPointRow(@NonNull ClusterBlock block, @NonNull KiCutTable.Point point) {
+    private void addPointRow(@NonNull ClusterBlock block, @NonNull KiCutTable.Point point,
+                             boolean showHints) {
         View view = inflater.inflate(R.layout.item_ki_cut_point, block.pointsBox, false);
         PointRow row = new PointRow(view);
         row.cold.setText(String.valueOf(point.cold));
         row.up.setText(String.valueOf(point.up));
         row.dn.setText(String.valueOf(point.dn));
-        applyHints(row, view);
+        applyHints(row, showHints);
         row.cold.addTextChangedListener(watcher());
         row.up.addTextChangedListener(watcher());
         row.dn.addTextChangedListener(watcher());
@@ -259,15 +263,18 @@ final class KiCutTableEditor {
         block.pointsBox.addView(view);
     }
 
-    /** 三个框的浮起说明取定义里的 {@code rowFields[i].label}（定义没写就不设，不另抄一份文案）。 */
-    private void applyHints(@NonNull PointRow row, @NonNull View view) {
-        if (meta.rowFields == null) {
+    /**
+     * 三个框的浮起说明取定义里的 {@code rowFields[i].label}（定义没写就不设，不另抄一份文案）。
+     * <b>只有整张表的第一个点行</b>才带说明；其余行不设，OutlinedBox 无 hint 时渲染成普通圆角描边、无缺口。
+     */
+    private void applyHints(@NonNull PointRow row, boolean show) {
+        if (!show || meta.rowFields == null) {
             return;
         }
-        EditText[] fields = {row.cold, row.up, row.dn};
-        for (int i = 0; i < fields.length && i < meta.rowFields.size(); i++) {
+        TextInputLayout[] boxes = {row.coldBox, row.upBox, row.dnBox};
+        for (int i = 0; i < boxes.length && i < meta.rowFields.size(); i++) {
             FieldMeta field = meta.rowFields.get(i);
-            fields[i].setHint(field.label);
+            boxes[i].setHint(field.label);
         }
     }
 
@@ -368,6 +375,9 @@ final class KiCutTableEditor {
         final EditText cold;
         final EditText up;
         final EditText dn;
+        final TextInputLayout coldBox;
+        final TextInputLayout upBox;
+        final TextInputLayout dnBox;
         final View deleteButton;
 
         PointRow(View view) {
@@ -375,6 +385,9 @@ final class KiCutTableEditor {
             this.cold = view.findViewById(R.id.ki_cut_cold);
             this.up = view.findViewById(R.id.ki_cut_up);
             this.dn = view.findViewById(R.id.ki_cut_dn);
+            this.coldBox = view.findViewById(R.id.ki_cut_cold_box);
+            this.upBox = view.findViewById(R.id.ki_cut_up_box);
+            this.dnBox = view.findViewById(R.id.ki_cut_dn_box);
             this.deleteButton = view.findViewById(R.id.ki_cut_point_del);
             this.cold.setInputType(InputType.TYPE_CLASS_NUMBER);
             this.up.setInputType(InputType.TYPE_CLASS_NUMBER);
@@ -400,7 +413,7 @@ final class KiCutTableEditor {
             ViewGroup.LayoutParams lp = view.getLayoutParams();
             if (lp instanceof ViewGroup.MarginLayoutParams) {
                 ((ViewGroup.MarginLayoutParams) lp).bottomMargin =
-                        view.getResources().getDimensionPixelSize(R.dimen.space_s);
+                        view.getResources().getDimensionPixelSize(R.dimen.space_xs);
             }
         }
     }

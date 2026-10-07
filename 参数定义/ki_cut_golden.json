@@ -1,5 +1,5 @@
 {
-  "note": "KI 分段削减表求值 golden（期望值为升/降倍率，×100 口径）。由 Python 参照实现按 lsp模块/daemon/ki_cut.h 的算法逐条计算；其中标注的配置点/范围外/多簇取最小等为人工手算点（见 ki分段削减-方案-C侧.md 实施记录）。check_params.py 在 CI 上编译 ki_cut.h 的对拍程序，逐条比对。",
+  "note": "KI 分段倍率表求值 golden（期望值为升/降倍率，×100 口径）。由 Python 参照实现按 lsp模块/daemon/ki_cut.h 的算法逐条计算；其中标注的配置点/范围外/多簇取最小等为人工手算点（见 ki分段削减-方案-C侧.md 实施记录）。check_params.py 在 CI 上编译 ki_cut.h 的对拍程序，逐条比对。",
   "tolerance": 0.05,
   "cases": [
     {

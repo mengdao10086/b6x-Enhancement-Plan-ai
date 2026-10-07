@@ -35,7 +35,7 @@
 // static 变量声明之后（见 params_generated.h 头部说明）。
 #include "params_generated.h"
 
-// 「KI 分段削减表」求值算法（无外部依赖的纯头，与参数定义/check_params.py 的跨端对拍程序共用）
+// 「KI 分段倍率表」求值算法（无外部依赖的纯头，与参数定义/check_params.py 的跨端对拍程序共用）
 #include "ki_cut.h"
 
 // --- 通用宏 ---
@@ -236,7 +236,7 @@ static int pid_cpu_comp_offset = 100;           // PID_CPU_COMP 第三值：偏�
 static int pid_cold_min = 1;              // PID_COLD_RANGE 第一值：制冷强度下限
 static int pid_cold_max = 190;            // PID_COLD_RANGE 第二值：制冷强度上限（B6X）
 
-// --- 「KI 分段削减表」参数（配置值为整数；倍率 ×100 换算进内部）---
+// --- 「KI 分段倍率表」参数（配置值为整数；倍率 ×100 换算进内部）---
 // KI_CUT_<簇号> = 重复三元组「冷值,升倍率,降倍率,...」（冷值 0~255；升/降倍率 ×100，100=不削）
 // KI_CUT_SMOOTH = 平滑系数（×100，0/100=关闭平滑）；簇内按冷值升序折线插值、多簇取最小
 static int ki_cut_smooth = 15;            // KI_CUT_SMOOTH：零相位平滑系数（×100；0 或 100 = 关闭）
@@ -273,7 +273,7 @@ static int pid_batt_snap_done = 0;        // 停机后是否已做一次"恢复�
 static int pid_align_rpm = 2000;          // PID 目标 RPM（仅初始化对齐与日志使用；风扇下发已由 compute_fan_target 独立计算）
 static int pid_align_cold = 1;            // PID 目标制冷强度
 
-// --- 「KI 分段削减表」运行状态（复位值 = 不削减：倍率 = KI_CUT_NONE）---
+// --- 「KI 分段倍率表」运行状态（复位值 = 不削减：倍率 = KI_CUT_NONE）---
 static float ki_cut_mult_up = (float)KI_CUT_NONE;   // KI 升速率倍率（×100；100 = 不削）
 static float ki_cut_mult_dn = (float)KI_CUT_NONE;   // KI 降速率倍率（×100；100 = 不削）
 
@@ -335,7 +335,7 @@ static const char *status_field_value(const char *line, const char *field) {
 #define WEBUI_DATA_COLS       8
 #define WEBUI_ROW_FMT         "%ld,%d,%d,%d,%d,%d,%d,%d\n"
 
-// 生效制冷上限提示文件（写给 app 定 KI 分段削减曲线横轴）；行格式与降级见 app/逻辑说明.md §6.6
+// 生效制冷上限提示文件（写给 app 定 KI 分段倍率曲线横轴）；行格式与降级见 app/逻辑说明.md §6.6
 #define COLDMAX_HINT_PATH     PRIVATE_DIR "/tempctrl_coldmax"
 
 // 三方 app 包名（farsef 在最近连 B6X 散热器时也参与仲裁）
@@ -567,7 +567,7 @@ struct IntCfgKey { const char *key; int *var; int min; int max; };
 static const struct IntCfgKey INT_CFG_KEYS[] = {
     // 表行由 params_generated.h 的 CFG_PERF_INT_KEYS 展开，键序与 clamp 边界随定义，勿在此手抄。
     // 多值键（PID_SPEED / PID_KI_RATE / PID_TARGET / PID_TARGET_DIR / PID_COLD_RANGE / PID_CPU_COMP / PID_SPEED_RECALL）
-    // KI 分段削减表（KI_CUT_<簇号>）在 parse_pid_cfg 按行前缀分段解析，不进本表
+    // KI 分段倍率表（KI_CUT_<簇号>）在 parse_pid_cfg 按行前缀分段解析，不进本表
 #define CFG_ROW(k, var, lo, hi) { k, &var, lo, hi },
     CFG_PERF_INT_KEYS(CFG_ROW)
 #undef CFG_ROW
@@ -694,7 +694,7 @@ static int parse_pid_cfg(const char *key, int val, const char *val_str) {
         if (n >= 2) pid_spd_recall_weight = clamp(w, 100, 1000);
         return 1;
     }
-    // KI 分段削减表：KI_CUT_<簇号> = 重复三元组「冷值,升倍率,降倍率,...」。
+    // KI 分段倍率表：KI_CUT_<簇号> = 重复三元组「冷值,升倍率,降倍率,...」。
     // 行前缀与逐字段 clamp 边界取自生成头（CFG_ROW_PREFIX_KI_CUT / CFG_MIN|MAX_KI_CUT_F*），
     // 解析本体见 ki_cut_parse_row（支持任意簇号，故不是精确 strcmp）。
     if (strncmp(key, CFG_ROW_PREFIX_KI_CUT, sizeof(CFG_ROW_PREFIX_KI_CUT) - 1) == 0) {
@@ -810,7 +810,7 @@ static void reset_perf_layer_defaults(void) {
     hot_derate = 0;
     hot_derate_cooldown = 0;
     hot_recover_cooldown = 0;
-    // KI 分段削减表不是 int 取值位（行数可变），其默认表另行复位（复用默认行字符串）
+    // KI 分段倍率表不是 int 取值位（行数可变），其默认表另行复位（复用默认行字符串）
     reset_ki_cut_defaults();
 }
 
@@ -2870,8 +2870,8 @@ static int cpu_comp_now(int batt) {
     return (int)(pid_cpu_comp_smooth * 10 + 0.5f);
 }
 
-// ======================== KI 分段削减表 ========================
-// 冷值 → 各簇折线插值（可平滑）→ 多簇取最小 → KI 升/降倍率；算法、取样与单位见 逻辑说明.md「KI 分段削减表」。
+// ======================== KI 分段倍率表 ========================
+// 冷值 → 各簇折线插值（可平滑）→ 多簇取最小 → KI 升/降倍率；算法、取样与单位见 逻辑说明.md「KI 分段倍率表」。
 // 求值核心（排序/去重/插值/平滑/多簇取最小）在只依赖自身的 ki_cut.h 内，与 CI 跨端对拍程序共用同一实现。
 
 /**
@@ -2988,7 +2988,7 @@ static float pid_compute(int batt_10, float dt, float cpu_comp, int batt_window_
         pid_target_f += ta * (raw_target - pid_target_f);
     }
 
-    // KI 分段削减表重算：门控与下面的 KDP 一致（温度窗口变化），
+    // KI 分段倍率表重算：门控与下面的 KDP 一致（温度窗口变化），
     // 取样 = 上次重算算出的目标冷值 pid_align_cold；本轮升/降倍率只作用于 KI 升/降速率（不作用于 KDP）。
     if (batt_window_changed)
         ki_cut_refresh(pid_align_cold);
@@ -3942,7 +3942,7 @@ int main(int argc, char *argv[]) {
     // 由 main_loop 按 CONFIG_RETRY_INTERVAL 周期重试（开机早期私有目录尚未挂上时只能如此，
     // 见 config_loaded 声明处的说明）。--config 指定的路径同样保留，重试时沿用同一条来源。
     set_default_log_path();
-    // KI 分段削减表：先装入代码默认表（配置缺失或三层全关时也按默认生效），随后 load_config 的 KI_CUT_n 会覆盖
+    // KI 分段倍率表：先装入代码默认表（配置缺失或三层全关时也按默认生效），随后 load_config 的 KI_CUT_n 会覆盖
     reset_ki_cut_defaults();
     if (argc >= 3 && strcmp(argv[1], "--config") == 0) {
         strncpy(config_path, argv[2], sizeof(config_path) - 1);
