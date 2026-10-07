@@ -103,8 +103,6 @@
     -->
     <dimen name="ki_cut_del_glyph_size">21sp</dimen>
     <dimen name="ki_cut_chart_height">120dp</dimen>
-    <!-- 图例色块：压成单行紧凑后取 8dp（原 10dp） -->
-    <dimen name="ki_cut_legend_swatch">8dp</dimen>
-    <!-- 图例文字字号：压成单行紧凑后取 10sp（原为 Caption 的 12sp） -->
-    <dimen name="ki_cut_legend_text_size">10sp</dimen>
+    <!-- 图例色块：10dp（本轮曾压到 8dp，按真机反馈改回原值） -->
+    <dimen name="ki_cut_legend_swatch">10dp</dimen>
 </resources>

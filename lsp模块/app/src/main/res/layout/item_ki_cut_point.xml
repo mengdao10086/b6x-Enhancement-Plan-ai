@@ -6,6 +6,12 @@
     @dimen/field_height + 同内边距口径），值仍居中（textAlignment="center"）。
     浮起说明（rowFields[].label）只由 KiCutTableEditor 设给「整张表的第一个点行」；
     其余行不设 hint，OutlinedBox 无 hint 时渲染成普通圆角描边、无缺口。
+
+    「×」按钮（与簇块的删除簇/添加点/添加簇同族）的垂直内边距与 inset 必须显式归零：
+    M3 TextButton 样式自带 android:paddingTop/Bottom=6dp 与 android:insetTop/Bottom=4dp，
+    而 MaterialButtonHelper#setVerticalInsets 会把 inset 叠进 padding（padding = padding + inset），
+    二者相加 = 上下各 10dp；框高压到 30dp 后内容盒只剩 10dp，装不下文字行盒 → 按钮只露上半边。
+    此处 padding=0dp 已覆盖 6dp，再把 inset 归零（内容盒 = 30dp）才能完整显示。
 -->
 <LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:app="http://schemas.android.com/apk/res-auto"
@@ -113,7 +119,10 @@
         android:layout_width="@dimen/ki_cut_del_size"
         android:layout_height="@dimen/ki_cut_del_size"
         android:contentDescription="@string/config_ki_cut_del_point"
+        android:minHeight="0dp"
         android:minWidth="0dp"
+        android:insetTop="0dp"
+        android:insetBottom="0dp"
         android:padding="0dp"
         android:text="@string/config_ki_cut_del_glyph"
         android:textColor="@color/ki_cut_del"

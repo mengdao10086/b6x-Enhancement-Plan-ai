@@ -3,7 +3,8 @@
     KI 分段倍率表整块（挂在键行 WrapRowLayout 的 fullLine 位上）：
       簇块容器（KiCutTableEditor 往里塞 item_ki_cut_cluster.xml）→ 实时倍率曲线 → 图例。
     这里只摆静态骨架；簇/点全部由 KiCutTableEditor 现场增删（「添加簇」已移入每个簇块底部）。
-    图例（两条倍率线的色块 + 红色竖虚线色块）压在曲线下方一行、整行居中，紧凑排布（无上距、小字号小色块）。
+    图例（两条倍率线的色块 + 红色竖虚线色块）压在曲线下方一行、整行居中，去掉 4dp 上距以紧凑排布
+   （字号/色块维持 Caption 12sp 与 10dp，本轮曾压小，按真机反馈改回原值）。
 -->
 <LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
     android:id="@+id/ki_cut_root"
@@ -41,8 +42,7 @@
             android:layout_marginStart="@dimen/space_xs"
             android:layout_marginEnd="@dimen/space_m"
             android:text="@string/config_ki_cut_legend_up"
-            android:textAppearance="@style/TextAppearance.B6XTempCtrl.Caption"
-            android:textSize="@dimen/ki_cut_legend_text_size" />
+            android:textAppearance="@style/TextAppearance.B6XTempCtrl.Caption" />
 
         <View
             android:layout_width="@dimen/ki_cut_legend_swatch"
@@ -55,8 +55,7 @@
             android:layout_marginStart="@dimen/space_xs"
             android:layout_marginEnd="@dimen/space_m"
             android:text="@string/config_ki_cut_legend_down"
-            android:textAppearance="@style/TextAppearance.B6XTempCtrl.Caption"
-            android:textSize="@dimen/ki_cut_legend_text_size" />
+            android:textAppearance="@style/TextAppearance.B6XTempCtrl.Caption" />
 
         <View
             android:layout_width="@dimen/ki_cut_legend_swatch"
@@ -68,7 +67,6 @@
             android:layout_height="wrap_content"
             android:layout_marginStart="@dimen/space_xs"
             android:text="@string/config_ki_cut_legend_target"
-            android:textAppearance="@style/TextAppearance.B6XTempCtrl.Caption"
-            android:textSize="@dimen/ki_cut_legend_text_size" />
+            android:textAppearance="@style/TextAppearance.B6XTempCtrl.Caption" />
     </LinearLayout>
 </LinearLayout>

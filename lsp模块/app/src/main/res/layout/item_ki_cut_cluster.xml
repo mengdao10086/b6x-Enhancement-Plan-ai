@@ -4,7 +4,13 @@
     点行由 KiCutTableEditor 现场 inflate item_ki_cut_point.xml 后 addView 进 ki_cut_cluster_points。
     块底色取 app_surface_container_high（比卡片底色亮一档），簇与簇之间自然分得开。
     去空气：块内不设内边距、底部行不设上距、块与块之间不留下外边距；「添加点」「添加簇」同一行。
+
+    三个 MaterialButton 的垂直内边距与 inset 都显式归零，原因见 item_ki_cut_point.xml 顶部注释：
+    M3 TextButton 样式自带 paddingTop/Bottom=6dp 与 insetTop/Bottom=4dp，而 MaterialButtonHelper 会把
+    inset 叠进 padding（padding += inset），二者相加 = 上下各 10dp；框高 30dp 时内容盒只剩 10dp，
+    装不下 12sp 文字的行盒 → 只露上半边。显式写 0dp 后内容盒 = 30dp，文字完整居中。
 -->
+
 <LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
     android:id="@+id/ki_cut_cluster"
     android:layout_width="match_parent"
@@ -31,7 +37,12 @@
             android:layout_width="wrap_content"
             android:layout_height="@dimen/ki_cut_del_size"
             android:contentDescription="@string/config_ki_cut_del_cluster"
+            android:minHeight="0dp"
             android:minWidth="0dp"
+            android:insetTop="0dp"
+            android:insetBottom="0dp"
+            android:paddingTop="0dp"
+            android:paddingBottom="0dp"
             android:paddingStart="@dimen/space_s"
             android:paddingEnd="@dimen/space_s"
             android:text="@string/config_ki_cut_del_cluster_text"
@@ -57,7 +68,12 @@
             style="@style/Widget.Material3.Button.TextButton"
             android:layout_width="wrap_content"
             android:layout_height="@dimen/ki_cut_del_size"
+            android:minHeight="0dp"
             android:minWidth="0dp"
+            android:insetTop="0dp"
+            android:insetBottom="0dp"
+            android:paddingTop="0dp"
+            android:paddingBottom="0dp"
             android:paddingStart="@dimen/space_s"
             android:paddingEnd="@dimen/space_s"
             android:text="@string/config_ki_cut_add_point"
@@ -68,7 +84,12 @@
             style="@style/Widget.Material3.Button.TextButton"
             android:layout_width="wrap_content"
             android:layout_height="@dimen/ki_cut_del_size"
+            android:minHeight="0dp"
             android:minWidth="0dp"
+            android:insetTop="0dp"
+            android:insetBottom="0dp"
+            android:paddingTop="0dp"
+            android:paddingBottom="0dp"
             android:paddingStart="@dimen/space_s"
             android:paddingEnd="@dimen/space_s"
             android:text="@string/config_ki_cut_add_cluster"
