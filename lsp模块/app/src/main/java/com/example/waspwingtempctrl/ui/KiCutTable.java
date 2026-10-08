@@ -26,6 +26,11 @@ public final class KiCutTable {
     /** 单簇点数上限（与 {@code KI_CUT_MAX_POINTS} 一致）。 */
     private static final int MAX_POINTS = 32;
 
+    /** 曲线图的取值轴：升倍率 / 降倍率 / KDP 倍率（三轴均为 ×100 口径）。 */
+    public static final int AXIS_UP = 0;
+    public static final int AXIS_DN = 1;
+    public static final int AXIS_KDP = 2;
+
     /** 一个控制点：冷值（档位）+ KDP 倍率 + 升倍率 + 降倍率（三个倍率均 ×100 口径）。 */
     public static final class Point {
         public final int cold;
@@ -179,10 +184,10 @@ public final class KiCutTable {
     /**
      * 曲线图上的一条线：{@code x = 0 … xMax} 逐格取所有簇的最小值。
      *
-     * @param up true = 升倍率那条，false = 降倍率那条
+     * @param axis 取值轴，见 {@link #AXIS_UP} / {@link #AXIS_DN} / {@link #AXIS_KDP}
      */
     @NonNull
-    public static float[] minCurve(@NonNull List<Cluster> clusters, int xMax, boolean up) {
+    public static float[] minCurve(@NonNull List<Cluster> clusters, int xMax, int axis) {
         List<Curve> curves = new ArrayList<>();
         for (Cluster cluster : clusters) {
             if (!cluster.isEmpty()) {
@@ -194,7 +199,7 @@ public final class KiCutTable {
             float v = NEUTRAL;
             boolean used = false;
             for (Curve curve : curves) {
-                float cv = up ? curve.up(x) : curve.dn(x);
+                float cv = curve.value(x, axis);
                 if (!used || cv < v) {
                     v = cv;
                 }
@@ -247,33 +252,46 @@ public final class KiCutTable {
 
         /** 取 {@code x} 处的值：折线按需插值（范围外平推到端点）。 */
         float up(int x) {
-            return lerp(pts, n, x, 0);
+            return value(x, AXIS_UP);
         }
 
         float dn(int x) {
-            return lerp(pts, n, x, 1);
+            return value(x, AXIS_DN);
+        }
+
+        /** 按取值轴取 {@code x} 处的值（升 / 降 / KDP）。 */
+        float value(int x, int axis) {
+            return lerp(pts, n, x, axis);
         }
 
         /** 折线取值：{@code x} 在两端外取端点值，其间按相邻控制点线性插值。 */
         private static float lerp(Point[] pts, int n, int x, int axis) {
             if (x <= pts[0].cold) {
-                return value(pts[0], axis);
+                return axisValue(pts[0], axis);
             }
             if (x >= pts[n - 1].cold) {
-                return value(pts[n - 1], axis);
+                return axisValue(pts[n - 1], axis);
             }
             for (int i = 1; i < n; i++) {
                 if (x <= pts[i].cold) {
                     float t = (float) (x - pts[i - 1].cold) / (float) (pts[i].cold - pts[i - 1].cold);
-                    float y0 = value(pts[i - 1], axis);
-                    return y0 + t * (value(pts[i], axis) - y0);
+                    float y0 = axisValue(pts[i - 1], axis);
+                    return y0 + t * (axisValue(pts[i], axis) - y0);
                 }
             }
-            return value(pts[n - 1], axis);
+            return axisValue(pts[n - 1], axis);
         }
 
-        private static float value(Point p, int axis) {
-            return axis != 0 ? p.dn : p.up;
+        private static float axisValue(Point p, int axis) {
+            switch (axis) {
+                case AXIS_KDP:
+                    return p.kdp;
+                case AXIS_DN:
+                    return p.dn;
+                case AXIS_UP:
+                default:
+                    return p.up;
+            }
         }
     }
 }

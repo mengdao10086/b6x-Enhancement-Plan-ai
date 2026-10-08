@@ -55,10 +55,13 @@
     <color name="chart_axis">#888888</color>
 
     <!-- ===== KI 分段倍率表曲线 =====
-         两条倍率线 + 一条"当前冷值"竖虚线。色号取 Material 500/600 标准色板，与上面曲线页同族；
-         红虚线用 Red 600(#E53935) 而非曲线页电池那条 Red 500(#F44336)，避免与本页红点混为一谈。 -->
+         三条倍率线（KDP / 升 / 降）+ 一条"当前冷值"竖虚线。色号取 Material 500/600 标准色板，
+         与上面曲线页同族；红虚线用 Red 600(#E53935) 而非曲线页电池那条 Red 500(#F44336)，
+         避免与本页红点混为一谈。KDP 取 Deep Purple 300(#9575CD)：与升(蓝)/降(绿)同族但更淡、
+         且线更细，作参考线不抢眼。 -->
     <color name="ki_cut_up">#2196F3</color>
     <color name="ki_cut_down">#4CAF50</color>
+    <color name="ki_cut_kdp">#9575CD</color>
     <color name="ki_cut_target">#E53935</color>
     <!-- 删除按钮（点行 × 与簇表头「删除簇」共用）：红色表示破坏性操作；与上面目标冷值线同为 Red 600 -->
     <color name="ki_cut_del">#E53935</color>

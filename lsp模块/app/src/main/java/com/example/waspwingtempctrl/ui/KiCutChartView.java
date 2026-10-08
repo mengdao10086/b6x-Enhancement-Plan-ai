@@ -17,7 +17,8 @@ import com.example.waspwingtempctrl.R;
 import java.util.Locale;
 
 /**
- * KI 分段倍率表的实时倍率曲线：两条线（KI 升倍率 / KI 降倍率，×100 口径）+ 一条红色竖虚线标「当前冷值」。
+ * KI 分段倍率表的实时倍率曲线：三条线（KDP 倍率 / 升倍率 / 降倍率，均 ×100 口径；KDP 更淡更细、画在下层）
+ * + 一条红色竖虚线标「当前冷值」。
  *
  * <p>横轴 0…当前设备制冷上限（见 {@link KiCutData#coldMax}），纵轴<b>自适应定标</b>——与实时信息图同一套
  * {@link ChartAxis}（档位梯 1/2/3 + ≥5 的 5 倍数、3~5 段取离跨度/4 最近），<b>不额外加最小跨度兜底</b>；
@@ -30,6 +31,8 @@ import java.util.Locale;
 final class KiCutChartView extends View {
 
     private static final float LINE_WIDTH_DP = 2f;
+    /** KDP 那条更细（同族但更淡，不抢升/降两条的主角）。 */
+    private static final float KDP_WIDTH_DP = 1.5f;
     private static final float GRID_WIDTH_DP = 1f;
     private static final float REF_WIDTH_DP = 1.5f;
     private static final float TICK_TEXT_DP = 10f;
@@ -42,6 +45,7 @@ final class KiCutChartView extends View {
     private final Paint textPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final Paint upPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final Paint dnPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
+    private final Paint kdpPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final Paint targetPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
 
     private float density;
@@ -49,11 +53,13 @@ final class KiCutChartView extends View {
     private int colorAxis;
     private int colorUp;
     private int colorDn;
+    private int colorKdp;
     private int colorTarget;
     private boolean colorsReady;
 
     private float[] up = new float[0];
     private float[] dn = new float[0];
+    private float[] kdp = new float[0];
     private int xMax = 190;
     private int target = -1;
     /** 横轴刻度（表里各点冷值 ∪ {0, xMax}，去重升序）；由 {@link #setCurves} 注入、onDraw 消费。 */
@@ -91,18 +97,21 @@ final class KiCutChartView extends View {
             p.setStyle(Paint.Style.STROKE);
             p.setStrokeWidth(LINE_WIDTH_DP * density);
         }
+        kdpPaint.setStyle(Paint.Style.STROKE);
+        kdpPaint.setStrokeWidth(KDP_WIDTH_DP * density);
         targetPaint.setPathEffect(new DashPathEffect(
                 new float[]{TARGET_DASH_ON_DP * density, TARGET_DASH_OFF_DP * density}, 0f));
     }
 
     /**
-     * 上屏一批曲线数据（主线程）：{@code up}/{@code dn} 长度 = {@code xMax + 1}，逐格取值；
+     * 上屏一批曲线数据（主线程）：{@code up}/{@code dn}/{@code kdp} 长度均 = {@code xMax + 1}，逐格取值；
      * {@code xTicks} 是横轴刻度（表里各点的冷值 ∪ {0, xMax}，去重升序，<b>不抽稀</b>、允许重叠）。
      */
-    void setCurves(@NonNull float[] up, @NonNull float[] dn, int xMax, int target,
-                   @NonNull int[] xTicks) {
+    void setCurves(@NonNull float[] up, @NonNull float[] dn, @NonNull float[] kdp, int xMax,
+                   int target, @NonNull int[] xTicks) {
         this.up = up;
         this.dn = dn;
+        this.kdp = kdp;
         this.xMax = Math.max(1, xMax);
         this.target = target;
         this.ticks = xTicks;
@@ -127,18 +136,19 @@ final class KiCutChartView extends View {
         colorAxis = getResources().getColor(R.color.chart_axis, getContext().getTheme());
         colorUp = getResources().getColor(R.color.ki_cut_up, getContext().getTheme());
         colorDn = getResources().getColor(R.color.ki_cut_down, getContext().getTheme());
+        colorKdp = getResources().getColor(R.color.ki_cut_kdp, getContext().getTheme());
         colorTarget = getResources().getColor(R.color.ki_cut_target, getContext().getTheme());
         colorsReady = true;
     }
 
     /**
-     * 纵轴定标：取值范围 = 两条曲线的全部取值<b>并入中性值（100 = 不削）</b>，再照 {@link ChartAxis#fit}
+     * 纵轴定标：取值范围 = 三条曲线的全部取值<b>并入中性值（100 = 不削）</b>，再照 {@link ChartAxis#fit}
      * 求整档轴。并入中性值只为「基准线恒可见」，不改定标算法本身（无最小跨度兜底）。
      */
     private void fitAxis() {
         float mn = Float.POSITIVE_INFINITY;
         float mx = Float.NEGATIVE_INFINITY;
-        for (float[] arr : new float[][]{up, dn}) {
+        for (float[] arr : new float[][]{up, dn, kdp}) {
             for (float v : arr) {
                 if (v < mn) {
                     mn = v;
@@ -217,9 +227,11 @@ final class KiCutChartView extends View {
             canvas.drawText(text, Math.min(Math.max(px, half), w - half), h - pad / 2f, textPaint);
         }
 
-        // 两条曲线
+        // 三条曲线：KDP 在下层（更淡更细，不抢眼），升/降在上层
+        kdpPaint.setColor(colorKdp);
         upPaint.setColor(colorUp);
         dnPaint.setColor(colorDn);
+        canvas.drawPath(path(kdp, plotL, plotR, plotT, plotB), kdpPaint);
         canvas.drawPath(path(up, plotL, plotR, plotT, plotB), upPaint);
         canvas.drawPath(path(dn, plotL, plotR, plotT, plotB), dnPaint);
 

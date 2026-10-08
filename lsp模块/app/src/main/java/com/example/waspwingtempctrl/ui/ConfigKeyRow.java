@@ -653,15 +653,20 @@ final class ConfigKeyRow {
         }
 
         /**
-         * 把路径摆进框里：<b>放得下就不滚</b>（框内由 gravity/textAlignment 摆，与数值框一致），
-         * 放不下才滚到最右端、显示右半段（文件名）。布局还没算出来就等下一次回填；聚焦时不动。
+         * 把路径值摆进框里：把文本行的右沿对到<b>内容右沿</b>（框宽去掉左右内边距），放不下时
+         * 自动只露右半段（文件名）。布局还没算出来就等下一次回填；聚焦时不动。
          *
-         * <p><b>为什么要分流</b>：开了 scrollHorizontally 的输入框传给 Layout 的宽是 1MB，短值在
-         * "1MB 宽的 Layout"里排版后，{@code getLineRight(0)} 落在文本中部附近，拿它减视图宽去
-         * {@code scrollTo} 会把窗口右沿摆到文本中部——短值（如 {@code c0}）就只露首个字符的左半边、
-         * 整体贴右。这个"溢出→右端贴框"的原式对<b>长路径</b>是对的（文本远宽于框），故溢出分支保留原式
-         * 不变；只用文本实际宽 {@code getLineWidth(0)}（不受排版宽/对齐影响）判"放得下"来兜住短值。
-         * 见 app 逻辑说明.md §6.1。
+         * <p><b>为什么右沿要对"内容右沿"而不是"框右沿"</b>：{@code scrollTo} 的距离由
+         * {@code getLineRight(0)}（文本行右沿）减去目标右沿得来；减<b>框宽</b>会把整段文本多推
+         * {@code paddingStart + paddingEnd}（= 16dp）出去，值尾正好挂在框右边线之外。短值（如
+         * {@code c0} 约 16dp 宽）被推出大半、只剩首个字符的左半边（"偏右 / 半个字"由此而来）；
+         * 长路径则表现为最后几个字符溢出到框外。改减<b>内容宽</b>即归位。见 app 逻辑说明.md §6.1。
+         *
+         * <p><b>为什么不做"放得下就不滚"（{@code target=0}）</b>：开了 scrollHorizontally 的输入框
+         * 交给 Layout 的排版宽是 ~1MB，文本按 {@code textAlignment} 在这片虚拟宽里对齐，故
+         * {@code scrollX=0} 落在虚拟宽的最左端、框里一个字都画不出；要露出文本，{@code scrollX} 必须
+         * 算到"行右沿 − 内容宽"这个量级。故短值、长值同一算式：短值右沿对齐后整段值完整可见，落点也
+         * 与数值框（框架自己把光标带进可视区）一致。
          */
         private void applyPathScroll() {
             TextInputEditText input = field.input;
@@ -674,13 +679,10 @@ final class ConfigKeyRow {
                 return;
             }
             int content = viewWidth - input.getPaddingStart() - input.getPaddingEnd();
-            int textWidth = (int) Math.ceil(layout.getLineWidth(0));
-            int target;
-            if (content > 0 && textWidth <= content) {
-                target = 0;                     // 放得下：不滚（getLineWidth 才是文本实际宽）
-            } else {
-                target = Math.max(0, (int) Math.ceil(layout.getLineRight(0)) - viewWidth);
+            if (content <= 0) {
+                return;
             }
+            int target = Math.max(0, (int) Math.ceil(layout.getLineRight(0)) - content);
             if (input.getScrollX() != target) {
                 input.scrollTo(target, 0);
             }
@@ -825,9 +827,10 @@ final class ConfigKeyRow {
             Context context = block.getContext();
             int coldMax = KiCutData.coldMax(context);
             List<KiCutTable.Cluster> clusters = editor.getClusters();
-            chart.setCurves(KiCutTable.minCurve(clusters, coldMax, true),
-                    KiCutTable.minCurve(clusters, coldMax, false), coldMax, targetCold,
-                    xTicksOf(clusters, coldMax));
+            chart.setCurves(KiCutTable.minCurve(clusters, coldMax, KiCutTable.AXIS_UP),
+                    KiCutTable.minCurve(clusters, coldMax, KiCutTable.AXIS_DN),
+                    KiCutTable.minCurve(clusters, coldMax, KiCutTable.AXIS_KDP),
+                    coldMax, targetCold, xTicksOf(clusters, coldMax));
         }
 
         /**

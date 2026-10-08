@@ -72,9 +72,9 @@
         下面两个 itemPadding 作用在菜单视图上，不是本控件自身的 paddingBottom；后者由 ui/EdgeToEdge
         独占改写（= 系统条高），故两者互不叠加。
         本处声明的 53dp 是 EdgeToEdge 的"基准内容高"：运行时 height 会变成 53dp + 系统条高，
-        背景铺到屏幕底、页签留在系统条之上。键盘弹起不改变本栏自身的 height/paddingBottom
-        （inset 仍取 systemBars），但本栏是 setup_root 的子 View，会随页面根新增的底部避让
-        （min(键盘高, 屏高/3)）一起被抬高。
+        背景铺到屏幕底、页签留在系统条之上。键盘弹起时本栏的 height/paddingBottom/位置都不变
+        （inset 仍取 systemBars）：底部避让只落在内容区（page_pager）、不落在页面根，故本栏
+        不被顶起（被键盘盖住即可）。
     -->
     <com.google.android.material.bottomnavigation.BottomNavigationView
         android:id="@+id/bottom_nav"

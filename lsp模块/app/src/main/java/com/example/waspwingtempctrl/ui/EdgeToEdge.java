@@ -18,6 +18,8 @@ import androidx.core.view.ViewCompat;
 import androidx.core.view.WindowCompat;
 import androidx.core.view.WindowInsetsCompat;
 
+import com.example.waspwingtempctrl.R;
+
 import java.lang.reflect.Field;
 
 /**
@@ -27,12 +29,12 @@ import java.lang.reflect.Field;
  * {@code app/逻辑说明.md} §9.2。
  *
  * <p>键盘：窗口 softInputMode 全局设成 {@code ADJUST_NOTHING}，<b>窗口本身不缩、不平移</b>（系统栏
- * 让位仍只按 systemBars 算）；在此基础上另加三件事，全部复用 root 上那唯一一个 inset 监听（另装
- * 监听会顶掉让位监听）：
+ * 让位仍只按 systemBars 算）。键盘弹起时让位只落在<b>内容区</b>、<b>底栏留在屏幕底不动</b>；另加三件事，
+ * 全部复用 root 上那唯一一个 inset 监听（另装监听会顶掉让位监听）：
  * <ul>
  *   <li>被键盘挡住的输入框由 {@link ImeReveal} 滚进可视区；</li>
- *   <li>键盘在时页面根多吃一段<b>封顶的底部避让</b>（{@code min(键盘高, 屏高/3)}），页面根的子 View
- *       （底栏）随之被抬高；</li>
+ *   <li>内容区（配置页 {@code page_pager} / 设置页 {@code settings_container}，见 {@link #CONTENT_HOST_IDS}）
+ *       多吃一段<b>封顶的底部避让</b>（{@code min(键盘高, 屏高/3)}），底栏<b>不随之移动、几何逐值不变</b>；</li>
  *   <li>键盘收起（由在变不在）时由 {@link KeyboardState} 主动清掉当前输入框焦点（防抖）。</li>
  * </ul>
  * 另在焦点变化/键盘弹起时给输入框关掉框架文本放大镜（{@link #disableMagnifier}，反射，失败静默）。
@@ -43,22 +45,25 @@ public final class EdgeToEdge {
     }
 
     /**
-     * @param root      页面根（顶/左/右内边距归它；键盘在时底部避让也归它）
+     * @param root      页面根（顶/左/右内边距归它）
      * @param bottomBar 要铺到屏幕底的那个栏（底栏），可为 null（没有这种栏时底部内边距归 root）。
      *                  它必须是定高（wrap_content/match_parent 时本类不动它）；XML 里声明的那个高度
      *                  被当作基准内容高，只在首次调用时量一次，之后不再反推（见 {@link BottomBarLayout}）。
-     *                  键盘在时根底内边距改吃避让高度，底栏作为根的子 View 会被一起抬到避让带之上。
+     *                  键盘弹起时它<b>不动</b>——避让落在内容区（{@link #findContentHost}），不在本栏。
      */
     public static void apply(@NonNull Activity activity, @NonNull View root,
                              @Nullable View bottomBar) {
         WindowCompat.setDecorFitsSystemWindows(activity.getWindow(), false);
         // 键盘只覆盖、窗口不缩不平移。decorFits=false 下 adjust 值不影响 insets 派发（见 app/逻辑说明.md
-        // §9.2），这里锁死"不缩窗、不平移"这条旧通路；页面根另吃一段封顶底部避让，见下方 root 监听。
+        // §9.2），这里锁死"不缩窗、不平移"这条旧通路；底部避让落在内容区，见下方 root 监听。
         activity.getWindow().setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_NOTHING
                 | WindowManager.LayoutParams.SOFT_INPUT_STATE_UNCHANGED);
         final BottomBarLayout bottomBarLayout = new BottomBarLayout();
+        final ContentHostAvoid contentHostAvoid = new ContentHostAvoid();
         final ImeReveal imeReveal = new ImeReveal();
         final KeyboardState keyboardState = new KeyboardState(root);
+        // 避让落点 = 除底栏以外的那块内容区；取不到即 null，整条避让安全退化（不加、不崩）。
+        final View contentHost = findContentHost(root, bottomBar);
         if (bottomBar != null) {
             // 顶掉 material 自带的那个会改写 paddingBottom 的监听（见类注释）
             ViewCompat.setOnApplyWindowInsetsListener(bottomBar, (view, windowInsets) -> windowInsets);
@@ -68,11 +73,9 @@ public final class EdgeToEdge {
             Insets ime = windowInsets.getInsets(WindowInsetsCompat.Type.ime());
             // 键盘高（px，相对窗口底）；0 表示键盘不在。与 ImeReveal 同口径，单点计算、多处复用。
             int imeBottom = ime.bottom > bars.bottom ? ime.bottom : 0;
-            // 键盘在时根底内边距改吃避让高度；其余情况沿用原口径（无底栏吃 systemBars，有底栏归底栏）。
-            int avoid = bottomAvoidPx(view, imeBottom);
-            int rootBottom = avoid > 0
-                    ? (bottomBar == null ? Math.max(avoid, bars.bottom) : avoid)
-                    : (bottomBar == null ? bars.bottom : 0);
+            // 根：只吃顶/左/右 + 底（无底栏吃 systemBars，有底栏归底栏）。避让**不落在这里**，
+            // 落在根会连底栏一起顶起——实测被用户否掉，改为落到内容区（见下）。
+            int rootBottom = bottomBar == null ? bars.bottom : 0;
             if (view.getPaddingLeft() != bars.left || view.getPaddingTop() != bars.top
                     || view.getPaddingRight() != bars.right || view.getPaddingBottom() != rootBottom) {
                 view.setPadding(bars.left, bars.top, bars.right, rootBottom);
@@ -80,6 +83,8 @@ public final class EdgeToEdge {
             if (bottomBar != null) {
                 bottomBarLayout.apply(bottomBar, bars.bottom);
             }
+            // 键盘在时内容区底部让出 min(键盘高, 屏高/3)：内容缩到避让带之上，底栏留在屏幕底不动。
+            contentHostAvoid.apply(contentHost, bottomAvoidPx(view, imeBottom));
             // 复用这唯一一个 inset 监听驱动"聚焦滚进可视区"（另装监听会顶掉本让位监听）
             imeReveal.onInsets(view, imeBottom);
             // 键盘由不在变在：给当前输入框关掉框架放大镜（反射，失败静默）
@@ -99,8 +104,30 @@ public final class EdgeToEdge {
     }
 
     /**
-     * 键盘在时页面根要补的底部避让高度（px）：{@code min(键盘高, 屏高/3)}——键盘再高也只顶掉页面
-     * 根下面 1/3，避免整页被顶得太狠。键盘不在返回 0。屏高优先取根的实测高（与这次布局同口径），
+     * 内容宿主的候选 id（配置页 ViewPager2 / 设置页内容容器），按序取第一个命中的。
+     * 硬编码两个外壳布局的 id 是刻意的取舍：避让必须落在"除底栏以外的那块内容区"，而外壳以外的
+     * 通用判据（"根的第一个非底栏子 View"）会连标题栏一起算进来，更脆。
+     */
+    private static final int[] CONTENT_HOST_IDS = {R.id.page_pager, R.id.settings_container};
+
+    /**
+     * 取"除底栏以外的那块内容区"作为避让落点：按 {@link #CONTENT_HOST_IDS} 在 root 内找。
+     * 取不到（布局改了名、或换了外壳）返回 {@code null} ⇒ 调用方安全退化，不加避让。
+     */
+    @Nullable
+    private static View findContentHost(@NonNull View root, @Nullable View bottomBar) {
+        for (int id : CONTENT_HOST_IDS) {
+            View candidate = root.findViewById(id);
+            if (candidate != null && candidate != bottomBar) {
+                return candidate;
+            }
+        }
+        return null;
+    }
+
+    /**
+     * 键盘在时内容区要补的底部避让高度（px）：{@code min(键盘高, 屏高/3)}——键盘再高也只顶掉内容区
+     * 下面 1/3，避免内容被顶得太狠。键盘不在返回 0。屏高优先取根的实测高（与这次布局同口径），
      * 未量到退回显示指标。
      */
     private static int bottomAvoidPx(@NonNull View root, int imeBottom) {
@@ -151,6 +178,31 @@ public final class EdgeToEdge {
             }
         } catch (Throwable ignored) {
             // 反射失败：静默放弃，保留系统默认放大镜
+        }
+    }
+
+    /**
+     * 内容宿主的底部避让：{@code host.paddingBottom = 基准底内边距 + 避让}。基准仅在首次调用时量一次
+     * （同 {@link BottomBarLayout} 的口径），免得把上次写进去的避让当成基准而逐次累加。宿主为 null 时
+     * 什么都不做（安全退化）。
+     */
+    private static final class ContentHostAvoid {
+
+        /** 基准底内边距；负值表示还没量过。 */
+        private int basePaddingBottom = -1;
+
+        void apply(@Nullable View host, int avoid) {
+            if (host == null) {
+                return;
+            }
+            if (basePaddingBottom < 0) {
+                basePaddingBottom = host.getPaddingBottom();
+            }
+            int bottom = basePaddingBottom + avoid;
+            if (host.getPaddingBottom() != bottom) {
+                host.setPadding(host.getPaddingLeft(), host.getPaddingTop(),
+                        host.getPaddingRight(), bottom);
+            }
         }
     }
 

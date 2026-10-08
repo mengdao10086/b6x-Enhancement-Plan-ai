@@ -49,6 +49,7 @@
     <string name="config_ki_cut_del_point">删除本点</string>
     <string name="config_ki_cut_del_glyph">×</string>
     <string name="config_ki_cut_cluster_title">簇 %1$d</string>
+    <string name="config_ki_cut_legend_kdp">KDP倍率</string>
     <string name="config_ki_cut_legend_up">升倍率</string>
     <string name="config_ki_cut_legend_down">降倍率</string>
     <string name="config_ki_cut_legend_target">当前冷值</string>
