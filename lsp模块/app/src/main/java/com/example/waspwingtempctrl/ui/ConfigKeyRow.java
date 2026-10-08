@@ -943,6 +943,7 @@ final class ConfigKeyRow {
             // 压掉半个 hint 字高"）。只 setHint(null) 不保证触发 margin 重算，故必须显式关掉。
             layout.setHint(null);
             layout.setHintEnabled(false);
+            applyNoHintBoxGeometry(input, layout);
         } else {
             layout.setHint(hint);
         }
@@ -962,6 +963,29 @@ final class ConfigKeyRow {
             return true;
         });
         return new Field(fieldView, input, layout, null);
+    }
+
+    /**
+     * 无浮起说明的框（int / path）的竖直几何：<b>正文上下等距</b> + 框顶与行上界留
+     * {@code @dimen/config_field_nohint_top_gap}。由 {@link #addField} 只在空 hint（= 无说明的
+     * int/path）时调用——<b>有 hint 的字段（multi / enum / 表点行）不走这里</b>，仍沿用
+     * {@code item_config_field.xml} 里那套上下不对称内边距与 material 给 inputFrame 的 ≈7dp 顶外边距，
+     * 几何逐值不变。
+     *
+     * <p>上下内边距取 {@code config_field_pad_top} 与 {@code config_field_pad_bottom} 的中点
+     * {@code @dimen/config_field_pad_nohint}：两者之和仍是 7dp，内容区可用高仍是 36 − 7 = 29dp
+     * （与有 hint 的行同高、行高不变），只把内容区从"相对框几何中心下沉 1.5dp"摆回几何中心，
+     * 正文到上下边框因此等距。算式见 {@code item_config_field.xml} 顶部注释。
+     */
+    private void applyNoHintBoxGeometry(@NonNull TextInputEditText input,
+                                        @NonNull TextInputLayout layout) {
+        int pad = root.getResources().getDimensionPixelSize(R.dimen.config_field_pad_nohint);
+        input.setPaddingRelative(input.getPaddingStart(), pad, input.getPaddingEnd(), pad);
+        ViewGroup.LayoutParams lp = layout.getLayoutParams();
+        if (lp instanceof ViewGroup.MarginLayoutParams) {
+            ((ViewGroup.MarginLayoutParams) lp).topMargin =
+                    root.getResources().getDimensionPixelSize(R.dimen.config_field_nohint_top_gap);
+        }
     }
 
     /** 把键内控件挂到行骨架上：参数名之后、行级文本之前，并标 trailing（与参数名同行的尾段）。 */

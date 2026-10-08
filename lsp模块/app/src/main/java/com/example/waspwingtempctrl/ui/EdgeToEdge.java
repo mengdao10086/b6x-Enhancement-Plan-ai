@@ -34,7 +34,8 @@ import java.lang.reflect.Field;
  * <ul>
  *   <li>被键盘挡住的输入框由 {@link ImeReveal} 滚进可视区；</li>
  *   <li>内容区（配置页 {@code page_pager} / 设置页 {@code settings_container}，见 {@link #CONTENT_HOST_IDS}）
- *       多吃一段<b>封顶的底部避让</b>（{@code min(键盘高, 屏高/3)}），底栏<b>不随之移动、几何逐值不变</b>；</li>
+ *       让出一段<b>封顶的底部避让</b>，使内容底边正好贴到键盘顶（避让量已减去宿主底边到屏底的距离，
+ *       见 {@link #bottomAvoidPx}），底栏<b>不随之移动、几何逐值不变</b>；</li>
  *   <li>键盘收起（由在变不在）时由 {@link KeyboardState} 主动清掉当前输入框焦点（防抖）。</li>
  * </ul>
  * 另在焦点变化/键盘弹起时给输入框关掉框架文本放大镜（{@link #disableMagnifier}，反射，失败静默）。
@@ -83,8 +84,9 @@ public final class EdgeToEdge {
             if (bottomBar != null) {
                 bottomBarLayout.apply(bottomBar, bars.bottom);
             }
-            // 键盘在时内容区底部让出 min(键盘高, 屏高/3)：内容缩到避让带之上，底栏留在屏幕底不动。
-            contentHostAvoid.apply(contentHost, bottomAvoidPx(view, imeBottom));
+            // 键盘在时内容区底部让出一段：内容底边正好贴到键盘顶（避让量已减去"宿主底边到屏底的距离"，
+            // 否则会比键盘顶多让出一段≈底栏高，看着就是"底栏原位置成背景板、内容飘在键盘上方"）。底栏不动。
+            contentHostAvoid.apply(contentHost, bottomAvoidPx(view, contentHost, imeBottom));
             // 复用这唯一一个 inset 监听驱动"聚焦滚进可视区"（另装监听会顶掉本让位监听）
             imeReveal.onInsets(view, imeBottom);
             // 键盘由不在变在：给当前输入框关掉框架放大镜（反射，失败静默）
@@ -126,19 +128,40 @@ public final class EdgeToEdge {
     }
 
     /**
-     * 键盘在时内容区要补的底部避让高度（px）：{@code min(键盘高, 屏高/3)}——键盘再高也只顶掉内容区
-     * 下面 1/3，避免内容被顶得太狠。键盘不在返回 0。屏高优先取根的实测高（与这次布局同口径），
-     * 未量到退回显示指标。
+     * 键盘在时内容区要补的底部避让高度（px）：
+     * {@code clamp(键盘高 − 宿主底边到屏底的距离, 0, 屏高/3)}。
+     *
+     * <p><b>为什么要减去"宿主底边到屏底的距离"</b>：宿主（配置页 ViewPager2 / 设置页内容容器）本来就
+     * 在底栏 / 系统条<b>之上</b>，而键盘高是从<b>整屏底</b>量的。若直接让 {@code min(键盘高, 屏高/3)}，
+     * 内容底边会比键盘顶多让出一段（约等于底栏高）——表现为"底栏原位置成了一块背景板、内容飘在键盘
+     * 上方"。减去这段后，内容底边正好贴到键盘顶。
+     *
+     * <p><b>封顶 1/3 保留</b>：键盘再高也只让内容区缩 1/3（超出部分由键盘盖住，与原设计一致）。
+     * 键盘不在、宿主取不到、或布局未就绪时返回 0（不加避让，安全退化）。
      */
-    private static int bottomAvoidPx(@NonNull View root, int imeBottom) {
-        if (imeBottom <= 0) {
+    private static int bottomAvoidPx(@NonNull View root, @Nullable View host, int imeBottom) {
+        if (imeBottom <= 0 || host == null || root.getHeight() <= 0 || host.getHeight() <= 0) {
             return 0;
         }
-        int screenHeight = root.getHeight();
-        if (screenHeight <= 0) {
-            screenHeight = root.getResources().getDisplayMetrics().heightPixels;
+        int compensated = imeBottom - hostBottomInsetPx(root, host);
+        if (compensated <= 0) {
+            return 0;
         }
-        return Math.min(imeBottom, screenHeight / 3);
+        return Math.min(compensated, root.getHeight() / 3);
+    }
+
+    /**
+     * 内容宿主底边到屏幕底（= 根底边）的距离（px）：{@code 根底边在窗口中的 y − 宿主底边在窗口中的 y}。
+     *
+     * <p>该值只由宿主下方的兄弟（底栏 / 分隔线 / 根的内边距）决定，<b>不随本类写进宿主的 padding 变化</b>
+     * （padding 是宿主内部的事），故可在每次 inset 派发时安全重算。
+     */
+    private static int hostBottomInsetPx(@NonNull View root, @NonNull View host) {
+        int[] rootLoc = new int[2];
+        int[] hostLoc = new int[2];
+        root.getLocationInWindow(rootLoc);
+        host.getLocationInWindow(hostLoc);
+        return (rootLoc[1] + root.getHeight()) - (hostLoc[1] + host.getHeight());
     }
 
     /** 放大镜 animator 在 {@code Editor} 上的候选字段名（新名 → 旧名）。 */

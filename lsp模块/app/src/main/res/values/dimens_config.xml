@@ -62,6 +62,24 @@
     <dimen name="config_field_pad_bottom">2dp</dimen>
 
     <!--
+        无浮起说明的框（int / path）的上下内边距：正文上下等距（有说明那套不对称的见 @dimen/config_field_pad_top）。
+        取 @dimen/config_field_pad_top 与 @dimen/config_field_pad_bottom 的中点 (5 + 2) / 2 = 3.5dp：
+        两者之和仍是 7dp，故无说明行（框 36dp，见 item_config_field.xml 顶部注释）的内容区可用高仍是
+        36 − 7 = 29dp、框高不变；只是把内容区从"相对框几何中心下沉 1.5dp"摆回几何中心，正文到上下边框因此等距。
+        （框顶另由 @dimen/config_field_nohint_top_gap 下移 1dp，字段外框高随之 +1dp。）
+        由 ConfigKeyRow#applyNoHintBoxGeometry 只对「本行无 hint」的字段施加。
+    -->
+    <dimen name="config_field_pad_nohint">3.5dp</dimen>
+
+    <!--
+        无浮起说明的框顶与行上界的距离。删 hint 时 setHintEnabled(false) 会把 material 给 inputFrame 加的
+        ≈7dp 顶外边距归零（见 item_config_field.xml 顶部注释），框顶于是贴着行顶；本值给回 1dp 呼吸位。
+        只对「本行无 hint」的字段施加（ConfigKeyRow#applyNoHintBoxGeometry）；有 hint 的行仍由 material
+        那 ≈7dp 决定，逐值不变。取值 1dp = 项目最小步（同 @dimen/config_hint_slack）。
+    -->
+    <dimen name="config_field_nohint_top_gap">1dp</dimen>
+
+    <!--
         参数（键行）之间的纵向间隔 = 分组卡默认行距 space_m(12dp) 的一半。
         卡内上下内边距仍是 space_s，只压键与键之间这一段。
         键行内部（同一个键的几行之间）的行距另由键行自己取 @dimen/space_xs(4dp)，须小于本值。
