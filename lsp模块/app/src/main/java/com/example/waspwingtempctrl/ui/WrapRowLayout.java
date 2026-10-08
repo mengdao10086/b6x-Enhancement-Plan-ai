@@ -69,6 +69,24 @@ public final class WrapRowLayout extends ViewGroup {
          */
         int verticalCenterAt = VERTICAL_CENTER_UNSET;
 
+        /** {@link #rowGapCap} 的"未设"值：按容器行距。 */
+        static final int ROW_GAP_UNSET = -1;
+
+        /**
+         * 本行（作为父容器的子视图）希望被分配的<b>上下行距上限</b>：只收不放——父容器按
+         * {@code min(容器行距, 本行上限, 相邻行上限)} 算这两行之间的间距。未设
+         * （{@link #ROW_GAP_UNSET}）时行为与从前一致。只由 {@link #setRowGapCap} 施加，无 XML 属性。
+         */
+        int rowGapCap = ROW_GAP_UNSET;
+
+        /**
+         * 设本行的上下行距上限（像素，{@code -1} = 未设）。须在父容器测量前调用
+         * （键行在挂进分组卡 body 之前由 {@code ConfigKeyRow} 施加）。
+         */
+        public void setRowGapCap(int px) {
+            rowGapCap = px;
+        }
+
         /** 由子标签的 {@code app:} 属性读出标记（{@code inflate(xml, parent, false)} 走这条路）。 */
         public LayoutParams(Context context, AttributeSet attrs) {
             super(context, attrs);
@@ -91,6 +109,7 @@ public final class WrapRowLayout extends ViewGroup {
             fullLine = source.fullLine;
             breakBefore = source.breakBefore;
             verticalCenterAt = source.verticalCenterAt;
+            rowGapCap = source.rowGapCap;
         }
 
         public LayoutParams(@NonNull ViewGroup.LayoutParams source) {
@@ -255,7 +274,7 @@ public final class WrapRowLayout extends ViewGroup {
             }
             if (lp.fullLine) {
                 flushRow(pass);
-                placeFullLine(pass, child, lp);
+                placeFullLine(pass, child, lp, index);
                 index++;
             } else if (lp.trailing) {
                 index = placeTailRun(pass, index, lp);
@@ -514,15 +533,47 @@ public final class WrapRowLayout extends ViewGroup {
     /**
      * fullLine 子视图：独占一行且铺满可用宽。它自己就是整行，纵向落点仍复用 {@link #placeChild}
      * （未标记者等价于"行顶 + 上外边距"，标记过的照 {@code verticalCenterAt} 落点）。
+     *
+     * <p>本行之后的间距取 {@link #rowGapForRow}：键行（fullLine）可经
+     * {@link LayoutParams#setRowGapCap} 把上下行距收窄（如开关行）。
      */
-    private void placeFullLine(Pass pass, View child, LayoutParams lp) {
+    private void placeFullLine(Pass pass, View child, LayoutParams lp, int index) {
         int height = occupiedHeight(child, lp);
         if (pass.place) {
             placeChild(child, lp, getPaddingLeft(), pass.y, height);
         }
         pass.bottom = pass.y + height;
         pass.contentWidth = Math.max(pass.contentWidth, outerWidth(child, lp));
-        pass.y += height + rowGap;
+        pass.y += height + rowGapForRow(lp, index);
+    }
+
+    /**
+     * 本行与其下一行之间的行距 = {@code min(容器行距, 本行上限, 下一行上限)}，只收不放。
+     * 取两侧的 min 才能让"只给开关行设上限"同时压掉它<b>上</b>（由上一行的这里算）与<b>下</b>两处间距。
+     */
+    private int rowGapForRow(LayoutParams lp, int index) {
+        int gap = rowGap;
+        if (lp.rowGapCap >= 0) {
+            gap = Math.min(gap, lp.rowGapCap);
+        }
+        int next = rowGapCapOfNextRow(index + 1);
+        if (next >= 0) {
+            gap = Math.min(gap, next);
+        }
+        return gap;
+    }
+
+    /** 从 {@code index} 起跳过 GONE，取首个可见子视图的行距上限；没有则 {@link LayoutParams#ROW_GAP_UNSET}。 */
+    private int rowGapCapOfNextRow(int index) {
+        final int count = getChildCount();
+        for (int i = index; i < count; i++) {
+            View child = getChildAt(i);
+            if (child.getVisibility() == GONE) {
+                continue;
+            }
+            return ((LayoutParams) child.getLayoutParams()).rowGapCap;
+        }
+        return LayoutParams.ROW_GAP_UNSET;
     }
 
     /**

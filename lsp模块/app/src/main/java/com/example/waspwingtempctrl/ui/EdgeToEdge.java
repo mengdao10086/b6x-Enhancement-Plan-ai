@@ -1,11 +1,15 @@
 package com.example.waspwingtempctrl.ui;
 
 import android.app.Activity;
+import android.os.Handler;
+import android.os.Looper;
 import android.view.View;
 import android.view.ViewGroup;
 import android.view.ViewParent;
 import android.view.WindowManager;
+import android.widget.EditText;
 import android.widget.ScrollView;
+import android.widget.TextView;
 
 import androidx.annotation.NonNull;
 import androidx.annotation.Nullable;
@@ -14,14 +18,24 @@ import androidx.core.view.ViewCompat;
 import androidx.core.view.WindowCompat;
 import androidx.core.view.WindowInsetsCompat;
 
+import java.lang.reflect.Field;
+
 /**
  * 下侧沉浸式：让窗口铺满整屏（含系统手势条/导航栏那一条带子），系统栏的让位由本类算。
  *
  * <p>为什么需要它、谁吃哪段内边距、为什么要顶掉底栏自带的 inset 监听、与键盘的关系——见
  * {@code app/逻辑说明.md} §9.2。
  *
- * <p>键盘一律"只覆盖、不顶起"：窗口 softInputMode 全局设成 {@code ADJUST_NOTHING}，让位算法
- * 不再有 IME 分支；被键盘挡住的输入框由本类内建的 {@link ImeReveal} 滚进可视区。
+ * <p>键盘：窗口 softInputMode 全局设成 {@code ADJUST_NOTHING}，<b>窗口本身不缩、不平移</b>（系统栏
+ * 让位仍只按 systemBars 算）；在此基础上另加三件事，全部复用 root 上那唯一一个 inset 监听（另装
+ * 监听会顶掉让位监听）：
+ * <ul>
+ *   <li>被键盘挡住的输入框由 {@link ImeReveal} 滚进可视区；</li>
+ *   <li>键盘在时页面根多吃一段<b>封顶的底部避让</b>（{@code min(键盘高, 屏高/3)}），页面根的子 View
+ *       （底栏）随之被抬高；</li>
+ *   <li>键盘收起（由在变不在）时由 {@link KeyboardState} 主动清掉当前输入框焦点（防抖）。</li>
+ * </ul>
+ * 另在焦点变化/键盘弹起时给输入框关掉框架文本放大镜（{@link #disableMagnifier}，反射，失败静默）。
  */
 public final class EdgeToEdge {
 
@@ -29,44 +43,115 @@ public final class EdgeToEdge {
     }
 
     /**
-     * @param root      页面根（顶/左/右内边距归它）
+     * @param root      页面根（顶/左/右内边距归它；键盘在时底部避让也归它）
      * @param bottomBar 要铺到屏幕底的那个栏（底栏），可为 null（没有这种栏时底部内边距归 root）。
      *                  它必须是定高（wrap_content/match_parent 时本类不动它）；XML 里声明的那个高度
      *                  被当作基准内容高，只在首次调用时量一次，之后不再反推（见 {@link BottomBarLayout}）。
+     *                  键盘在时根底内边距改吃避让高度，底栏作为根的子 View 会被一起抬到避让带之上。
      */
     public static void apply(@NonNull Activity activity, @NonNull View root,
                              @Nullable View bottomBar) {
         WindowCompat.setDecorFitsSystemWindows(activity.getWindow(), false);
-        // 键盘只覆盖、不顶起：整页不重排、底栏不上移。decorFits=false 下 adjust 值不影响 insets
-        // 派发（见 app/逻辑说明.md §9.2），这里锁死"不缩窗、不平移"这条旧通路。
+        // 键盘只覆盖、窗口不缩不平移。decorFits=false 下 adjust 值不影响 insets 派发（见 app/逻辑说明.md
+        // §9.2），这里锁死"不缩窗、不平移"这条旧通路；页面根另吃一段封顶底部避让，见下方 root 监听。
         activity.getWindow().setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_NOTHING
                 | WindowManager.LayoutParams.SOFT_INPUT_STATE_UNCHANGED);
         final BottomBarLayout bottomBarLayout = new BottomBarLayout();
         final ImeReveal imeReveal = new ImeReveal();
+        final KeyboardState keyboardState = new KeyboardState(root);
         if (bottomBar != null) {
             // 顶掉 material 自带的那个会改写 paddingBottom 的监听（见类注释）
             ViewCompat.setOnApplyWindowInsetsListener(bottomBar, (view, windowInsets) -> windowInsets);
         }
         ViewCompat.setOnApplyWindowInsetsListener(root, (view, windowInsets) -> {
             Insets bars = windowInsets.getInsets(WindowInsetsCompat.Type.systemBars());
-            // 让位只按 systemBars 算：键盘不参与重排
-            if (bottomBar == null) {
-                view.setPadding(bars.left, bars.top, bars.right, bars.bottom);
-            } else {
-                view.setPadding(bars.left, bars.top, bars.right, 0);
+            Insets ime = windowInsets.getInsets(WindowInsetsCompat.Type.ime());
+            // 键盘高（px，相对窗口底）；0 表示键盘不在。与 ImeReveal 同口径，单点计算、多处复用。
+            int imeBottom = ime.bottom > bars.bottom ? ime.bottom : 0;
+            // 键盘在时根底内边距改吃避让高度；其余情况沿用原口径（无底栏吃 systemBars，有底栏归底栏）。
+            int avoid = bottomAvoidPx(view, imeBottom);
+            int rootBottom = avoid > 0
+                    ? (bottomBar == null ? Math.max(avoid, bars.bottom) : avoid)
+                    : (bottomBar == null ? bars.bottom : 0);
+            if (view.getPaddingLeft() != bars.left || view.getPaddingTop() != bars.top
+                    || view.getPaddingRight() != bars.right || view.getPaddingBottom() != rootBottom) {
+                view.setPadding(bars.left, bars.top, bars.right, rootBottom);
+            }
+            if (bottomBar != null) {
                 bottomBarLayout.apply(bottomBar, bars.bottom);
             }
             // 复用这唯一一个 inset 监听驱动"聚焦滚进可视区"（另装监听会顶掉本让位监听）
-            imeReveal.onInsets(view, windowInsets);
+            imeReveal.onInsets(view, imeBottom);
+            // 键盘由不在变在：给当前输入框关掉框架放大镜（反射，失败静默）
+            if (keyboardState.onInsets(imeBottom)) {
+                disableMagnifier(view.findFocus());
+            }
             return windowInsets;
         });
         ViewCompat.requestApplyInsets(root);
-        // 键盘已弹起时焦点在输入框之间跳动，也要重新滚一次
+        // 键盘已弹起时焦点在输入框之间跳动，也要重新滚一次；顺手给新焦点关掉放大镜
         root.getViewTreeObserver().addOnGlobalFocusChangeListener((oldFocus, newFocus) -> {
             if (newFocus != null) {
+                disableMagnifier(newFocus);
                 imeReveal.onFocusChanged(root);
             }
         });
+    }
+
+    /**
+     * 键盘在时页面根要补的底部避让高度（px）：{@code min(键盘高, 屏高/3)}——键盘再高也只顶掉页面
+     * 根下面 1/3，避免整页被顶得太狠。键盘不在返回 0。屏高优先取根的实测高（与这次布局同口径），
+     * 未量到退回显示指标。
+     */
+    private static int bottomAvoidPx(@NonNull View root, int imeBottom) {
+        if (imeBottom <= 0) {
+            return 0;
+        }
+        int screenHeight = root.getHeight();
+        if (screenHeight <= 0) {
+            screenHeight = root.getResources().getDisplayMetrics().heightPixels;
+        }
+        return Math.min(imeBottom, screenHeight / 3);
+    }
+
+    /** 放大镜 animator 在 {@code Editor} 上的候选字段名（新名 → 旧名）。 */
+    private static final String[] MAGNIFIER_FIELD_NAMES = {"mMagnifierAnimator", "mMagnifier"};
+
+    /**
+     * 关掉框架的文本放大镜：反射取 {@code TextView.mEditor}，再把 {@code Editor} 里那个放大镜
+     * animator 置空。框架的 {@code updateMagnifier} 对空 animator 直接 return，故置空即"删掉放大镜"
+     * 而**保留拖动手柄**。
+     *
+     * <p>只对 {@link EditText}（含 {@code TextInputEditText}）动手。整段包在 {@code try/catch(Throwable)}
+     * 里：隐藏字段被改名 / 不可写（新版多为 {@code private final}）/ 被 hidden-api 拦下，都只静默放弃，
+     * **绝不抛到主线程、也绝不影响其它功能**（见 {@code app/逻辑说明.md} §10 未验证项）。
+     */
+    private static void disableMagnifier(@Nullable View view) {
+        if (!(view instanceof EditText)) {
+            return;
+        }
+        try {
+            Field editorField = TextView.class.getDeclaredField("mEditor");
+            editorField.setAccessible(true);
+            Object editor = editorField.get(view);
+            if (editor == null) {
+                return;
+            }
+            for (String name : MAGNIFIER_FIELD_NAMES) {
+                try {
+                    Field field = editor.getClass().getDeclaredField(name);
+                    field.setAccessible(true);
+                    if (field.get(editor) != null) {
+                        field.set(editor, null);
+                    }
+                    return;     // 命中即止（找到名字就算成功，值本来就是空也不必再找）
+                } catch (NoSuchFieldException ignored) {
+                    // 换下一个候选字段名
+                }
+            }
+        } catch (Throwable ignored) {
+            // 反射失败：静默放弃，保留系统默认放大镜
+        }
     }
 
     /**
@@ -101,24 +186,89 @@ public final class EdgeToEdge {
     }
 
     /**
+     * 键盘"在 / 不在"的状态机：只在"由在变不在"时，延后一小段**复核**并清掉输入框焦点。
+     *
+     * <p>为什么要它：失焦即提交挂在键行自己的焦点监听上，而按返回键收起键盘时框架**不清焦点**，
+     * 输入框会停在编辑态——既不提交也不复位。
+     *
+     * <p>为什么要延后复核：IME 收起是动画，inset 会经过若干中间值、甚至瞬时归零；等一小段再看，
+     * 键盘还在就取消、真没了才清，避免动画中间态误清焦点。
+     *
+     * <p>"哪些控件算输入框"：只认 {@link EditText}（含 {@code TextInputEditText}）——任意可聚焦
+     * View（按钮、开关、可聚焦容器等）不算，免得误伤非文本控件。
+     */
+    private static final class KeyboardState {
+
+        /** 收起后等多久复核（毫秒）：覆盖 IME 收起动画的中间态。 */
+        private static final long RELEASE_DELAY_MS = 120L;
+
+        private final View root;
+        private final Handler handler = new Handler(Looper.getMainLooper());
+        private boolean imePresent;
+        private boolean releasePending;
+
+        KeyboardState(@NonNull View root) {
+            this.root = root;
+        }
+
+        /** @return 本次是否"键盘由不在变在"（调用方据此给当前输入框关放大镜）。 */
+        boolean onInsets(int imeBottom) {
+            boolean present = imeBottom > 0;
+            boolean becamePresent = present && !imePresent;
+            boolean becameAbsent = !present && imePresent;
+            imePresent = present;
+            if (becamePresent) {
+                cancelRelease();
+            } else if (becameAbsent) {
+                scheduleRelease();
+            }
+            return becamePresent;
+        }
+
+        private void scheduleRelease() {
+            releasePending = true;
+            handler.removeCallbacksAndMessages(null);
+            handler.postDelayed(() -> {
+                releasePending = false;
+                if (imePresent) {
+                    return;     // 复核时键盘又回来了：不动焦点
+                }
+                View focused = root.findFocus();
+                if (focused instanceof EditText && focused.isFocused()) {
+                    focused.clearFocus();
+                }
+            }, RELEASE_DELAY_MS);
+        }
+
+        private void cancelRelease() {
+            if (releasePending) {
+                handler.removeCallbacksAndMessages(null);
+                releasePending = false;
+            }
+        }
+    }
+
+    /**
      * "聚焦滚进可视区"兜底：键盘弹起时，若当前焦点所在的输入框被键盘挡住，就把<b>它所在的那个
      * 滚动区</b>往上滚一点让它露出来。只改滚动偏移、零 padding，因此无状态、无残留、无"必须成对"。
      *
-     * <p>纯增量：读不到键盘高度（{@code ime.bottom <= bars.bottom}）就什么都不做，绝不退化回重排。
+     * <p>纯增量：读不到键盘高度（{@code imeBottom <= 0}）就什么都不做，绝不退化回重排。
      */
     private static final class ImeReveal {
 
-        /** 输入框与键盘之间要留的余量。 */
-        private static final int MARGIN_DP = 16;
+        /**
+         * 输入框与键盘之间要留的余量。取 48dp 而非 16dp：插入手柄挂在光标下方、向下伸约 25dp
+         * （AOSP {@code INSERTION_HANDLE_DELTA_HEIGHT} 默认 25），余量太小则手柄落进键盘那条带子里
+         * （见 app/逻辑说明.md §9.2 与未验证项）。**该值需真机微调**。
+         */
+        private static final int MARGIN_DP = 48;
 
         /** 最近一次键盘高度（px，相对窗口底）；0 表示键盘不在。每个实例只服务一个 Activity 窗口，不跨页共享。 */
         private int lastImeBottom;
 
         /** inset 变化时调用：记下键盘高度，键盘在就滚一次。 */
-        void onInsets(@NonNull View root, @NonNull WindowInsetsCompat insets) {
-            Insets bars = insets.getInsets(WindowInsetsCompat.Type.systemBars());
-            Insets ime = insets.getInsets(WindowInsetsCompat.Type.ime());
-            lastImeBottom = ime.bottom > bars.bottom ? ime.bottom : 0;
+        void onInsets(@NonNull View root, int imeBottom) {
+            lastImeBottom = imeBottom;
             if (lastImeBottom > 0) {
                 scheduleReveal(root);
             }

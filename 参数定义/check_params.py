@@ -46,7 +46,7 @@ sys.dont_write_bytecode = True   # 不在 参数定义/ 里留 __pycache__（.gi
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import gen_params  # noqa: E402  同目录模块，标准库路径规则即可导入
 
-EXPECTED_KEY_COUNT = 56
+EXPECTED_KEY_COUNT = 55
 VALID_TYPES = ("switch", "int", "multi", "path", "enum", "table")
 
 
@@ -593,7 +593,7 @@ def _build_harness(cases):
     for ci, case in enumerate(cases):
         clusters = case["clusters"]
         for gi, cl in enumerate(clusters):
-            pts = ", ".join("{%d,%d,%d}" % (p[0], p[1], p[2]) for p in cl)
+            pts = ", ".join("{%d,%d,%d,%d}" % (p[0], p[1], p[2], p[3]) for p in cl)
             lines.append("static const KiCutPoint c{0}_{1}[] = {{{2}}};".format(ci, gi, pts))
         if clusters:
             inits = ", ".join("{{c{0}_{1}, {2}}}".format(ci, gi, len(cl))
@@ -601,13 +601,13 @@ def _build_harness(cases):
             lines.append("static const KiCutCluster cs{0}[] = {{{1}}};".format(ci, inits))
     lines.append("")
     lines.append("int main(void) {")
-    lines.append("    float up, dn;")
+    lines.append("    float kdp, up, dn;")
     for ci, case in enumerate(cases):
         clusters = case["clusters"]
         ptr = "cs%d" % ci if clusters else "0"
-        lines.append("    ki_cut_eval({0}, {1}, {2}, {3}, &up, &dn);".format(
-            ptr, len(clusters), case["smooth"], case["cold"]))
-        lines.append('    printf("{0} %.6f %.6f\\n", up, dn);'.format(ci))
+        lines.append("    ki_cut_eval({0}, {1}, {2}, &kdp, &up, &dn);".format(
+            ptr, len(clusters), case["cold"]))
+        lines.append('    printf("{0} %.6f %.6f %.6f\\n", kdp, up, dn);'.format(ci))
     lines.append("    return 0;")
     lines.append("}")
     return "\n".join(lines) + "\n"
@@ -656,12 +656,15 @@ def fail_check_e(definition):
             line = line.strip()
             if not line:
                 continue
-            idx_s, up_s, dn_s = line.split()
+            idx_s, kdp_s, up_s, dn_s = line.split()
             case = cases[int(idx_s)]
             seen += 1
-            if abs(float(up_s) - case["up"]) > tol or abs(float(dn_s) - case["dn"]) > tol:
-                bad.append("%s：C=(%s,%s) ≠ golden=(%s,%s)"
-                           % (case["name"], up_s, dn_s, case["up"], case["dn"]))
+            if (abs(float(kdp_s) - case["kdp"]) > tol
+                    or abs(float(up_s) - case["up"]) > tol
+                    or abs(float(dn_s) - case["dn"]) > tol):
+                bad.append("%s：C=(%s,%s,%s) ≠ golden=(%s,%s,%s)"
+                           % (case["name"], kdp_s, up_s, dn_s,
+                              case["kdp"], case["up"], case["dn"]))
         if seen != len(cases):
             raise Failure("E 对拍程序输出 %d 行 ≠ 用例 %d 条" % (seen, len(cases)))
         if bad:
@@ -709,22 +712,23 @@ def fail_check_f(definition):
         raise Failure("F load_config 内未找到 char line[N] 配置行缓冲")
     buf = int(mbuf.group(1))
 
-    mpfx = re.search(r'#define\s+CFG_ROW_PREFIX_KI_CUT\s+"([^"]*)"', h_text)
+    mpfx = re.search(r'#define\s+CFG_ROW_PREFIX_PID_CUT\s+"([^"]*)"', h_text)
     if not mpfx:
-        raise Failure("F 未找到 CFG_ROW_PREFIX_KI_CUT（params_generated.h）")
+        raise Failure("F 未找到 CFG_ROW_PREFIX_PID_CUT（params_generated.h）")
     pfx = mpfx.group(1)
-    f1 = _macro_int("CFG_MAX_KI_CUT_F1", h_text, "params_generated.h")
-    f2 = _macro_int("CFG_MAX_KI_CUT_F2", h_text, "params_generated.h")
-    f3 = _macro_int("CFG_MAX_KI_CUT_F3", h_text, "params_generated.h")
+    f1 = _macro_int("CFG_MAX_PID_CUT_F1", h_text, "params_generated.h")
+    f2 = _macro_int("CFG_MAX_PID_CUT_F2", h_text, "params_generated.h")
+    f3 = _macro_int("CFG_MAX_PID_CUT_F3", h_text, "params_generated.h")
+    f4 = _macro_int("CFG_MAX_PID_CUT_F4", h_text, "params_generated.h")
     max_cluster = _macro_int("KI_CUT_MAX_CLUSTERS", c_text, "tempctrl.c")
 
-    triple = "%d,%d,%d" % (f1, f2, f3)
-    need = len("%s%d=%s\n" % (pfx, max_cluster, ",".join([triple] * max_points)))
+    quad = "%d,%d,%d,%d" % (f1, f2, f3, f4)
+    need = len("%s%d=%s\n" % (pfx, max_cluster, ",".join([quad] * max_points)))
     if buf - 1 < need:                     # fgets 最多读 buf-1 字节
         raise Failure(
-            "F 配置行缓冲 char line[%d] 不足：KI_CUT 满 %d 点行最长 %d 字节（含换行），"
+            "F 配置行缓冲 char line[%d] 不足：PID_CUT 满 %d 点行最长 %d 字节（含换行），"
             "load_config 会截断整行 → 请同步放宽其 char line[]" % (buf, max_points, need))
-    return ("F 配置行缓冲静态护栏：load_config char line[%d] ≥ KI_CUT 满 %d 点最长行 %d 字节"
+    return ("F 配置行缓冲静态护栏：load_config char line[%d] ≥ PID_CUT 满 %d 点最长行 %d 字节"
             "（静态字面比对，非运行时执行）" % (buf, max_points, need))
 
 

@@ -69,6 +69,13 @@
     <dimen name="config_key_row_gap">6dp</dimen>
 
     <!--
+        开关类参数行的上下行距上限（= 键行默认行距 config_key_row_gap 的一半）：开关行比输入框行矮
+        （无浮起提示、控件也简），压到一半更紧凑。由 ConfigKeyRow 对 meta.isSwitch() 的行施加；
+        其余类型的行仍走 6dp。只压开关行，int/path/multi/表行不受影响。
+    -->
+    <dimen name="config_switch_row_gap">3dp</dimen>
+
+    <!--
         展开/收起三角的图标盒（也是箭头控件的宽高）。取 24dp：与分组卡头 / 诊断卡头的
         12dp 内边距相加正好 48dp，与 @dimen/row_min_height 一致；图标墨迹 12×14dp，
         居中后完整可见（同 drawable/ic_triangle.xml）。

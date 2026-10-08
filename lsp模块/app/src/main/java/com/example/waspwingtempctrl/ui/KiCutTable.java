@@ -10,13 +10,13 @@ import java.util.List;
 /**
  * KI 分段倍率表的纯模型与求值（<b>无 Android 依赖</b>，可在桌面 JVM 上直接跑）。
  *
- * <p>落盘口径（一行一簇、行内三元组重复）与求值算法（逐簇折线 → 双向 EMA → 控制点残差回补 → 跨簇取最小）
- * 的唯一权威是 C 端 {@code daemon/ki_cut.h}；本类是与它<b>逐值对齐</b>的界面侧重算实现（对照
+ * <p>落盘口径（一行一簇、行内重复四元组）与求值算法（逐簇折线 → 跨簇取最小）的唯一权威是 C 端
+ * {@code daemon/ki_cut.h}；本类是与它<b>逐值对齐</b>的界面侧重算实现（对照
  * {@code 参数定义/ki_cut_golden.json}），只服务编辑器预览与曲线图，<b>不参与落盘</b>（落盘的是原始数字）。
  *
  * <p>与 C 端逐条对齐的几点：点按冷值<b>稳定升序</b>且<b>同冷值保留先出现者</b>；单簇点数上限 32；
- * 采样跨度上限 256（超了退回折线）；{@code smooth} 为 0 或 100 视为关闭平滑；单点簇整簇恒定；
- * 端点外平推；多簇取最小；无有效簇恒为 {@link #NEUTRAL}。输出为 <b>float</b>（与 C 端同为 32 位浮点）。
+ * 曲线为<b>纯折线</b>（无平滑）；单点簇整簇恒定；端点外平推；多簇取最小；无有效簇恒为 {@link #NEUTRAL}。
+ * 输出为 <b>float</b>（与 C 端同为 32 位浮点）。
  */
 public final class KiCutTable {
 
@@ -25,17 +25,17 @@ public final class KiCutTable {
 
     /** 单簇点数上限（与 {@code KI_CUT_MAX_POINTS} 一致）。 */
     private static final int MAX_POINTS = 32;
-    /** 采样格点上限（与 {@code KI_CUT_SPAN_MAX} 一致；冷值 0~255，跨度 ≤ 256）。 */
-    private static final int SPAN_MAX = 256;
 
-    /** 一个控制点：冷值（档位）+ 升倍率 + 降倍率（升/降均为 ×100 口径）。 */
+    /** 一个控制点：冷值（档位）+ KDP 倍率 + 升倍率 + 降倍率（三个倍率均 ×100 口径）。 */
     public static final class Point {
         public final int cold;
+        public final int kdp;
         public final int up;
         public final int dn;
 
-        public Point(int cold, int up, int dn) {
+        public Point(int cold, int kdp, int up, int dn) {
             this.cold = cold;
+            this.kdp = kdp;
             this.up = up;
             this.dn = dn;
         }
@@ -63,15 +63,16 @@ public final class KiCutTable {
     // ==================== 行编解码 ====================
 
     /**
-     * 一行文本 → 一个簇：按非数字分隔取出整数，每三个一组（冷值,升,降）；末尾不足三个的整组丢弃。
+     * 一行文本 → 一个簇：按非数字分隔取出整数，每四个一组（冷值,KDP,升,降）；末尾不足四个的整组丢弃。
      * 空串 / 无数字 → 空簇。
      */
     @NonNull
     public static Cluster parseLine(@NonNull String line) {
         List<Integer> nums = parseInts(line);
         Cluster cluster = new Cluster();
-        for (int i = 0; i + 3 <= nums.size(); i += 3) {
-            cluster.points.add(new Point(nums.get(i), nums.get(i + 1), nums.get(i + 2)));
+        for (int i = 0; i + 4 <= nums.size(); i += 4) {
+            cluster.points.add(new Point(
+                    nums.get(i), nums.get(i + 1), nums.get(i + 2), nums.get(i + 3)));
         }
         return cluster;
     }
@@ -89,7 +90,7 @@ public final class KiCutTable {
         return out;
     }
 
-    /** 一个簇 → 一行落盘文本（`冷值,升,降,…`）。 */
+    /** 一个簇 → 一行落盘文本（`冷值,KDP,升,降,…`）。 */
     @NonNull
     public static String formatRow(@NonNull Cluster cluster) {
         StringBuilder sb = new StringBuilder();
@@ -97,7 +98,8 @@ public final class KiCutTable {
             if (sb.length() > 0) {
                 sb.append(',');
             }
-            sb.append(p.cold).append(',').append(p.up).append(',').append(p.dn);
+            sb.append(p.cold).append(',').append(p.kdp).append(',').append(p.up).append(',')
+                    .append(p.dn);
         }
         return sb.toString();
     }
@@ -154,7 +156,7 @@ public final class KiCutTable {
      * @return {@code {升倍率, 降倍率}}（×100 口径，未取整——与 C 端同为浮点）
      */
     @NonNull
-    public static float[] evaluate(@NonNull List<Cluster> clusters, int cold, int smooth) {
+    public static float[] evaluate(@NonNull List<Cluster> clusters, int cold) {
         float up = NEUTRAL;
         float dn = NEUTRAL;
         boolean used = false;
@@ -162,7 +164,7 @@ public final class KiCutTable {
             if (cluster.isEmpty()) {
                 continue;
             }
-            Curve curve = Curve.of(cluster, smooth);
+            Curve curve = Curve.of(cluster);
             if (!used || curve.up(cold) < up) {
                 up = curve.up(cold);
             }
@@ -180,12 +182,11 @@ public final class KiCutTable {
      * @param up true = 升倍率那条，false = 降倍率那条
      */
     @NonNull
-    public static float[] minCurve(@NonNull List<Cluster> clusters, int smooth, int xMax,
-                                   boolean up) {
+    public static float[] minCurve(@NonNull List<Cluster> clusters, int xMax, boolean up) {
         List<Curve> curves = new ArrayList<>();
         for (Cluster cluster : clusters) {
             if (!cluster.isEmpty()) {
-                curves.add(Curve.of(cluster, smooth));
+                curves.add(Curve.of(cluster));
             }
         }
         float[] out = new float[Math.max(0, xMax) + 1];
@@ -207,30 +208,21 @@ public final class KiCutTable {
     /**
      * 一个簇的曲线：点按冷值稳定升序、同冷值保留先出现者；折线插值（范围外平推）。
      *
-     * <p><b>零分配护栏</b>：折线分支（含跨度越界 / smooth 关 / 单点）<b>不按跨度分配数组</b>，只保留
-     * 排好序的 {@link Point}[]，在 {@link #up(int)}/{@link #dn(int)} 里按需插值；只有平滑分支预计算
-     * 数组，且分配前必须被跨度上界 {@link #SPAN_MAX} 挡住。冷值被改成极值（如 ±2e9）时跨度会溢出
-     * 甚至为负，护栏一律退回折线、绝不分配，避免 OOM / NegativeArraySizeException。
+     * <p><b>零分配</b>：只保留排好序、去重后的 {@link Point}[]，在 {@link #up(int)}/{@link #dn(int)} 里
+     * 按需插值——不按跨度分配数组，故冷值被改成极值（如 ±2e9）也不会 OOM / NegativeArraySizeException。
      */
     private static final class Curve {
 
         /** 排序去重后的控制点（长度 = 去重后点数）。 */
         private final Point[] pts;
         private final int n;
-        private final int xMin;
-        /** 平滑分支预计算的整条曲线（长度 = span）；折线分支为 null（按需插值、零分配）。 */
-        private final float[] upArr;
-        private final float[] dnArr;
 
-        private Curve(Point[] pts, int n, float[] upArr, float[] dnArr) {
+        private Curve(Point[] pts, int n) {
             this.pts = pts;
             this.n = n;
-            this.xMin = pts[0].cold;
-            this.upArr = upArr;
-            this.dnArr = dnArr;
         }
 
-        static Curve of(@NonNull Cluster cluster, int smooth) {
+        static Curve of(@NonNull Cluster cluster) {
             int n = Math.min(cluster.points.size(), MAX_POINTS);
             Point[] pts = new Point[n];
             for (int i = 0; i < n; i++) {
@@ -250,71 +242,16 @@ public final class KiCutTable {
                 }
                 pts[m++] = pts[i];
             }
-            n = m;
-            int xMin = pts[0].cold;
-            int xMax = pts[n - 1].cold;
-            // 跨度护栏：仅当落在 [1, SPAN_MAX] 内才走预计算平滑分支；越界 / 溢出（含为负）一律退回折线
-            long spanL = (long) xMax - (long) xMin + 1L;
-            boolean smoothing = n >= 2 && smooth > 0 && smooth < 100
-                    && spanL >= 1L && spanL <= SPAN_MAX;
-            if (!smoothing) {
-                return new Curve(pts, n, null, null);
-            }
-            int span = (int) spanL;
-            return new Curve(pts, n, build(pts, n, xMin, span, 0, smooth),
-                    build(pts, n, xMin, span, 1, smooth));
+            return new Curve(pts, m);
         }
 
-        /** 取 {@code x} 处的值：平滑分支查预计算数组（范围外平推）；折线分支按需插值（零分配）。 */
+        /** 取 {@code x} 处的值：折线按需插值（范围外平推到端点）。 */
         float up(int x) {
-            return valueAt(x, 0);
+            return lerp(pts, n, x, 0);
         }
 
         float dn(int x) {
-            return valueAt(x, 1);
-        }
-
-        private float valueAt(int x, int axis) {
-            float[] arr = axis != 0 ? dnArr : upArr;
-            if (arr == null) {
-                return lerp(pts, n, x, axis);
-            }
-            long idx = (long) x - (long) xMin;
-            if (idx < 0L) {
-                idx = 0L;
-            } else if (idx > arr.length - 1L) {
-                idx = arr.length - 1L;
-            }
-            return arr[(int) idx];
-        }
-
-        /** 在整数格上产出整条曲线（长度 = span）。{@code axis}：0=升，1=降。仅平滑分支调用。 */
-        private static float[] build(Point[] pts, int n, int xMin, int span, int axis, int smoothPct) {
-            float[] s = new float[span];
-            for (int k = 0; k < span; k++) {
-                s[k] = lerp(pts, n, xMin + k, axis);
-            }
-            float a = smoothPct / 100f;
-            float[] f = new float[span];
-            f[0] = s[0];
-            for (int k = 1; k < span; k++) {
-                f[k] = a * s[k] + (1f - a) * f[k - 1];
-            }
-            float[] b = new float[span];
-            b[span - 1] = f[span - 1];
-            for (int k = span - 2; k >= 0; k--) {
-                b[k] = a * f[k] + (1f - a) * b[k + 1];
-            }
-            // 控制点残差 r_i = y_i − B(x_i)；网格上相邻控制点间线性回补（两端外取端值残差）
-            float[] residual = new float[n];
-            for (int i = 0; i < n; i++) {
-                residual[i] = value(pts[i], axis) - b[pts[i].cold - xMin];
-            }
-            float[] out = new float[span];
-            for (int k = 0; k < span; k++) {
-                out[k] = b[k] + lerpResidual(pts, n, residual, xMin + k);
-            }
-            return out;
+            return lerp(pts, n, x, 1);
         }
 
         /** 折线取值：{@code x} 在两端外取端点值，其间按相邻控制点线性插值。 */
@@ -333,24 +270,6 @@ public final class KiCutTable {
                 }
             }
             return value(pts[n - 1], axis);
-        }
-
-        /** 控制点残差的线性回补：{@code x} 在两端外取端点残差。 */
-        private static float lerpResidual(Point[] pts, int n, float[] residual, int x) {
-            if (x <= pts[0].cold) {
-                return residual[0];
-            }
-            if (x >= pts[n - 1].cold) {
-                return residual[n - 1];
-            }
-            for (int i = 1; i < n; i++) {
-                if (x <= pts[i].cold) {
-                    float t = (float) (x - pts[i - 1].cold) / (float) (pts[i].cold - pts[i - 1].cold);
-                    float r0 = residual[i - 1];
-                    return r0 + t * (residual[i] - r0);
-                }
-            }
-            return residual[n - 1];
         }
 
         private static float value(Point p, int axis) {

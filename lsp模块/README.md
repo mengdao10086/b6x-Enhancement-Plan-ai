@@ -162,6 +162,8 @@ TARGET_TEMP=180     ← 18.0°C
 | 降级路径 | 设备端 `busybox` / `toybox` / `unzip` 都不可用时，脚本改按清单比对；清单的 `APK_MTIME` 与当前 APK 不一致即视为陈旧、**不采用**（宁可不动也不装错） |
 
 > 方向是「app 写、脚本读」，与上文两条相反。中间状态一律落 APK 私有目录，**不新增 `/data/local/tmp` 文件**。
+>
+> `tempctrl_sync_manifest`（界面写、脚本读）与 `tempctrl_deploy_stamp`（脚本写、脚本读）**有意保持两份独立文件、不合并**：两者写者、格式（`KEY=VALUE` vs 单行 `<mtime> ok`）、原子性（`.tmp`+`rename` vs 直接覆写）与创建者所有权（界面 vs root 脚本）都不同，且**互不读对方的键**；合并只少一个私有目录小文件（卸载时随目录整体清除），却要把稳定的降级路径暴露给跨进程并发改写。
 
 ---
 
@@ -211,6 +213,8 @@ TARGET_TEMP=180     ← 18.0°C
 | `tempctrl_wd_spawn` | 同上 | daemon（每次拉起看门狗时写一行时间戳，作拉起冷却用，详见上文反向保活） |
 
 > 卸载自清的清理清单与「清除数据」的已知代价见 [app/逻辑说明.md](app/逻辑说明.md) §2.5。
+>
+> **三份跨进程协议文件原样未动**：`tempctrl_b6x.status` / `tempctrl_b7x.status`、`tempctrl_uiprefs`、`tempctrl_bt_req` 仍落 `/data/local/tmp/`，本轮**未迁移**（涉及 3 个宿主包寻址 + SELinux 未验证），列为后续待真机验证项。
 
 ---
 

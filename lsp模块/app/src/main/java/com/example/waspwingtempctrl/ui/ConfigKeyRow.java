@@ -41,6 +41,7 @@ import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.TreeSet;
 
 /**
  * 一个配置键的行：switch / int / multi / path / enum / table 六种 type 各由一个 {@link Renderer} 渲染，
@@ -229,6 +230,26 @@ final class ConfigKeyRow {
         renderer.build();
         alignLabelToInputBox();
         shiftLabelInNonSwitchRow();
+        applySwitchRowGap();
+    }
+
+    /**
+     * 开关行的上下行距减半：把本行的行距上限写进它在分组卡 body 里的
+     * {@link WrapRowLayout.LayoutParams}（{@code setRowGapCap}）。须在挂进 body 之前施加——本构造正是
+     * 那一刻（{@code create()} 只 inflate、不 attach，随后由 {@code ConfigGroupBinder} addView）。
+     *
+     * <p>判定一律用 {@link KeyMeta#isSwitch()}（六型里的 switch 型；multi 里的布尔子字段不算，仍 6dp）。
+     * 取 min 的对称压缩由容器完成，故这里只写本行的上限。取值见 @dimen/config_switch_row_gap。
+     */
+    private void applySwitchRowGap() {
+        if (!meta.isSwitch()) {
+            return;
+        }
+        if (root.getLayoutParams() instanceof WrapRowLayout.LayoutParams) {
+            ((WrapRowLayout.LayoutParams) root.getLayoutParams()).setRowGapCap(
+                    root.getResources().getDimensionPixelSize(R.dimen.config_switch_row_gap));
+            root.requestLayout();
+        }
     }
 
     /**
@@ -448,8 +469,8 @@ final class ConfigKeyRow {
         @Override
         public void build() {
             String caption = joinParts(joinParts(meta.unit, rangeText(0)), meta.unitNote);
-            fields.add(addNumberField(
-                    root.getContext().getString(R.string.config_hint_value), caption, true));
+            // 数值字段不设浮起说明：hint「数值」不含信息（空 hint 走 addField 的不设说明分支）
+            fields.add(addNumberField("", caption, true));
         }
 
         @Override
@@ -589,8 +610,8 @@ final class ConfigKeyRow {
 
         @Override
         public void build() {
-            field = addField(root.getContext().getString(R.string.config_hint_path),
-                    "", false, true);
+            // 路径字段不设浮起说明：hint「路径」不含信息（空 hint 走 addField 的不设说明分支）
+            field = addField("", "", false, true);
             // 不按内容定宽：路径长度不可控（默认日志路径 58 字符约 570dp），定宽会顶出屏幕；
             // 吃满行尾，放不下由输入框自己横向滚
             writeWidth(field, ViewGroup.LayoutParams.MATCH_PARENT);
@@ -632,10 +653,15 @@ final class ConfigKeyRow {
         }
 
         /**
-         * 把输入框的横向位置摆到最右端（路径放不下时显示右半段）；上限取 {@link Layout#getLineRight}
-         * 减视图宽（<b>不能</b>取 {@code getWidth()}：开了 scrollHorizontally 的输入框传给 Layout 的宽是
-         * 1MB，拿它算会摆到文本右侧空白里、框里一个字都画不出）。布局还没算出来就等下一次回填；
-         * 聚焦时不动。见 app 逻辑说明.md §6.1。
+         * 把路径摆进框里：<b>放得下就不滚</b>（框内由 gravity/textAlignment 摆，与数值框一致），
+         * 放不下才滚到最右端、显示右半段（文件名）。布局还没算出来就等下一次回填；聚焦时不动。
+         *
+         * <p><b>为什么要分流</b>：开了 scrollHorizontally 的输入框传给 Layout 的宽是 1MB，短值在
+         * "1MB 宽的 Layout"里排版后，{@code getLineRight(0)} 落在文本中部附近，拿它减视图宽去
+         * {@code scrollTo} 会把窗口右沿摆到文本中部——短值（如 {@code c0}）就只露首个字符的左半边、
+         * 整体贴右。这个"溢出→右端贴框"的原式对<b>长路径</b>是对的（文本远宽于框），故溢出分支保留原式
+         * 不变；只用文本实际宽 {@code getLineWidth(0)}（不受排版宽/对齐影响）判"放得下"来兜住短值。
+         * 见 app 逻辑说明.md §6.1。
          */
         private void applyPathScroll() {
             TextInputEditText input = field.input;
@@ -647,7 +673,14 @@ final class ConfigKeyRow {
             if (layout == null || viewWidth <= 0) {
                 return;
             }
-            int target = Math.max(0, (int) Math.ceil(layout.getLineRight(0)) - viewWidth);
+            int content = viewWidth - input.getPaddingStart() - input.getPaddingEnd();
+            int textWidth = (int) Math.ceil(layout.getLineWidth(0));
+            int target;
+            if (content > 0 && textWidth <= content) {
+                target = 0;                     // 放得下：不滚（getLineWidth 才是文本实际宽）
+            } else {
+                target = Math.max(0, (int) Math.ceil(layout.getLineRight(0)) - viewWidth);
+            }
             if (input.getScrollX() != target) {
                 input.scrollTo(target, 0);
             }
@@ -664,10 +697,6 @@ final class ConfigKeyRow {
      */
     private final class TableRenderer implements Renderer {
 
-        /** 与 KI 倍率表配套的平滑系数键（契约固定为这个名字；定义里查不到时按 15 处理）。 */
-        private static final String SMOOTH_KEY = "KI_CUT_SMOOTH";
-        /** 平滑系数缺省值（与契约的 KI_CUT_SMOOTH 默认一致）。 */
-        private static final int SMOOTH_DEFAULT = 15;
         /** 「当前冷值」（红虚线位置）的刷新周期（与数据文件写入节奏同档）。 */
         private static final long TARGET_REFRESH_MS = 1000L;
         /** 编辑中曲线重算的防抖窗口：框内文本停 1 秒才重算（写盘仍走 {@link ConfigWriteQueue} 的 1200ms）。 */
@@ -795,10 +824,32 @@ final class ConfigKeyRow {
             }
             Context context = block.getContext();
             int coldMax = KiCutData.coldMax(context);
-            int smooth = smoothPct();
             List<KiCutTable.Cluster> clusters = editor.getClusters();
-            chart.setCurves(KiCutTable.minCurve(clusters, smooth, coldMax, true),
-                    KiCutTable.minCurve(clusters, smooth, coldMax, false), coldMax, targetCold);
+            chart.setCurves(KiCutTable.minCurve(clusters, coldMax, true),
+                    KiCutTable.minCurve(clusters, coldMax, false), coldMax, targetCold,
+                    xTicksOf(clusters, coldMax));
+        }
+
+        /**
+         * 横轴刻度 = 表里各点的冷值 ∪ {0, coldMax}，去重升序、<b>不抽稀</b>（允许重叠）。
+         * 超上限的冷值不过滤，交给控件 {@code gridX} 钳到右沿。
+         */
+        @NonNull
+        private int[] xTicksOf(@NonNull List<KiCutTable.Cluster> clusters, int coldMax) {
+            TreeSet<Integer> ticks = new TreeSet<>();
+            ticks.add(0);
+            ticks.add(coldMax);
+            for (KiCutTable.Cluster cluster : clusters) {
+                for (KiCutTable.Point point : cluster.points) {
+                    ticks.add(point.cold);
+                }
+            }
+            int[] out = new int[ticks.size()];
+            int i = 0;
+            for (int value : ticks) {
+                out[i++] = value;
+            }
+            return out;
         }
 
         /** 排一次编辑中的曲线重算（1 秒防抖，重置窗口）。 */
@@ -810,12 +861,6 @@ final class ConfigKeyRow {
         /** 取消未触发的曲线重算（失焦提交、或框变空时调）。 */
         private void cancelRedraw() {
             ticker.removeCallbacks(redrawTask);
-        }
-
-        /** 平滑系数（×100 口径之外直接就是 %）：取当前有效值，定义里没有这个键时按默认值。 */
-        private int smoothPct() {
-            Value value = host.effectiveValue(SMOOTH_KEY);
-            return value != null ? value.intAt(0) : SMOOTH_DEFAULT;
         }
 
         /** 读一次「当前冷值」；只有值真的变了（或首次）才重绘。视图不可见时跳过读盘。 */
@@ -888,7 +933,16 @@ final class ConfigKeyRow {
         TextInputLayout layout = fieldView.findViewById(R.id.config_field_layout);
         TextInputEditText input = fieldView.findViewById(R.id.config_field_input);
         TextView captionView = fieldView.findViewById(R.id.config_field_note);
-        layout.setHint(hint);
+        if (hint.isEmpty()) {
+            // 无信息字段（int/path）不设浮起说明。setHintEnabled(false) 让 material 的
+            // calculateLabelMarginTop() 恒返回 0 → 内层 inputFrame 的 topMargin（OUTLINE 下 =
+            // 折叠说明行高/2 ≈7dp）归零 → 框顶回到行顶、框高回到 field_height（这正是"删 hint 后
+            // 压掉半个 hint 字高"）。只 setHint(null) 不保证触发 margin 重算，故必须显式关掉。
+            layout.setHint(null);
+            layout.setHintEnabled(false);
+        } else {
+            layout.setHint(hint);
+        }
         if (path) {
             input.setInputType(InputType.TYPE_CLASS_TEXT);
         }

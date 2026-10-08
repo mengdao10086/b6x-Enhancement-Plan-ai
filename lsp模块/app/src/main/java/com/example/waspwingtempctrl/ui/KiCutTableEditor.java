@@ -23,12 +23,12 @@ import java.util.ArrayList;
 import java.util.List;
 
 /**
- * KI 分段倍率表的编辑器：以「簇」为块（{@code item_ki_cut_cluster.xml}），块内以「点」为行
- * （{@code item_ki_cut_point.xml}，每点三个数字：冷值 / KI 升倍率 / KI 降倍率）。支持增删簇与增删点。
+ * 分段倍率表的编辑器：以「簇」为块（{@code item_ki_cut_cluster.xml}），块内以「点」为行
+ * （{@code item_ki_cut_point.xml}，每点四个数字：冷值 / KDP 倍率 / 升倍率 / 降倍率）。支持增删簇与增删点。
  *
- * <p><b>数据是「值 = 多行文本」</b>（每行一簇、行内三元组重复，见 {@link KiCutTable}）：本类只管把
+ * <p><b>数据是「值 = 多行文本」</b>（每行一簇、行内四元组重复，见 {@link KiCutTable}）：本类只管把
  * 文本渲染成控件、把控件读回文本；落盘与算法都在别处（{@link com.example.waspwingtempctrl.ConfigStore}
- * 与 {@link KiCutTable}）。点行里三个框的浮起说明直接取定义 {@code rowFields[].label}，不在界面另抄一份；
+ * 与 {@link KiCutTable}）。点行里四个框的浮起说明直接取定义 {@code rowFields[].label}，不在界面另抄一份；
  * 且<b>只有整张表的第一个点行带说明</b>（第 1 簇第 1 点），其余行不带 hint。
  *
  * <p><b>不打扰正在编辑的用户</b>：{@link #setClusters} 先与控件当前内容比对，一致就什么都不做
@@ -102,14 +102,16 @@ final class KiCutTableEditor {
             KiCutTable.Cluster cluster = new KiCutTable.Cluster();
             for (PointRow row : block.rows) {
                 int cold = parseInt(row.cold, 0);
+                int kdp = parseInt(row.kdp, KiCutTable.NEUTRAL);
                 int up = parseInt(row.up, KiCutTable.NEUTRAL);
                 int dn = parseInt(row.dn, KiCutTable.NEUTRAL);
                 if (clamp) {
                     cold = clampField(cold, 0);
-                    up = clampField(up, 1);
-                    dn = clampField(dn, 2);
+                    kdp = clampField(kdp, 1);
+                    up = clampField(up, 2);
+                    dn = clampField(dn, 3);
                 }
-                cluster.points.add(new KiCutTable.Point(cold, up, dn));
+                cluster.points.add(new KiCutTable.Point(cold, kdp, up, dn));
             }
             out.add(cluster);
         }
@@ -218,9 +220,10 @@ final class KiCutTableEditor {
         listener.onEdited(Listener.EditKind.STRUCTURAL);
     }
 
-    /** 新增点的初值：冷值取定义下限（取不到为 0），升降都是 100（不削）。 */
+    /** 新增点的初值：冷值取定义下限（取不到为 0），KDP/升/降都是 100（不削）。 */
     private KiCutTable.Point newDefaultPoint() {
-        return new KiCutTable.Point(minOf(0, 0), KiCutTable.NEUTRAL, KiCutTable.NEUTRAL);
+        return new KiCutTable.Point(minOf(0, 0), KiCutTable.NEUTRAL, KiCutTable.NEUTRAL,
+                KiCutTable.NEUTRAL);
     }
 
     // ==================== 建块 ====================
@@ -245,10 +248,12 @@ final class KiCutTableEditor {
         View view = inflater.inflate(R.layout.item_ki_cut_point, block.pointsBox, false);
         PointRow row = new PointRow(view);
         row.cold.setText(String.valueOf(point.cold));
+        row.kdp.setText(String.valueOf(point.kdp));
         row.up.setText(String.valueOf(point.up));
         row.dn.setText(String.valueOf(point.dn));
         applyHints(row, showHints);
         row.cold.addTextChangedListener(watcher());
+        row.kdp.addTextChangedListener(watcher());
         row.up.addTextChangedListener(watcher());
         row.dn.addTextChangedListener(watcher());
         row.deleteButton.setOnClickListener(v -> onDeletePoint(indexOf(block), block.rows.indexOf(row)));
@@ -261,15 +266,21 @@ final class KiCutTableEditor {
                 listener.onEdited(Listener.EditKind.COMMIT);
             }
         });
+        row.kdp.setOnFocusChangeListener((v, hasFocus) -> {
+            if (!hasFocus) {
+                clampOnBlur(row.kdp, 1);
+                listener.onEdited(Listener.EditKind.COMMIT);
+            }
+        });
         row.up.setOnFocusChangeListener((v, hasFocus) -> {
             if (!hasFocus) {
-                clampOnBlur(row.up, 1);
+                clampOnBlur(row.up, 2);
                 listener.onEdited(Listener.EditKind.COMMIT);
             }
         });
         row.dn.setOnFocusChangeListener((v, hasFocus) -> {
             if (!hasFocus) {
-                clampOnBlur(row.dn, 2);
+                clampOnBlur(row.dn, 3);
                 listener.onEdited(Listener.EditKind.COMMIT);
             }
         });
@@ -278,14 +289,14 @@ final class KiCutTableEditor {
     }
 
     /**
-     * 三个框的浮起说明取定义里的 {@code rowFields[i].label}（定义没写就不设，不另抄一份文案）。
+     * 四个框的浮起说明取定义里的 {@code rowFields[i].label}（定义没写就不设，不另抄一份文案）。
      * <b>只有整张表的第一个点行</b>才带说明；其余行不设，OutlinedBox 无 hint 时渲染成普通圆角描边、无缺口。
      */
     private void applyHints(@NonNull PointRow row, boolean show) {
         if (!show || meta.rowFields == null) {
             return;
         }
-        TextInputLayout[] boxes = {row.coldBox, row.upBox, row.dnBox};
+        TextInputLayout[] boxes = {row.coldBox, row.kdpBox, row.upBox, row.dnBox};
         for (int i = 0; i < boxes.length && i < meta.rowFields.size(); i++) {
             FieldMeta field = meta.rowFields.get(i);
             boxes[i].setHint(field.label);
@@ -345,7 +356,7 @@ final class KiCutTableEditor {
     boolean hasEmptyField() {
         for (ClusterBlock block : blocks) {
             for (PointRow row : block.rows) {
-                if (isEmpty(row.cold) || isEmpty(row.up) || isEmpty(row.dn)) {
+                if (isEmpty(row.cold) || isEmpty(row.kdp) || isEmpty(row.up) || isEmpty(row.dn)) {
                     return true;
                 }
             }
@@ -402,13 +413,15 @@ final class KiCutTableEditor {
         }
     }
 
-    /** 一个点行（三个数字框 + 删除）。 */
+    /** 一个点行（四个数字框 + 删除）。 */
     private final class PointRow {
         final View view;
         final EditText cold;
+        final EditText kdp;
         final EditText up;
         final EditText dn;
         final TextInputLayout coldBox;
+        final TextInputLayout kdpBox;
         final TextInputLayout upBox;
         final TextInputLayout dnBox;
         final View deleteButton;
@@ -416,13 +429,16 @@ final class KiCutTableEditor {
         PointRow(View view) {
             this.view = view;
             this.cold = view.findViewById(R.id.ki_cut_cold);
+            this.kdp = view.findViewById(R.id.ki_cut_kdp);
             this.up = view.findViewById(R.id.ki_cut_up);
             this.dn = view.findViewById(R.id.ki_cut_dn);
             this.coldBox = view.findViewById(R.id.ki_cut_cold_box);
+            this.kdpBox = view.findViewById(R.id.ki_cut_kdp_box);
             this.upBox = view.findViewById(R.id.ki_cut_up_box);
             this.dnBox = view.findViewById(R.id.ki_cut_dn_box);
             this.deleteButton = view.findViewById(R.id.ki_cut_point_del);
             this.cold.setInputType(InputType.TYPE_CLASS_NUMBER);
+            this.kdp.setInputType(InputType.TYPE_CLASS_NUMBER);
             this.up.setInputType(InputType.TYPE_CLASS_NUMBER);
             this.dn.setInputType(InputType.TYPE_CLASS_NUMBER);
         }

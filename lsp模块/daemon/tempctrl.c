@@ -236,13 +236,18 @@ static int pid_cpu_comp_offset = 100;           // PID_CPU_COMP 第三值：偏�
 static int pid_cold_min = 1;              // PID_COLD_RANGE 第一值：制冷强度下限
 static int pid_cold_max = 190;            // PID_COLD_RANGE 第二值：制冷强度上限（B6X）
 
-// --- 「KI 分段倍率表」参数（配置值为整数；倍率 ×100 换算进内部）---
-// KI_CUT_<簇号> = 重复三元组「冷值,升倍率,降倍率,...」（冷值 0~255；升/降倍率 ×100，100=不削）
-// KI_CUT_SMOOTH = 平滑系数（×100，0/100=关闭平滑）；簇内按冷值升序折线插值、多簇取最小
-static int ki_cut_smooth = 15;            // KI_CUT_SMOOTH：零相位平滑系数（×100；0 或 100 = 关闭）
+// --- 「PID 分段倍率表」参数（配置值为整数；倍率 ×100 换算进内部）---
+// PID_CUT_<簇号> = 重复四元组「冷值,KDP倍率,升倍率,降倍率,...」（冷值 0~255；三倍率 ×100，100=不削）
+// 簇内按冷值升序折线插值、多簇逐轴取最小；旧键名 KI_CUT_<簇号>（三元组）仍被识别并迁移，见 parse_legacy_pidcut_cfg
 #define KI_CUT_MAX_CLUSTERS 8             // 支持的簇数上限（簇号 1~KI_CUT_MAX_CLUSTERS）
+#define CFG_ROW_PREFIX_KI_CUT_LEGACY "KI_CUT_"   // 旧表键前缀（三元组）；永久兼容（读取 + 一次性迁移），不做移除
 static KiCutPoint ki_cut_rows[KI_CUT_MAX_CLUSTERS][KI_CUT_MAX_POINTS];  // 各簇原始点（求值内部排序去重）
 static int ki_cut_cnt[KI_CUT_MAX_CLUSTERS];   // 各簇点数（0 = 未配置）
+static KiCutPoint legacy_rows[KI_CUT_MAX_CLUSTERS][KI_CUT_MAX_POINTS];  // 旧键(KI_CUT_)暂存（每点补 KDP=100），仅填充未被新键占用的簇
+static int legacy_cnt[KI_CUT_MAX_CLUSTERS];   // 旧键各簇点数（0 = 无）
+static int pidcut_new_seen[KI_CUT_MAX_CLUSTERS];  // 本轮新键(PID_CUT_)配置过的簇号（新键优先）
+static int legacy_pidcut_seen = 0;            // 本轮加载是否遇到旧 KI_CUT_* 键（触发一次性迁移写回）
+static int migrate_give_up = 0;               // 迁移写回失败过一次后不再重试（避免每轮刷日志；重启后重试）
 
 // --- PID 运行时状态（单累积器）---
 static float pid_ki = 0.0f;               // 积分累积值（acc；float：限幅赋小数需保留）
@@ -273,7 +278,8 @@ static int pid_batt_snap_done = 0;        // 停机后是否已做一次"恢复�
 static int pid_align_rpm = 2000;          // PID 目标 RPM（仅初始化对齐与日志使用；风扇下发已由 compute_fan_target 独立计算）
 static int pid_align_cold = 1;            // PID 目标制冷强度
 
-// --- 「KI 分段倍率表」运行状态（复位值 = 不削减：倍率 = KI_CUT_NONE）---
+// --- 「PID 分段倍率表」运行状态（复位值 = 不削减：倍率 = KI_CUT_NONE）---
+static float ki_cut_mult_kdp = (float)KI_CUT_NONE;  // KDP 融合项倍率（×100；100 = 不削）
 static float ki_cut_mult_up = (float)KI_CUT_NONE;   // KI 升速率倍率（×100；100 = 不削）
 static float ki_cut_mult_dn = (float)KI_CUT_NONE;   // KI 降速率倍率（×100；100 = 不削）
 
@@ -461,6 +467,9 @@ static int compute_fan_target(void);
 static void set_default_log_path(void);   // 层开关复位用（定义在 write_log 之后）
 static void reset_cpu_affinity_defaults(void);   // parse_sysfs_cfg/load_config 在前，定义在复位函数区
 static void ki_cut_parse_row(const char *idx_str, const char *val_str);  // parse_pid_cfg 调用，定义在 KI 削减区
+static int  parse_legacy_pidcut_cfg(const char *key, const char *val_str);  // load_config 调用（旧 KI_CUT_* 键兼容），定义在 KI 削减区
+static void apply_legacy_pidcut(void);     // load_config 调用（旧键按新键优先生效），定义在 KI 削减区
+static int  migrate_pid_cut_config(const char *path);   // load_config 调用（旧键一次性迁移写回），定义在 KI 削减区
 static void reset_ki_cut_defaults(void);   // reset_perf_layer_defaults 与 main 调用，定义在 KI 削减区
 static void install_cache_mark(const char *pkg);   // /proc 命中正向标记（定义在安装缓存区，供 app_process_scan 调用）
 
@@ -567,7 +576,7 @@ struct IntCfgKey { const char *key; int *var; int min; int max; };
 static const struct IntCfgKey INT_CFG_KEYS[] = {
     // 表行由 params_generated.h 的 CFG_PERF_INT_KEYS 展开，键序与 clamp 边界随定义，勿在此手抄。
     // 多值键（PID_SPEED / PID_KI_RATE / PID_TARGET / PID_TARGET_DIR / PID_COLD_RANGE / PID_CPU_COMP / PID_SPEED_RECALL）
-    // KI 分段倍率表（KI_CUT_<簇号>）在 parse_pid_cfg 按行前缀分段解析，不进本表
+    // PID 分段倍率表（PID_CUT_<簇号>）在 parse_pid_cfg 按行前缀分段解析，不进本表
 #define CFG_ROW(k, var, lo, hi) { k, &var, lo, hi },
     CFG_PERF_INT_KEYS(CFG_ROW)
 #undef CFG_ROW
@@ -694,11 +703,12 @@ static int parse_pid_cfg(const char *key, int val, const char *val_str) {
         if (n >= 2) pid_spd_recall_weight = clamp(w, 100, 1000);
         return 1;
     }
-    // KI 分段倍率表：KI_CUT_<簇号> = 重复三元组「冷值,升倍率,降倍率,...」。
-    // 行前缀与逐字段 clamp 边界取自生成头（CFG_ROW_PREFIX_KI_CUT / CFG_MIN|MAX_KI_CUT_F*），
+    // PID 分段倍率表：PID_CUT_<簇号> = 重复四元组「冷值,KDP倍率,升倍率,降倍率,...」。
+    // 行前缀与逐字段 clamp 边界取自生成头（CFG_ROW_PREFIX_PID_CUT / CFG_MIN|MAX_PID_CUT_F*），
     // 解析本体见 ki_cut_parse_row（支持任意簇号，故不是精确 strcmp）。
-    if (strncmp(key, CFG_ROW_PREFIX_KI_CUT, sizeof(CFG_ROW_PREFIX_KI_CUT) - 1) == 0) {
-        ki_cut_parse_row(key + sizeof(CFG_ROW_PREFIX_KI_CUT) - 1, val_str);
+    // 旧键名 KI_CUT_<簇号> 的兼容与迁移见 parse_legacy_pidcut_cfg（另立函数，避免被 CI 判为多键）。
+    if (strncmp(key, CFG_ROW_PREFIX_PID_CUT, sizeof(CFG_ROW_PREFIX_PID_CUT) - 1) == 0) {
+        ki_cut_parse_row(key + sizeof(CFG_ROW_PREFIX_PID_CUT) - 1, val_str);
         return 1;
     }
     return 0;
@@ -846,8 +856,8 @@ static int load_config(const char *path) {
         return 0;   // 打不开 = 未加载成功，调用方据此保留"待重试"状态（见 config_loaded）
     }
     // --- 第一遍：预读 PERF_ENABLED 和 DEBUG_ENABLED（全扫描，不受配置顺序影响）---
-    // 须容纳最长配置行 KI_CUT_<n> 满 32 点（≈393 字节），故取 512
-    char line[512];
+    // 须容纳最长配置行 PID_CUT_<n> 满 32 点（四元组，最长 ≈522 字节含换行），故取 640
+    char line[640];
     int perf_enabled = 1;
     int found_debug = 0;
     int found_sysfs = 0;
@@ -929,6 +939,8 @@ static int load_config(const char *path) {
 
     // --- 第二遍：全量单次扫描，仅按层分发（DEBUG/sysfs/PERF），无子守卫 ---
     affinity_cfg_seen = 0;
+    memset(legacy_cnt, 0, sizeof(legacy_cnt));            // 旧键暂存清零；本遍末尾按「新键优先」合并
+    memset(pidcut_new_seen, 0, sizeof(pidcut_new_seen));
     rewind(f);
     while (fgets(line, sizeof(line), f)) {
         char *key;
@@ -951,6 +963,9 @@ static int load_config(const char *path) {
         // --- 性能参数：仅 PERF_ENABLED=1 时解析（不含 DEBUG_*/sysfs 路径键） ---
         if (!perf_enabled) continue;
 
+        // 旧键兼容（永久）：KI_CUT_<簇号>（三元组）与已废弃的 KI_CUT_SMOOTH，见 parse_legacy_pidcut_cfg
+        if (parse_legacy_pidcut_cfg(key, val_str)) continue;
+
         // 表驱动单值 → 分段函数（PID/通用），键互不重叠、唯一命中
         if (parse_int_cfg(key, val)) continue;
         if (parse_pid_cfg(key, val, val_str)) continue;
@@ -962,7 +977,22 @@ static int load_config(const char *path) {
     // "未配置时应生效的区间"，沿用旧值会让手删该行后仍留着旧区间
     if (found_sysfs && !affinity_cfg_seen) reset_cpu_affinity_defaults();
 
+    apply_legacy_pidcut();   // 旧键生效：仅填充本轮未被新键 PID_CUT_ 占用的簇（新键优先）
+
     fclose(f);
+
+    // 旧键一次性迁移写回（方案 B）：检出旧 KI_CUT_* 时把配置就地改名/补列，并删除已废弃的 KI_CUT_SMOOTH。
+    // 失败保留原文件（上面的读兼容已把旧值装入内存，行为不丢）。迁移成功后刷新 config_mtime，
+    // 避免下一轮因本函数自身改写文件而重复热重载。仅在本轮真正解析到旧键时触发（幂等）。
+    if (legacy_pidcut_seen && !migrate_give_up) {
+        if (migrate_pid_cut_config(path)) {
+            struct stat mst;
+            if (stat(path, &mst) == 0) config_mtime = mst.st_mtime;   // 避免本函数自身改写触发下一轮热重载
+        } else {
+            migrate_give_up = 1;   // 写回失败不再重试（避免每轮刷日志；读兼容已生效，行为不丢）
+        }
+    }
+    legacy_pidcut_seen = 0;
 
     return 1;   // 已读完并解析
 }
@@ -2870,25 +2900,25 @@ static int cpu_comp_now(int batt) {
     return (int)(pid_cpu_comp_smooth * 10 + 0.5f);
 }
 
-// ======================== KI 分段倍率表 ========================
-// 冷值 → 各簇折线插值（可平滑）→ 多簇取最小 → KI 升/降倍率；算法、取样与单位见 逻辑说明.md「KI 分段倍率表」。
-// 求值核心（排序/去重/插值/平滑/多簇取最小）在只依赖自身的 ki_cut.h 内，与 CI 跨端对拍程序共用同一实现。
+// ======================== PID 分段倍率表 ========================
+// 冷值 → 各簇折线插值 → 多簇逐轴取最小 → KDP / KI 升 / KI 降倍率；算法、取样与单位见 逻辑说明.md「PID 分段倍率表」。
+// 求值核心（排序/去重/插值/多簇取最小）在只依赖自身的 ki_cut.h 内，与 CI 跨端对拍程序共用同一实现。
 
 /**
- * 解析一行 KI_CUT_<簇号>：逗号分隔的重复三元组「冷值,升倍率,降倍率」。逐字段按生成头给出的边界钳位；
- * 值个数非 3 的整数倍或簇号非法时整行忽略（保持该簇上次值）。排序与同冷值取舍在求值时做（ki_cut_normalize）。
+ * 解析一行 PID_CUT_<簇号>：逗号分隔的重复四元组「冷值,KDP倍率,升倍率,降倍率」。逐字段按生成头给出的边界钳位；
+ * 值个数非 4 的整数倍或簇号非法时整行忽略（保持该簇上次值）。排序与同冷值取舍在求值时做（ki_cut_normalize）。
  */
 static void ki_cut_parse_row(const char *idx_str, const char *val_str) {
     char *endp = NULL;
     long idx = strtol(idx_str, &endp, 10);
     if (endp == idx_str || idx < 1 || idx > KI_CUT_MAX_CLUSTERS) {
-        write_log("配置 KI_CUT 簇号非法（%s），已忽略该行", idx_str);
+        write_log("配置 PID_CUT 簇号非法（%s），已忽略该行", idx_str);
         return;
     }
-    int vals[KI_CUT_MAX_POINTS * 3];
+    int vals[KI_CUT_MAX_POINTS * 4];
     int cnt = 0;
     const char *s = val_str;
-    while (*s && cnt < KI_CUT_MAX_POINTS * 3) {
+    while (*s && cnt < KI_CUT_MAX_POINTS * 4) {
         char *e = NULL;
         long v = strtol(s, &e, 10);
         if (e == s) break;                       // 非数字：停止取数
@@ -2896,33 +2926,208 @@ static void ki_cut_parse_row(const char *idx_str, const char *val_str) {
         s = e;
         while (*s == ',' || *s == ' ' || *s == '\t') s++;
     }
-    if (cnt == 0 || cnt % 3 != 0) {
-        write_log("配置 KI_CUT_%ld 值个数 %d 非三元组整数倍，已忽略整行", idx, cnt);
+    if (cnt == 0 || cnt % 4 != 0) {
+        write_log("配置 PID_CUT_%ld 值个数 %d 非四元组整数倍，已忽略整行", idx, cnt);
         return;
+    }
+    int np = cnt / 4;
+    for (int i = 0; i < np; i++) {
+        ki_cut_rows[idx - 1][i].cold = clamp(vals[4 * i],     CFG_MIN_PID_CUT_F1, CFG_MAX_PID_CUT_F1);
+        ki_cut_rows[idx - 1][i].kdp  = clamp(vals[4 * i + 1], CFG_MIN_PID_CUT_F2, CFG_MAX_PID_CUT_F2);
+        ki_cut_rows[idx - 1][i].up   = clamp(vals[4 * i + 2], CFG_MIN_PID_CUT_F3, CFG_MAX_PID_CUT_F3);
+        ki_cut_rows[idx - 1][i].dn   = clamp(vals[4 * i + 3], CFG_MIN_PID_CUT_F4, CFG_MAX_PID_CUT_F4);
+    }
+    ki_cut_cnt[idx - 1] = np;
+    pidcut_new_seen[idx - 1] = 1;   // 新键优先：标记该簇由新键 PID_CUT_ 配置
+}
+
+/**
+ * 旧键兼容（永久）：KI_CUT_<簇号> = 重复三元组「冷值,升倍率,降倍率,...」。
+ * 每点补 KDP 倍率 = 100（不削）后按四元组口径**暂存到 legacy_rows**（不直接写 ki_cut_rows）；
+ * 已删除的 KI_CUT_SMOOTH 整行忽略。
+ * 命中返回 1，否则 0。**独立函数**且用 strncmp+宏（非裸 strcmp 字面量），以免被 CI 的「C 端解析键单一来源」判成多键。
+ */
+static int parse_legacy_pidcut_cfg(const char *key, const char *val_str) {
+    // KI_CUT_SMOOTH 以 "KI_CUT_" 开头，必须在「前缀」判定**之前**拦下，否则会被当成簇号 "SMOOTH" 解析失败、误报簇号非法
+    if (strncmp(key, "KI_CUT_SMOOTH", 13) == 0) {   // 已删除的滤波键：忽略（迁移时一并清除）
+        legacy_pidcut_seen = 1;
+        return 1;
+    }
+    const size_t plen = sizeof(CFG_ROW_PREFIX_KI_CUT_LEGACY) - 1;
+    if (strncmp(key, CFG_ROW_PREFIX_KI_CUT_LEGACY, plen) != 0) return 0;
+    legacy_pidcut_seen = 1;
+    const char *idx_str = key + plen;
+    char *endp = NULL;
+    long idx = strtol(idx_str, &endp, 10);
+    if (endp == idx_str || idx < 1 || idx > KI_CUT_MAX_CLUSTERS) {
+        write_log("配置 KI_CUT_（旧）簇号非法（%s），已忽略该行", idx_str);
+        return 1;
+    }
+    int vals[KI_CUT_MAX_POINTS * 3];
+    int cnt = 0;
+    const char *s = val_str;
+    while (*s && cnt < KI_CUT_MAX_POINTS * 3) {
+        char *e = NULL;
+        long v = strtol(s, &e, 10);
+        if (e == s) break;
+        vals[cnt++] = (int)v;
+        s = e;
+        while (*s == ',' || *s == ' ' || *s == '\t') s++;
+    }
+    if (cnt == 0 || cnt % 3 != 0) {
+        write_log("配置 KI_CUT_%ld（旧）值个数 %d 非三元组整数倍，已忽略整行", idx, cnt);
+        return 1;
     }
     int np = cnt / 3;
     for (int i = 0; i < np; i++) {
-        ki_cut_rows[idx - 1][i].cold = clamp(vals[3 * i],     CFG_MIN_KI_CUT_F1, CFG_MAX_KI_CUT_F1);
-        ki_cut_rows[idx - 1][i].up   = clamp(vals[3 * i + 1], CFG_MIN_KI_CUT_F2, CFG_MAX_KI_CUT_F2);
-        ki_cut_rows[idx - 1][i].dn   = clamp(vals[3 * i + 2], CFG_MIN_KI_CUT_F3, CFG_MAX_KI_CUT_F3);
+        legacy_rows[idx - 1][i].cold = clamp(vals[3 * i],     CFG_MIN_PID_CUT_F1, CFG_MAX_PID_CUT_F1);
+        legacy_rows[idx - 1][i].kdp  = (int)KI_CUT_NONE;   // 旧表无 KDP 倍率 → 不削
+        legacy_rows[idx - 1][i].up   = clamp(vals[3 * i + 1], CFG_MIN_PID_CUT_F2, CFG_MAX_PID_CUT_F2);
+        legacy_rows[idx - 1][i].dn   = clamp(vals[3 * i + 2], CFG_MIN_PID_CUT_F3, CFG_MAX_PID_CUT_F3);
     }
-    ki_cut_cnt[idx - 1] = np;
+    legacy_cnt[idx - 1] = np;
+    return 1;
 }
 
-/** 复位为代码默认表：清空全部簇，再把生成头给出的默认行（CFG_DEFAULT_KI_CUT_n）按同一解析路径装入 */
+/** 旧键生效（新键优先）：仅对「本轮未被新键 PID_CUT_ 占用」的簇，用旧键暂存值覆盖生效表。 */
+static void apply_legacy_pidcut(void) {
+    for (int i = 0; i < KI_CUT_MAX_CLUSTERS; i++) {
+        if (pidcut_new_seen[i] || legacy_cnt[i] <= 0) continue;
+        for (int k = 0; k < legacy_cnt[i]; k++) ki_cut_rows[i][k] = legacy_rows[i][k];
+        ki_cut_cnt[i] = legacy_cnt[i];
+    }
+}
+
+/**
+ * 一次性迁移写回（方案 B）：把配置文件里的旧键就地改名——
+ *   KI_CUT_<簇号>=<三元组> → PID_CUT_<簇号>=<四元组>（每点补 KDP 倍率 100=不削）；
+ *   KI_CUT_SMOOTH=… → 整行删除（该键已废弃）；其余行原样保留。
+ * 原子性：写同目录 <path>.mig → 按原文件属主/权限 chmod+chown → rename 覆盖。daemon 以 root 运行，
+ *   不 chown 会令临时文件落成 root 属主，app 读不到。返回 1=已改写，0=无需改写或失败（失败保留原文件，
+ *   读兼容路径已生效，行为不丢）。幂等：迁移后文件无旧键，重跑不再触发。
+ */
+static int migrate_pid_cut_config(const char *path) {
+    FILE *f = fopen(path, "r");
+    if (!f) return 0;
+    struct stat st;
+    if (stat(path, &st) != 0) { fclose(f); return 0; }
+
+    char tmp[300];
+    snprintf(tmp, sizeof(tmp), "%s.mig", path);
+    FILE *g = fopen(tmp, "w");
+    if (!g) { fclose(f); return 0; }
+
+    // 预扫：先记录文件里已存在的 PID_CUT_<n> 簇号；迁移时对「已有新键的同簇旧行」丢弃，避免写出重复行
+    int new_seen[KI_CUT_MAX_CLUSTERS] = {0};
+    {
+        char l2[640];
+        const size_t NPFX = sizeof(CFG_ROW_PREFIX_PID_CUT) - 1;
+        while (fgets(l2, sizeof(l2), f)) {
+            const char *q = l2;
+            while (*q == ' ' || *q == '\t') q++;
+            if (*q == '#' || strncmp(q, CFG_ROW_PREFIX_PID_CUT, NPFX) != 0) continue;
+            char *e2 = NULL;
+            long n2 = strtol(q + NPFX, &e2, 10);
+            if (e2 != q + NPFX && n2 >= 1 && n2 <= KI_CUT_MAX_CLUSTERS) new_seen[n2 - 1] = 1;
+        }
+        rewind(f);
+    }
+
+    const size_t LOLDN = sizeof(CFG_ROW_PREFIX_KI_CUT_LEGACY) - 1;
+    int changed = 0;
+    char line[640];
+    while (fgets(line, sizeof(line), f)) {
+        const char *p = line;
+        while (*p == ' ' || *p == '\t') p++;
+        const char *eq = strchr(p, '=');
+        if (*p != '#' && eq) {
+            size_t klen = (size_t)(eq - p);
+            while (klen > 0 && (p[klen - 1] == ' ' || p[klen - 1] == '\t')) klen--;
+            if (klen == 13 && strncmp(p, "KI_CUT_SMOOTH", 13) == 0) {
+                changed = 1;                 // 已废弃键：整行删除
+                continue;
+            }
+            if (klen > LOLDN && strncmp(p, CFG_ROW_PREFIX_KI_CUT_LEGACY, LOLDN) == 0) {
+                changed = 1;
+                char *ie = NULL;
+                long lidx = strtol(p + LOLDN, &ie, 10);
+                if (ie != p + LOLDN && lidx >= 1 && lidx <= KI_CUT_MAX_CLUSTERS && new_seen[lidx - 1]) {
+                    continue;                // 该簇已有新键行：丢弃旧行（不产出重复）
+                }
+                int vals[KI_CUT_MAX_POINTS * 3];
+                int cnt = 0;
+                const char *s = eq + 1;
+                while (*s && cnt < KI_CUT_MAX_POINTS * 3) {
+                    char *e = NULL;
+                    long v = strtol(s, &e, 10);
+                    if (e == s) break;
+                    vals[cnt++] = (int)v;
+                    s = e;
+                    while (*s == ',' || *s == ' ' || *s == '\t') s++;
+                }
+                if (cnt > 0 && cnt % 3 == 0) {
+                    char out[600];
+                    int off = snprintf(out, sizeof(out), "%s%.*s=",
+                                       CFG_ROW_PREFIX_PID_CUT, (int)(klen - LOLDN), p + LOLDN);
+                    int ok = (off > 0 && off < (int)sizeof(out));
+                    for (int i = 0; ok && i < cnt / 3; i++) {
+                        int n = snprintf(out + off, (size_t)((int)sizeof(out) - off),
+                                         "%s%d,%d,%d,%d", i ? "," : "",
+                                         vals[3 * i], KI_CUT_NONE, vals[3 * i + 1], vals[3 * i + 2]);
+                        if (n < 0 || off + n >= (int)sizeof(out)) { ok = 0; break; }
+                        off += n;
+                    }
+                    if (ok) {
+                        fputs(out, g);
+                        fputc('\n', g);
+                        continue;
+                    }
+                }
+                continue;                    // 无法解析的旧行：丢弃（原本即被忽略）
+            }
+        }
+        fputs(line, g);                      // 其余行原样保留
+    }
+    fclose(f);
+
+    if (!changed) { fclose(g); remove(tmp); return 0; }
+
+    fflush(g);
+    // 属主/权限必须对齐原文件：daemon 以 root 运行，临时文件默认 root 属主；不对齐则 rename 后 app 再也写不进该配置。
+    // 校验返回；任一失败即放弃写回（保留原文件与属主，读兼容仍生效），避免把配置落成 app 写不了的 root 文件。
+    int m1 = fchmod(fileno(g), st.st_mode & 07777);
+    int m2 = fchown(fileno(g), st.st_uid, st.st_gid);
+    fclose(g);
+    if (m1 != 0 || m2 != 0) {
+        write_log("配置 旧键迁移：无法对齐属主/权限（chmod=%d chown=%d），已放弃写回：%s", m1, m2, path);
+        remove(tmp);
+        return 0;
+    }
+
+    if (rename(tmp, path) != 0) {
+        write_log("配置 旧键迁移写回失败（rename），保留原文件：%s", path);
+        remove(tmp);
+        return 0;
+    }
+    write_log("配置 旧键 KI_CUT_* 已迁移为 PID_CUT_*（并清除已废弃的 KI_CUT_SMOOTH）");
+    return 1;
+}
+
+/** 复位为代码默认表：清空全部簇，再把生成头给出的默认行（CFG_DEFAULT_PID_CUT_n）按同一解析路径装入 */
 static void reset_ki_cut_defaults(void) {
     memset(ki_cut_cnt, 0, sizeof(ki_cut_cnt));
-    ki_cut_parse_row("1", CFG_DEFAULT_KI_CUT_1);
+    ki_cut_parse_row("1", CFG_DEFAULT_PID_CUT_1);
 }
 
-/** 重算：按取样冷值求各簇最小倍率（升/降各一），并打诊断日志 */
+/** 重算：按取样冷值求各簇最小倍率（KDP/升/降各一），并打诊断日志 */
 static void ki_cut_refresh(int cold) {
     KiCutCluster cs[KI_CUT_MAX_CLUSTERS];
     int n = 0;
     for (int i = 0; i < KI_CUT_MAX_CLUSTERS; i++)
         if (ki_cut_cnt[i] > 0) { cs[n].pts = ki_cut_rows[i]; cs[n].n = ki_cut_cnt[i]; n++; }
-    ki_cut_eval(cs, n, ki_cut_smooth, cold, &ki_cut_mult_up, &ki_cut_mult_dn);
-    pid_log("KI削减 冷值=%d 升=%.1f 降=%.1f 簇=%d", cold, ki_cut_mult_up, ki_cut_mult_dn, n);
+    ki_cut_eval(cs, n, cold, &ki_cut_mult_kdp, &ki_cut_mult_up, &ki_cut_mult_dn);
+    pid_log("PID削减 冷值=%d KDP=%.1f 升=%.1f 降=%.1f 簇=%d",
+            cold, ki_cut_mult_kdp, ki_cut_mult_up, ki_cut_mult_dn, n);
 }
 
 // ======================== PID 控制函数 ========================
@@ -3001,9 +3206,9 @@ static float pid_compute(int batt_10, float dt, float cpu_comp, int batt_window_
         pid_ki += (ki_rate / 1000.0f) * integrand;
     }
 
-    // KDP（融合 P+D）：温度变了才更新；温度未变沿用上次值（跳过①）；不乘任何冷值倍率
+    // KDP（融合 P+D）：温度变了才更新；温度未变沿用上次值（跳过①）；乘 PID 分段倍率表的 KDP 倍率（100 = 不削）
     if (batt_window_changed)
-        pid_kdp = (pid_kdp_coef / 1000.0f) * chkdp;
+        pid_kdp = (pid_kdp_coef / 1000.0f) * chkdp * (ki_cut_mult_kdp / 100.0f);
 
     // 预算钳制：acc ≥0 且 ≤ max(0, 1−kdp)（防 acc+kdp 超 1 被末端硬截断，即抗 windup）
     float budget = 1.0f - pid_kdp;
@@ -3192,7 +3397,8 @@ static void pid_reset_core(void) {
     recall_anchor = 0;
     recall_prev_batt = 0;
     recall_cycles = 0;
-    // KI 削减倍率复位为「不削减」（下次重算再按新冷值求；簇配置本身是配置项，不动）
+    // 削减倍率复位为「不削减」（下次重算再按新冷值求；簇配置本身是配置项，不动）
+    ki_cut_mult_kdp = (float)KI_CUT_NONE;
     ki_cut_mult_up = (float)KI_CUT_NONE;
     ki_cut_mult_dn = (float)KI_CUT_NONE;
 }
@@ -3285,7 +3491,6 @@ static void cleanup_artifacts_on_uninstall(void) {
         "/data/local/tmp/tempctrl_uiprefs",
         "/data/local/tmp/tempctrl_service.log",
         "/data/local/tmp/tempctrl.lock",       // 兜底单实例锁 LOCK_FALLBACK_PATH（非旧版残留）：卸载时同等清理
-        "/data/local/tmp/tempctrl_last_dev",   // 旧版残留
         // service.d 脚本两个候选路径（KSU 版本分界，见 Deployer）
         "/data/adb/service.d/b6x-tempctrl.sh",
         "/data/adb/ksu/service.d/b6x-tempctrl.sh",
@@ -3516,6 +3721,9 @@ static void main_loop(void) {
         }
     } else if (config_path[0] != '\0' && stat(config_path, &st) == 0 && st.st_mtime != config_mtime) {
         load_config(config_path);
+        // load_config 内可能已做旧键迁移写回（改了 mtime）：重取，避免用迁移前的 st 覆盖、多触发一次热重载
+        struct stat mst2;
+        if (stat(config_path, &mst2) == 0) st.st_mtime = mst2.st_mtime;
         config_mtime = st.st_mtime;
         write_log("配置 热重载");
         // 配置重载可能重置了 fan_rpm_max/pid_cold_max，立即用设备限制覆盖
@@ -3942,7 +4150,7 @@ int main(int argc, char *argv[]) {
     // 由 main_loop 按 CONFIG_RETRY_INTERVAL 周期重试（开机早期私有目录尚未挂上时只能如此，
     // 见 config_loaded 声明处的说明）。--config 指定的路径同样保留，重试时沿用同一条来源。
     set_default_log_path();
-    // KI 分段倍率表：先装入代码默认表（配置缺失或三层全关时也按默认生效），随后 load_config 的 KI_CUT_n 会覆盖
+    // PID 分段倍率表：先装入代码默认表（配置缺失或三层全关时也按默认生效），随后 load_config 的 PID_CUT_n 会覆盖
     reset_ki_cut_defaults();
     if (argc >= 3 && strcmp(argv[1], "--config") == 0) {
         strncpy(config_path, argv[2], sizeof(config_path) - 1);

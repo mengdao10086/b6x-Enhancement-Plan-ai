@@ -29,9 +29,6 @@ import java.util.Locale;
  */
 final class KiCutChartView extends View {
 
-    /** 横轴刻度段数（0 / 四分之一 … / 上限）。 */
-    private static final int X_TICKS = 4;
-
     private static final float LINE_WIDTH_DP = 2f;
     private static final float GRID_WIDTH_DP = 1f;
     private static final float REF_WIDTH_DP = 1.5f;
@@ -59,6 +56,8 @@ final class KiCutChartView extends View {
     private float[] dn = new float[0];
     private int xMax = 190;
     private int target = -1;
+    /** 横轴刻度（表里各点冷值 ∪ {0, xMax}，去重升序）；由 {@link #setCurves} 注入、onDraw 消费。 */
+    private int[] ticks = new int[0];
 
     // ---- setCurves 产物：纵轴定标与其刻度；onDraw 只消费 ----
     private ChartAxis axis;
@@ -96,12 +95,17 @@ final class KiCutChartView extends View {
                 new float[]{TARGET_DASH_ON_DP * density, TARGET_DASH_OFF_DP * density}, 0f));
     }
 
-    /** 上屏一批曲线数据（主线程）：{@code up}/{@code dn} 长度 = {@code xMax + 1}，逐格取值。 */
-    void setCurves(@NonNull float[] up, @NonNull float[] dn, int xMax, int target) {
+    /**
+     * 上屏一批曲线数据（主线程）：{@code up}/{@code dn} 长度 = {@code xMax + 1}，逐格取值；
+     * {@code xTicks} 是横轴刻度（表里各点的冷值 ∪ {0, xMax}，去重升序，<b>不抽稀</b>、允许重叠）。
+     */
+    void setCurves(@NonNull float[] up, @NonNull float[] dn, int xMax, int target,
+                   @NonNull int[] xTicks) {
         this.up = up;
         this.dn = dn;
         this.xMax = Math.max(1, xMax);
         this.target = target;
+        this.ticks = xTicks;
         fitAxis();
         invalidate();
     }
@@ -203,10 +207,9 @@ final class KiCutChartView extends View {
         float refY = axis.y(KiCutTable.NEUTRAL, plotT, plotB - plotT);
         canvas.drawLine(plotL, refY, plotR, refY, refPaint);
 
-        // 横轴刻度 + 刻度数字
+        // 横轴刻度 + 刻度数字：刻度由调用方给定（表里各点冷值 ∪ {0, xMax}），不抽稀、允许重叠
         textPaint.setTextAlign(Paint.Align.CENTER);
-        for (int i = 0; i <= X_TICKS; i++) {
-            int x = Math.round(xMax * (i / (float) X_TICKS));
+        for (int x : ticks) {
             float px = gridX(x, plotL, plotR);
             canvas.drawLine(px, plotT, px, plotB, gridPaint);
             String text = label(x);

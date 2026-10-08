@@ -1224,7 +1224,7 @@ public final class ConfigStore {
                     boolean family = familyByPrefix.containsValue(e.getKey());
                     sb.append('\n').append("# ")
                             .append(comment == null ? e.getKey() : comment)
-                            .append(family ? "（本族由界面补写）\n" : "（本行由界面补写）\n");
+                            .append('\n');
                     if (family) {
                         List<String> block = familyLines(families.get(e.getKey()), e.getValue());
                         for (String row : block) {

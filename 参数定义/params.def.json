@@ -7,7 +7,7 @@
     "  factory = 出厂值（配置文件**不存在**时由部署流程写入的值）。配置文件已存在时一律保留既有值，不覆盖。profile.conf 写出的是它。",
     "  绝大多数键两者相同；不同者仅 PERF_ENABLED / APP_LAUNCH_ENABLED / APP_WATCHDOG 三个（见 对齐报告.md）。",
     "键序 = profile.conf 的书写顺序（同时也是界面渲染顺序）；范围以 tempctrl.c 的 clamp/护栏为准。",
-    "type 取值：switch（0/1 布尔）· int（单整数）· multi（多值，范围在 fields）· path（路径字符串，无范围）· enum（文本枚举，取值域在 options）· table（表键：rowPrefix 行前缀 + rowFields 逐字段范围 + defaultRows 默认行，界面渲染为表编辑器，如 KI_CUT）。",
+    "type 取值：switch（0/1 布尔）· int（单整数）· multi（多值，范围在 fields）· path（路径字符串，无范围）· enum（文本枚举，取值域在 options）· table（表键：rowPrefix 行前缀 + rowFields 逐字段范围 + defaultRows 默认行，界面渲染为表编辑器，如 PID_CUT）。",
     "min/max：switch/int 为整数；multi 为 null（逐字段见 fields）；path 为 null（字符串无范围）；enum 为 null（值域见 options）；table 为 null（逐字段见 rowFields）。",
     "unit：有单位则填；无单位必须写 unitNote 说明原因，不得留空。",
     "requires：该键生效的前置键（值为 1 时本键才被读取）。",
@@ -414,7 +414,7 @@
       "daemonConsumes": true,
       "fields": [
         { "label": "起始强度", "unit": "制冷强度档位", "min": 0, "max": 194, "default": 40, "cVar": "cold_map_start" },
-        { "label": "指数", "unit": "×100（存储值 150 = 实际指数 1.50）", "min": 50, "max": 500, "default": 150, "cVar": "cold_map_exp" }
+        { "label": "指数", "unit": "", "unitNote": "无量纲，存储值 = 实际指数 ×100（150 = 1.50）", "min": 50, "max": 500, "default": 150, "cVar": "cold_map_exp" }
       ]
     },
     {
@@ -530,7 +530,7 @@
       "group": "perf",
       "role": "setting",
       "type": "int",
-      "label": "KDP 融合系数(÷1000)",
+      "label": "KDP 融合系数",
       "desc": "kdp = 系数/1000 ×（误差 + 速度项×0.33 + CPU 补偿）；速度项已按 PID_SPEED 缩放；无记忆，温度未变时沿用上周期值",
       "cTable": "perf-int",
       "docOrder": 14,
@@ -541,8 +541,8 @@
         "KDP 融合系数（÷1000，1~1000，默认 300）：kdp = 系数/1000 ×（误差 + 速度项×0.33 + CPU 补偿）",
         "  无记忆；温度未变时沿用上周期 kdp（速度项定义见 PID_SPEED）"
       ],
-      "unit": "×1000（存储值 300 = 实际系数 0.300）",
-      "unitNote": "",
+      "unit": "",
+      "unitNote": "无量纲融合系数，存储值 = 实际系数 ×1000（300 = 0.300）",
       "default": 300,
       "factory": 300,
       "min": 1,
@@ -556,7 +556,7 @@
       "group": "perf",
       "role": "setting",
       "type": "multi",
-      "label": "KI 积分升/降速率(÷1000)",
+      "label": "KI 积分升/降速率",
       "desc": "被积项 = ch − 动态目标；被积项 ≥0 用升速率、<0 用降速率，每周期 积分累积值 += 速率/1000 × 被积项（不乘 dt）；默认 20 30",
       "docOrder": 15,
       "docDesc": "KI 积分升/降速率（双值，均 ÷1000：升速率 降速率）。被积项 `ch−target_f ≥ 0` 用升速率、`< 0` 用降速率；`acc += 速率×(ch−target_f)` 不乘 dt，`acc` 钳 `[0, 1−kdp]`（抗 windup）。默认 20 30（降快于升），可独立调整",
@@ -575,8 +575,8 @@
       "requires": ["PERF_ENABLED"],
       "daemonConsumes": true,
       "fields": [
-        { "label": "升速率", "unit": "×1000", "min": 1, "max": 1000, "default": 20, "cVar": "pid_ki_up_coef" },
-        { "label": "降速率", "unit": "×1000", "min": 1, "max": 1000, "default": 30, "cVar": "pid_ki_down_coef" }
+        { "label": "升速率", "unit": "", "unitNote": "无量纲，存储值 = 实际速率 ×1000", "min": 1, "max": 1000, "default": 20, "cVar": "pid_ki_up_coef" },
+        { "label": "降速率", "unit": "", "unitNote": "无量纲，存储值 = 实际速率 ×1000", "min": 1, "max": 1000, "default": 30, "cVar": "pid_ki_down_coef" }
       ]
     },
     {
@@ -585,7 +585,7 @@
       "role": "setting",
       "type": "multi",
       "label": "速度倍率与非线性",
-      "desc": "三值：速度倍率（÷10，100 = 速度×10，0=关闭）· 非线性阈值 L（÷100，20 = 0.20 °C/周期）· 非线性强度 q（÷100，100 = 1.00，0 = 不降权）；速度幅度 ≥ L 完全跟随，< L 按幂曲线降权",
+      "desc": "三值：速度倍率 · 非线性阈值 L（°C/周期）· 非线性强度 q；速度幅度 ≥ L 完全跟随，< L 按幂曲线降权",
       "docOrder": 16,
       "docDesc": "速度项（三值：速度倍率 ÷10 · 非线性阈值 L ÷100 · 非线性强度 q ÷100，默认 100 20 100 = ×10 / 0.20 °C/周期 / 1.00）。`ch = error + v×倍率/10 + cpu_comp`，同时进入 KDP 的 `ch_kdp`（速度项按 0.33 衰减）；`|v| ≥ L` 严格恒等（1:1、无恒定偏置），`|v| < L` 按平滑阶跃取 q 次幂降权（q=0 位精确恒等、不降权），保号且 |输出| ≤ |v|；倍率越大越跟手",
       "confNote": [
@@ -603,9 +603,9 @@
       "requires": ["PERF_ENABLED"],
       "daemonConsumes": true,
       "fields": [
-        { "label": "速度倍率(÷10)", "unit": "×10（存储值 100 = 实际倍率 10）", "min": 0, "max": 1000, "default": 100, "cVar": "pid_speed_coef" },
-        { "label": "速度非线性阈值(÷100)", "unit": "×100（存储值 20 = 实际阈值 0.20 °C/周期）", "min": 10, "max": 100, "default": 20, "cVar": "pid_spd_nl_thr_p100" },
-        { "label": "速度非线性强度(÷100)", "unit": "×100（存储值 100 = 实际强度 1.00）", "min": 0, "max": 400, "default": 100, "cVar": "pid_spd_nl_exp_p100" }
+        { "label": "速度倍率", "unit": "", "unitNote": "无量纲，存储值 = 实际倍率 ×10（100 = ×10）", "min": 0, "max": 1000, "default": 100, "cVar": "pid_speed_coef" },
+        { "label": "速度非线性阈值", "unit": "", "unitNote": "°C/周期，存储值 = 实际阈值 ×100（20 = 0.20）", "min": 10, "max": 100, "default": 20, "cVar": "pid_spd_nl_thr_p100" },
+        { "label": "速度非线性强度", "unit": "", "unitNote": "无量纲，存储值 = 实际强度 ×100（100 = 1.00）", "min": 0, "max": 400, "default": 100, "cVar": "pid_spd_nl_exp_p100" }
       ]
     },
     {
@@ -633,7 +633,7 @@
       "requires": ["PERF_ENABLED"],
       "daemonConsumes": true,
       "fields": [
-        { "label": "目标系数", "unit": "×1000", "min": 1, "max": 1000, "default": 20, "cVar": "pid_target_coef" },
+        { "label": "目标系数", "unit": "", "unitNote": "无量纲，存储值 = 实际系数 ×1000", "min": 1, "max": 1000, "default": 20, "cVar": "pid_target_coef" },
         { "label": "目标平滑(%)", "unit": "%", "min": 1, "max": 100, "default": 10, "cVar": "pid_target_alpha" },
         { "label": "目标上限(0.1°C)", "unit": "0.1°C", "min": 1, "max": 100, "default": 15, "cVar": "pid_target_max" }
       ]
@@ -749,7 +749,7 @@
       "daemonConsumes": true,
       "fields": [
         { "bool": true, "label": "开关", "unit": "", "unitNote": "布尔子开关，取值 0/1", "min": 0, "max": 1, "default": 1, "cVar": null },
-        { "label": "回溯速度权重(÷1000)", "unit": "×1000", "min": 100, "max": 1000, "default": 1000, "cVar": "pid_spd_recall_weight" }
+        { "label": "回溯速度权重", "unit": "", "unitNote": "无量纲，存储值 = 实际权重 ×1000（1000 = 全量）", "min": 100, "max": 1000, "default": 1000, "cVar": "pid_spd_recall_weight" }
       ]
     },
     {
@@ -781,60 +781,38 @@
       ]
     },
     {
-      "key": "KI_CUT",
+      "key": "PID_CUT",
       "group": "perf",
       "role": "setting",
       "type": "table",
-      "label": "KI 分段倍率表",
-      "desc": "按冷值分段削减 KI 升/降速率（倍率 ×100：100=不削、0=完全压死，各 0~200）。每行一个簇，行值为重复三元组「冷值,升倍率,降倍率,...」（冷值 0~255）：簇内按冷值升序折线插值、两端外平推，多簇取最小倍率",
+      "label": "PID 分段倍率表",
+      "desc": "按冷值分段削减 PID 的 KDP 与 KI 升/降速率（倍率 100=不削、0=完全压死，各 0~200）。每行一个簇，行值为重复四元组「冷值,KDP倍率,升倍率,降倍率,...」（冷值 0~255）：簇内按冷值升序折线插值、两端外平推，多簇取最小倍率",
       "docOrder": 23,
-      "docDesc": "KI 分段倍率表（每行一个簇；行值为重复三元组：冷值 升倍率 降倍率，冷值 0~255、倍率 0~200，均 ×100：100=不削、0=完全压死）。取**上次 PID 重算**的目标冷值：簇内按冷值升序折线插值、两端外平推；多簇取各簇值的**最小**倍率（削减更大者优先）；无有效簇则不削减。配置键为 `KI_CUT_1`、`KI_CUT_2`…（簇号从 1 起连续）；平滑系数见 `KI_CUT_SMOOTH`。作用点：升/降倍率分别乘进 KI 升速率、KI 降速率（不作用于 KDP）",
+      "docDesc": "PID 分段倍率表（每行一个簇；行值为重复四元组：冷值 KDP倍率 升倍率 降倍率，冷值 0~255、各倍率 0~200，均 ×100：100=不削、0=完全压死）。取**上次 PID 重算**的目标冷值：簇内按冷值升序折线插值、两端外平推；多簇取各簇值的**最小**倍率（削减更大者优先）；无有效簇则不削减。配置键为 `PID_CUT_1`、`PID_CUT_2`…（簇号从 1 起连续）。作用点：KDP 倍率乘进 KDP 融合项（`pid_kdp`），升/降倍率分别乘进 KI 升速率、KI 降速率",
       "confNote": [
-        "--- KI 分段倍率表 ---",
-        "按冷值分段削减 KI 升/降速率（调积分速率，不调风扇转速）",
-        "格式（行值）：冷值,升倍率,降倍率,冷值,升倍率,降倍率,...（重复三元组，簇内乱序可容忍）",
-        "  冷值 0~255（制冷强度档位）；升/降倍率 ×100（100=不削、0=完全压死），范围 0~200",
+        "--- PID 分段倍率表 ---",
+        "按冷值分段削减 PID 的 KDP 与 KI 升/降速率（调 KDP 融合项与积分速率，不调风扇转速）",
+        "格式（行值）：冷值,KDP倍率,升倍率,降倍率,冷值,KDP倍率,升倍率,降倍率,...（重复四元组，簇内乱序可容忍）",
+        "  冷值 0~255（制冷强度档位）；三个倍率均 ×100（100=不削、0=完全压死），范围 0~200",
         "  簇内按冷值升序折线插值，两端外平推；多簇取最小倍率；无有效簇则不削减",
-        "  键名 KI_CUT_1 / KI_CUT_2 …（簇号从 1 起，连续）"
+        "  键名 PID_CUT_1 / PID_CUT_2 …（簇号从 1 起，连续）",
+        "  旧键名 KI_CUT_<簇号>（三元组、无 KDP 倍率）仍被识别，并自动迁移为 PID_CUT_<簇号>（KDP 倍率补 100=不削）"
       ],
       "unit": "",
       "unitNote": "表键，各字段单位见 rowFields",
-      "default": ["1,100,50,40,100,100,100,70,80,190,50,65"],
-      "factory": ["1,100,50,40,100,100,100,70,80,190,50,65"],
+      "default": ["1,100,100,50,40,100,100,100,100,100,70,80,190,100,50,65"],
+      "factory": ["1,100,100,50,40,100,100,100,100,100,70,80,190,100,50,65"],
       "min": null,
       "max": null,
-      "rangeNote": "范围逐字段见 rowFields（冷值 0~255、升/降倍率 0~200）",
-      "rowPrefix": "KI_CUT_",
+      "rangeNote": "范围逐字段见 rowFields（冷值 0~255、三个倍率 0~200）",
+      "rowPrefix": "PID_CUT_",
       "rowFields": [
         { "label": "冷值", "min": 0, "max": 255, "unit": "制冷强度档位" },
-        { "label": "KI 升倍率", "min": 0, "max": 200, "unit": "×100（100=不削）" },
-        { "label": "KI 降倍率", "min": 0, "max": 200, "unit": "×100（100=不削）" }
+        { "label": "KDP 倍率", "min": 0, "max": 200, "unit": "", "unitNote": "×100（100=不削）" },
+        { "label": "升倍率", "min": 0, "max": 200, "unit": "", "unitNote": "×100（100=不削）" },
+        { "label": "降倍率", "min": 0, "max": 200, "unit": "", "unitNote": "×100（100=不削）" }
       ],
-      "defaultRows": ["1,100,50,40,100,100,100,70,80,190,50,65"],
-      "requires": ["PERF_ENABLED"],
-      "daemonConsumes": true,
-      "fields": null
-    },
-    {
-      "key": "KI_CUT_SMOOTH",
-      "group": "perf",
-      "role": "setting",
-      "type": "int",
-      "label": "KI 分段倍率 平滑系数",
-      "desc": "KI 分段倍率表的零相位平滑系数（×100，0~100，默认 15=0.15）：对折线序列正向+反向各一遍 EMA，再按配置点残差线性回补（配置点上取值不变）；0 或 100 = 关闭平滑",
-      "docOrder": 24,
-      "docDesc": "KI 分段倍率表的平滑系数（×100，0~100，默认 15=0.15）。对折线序列在冷值格点上采样后做正向+反向各一遍 EMA（零相位），再按配置点残差线性回补，**配置点上严格取回原值**；0 或 100 = 关闭平滑（直接取折线值）",
-      "confNote": [
-        "KI 分段倍率表平滑系数（×100，0~100，默认 15=0.15）",
-        "  零相位双向 EMA + 配置点残差回补（配置点上取值不变）；0 或 100 = 关闭平滑"
-      ],
-      "unit": "×100（0 或 100 = 关闭平滑）",
-      "unitNote": "",
-      "default": 15,
-      "factory": 15,
-      "min": 0,
-      "max": 100,
-      "cTable": "perf-int",
+      "defaultRows": ["1,100,100,50,40,100,100,100,100,100,70,80,190,100,50,65"],
       "requires": ["PERF_ENABLED"],
       "daemonConsumes": true,
       "fields": null
@@ -1033,7 +1011,7 @@
       "group": "sysfs",
       "role": "setting",
       "type": "multi",
-      "label": "CPU zone 重扫间隔/保留数",
+      "label": "CPU zone 重扫参数",
       "desc": "首次真全量扫描建立有效 zone 名单（排除初值 ≤0）；此后每「重扫间隔」秒在名单内重排，保留温度最高的 N 个",
       "cTable": "sysfs",
       "cKind": "SK_RESCAN",
@@ -1062,7 +1040,7 @@
       "group": "sysfs",
       "role": "setting",
       "type": "path",
-      "label": "CPU 亲和核/簇",
+      "label": "CPU 亲和",
       "desc": "守护进程自身被限制运行的核。首字符 c = 簇模式（c 后每一位数字是一个簇号：c0 只用 0 号簇、c123 用 1/2/3 号簇；簇边界按本机内核拓扑现算）；否则按核号：单值 0、范围 0-1、列表 0,2-3，旧写法 0 5 仍按区间 0~5 解释。运行期与本机 /sys/devices/system/cpu/present 取交集后生效，值非法或交集为空则回落代码默认 c0；**值内不能带行内注释**（如 0 5  # 大核 会整串判非法并回落默认 c0）",
       "cTable": "sysfs",
       "cKind": "SK_AFFINITY",
@@ -1309,7 +1287,7 @@
       "role": "setting",
       "type": "multi",
       "label": "动画速度",
-      "desc": "展开/收起的时长与两端减速（三值，见 fields）：速率（dp/ms，×10）越大越快、起步时间（毫秒）越大越慢、强度（%）越大两端越慢中段越快；时长 =（位移dp ÷ 速率/10 + 起步）÷ 2，独立于系统「动画时长缩放」",
+      "desc": "展开/收起的时长与两端减速（三值，见 fields）：速率（dp/ms）越大越快、起步时间（毫秒）越大越慢、强度（%）越大两端越慢中段越快；时长 =（位移dp ÷ 速率/10 + 起步）÷ 2，独立于系统「动画时长缩放」",
       "docOrder": 53,
       "docDesc": "动画速度（三值：速率 ×10 · 起步毫秒 · 两端减速强度%，默认 32 240 60 = 3.2 dp/ms / 240ms / 0.60）。时长 =（位移dp ÷ 速率/10 + 起步）÷ 2，展开与收起共用；速率越大越快、起步越大越慢、强度越大两端越慢中段越快（0 = 匀速）。**仅界面读取，守护进程忽略**",
       "confNote": [
@@ -1328,9 +1306,9 @@
       "requires": [],
       "daemonConsumes": false,
       "fields": [
-        { "label": "速率", "unit": "dp/ms（×10：存储值 32 = 3.2 dp/ms）", "min": 10, "max": 100, "default": 32, "cVar": null },
+        { "label": "速率", "unit": "dp/ms", "unitNote": "存储值 = 实际速率 ×10（32 = 3.2 dp/ms）", "min": 10, "max": 100, "default": 32, "cVar": null },
         { "label": "起步时间", "unit": "毫秒", "min": 0, "max": 600, "default": 240, "cVar": null },
-        { "label": "慢速启停强度", "unit": "%（×100：存储值 60 = 0.60；越大两端越慢，0 = 匀速）", "min": 0, "max": 100, "default": 60, "cVar": null }
+        { "label": "慢速启停强度", "unit": "%", "unitNote": "存储值 = 实际强度 ×100（60 = 0.60）；越大两端越慢，0 = 匀速", "min": 0, "max": 100, "default": 60, "cVar": null }
       ]
     },
     {
@@ -1377,8 +1355,8 @@
       "requires": [],
       "daemonConsumes": false,
       "fields": [
-        { "label": "每遍权重α(×100)", "unit": "×100", "min": 0, "max": 100, "default": 15, "cVar": null },
-        { "label": "最小步长(×100)", "unit": "×100", "min": 0, "max": 100, "default": 5, "cVar": null }
+        { "label": "每遍权重 α", "unit": "", "unitNote": "无量纲，存储值 = 实际权重 ×100（15 = 0.15）", "min": 0, "max": 100, "default": 15, "cVar": null },
+        { "label": "最小步长", "unit": "", "unitNote": "无量纲，存储值 = 实际步长 ×100（5 = 0.05）", "min": 0, "max": 100, "default": 5, "cVar": null }
       ]
     },
     {
@@ -1578,8 +1556,7 @@
       "PID_TARGET_DIR": ["pid_target_dir_on", "pid_target_away_alpha", "pid_target_toward_alpha"],
       "PID_SPEED_RECALL": ["pid_spd_recall_on", "pid_spd_recall_weight"],
       "PID_COLD_RANGE": ["pid_cold_min", "pid_cold_max", "b7_pid_cold_max"],
-      "KI_CUT": [],
-      "KI_CUT_SMOOTH": ["ki_cut_smooth"],
+      "PID_CUT": [],
       "SYSFS_ENABLED": ["found_sysfs"],
       "BATT_TEMP_PATH": ["BATT_TEMP_PATH"],
       "BATT_TEMP_DIVISOR": ["BATT_TEMP_DIVISOR"],

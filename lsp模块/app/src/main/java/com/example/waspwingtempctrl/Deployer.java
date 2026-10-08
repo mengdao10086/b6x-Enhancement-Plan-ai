@@ -552,6 +552,7 @@ public final class Deployer {
                     "service.d 脚本写入失败（" + svcd + "）", null);
         }
         steps.add("service.d 脚本就位：" + svcd + "/" + SCRIPT_NAME);
+        steps.add("已清旧版迁移残留 /data/local/tmp/tempctrl_last_dev（daemon 不再读写）");
         String deployedBinMd5 = nvl(kv.get("BIN_MD5"));
         String deployedScriptMd5 = nvl(kv.get("SCRIPT_MD5"));
         if (!binMd5.equals(deployedBinMd5) || !scriptMd5.equals(deployedScriptMd5)) {
@@ -643,7 +644,7 @@ public final class Deployer {
     /**
      * 卸载部署：停进程 → 删脚本/二进制/锁/status 双文件 → 删私有目录里的运行时产物。
      * <b>故意不清</b> {@code profile.conf}、省电白名单、{@code tempctrl_last_dev} 的新落点；
-     * 唯一例外是它的旧落点残留。<b>阻塞</b>。详见 app/逻辑说明.md §2.4。
+     * 它的旧落点残留另由 {@link #deploy()} 部署时主动清，此处卸载兜底再清一次。<b>阻塞</b>。详见 app/逻辑说明.md §2.4。
      */
     public Result uninstall() {
         List<String> steps = new ArrayList<>();
@@ -1193,6 +1194,8 @@ public final class Deployer {
         return pidsPreamble()
                 + serviceDirPreamble()
                 + "mkdir -p \"$svcd\" 2>&1\n"
+                // 旧版迁移残留（daemon 侧预创建已删、无人读写）：部署顺手清掉，免得只在卸载时才清
+                + "rm -f /data/local/tmp/tempctrl_last_dev\n"
                 // 原子替换：先写 $BIN.new 再 mv。既避开"覆写正在运行的二进制 ETXTBSY"，也避开
                 // "先删后落"被打断留下"二进制不存在"的半成品；在跑的旧进程继续持旧 inode 跑完自己那一轮。
                 + "cp -f " + quote(stagedBin.getAbsolutePath()) + " \"$BIN.new\" && chmod 0755 \"$BIN.new\" "

@@ -32,8 +32,6 @@
     <!-- ===== 键行 ===== -->
     <string name="config_badge_inactive">未生效</string>
     <string name="config_ui_only">界面自用，c-daemon 不读取</string>
-    <string name="config_hint_value">数值</string>
-    <string name="config_hint_path">路径</string>
     <string name="config_range">范围 %1$s~%2$s</string>
     <string name="config_clamped">原值 %1$s → 已按定义范围钳制为 %2$s</string>
     <string name="config_input_restored">输入为空或不可解析，已恢复为上一次的值</string>
@@ -51,8 +49,8 @@
     <string name="config_ki_cut_del_point">删除本点</string>
     <string name="config_ki_cut_del_glyph">×</string>
     <string name="config_ki_cut_cluster_title">簇 %1$d</string>
-    <string name="config_ki_cut_legend_up">KI 升倍率</string>
-    <string name="config_ki_cut_legend_down">KI 降倍率</string>
+    <string name="config_ki_cut_legend_up">升倍率</string>
+    <string name="config_ki_cut_legend_down">降倍率</string>
     <string name="config_ki_cut_legend_target">当前冷值</string>
     <string name="config_ki_cut_limit_cluster">已达上限：最多 %1$d 簇</string>
     <string name="config_ki_cut_limit_point">已达上限：每簇最多 %1$d 点</string>
