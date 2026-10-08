@@ -159,6 +159,9 @@ def build_params_json(definition):
                       "unit": f.get("unit", "")}
                 if f.get("unitNote"):
                     fo["unitNote"] = f["unitNote"]
+                # 允许留空的字段（如 PID_CUT 的三个倍率）：界面据此允许空输入，语义由 C 端定义
+                if f.get("allowEmpty"):
+                    fo["allowEmpty"] = True
                 row_fields.append(fo)
             item["rowFields"] = row_fields
             item["defaultRows"] = list(entry.get("defaultRows") or [])

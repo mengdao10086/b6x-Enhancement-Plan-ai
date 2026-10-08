@@ -41,14 +41,14 @@
         「框」（EditText 的背景描边）的高分两档：无浮起说明（int / path）时 material 不给内层 inputFrame
         加顶边距，框 = @dimen/field_height 36dp；有浮起说明（multi / enum / 表点行）时 material 加 ≈7dp
         顶边距（TextInputLayout.calculateLabelMarginTop()，见 @dimen/config_field_nohint_top_gap），框 ≈ 29dp。
-        · 无说明的 int / path（框 36dp）：ConfigKeyRow#applyNoHintBoxGeometry 把上下内边距改写成中点
-          @dimen/config_field_pad_nohint(3.5dp)，正文上下等距；框顶再补 @dimen/config_field_nohint_top_gap(1dp)。
-          内容区 = 36 − 3.5 − 3.5 = 29dp，正文行盒（16sp 约 18.75dp）在内容区里居中 → 到上下边框等距、
-          中心 = 框几何中心 18dp。
+        · 无说明的 int / path（框 36dp）：ConfigKeyRow#applyNoHintBoxGeometry 把上下内边距改写成与下边同档的
+          @dimen/config_field_pad_nohint(2dp)，正文上下等距；框顶再补 @dimen/config_field_nohint_top_gap(1dp)。
+          内容区 = 36 − 2 − 2 = 32dp，正文行盒（16sp 约 18.75dp）在内容区里居中 → 到上下边框等距、
+          正文中心 = 框几何中心（行顶下 1 + 18 = 19dp，含框顶那 1dp）。
         · 有说明的 multi / enum / 表点行（框 ≈29dp）：仍用 5 / 2，内容区 = 29 − 5 − 2 = 22dp，正文中心比
           框几何中心（14.5dp）低 (padTop − padBottom) / 2 = 1.5dp——落点只由两内边距之差决定、与框高无关。
         · 注：@dimen/config_field_pad_top 注释里"内容区 [5, 34] / 可用高 29dp / 中心 19.5dp"那套是
-          「框 36dp + 5 / 2」口径（= 改前无说明行的几何）；改后无说明行按 3.5 / 3.5、有说明行落 22dp，
+          「框 36dp + 5 / 2」口径（= 改前无说明行的几何）；改后无说明行按 2 / 2、有说明行落 22dp，
           以本条两档为准，余量与"最薄处"推导仍见该处。
       · scrollHorizontally：等于 setHorizontallyScrolling(true)——单行横向滚动的开关。不开时
         Layout 宽 == 视图宽，scrollX 恒为 0，path 键放不下的右半段（文件名）永远看不见。

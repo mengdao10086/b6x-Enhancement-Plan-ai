@@ -62,14 +62,15 @@
     <dimen name="config_field_pad_bottom">2dp</dimen>
 
     <!--
-        无浮起说明的框（int / path）的上下内边距：正文上下等距（有说明那套不对称的见 @dimen/config_field_pad_top）。
-        取 @dimen/config_field_pad_top 与 @dimen/config_field_pad_bottom 的中点 (5 + 2) / 2 = 3.5dp：
-        两者之和仍是 7dp，故无说明行（框 36dp，见 item_config_field.xml 顶部注释）的内容区可用高仍是
-        36 − 7 = 29dp、框高不变；只是把内容区从"相对框几何中心下沉 1.5dp"摆回几何中心，正文到上下边框因此等距。
+        无浮起说明的框（int / path）的上下内边距：正文上下等距，取值就是下边那档
+        @dimen/config_field_pad_bottom (2dp)（有说明那套不对称的见 @dimen/config_field_pad_top）。
+        两内边距之和 = 2 + 2 = 4dp，故无说明行（框 36dp，见 item_config_field.xml 顶部注释）的内容区
+        可用高 = 36 − 4 = 32dp（比有说明行的 29dp 大 3dp）；正文在内容区里居中即框的几何中心，
+        到上下边框等距。
         （框顶另由 @dimen/config_field_nohint_top_gap 下移 1dp，字段外框高随之 +1dp。）
         由 ConfigKeyRow#applyNoHintBoxGeometry 只对「本行无 hint」的字段施加。
     -->
-    <dimen name="config_field_pad_nohint">3.5dp</dimen>
+    <dimen name="config_field_pad_nohint">2dp</dimen>
 
     <!--
         无浮起说明的框顶与行上界的距离。删 hint 时 setHintEnabled(false) 会把 material 给 inputFrame 加的
@@ -108,8 +109,10 @@
     <dimen name="switch_trim_end">-6dp</dimen>
 
     <!--
-        参数名的下移量：其控件<b>不是开关</b>的行（int / path / enum / 首字段非布尔的 multi），
-        参数名整体下移这么多，名字与框内正文看起来更齐。开关行的名字不动。
+        参数名的下移量：<b>enum 行与 path 行</b>有效——它们的参数名仍按行高居中并整体下移这么多
+        （enum 是分段开关、没有"框体"；path 的框吃满整行、名字在框上一行、与框不同行，故都不钉框体几何中点）。
+        有输入框的 int / multi 数值行改由 ConfigKeyRow#alignLabelToField 把名字钉在框体几何中点
+        （顶隙 + 半个框高），不用本值；开关行、表行、首字段为布尔的 multi 也不动。
         实现是 ConfigKeyRow 里的纯渲染位移（setTranslationY）：不进测量、不进排布，
         行高与换行几何一个字都不变，观感不对只改这一个值。
     -->
@@ -117,7 +120,7 @@
 
     <!--
         ===== KI 分段倍率表 =====
-        点行里三个数字框改用标准字段样式（item_config_field.xml，框高 @dimen/field_height 36dp）；
+        点行里四个数字框改用标准字段样式（item_config_field.xml，框高 @dimen/field_height 36dp）；
         删除/添加按钮取 30dp（比框略矮、仍够点准，两张表里重复出现，不宜太占位）。
         曲线高 120dp：够画清倍率取值与动态刻度，又不至于把参数卡撑成一屏放不下。
     -->

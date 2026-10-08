@@ -194,6 +194,8 @@ def fail_check_b(definition):
                                     % (name, ri + 1, len(toks), nf))
                 for j, tok in enumerate(toks):
                     s = tok.strip()
+                    if not s and nf and fields[j % nf].get("allowEmpty"):
+                        continue                 # 允许留空的字段：空 token 合法（= 该轴跳过此点）
                     if not re.fullmatch(r"-?\d+", s):
                         problems.append("%s 第 %d 个默认行第 %d 值 %r 非整数"
                                         % (name, ri + 1, j + 1, tok))
@@ -587,13 +589,33 @@ def fail_check_d3(definition, h_text, c_text):
 # E 跨端对拍：lsp模块/daemon/ki_cut.h 求值实现 vs 参数定义/ki_cut_golden.json
 # --------------------------------------------------------------------------
 
+def _pt_literal(p):
+    """golden 的一个点 [冷值, KDP, 升, 降] → C 聚合初始化 {cold, kdp, up, dn, skip}。
+    三个倍率字段为 null 表示该轴留空（置对应 skip 位），值填 KI_CUT_NONE 占位（求值时按 skip 跳过）。
+    冷值是横坐标、必填，不可为 null。"""
+    if len(p) != 4:
+        raise Failure("golden 用例的点应为 [冷值,KDP,升,降] 四元：%r" % (p,))
+    cold = p[0]
+    if cold is None:
+        raise Failure("golden 用例的冷值不可为 null（冷值必填）：%r" % (p,))
+    vals = []
+    skip = 0
+    for i, v in enumerate(p[1:4]):
+        if v is None:
+            skip |= (1 << i)                 # bit0=KDP、bit1=升、bit2=降，对应 KI_CUT_SKIP_*
+            vals.append("KI_CUT_NONE")
+        else:
+            vals.append(str(int(v)))
+    return "{%d,%s,%d}" % (cold, ",".join(vals), skip)
+
+
 def _build_harness(cases):
     """由 golden 用例现写一个宿主 C 程序（内含 ki_cut.h，逐条求值并按序打印）。"""
     lines = ["#include <stdio.h>", '#include "ki_cut.h"', ""]
     for ci, case in enumerate(cases):
         clusters = case["clusters"]
         for gi, cl in enumerate(clusters):
-            pts = ", ".join("{%d,%d,%d,%d}" % (p[0], p[1], p[2], p[3]) for p in cl)
+            pts = ", ".join(_pt_literal(p) for p in cl)
             lines.append("static const KiCutPoint c{0}_{1}[] = {{{2}}};".format(ci, gi, pts))
         if clusters:
             inits = ", ".join("{{c{0}_{1}, {2}}}".format(ci, gi, len(cl))

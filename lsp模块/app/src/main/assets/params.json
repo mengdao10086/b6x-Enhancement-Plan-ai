@@ -1022,7 +1022,7 @@
       "role": "setting",
       "type": "table",
       "label": "PID 分段倍率表",
-      "desc": "按冷值分段削减 PID 的 KDP 与 KI 升/降速率（倍率 100=不削、0=完全压死，各 0~200）。每行一个簇，行值为重复四元组「冷值,KDP倍率,升倍率,降倍率,...」（冷值 0~255）：簇内按冷值升序折线插值、两端外平推，多簇取最小倍率",
+      "desc": "按冷值分段削减 PID 的 KDP 与 KI 升/降速率（倍率 100=不削、0=完全压死，各 0~200）。每行一个簇，行值为重复四元组「冷值,KDP倍率,升倍率,降倍率,...」（冷值 0~255）：簇内按冷值升序折线插值、两端外平推，多簇取最小倍率。三个倍率字段可留空（连续两个逗号间不写）= 该点在该轴上不作为控制点（求值时剔除、由相邻控制点直接连线）；冷值必填",
       "unit": "",
       "unitNote": "表键，各字段单位见 rowFields",
       "default": [
@@ -1037,7 +1037,7 @@
         "PERF_ENABLED"
       ],
       "daemonConsumes": true,
-      "rangeNote": "范围逐字段见 rowFields（冷值 0~255、三个倍率 0~200）",
+      "rangeNote": "范围逐字段见 rowFields（冷值 0~255、三个倍率 0~200）；三个倍率字段可留空（= 该轴跳过此点）",
       "fields": null,
       "rowPrefix": "PID_CUT_",
       "rowFields": [
@@ -1052,21 +1052,24 @@
           "min": 0,
           "max": 200,
           "unit": "",
-          "unitNote": "×100（100=不削）"
+          "unitNote": "×100（100=不削）；可留空=该轴跳过此点",
+          "allowEmpty": true
         },
         {
           "label": "升倍率",
           "min": 0,
           "max": 200,
           "unit": "",
-          "unitNote": "×100（100=不削）"
+          "unitNote": "×100（100=不削）；可留空=该轴跳过此点",
+          "allowEmpty": true
         },
         {
           "label": "降倍率",
           "min": 0,
           "max": 200,
           "unit": "",
-          "unitNote": "×100（100=不削）"
+          "unitNote": "×100（100=不削）；可留空=该轴跳过此点",
+          "allowEmpty": true
         }
       ],
       "defaultRows": [

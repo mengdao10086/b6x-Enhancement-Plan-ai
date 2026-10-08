@@ -105,13 +105,24 @@ final class KiCutTableEditor {
                 int kdp = parseInt(row.kdp, KiCutTable.NEUTRAL);
                 int up = parseInt(row.up, KiCutTable.NEUTRAL);
                 int dn = parseInt(row.dn, KiCutTable.NEUTRAL);
+                // 倍率框为空 = 该轴留空（该点在该轴不作为控制点）：置 skip 位，写回时空 token 原样保留
+                int skip = 0;
+                if (isEmpty(row.kdp)) {
+                    skip |= KiCutTable.SKIP_KDP;
+                }
+                if (isEmpty(row.up)) {
+                    skip |= KiCutTable.SKIP_UP;
+                }
+                if (isEmpty(row.dn)) {
+                    skip |= KiCutTable.SKIP_DN;
+                }
                 if (clamp) {
                     cold = clampField(cold, 0);
                     kdp = clampField(kdp, 1);
                     up = clampField(up, 2);
                     dn = clampField(dn, 3);
                 }
-                cluster.points.add(new KiCutTable.Point(cold, kdp, up, dn));
+                cluster.points.add(new KiCutTable.Point(cold, kdp, up, dn, skip));
             }
             out.add(cluster);
         }
@@ -220,10 +231,10 @@ final class KiCutTableEditor {
         listener.onEdited(Listener.EditKind.STRUCTURAL);
     }
 
-    /** 新增点的初值：冷值取定义下限（取不到为 0），KDP/升/降都是 100（不削）。 */
+    /** 新增点的初值：冷值取定义下限（取不到为 0），KDP/升/降都是 100（不削），三轴均非留空。 */
     private KiCutTable.Point newDefaultPoint() {
         return new KiCutTable.Point(minOf(0, 0), KiCutTable.NEUTRAL, KiCutTable.NEUTRAL,
-                KiCutTable.NEUTRAL);
+                KiCutTable.NEUTRAL, 0);
     }
 
     // ==================== 建块 ====================
@@ -248,9 +259,10 @@ final class KiCutTableEditor {
         View view = inflater.inflate(R.layout.item_ki_cut_point, block.pointsBox, false);
         PointRow row = new PointRow(view);
         row.cold.setText(String.valueOf(point.cold));
-        row.kdp.setText(String.valueOf(point.kdp));
-        row.up.setText(String.valueOf(point.up));
-        row.dn.setText(String.valueOf(point.dn));
+        // 留空轴渲染成空框（与「空 = 留空」一一对应），非留空轴渲染数值
+        row.kdp.setText(KiCutTable.isSkipped(point, KiCutTable.AXIS_KDP) ? "" : String.valueOf(point.kdp));
+        row.up.setText(KiCutTable.isSkipped(point, KiCutTable.AXIS_UP) ? "" : String.valueOf(point.up));
+        row.dn.setText(KiCutTable.isSkipped(point, KiCutTable.AXIS_DN) ? "" : String.valueOf(point.dn));
         applyHints(row, showHints);
         row.cold.addTextChangedListener(watcher());
         row.kdp.addTextChangedListener(watcher());
@@ -262,7 +274,11 @@ final class KiCutTableEditor {
         // 立刻重算曲线并立刻写盘（见 Listener.EditKind.COMMIT）。
         row.cold.setOnFocusChangeListener((v, hasFocus) -> {
             if (!hasFocus) {
-                clampOnBlur(row.cold, 0);
+                if (!isEmpty(row.cold)) {
+                    clampOnBlur(row.cold, 0);
+                }
+                // 冷值必填：留空时**不补值、不写盘**，只发 COMMIT——commit 里 read() 见空冷值返回 null，
+                // 于是走 restoreInputs() 还原磁盘原值并提示「已恢复」，绝不把空冷值补成下限悄悄写盘。
                 listener.onEdited(Listener.EditKind.COMMIT);
             }
         });
@@ -351,12 +367,14 @@ final class KiCutTableEditor {
     }
 
     /**
-     * 是否有任一数字框为空（编辑中的半截态）：有则曲线不重算、配置也不写盘（见 {@link Listener}）。
+     * 是否有<b>冷值框</b>为空（编辑中的半截态）：有则曲线不重算、配置也不写盘（见 {@link Listener}）。
+     *
+     * <p>倍率框为空是<b>合法值</b>（该轴留空），不算半截态——故此处只看冷值（冷值必填）。
      */
-    boolean hasEmptyField() {
+    boolean hasEmptyCold() {
         for (ClusterBlock block : blocks) {
             for (PointRow row : block.rows) {
-                if (isEmpty(row.cold) || isEmpty(row.kdp) || isEmpty(row.up) || isEmpty(row.dn)) {
+                if (isEmpty(row.cold)) {
                     return true;
                 }
             }
@@ -369,8 +387,16 @@ final class KiCutTableEditor {
         return editable == null || editable.toString().trim().isEmpty();
     }
 
-    /** 失焦把值收敛进 {@code rowFields[idx]} 的 min/max；空值按下限补。 */
+    /**
+     * 失焦处理：可留空字段（{@code rowFields[idx].allowEmpty}）留空时保持为空（合法值，不补值）；
+     * 其余字段留空或越界时收敛回 {@code rowFields[idx]} 的 min/max（冷值留空按下限补）。
+     */
     private void clampOnBlur(@NonNull EditText field, int idx) {
+        if (isEmpty(field)) {
+            if (allowEmpty(idx)) {
+                return;   // 倍率可留空：保持为空，不补 0 / 不补 min
+            }
+        }
         int fallback = idx == 0 ? 0 : KiCutTable.NEUTRAL;
         int value = parseInt(field, fallback);
         Integer min = limit(idx, true);
@@ -384,6 +410,14 @@ final class KiCutTableEditor {
         if (!String.valueOf(value).contentEquals(field.getText())) {
             field.setText(String.valueOf(value));
         }
+    }
+
+    /** {@code rowFields[idx].allowEmpty}（定义没写或非表键时为 false）。 */
+    private boolean allowEmpty(int idx) {
+        if (meta.rowFields == null || idx >= meta.rowFields.size()) {
+            return false;
+        }
+        return meta.rowFields.get(idx).allowEmpty;
     }
 
     @Nullable

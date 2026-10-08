@@ -9,11 +9,13 @@
  * 因两处共用，本头不 include 任何头文件、不依赖 libc/libm（只用四则运算与 float）。
  *
  * 算法（与 参数定义/params.def.json 的 PID_CUT 定义、逻辑说明.md 同源）：
- *   1. 簇内点按冷值升序；同一冷值保留**先出现者**。
- *   2. 折线 L(x)：簇内相邻点线性插值，低于最小冷值取首点值、高于最大冷值取末点值（两端平推）。
- *   3. 每点三轴：KDP 倍率 / 升倍率 / 降倍率，各自独立按折线求值（**无滤波**）。
+ *   1. 点按冷值升序；同一冷值保留**先出现者**。
+ *   2. 每点三轴独立：KDP 倍率 / 升倍率 / 降倍率。某轴标记为「留空」（skip 位）时，该点在该轴上
+ *      **不作为控制点**——从该轴的控制点序列中剔除，折线由相邻的两个未留空控制点直接连线。
+ *   3. 折线 L(x)（逐轴）：在该轴控制点序列内相邻点线性插值；x ≤ 该轴最小冷值取首点、x ≥ 最大冷值
+ *      取末点（两端平推）；该轴一个控制点都没有 → 该轴恒为 KI_CUT_NONE（100 = 不削）。
  *   4. 多簇逐轴取**最小**倍率（倍率更小 = 削减更大）；无有效簇 → KI_CUT_NONE。
- * 倍率口径：×100（100 = 不削，0 = 完全压死）。
+ * 倍率口径：×100（100 = 不削，0 = 完全压死）。冷值恒为控制点（必填、无留空）。
  */
 #ifndef KI_CUT_H
 #define KI_CUT_H
@@ -21,12 +23,18 @@
 #define KI_CUT_MAX_POINTS 32   /* 单簇最多配置点数（去重后） */
 #define KI_CUT_NONE       100  /* 无有效簇时的倍率（×100 = 不削） */
 
-/* 一个配置点：冷值 + KDP / 升 / 降三轴倍率（均 ×100，0~200） */
+/* 该点在某轴上「留空」（不作为控制点）的标记位；KDP / 升 / 降各一位 */
+#define KI_CUT_SKIP_KDP 1u
+#define KI_CUT_SKIP_UP  2u
+#define KI_CUT_SKIP_DN  4u
+
+/* 一个配置点：冷值 + KDP / 升 / 降三轴倍率（均 ×100，0~200）+ 各轴留空标记 */
 typedef struct {
     int cold;
     int kdp;
     int up;
     int dn;
+    unsigned char skip;   /* KI_CUT_SKIP_* 的按位或；0 = 三轴都作为控制点 */
 } KiCutPoint;
 
 /* 一个簇：点数 + 点数组（求值内部会复制并按冷值排序，不改动入参） */
@@ -40,19 +48,39 @@ static int ki_cut_pick(const KiCutPoint *p, int axis) {
     return (axis == 0) ? p->kdp : (axis == 1 ? p->up : p->dn);
 }
 
-/** 折线取值：x ≤ 首点冷值取首点、x ≥ 末点冷值取末点、其间线性插值。axis: 0=kdp 1=up 2=dn */
+/** 某点在某轴上是否「留空」（不作为控制点）：axis 0=kdp 1=up 2=dn */
+static int ki_cut_is_skipped(const KiCutPoint *p, int axis) {
+    unsigned char bit = (axis == 0) ? KI_CUT_SKIP_KDP
+                                    : (axis == 1 ? KI_CUT_SKIP_UP : KI_CUT_SKIP_DN);
+    return (p->skip & bit) != 0;
+}
+
+/**
+ * 折线取值：在该轴**未留空**的控制点序列内，x ≤ 首点冷值取首点、x ≥ 末点冷值取末点、其间线性插值。
+ * 该轴无任何控制点（全部留空）→ 返回 KI_CUT_NONE（不削）。axis: 0=kdp 1=up 2=dn
+ */
 static float ki_cut_lerp(const KiCutPoint *p, int n, int x, int axis) {
-    if (x <= p[0].cold)     return (float)ki_cut_pick(&p[0], axis);
-    if (x >= p[n - 1].cold) return (float)ki_cut_pick(&p[n - 1], axis);
-    for (int i = 1; i < n; i++) {
+    int first = -1, last = -1;
+    for (int i = 0; i < n; i++) {
+        if (ki_cut_is_skipped(&p[i], axis)) continue;
+        if (first < 0) first = i;
+        last = i;
+    }
+    if (first < 0) return (float)KI_CUT_NONE;                  /* 该轴无控制点：全程不削 */
+    if (x <= p[first].cold) return (float)ki_cut_pick(&p[first], axis);
+    if (x >= p[last].cold)  return (float)ki_cut_pick(&p[last], axis);
+    int prev = first;
+    for (int i = first + 1; i <= last; i++) {
+        if (ki_cut_is_skipped(&p[i], axis)) continue;
         if (x <= p[i].cold) {
-            float t = (float)(x - p[i - 1].cold) / (float)(p[i].cold - p[i - 1].cold);
-            float y0 = (float)ki_cut_pick(&p[i - 1], axis);
+            float t = (float)(x - p[prev].cold) / (float)(p[i].cold - p[prev].cold);
+            float y0 = (float)ki_cut_pick(&p[prev], axis);
             float y1 = (float)ki_cut_pick(&p[i], axis);
             return y0 + t * (y1 - y0);
         }
+        prev = i;
     }
-    return (float)ki_cut_pick(&p[n - 1], axis);
+    return (float)ki_cut_pick(&p[last], axis);                 /* 理论不可达（x 已在 [first,last] 内） */
 }
 
 /** 就地规范化：稳定升序排序（同冷值保持原始先后），同一冷值只保留先出现者。返回去重后点数 */

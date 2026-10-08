@@ -797,7 +797,8 @@ public final class ConfigStore {
                             fo.isNull("min") ? null : Integer.valueOf(fo.optInt("min")),
                             fo.isNull("max") ? null : Integer.valueOf(fo.optInt("max")),
                             fo.optInt("default", 0),
-                            fo.optBoolean("bool", false)));
+                            fo.optBoolean("bool", false),
+                            fo.optBoolean("allowEmpty", false)));
                 }
             }
             this.fields = f.isEmpty() ? null : Collections.unmodifiableList(f);
@@ -855,7 +856,8 @@ public final class ConfigStore {
                         fo.optString("unit", ""),
                         fo.isNull("min") ? null : Integer.valueOf(fo.optInt("min")),
                         fo.isNull("max") ? null : Integer.valueOf(fo.optInt("max")),
-                        0, false));
+                        0, false,
+                        fo.optBoolean("allowEmpty", false)));
             }
             return f.isEmpty() ? null : Collections.unmodifiableList(f);
         }
@@ -995,15 +997,22 @@ public final class ConfigStore {
          * 详见 app/逻辑说明.md §3.4。
          */
         public final boolean bool;
+        /**
+         * true = 该字段允许留空（值里对应 token 为空）：仅表型键的 {@code rowFields[]} 用，
+         * 界面据此把「空」当合法值（编辑时防抖落盘、失焦保持为空），不当作编辑中的半截态。
+         * 详见 参数定义/params.def.json 的 PID_CUT 与 daemon/ki_cut.h。
+         */
+        public final boolean allowEmpty;
 
         FieldMeta(String label, String unit, Integer min, Integer max, int defaultValue,
-                  boolean bool) {
+                  boolean bool, boolean allowEmpty) {
             this.label = label;
             this.unit = unit;
             this.min = min;
             this.max = max;
             this.defaultValue = defaultValue;
             this.bool = bool;
+            this.allowEmpty = allowEmpty;
         }
     }
 

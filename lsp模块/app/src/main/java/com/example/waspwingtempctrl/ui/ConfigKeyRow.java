@@ -174,6 +174,12 @@ final class ConfigKeyRow {
     /** 数值字段的最小宽：见 {@link #measuredFieldWidth}。 */
     private final int minFieldWidth;
 
+    /** 本行的字段是否走「无浮起说明」那一套几何（int / path）——由 {@link #applyNoHintBoxGeometry} 置位。 */
+    private boolean noHintBox;
+
+    /** 本行的字段是否吃满整行（path 的框）——此时参数名与框不在同一行，{@link #alignLabelToField} 不钉框体中心。 */
+    private boolean fieldFillsRow;
+
     /** true 时忽略控件回调：程序化回填值不该被当成用户改动作业。 */
     private boolean suppressChange;
 
@@ -228,9 +234,36 @@ final class ConfigKeyRow {
 
         renderer = createRenderer();
         renderer.build();
-        alignLabelToInputBox();
-        shiftLabelInNonSwitchRow();
+        alignLabelToField();
         applySwitchRowGap();
+    }
+
+    /**
+     * 参数名的竖直对齐：<b>与控件本体的竖直中点对齐，不再考虑浮起说明的高度</b>。
+     *
+     * <p>有输入框的行（int / multi 数值；参数名与框<b>同行</b>）：把名字的垂直中心钉到框体的几何中点——
+     * 框高恒为 {@code @dimen/field_height}(36dp)，框顶 = 行顶 + 本行无 hint 时的
+     * {@code @dimen/config_field_nohint_top_gap}(1dp)（见 {@link #applyNoHintBoxGeometry}）。hint 在不在
+     * 都不进这个算式：hint 只把框内可视描边下压 ≈7dp，不改控件本身的位置。
+     *
+     * <p>其余行<b>不钉</b>：path 的框吃满整行、独占一行，参数名在它<b>上一行</b>（与框不同行，见
+     * {@link #fieldFillsRow}）；enum 的分段开关不是输入框（{@code wrap_content}，没有"框体"）。
+     * 这两类仍按行高居中并整体下移 {@code @dimen/config_label_shift}（原 {@code shiftLabelInNonSwitchRow}
+     * 的口径，逐值不变）；开关行（{@link KeyMeta#isSwitch()}）、表行、以及首字段为布尔的 multi 不参与对齐。
+     */
+    private void alignLabelToField() {
+        if (meta.isSwitch() || meta.isTable() || (meta.isMulti() && meta.fields.get(0).bool)) {
+            return;
+        }
+        if (meta.isEnum() || fieldFillsRow) {
+            labelView.setTranslationY(
+                    root.getResources().getDimensionPixelSize(R.dimen.config_label_shift));
+            return;
+        }
+        int boxTop = noHintBox
+                ? root.getResources().getDimensionPixelSize(R.dimen.config_field_nohint_top_gap) : 0;
+        int boxHalf = root.getResources().getDimensionPixelSize(R.dimen.field_height) / 2;
+        root.setVerticalCenterAt(labelView, boxTop + boxHalf);
     }
 
     /**
@@ -250,31 +283,6 @@ final class ConfigKeyRow {
                     root.getResources().getDimensionPixelSize(R.dimen.config_switch_row_gap));
             root.requestLayout();
         }
-    }
-
-    /**
-     * 多值键参数名的竖直对齐：把它的垂直中心钉在行顶之下"输入框半高"处（<b>只标多值键、且首个字段
-     * 为输入框型</b>）。见 app 逻辑说明.md §6.1。
-     */
-    private void alignLabelToInputBox() {
-        if (!meta.isMulti() || meta.fields.get(0).bool) {
-            return;
-        }
-        int boxHalfHeight = root.getResources().getDimensionPixelSize(R.dimen.field_height) / 2;
-        root.setVerticalCenterAt(labelView, boxHalfHeight);
-    }
-
-    /**
-     * 参数名的下移：非开关行里整体下移 @dimen/config_label_shift（<b>是渲染位移，不是
-     * {@link #alignLabelToInputBox} 那种"钉垂直中心"</b>，不进测量/排布，行高与换行几何不变）。
-     * 见 app 逻辑说明.md §6.1。
-     */
-    private void shiftLabelInNonSwitchRow() {
-        if (meta.isSwitch() || meta.isTable() || (meta.isMulti() && meta.fields.get(0).bool)) {
-            return;
-        }
-        labelView.setTranslationY(
-                root.getResources().getDimensionPixelSize(R.dimen.config_label_shift));
     }
 
     /** 按定义里的 type 选渲染器：一处判断，六种 type 各一份实现（定义里只有这六种，int 是其余情况）。 */
@@ -615,6 +623,7 @@ final class ConfigKeyRow {
             // 不按内容定宽：路径长度不可控（默认日志路径 58 字符约 570dp），定宽会顶出屏幕；
             // 吃满行尾，放不下由输入框自己横向滚
             writeWidth(field, ViewGroup.LayoutParams.MATCH_PARENT);
+            fieldFillsRow = true;   // 框独占一行：参数名在其上一行，见 alignLabelToField
         }
 
         @Override
@@ -717,11 +726,11 @@ final class ConfigKeyRow {
                 ticker.postDelayed(this, TARGET_REFRESH_MS);
             }
         };
-        /** 编辑中曲线重算的防抖任务；到点时再查一次「是否有空框」，有则放弃（见 {@link KiCutTableEditor#hasEmptyField}）。 */
+        /** 编辑中曲线重算的防抖任务；到点时再查一次「冷值框是否为空」，为空则放弃（见 {@link KiCutTableEditor#hasEmptyCold}）。 */
         private final Runnable redrawTask = new Runnable() {
             @Override
             public void run() {
-                if (editor != null && !editor.hasEmptyField()) {
+                if (editor != null && !editor.hasEmptyCold()) {
                     redrawChart();
                 }
             }
@@ -742,9 +751,9 @@ final class ConfigKeyRow {
                     }
                     switch (kind) {
                         case TYPING:
-                            // 编辑中：有框为空 → 曲线不重算、配置也不写盘；否则曲线按 1 秒防抖，
-                            // 写盘仍走队列的 1200ms 防抖
-                            if (editor.hasEmptyField()) {
+                            // 编辑中：冷值框为空 → 曲线不重算、配置也不写盘；否则曲线按 1 秒防抖，
+                            // 写盘仍走队列的 1200ms 防抖（倍率框为空是合法值，走此正常分支）
+                            if (editor.hasEmptyCold()) {
                                 cancelRedraw();
                                 commit(false);
                             } else {
@@ -800,8 +809,8 @@ final class ConfigKeyRow {
         @Override
         @Nullable
         public Value read(boolean fallbackForUnparsed) {
-            if (!fallbackForUnparsed && editor.hasEmptyField()) {
-                // 有框为空 = 编辑中的半截态：不写盘（曲线也不重算，见 onEdited 的 TYPING 分支）
+            if (!fallbackForUnparsed && editor.hasEmptyCold()) {
+                // 冷值框为空 = 编辑中的半截态：不写盘（曲线也不重算，见 onEdited 的 TYPING 分支）
                 return null;
             }
             // 否则表随时有完整值（编辑器把非法输入收敛进定义范围）
@@ -819,9 +828,12 @@ final class ConfigKeyRow {
             return Collections.singletonList(block);
         }
 
-        /** 依「当前冷值」的当前值重绘曲线。 */
+        /** 依「当前冷值」的当前值重绘曲线。冷值框为空（编辑中的半截态）时不重算，保留上一次的曲线。 */
         private void redrawChart() {
             if (chart == null || block == null || editor == null) {
+                return;
+            }
+            if (editor.hasEmptyCold()) {
                 return;
             }
             Context context = block.getContext();
@@ -834,13 +846,14 @@ final class ConfigKeyRow {
         }
 
         /**
-         * 横轴刻度 = 表里各点的冷值 ∪ {0, coldMax}，去重升序、<b>不抽稀</b>（允许重叠）。
-         * 超上限的冷值不过滤，交给控件 {@code gridX} 钳到右沿。
+         * 横轴刻度 = 表里各点的冷值 ∪ {coldMax}，去重升序、<b>不抽稀</b>（允许重叠）。
+         * 不补 0：曲线本身仍按 0…coldMax 绘制（范围不变），只是 0 处不再画刻度——
+         * 若某点的冷值恰是 0，它作为<b>点值</b>自然仍在集合里。超上限的冷值不过滤，交给控件
+         * {@code gridX} 钳到右沿。
          */
         @NonNull
         private int[] xTicksOf(@NonNull List<KiCutTable.Cluster> clusters, int coldMax) {
             TreeSet<Integer> ticks = new TreeSet<>();
-            ticks.add(0);
             ticks.add(coldMax);
             for (KiCutTable.Cluster cluster : clusters) {
                 for (KiCutTable.Point point : cluster.points) {
@@ -972,15 +985,15 @@ final class ConfigKeyRow {
      * {@code item_config_field.xml} 里那套上下不对称内边距与 material 给 inputFrame 的 ≈7dp 顶外边距，
      * 几何逐值不变。
      *
-     * <p>上下内边距取 {@code config_field_pad_top} 与 {@code config_field_pad_bottom} 的中点
-     * {@code @dimen/config_field_pad_nohint}：两者之和仍是 7dp，内容区可用高仍是 36 − 7 = 29dp
-     * （与有 hint 的行同高、行高不变），只把内容区从"相对框几何中心下沉 1.5dp"摆回几何中心，
-     * 正文到上下边框因此等距。算式见 {@code item_config_field.xml} 顶部注释。
+     * <p>上下内边距取与下边同档的 {@code @dimen/config_field_pad_nohint}(2dp)：两者之和 = 4dp，
+     * 内容区可用高 = 36 − 4 = 32dp（比有说明行的 29dp 大 3dp）；正文在内容区里居中即框的几何中心，
+     * 到上下边框因此等距。算式见 {@code item_config_field.xml} 顶部注释。
      */
     private void applyNoHintBoxGeometry(@NonNull TextInputEditText input,
                                         @NonNull TextInputLayout layout) {
         int pad = root.getResources().getDimensionPixelSize(R.dimen.config_field_pad_nohint);
         input.setPaddingRelative(input.getPaddingStart(), pad, input.getPaddingEnd(), pad);
+        noHintBox = true;
         ViewGroup.LayoutParams lp = layout.getLayoutParams();
         if (lp instanceof ViewGroup.MarginLayoutParams) {
             ((ViewGroup.MarginLayoutParams) lp).topMargin =

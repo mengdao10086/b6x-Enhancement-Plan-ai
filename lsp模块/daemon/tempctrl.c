@@ -238,6 +238,7 @@ static int pid_cold_max = 190;            // PID_COLD_RANGE 第二值：制冷�
 
 // --- 「PID 分段倍率表」参数（配置值为整数；倍率 ×100 换算进内部）---
 // PID_CUT_<簇号> = 重复四元组「冷值,KDP倍率,升倍率,降倍率,...」（冷值 0~255；三倍率 ×100，100=不削）
+// 三个倍率字段可留空（两次逗号之间什么都不写）= 该点在该轴上不作为控制点；冷值必填
 // 簇内按冷值升序折线插值、多簇逐轴取最小；旧键名 KI_CUT_<簇号>（三元组）仍被识别并迁移，见 parse_legacy_pidcut_cfg
 #define KI_CUT_MAX_CLUSTERS 8             // 支持的簇数上限（簇号 1~KI_CUT_MAX_CLUSTERS）
 #define CFG_ROW_PREFIX_KI_CUT_LEGACY "KI_CUT_"   // 旧表键前缀（三元组）；永久兼容（读取 + 一次性迁移），不做移除
@@ -703,7 +704,7 @@ static int parse_pid_cfg(const char *key, int val, const char *val_str) {
         if (n >= 2) pid_spd_recall_weight = clamp(w, 100, 1000);
         return 1;
     }
-    // PID 分段倍率表：PID_CUT_<簇号> = 重复四元组「冷值,KDP倍率,升倍率,降倍率,...」。
+    // PID 分段倍率表：PID_CUT_<簇号> = 重复四元组「冷值,KDP倍率,升倍率,降倍率,...」（三个倍率可留空）。
     // 行前缀与逐字段 clamp 边界取自生成头（CFG_ROW_PREFIX_PID_CUT / CFG_MIN|MAX_PID_CUT_F*），
     // 解析本体见 ki_cut_parse_row（支持任意簇号，故不是精确 strcmp）。
     // 旧键名 KI_CUT_<簇号> 的兼容与迁移见 parse_legacy_pidcut_cfg（另立函数，避免被 CI 判为多键）。
@@ -2902,11 +2903,29 @@ static int cpu_comp_now(int batt) {
 
 // ======================== PID 分段倍率表 ========================
 // 冷值 → 各簇折线插值 → 多簇逐轴取最小 → KDP / KI 升 / KI 降倍率；算法、取样与单位见 逻辑说明.md「PID 分段倍率表」。
-// 求值核心（排序/去重/插值/多簇取最小）在只依赖自身的 ki_cut.h 内，与 CI 跨端对拍程序共用同一实现。
+// 求值核心（排序/去重/按轴剔除留空点/插值/多簇取最小）在只依赖自身的 ki_cut.h 内，与 CI 跨端对拍程序共用同一实现。
+
+/** 解析一个（不要求 NUL 结尾的）十进制 token：整段须为合法整数（可带前导 +/-）。成功写 *out 返回 1 */
+static int ki_cut_tok_int(const char *p, size_t len, int *out) {
+    if (len == 0 || len >= 24) return 0;
+    char buf[24];
+    memcpy(buf, p, len);
+    buf[len] = '\0';
+    char *e = NULL;
+    long v = strtol(buf, &e, 10);
+    if (e == buf || *e != '\0') return 0;
+    *out = (int)v;
+    return 1;
+}
 
 /**
- * 解析一行 PID_CUT_<簇号>：逗号分隔的重复四元组「冷值,KDP倍率,升倍率,降倍率」。逐字段按生成头给出的边界钳位；
- * 值个数非 4 的整数倍或簇号非法时整行忽略（保持该簇上次值）。排序与同冷值取舍在求值时做（ki_cut_normalize）。
+ * 解析一行 PID_CUT_<簇号>：**仅逗号分隔**的重复四元组「冷值,KDP倍率,升倍率,降倍率」。
+ * **每段按逗号切分、允许留空**（两次逗号之间什么都不写）：三个倍率字段留空 = 该点在该轴上
+ * 不作为控制点（求值时剔除，语义与实现见 ki_cut.h）；冷值是横坐标、必填。
+ * 逐字段按生成头给出的边界钳位。**冷值**留空或非整数 → 该点整点忽略；**倍率位**非空且非整数 →
+ * 整行忽略（保持该簇上次值）。整行忽略的其它情形：段数非 4 的整数倍、整行无任何有效点。
+ * 超过 KI_CUT_MAX_POINTS 点的多余部分忽略（并记一条日志）。纯空格分隔（无逗号）的行会因段数
+ * 不符而被忽略。排序与同冷值取舍在求值时做（ki_cut_normalize）。
  */
 static void ki_cut_parse_row(const char *idx_str, const char *val_str) {
     char *endp = NULL;
@@ -2915,28 +2934,66 @@ static void ki_cut_parse_row(const char *idx_str, const char *val_str) {
         write_log("配置 PID_CUT 簇号非法（%s），已忽略该行", idx_str);
         return;
     }
-    int vals[KI_CUT_MAX_POINTS * 4];
-    int cnt = 0;
+    // 按逗号切分整行（空段保留，视为该字段留空）；段数上限 = 满点数 × 四元组宽度
+    const char *tok[KI_CUT_MAX_POINTS * 4];
+    size_t tlen[KI_CUT_MAX_POINTS * 4];
+    int ntok = 0;
     const char *s = val_str;
-    while (*s && cnt < KI_CUT_MAX_POINTS * 4) {
-        char *e = NULL;
-        long v = strtol(s, &e, 10);
-        if (e == s) break;                       // 非数字：停止取数
-        vals[cnt++] = (int)v;
-        s = e;
-        while (*s == ',' || *s == ' ' || *s == '\t') s++;
+    while (ntok < KI_CUT_MAX_POINTS * 4) {
+        const char *b = s;
+        while (*s && *s != ',') s++;
+        const char *e = s;
+        while (b < e && (*b == ' ' || *b == '\t')) b++;      // 段内两端空白剔除
+        while (e > b && (e[-1] == ' ' || e[-1] == '\t')) e--;
+        tok[ntok] = b;
+        tlen[ntok] = (size_t)(e - b);
+        ntok++;
+        if (*s != ',') break;                                // 行尾结束；否则跨过逗号继续
+        s++;
     }
-    if (cnt == 0 || cnt % 4 != 0) {
-        write_log("配置 PID_CUT_%ld 值个数 %d 非四元组整数倍，已忽略整行", idx, cnt);
+    if (ntok == KI_CUT_MAX_POINTS * 4 && *s) {
+        write_log("配置 PID_CUT_%ld 点数超过上限 %d，多余部分已忽略", idx, KI_CUT_MAX_POINTS);
+    }
+    if (ntok % 4 != 0) {
+        write_log("配置 PID_CUT_%ld 值个数 %d 非四元组整数倍，已忽略整行", idx, ntok);
         return;
     }
-    int np = cnt / 4;
-    for (int i = 0; i < np; i++) {
-        ki_cut_rows[idx - 1][i].cold = clamp(vals[4 * i],     CFG_MIN_PID_CUT_F1, CFG_MAX_PID_CUT_F1);
-        ki_cut_rows[idx - 1][i].kdp  = clamp(vals[4 * i + 1], CFG_MIN_PID_CUT_F2, CFG_MAX_PID_CUT_F2);
-        ki_cut_rows[idx - 1][i].up   = clamp(vals[4 * i + 2], CFG_MIN_PID_CUT_F3, CFG_MAX_PID_CUT_F3);
-        ki_cut_rows[idx - 1][i].dn   = clamp(vals[4 * i + 3], CFG_MIN_PID_CUT_F4, CFG_MAX_PID_CUT_F4);
+    // 先解析到临时数组，全部有效后才提交，避免中途失败把该簇写成"新旧混合"
+    KiCutPoint tmp[KI_CUT_MAX_POINTS];
+    int np = 0;
+    for (int i = 0; i + 3 < ntok; i += 4) {
+        int cold;
+        if (!ki_cut_tok_int(tok[i], tlen[i], &cold)) {
+            write_log("配置 PID_CUT_%ld 第 %d 点冷值留空或非整数，已忽略该点", idx, i / 4 + 1);
+            continue;                                        // 冷值必填（横坐标）：整点忽略
+        }
+        KiCutPoint pk;
+        pk.cold = clamp(cold, CFG_MIN_PID_CUT_F1, CFG_MAX_PID_CUT_F1);
+        pk.skip = 0;
+        static const unsigned char rate_bit[3] = { KI_CUT_SKIP_KDP, KI_CUT_SKIP_UP, KI_CUT_SKIP_DN };
+        static const int rate_min[3] = { CFG_MIN_PID_CUT_F2, CFG_MIN_PID_CUT_F3, CFG_MIN_PID_CUT_F4 };
+        static const int rate_max[3] = { CFG_MAX_PID_CUT_F2, CFG_MAX_PID_CUT_F3, CFG_MAX_PID_CUT_F4 };
+        int rate[3] = { KI_CUT_NONE, KI_CUT_NONE, KI_CUT_NONE };
+        int bad = 0;
+        for (int a = 0; a < 3; a++) {
+            if (tlen[i + 1 + a] == 0) { pk.skip |= rate_bit[a]; continue; }   // 留空：该轴跳过此点
+            if (!ki_cut_tok_int(tok[i + 1 + a], tlen[i + 1 + a], &rate[a])) { bad = 1; break; }
+            rate[a] = clamp(rate[a], rate_min[a], rate_max[a]);
+        }
+        if (bad) {
+            write_log("配置 PID_CUT_%ld 第 %d 点含非整数内容，已忽略整行", idx, i / 4 + 1);
+            return;
+        }
+        pk.kdp = rate[0];
+        pk.up  = rate[1];
+        pk.dn  = rate[2];
+        tmp[np++] = pk;
     }
+    if (np == 0) {
+        write_log("配置 PID_CUT_%ld 未含有效点，已忽略整行", idx);
+        return;
+    }
+    for (int k = 0; k < np; k++) ki_cut_rows[idx - 1][k] = tmp[k];
     ki_cut_cnt[idx - 1] = np;
     pidcut_new_seen[idx - 1] = 1;   // 新键优先：标记该簇由新键 PID_CUT_ 配置
 }
