@@ -6,8 +6,10 @@
 -->
 <resources>
     <string name="config_ki_cut_split_cluster">拆分簇</string>
-    <string name="config_ki_cut_split_hint">拆分中：点横线＝在此拆分；点行＝该行由上下两簇共享（再点「拆分簇」退出）</string>
-    <string name="config_ki_cut_insert_hint">插入中：点横线＝在此插入一行（再点「添加点」退出）</string>
+    <!-- 模式态提示：紧跟在「簇 N」标题之后同一行（见 item_ki_cut_cluster.xml），进模式才显示、退出即 GONE，
+         故不写「如何退出」（再点按钮/点表外即可），只留一句操作说明。 -->
+    <string name="config_ki_cut_split_hint">拆分中：点横线＝在此拆分；点行＝该行由上下两簇共享</string>
+    <string name="config_ki_cut_insert_hint">插入中：点横线＝在此插入一行</string>
     <string name="config_ki_cut_empty_hint">还没有簇，全段都不削减（全 100）</string>
 
     <!-- 无障碍：横线与点行在两种语义下的说明 -->

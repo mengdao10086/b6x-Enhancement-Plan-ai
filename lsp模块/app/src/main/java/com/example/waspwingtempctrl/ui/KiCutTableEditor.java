@@ -853,7 +853,7 @@ final class KiCutTableEditor {
         }
     }
 
-    /** 一个簇块（表头 + 点行/横线容器 + 底部行：添加点 / 添加簇 / 拆分簇 / 删除簇 + 模式提示）。 */
+    /** 一个簇块（表头「簇 N」+ 模式提示同一行 + 点行/横线容器 + 底部行：添加点 / 添加簇 / 拆分簇 / 删除簇）。 */
     private final class ClusterBlock {
         final View view;
         final TextView title;
@@ -862,7 +862,7 @@ final class KiCutTableEditor {
         final MaterialButton addClusterButton;
         final MaterialButton splitClusterButton;
         final MaterialButton deleteClusterButton;
-        /** 进入插入/拆分态时显示的一句话提示（文案按模式切）。 */
+        /** 模式态提示，紧跟在「簇 N」标题之后同一行（文案按模式切，非模式态 GONE 不占高）。 */
         final TextView modeHint;
         final List<PointRow> rows = new ArrayList<>();
         /** 本簇的插入横线，顺序即位置（长度恒为 rows.size()+1）；默认隐藏，仅模式中显示。 */
