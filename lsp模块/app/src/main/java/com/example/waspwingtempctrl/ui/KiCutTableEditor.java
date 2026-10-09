@@ -362,6 +362,10 @@ final class KiCutTableEditor {
      */
     private void applyModeVisuals() {
         Context context = clustersBox.getContext();
+        int normalBox = context.getResources().getDimensionPixelSize(R.dimen.ki_cut_point_height);
+        int compactBox = context.getResources().getDimensionPixelSize(R.dimen.ki_cut_point_height_compact);
+        int lineNet = normalBox - compactBox;   // 单条线净占高（= 单行压缩量）
+        int basePad = context.getResources().getDimensionPixelSize(R.dimen.ki_cut_cluster_pad_bottom);
         for (int i = 0; i < blocks.size(); i++) {
             ClusterBlock block = blocks.get(i);
             boolean inserting = i == insertModeIndex;
@@ -393,6 +397,20 @@ final class KiCutTableEditor {
             block.modeHint.setVisibility(active ? View.VISIBLE : View.GONE);
             block.modeHint.setText(splitting
                     ? R.string.config_ki_cut_split_hint : R.string.config_ki_cut_insert_hint);
+            // 归零：模式态相对常态的「多出/缺少」高 = 行数×(常态框高 − 本态框高) − 可见线数×线净占高，
+            // 用本块下内边距抵消，使两种模式总高恒等于常态（退出模式即回到基准 6dp）。
+            //   插入态：N 行压掉 6N、却有 (N+1) 条可见线 → 多 6dp，减掉 6 → 内边距 0；
+            //   拆分态：N 行压掉 6N、只有 (N−1) 条可见线（首尾无意义已隐藏）→ 缺 6dp，补 6 → 内边距 12。
+            int visibleLines = 0;
+            for (View line : block.lines) {
+                if (line.getVisibility() == View.VISIBLE) {
+                    visibleLines++;
+                }
+            }
+            int padBottom = basePad
+                    + block.rows.size() * (normalBox - boxHeight)
+                    - visibleLines * lineNet;
+            block.view.setPadding(0, 0, 0, Math.max(0, padBottom));
         }
         syncCaptureLayer();
     }

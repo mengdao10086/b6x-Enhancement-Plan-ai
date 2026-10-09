@@ -4,7 +4,8 @@
     （"添加点" "添加簇" "拆分簇" …空档… "删除簇"，删除簇在最右）。
     点行与插入横线由 KiCutTableEditor 现场 inflate item_ki_cut_point.xml / item_ki_cut_insert_line.xml
     后 addView 进 ki_cut_cluster_points（横线与行交替）。块底色取 app_surface_container_high
-    （比卡片底色亮一档），簇与簇之间自然分得开。去空气：块内不设内边距、底部行不设上距、块与块之间不留下外边距。
+    （比卡片底色亮一档），簇与簇之间自然分得开。去空气：块内只保留 @dimen/ki_cut_cluster_pad_bottom（模式态
+    等高补偿的基准，6dp）、底部行不设上距、块与块之间不留下外边距。
 
     四个 MaterialButton 的垂直内边距与 inset 都显式归零，原因见 item_ki_cut_point.xml 顶部注释：
     M3 TextButton 样式自带 paddingTop/Bottom=6dp 与 insetTop/Bottom=4dp，而 MaterialButtonHelper 会把
@@ -17,12 +18,14 @@
     android:layout_width="match_parent"
     android:layout_height="wrap_content"
     android:background="@color/app_surface_container_high"
-    android:orientation="vertical">
+    android:orientation="vertical"
+    android:paddingBottom="@dimen/ki_cut_cluster_pad_bottom">
 
     <!-- 表头行：「簇 N」+ 模式态提示（同一行、紧跟簇名）；2dp 下内边距给首条横线上抬让位
          （否则首条横线顶到标题、第 1 行的浮起列名不够露）。是本块唯一的内部留白，其余仍不设内边距。
          提示 TextView（ki_cut_split_hint）常态 GONE → 不占任何高度（模式退出后不留空）；进模式才可见，
-         文字接在簇名之后、放不下自动折到第二行（不另占按钮行之下的一整行）。由 KiCutTableEditor 切文案/显隐。 -->
+         文字接在簇名之后，**限单行、放不下尾部省略**（maxLines=1 + ellipsize=end）——这样表头行高不随
+         提示显隐/折行改变，两种模式才能与常态严格等高（见 KiCutTableEditor#applyModeVisuals 的下内边距补偿）。 -->
     <LinearLayout
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
@@ -42,6 +45,8 @@
             android:layout_height="wrap_content"
             android:layout_weight="1"
             android:layout_marginStart="@dimen/space_s"
+            android:ellipsize="end"
+            android:maxLines="1"
             android:textAppearance="@style/TextAppearance.B6XTempCtrl.Caption"
             android:visibility="gone" />
     </LinearLayout>

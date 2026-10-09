@@ -23,4 +23,9 @@
          hintEnabled 时恒在、与有没有列名文字无关），故相邻两行的「框体」之间其实是 7dp 留白 + 6dp 槽 = 13dp；
          横线下移约半个留白（本值）才落在两框正中。由 KiCutTableEditor#applyLineMargins 使用。 -->
     <dimen name="ki_cut_insert_line_shift">4dp</dimen>
+
+    <!-- 簇块常态的基准下内边距：＝横线的净占高（36−30 = 6dp）。它不是装饰，是「两种模式与常态严格等高」的
+         补偿基数——模式态把本块下内边距按「相对常态多出/缺少的高度」增删（多出减、缺少加，见
+         KiCutTableEditor#applyModeVisuals），故常态必须留得住这 6dp 才减得动。 -->
+    <dimen name="ki_cut_cluster_pad_bottom">6dp</dimen>
 </resources>
