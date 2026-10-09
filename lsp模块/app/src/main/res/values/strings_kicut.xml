@@ -7,6 +7,7 @@
 <resources>
     <string name="config_ki_cut_split_cluster">拆分簇</string>
     <string name="config_ki_cut_split_hint">拆分中：点横线＝在此拆分；点行＝该行由上下两簇共享（再点「拆分簇」退出）</string>
+    <string name="config_ki_cut_insert_hint">插入中：点横线＝在此插入一行（再点「添加点」退出）</string>
     <string name="config_ki_cut_empty_hint">还没有簇，全段都不削减（全 100）</string>
 
     <!-- 无障碍：横线与点行在两种语义下的说明 -->

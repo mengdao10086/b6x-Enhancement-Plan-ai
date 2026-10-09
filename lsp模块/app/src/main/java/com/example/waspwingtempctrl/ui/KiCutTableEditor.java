@@ -39,8 +39,12 @@ import java.util.List;
  * 增删簇/点/拆分只在用户点击那一刻重建（那时重建正是预期）。
  *
  * <p><b>每簇行间与首尾的高亮横线</b>（{@code item_ki_cut_insert_line.xml}）是真实兄弟视图，与点行不重叠，
- * 故触摸天然无冲突。常态点线＝在该处插入一条「四元组全空」的新行；进入<b>拆分态</b>（点「拆分簇」）后，
- * 同一批线改为「在此拆分」，且点行本身＝该行由上下两簇共享。整表在 0 簇时显示「还没有簇」空态与「添加簇」。
+ * 故触摸天然无冲突。<b>横线默认隐藏</b>，只有进入两种模式之一才显示：
+ * <ul>
+ *   <li><b>插入态</b>（点「添加点」）：点线＝在该处插入一条「四元组全空」的新行（不再直接追加到末尾）；</li>
+ *   <li><b>拆分态</b>（点「拆分簇」）：点线＝在此常规拆分，点行本身＝该行由上下两簇共享。</li>
+ * </ul>
+ * 两种模式互斥；再点同一按钮、点表内空白处、或发生增删/拆分即退出。整表在 0 簇时显示「还没有簇」空态与「添加簇」。
  */
 final class KiCutTableEditor {
 
@@ -79,9 +83,10 @@ final class KiCutTableEditor {
     /** true 时忽略控件回调：程序化回填不该被当成用户改动作业。 */
     private boolean suppress;
 
-    /** 当前处于「拆分态」的簇块（同一时刻至多一个）；null = 无常态。任何重建都会清空它。 */
-    @Nullable
-    private ClusterBlock splitBlock;
+    /** 「插入态」所在簇的下标（-1 = 无）：此时本簇的行间横线显示，点线在该处插一行全空行。 */
+    private int insertModeIndex = -1;
+    /** 「拆分态」所在簇的下标（-1 = 无）：此时本簇的横线改色显示、点行＝共享拆分。两种模式互斥。 */
+    private int splitModeIndex = -1;
 
     KiCutTableEditor(@NonNull KeyMeta meta, @NonNull View root, @NonNull Listener listener) {
         this.meta = meta;
@@ -94,6 +99,8 @@ final class KiCutTableEditor {
             // 删到 0 簇后没任何簇块（「添加簇」按钮原本挂在每个簇块底部），故空态自带一枚补回入口
             emptyAdd.setOnClickListener(v -> onAddCluster(0));
         }
+        // 点表内空白处退出插入/拆分态（点簇块背景亦同，见 addClusterBlock）
+        clustersBox.setOnClickListener(v -> exitModes());
     }
 
     // ==================== 值 ⇄ 控件 ====================
@@ -183,15 +190,22 @@ final class KiCutTableEditor {
 
     private void rebuild(@NonNull List<KiCutTable.Cluster> clusters) {
         suppress = true;
-        splitBlock = null;   // 重建后控件全新，拆分态一并退出
         try {
             clustersBox.removeAllViews();
             blocks.clear();
             for (KiCutTable.Cluster cluster : clusters) {
                 addClusterBlock(cluster);
             }
+            // 模式按下标保留（插入态在插入后仍留在本簇，便于连续插行）；越界即退出
+            if (insertModeIndex >= blocks.size()) {
+                insertModeIndex = -1;
+            }
+            if (splitModeIndex >= blocks.size()) {
+                splitModeIndex = -1;
+            }
             refreshTitles();
             refreshButtons();
+            applyModeVisuals();
         } finally {
             suppress = false;
         }
@@ -244,19 +258,12 @@ final class KiCutTableEditor {
         listener.onEdited(Listener.EditKind.STRUCTURAL);
     }
 
-    private void onAddPoint(int index) {
-        List<KiCutTable.Cluster> model = getClustersRaw();
-        if (index < 0 || index >= model.size()) {
-            return;
-        }
-        if (model.get(index).points.size() >= MAX_POINTS) {
-            listener.notifyUser(clustersBox.getContext().getString(
-                    R.string.config_ki_cut_limit_point, MAX_POINTS));
-            return;
-        }
-        model.get(index).points.add(newDefaultPoint());
-        rebuild(model);
-        listener.onEdited(Listener.EditKind.STRUCTURAL);
+    /** 点「添加点」：只切换本簇的插入态（显示行间横线），不再直接追加行——点某条横线才在该处插入。 */
+    private void onInsertToggle(@NonNull ClusterBlock block) {
+        int index = indexOf(block);
+        insertModeIndex = (insertModeIndex == index) ? -1 : index;
+        splitModeIndex = -1;   // 两种模式互斥
+        applyModeVisuals();
     }
 
     private void onDeletePoint(int index, int rowIndex) {
@@ -265,8 +272,13 @@ final class KiCutTableEditor {
             return;
         }
         List<KiCutTable.Point> points = model.get(index).points;
-        if (rowIndex < 0 || rowIndex >= points.size() || points.size() <= 1) {
-            return;   // 每簇至少留一个点
+        if (rowIndex < 0 || rowIndex >= points.size()) {
+            return;
+        }
+        if (points.size() == 1) {
+            // 删掉最后一个点 = 删除整簇（复用既有删除簇路径：确认弹窗 + 「删到 0 簇」的处理）
+            onDeleteCluster(index);
+            return;
         }
         points.remove(rowIndex);
         rebuild(model);
@@ -304,24 +316,43 @@ final class KiCutTableEditor {
 
     // ==================== 拆分簇 ====================
 
-    /** 点「拆分簇」：在本簇的拆分态与常态之间切换（同一时刻只有一个簇处于拆分态）。 */
+    /** 点「拆分簇」：在本簇的拆分态与常态之间切换（同一时刻只有一个簇处于某一种模式）。 */
     private void onSplitToggle(@NonNull ClusterBlock block) {
-        splitBlock = (splitBlock == block) ? null : block;
-        applySplitVisuals();
+        int index = indexOf(block);
+        splitModeIndex = (splitModeIndex == index) ? -1 : index;
+        insertModeIndex = -1;   // 两种模式互斥
+        applyModeVisuals();
     }
 
-    /** 拆分态视觉：本簇的线与行的可点语义切换（线＝拆分、行＝共享），并在块底显示一句话提示。 */
-    private void applySplitVisuals() {
+    /** 退出插入/拆分态（点表内空白处、或重建后下标越界时）。 */
+    private void exitModes() {
+        if (insertModeIndex < 0 && splitModeIndex < 0) {
+            return;
+        }
+        insertModeIndex = -1;
+        splitModeIndex = -1;
+        applyModeVisuals();
+    }
+
+    /**
+     * 模式视觉：<b>横线默认隐藏</b>，只有处于插入/拆分态的簇才显示——插入态横线用常态色（开关绿）、
+     * 点线＝在该处插入；拆分态横线改色（红）、点线＝在此拆分，且该簇点行的命中层可见（点行＝共享拆分）。
+     * 块底提示按模式改文案。
+     */
+    private void applyModeVisuals() {
         Context context = clustersBox.getContext();
-        for (ClusterBlock block : blocks) {
-            boolean splitting = block == splitBlock;
+        for (int i = 0; i < blocks.size(); i++) {
+            ClusterBlock block = blocks.get(i);
+            boolean inserting = i == insertModeIndex;
+            boolean splitting = i == splitModeIndex;
+            boolean active = inserting || splitting;
             int lineColor = context.getColor(
                     splitting ? R.color.ki_cut_insert_line_split : R.color.ki_cut_insert_line);
-            for (int i = 0; i < block.lines.size(); i++) {
-                View holder = block.lines.get(i);
-                boolean edge = i == 0 || i == block.lines.size() - 1;
-                // 首尾线在拆分态无意义（会把簇切成空的一侧），隐藏掉
-                holder.setVisibility(splitting && edge ? View.GONE : View.VISIBLE);
+            for (int j = 0; j < block.lines.size(); j++) {
+                View holder = block.lines.get(j);
+                boolean edge = j == 0 || j == block.lines.size() - 1;
+                // 拆分态首尾线无意义（会把簇切成空的一侧），隐藏掉；其余按是否处于模式决定显隐
+                holder.setVisibility(active && !(splitting && edge) ? View.VISIBLE : View.GONE);
                 View bar = holder.findViewById(R.id.ki_cut_line_bar);
                 if (bar != null) {
                     bar.setBackgroundColor(lineColor);
@@ -331,27 +362,29 @@ final class KiCutTableEditor {
             }
             for (PointRow row : block.rows) {
                 row.hit.setVisibility(splitting ? View.VISIBLE : View.GONE);
-                // 拆分态该行可点＝共享拆分；常态命中层不可见，此描述不起作用
+                // 拆分态该行可点＝共享拆分；其余时候命中层不可见，此描述不起作用
                 row.hit.setContentDescription(context.getString(R.string.config_ki_cut_split_row));
             }
-            block.splitHint.setVisibility(splitting ? View.VISIBLE : View.GONE);
+            block.modeHint.setVisibility(active ? View.VISIBLE : View.GONE);
+            block.modeHint.setText(splitting
+                    ? R.string.config_ki_cut_split_hint : R.string.config_ki_cut_insert_hint);
         }
     }
 
-    /** 点横线：常态＝在该处插一行；拆分态＝在此常规拆分。 */
+    /** 点横线：插入态＝在该处插一行；拆分态＝在此常规拆分。 */
     private void onLineClicked(@NonNull ClusterBlock block, int at) {
         int index = indexOf(block);
-        if (block == splitBlock) {
+        if (index == splitModeIndex) {
             // 常规拆分：上簇 = 该线以上的点，下簇 = 该线以下的点
             splitCluster(index, at, at);
-        } else {
+        } else if (index == insertModeIndex) {
             insertBlankRow(index, at);
         }
     }
 
     /** 点行：拆分态下＝该行同属上下两簇（共享行）。 */
     private void onRowClicked(@NonNull ClusterBlock block, int rowIndex) {
-        if (block == splitBlock) {
+        if (indexOf(block) == splitModeIndex) {
             // 共享拆分：上簇 = [0..row]，下簇 = [row..n-1]，该行两簇各一份
             splitCluster(indexOf(block), rowIndex + 1, rowIndex);
         }
@@ -382,7 +415,8 @@ final class KiCutTableEditor {
         lower.points.addAll(points.subList(lowerStart, n));
         model.set(clusterIndex, upper);
         model.add(clusterIndex + 1, lower);
-        rebuild(model);   // rebuild 会清掉拆分态
+        splitModeIndex = -1;   // 拆分已完成，退出拆分态（插入态不在此列，其下标已越界也会被 rebuild 清掉）
+        rebuild(model);
         listener.onEdited(Listener.EditKind.STRUCTURAL);
     }
 
@@ -394,10 +428,13 @@ final class KiCutTableEditor {
         boolean firstCluster = blocks.isEmpty();
         blocks.add(block);
         block.deleteClusterButton.setOnClickListener(v -> onDeleteCluster(indexOf(block)));
-        block.addPointButton.setOnClickListener(v -> onAddPoint(indexOf(block)));
+        // 「添加点」＝进入/退出插入态（不再直接追加行）
+        block.addPointButton.setOnClickListener(v -> onInsertToggle(block));
         // 「添加簇」在每个簇块底部：新簇插在本块之后（不是追加到末尾），其后各簇整体下移
         block.addClusterButton.setOnClickListener(v -> onAddCluster(indexOf(block) + 1));
         block.splitClusterButton.setOnClickListener(v -> onSplitToggle(block));
+        // 点本簇空白处（表头等非子控件区域）退出插入/拆分态
+        block.view.setOnClickListener(v -> exitModes());
         for (KiCutTable.Point point : cluster.points) {
             addInsertLine(block);   // 行之前一条
             addPointRow(block, point, firstCluster && block.rows.isEmpty());
@@ -492,19 +529,15 @@ final class KiCutTableEditor {
 
     /**
      * 刷新按钮与空态：「添加簇」「拆分簇」到上限时置灰（拆分还要求本簇至少两个点）；
-     * 删除簇恒可用（允许删到 0 簇）；每簇仅剩一个点时不能删点。0 簇时显示空态与补回入口。
+     * 「添加点」到 32 点时置灰（它是插入态的模式按钮）；删除簇与删除点恒可用（删最后一个点＝删该簇，
+     * 允许一直删到 0 簇）。0 簇时显示空态与补回入口。
      */
     private void refreshButtons() {
         boolean canAddCluster = blocks.size() < MAX_CLUSTERS;
         for (ClusterBlock block : blocks) {
             block.addClusterButton.setEnabled(canAddCluster);
             block.splitClusterButton.setEnabled(canAddCluster && block.rows.size() >= 2);
-            block.deleteClusterButton.setEnabled(true);
             block.addPointButton.setEnabled(block.rows.size() < MAX_POINTS);
-            boolean multiPoint = block.rows.size() > 1;
-            for (PointRow row : block.rows) {
-                row.deleteButton.setEnabled(multiPoint);
-            }
         }
         if (emptyState != null) {
             emptyState.setVisibility(blocks.isEmpty() ? View.VISIBLE : View.GONE);
@@ -653,7 +686,7 @@ final class KiCutTableEditor {
         }
     }
 
-    /** 一个簇块（表头 + 点行/横线容器 + 底部行：添加点 / 添加簇 / 拆分簇 / 删除簇 + 拆分态提示）。 */
+    /** 一个簇块（表头 + 点行/横线容器 + 底部行：添加点 / 添加簇 / 拆分簇 / 删除簇 + 模式提示）。 */
     private final class ClusterBlock {
         final View view;
         final TextView title;
@@ -662,9 +695,10 @@ final class KiCutTableEditor {
         final MaterialButton addClusterButton;
         final MaterialButton splitClusterButton;
         final MaterialButton deleteClusterButton;
-        final TextView splitHint;
+        /** 进入插入/拆分态时显示的一句话提示（文案按模式切）。 */
+        final TextView modeHint;
         final List<PointRow> rows = new ArrayList<>();
-        /** 本簇的插入横线，顺序即位置（长度恒为 rows.size()+1）。 */
+        /** 本簇的插入横线，顺序即位置（长度恒为 rows.size()+1）；默认隐藏，仅模式中显示。 */
         final List<View> lines = new ArrayList<>();
 
         ClusterBlock(View view) {
@@ -675,7 +709,7 @@ final class KiCutTableEditor {
             this.addClusterButton = view.findViewById(R.id.ki_cut_cluster_add_cluster);
             this.splitClusterButton = view.findViewById(R.id.ki_cut_cluster_split);
             this.deleteClusterButton = view.findViewById(R.id.ki_cut_cluster_del);
-            this.splitHint = view.findViewById(R.id.ki_cut_split_hint);
+            this.modeHint = view.findViewById(R.id.ki_cut_split_hint);
         }
     }
 }

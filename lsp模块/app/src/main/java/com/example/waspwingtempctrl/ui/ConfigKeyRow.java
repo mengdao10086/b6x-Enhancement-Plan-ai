@@ -1584,19 +1584,25 @@ final class ConfigKeyRow {
 
     /**
      * 参数说明浮窗：点输入框（获焦）或开关行的「?」时，在 Activity 内容根（{@code android.R.id.content}）
-     * 上叠一层全屏浮层（压暗 + 说明卡）并渐入；<b>不拦截任何操作</b>——
+     * 上叠一层全屏浮层（压暗 + 说明卡）并渐入。
+     *
+     * <p>「不影响任何操作」的准确含义是——<b>只有触摸「说明窗口以外」的区域才放行</b>：
      * <ul>
-     *   <li>落在<b>说明卡上</b>：吞掉（点了当没点），保持显示；</li>
+     *   <li>落在<b>说明卡上</b>（含卡内滚动 / 点击）：由卡<b>正常消费</b>，保持显示；</li>
      *   <li>落在<b>触发控件</b>（输入框 /「?」）上：放行（事件落到下面的真实控件），保持显示；</li>
      *   <li>落在<b>别处</b>（含从别处起滑）：放行<b>并</b>渐隐——渐隐与这次操作并行，不吞掉它。</li>
      * </ul>
      * 键盘是另一个窗口，本浮层收不到它的触摸，点键盘不受影响。
      *
-     * <p>「放行」靠本浮层在非卡片区域<b>不消费</b>触摸（{@link ViewGroup} 会把事件继续派给兄弟子视图）——
+     * <p>「放行」靠本浮层在卡片以外<b>不消费</b>触摸（{@link ViewGroup} 会把事件继续派给兄弟子视图）——
      * 这也是不采用 {@code PopupWindow} 的原因：窗外的触摸会被它消费后再消失，下层拿不到这次手势。
      *
+     * <p>定位在<b>首次绘制之前</b>完成：挂上去时卡 {@code alpha=0}（不可见），量好尺寸、摆到锚点旁之后
+     * 才开始入场动画——绝不让人看到"从左上角闪一下再跳过去"。退场是淡出动画（{@code alpha→0}，结束
+     * 之后才 {@code removeView}），不是瞬时消失。
+     *
      * <p>实例在进程内至多一个（同一时刻只有一页在操作）；由 {@link #show} 复用/重建，{@link #hide()}
-     * 渐隐后移除。取不到内容根/锚点时不挂浮层（安全退化）。浮层不请求焦点、不动既有键盘逻辑。
+     * 淡出后移除。取不到内容根/锚点时不挂浮层（安全退化）。浮层不请求焦点、不动既有键盘逻辑。
      */
     private static final class HintOverlay {
 
@@ -1606,6 +1612,10 @@ final class ConfigKeyRow {
         /** 入场位移（dp）：从下往上 8dp 浮起；起始缩放 0.98（不从 0 起）。 */
         private static final float IN_TRANSLATE_DP = 8f;
         private static final float IN_SCALE = 0.98f;
+        /** 卡宽 = 屏幕宽 × 此比例（4/5）。 */
+        private static final float WIDTH_FRACTION = 0.8f;
+        /** 卡高上限 = 屏幕高 × 此比例（1/4）；超出由卡内 ScrollView 承接滚动。 */
+        private static final float MAX_HEIGHT_FRACTION = 0.25f;
 
         private static HintOverlay current;
 
@@ -1665,6 +1675,7 @@ final class ConfigKeyRow {
             overlay.addView(scrim);
 
             card = LayoutInflater.from(context).inflate(R.layout.item_config_hint_popup, overlay, false);
+            card.setAlpha(0f);   // 定位完成前完全透明：绝不让人看到中间位置
             overlay.addView(card);
             titleView = card.findViewById(R.id.config_hint_title);
             bodyView = card.findViewById(R.id.config_hint_body);
@@ -1686,8 +1697,11 @@ final class ConfigKeyRow {
             host.addView(overlay);
         }
 
-        /** 绑定内容与锚点：换键则换文本，随后重定位并渐入。 */
+        /** 绑定内容与锚点：换键则换文本，随后重定位（首帧前）并渐入。被再次唤起时先取消上一次动画。 */
         private void bind(@NonNull KeyMeta meta, @NonNull View anchor) {
+            // 抢占上一次未完成的入/退场：先取消，免得旧退场的收尾把新浮层移除
+            card.animate().cancel();
+            scrim.animate().cancel();
             this.key = meta.key;
             this.anchor = anchor;
             titleView.setText(meta.label);
@@ -1698,13 +1712,16 @@ final class ConfigKeyRow {
                 addSection(ctx, sections.get(i), i == 0);
             }
             registerScroll(anchor);
+            card.setAlpha(0f);   // 新内容在定位完成前同样不可见
             showing = true;
             overlay.post(this::layoutAndShow);
         }
 
         /**
-         * 触摸分发：只在按下时判定落点。卡片内吞掉（当没点）；触发控件上放行、不消失；
-         * 别处放行并渐隐——返回 false 即「未消费」，事件继续派给下面的真实视图，原操作照常。
+         * 触摸分发：只在按下时判定落点。<b>卡片本体正常消费</b>（返回 true，含卡内滚动/点击）；
+         * 触发控件上放行、不消失；别处放行并渐隐——返回 false 即「未消费」，事件继续派给下面的
+         * 真实视图，原操作照常。注意：卡内（ScrollView/子控件）自己会消费，通常根本到不了这里，
+         * 这一支只是"卡内空白处也当卡本体"的兜底。
          */
         private boolean onTouch(View v, MotionEvent ev) {
             if (ev.getActionMasked() != MotionEvent.ACTION_DOWN) {
@@ -1733,28 +1750,40 @@ final class ConfigKeyRow {
                     && y >= loc[1] && y < loc[1] + view.getHeight();
         }
 
-        /** 摆放好后再渐入（首次/换键用；滚动跟随只重定位、不再渐入）。 */
+        /**
+         * 摆好后再渐入（首次/换键用；滚动跟随只重定位、不再渐入）。若此刻浮层尺寸还没量出来，就
+         * 下一帧再试——期间卡 {@code alpha=0}，用户看不到任何中间位置。
+         */
         private void layoutAndShow() {
+            if (overlay.getParent() == null || anchor == null) {
+                return;
+            }
+            if (overlay.getWidth() <= 0 || overlay.getHeight() <= 0) {
+                overlay.post(this::layoutAndShow);
+                return;
+            }
             if (reposition()) {
                 animateIn();
             }
         }
 
-        /** 量卡、就近锚定（默认贴锚点上方，放不下翻到下方）并摆好。返回是否成功摆放。 */
+        /**
+         * 量卡、就近锚定（默认贴锚点上方，放不下翻到下方）并摆好：卡宽 = 屏宽 4/5（固定），
+         * 卡高 = min(内容自然高, 屏高 1/4)——超出由卡内 ScrollView 承接滚动。返回是否成功摆放。
+         */
         private boolean reposition() {
             if (overlay.getParent() == null || anchor == null) {
                 return false;
             }
             Resources res = card.getResources();
-            int pad = res.getDimensionPixelSize(R.dimen.config_hint_popup_margin);
-            int availW = Math.max(0, overlay.getWidth() - 2 * pad);
-            int maxW = Math.min(availW,
-                    res.getDimensionPixelSize(R.dimen.config_hint_popup_max_width));
+            int lo = res.getDimensionPixelSize(R.dimen.config_hint_popup_margin);
+            int maxW = Math.max(0, Math.round(overlay.getWidth() * WIDTH_FRACTION));
+            int maxH = Math.max(0, Math.round(overlay.getHeight() * MAX_HEIGHT_FRACTION));
+            // 宽按 EXACTLY 量（固定 4/5 屏宽）；高 UNSPECIFIED 量出自然高后再封"1/4 屏高"的顶
             card.measure(
-                    View.MeasureSpec.makeMeasureSpec(maxW, View.MeasureSpec.AT_MOST),
+                    View.MeasureSpec.makeMeasureSpec(maxW, View.MeasureSpec.EXACTLY),
                     View.MeasureSpec.makeMeasureSpec(0, View.MeasureSpec.UNSPECIFIED));
-            int cw = Math.min(card.getMeasuredWidth(), availW);
-            int ch = card.getMeasuredHeight();
+            int ch = Math.min(card.getMeasuredHeight(), maxH);
 
             int[] aLoc = new int[2];
             int[] rLoc = new int[2];
@@ -1763,14 +1792,14 @@ final class ConfigKeyRow {
             int ax = aLoc[0] - rLoc[0];
             int ay = aLoc[1] - rLoc[1];
             int offset = res.getDimensionPixelSize(R.dimen.config_hint_popup_offset);
-            int left = clamp(ax, pad, Math.max(pad, overlay.getWidth() - pad - cw));
+            int left = clamp(ax, lo, Math.max(lo, overlay.getWidth() - lo - maxW));
             int above = ay - offset - ch;
-            int top = above >= pad ? above : (ay + anchor.getHeight() + offset);
-            top = clamp(top, pad, Math.max(pad, overlay.getHeight() - pad - ch));
+            int top = above >= lo ? above : (ay + anchor.getHeight() + offset);
+            top = clamp(top, lo, Math.max(lo, overlay.getHeight() - lo - ch));
 
             FrameLayout.LayoutParams lp = (FrameLayout.LayoutParams) card.getLayoutParams();
-            lp.width = cw;
-            lp.height = ch;
+            lp.width = maxW;
+            lp.height = Math.max(0, ch);
             lp.leftMargin = left;
             lp.topMargin = top;
             card.setLayoutParams(lp);
