@@ -7,7 +7,7 @@
 
     四个框等宽（0dp + weight=1），用与 item_config_field.xml 同一套字段样式
     （Widget.Material3.TextInputLayout.OutlinedBox + 同圆角 @dimen/field_radius），
-    但高度/字号本轮缩小（点行 30dp / 15sp，见 dimens_kicut.xml），值仍居中（textAlignment="center"）。
+    框高/字号与同页其它参数输入框一致（常态 36dp / 16sp，见 dimens_kicut.xml），值仍居中（textAlignment="center"）。
     浮起说明（rowFields[].label）只由 KiCutTableEditor 设给「整张表的第一个点行」；
     其余行不设 hint，OutlinedBox 无 hint 时渲染成普通圆角描边、无缺口。
 

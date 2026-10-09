@@ -381,7 +381,7 @@ final class KiCutTableEditor {
                 holder.setContentDescription(context.getString(
                         splitting ? R.string.config_ki_cut_split_line : R.string.config_ki_cut_insert_line));
             }
-            // 压缩＝横线占用的高度：模式态框压到 24dp（+ 线 6dp = 常态行高 30dp），并关掉浮起列名
+            // 压缩＝横线占用的高度：模式态框压到 30dp（+ 线 6dp = 常态行高 36dp），并关掉浮起列名
             int boxHeight = context.getResources().getDimensionPixelSize(active
                     ? R.dimen.ki_cut_point_height_compact : R.dimen.ki_cut_point_height);
             for (PointRow row : block.rows) {
@@ -546,8 +546,10 @@ final class KiCutTableEditor {
      * 追加一条可点高亮横线（其插入位置 = 当前行数，即它落在已有各行之下、下一条行之上）。
      *
      * <p>用<b>负外边距</b>把它上下各 2dp 的透明留白压进相邻点行：视觉上线的边缘正好贴住输入框（零间隙）、
-     * 且它在布局里只占 6dp（＝可见线高），故模式态「框 24dp + 线 6dp ＝ 常态行高 30dp」；命中区却是
+     * 且它在布局里只占 6dp（＝可见线高），故模式态「框 30dp + 线 6dp ＝ 常态行高 36dp」；命中区却是
      * 6dp＋上下各 2dp＝10dp。多出的 2dp 只吃掉输入框外沿（正文区域不受影响）。
+     * <b>贴紧的前提</b>：模式态四个框必须都 setHintEnabled(false)（见 {@link PointRow#applyCompact}），
+     * 去掉 material 给浮起说明预留的 ≈7dp 顶隙，否则框体被顶隙下压、横线上方会露空。
      */
     private void addInsertLine(@NonNull ClusterBlock block) {
         View holder = inflater.inflate(R.layout.item_ki_cut_insert_line, block.pointsBox, false);
@@ -803,16 +805,21 @@ final class KiCutTableEditor {
         }
 
         /**
-         * 常态/模式态切换：四个框与删除按钮一并改成 {@code boxHeight}（常态 30dp、模式态 24dp），
+         * 常态/模式态切换：四个框与删除按钮一并改成 {@code boxHeight}（常态 36dp、模式态 30dp），
          * 模式态另关掉浮起列名（否则「列名 + 数字」在压缩高度里装不下、数字被裁），退出模式恢复列名。
-         * 只对**有列名**的框动 {@code setHintEnabled}（同一张表只有第一个点行带列名，其余框本就没有列名）。
+         *
+         * <p><b>必须对「全部」四个框无条件 {@code setHintEnabled(!compact)}，不能用 {@code getHint()} 当守卫。</b>
+         * material 的 {@code setHintEnabled(false)} 会把 hint 字段置空（并把它挪成 EditText 的占位符），
+         * 而 {@code getHint()} 在 {@code hintEnabled=false} 时恒返回 null——于是「本框有列名」这个判断在
+         * 第一次关闭后就再也为真不了，退出模式时 {@code setHintEnabled(true)} 永远不会被调用、列名回不来
+         * （原先的 bug：只有整表 rebuild 造出新控件才恢复）。{@code setHintEnabled} 自身幂等（值未变即早返回），
+         * 对本就没有列名的框也只是去掉/恢复 material 给浮起说明预留的 ≈7dp 顶隙，无副作用；
+         * 而那 7dp 顶隙正是「压缩后数字被裁、横线上方留空」的根源，故无列名的框也必须一起关。
          */
         void applyCompact(boolean compact, int boxHeight) {
             for (TextInputLayout box : boxes) {
                 setHeight(box, boxHeight);
-                if (!TextUtils.isEmpty(box.getHint())) {
-                    box.setHintEnabled(!compact);
-                }
+                box.setHintEnabled(!compact);
             }
             setHeight(deleteButton, boxHeight);
         }

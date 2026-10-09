@@ -5,12 +5,16 @@
     故本包新增的尺寸一律集中在此（既有条目仍只读引用 dimens_config.xml）。
 -->
 <resources>
-    <!-- 点行四个数字框的高与字号：常态 30dp（列名照常浮起）；删除按钮常态也 30dp，行高即 30dp。 -->
-    <dimen name="ki_cut_point_height">30dp</dimen>
-    <!-- 模式态（插入/拆分）框高：＝常态 30dp − 横线占用高度 6dp，故「框 + 线」合计仍 30dp，整表总高不变。
-         此高度配 15sp 数字需同时关掉浮起列名（见 KiCutTableEditor#applyModeVisuals），否则装不下。 -->
-    <dimen name="ki_cut_point_height_compact">24dp</dimen>
-    <dimen name="ki_cut_point_text_size">15sp</dimen>
+    <!-- 点行四个数字框的高与字号：常态 36dp，**与同页其它带列名的参数输入框同高**
+         （那类框的高＝@dimen/field_height 36dp，见 values/dimens.xml；字号＝@dimen/config_field_text_size 16sp）。
+         两者取同值后，本表的框与「远离基线 a(%)」等框逐值等高、列名基线也一致。 -->
+    <dimen name="ki_cut_point_height">36dp</dimen>
+    <!-- 模式态（插入/拆分）框高：＝常态 36dp − 横线占用高度 6dp = 30dp，故「框 + 线」合计仍 36dp，逐行与常态等高、整表总高不变。
+         此高度关掉浮起列名后，框内可用高 = 30 − 上内边距 5 − 下内边距 2 = 23dp，装 16sp 数字（行盒约 18.75dp）有余量。
+         关键：压缩时必须对**全部**框（含本就没有列名的那些）都 setHintEnabled(false)——
+         否则无列名的框仍带 material 给浮起说明预留的 ≈7dp 顶隙，可用高只剩 16dp，数字被裁且横线上下不贴。 -->
+    <dimen name="ki_cut_point_height_compact">30dp</dimen>
+    <dimen name="ki_cut_point_text_size">16sp</dimen>
 
     <!-- 插入/拆分横线：可见线粗 6dp；上下各 2dp 透明留白＝命中区外扩（配合负外边距，视觉上仍是零间隙、不吃行高）。 -->
     <dimen name="ki_cut_insert_line_thickness">6dp</dimen>

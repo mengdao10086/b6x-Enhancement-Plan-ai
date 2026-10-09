@@ -3,7 +3,8 @@
     分段倍率表的一条「高亮横线」：可见细线 @dimen/ki_cut_insert_line_thickness(6dp)、全宽。
     上下各 @dimen/ki_cut_insert_line_gap(2dp) 是**透明留白**：视觉上线的边缘正好贴住输入框（零间隙，读不出留白），
     同时把可点区外扩到 10dp。KiCutTableEditor 再用**负外边距**（-2dp）把这段留白压进相邻点行，故它在布局里
-    只占 6dp——模式态「框 24dp + 线 6dp ＝ 常态行高 30dp」，整表总高不变；多出的 2dp 只吃掉输入框外沿。
+    只占 6dp——模式态「框 30dp + 线 6dp ＝ 常态行高 36dp」，整表总高不变；多出的 2dp 只吃掉输入框外沿。
+    （贴住上下框体的前提：模式态四个框都关掉浮起说明与其 ≈7dp 顶隙，见 KiCutTableEditor#applyCompact。）
     由 KiCutTableEditor 现场 inflate 后 addView 进 ki_cut_cluster_points，夹在各点行之间与首尾。
     <b>默认隐藏</b>（visibility=gone）：只有进入「插入态」（点「添加点」）或「拆分态」（点「拆分簇」）才显示；
     插入态点线＝该处插一行全空行，拆分态改色为拆分线＝在此拆分。
