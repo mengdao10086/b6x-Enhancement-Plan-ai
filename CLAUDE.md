@@ -78,7 +78,7 @@
 | `参考资料/decompile/b6_devtool/反编译分析.md` | 开发者工具 App 内部运行逻辑分析；**不进 git** |
 | `参考资料/decompile/` | 各工具反编译产物与逐 app 分析（`b6_devtool/`、`b6_overclock_v2/`、`b7_overclock_v3/`、`b8x/`；**不进 git**，索引见 `通用.md`） |
 | `参考资料/c_historical_sources/` | tempctrl 历史版本源码（单独追踪） |
-| `参考资料/smali_patching_attempts/` | smali 工具链产物（失败尝试，工具 jar 已并入集中 `工具/`；不进 git） |
+| `参考资料/smali_patching_attempts/` | smali 工具链产物（失败尝试，工具 jar 已并入集中 `D:\tools\`；不进 git） |
 | `.github/workflows/build.yml` | CI 单一构建链：编译 C → 注入 APK assets → 出唯一交付物 APK |
 
 
@@ -86,10 +86,11 @@
 
 | 工具 | 位置 |
 |------|------|
-| `baksmali.jar` | `../工具/baksmali.jar`（集中目录） |
-| `smali.jar` | `../工具/smali.jar` |
-| `debug.keystore` | `../工具/debug.keystore` |
-| `jadx.jar` | `../工具/jadx.jar` |
+| `baksmali.jar` | `D:\tools\baksmali.jar` |
+| `smali.jar` | `D:\tools\smali.jar` |
+| `debug.keystore` | `D:\tools\debug.keystore` |
+| `jadx.jar` | `D:\tools\jadx.jar`（仅核心库，不可直接执行） |
+| `jadx`（可执行） | `D:\tools\jadx\bin\jadx.bat` |
 
 ---
 
