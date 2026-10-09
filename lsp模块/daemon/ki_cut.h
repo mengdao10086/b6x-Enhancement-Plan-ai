@@ -14,8 +14,10 @@
  *      **不作为控制点**——从该轴的控制点序列中剔除，折线由相邻的两个未留空控制点直接连线。
  *   3. 折线 L(x)（逐轴）：在该轴控制点序列内相邻点线性插值；x ≤ 该轴最小冷值取首点、x ≥ 最大冷值
  *      取末点（两端平推）；该轴一个控制点都没有 → 该轴恒为 KI_CUT_NONE（100 = 不削）。
- *   4. 多簇逐轴取**离各簇候选平均值最近**的那一簇的值（「重合」处不再一律取最小）；并列取更小倍率
- *      （与旧「取最小」在 2 簇时逐位一致）；无有效簇 → KI_CUT_NONE。
+ *   4. 多簇**逐轴独立**：先取该轴上各簇「有效控制点覆盖范围」的并集区间；参照值 M ＝ 该区间内、
+ *      各簇在**自身覆盖范围**内所有整数冷值处候选值的总体平均（每个整数冷值算一次、无候选处不计）。
+ *      对每个冷值取候选里 |v-M| 最小者；并列（含浮点舍入噪声）取更小倍率。该轴只有 1 个候选时直通
+ *      （不受 M 影响）。某簇在该轴上全留空 = 无候选，不参与 M 也不进入取舍；该轴无任何候选 → KI_CUT_NONE。
  * 倍率口径：×100（100 = 不削，0 = 完全压死）。
  */
 #ifndef KI_CUT_H
@@ -101,28 +103,8 @@ static int ki_cut_normalize(KiCutPoint *p, int n) {
 }
 
 /**
- * 单簇求值。三轴各自按折线求值（无滤波）。n < 1 视为无效，返回 0（不改输出）；
- * 否则返回 1 并写入该簇的 KDP / 升 / 降倍率（×100）。单点簇整簇恒为该点值。
- */
-static int ki_cut_cluster_eval(const KiCutPoint *in, int n, int cold,
-                               float *kdp, float *up, float *dn) {
-    if (n < 1) return 0;
-    if (n > KI_CUT_MAX_POINTS) n = KI_CUT_MAX_POINTS;
-
-    KiCutPoint pts[KI_CUT_MAX_POINTS];
-    for (int i = 0; i < n; i++) pts[i] = in[i];
-    n = ki_cut_normalize(pts, n);
-
-    *kdp = ki_cut_lerp(pts, n, cold, 0);
-    *up  = ki_cut_lerp(pts, n, cold, 1);
-    *dn  = ki_cut_lerp(pts, n, cold, 2);
-    return 1;
-}
-
-/**
- * 等距判定容差：`|d1-d2|` 落在浮点舍入噪声内即视为等距。
- * 必要性见「两簇恒等距」：2 簇时两候选到均值数学上等距，但 float32 下 `m-v1` 与 `v2-m` 各自舍入，
- * 差值可达 ~几 ulp（实测 1.9e-6），精确比较会**反过来选中较大值**。eps=1e-3 远超该噪声（值域 0~200，
+ * 等距判定容差：`|d1-d2|` 落在浮点舍入噪声内即视为等距。float32 下两候选到同一参照值 M 的距离
+ * 可达数 ulp 偏差，精确比较会漏判而**反过来选中较大倍率**；eps=1e-3 远超该噪声（值域 0~200、
  * 舍入误差 ≤ ~1e-4）、又远小于任何有意义的倍率差（判据容差 0.05）。
  */
 #define KI_CUT_TIE_EPS 1.0e-3f
@@ -139,42 +121,97 @@ static float ki_cut_nearer(float cur, float cand, float target) {
     return (dn < dc) ? cand : cur;
 }
 
+/** 该轴上「未留空控制点」的首/末下标。无控制点（全留空）→ 返回 0（该轴无候选）；否则返回 1 并写出 first/last。 */
+static int ki_cut_axis_span(const KiCutPoint *p, int n, int axis, int *first, int *last) {
+    int f = -1, l = -1;
+    for (int i = 0; i < n; i++) {
+        if (ki_cut_is_skipped(&p[i], axis)) continue;
+        if (f < 0) f = i;
+        l = i;
+    }
+    if (f < 0) return 0;
+    *first = f; *last = l;
+    return 1;
+}
+
 /**
- * 多簇求值：各簇分别求值后，逐轴取**离各簇候选平均值最近**的那一簇的值（「重合」处不再一律取最小）；
- * 等距取更小倍率。无有效簇 → 三轴均 KI_CUT_NONE。返回有效簇数。
+ * 该轴在**自身覆盖区间**（首/末未留空控制点冷值之间）内所有整数冷值上候选值之和，及整数冷值个数。
+ * 折线在整数冷值上求和用梯形公式（对线性段精确）：Σ_{a..b} 线性值 = (b-a+1)·(v_a+v_b)/2，段间公共端点
+ * 减去一次。**不按跨度迭代**——冷值被写成极值（如 ±2e9）时也不会退化成 O(span) 死循环。
+ */
+static void ki_cut_axis_intra(const KiCutPoint *p, int n, int axis,
+                              float *out_sum, float *out_cnt) {
+    int idx[KI_CUT_MAX_POINTS];
+    int m = 0;
+    for (int i = 0; i < n; i++)
+        if (!ki_cut_is_skipped(&p[i], axis)) idx[m++] = i;
+    float lo = (float)p[idx[0]].cold;
+    float hi = (float)p[idx[m - 1]].cold;
+    *out_cnt = hi - lo + 1.0f;
+    if (m == 1) { *out_sum = (float)ki_cut_pick(&p[idx[0]], axis); return; }
+    float s = 0.0f;
+    for (int j = 0; j + 1 < m; j++) {
+        float ca = (float)p[idx[j]].cold,     cb = (float)p[idx[j + 1]].cold;
+        float va = (float)ki_cut_pick(&p[idx[j]], axis);
+        float vb = (float)ki_cut_pick(&p[idx[j + 1]], axis);
+        s += (cb - ca + 1.0f) * (va + vb) / 2.0f;
+    }
+    for (int j = 1; j + 1 < m; j++) s -= (float)ki_cut_pick(&p[idx[j]], axis);
+    *out_sum = s;
+}
+
+/**
+ * 单轴多簇求值。参照值 M ＝ 各参评簇（该轴有控制点的簇）**自身覆盖区间**内整数冷值候选值的总体
+ * 平均（无候选处不计；全留空簇不参评）。逐冷值取候选里离 M 最近者（并列取更小）；只有一个候选时
+ * 恒取它（= 直通，与 M 无关）；无候选簇 → KI_CUT_NONE。float32 运算顺序固定，与 Java 镜像逐位一致。
+ */
+static float ki_cut_axis_eval(const KiCutCluster *cs, int ncl, int cold, int axis) {
+    float num = 0.0f, cnt = 0.0f;   // M 的分子/分母：各参评簇覆盖区间内候选值总和 / 整数冷值总数
+    int np = 0;
+    for (int i = 0; i < ncl; i++) {
+        int n = cs[i].n;
+        if (n < 1) continue;
+        if (n > KI_CUT_MAX_POINTS) n = KI_CUT_MAX_POINTS;
+        KiCutPoint pts[KI_CUT_MAX_POINTS];
+        for (int k = 0; k < n; k++) pts[k] = cs[i].pts[k];
+        n = ki_cut_normalize(pts, n);
+        int first, last;
+        if (!ki_cut_axis_span(pts, n, axis, &first, &last)) continue;   // 该轴全留空：无候选，不参评
+        float s, c;
+        ki_cut_axis_intra(pts, n, axis, &s, &c);
+        num += s; cnt += c; np++;
+    }
+    if (np == 0) return (float)KI_CUT_NONE;
+    float m = num / cnt;
+    float best = 0.0f;
+    int first_cand = 1;
+    for (int i = 0; i < ncl; i++) {
+        int n = cs[i].n;
+        if (n < 1) continue;
+        if (n > KI_CUT_MAX_POINTS) n = KI_CUT_MAX_POINTS;
+        KiCutPoint pts[KI_CUT_MAX_POINTS];
+        for (int k = 0; k < n; k++) pts[k] = cs[i].pts[k];
+        n = ki_cut_normalize(pts, n);
+        int first, last;
+        if (!ki_cut_axis_span(pts, n, axis, &first, &last)) continue;
+        float v = ki_cut_lerp(pts, n, cold, axis);
+        if (first_cand) { best = v; first_cand = 0; continue; }
+        best = ki_cut_nearer(best, v, m);
+    }
+    return best;
+}
+
+/**
+ * 多簇求值：三轴各自按 ki_cut_axis_eval 求值（逐轴独立）。返回**非空簇数**（供诊断日志的「簇=N」）。
+ * 无任何非空簇 → 三轴均 KI_CUT_NONE。
  */
 static int ki_cut_eval(const KiCutCluster *cs, int ncl, int cold,
                        float *kdp, float *up, float *dn) {
-    // 第一遍：各轴候选之和与簇数（求平均值）
-    float sk = 0.0f, su = 0.0f, sd = 0.0f;
     int used = 0;
-    for (int i = 0; i < ncl; i++) {
-        float ck, cu, cd;
-        if (!ki_cut_cluster_eval(cs[i].pts, cs[i].n, cold, &ck, &cu, &cd)) continue;
-        sk += ck; su += cu; sd += cd;
-        used++;
-    }
-    if (used == 0) {
-        *kdp = (float)KI_CUT_NONE;
-        *up  = (float)KI_CUT_NONE;
-        *dn  = (float)KI_CUT_NONE;
-        return 0;
-    }
-    float mk = sk / (float)used, mu = su / (float)used, md = sd / (float)used;
-    // 第二遍：逐轴取离均值最近者（等距取更小）
-    float bk = 0.0f, bu = 0.0f, bd = 0.0f;
-    int first = 1;
-    for (int i = 0; i < ncl; i++) {
-        float ck, cu, cd;
-        if (!ki_cut_cluster_eval(cs[i].pts, cs[i].n, cold, &ck, &cu, &cd)) continue;
-        if (first) { bk = ck; bu = cu; bd = cd; first = 0; continue; }
-        bk = ki_cut_nearer(bk, ck, mk);
-        bu = ki_cut_nearer(bu, cu, mu);
-        bd = ki_cut_nearer(bd, cd, md);
-    }
-    *kdp = bk;
-    *up  = bu;
-    *dn  = bd;
+    for (int i = 0; i < ncl; i++) if (cs[i].n >= 1) used++;
+    *kdp = ki_cut_axis_eval(cs, ncl, cold, 0);
+    *up  = ki_cut_axis_eval(cs, ncl, cold, 1);
+    *dn  = ki_cut_axis_eval(cs, ncl, cold, 2);
     return used;
 }
 

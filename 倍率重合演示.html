@@ -180,9 +180,10 @@
   </header>
 
   <section class="fact">
-    <div class="t">先记住这条事实</div>
-    多簇重合时，现在不再一律「取最小」，而是取<b>离各簇候选平均值最近</b>的那一簇；距离并列时取更小倍率。<br>
-    但——<span class="hl">恰好两条线时，两个候选值到它们的平均值恒等距，所以 <b>2 簇时结果就等于「取最小」</b></span>；<b>只有 3 簇及以上，「离均值最近」才可能选出不是最小的那一条</b>。
+    <div class="t">先记住这条规则</div>
+    多簇重合时，每个冷值取「<b>离该轴整段参照值 M 最近</b>」的那一簇；距离并列（<span class="mono">|d₀−d₁| ≤ 1e-3</span>）取更小倍率。<br>
+    M <b>不是逐点平均</b>，而是<b>每条轴一个常数</b>：该轴上各簇在自身覆盖区间内、所有整数冷值处候选值的总体平均（区间长的簇占权重大）——所以图上 M 是一条<b>水平线</b>。<br>
+    该轴只有 <b>1 个候选</b>时直通（不受 M 影响）；某簇在该轴全留空 = 无候选、不参评。<span class="hl">旧口径「逐点平均」已废弃——恰好两条线时两边到逐点平均恒等距，规则失效，故改为整段一个常数。</span>
   </section>
 
   <details class="rules" open>
@@ -192,14 +193,15 @@
         <li>每个簇内的点按<b>冷值升序</b>排列；<b>同一冷值只保留先出现的那一个</b>（<code>ki_cut_normalize</code>）。单簇点数上限 32。</li>
         <li><b>三条轴互相独立</b>：KDP 倍率 / 升倍率 / 降倍率。某个倍率框<b>留空</b> = 该点在这条轴上不作为控制点，从该轴的控制点序列里剔除，折线由左右相邻的未留空控制点直接连线（<code>ki_cut_lerp</code> 跳过 <code>KI_CUT_SKIP_*</code> 的点）。</li>
         <li><b>折线</b>：相邻控制点之间线性插值；小于最小冷值取首点、大于最大冷值取末点（<b>两端平推</b>）；某轴一个控制点都不剩 → 该轴恒为 100（不削）。</li>
-        <li><b>多簇</b>：各簇先各轴算出候选值，得到该 x 上的候选集合；取<b>离这些候选平均值最近</b>的那一个，<b>并列时取更小倍率</b>（<code>ki_cut_eval</code> + <code>ki_cut_nearer</code>）。</li>
-        <li><b>冷值留空 = 占位行</b>：整点不参与任何轴求值，只用于编辑/落盘往返。整簇都是占位行 → 该簇清空（对该轴无贡献）。</li>
-        <li>没有任何有效簇（0 簇或全占位）→ 三轴均 100（不削）。</li>
+        <li><b>多簇逐轴独立</b>：参照值 M ＝ 该轴上各<b>参评簇</b>（该轴有控制点者）在其<b>自身覆盖区间</b>内、所有整数冷值处候选值的总体平均（每个整数冷值算一次；无候选处不计）。每个冷值取候选中 |v − M| 最小者；<b>并列（|d₀−d₁| ≤ 1e-3）取更小倍率</b>（<code>ki_cut_axis_eval</code> + <code>ki_cut_nearer</code>）；该轴只有 1 个候选时直通。</li>
+        <li><b>冷值留空 = 占位行</b>：整点不参与任何轴求值，只用于编辑/落盘往返。整簇都是占位行 → 该簇清空（不参评）。</li>
+        <li>没有任何参评簇（0 簇 / 全占位 / 该轴全留空）→ 该轴 100（不削）。</li>
       </ol>
       <div class="kt">
-        <b>关于 2 簇：</b>两个候选 a、b，平均值 m=(a+b)/2，则 |a−m| = |b−m| 恒成立 → 永远并列 → 并列取更小 → 等价于「取最小」。<br>
-        <b>3 簇起才有区别：</b>例如候选 {55, 70, 70}（均值 65），最近的是 70（并列取更小仍是 70），而不是最小的 55。<br>
-        <b>实现口径：</b>等距判定用与源一致的容差 <span class="mono">TIE_EPS = 1e-3</span>（<span class="mono">|d₀−d₁| ≤ TIE_EPS</span> 即判并列 → 取更小）：2 簇时两候选到均值数学恒等距，但 float32 下各自舍入（实测 ~1.9e-6）会让精确比较反过来选中较大值；加容差后 <b>2 簇恒等于「取最小」且不随舍入翻转</b>。本页逐句对齐源实现，非并列值结果亦完全一致。
+        <b>验收例（页内预设「★ 两簇不交叉（用户验收例）」）：</b>簇1 左 70 / 右 90，簇2 左 60 / 右 80 → M = (70+90+60+80)/4 = <b>75</b>（两段都是直线且跨度相同，故 M ＝ 四个端点值的平均）。<br>
+        左段：|70−75|=5 &lt; |60−75|=15 → 生效 <b>70</b>（取较高的那条，已不再是「取最小」）；右段：|80−75|=5 &lt; |90−75|=15 → 生效 <b>80</b>；中点：|80−75| = |70−75| → 并列 → 取更小 <b>70</b>。<br>
+        <b>为什么废弃「逐点平均」：</b>逐点平均 M(x)=(a(x)+b(x))/2 时，两候选到 M(x) 恒等距 → 只剩并列、规则失效。改成<b>整段一个常数 M</b> 后才有区分度。<br>
+        <b>实现口径：</b>与源逐句一致（<code>ki_cut_axis_eval</code> / <code>KiCutTable.axisEffective</code>）：M 用梯形公式在整数冷值上求和；等距判定用 <code>TIE_EPS = 1e-3</code>，并列取更小倍率。
       </div>
     </div>
   </details>
@@ -234,7 +236,7 @@
             <div class="seg" id="axisSeg"></div>
           </div>
           <div class="rowline">
-            <button class="btn sm" id="tMean" aria-pressed="true">各候选平均值参考线</button>
+            <button class="btn sm" id="tMean" aria-pressed="true">整段参照值 M 参考线</button>
             <button class="btn sm" id="tRaw" aria-pressed="true">各簇原始曲线</button>
           </div>
           <div class="rowline">
@@ -264,7 +266,7 @@
         <h2>数据表（当前取值轴）</h2>
         <div class="inner"><div class="tblscroll" id="tbl"></div></div>
       </div>
-      <p class="small muted" style="margin:0">虚线口径：每个冷值上画「<b>离生效值最近的那一条不生效候选</b>」（对应 KiCutTable.shadowCurve），故虚线多数时候紧贴实线，只在候选值互相合并/交换的冷值处明显凸出；实线本身是每个冷值选中的那一方连成的连续折线。</p>
+      <p class="small muted" style="margin:0">虚线口径：每个冷值上画「<b>离生效值最近的那一条不生效候选</b>」（对应 KiCutTable.shadowCurve），故虚线多数时候紧贴实线，只在候选值互相合并/交换的冷值处明显凸出。实线＝每个冷值选中的那一方连成的折线；在两簇「选中方切换」的冷值处，两候选本身取值不同，实线会出现<b>竖向跳变</b>（例：验收例在 x=100 由并列取更小跳到 70）。</p>
       <p class="small muted" id="note" style="margin:0"></p>
     </main>
   </div>
@@ -339,26 +341,71 @@ const KC = (function () {
   }
 
   /* 等距判定容差，与源一致：ki_cut.h:KI_CUT_TIE_EPS / KiCutTable.java:TIE_EPS = 1.0e-3f。
-     2 簇时两候选到均值数学恒等距，但 float32 下各自舍入（实测 ~1.9e-6）会让精确比较反过来选中较大值；
-     |d0-d1| 落在该容差内即判为并列 → 一律取更小倍率。故 2 簇恒等于「取最小」且不随舍入翻转。 */
+     两候选到同一参照值 M 的距离在 float32 下可达数 ulp 偏差，精确比较会漏判而反过来选中较大倍率；
+     |d0-d1| ≤ TIE_EPS 即判为并列 → 一律取更小倍率。 */
   const TIE_EPS = 1.0e-3;
 
-  /* ki_cut_eval 第二遍 / KiCutTable.pickByMean：取离均值最近者；等距（含舍入噪声）取更小（逐句对齐源） */
-  function pickByMean(cand) {
-    if (cand.length === 0) return NONE;
-    let sum = 0;
-    for (let i = 0; i < cand.length; i++) sum += cand[i];
-    const mean = sum / cand.length;
-    let best = cand[0];
-    for (let i = 1; i < cand.length; i++) {
-      const d0 = Math.abs(best - mean);
-      const d1 = Math.abs(cand[i] - mean);
-      if (Math.abs(d0 - d1) <= TIE_EPS) {
-        if (cand[i] < best) best = cand[i];     /* 等距（含舍入噪声）→ 取更小 */
-      } else if (d1 < d0) {
-        best = cand[i];
-      }
+  /* ki_cut_axis_span：该轴未留空控制点的首/末下标；无控制点（全留空）→ null（该簇在该轴不参评） */
+  function axisSpan(pts, axis) {
+    let first = -1, last = -1;
+    for (let i = 0; i < pts.length; i++) {
+      if (isSkipped(pts[i], axis)) continue;
+      if (first < 0) first = i;
+      last = i;
     }
+    return first < 0 ? null : { first: first, last: last };
+  }
+  /* 该簇在该轴是否参评（有 ≥1 个未留空控制点） */
+  function hasAxis(pts, axis) { return axisSpan(pts, axis) !== null; }
+
+  /* ki_cut_axis_intra：该簇自身覆盖区间内整数冷值候选值之和（梯形公式，对线性段精确；段间公共端点减一次） */
+  function intraSum(pts, axis) {
+    const idx = [];
+    for (let i = 0; i < pts.length; i++) if (!isSkipped(pts[i], axis)) idx.push(i);
+    if (idx.length === 1) return pick(pts[idx[0]], axis);
+    let s = 0;
+    for (let j = 0; j + 1 < idx.length; j++) {
+      const ca = pts[idx[j]].cold, cb = pts[idx[j + 1]].cold;
+      const va = pick(pts[idx[j]], axis), vb = pick(pts[idx[j + 1]], axis);
+      s += (cb - ca + 1) * (va + vb) / 2;
+    }
+    for (let j = 1; j + 1 < idx.length; j++) s -= pick(pts[idx[j]], axis);
+    return s;
+  }
+  /* 该轴覆盖区间的整数冷值个数（首/末未留空控制点冷值之差 + 1） */
+  function coverageCount(pts, axis) {
+    const sp = axisSpan(pts, axis);
+    return sp === null ? 0 : pts[sp.last].cold - pts[sp.first].cold + 1;
+  }
+  /* 该轴参评簇（该轴有控制点者）；全留空的簇不参评 */
+  function partOf(curves, axis) {
+    const out = [];
+    for (let i = 0; i < curves.length; i++) if (hasAxis(curves[i], axis)) out.push(curves[i]);
+    return out;
+  }
+  /* 整段参照值 M ＝ 各参评簇覆盖区间内整数冷值候选值的总体平均（每整数冷值一次；无参评簇 → NONE） */
+  function axisMean(part, axis) {
+    let num = 0, cnt = 0;
+    for (let i = 0; i < part.length; i++) { num += intraSum(part[i], axis); cnt += coverageCount(part[i], axis); }
+    return cnt > 0 ? num / cnt : NONE;
+  }
+  /* 该轴的整段参照值 M（每条轴一个常数，与 x 无关） */
+  function meanOf(curves, axis) { return axisMean(partOf(curves, axis), axis); }
+
+  /* ki_cut_nearer：取离 target 更近者；等距（含浮点舍入噪声）取更小倍率 */
+  function nearer(cur, cand, target) {
+    let dc = cur - target; if (dc < 0) dc = -dc;
+    let dn = cand - target; if (dn < 0) dn = -dn;
+    const diff = dc > dn ? dc - dn : dn - dc;
+    if (diff <= TIE_EPS) return cand < cur ? cand : cur;
+    return dn < dc ? cand : cur;
+  }
+  /* 单轴多簇生效值：取离整段参照值 M 最近者，并列取更小；只有 1 个参评簇 → 直通（不受 M 影响） */
+  function axisEffective(part, cold, axis) {
+    if (part.length === 0) return NONE;
+    const m = axisMean(part, axis);
+    let best = lerp(part[0], cold, axis);
+    for (let i = 1; i < part.length; i++) best = nearer(best, lerp(part[i], cold, axis), m);
     return best;
   }
 
@@ -372,40 +419,38 @@ const KC = (function () {
     return out;
   }
 
-  /* 单冷值求值：三轴各自跨簇取离均值最近者 */
+  /* 单冷值求值：三轴各自独立（在该轴参评簇里取离该轴整段参照值 M 最近者，并列取更小） */
   function evalAt(curves, cold) {
     const res = {};
-    for (let a = 0; a < AXES.length; a++) {
-      const ax = AXES[a];
-      const cand = [];
-      for (let i = 0; i < curves.length; i++) cand.push(lerp(curves[i], cold, ax));
-      res[ax] = pickByMean(cand);
-    }
+    for (let a = 0; a < AXES.length; a++) res[AXES[a]] = axisEffective(partOf(curves, AXES[a]), cold, AXES[a]);
     return res;
   }
 
-  /* 单个 x 的采样：生效值 / 是否有被舍弃候选 / 最近被舍弃候选 / 候选平均值 / 全部候选 */
+  /* 单个 x 的采样：生效值 / 是否有被舍弃候选 / 最近被舍弃候选 / 整段参照值 M / 参评簇候选值 */
   function sample(curves, x, axis) {
-    if (curves.length === 0) return { eff: NONE, has: false, shadow: NONE, mean: NONE, cand: [] };
+    const part = partOf(curves, axis);
+    if (part.length === 0) return { eff: NONE, has: false, shadow: NONE, mean: NONE, cand: [] };
+    const m = axisMean(part, axis);
+    let best = lerp(part[0], x, axis);
+    for (let i = 1; i < part.length; i++) best = nearer(best, lerp(part[i], x, axis), m);
     const cand = [];
-    let sum = 0;
-    for (let i = 0; i < curves.length; i++) { const v = lerp(curves[i], x, axis); cand.push(v); sum += v; }
-    const mean = sum / cand.length;
-    const eff = pickByMean(cand);
-    let has = false, bestD = 0, shadow = eff;
+    for (let i = 0; i < part.length; i++) cand.push(lerp(part[i], x, axis));
+    let has = false, bestD = 0, shadow = best;
     for (let i = 0; i < cand.length; i++) {
       const v = cand[i];
-      if (v === eff) continue;                    /* 该簇即生效值 → 不算被舍弃候选（同 KiCutTable.axisSample） */
-      const d = Math.abs(v - eff);
+      if (v === best) continue;                   /* 该簇即生效值 → 不算被舍弃候选（同 KiCutTable.axisSample） */
+      const d = Math.abs(v - best);
       if (!has || d < bestD) { has = true; bestD = d; shadow = v; }
     }
-    return { eff: eff, has: has, shadow: shadow, mean: mean, cand: cand };
+    return { eff: best, has: has, shadow: shadow, mean: m, cand: cand };
   }
 
   return {
     MAX_POINTS: MAX_POINTS, NONE: NONE, SKIP: SKIP, AXES: AXES,
     isSkipped: isSkipped, pick: pick, normalize: normalize, toCurve: toCurve,
-    lerp: lerp, pickByMean: pickByMean, activeCurves: activeCurves,
+    lerp: lerp, nearer: nearer, axisSpan: axisSpan, hasAxis: hasAxis,
+    intraSum: intraSum, coverageCount: coverageCount, axisMean: axisMean, meanOf: meanOf,
+    partOf: partOf, axisEffective: axisEffective, activeCurves: activeCurves,
     evalAt: evalAt, sample: sample
   };
 })();
@@ -417,6 +462,10 @@ const AXIS_LABEL = { up: '升倍率', dn: '降倍率', kdp: 'KDP 倍率' };
 const SERIES = ['--s1', '--s2', '--s3', '--s4', '--s5', '--s6', '--s7', '--s8'];
 
 const PRESETS = [
+  { name: '★ 两簇不交叉（用户验收例）', clusters: [
+    [['50', '70', '70', '70'], ['150', '90', '90', '90']],
+    [['50', '60', '60', '60'], ['150', '80', '80', '80']]
+  ]},
   { name: '① 单簇（三轴正常）', clusters: [
     [['1', '100', '100', '50'], ['40', '100', '100', '100'], ['100', '100', '70', '80'], ['190', '100', '50', '65']]
   ]},
@@ -428,7 +477,7 @@ const PRESETS = [
     [['0', '40', '40', '40'], ['255', '140', '140', '140']],
     [['0', '140', '140', '140'], ['255', '40', '40', '40']]
   ]},
-  { name: '④ 三簇（离均值最近 ≠ 取最小）', clusters: [
+  { name: '④ 三簇（离 M 最近 ≠ 取最小）', clusters: [
     [['50', '80', '60', '60'], ['150', '60', '90', '100']],
     [['50', '70', '70', '40'], ['150', '50', '80', '90']],
     [['50', '55', '50', '30'], ['150', '45', '60', '70']]
@@ -633,6 +682,11 @@ function renderChart() {
   const clusterPts = state.clusters.map(buildPoints);
   const curves = KC.activeCurves(clusterPts);
 
+  /* 该轴参评簇（全留空簇不参评）与整段参照值 M（每条轴一个常数，与 x 无关） */
+  const partIdx = [];
+  for (let k = 0; k < curves.length; k++) if (KC.hasAxis(curves[k], state.axis)) partIdx.push(k);
+  const mRef = KC.meanOf(curves, state.axis);
+
   /* 定义域 */
   let maxCold = null, minCold = null;
   for (let ci = 0; ci < state.clusters.length; ci++) {
@@ -654,19 +708,19 @@ function renderChart() {
   /* 逐 x 采样 */
   const xs = [];
   for (let x = xMin; x <= xMax; x++) xs.push(x);
-  const eff = [], has = [], shadow = [], mean = [];
-  const rawVals = curves.map(() => []);
+  const eff = [], has = [], shadow = [];
+  const rawVals = partIdx.map(() => []);
   for (let i = 0; i < xs.length; i++) {
     const s = KC.sample(curves, xs[i], state.axis);
-    eff.push(s.eff); has.push(s.has); shadow.push(s.shadow); mean.push(s.mean);
-    for (let k = 0; k < curves.length; k++) rawVals[k].push(KC.lerp(curves[k], xs[i], state.axis));
+    eff.push(s.eff); has.push(s.has); shadow.push(s.shadow);
+    for (let k = 0; k < partIdx.length; k++) rawVals[k].push(KC.lerp(curves[partIdx[k]], xs[i], state.axis));
   }
 
   /* y 定义域 */
   let lo = Infinity, hi = -Infinity;
   const consider = arr => { for (const v of arr) { if (v < lo) lo = v; if (v > hi) hi = v; } };
   consider(eff);
-  if (state.showMean) consider(mean);
+  if (state.showMean && partIdx.length) consider([mRef]);
   if (state.showRaw) rawVals.forEach(consider);
   for (let i = 0; i < xs.length; i++) if (has[i]) { if (shadow[i] < lo) lo = shadow[i]; if (shadow[i] > hi) hi = shadow[i]; }
   if (!isFinite(lo)) { lo = 0; hi = 100; }
@@ -702,23 +756,23 @@ function renderChart() {
   parts.push('<text x="' + (M.l + PW / 2) + '" y="' + (SVG_H - 8) + '" fill="var(--muted)" font-size="11.5" text-anchor="middle">冷值</text>');
   parts.push('<text x="14" y="' + (M.t + PH / 2) + '" fill="var(--muted)" font-size="11.5" text-anchor="middle" transform="rotate(-90 14 ' + (M.t + PH / 2) + ')">倍率 ×100</text>');
 
-  /* 各簇原始曲线（细、淡） */
+  /* 各簇原始曲线（细、淡；只画该轴参评的簇） */
   const endLabels = [];
   if (state.showRaw) {
-    for (let k = 0; k < curves.length; k++) {
-      const color = 'var(' + SERIES[k % SERIES.length] + ')';
+    for (let k = 0; k < partIdx.length; k++) {
+      const color = 'var(' + SERIES[partIdx[k] % SERIES.length] + ')';
       let d = '';
       for (let i = 0; i < xs.length; i++) d += (i ? 'L' : 'M') + f(X(xs[i])) + ' ' + f(Y(rawVals[k][i]));
       parts.push('<path d="' + d + '" fill="none" stroke="' + color + '" stroke-width="1.6" stroke-linejoin="round" opacity="0.55"/>');
-      endLabels.push({ y: Y(rawVals[k][xs.length - 1]), text: '簇' + (k + 1), color: color });
+      endLabels.push({ y: Y(rawVals[k][xs.length - 1]), text: '簇' + (partIdx[k] + 1), color: color });
     }
   }
 
-  /* 各候选平均值参考线（点线，中性色） */
-  if (state.showMean) {
-    let d = '';
-    for (let i = 0; i < xs.length; i++) d += (i ? 'L' : 'M') + f(X(xs[i])) + ' ' + f(Y(mean[i]));
-    parts.push('<path d="' + d + '" fill="none" stroke="var(--muted)" stroke-width="1.5" stroke-dasharray="1.5 3.5" stroke-linecap="round"/>');
+  /* 整段参照值 M 参考线（每条轴一个水平常数） */
+  if (state.showMean && partIdx.length) {
+    const ym = f(Y(mRef));
+    parts.push('<line x1="' + M.l + '" y1="' + ym + '" x2="' + (SVG_W - M.r) + '" y2="' + ym + '" stroke="var(--muted)" stroke-width="1.5" stroke-dasharray="1.5 3.5" stroke-linecap="round"/>');
+    parts.push('<text x="' + (M.l + 6) + '" y="' + (ym - 6) + '" fill="var(--muted)" font-size="11" font-weight="600">M = ' + fmt(mRef) + '</text>');
   }
 
   /* 被舍弃候选（同色虚线，仅在不生效区间；两端接在实线上） */
@@ -757,27 +811,29 @@ function renderChart() {
   parts.push('<rect id="hitArea" x="' + M.l + '" y="' + M.t + '" width="' + PW + '" height="' + PH + '" fill="transparent" style="cursor:crosshair"/>');
 
   svg.innerHTML = parts.join('');
-  last = { xs: xs, xMin: xMin, xMax: xMax, eff: eff, has: has, shadow: shadow, mean: mean, rawVals: rawVals, curves: curves, X: X, Y: Y };
+  last = { xs: xs, xMin: xMin, xMax: xMax, eff: eff, has: has, shadow: shadow, mRef: mRef, partIdx: partIdx, rawVals: rawVals, X: X, Y: Y };
   bindHover();
-  renderLegend(curves);
+  renderLegend(partIdx);
   renderTable();
 
   const nRaw = state.clusters.length, nAct = curves.length;
-  let note = '当前取值轴：' + AXIS_LABEL[state.axis] + '　·　簇共 ' + nRaw + ' 个，其中有效（非空）' + nAct + ' 个。';
-  if (nRaw !== nAct) note += ' 空簇/全占位簇不参与取值。';
+  let note = '当前取值轴：' + AXIS_LABEL[state.axis] + '　·　整段参照值 M = ' + (partIdx.length ? fmt(mRef) : '—') +
+    '（该轴常数）　·　簇共 ' + nRaw + ' 个，有效（非空）' + nAct + ' 个、该轴参评 ' + partIdx.length + ' 个。';
+  if (nRaw !== nAct) note += ' 空簇/全占位簇不参与。';
+  if (nAct !== partIdx.length) note += ' 该轴全留空的簇不参评。';
   if (clamped) note += ' （横轴已截断到 1500 显示）';
   document.getElementById('note').textContent = note;
 }
 
-function renderLegend(curves) {
+function renderLegend(partIdx) {
   const el = document.getElementById('legend');
   const items = [];
   items.push('<span class="lg"><svg width="26" height="12"><line x1="1" y1="6" x2="25" y2="6" stroke="var(--ink)" stroke-width="2.6" stroke-linecap="round"/></svg>生效值（选中那一条）</span>');
   items.push('<span class="lg"><svg width="26" height="12"><line x1="1" y1="6" x2="25" y2="6" stroke="var(--ink)" stroke-width="2.4" stroke-dasharray="6 5" stroke-linecap="round"/></svg>被舍弃的候选（同色虚线，仅在不生效处）</span>');
-  if (state.showMean) items.push('<span class="lg"><svg width="26" height="12"><line x1="1" y1="6" x2="25" y2="6" stroke="var(--muted)" stroke-width="1.8" stroke-dasharray="1.5 3.5" stroke-linecap="round"/></svg>各候选平均值</span>');
-  if (state.showRaw && curves.length) {
-    for (let k = 0; k < curves.length; k++) {
-      items.push('<span class="lg"><i class="swatch" style="width:11px;height:3px;border-radius:2px;display:inline-block;background:var(' + SERIES[k % SERIES.length] + ')"></i>簇' + (k + 1) + ' 原始曲线</span>');
+  if (state.showMean && partIdx.length) items.push('<span class="lg"><svg width="26" height="12"><line x1="1" y1="6" x2="25" y2="6" stroke="var(--muted)" stroke-width="1.8" stroke-dasharray="1.5 3.5" stroke-linecap="round"/></svg>整段参照值 M（水平常数）</span>');
+  if (state.showRaw && partIdx.length) {
+    for (let k = 0; k < partIdx.length; k++) {
+      items.push('<span class="lg"><i class="swatch" style="width:11px;height:3px;border-radius:2px;display:inline-block;background:var(' + SERIES[partIdx[k] % SERIES.length] + ')"></i>簇' + (partIdx[k] + 1) + ' 原始曲线</span>');
     }
   }
   el.innerHTML = items.join('');
@@ -811,9 +867,9 @@ function showTip(x, i, leftPct) {
   const rows = [];
   rows.push('<div class="tr"><span class="sw solid"></span><span class="k">生效值</span><span class="v">' + fmt(last.eff[i]) + '</span></div>');
   if (last.has[i]) rows.push('<div class="tr"><span class="sw dash"></span><span class="k">被舍弃候选</span><span class="v">' + fmt(last.shadow[i]) + '</span></div>');
-  rows.push('<div class="tr"><span class="sw dot"></span><span class="k">候选平均值</span><span class="v">' + fmt(last.mean[i]) + '</span></div>');
-  last.curves.forEach((c, k) => {
-    rows.push('<div class="tr"><span class="sw" style="background:var(' + SERIES[k % SERIES.length] + ')"></span><span class="k">簇' + (k + 1) + '</span><span class="v">' + fmt(last.rawVals[k][i]) + '</span></div>');
+  rows.push('<div class="tr"><span class="sw dot"></span><span class="k">整段参照值 M</span><span class="v">' + (last.partIdx.length ? fmt(last.mRef) : '—') + '</span></div>');
+  last.partIdx.forEach((ci, k) => {
+    rows.push('<div class="tr"><span class="sw" style="background:var(' + SERIES[ci % SERIES.length] + ')"></span><span class="k">簇' + (ci + 1) + '</span><span class="v">' + fmt(last.rawVals[k][i]) + '</span></div>');
   });
   tip.innerHTML = '<div class="th">冷值 ' + x + '　·　' + AXIS_LABEL[state.axis] + '</div>' + rows.join('');
   const wrap = svg.parentElement;
@@ -829,14 +885,17 @@ function renderTable() {
   if (!state.showTable) return;
   const clusterPts = state.clusters.map(buildPoints);
   const curves = KC.activeCurves(clusterPts);
+  const partIdx = [];
+  for (let k = 0; k < curves.length; k++) if (KC.hasAxis(curves[k], state.axis)) partIdx.push(k);
+  const mRef = KC.meanOf(curves, state.axis);
   const set = new Set([last.xMin, last.xMax]);
   for (const cl of clusterPts) for (const p of cl) if (p.cold !== null) set.add(p.cold);
   const cols = [...set].filter(v => v >= last.xMin && v <= last.xMax).sort((a, b) => a - b);
-  let html = '<table class="data"><thead><tr><th>冷值</th><th>生效值</th><th>被舍弃候选</th><th>候选平均值</th>' +
-    curves.map((c, k) => '<th>簇' + (k + 1) + '</th>').join('') + '</tr></thead><tbody>';
+  let html = '<table class="data"><thead><tr><th>冷值</th><th>生效值</th><th>被舍弃候选</th><th>整段参照值 M</th>' +
+    partIdx.map(ci => '<th>簇' + (ci + 1) + '</th>').join('') + '</tr></thead><tbody>';
   for (const x of cols) {
     const s = KC.sample(curves, x, state.axis);
-    html += '<tr><td>' + x + '</td><td>' + fmt(s.eff) + '</td><td>' + (s.has ? fmt(s.shadow) : '—') + '</td><td>' + fmt(s.mean) + '</td>' +
+    html += '<tr><td>' + x + '</td><td>' + fmt(s.eff) + '</td><td>' + (s.has ? fmt(s.shadow) : '—') + '</td><td>' + (partIdx.length ? fmt(mRef) : '—') + '</td>' +
       s.cand.map(v => '<td>' + fmt(v) + '</td>').join('') + '</tr>';
   }
   html += '</tbody></table>';
@@ -845,16 +904,20 @@ function renderTable() {
 
 /* ---------- 内置自测（摘自 ki_cut_golden.json 的代表用例） ---------- */
 const SELF_TESTS = [
-  { name: 'multi3_ctl_100', cold: 100, clusters: [[[50, 80, 60, 60], [150, 60, 90, 100]], [[50, 70, 70, 40], [150, 50, 80, 90]], [[50, 55, 50, 30], [150, 45, 60, 70]]], kdp: 60, up: 75, dn: 65 },
-  { name: 'multi3_ctl_50', cold: 50, clusters: [[[50, 80, 60, 60], [150, 60, 90, 100]], [[50, 70, 70, 40], [150, 50, 80, 90]], [[50, 55, 50, 30], [150, 45, 60, 70]]], kdp: 70, up: 60, dn: 40 },
-  { name: 'multi3_ctl_150', cold: 150, clusters: [[[50, 80, 60, 60], [150, 60, 90, 100]], [[50, 70, 70, 40], [150, 50, 80, 90]], [[50, 55, 50, 30], [150, 45, 60, 70]]], kdp: 50, up: 80, dn: 90 },
-  { name: 'multi3_axis_neutral_c0', cold: 100, clusters: [[[50, 80, null, 60], [150, 60, null, 100]], [[50, 70, 70, 40], [150, 50, 80, 90]], [[50, 55, 50, 30], [150, 45, 60, 70]]], kdp: 60, up: 75, dn: 65 },
-  { name: 'multi4_tie_take_smaller', cold: 100, clusters: [[[100, 50, 50, 50]], [[100, 70, 70, 70]], [[100, 90, 90, 90]], [[100, 110, 110, 110]]], kdp: 70, up: 70, dn: 70 },
-  { name: 'multi2_mid_100', cold: 100, clusters: [[[50, 80, 50, 60], [150, 60, 90, 100]], [[50, 70, 70, 40], [150, 50, 80, 90]]], kdp: 60, up: 70, dn: 65 },
-  { name: 'empty_multi_min_100', cold: 100, clusters: [[[50, 80, null, 60], [150, 60, null, 100]], [[50, 70, 70, 40], [150, 50, 80, 90]]], kdp: 60, up: 75, dn: 65 },
-  { name: 'empty_single_point_up', cold: 100, clusters: [[[100, 30, null, 50]]], kdp: 30, up: 100, dn: 50 },
-  { name: 'empty_clusters_all_neutral', cold: 100, clusters: [], kdp: 100, up: 100, dn: 100 },
-  { name: 'unsorted_dedup_keep_first', cold: 100, clusters: [[[100, 71, 78, 79], [1, 100, 100, 50], [40, 100, 100, 100], [100, 999, 999, 999], [190, 100, 50, 65]]], kdp: 71, up: 78, dn: 79 }
+  { name: 'segavg_accept_left_50', cold: 50, clusters: [[[50,70,70,70],[150,90,90,90]],[[50,60,60,60],[150,80,80,80]]], kdp: 70.0, up: 70.0, dn: 70.0 },
+  { name: 'segavg_accept_right_150', cold: 150, clusters: [[[50,70,70,70],[150,90,90,90]],[[50,60,60,60],[150,80,80,80]]], kdp: 80.0, up: 80.0, dn: 80.0 },
+  { name: 'segavg_accept_mid_tie_100', cold: 100, clusters: [[[50,70,70,70],[150,90,90,90]],[[50,60,60,60],[150,80,80,80]]], kdp: 70.0, up: 70.0, dn: 70.0 },
+  { name: 'multi3_ctl_100', cold: 100, clusters: [[[50,80,60,60],[150,60,90,100]],[[50,70,70,40],[150,50,80,90]],[[50,55,50,30],[150,45,60,70]]], kdp: 60.0, up: 75.0, dn: 65.0 },
+  { name: 'multi3_ctl_50', cold: 50, clusters: [[[50,80,60,60],[150,60,90,100]],[[50,70,70,40],[150,50,80,90]],[[50,55,50,30],[150,45,60,70]]], kdp: 55.0, up: 70.0, dn: 60.0 },
+  { name: 'multi3_ctl_150', cold: 150, clusters: [[[50,80,60,60],[150,60,90,100]],[[50,70,70,40],[150,50,80,90]],[[50,55,50,30],[150,45,60,70]]], kdp: 60.0, up: 60.0, dn: 70.0 },
+  { name: 'multi3_axis_neutral_c0', cold: 100, clusters: [[[50,80,null,60],[150,60,null,100]],[[50,70,70,40],[150,50,80,90]],[[50,55,50,30],[150,45,60,70]]], kdp: 60.0, up: 55.0, dn: 65.0 },
+  { name: 'multi4_tie_take_smaller', cold: 100, clusters: [[[100,50,50,50]],[[100,70,70,70]],[[100,90,90,90]],[[100,110,110,110]]], kdp: 70.0, up: 70.0, dn: 70.0 },
+  { name: 'multi2_mid_100', cold: 100, clusters: [[[50,80,50,60],[150,60,90,100]],[[50,70,70,40],[150,50,80,90]]], kdp: 60.0, up: 70.0, dn: 65.0 },
+  { name: 'empty_multi_min_100', cold: 100, clusters: [[[50,80,null,60],[150,60,null,100]],[[50,70,70,40],[150,50,80,90]]], kdp: 60.0, up: 75.0, dn: 65.0 },
+  { name: 'empty_single_point_up', cold: 100, clusters: [[[100,30,null,50]]], kdp: 30.0, up: 100.0, dn: 50.0 },
+  { name: 'empty_clusters_all_neutral', cold: 100, clusters: [], kdp: 100.0, up: 100.0, dn: 100.0 },
+  { name: 'unsorted_dedup_keep_first', cold: 100, clusters: [[[100,71,78,79],[1,100,100,50],[40,100,100,100],[100,999,999,999],[190,100,50,65]]], kdp: 71.0, up: 78.0, dn: 79.0 },
+  { name: 'multi2_interp_tie_smaller_x2', cold: 2, clusters: [[[0,100,100,100],[10,0,0,0]],[[0,30,30,30],[10,7,7,7]]], kdp: 25.4, up: 25.4, dn: 25.4 }
 ];
 
 function goldenToCurves(clusters) {
@@ -909,7 +972,7 @@ function renderAll() { renderEditor(); renderAxisSeg(); renderChart(); }
     const next = cur === 'dark' ? 'light' : 'dark';
     document.documentElement.setAttribute('data-theme', next);
   };
-  loadPreset(3);   /* 默认：三簇场景，最能体现「离均值最近」 */
+  loadPreset(0);   /* 默认：用户验收例（两簇不交叉） */
   runSelftest();
 })();
 </script>

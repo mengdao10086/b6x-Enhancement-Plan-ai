@@ -25,8 +25,9 @@ import java.util.List;
  * 后者仍按旧口径丢弃该点。落盘哨兵形态：空值行或全占位行 → 该簇清空（= 全段不削），见 `tempctrl.c`。
  *
  * <p>与 C 端逐条对齐的几点：点按冷值<b>稳定升序</b>且<b>同冷值保留先出现者</b>（与是否留空无关）；单簇点数上限 32；
- * 曲线为<b>纯折线</b>（无平滑）；单点簇整簇恒定；端点外平推；**多簇逐轴取「离各簇候选平均值最近」者**
- * （等距取更小倍率）；无有效簇恒为 {@link #NEUTRAL}。输出为 <b>float</b>（与 C 端同为 32 位浮点，运算顺序亦逐位对齐）。
+ * 曲线为<b>纯折线</b>（无平滑）；单点簇整簇恒定；端点外平推；**多簇逐轴取「离该轴整段参照值 M 最近」者**
+ * （并列取更小倍率；该轴只有 1 个候选则直通）；无参评簇恒为 {@link #NEUTRAL}。输出为 <b>float</b>
+ * （与 C 端同为 32 位浮点，运算顺序亦逐位对齐）。
  */
 public final class KiCutTable {
 
@@ -254,21 +255,15 @@ public final class KiCutTable {
     // ==================== 求值 ====================
 
     /**
-     * 一个冷值上的输出倍率：逐簇求值后逐轴取「离各簇候选平均值最近」者（等距取更小）；
-     * 无有效簇时返回 {@link #NEUTRAL}。
+     * 一个冷值上的输出倍率：逐轴按 {@link #axisEffective} 取「离该轴整段参照值 M 最近」的候选（并列取更小）；
+     * 该轴无参评簇时返回 {@link #NEUTRAL}。
      *
      * @return {@code {升倍率, 降倍率}}（×100 口径，未取整——与 C 端同为浮点）
      */
     @NonNull
     public static float[] evaluate(@NonNull List<Cluster> clusters, int cold) {
         List<Curve> cs = activeCurves(clusters);
-        float[] upCand = new float[cs.size()];
-        float[] dnCand = new float[cs.size()];
-        for (int i = 0; i < cs.size(); i++) {
-            upCand[i] = cs.get(i).value(cold, AXIS_UP);
-            dnCand[i] = cs.get(i).value(cold, AXIS_DN);
-        }
-        return new float[]{pickByMean(upCand), pickByMean(dnCand)};
+        return new float[]{axisEffective(cs, cold, AXIS_UP), axisEffective(cs, cold, AXIS_DN)};
     }
 
     /** 有效簇（含 ≥1 个填了冷值的点）对应的曲线；占位行-only 的簇不算（与 C 端「清空该簇」一致）。 */
@@ -285,39 +280,67 @@ public final class KiCutTable {
     }
 
     /**
-     * 等距判定容差（与 C 端 {@code KI_CUT_TIE_EPS} 一致）。2 簇时两候选到均值数学上等距，但 float32 下
-     * `mean-v1` 与 `v2-mean` 各自舍入、差值可达几 ulp（实测 1.9e-6），精确比较会**反过来选中较大值**；
-     * 1e-3 远超该噪声、又远小于判据容差 0.05。
+     * 等距判定容差（与 C 端 {@code KI_CUT_TIE_EPS} 一致）。float32 下两候选到同一参照值 M 的距离可达
+     * 数 ulp 偏差，精确比较会漏判而**反过来选中较大倍率**；1e-3 远超该噪声、又远小于判据容差 0.05。
      */
     private static final float TIE_EPS = 1.0e-3f;
 
-    /** 逐轴取「离各候选平均值最近」者；**等距（含浮点舍入噪声）取更小倍率**（2 簇时恒等于「取最小」）；无候选 → NEUTRAL。 */
-    private static float pickByMean(@NonNull float[] cand) {
-        if (cand.length == 0) {
+    /** 取「离 target 更近」者；**等距（含浮点舍入噪声）取更小倍率**。与 C 端 {@code ki_cut_nearer} 逐语句一致。 */
+    private static float nearer(float cur, float cand, float target) {
+        float dc = cur - target;
+        if (dc < 0f) {
+            dc = -dc;
+        }
+        float dn = cand - target;
+        if (dn < 0f) {
+            dn = -dn;
+        }
+        float diff = (dc > dn) ? (dc - dn) : (dn - dc);
+        if (diff <= TIE_EPS) {
+            return (cand < cur) ? cand : cur;   // 等距（含舍入）→ 取更小
+        }
+        return (dn < dc) ? cand : cur;
+    }
+
+    /**
+     * 该轴参评簇的整段参照值 M ＝ 各簇自身覆盖区间内整数冷值候选值的总体平均（无候选处不计）。
+     * 求和与 C 端 {@code ki_cut_axis_intra} 的梯形公式逐语句一致；无参评簇返回 {@link #NEUTRAL}。
+     */
+    private static float axisMean(@NonNull List<Curve> part, int axis) {
+        float num = 0f;
+        float cnt = 0f;
+        for (Curve c : part) {
+            num += c.intraSum(axis);
+            cnt += c.coverageCount(axis);
+        }
+        return cnt > 0f ? num / cnt : NEUTRAL;
+    }
+
+    /**
+     * 单轴多簇生效值：参评簇 = 该轴有控制点的簇（全留空簇不参评）；逐候选取离整段参照值 M 最近者
+     * （并列取更小）；只有一个候选则恒取它（直通，与 M 无关）；无参评簇 → {@link #NEUTRAL}。
+     * 与 C 端 {@code ki_cut_axis_eval} 逐语句一致。
+     */
+    private static float axisEffective(@NonNull List<Curve> cs, int cold, int axis) {
+        List<Curve> part = new ArrayList<>();
+        for (Curve c : cs) {
+            if (c.hasAxis(axis)) {
+                part.add(c);
+            }
+        }
+        if (part.isEmpty()) {
             return NEUTRAL;
         }
-        float sum = 0f;
-        for (float v : cand) {
-            sum += v;
-        }
-        float mean = sum / cand.length;
-        float best = cand[0];
-        for (int i = 1; i < cand.length; i++) {
-            float d0 = Math.abs(best - mean);
-            float d1 = Math.abs(cand[i] - mean);
-            if (Math.abs(d0 - d1) <= TIE_EPS) {
-                if (cand[i] < best) {
-                    best = cand[i];     // 等距（含舍入噪声）→ 取更小
-                }
-            } else if (d1 < d0) {
-                best = cand[i];
-            }
+        float m = axisMean(part, axis);
+        float best = part.get(0).value(cold, axis);
+        for (int i = 1; i < part.size(); i++) {
+            best = nearer(best, part.get(i).value(cold, axis), m);
         }
         return best;
     }
 
     /**
-     * 曲线图上「实际生效」的一条线：{@code x = 0 … xMax} 逐格取该生效值（逐簇候选取离平均值最近者）。
+     * 曲线图上「实际生效」的一条线：{@code x = 0 … xMax} 逐格取该生效值（逐轴取离整段参照值最近者）。
      * 语义与 C 端 {@code ki_cut_eval} 逐位对齐。
      *
      * @param axis 取值轴，见 {@link #AXIS_UP} / {@link #AXIS_DN} / {@link #AXIS_KDP}
@@ -378,26 +401,33 @@ public final class KiCutTable {
 
     /**
      * 逐轴逐 x 的采样：{@code out = {生效值, 是否有不生效候选(0/1), 最近的不生效候选值}}。
-     * 生效值 = 各簇候选里离候选平均值最近者（等距取更小）；无候选簇 → NEUTRAL、无候选。
+     * 生效值 = 参评簇（该轴有控制点）里离整段参照值 M 最近者（并列取更小）；无参评簇 → NEUTRAL、无候选。
      */
     private static void axisSample(@NonNull List<Curve> cs, int x, int axis,
                                    @NonNull float[] out) {
-        if (cs.isEmpty()) {
+        List<Curve> part = new ArrayList<>();
+        for (Curve c : cs) {
+            if (c.hasAxis(axis)) {
+                part.add(c);
+            }
+        }
+        if (part.isEmpty()) {
             out[0] = NEUTRAL;
             out[1] = 0f;
             out[2] = NEUTRAL;
             return;
         }
-        float[] cand = new float[cs.size()];
-        for (int i = 0; i < cs.size(); i++) {
-            cand[i] = cs.get(i).value(x, axis);
+        float m = axisMean(part, axis);
+        float best = part.get(0).value(x, axis);
+        for (int i = 1; i < part.size(); i++) {
+            best = nearer(best, part.get(i).value(x, axis), m);
         }
-        out[0] = pickByMean(cand);
-        float best = out[0];
+        out[0] = best;
         float shadow = best;
         boolean has = false;
         float bestD = 0f;
-        for (float v : cand) {
+        for (Curve c : part) {
+            float v = c.value(x, axis);
             if (v == best) {
                 continue;
             }
@@ -467,6 +497,66 @@ public final class KiCutTable {
         /** 按取值轴取 {@code x} 处的值（升 / 降 / KDP）：折线按需插值（范围外平推到端点）。 */
         float value(int x, int axis) {
             return lerp(pts, n, x, axis);
+        }
+
+        /** 该轴是否有 ≥1 个未留空控制点（= 该簇是否在该轴参评）。 */
+        boolean hasAxis(int axis) {
+            for (int i = 0; i < n; i++) {
+                if (!isSkipped(pts[i], axis)) {
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        /**
+         * 该轴覆盖区间（首/末未留空控制点冷值之间）内所有整数冷值上候选值之和。梯形公式、对线性段精确；
+         * 段间公共端点减去一次。**不按跨度迭代**（冷值为极值时不退化）。与 C 端 {@code ki_cut_axis_intra} 逐语句一致。
+         */
+        float intraSum(int axis) {
+            int[] idx = new int[n];
+            int m = 0;
+            for (int i = 0; i < n; i++) {
+                if (!isSkipped(pts[i], axis)) {
+                    idx[m++] = i;
+                }
+            }
+            if (m == 1) {
+                return axisValue(pts[idx[0]], axis);
+            }
+            float s = 0f;
+            for (int j = 0; j + 1 < m; j++) {
+                float ca = pts[idx[j]].cold;
+                float cb = pts[idx[j + 1]].cold;
+                float va = axisValue(pts[idx[j]], axis);
+                float vb = axisValue(pts[idx[j + 1]], axis);
+                s += (cb - ca + 1f) * (va + vb) / 2f;
+            }
+            for (int j = 1; j + 1 < m; j++) {
+                s -= axisValue(pts[idx[j]], axis);
+            }
+            return s;
+        }
+
+        /** 该轴覆盖区间的整数冷值个数（首/末未留空控制点冷值之差 + 1）；该轴无控制点 → 0。 */
+        float coverageCount(int axis) {
+            int first = -1;
+            int last = -1;
+            for (int i = 0; i < n; i++) {
+                if (isSkipped(pts[i], axis)) {
+                    continue;
+                }
+                if (first < 0) {
+                    first = i;
+                }
+                last = i;
+            }
+            if (first < 0) {
+                return 0f;
+            }
+            float lo = pts[first].cold;
+            float hi = pts[last].cold;
+            return hi - lo + 1f;
         }
 
         /**
