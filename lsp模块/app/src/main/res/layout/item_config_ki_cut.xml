@@ -18,6 +18,40 @@
         android:layout_height="wrap_content"
         android:orientation="vertical" />
 
+    <!-- 0 簇空态：簇可删到一个不剩（＝全段全 100），但每簇块底部的「添加簇」也随之消失，
+         故空态自带一枚补回入口。仅 blocks 为空时可见（KiCutTableEditor#refreshButtons 切）。 -->
+    <LinearLayout
+        android:id="@+id/ki_cut_empty_state"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:gravity="center_vertical"
+        android:orientation="horizontal"
+        android:visibility="gone">
+
+        <TextView
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:text="@string/config_ki_cut_empty_hint"
+            android:textAppearance="@style/TextAppearance.B6XTempCtrl.Caption" />
+
+        <com.google.android.material.button.MaterialButton
+            android:id="@+id/ki_cut_empty_add"
+            style="@style/Widget.Material3.Button.TextButton"
+            android:layout_width="wrap_content"
+            android:layout_height="@dimen/ki_cut_del_size"
+            android:insetTop="0dp"
+            android:insetBottom="0dp"
+            android:minHeight="0dp"
+            android:minWidth="0dp"
+            android:paddingTop="0dp"
+            android:paddingBottom="0dp"
+            android:paddingStart="@dimen/space_s"
+            android:paddingEnd="@dimen/space_s"
+            android:text="@string/config_ki_cut_add_cluster"
+            android:textSize="@dimen/text_caption" />
+    </LinearLayout>
+
     <com.example.waspwingtempctrl.ui.KiCutChartView
         android:id="@+id/ki_cut_chart"
         android:layout_width="match_parent"

@@ -14,11 +14,14 @@ import androidx.annotation.Nullable;
 
 import com.example.waspwingtempctrl.R;
 
+import java.util.List;
 import java.util.Locale;
 
 /**
- * KI 分段倍率表的实时倍率曲线：三条线（KDP 倍率 / 升倍率 / 降倍率，均 ×100 口径；KDP 更淡更细、画在下层）
- * + 一条红色竖虚线标「当前冷值」。
+ * 分段倍率表的实时倍率曲线：三条线（KDP 倍率 / 升倍率 / 降倍率，均 ×100 口径；KDP 更淡更细、画在下层）
+ * + 一条红色竖虚线标「当前冷值」。每条线：<b>实线＝整条生效值曲线</b>，另有<b>同色虚线＝不生效候选</b>
+ * 只在不生效区间画出（数据见 {@link Series}）——多簇倍率重合处取离候选平均值最近的那侧生效，另一侧即
+ * 不生效候选；两者高度可以不同，虚线两端落在实线上（从一个开始分开的点接出、到重新合上的点接回）。
  *
  * <p>横轴 0…当前设备制冷上限（见 {@link KiCutData#coldMax}），纵轴<b>自适应定标</b>——与实时信息图同一套
  * {@link ChartAxis}（档位梯 1/2/3 + ≥5 的 5 倍数、3~5 段取离跨度/4 最近），<b>不额外加最小跨度兜底</b>；
@@ -29,6 +32,36 @@ import java.util.Locale;
  * <b>本控件不读文件、不做算法</b>；纵轴定标与其刻度标签在 {@link #setCurves} 里算好并缓存，onDraw 只消费。
  */
 final class KiCutChartView extends View {
+
+    /**
+     * 一条曲线的三份并行数据（长度均 = {@code xMax + 1}）：生效值 / 不生效候选 / 该处是否存在不生效候选。
+     * {@code shadow[i]} 在该处没有不生效候选时等于 {@code value[i]}（虚线与实线重合，自然看不见）。
+     */
+    static final class Series {
+        final float[] value;
+        final float[] shadow;
+        final boolean[] inactive;
+
+        Series(@NonNull float[] value, @NonNull float[] shadow, @NonNull boolean[] inactive) {
+            this.value = value;
+            this.shadow = shadow;
+            this.inactive = inactive;
+        }
+
+        /** 按轴现算三份数据（只委托 {@link KiCutTable}；本控件仍不读文件、不做算法）。 */
+        @NonNull
+        static Series of(@NonNull List<KiCutTable.Cluster> clusters, int xMax, int axis) {
+            return new Series(KiCutTable.effectiveCurve(clusters, xMax, axis),
+                    KiCutTable.shadowCurve(clusters, xMax, axis),
+                    KiCutTable.inactiveMask(clusters, xMax, axis));
+        }
+
+        /** 空数据（仅作字段默认值；{@link #setCurves} 上屏前不绘制）。 */
+        @NonNull
+        static Series empty() {
+            return new Series(new float[0], new float[0], new boolean[0]);
+        }
+    }
 
     private static final float LINE_WIDTH_DP = 2f;
     /** KDP 那条更细（同族但更淡，不抢升/降两条的主角）。 */
@@ -47,6 +80,8 @@ final class KiCutChartView extends View {
     private final Paint dnPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final Paint kdpPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final Paint targetPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
+    /** 「不生效段」的虚线效果（口径与「当前冷值」竖虚线一致）；在 {@link #init()} 里按当前密度建。 */
+    private DashPathEffect dashEffect;
 
     private float density;
     private int colorGrid;
@@ -57,9 +92,9 @@ final class KiCutChartView extends View {
     private int colorTarget;
     private boolean colorsReady;
 
-    private float[] up = new float[0];
-    private float[] dn = new float[0];
-    private float[] kdp = new float[0];
+    private Series up = Series.empty();
+    private Series dn = Series.empty();
+    private Series kdp = Series.empty();
     private int xMax = 190;
     private int target = -1;
     /** 横轴刻度（表里各点冷值 ∪ {0, xMax}，去重升序）；由 {@link #setCurves} 注入、onDraw 消费。 */
@@ -99,15 +134,16 @@ final class KiCutChartView extends View {
         }
         kdpPaint.setStyle(Paint.Style.STROKE);
         kdpPaint.setStrokeWidth(KDP_WIDTH_DP * density);
-        targetPaint.setPathEffect(new DashPathEffect(
-                new float[]{TARGET_DASH_ON_DP * density, TARGET_DASH_OFF_DP * density}, 0f));
+        dashEffect = new DashPathEffect(
+                new float[]{TARGET_DASH_ON_DP * density, TARGET_DASH_OFF_DP * density}, 0f);
+        targetPaint.setPathEffect(dashEffect);
     }
 
     /**
-     * 上屏一批曲线数据（主线程）：{@code up}/{@code dn}/{@code kdp} 长度均 = {@code xMax + 1}，逐格取值；
+     * 上屏一批曲线数据（主线程）：三条线各自的 {@link Series} 长度均 = {@code xMax + 1}，逐格取值；
      * {@code xTicks} 是横轴刻度（表里各点的冷值 ∪ {0, xMax}，去重升序，<b>不抽稀</b>、允许重叠）。
      */
-    void setCurves(@NonNull float[] up, @NonNull float[] dn, @NonNull float[] kdp, int xMax,
+    void setCurves(@NonNull Series up, @NonNull Series dn, @NonNull Series kdp, int xMax,
                    int target, @NonNull int[] xTicks) {
         this.up = up;
         this.dn = dn;
@@ -142,19 +178,22 @@ final class KiCutChartView extends View {
     }
 
     /**
-     * 纵轴定标：取值范围 = 三条曲线的全部取值<b>并入中性值（100 = 不削）</b>，再照 {@link ChartAxis#fit}
-     * 求整档轴。并入中性值只为「基准线恒可见」，不改定标算法本身（无最小跨度兜底）。
+     * 纵轴定标：取值范围 = 三条曲线<b>的生效值与不生效候选值一并</b>并入中性值（100 = 不削），
+     * 再照 {@link ChartAxis#fit} 求整档轴。并入 shadow 值是为了不让虚线被定标裁掉；
+     * 并入中性值只为「基准线恒可见」，不改定标算法本身（无最小跨度兜底）。
      */
     private void fitAxis() {
         float mn = Float.POSITIVE_INFINITY;
         float mx = Float.NEGATIVE_INFINITY;
-        for (float[] arr : new float[][]{up, dn, kdp}) {
-            for (float v : arr) {
-                if (v < mn) {
-                    mn = v;
-                }
-                if (v > mx) {
-                    mx = v;
+        for (Series s : new Series[]{up, dn, kdp}) {
+            for (float[] arr : new float[][]{s.value, s.shadow}) {
+                for (float v : arr) {
+                    if (v < mn) {
+                        mn = v;
+                    }
+                    if (v > mx) {
+                        mx = v;
+                    }
                 }
             }
         }
@@ -227,13 +266,13 @@ final class KiCutChartView extends View {
             canvas.drawText(text, Math.min(Math.max(px, half), w - half), h - pad / 2f, textPaint);
         }
 
-        // 三条曲线：KDP 在下层（更淡更细，不抢眼），升/降在上层
+        // 三条曲线：KDP 在下层（更淡更细，不抢眼），升/降在上层；每条按生效（实线）/不生效（同色虚线）分段
         kdpPaint.setColor(colorKdp);
         upPaint.setColor(colorUp);
         dnPaint.setColor(colorDn);
-        canvas.drawPath(path(kdp, plotL, plotR, plotT, plotB), kdpPaint);
-        canvas.drawPath(path(up, plotL, plotR, plotT, plotB), upPaint);
-        canvas.drawPath(path(dn, plotL, plotR, plotT, plotB), dnPaint);
+        drawSeries(canvas, kdp, kdpPaint, plotL, plotR, plotT, plotB);
+        drawSeries(canvas, up, upPaint, plotL, plotR, plotT, plotB);
+        drawSeries(canvas, dn, dnPaint, plotL, plotR, plotT, plotB);
 
         // 当前冷值：一条红色竖虚线
         if (target >= 0 && target <= xMax) {
@@ -243,21 +282,77 @@ final class KiCutChartView extends View {
         }
     }
 
-    /** 逐格折线：{@code values[i]} 是 x=i 处的倍率（×100）。 */
-    private Path path(float[] values, float plotL, float plotR, float plotT, float plotB) {
+    /**
+     * 画一条曲线：<b>实线＝整条生效值曲线</b>（实际生效的那个值恒画实线，全线连续）；
+     * <b>虚线＝不生效候选</b>，只在不生效区间（{@code inactive=true} 的极大连续区间）单独画同色虚线。
+     * 虚线两端各向外多取一格（该处 {@code shadow == value}，落在实线上），故与实线相接、不悬空；
+     * 区间之间不连线，故一轴可有多段独立的虚线（如两簇交叉时前后各一段）。
+     */
+    private void drawSeries(Canvas canvas, Series s, Paint paint, float plotL, float plotR,
+                            float plotT, float plotB) {
+        paint.setPathEffect(null);
+        canvas.drawPath(fullPath(s.value, plotL, plotR, plotT, plotB), paint);
+        paint.setPathEffect(dashEffect);
+        canvas.drawPath(inactiveRunsPath(s, plotL, plotR, plotT, plotB), paint);
+        paint.setPathEffect(null);
+    }
+
+    /** 整条折线（逐格连起来）。 */
+    private Path fullPath(float[] values, float plotL, float plotR, float plotT, float plotB) {
         Path p = new Path();
-        boolean started = false;
         for (int x = 0; x < values.length; x++) {
             float px = gridX(x, plotL, plotR);
             float py = axis.y(values[x], plotT, plotB - plotT);
-            if (started) {
-                p.lineTo(px, py);
-            } else {
+            if (x == 0) {
                 p.moveTo(px, py);
-                started = true;
+            } else {
+                p.lineTo(px, py);
             }
         }
         return p;
+    }
+
+    /**
+     * 把连续「不生效」区间各并成一条折线段，可多段；区间之间不连线。粒度＝逐整数冷值，段在此并合。
+     *
+     * <p>端点处理：区间两端各向外多取一格，该格 {@code shadow == value} 本就在实线上；但若区间贴住
+     * {@code x=0} 或 {@code x=xMax}，那一侧无法外延，此时**该端点格改用生效值**（{@code value}），
+     * 令虚线端点落回实线、不悬空——同时保留「此处存在一个被舍弃的候选」的信息。
+     */
+    private Path inactiveRunsPath(Series s, float plotL, float plotR, float plotT, float plotB) {
+        Path p = new Path();
+        int n = s.value.length;
+        int x = 0;
+        while (x < n) {
+            if (!inactiveAt(s.inactive, x)) {
+                x++;
+                continue;
+            }
+            int start = x;
+            while (x < n && inactiveAt(s.inactive, x)) {
+                x++;
+            }
+            int end = x - 1;
+            int from = Math.max(0, start - 1);
+            int to = Math.min(n - 1, end + 1);
+            for (int i = from; i <= to; i++) {
+                // 贴边无法外延的端点格（start==0 的 from / end==xMax 的 to）：改用生效值，端点落回实线
+                boolean clampedEdge = (i == from && from == start) || (i == to && to == end);
+                float v = clampedEdge ? s.value[i] : s.shadow[i];
+                float px = gridX(i, plotL, plotR);
+                float py = axis.y(v, plotT, plotB - plotT);
+                if (i == from) {
+                    p.moveTo(px, py);
+                } else {
+                    p.lineTo(px, py);
+                }
+            }
+        }
+        return p;
+    }
+
+    private static boolean inactiveAt(boolean[] inactive, int x) {
+        return x >= 0 && x < inactive.length && inactive[x];
     }
 
     private float gridX(int x, float plotL, float plotR) {

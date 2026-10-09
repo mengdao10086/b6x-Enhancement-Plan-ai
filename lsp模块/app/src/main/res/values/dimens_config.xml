@@ -81,6 +81,14 @@
     <dimen name="config_field_nohint_top_gap">1dp</dimen>
 
     <!--
+        无浮起说明的框（int / path）的高度：比有说明的框（@dimen/field_height 36dp）矮 6dp。
+        无说明的框不需要给浮起说明留位，压掉这 6dp 后字段外框高随之从 37dp(=36+顶隙1) 降到 31dp，
+        行高同步下压；内容区可用高 = 30 − 2 − 2 = 26dp（正文行盒 16sp≈18.75dp 仍居得下）。
+        由 ConfigKeyRow#applyNoHintBoxGeometry 只对「本行无 hint」的字段施加；有说明的行逐值不变。
+    -->
+    <dimen name="config_field_nohint_height">30dp</dimen>
+
+    <!--
         参数（键行）之间的纵向间隔 = 分组卡默认行距 space_m(12dp) 的一半。
         卡内上下内边距仍是 space_s，只压键与键之间这一段。
         键行内部（同一个键的几行之间）的行距另由键行自己取 @dimen/space_xs(4dp)，须小于本值。
@@ -88,11 +96,11 @@
     <dimen name="config_key_row_gap">6dp</dimen>
 
     <!--
-        开关类参数行的上下行距上限（= 键行默认行距 config_key_row_gap 的一半）：开关行比输入框行矮
-        （无浮起提示、控件也简），压到一半更紧凑。由 ConfigKeyRow 对 meta.isSwitch() 的行施加；
-        其余类型的行仍走 6dp。只压开关行，int/path/multi/表行不受影响。
+        开关类参数行的上下行距上限：开关行比输入框行矮（无浮起提示、控件也简），压到 1dp 更紧凑。
+        由 ConfigKeyRow 对 meta.isSwitch() 的行施加；容器取 min(默认行距 6dp, 本行上限, 相邻行上限)，
+        故这 1dp 同时作用于开关行<b>上</b>与<b>下</b>两处。其余类型的行仍走 6dp，不受影响。
     -->
-    <dimen name="config_switch_row_gap">3dp</dimen>
+    <dimen name="config_switch_row_gap">1dp</dimen>
 
     <!--
         展开/收起三角的图标盒（也是箭头控件的宽高）。取 24dp：与分组卡头 / 诊断卡头的
@@ -133,4 +141,19 @@
     <dimen name="ki_cut_chart_height">120dp</dimen>
     <!-- 图例色块：10dp（本轮曾压到 8dp，按真机反馈改回原值） -->
     <dimen name="ki_cut_legend_swatch">10dp</dimen>
+
+    <!--
+        ===== 参数说明浮窗（见 ConfigKeyRow.HintOverlay） =====
+        说明卡的最大宽与离屏边距、与锚点的竖直间距。位置由 HintOverlay 就地测量后写成外边距：
+        横向被夹在 [边距, 宽 − 边距 − 卡宽] 内；纵向默认贴锚点上方（间距 offset），放不下翻到下方。
+    -->
+    <dimen name="config_hint_popup_max_width">320dp</dimen>
+    <dimen name="config_hint_popup_margin">12dp</dimen>
+    <dimen name="config_hint_popup_offset">8dp</dimen>
+
+    <!--
+        开关行标题后的「?」图标盒（点击弹参数说明浮窗）：24dp，与展开三角 @dimen/arrow_box 同档；
+        可点区域由行高（开关行 @dimen/field_height 36dp）兜底。
+    -->
+    <dimen name="config_hint_icon_size">24dp</dimen>
 </resources>

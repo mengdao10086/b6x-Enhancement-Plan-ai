@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    分段倍率表（编辑器）新增颜色。
+    此键族的既有颜色都在 G 包独占的 colors.xml 里，本包不得改那个文件，
+    故本包新增的颜色一律集中在此（既有条目如 ki_cut_up/down/kdp/del 仍只读引用 colors.xml）。
+    颜色均为 30% 透明度（#4D/#33），压在块底色上作「高亮/可选」提示，不喧宾夺主。
+-->
+<resources>
+    <!-- 插入横线常态色（与升倍率同族蓝） -->
+    <color name="ki_cut_insert_line">#4D2196F3</color>
+    <!-- 拆分态横线色（与删除/目标红同族） -->
+    <color name="ki_cut_insert_line_split">#4DE53935</color>
+    <!-- 拆分态覆盖整行的命中层底色（提示「此行可点」） -->
+    <color name="ki_cut_row_split_overlay">#33E53935</color>
+</resources>

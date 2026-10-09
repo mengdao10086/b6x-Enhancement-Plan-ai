@@ -745,6 +745,12 @@ public final class ConfigStore {
         public final String type;
         public final String label;
         public final String desc;
+        /**
+         * 界面说明块（{@code params.json} 的 {@code uiNote[]}）：<b>有序</b>的「小标题 + 正文」列表，
+         * 由参数定义侧生成（配置注释原文，按界面调用需要优化过）。无注释的键为空表。
+         * 界面说明浮窗优先渲染它，空表时回退到 {@link #desc} / 范围 / 单位等既有字段（见 ConfigKeyRow）。
+         */
+        public final List<UiNote> uiNote;
         public final String unit;
         public final String unitNote;
         public final Value defaultValue;
@@ -778,6 +784,7 @@ public final class ConfigStore {
             this.type = o.optString("type", "");
             this.label = o.optString("label", key);
             this.desc = o.optString("desc", "");
+            this.uiNote = parseUiNote(o.optJSONArray("uiNote"));
             this.unit = o.optString("unit", "");
             this.unitNote = o.optString("unitNote", "");
             this.requires = jsonStringList(o.optJSONArray("requires"));
@@ -1031,6 +1038,20 @@ public final class ConfigStore {
         }
     }
 
+    /**
+     * 界面说明块的一项（{@code params.json} 的 {@code uiNote[]}）：{@link #title} 是段的小标题
+     * （如「作用」「填写指导」），{@link #text} 是该段正文。仅供界面渲染（说明浮窗）。
+     */
+    public static final class UiNote {
+        public final String title;
+        public final String text;
+
+        UiNote(String title, String text) {
+            this.title = title;
+            this.text = text;
+        }
+    }
+
     /** 一个分组。 */
     public static final class GroupMeta {
         public final String id;
@@ -1264,7 +1285,16 @@ public final class ConfigStore {
         /** 一个表值（多行文本）→ 该族的落盘行：{@code prefix1=row1}、{@code prefix2=row2}…（行号从 1 起）。 */
         private static List<String> familyLines(String prefix, String value) {
             List<String> block = new ArrayList<>();
-            if (prefix == null || prefix.isEmpty() || value == null || value.isEmpty()) {
+            if (prefix == null || prefix.isEmpty()) {
+                return block;
+            }
+            if (value == null) {
+                return block;   // 键不存在：不写任何行
+            }
+            if (value.isEmpty()) {
+                // 键存在但值为空（用户把整张表删光）：写一行空值，把「空表」这个状态落盘。
+                // C 端把「键存在但值为空」当作「清空该簇」（等价 PID_CUT_n=,,,）；不写行则会被当作键缺失、回退出厂行。
+                block.add(prefix + "1=");
                 return block;
             }
             String[] rows = value.split("\n", -1);
@@ -1461,6 +1491,28 @@ public final class ConfigStore {
             return null;
         }
         return o.opt(name);
+    }
+
+    /**
+     * 解析 {@code uiNote[]}：有序的「小标题 + 正文」块。缺失、为空、非对象或正文为空的项都跳过；
+     * 结果为空表时界面据此回退到既有字段（见 ConfigKeyRow）。
+     */
+    private static List<UiNote> parseUiNote(JSONArray a) {
+        List<UiNote> out = new ArrayList<>();
+        if (a != null) {
+            for (int i = 0; i < a.length(); i++) {
+                JSONObject o = a.optJSONObject(i);
+                if (o == null) {
+                    continue;
+                }
+                String text = o.optString("text", "");
+                if (text.isEmpty()) {
+                    continue;
+                }
+                out.add(new UiNote(o.optString("title", ""), text));
+            }
+        }
+        return Collections.unmodifiableList(out);
     }
 
     private static List<String> jsonStringList(JSONArray a) {

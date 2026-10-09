@@ -1,0 +1,917 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="auto">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>飞智温控增强 · PID 分段倍率表 · 多簇重合处理演示</title>
+<style>
+  :root{
+    color-scheme: light;
+    --surface-1:#fcfcfb; --page:#f9f9f7;
+    --ink:#0b0b0b; --ink-2:#52514e; --muted:#898781;
+    --grid:#e1e0d9; --axis:#c3c2b7; --border:rgba(11,11,11,.10);
+    --wash:rgba(11,11,11,.035); --wash-2:rgba(11,11,11,.06);
+    --s1:#2a78d6; --s2:#eb6834; --s3:#1baf7a; --s4:#eda100;
+    --s5:#e87ba4; --s6:#008300; --s7:#4a3aa7; --s8:#e34948;
+    --good:#006300; --bad:#d03b3b; --warn:#8a5a00;
+  }
+  @media (prefers-color-scheme: dark){
+    :root:not([data-theme="light"]){
+      color-scheme: dark;
+      --surface-1:#1a1a19; --page:#0d0d0d;
+      --ink:#ffffff; --ink-2:#c3c2b7; --muted:#898781;
+      --grid:#2c2c2a; --axis:#383835; --border:rgba(255,255,255,.10);
+      --wash:rgba(255,255,255,.045); --wash-2:rgba(255,255,255,.075);
+      --s1:#3987e5; --s2:#d95926; --s3:#199e70; --s4:#c98500;
+      --s5:#d55181; --s6:#008300; --s7:#9085e9; --s8:#e66767;
+      --good:#0ca30c; --bad:#e66767; --warn:#c98500;
+    }
+  }
+  :root[data-theme="dark"]{
+    color-scheme: dark;
+    --surface-1:#1a1a19; --page:#0d0d0d;
+    --ink:#ffffff; --ink-2:#c3c2b7; --muted:#898781;
+    --grid:#2c2c2a; --axis:#383835; --border:rgba(255,255,255,.10);
+    --wash:rgba(255,255,255,.045); --wash-2:rgba(255,255,255,.075);
+    --s1:#3987e5; --s2:#d95926; --s3:#199e70; --s4:#c98500;
+    --s5:#d55181; --s6:#008300; --s7:#9085e9; --s8:#e66767;
+    --good:#0ca30c; --bad:#e66767; --warn:#c98500;
+  }
+
+  *{box-sizing:border-box}
+  html,body{margin:0;padding:0}
+  body{
+    background:var(--page); color:var(--ink);
+    font:14px/1.55 system-ui,-apple-system,"Segoe UI","Microsoft YaHei",sans-serif;
+    -webkit-font-smoothing:antialiased;
+  }
+  .wrap{max-width:1320px;margin:0 auto;padding:18px 18px 46px}
+
+  header.top{display:flex;align-items:flex-start;gap:14px;flex-wrap:wrap;margin-bottom:14px}
+  header.top h1{font-size:17px;margin:0 0 3px;letter-spacing:.2px}
+  header.top p{margin:0;color:var(--ink-2);font-size:12.5px}
+  header.top .spacer{flex:1}
+  .btn{
+    appearance:none;border:1px solid var(--border);background:var(--surface-1);color:var(--ink);
+    border-radius:8px;padding:6px 11px;font:inherit;font-size:12.5px;cursor:pointer;line-height:1.2;
+  }
+  .btn:hover{background:var(--wash-2)}
+  .btn:active{transform:translateY(1px)}
+  .btn.sm{padding:3px 8px;font-size:12px;border-radius:7px}
+  .btn.danger{color:var(--bad)}
+  .btn[aria-pressed="true"]{background:var(--ink);color:var(--surface-1);border-color:var(--ink)}
+  .btn.icon{padding:2px 7px;font-size:13px;line-height:1.1;color:var(--muted)}
+
+  .fact{
+    background:var(--surface-1);border:1px solid var(--border);border-left:4px solid var(--s1);
+    border-radius:10px;padding:11px 14px;margin-bottom:12px;font-size:13px;
+  }
+  .fact b{color:var(--ink)}
+  .fact .hl{background:var(--wash-2);border-radius:4px;padding:0 4px}
+  .fact .t{font-weight:650;margin-bottom:3px}
+
+  details.rules{
+    background:var(--surface-1);border:1px solid var(--border);border-radius:10px;
+    margin-bottom:14px;overflow:hidden;
+  }
+  details.rules>summary{cursor:pointer;padding:10px 14px;font-weight:600;font-size:13px;list-style:none}
+  details.rules>summary::-webkit-details-marker{display:none}
+  details.rules>summary::before{content:"▸ ";color:var(--muted)}
+  details.rules[open]>summary::before{content:"▾ "}
+  details.rules .body{padding:0 14px 12px;font-size:13px;color:var(--ink-2)}
+  details.rules ol{margin:4px 0 0;padding-left:20px}
+  details.rules li{margin:4px 0}
+  details.rules code{background:var(--wash-2);border-radius:4px;padding:1px 4px;font-size:12px}
+  details.rules .kt{margin-top:10px;padding:9px 11px;border:1px dashed var(--border);border-radius:8px;background:var(--wash)}
+
+  .app{display:flex;gap:16px;align-items:flex-start}
+  .panel{flex:0 0 392px;max-width:392px;display:flex;flex-direction:column;gap:14px}
+  .stage{flex:1;min-width:0;display:flex;flex-direction:column;gap:12px}
+
+  .card{background:var(--surface-1);border:1px solid var(--border);border-radius:10px}
+  .card>h2{
+    margin:0;padding:10px 13px;font-size:12.5px;font-weight:650;letter-spacing:.3px;
+    color:var(--ink-2);border-bottom:1px solid var(--border);text-transform:none;
+  }
+  .card .inner{padding:11px 13px}
+
+  .chips{display:flex;flex-wrap:wrap;gap:6px}
+  .seg{display:flex;gap:6px;flex-wrap:wrap}
+  .rowline{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+  .grow{flex:1}
+  .muted{color:var(--muted)}
+  .small{font-size:12px}
+  .mono{font-variant-numeric:tabular-nums;font-family:ui-monospace,Consolas,monospace}
+
+  /* editor */
+  .cluster{border:1px solid var(--border);border-radius:9px;margin-bottom:10px;overflow:hidden}
+  .cluster .chead{display:flex;align-items:center;gap:8px;padding:6px 8px;background:var(--wash);border-bottom:1px solid var(--border)}
+  .cluster .chead .swatch{width:11px;height:11px;border-radius:3px;flex:0 0 auto}
+  .cluster .chead .t{font-weight:600;font-size:12.5px}
+  .ptable{width:100%;border-collapse:collapse}
+  .ptable th{font-size:11px;color:var(--muted);font-weight:600;text-align:left;padding:5px 6px 3px}
+  .ptable td{padding:2px 4px;vertical-align:middle}
+  .ptable input{
+    width:100%;min-width:0;border:1px solid var(--border);background:var(--page);color:var(--ink);
+    border-radius:6px;padding:4px 6px;font:inherit;font-size:12.5px;font-family:ui-monospace,Consolas,monospace;
+  }
+  .ptable input:focus{outline:2px solid var(--s1);outline-offset:-1px;border-color:transparent}
+  .ptable input.bad{border-color:var(--bad);background:color-mix(in srgb,var(--bad) 8%,var(--page))}
+  .ptable input::placeholder{color:var(--muted);opacity:.75}
+  .ptable td.op{width:26px}
+  .ptable tr.placeholder input{opacity:.72;font-style:italic}
+  .cefoot{display:flex;gap:6px;padding:6px 8px;border-top:1px solid var(--border)}
+
+  /* legend + chart */
+  .legend{display:flex;flex-wrap:wrap;gap:6px 14px;align-items:center;font-size:12px;color:var(--ink-2)}
+  .legend .lg{display:inline-flex;align-items:center;gap:6px}
+  .legend svg{display:block}
+  .chartwrap{position:relative;background:var(--surface-1);border:1px solid var(--border);border-radius:10px;padding:6px 4px}
+  .chartwrap svg{display:block;width:100%;height:auto}
+  .tip{
+    position:absolute;pointer-events:none;z-index:5;min-width:150px;
+    background:var(--surface-1);border:1px solid var(--border);border-radius:8px;
+    box-shadow:0 6px 22px rgba(0,0,0,.16);padding:8px 10px;font-size:12px;color:var(--ink);
+    opacity:0;transition:opacity .08s linear;
+  }
+  .tip.on{opacity:1}
+  .tip .th{font-weight:650;margin-bottom:5px;font-variant-numeric:tabular-nums}
+  .tip .tr{display:flex;align-items:center;gap:6px;margin:2px 0}
+  .tip .tr .k{color:var(--ink-2);flex:1;white-space:nowrap}
+  .tip .tr .v{font-variant-numeric:tabular-nums;font-family:ui-monospace,Consolas,monospace}
+  .tip .sw{width:9px;height:9px;border-radius:2px;flex:0 0 auto}
+  .tip .sw.dash{background:none;border-top:2px dashed var(--ink);height:0;border-radius:0}
+  .tip .sw.solid{background:var(--ink)}
+  .tip .sw.dot{background:none;border-top:2px dotted var(--muted);height:0}
+
+  table.data{width:100%;border-collapse:collapse;font-size:12.5px;font-variant-numeric:tabular-nums}
+  table.data th,table.data td{text-align:right;padding:5px 8px;border-bottom:1px solid var(--border)}
+  table.data th:first-child,table.data td:first-child{text-align:left}
+  table.data th{color:var(--muted);font-weight:600}
+  .tblscroll{max-height:280px;overflow:auto;border:1px solid var(--border);border-radius:8px}
+
+  .selftest .sum{font-weight:650;margin-bottom:6px}
+  .selftest .sum.pass{color:var(--good)}
+  .selftest .sum.fail{color:var(--bad)}
+  .selftest ul{margin:4px 0 0;padding-left:18px}
+  .selftest li{margin:2px 0;font-size:12.5px}
+  .selftest code{font-family:ui-monospace,Consolas,monospace}
+
+  .badge{display:inline-block;border:1px solid var(--border);border-radius:999px;padding:1px 8px;font-size:11.5px;color:var(--ink-2)}
+  .emptycluster{color:var(--muted);font-size:12.5px;padding:8px 10px;border:1px dashed var(--border);border-radius:8px;text-align:center}
+
+  @media (max-width:900px){
+    .app{flex-direction:column}
+    .panel{flex:1 1 auto;max-width:none;width:100%}
+    .stage{width:100%}
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <header class="top">
+    <div>
+      <h1>飞智温控增强 · PID 分段倍率表 · 多簇曲线重合的处理</h1>
+      <p>本页按 <span class="mono">lsp模块/daemon/ki_cut.h</span>（C 端权威实现，与 <span class="mono">KiCutTable.java</span> 逐值对齐）1:1 复刻求值规则，用于直观查看多条簇曲线重合时「生效值」怎么选。</p>
+    </div>
+    <div class="spacer"></div>
+    <button class="btn" id="themeBtn" title="切换深浅色">切换主题</button>
+  </header>
+
+  <section class="fact">
+    <div class="t">先记住这条事实</div>
+    多簇重合时，现在不再一律「取最小」，而是取<b>离各簇候选平均值最近</b>的那一簇；距离并列时取更小倍率。<br>
+    但——<span class="hl">恰好两条线时，两个候选值到它们的平均值恒等距，所以 <b>2 簇时结果就等于「取最小」</b></span>；<b>只有 3 簇及以上，「离均值最近」才可能选出不是最小的那一条</b>。
+  </section>
+
+  <details class="rules" open>
+    <summary>求值规则（据此页 JS 逐条实现，可逐条对照 ki_cut.h）</summary>
+    <div class="body">
+      <ol>
+        <li>每个簇内的点按<b>冷值升序</b>排列；<b>同一冷值只保留先出现的那一个</b>（<code>ki_cut_normalize</code>）。单簇点数上限 32。</li>
+        <li><b>三条轴互相独立</b>：KDP 倍率 / 升倍率 / 降倍率。某个倍率框<b>留空</b> = 该点在这条轴上不作为控制点，从该轴的控制点序列里剔除，折线由左右相邻的未留空控制点直接连线（<code>ki_cut_lerp</code> 跳过 <code>KI_CUT_SKIP_*</code> 的点）。</li>
+        <li><b>折线</b>：相邻控制点之间线性插值；小于最小冷值取首点、大于最大冷值取末点（<b>两端平推</b>）；某轴一个控制点都不剩 → 该轴恒为 100（不削）。</li>
+        <li><b>多簇</b>：各簇先各轴算出候选值，得到该 x 上的候选集合；取<b>离这些候选平均值最近</b>的那一个，<b>并列时取更小倍率</b>（<code>ki_cut_eval</code> + <code>ki_cut_nearer</code>）。</li>
+        <li><b>冷值留空 = 占位行</b>：整点不参与任何轴求值，只用于编辑/落盘往返。整簇都是占位行 → 该簇清空（对该轴无贡献）。</li>
+        <li>没有任何有效簇（0 簇或全占位）→ 三轴均 100（不削）。</li>
+      </ol>
+      <div class="kt">
+        <b>关于 2 簇：</b>两个候选 a、b，平均值 m=(a+b)/2，则 |a−m| = |b−m| 恒成立 → 永远并列 → 并列取更小 → 等价于「取最小」。<br>
+        <b>3 簇起才有区别：</b>例如候选 {55, 70, 70}（均值 65），最近的是 70（并列取更小仍是 70），而不是最小的 55。<br>
+        <b>实现口径：</b>等距判定用与源一致的容差 <span class="mono">TIE_EPS = 1e-3</span>（<span class="mono">|d₀−d₁| ≤ TIE_EPS</span> 即判并列 → 取更小）：2 簇时两候选到均值数学恒等距，但 float32 下各自舍入（实测 ~1.9e-6）会让精确比较反过来选中较大值；加容差后 <b>2 簇恒等于「取最小」且不随舍入翻转</b>。本页逐句对齐源实现，非并列值结果亦完全一致。
+      </div>
+    </div>
+  </details>
+
+  <div class="app">
+    <aside class="panel">
+
+      <div class="card">
+        <h2>预设场景</h2>
+        <div class="inner">
+          <div class="chips" id="presets"></div>
+        </div>
+      </div>
+
+      <div class="card">
+        <h2>簇配置（可编辑：留空即「留空」）</h2>
+        <div class="inner">
+          <div id="editor"></div>
+          <div class="rowline" style="margin-top:4px">
+            <button class="btn" id="addCluster">+ 增加簇</button>
+            <span class="grow"></span>
+            <span class="small muted">冷值留空 = 占位行</span>
+          </div>
+        </div>
+      </div>
+
+      <div class="card">
+        <h2>图表选项</h2>
+        <div class="inner" style="display:flex;flex-direction:column;gap:9px">
+          <div class="rowline">
+            <span class="small muted" style="width:56px">取值轴</span>
+            <div class="seg" id="axisSeg"></div>
+          </div>
+          <div class="rowline">
+            <button class="btn sm" id="tMean" aria-pressed="true">各候选平均值参考线</button>
+            <button class="btn sm" id="tRaw" aria-pressed="true">各簇原始曲线</button>
+          </div>
+          <div class="rowline">
+            <button class="btn sm" id="tAuto" aria-pressed="false">横轴按数据范围自适应</button>
+            <button class="btn sm" id="tTable" aria-pressed="false">数据表</button>
+          </div>
+        </div>
+      </div>
+
+      <div class="card selftest">
+        <h2>自测（对照 参数定义/ki_cut_golden.json 代表用例）</h2>
+        <div class="inner">
+          <button class="btn" id="runSelf">运行自测</button>
+          <div id="selfOut" style="margin-top:9px"></div>
+        </div>
+      </div>
+
+    </aside>
+
+    <main class="stage">
+      <div class="legend" id="legend"></div>
+      <div class="chartwrap">
+        <svg id="chart" viewBox="0 0 820 460" role="img" aria-label="倍率折线图"></svg>
+        <div class="tip" id="tip"></div>
+      </div>
+      <div class="card" id="tableCard" style="display:none">
+        <h2>数据表（当前取值轴）</h2>
+        <div class="inner"><div class="tblscroll" id="tbl"></div></div>
+      </div>
+      <p class="small muted" style="margin:0">虚线口径：每个冷值上画「<b>离生效值最近的那一条不生效候选</b>」（对应 KiCutTable.shadowCurve），故虚线多数时候紧贴实线，只在候选值互相合并/交换的冷值处明显凸出；实线本身是每个冷值选中的那一方连成的连续折线。</p>
+      <p class="small muted" id="note" style="margin:0"></p>
+    </main>
+  </div>
+</div>
+
+<script>
+/*<<<ENGINE-START>>>*/
+/* 纯算法层：无 DOM 依赖，1:1 对应 lsp模块/daemon/ki_cut.h（与 KiCutTable.java 逐值对齐）。
+   轴命名 kdp/up/dn；倍率 ×100；留空位用 skip 位掩码。 */
+const KC = (function () {
+  const MAX_POINTS = 32;      /* KI_CUT_MAX_POINTS */
+  const NONE = 100;           /* KI_CUT_NONE：不削 */
+  const SKIP = { kdp: 1, up: 2, dn: 4 };   /* KI_CUT_SKIP_KDP / _UP / _DN */
+  const AXES = ['kdp', 'up', 'dn'];
+
+  function isSkipped(p, axis) { return (p.skip & SKIP[axis]) !== 0; }
+  function pick(p, axis) { return axis === 'kdp' ? p.kdp : axis === 'up' ? p.up : p.dn; }
+
+  /* ki_cut_normalize：稳定升序 + 同冷值保留先出现者 */
+  function normalize(arr) {
+    const pts = arr.slice();
+    for (let i = 1; i < pts.length; i++) {
+      const key = pts[i];
+      let j = i - 1;
+      while (j >= 0 && pts[j].cold > key.cold) { pts[j + 1] = pts[j]; j--; }
+      pts[j + 1] = key;
+    }
+    let m = 0;
+    for (let i = 0; i < pts.length; i++) {
+      if (m > 0 && pts[i].cold === pts[m - 1].cold) continue;
+      pts[m++] = pts[i];
+    }
+    pts.length = m;
+    return pts;
+  }
+
+  /* Curve.of：剔除占位行（cold=null）→ 取前 MAX_POINTS 个 → 排序去重 */
+  function toCurve(points) {
+    const pts = [];
+    for (let i = 0; i < points.length; i++) {
+      const p = points[i];
+      if (p.cold === null || p.cold === undefined) continue;
+      if (pts.length >= MAX_POINTS) break;
+      pts.push(p);
+    }
+    return normalize(pts);
+  }
+
+  /* ki_cut_lerp：逐轴折线取值，两端平推；该轴无控制点 → NONE */
+  function lerp(pts, x, axis) {
+    if (pts.length === 0) return NONE;
+    let first = -1, last = -1;
+    for (let i = 0; i < pts.length; i++) {
+      if (isSkipped(pts[i], axis)) continue;
+      if (first < 0) first = i;
+      last = i;
+    }
+    if (first < 0) return NONE;
+    if (x <= pts[first].cold) return pick(pts[first], axis);
+    if (x >= pts[last].cold) return pick(pts[last], axis);
+    let prev = first;
+    for (let i = first + 1; i <= last; i++) {
+      if (isSkipped(pts[i], axis)) continue;
+      if (x <= pts[i].cold) {
+        const t = (x - pts[prev].cold) / (pts[i].cold - pts[prev].cold);
+        const y0 = pick(pts[prev], axis);
+        return y0 + t * (pick(pts[i], axis) - y0);
+      }
+      prev = i;
+    }
+    return pick(pts[last], axis);
+  }
+
+  /* 等距判定容差，与源一致：ki_cut.h:KI_CUT_TIE_EPS / KiCutTable.java:TIE_EPS = 1.0e-3f。
+     2 簇时两候选到均值数学恒等距，但 float32 下各自舍入（实测 ~1.9e-6）会让精确比较反过来选中较大值；
+     |d0-d1| 落在该容差内即判为并列 → 一律取更小倍率。故 2 簇恒等于「取最小」且不随舍入翻转。 */
+  const TIE_EPS = 1.0e-3;
+
+  /* ki_cut_eval 第二遍 / KiCutTable.pickByMean：取离均值最近者；等距（含舍入噪声）取更小（逐句对齐源） */
+  function pickByMean(cand) {
+    if (cand.length === 0) return NONE;
+    let sum = 0;
+    for (let i = 0; i < cand.length; i++) sum += cand[i];
+    const mean = sum / cand.length;
+    let best = cand[0];
+    for (let i = 1; i < cand.length; i++) {
+      const d0 = Math.abs(best - mean);
+      const d1 = Math.abs(cand[i] - mean);
+      if (Math.abs(d0 - d1) <= TIE_EPS) {
+        if (cand[i] < best) best = cand[i];     /* 等距（含舍入噪声）→ 取更小 */
+      } else if (d1 < d0) {
+        best = cand[i];
+      }
+    }
+    return best;
+  }
+
+  /* activeCurves：只保留非空（≥1 个填了冷值的点）的簇 */
+  function activeCurves(clusterPoints) {
+    const out = [];
+    for (let i = 0; i < clusterPoints.length; i++) {
+      const c = toCurve(clusterPoints[i]);
+      if (c.length > 0) out.push(c);
+    }
+    return out;
+  }
+
+  /* 单冷值求值：三轴各自跨簇取离均值最近者 */
+  function evalAt(curves, cold) {
+    const res = {};
+    for (let a = 0; a < AXES.length; a++) {
+      const ax = AXES[a];
+      const cand = [];
+      for (let i = 0; i < curves.length; i++) cand.push(lerp(curves[i], cold, ax));
+      res[ax] = pickByMean(cand);
+    }
+    return res;
+  }
+
+  /* 单个 x 的采样：生效值 / 是否有被舍弃候选 / 最近被舍弃候选 / 候选平均值 / 全部候选 */
+  function sample(curves, x, axis) {
+    if (curves.length === 0) return { eff: NONE, has: false, shadow: NONE, mean: NONE, cand: [] };
+    const cand = [];
+    let sum = 0;
+    for (let i = 0; i < curves.length; i++) { const v = lerp(curves[i], x, axis); cand.push(v); sum += v; }
+    const mean = sum / cand.length;
+    const eff = pickByMean(cand);
+    let has = false, bestD = 0, shadow = eff;
+    for (let i = 0; i < cand.length; i++) {
+      const v = cand[i];
+      if (v === eff) continue;                    /* 该簇即生效值 → 不算被舍弃候选（同 KiCutTable.axisSample） */
+      const d = Math.abs(v - eff);
+      if (!has || d < bestD) { has = true; bestD = d; shadow = v; }
+    }
+    return { eff: eff, has: has, shadow: shadow, mean: mean, cand: cand };
+  }
+
+  return {
+    MAX_POINTS: MAX_POINTS, NONE: NONE, SKIP: SKIP, AXES: AXES,
+    isSkipped: isSkipped, pick: pick, normalize: normalize, toCurve: toCurve,
+    lerp: lerp, pickByMean: pickByMean, activeCurves: activeCurves,
+    evalAt: evalAt, sample: sample
+  };
+})();
+/*<<<ENGINE-END>>>*/
+
+/* ============================ 页面状态与渲染 ============================ */
+
+const AXIS_LABEL = { up: '升倍率', dn: '降倍率', kdp: 'KDP 倍率' };
+const SERIES = ['--s1', '--s2', '--s3', '--s4', '--s5', '--s6', '--s7', '--s8'];
+
+const PRESETS = [
+  { name: '① 单簇（三轴正常）', clusters: [
+    [['1', '100', '100', '50'], ['40', '100', '100', '100'], ['100', '100', '70', '80'], ['190', '100', '50', '65']]
+  ]},
+  { name: '② 两簇不交叉', clusters: [
+    [['0', '80', '60', '90'], ['255', '100', '120', '60']],
+    [['0', '50', '40', '70'], ['255', '60', '70', '40']]
+  ]},
+  { name: '③ 两簇交叉', clusters: [
+    [['0', '40', '40', '40'], ['255', '140', '140', '140']],
+    [['0', '140', '140', '140'], ['255', '40', '40', '40']]
+  ]},
+  { name: '④ 三簇（离均值最近 ≠ 取最小）', clusters: [
+    [['50', '80', '60', '60'], ['150', '60', '90', '100']],
+    [['50', '70', '70', '40'], ['150', '50', '80', '90']],
+    [['50', '55', '50', '30'], ['150', '45', '60', '70']]
+  ]},
+  { name: '⑤ 含冷值留空的行', clusters: [
+    [['1', '100', '', '50'], ['40', '100', '100', '100'], ['100', '100', '70', '80'], ['190', '100', '50', '65'], ['', '120', '120', '120']],
+    [['1', '100', '100', '80'], ['100', '90', '60', '70']]
+  ]},
+  { name: '⑥ 0 簇（全段 100）', clusters: [] }
+];
+
+const state = {
+  clusters: [],
+  axis: 'up',
+  showMean: true,
+  showRaw: true,
+  autoRange: false,
+  showTable: false
+};
+
+function newRow(c, k, u, d) { return { cold: c == null ? '' : String(c), kdp: k == null ? '' : String(k), up: u == null ? '' : String(u), dn: d == null ? '' : String(d) }; }
+function newCluster(rows) { return { points: (rows && rows.length ? rows.map(r => newRow(r[0], r[1], r[2], r[3])) : [newRow('', '', '', '')]) }; }
+
+function loadPreset(idx) {
+  state.clusters = PRESETS[idx].clusters.map(cl => newCluster(cl));
+  renderAll();
+}
+
+/* ---------- 解析：与 ki_cut_parse_row 同口径 ---------- */
+function parseIntStrict(s) {
+  s = String(s).trim();
+  if (s === '') return null;
+  if (!/^[+-]?\d+$/.test(s)) return null;
+  const v = parseInt(s, 10);
+  return Number.isFinite(v) ? v : null;
+}
+/* 返回该簇的引擎点数组；某倍率字段「非空但非整数」→ 整簇忽略（返回 []） */
+function buildPoints(cluster) {
+  const out = [];
+  let bad = false;
+  for (let ri = 0; ri < cluster.points.length; ri++) {
+    const raw = cluster.points[ri];
+    const coldBlank = raw.cold.trim() === '';
+    const cold = parseIntStrict(raw.cold);
+    if (!coldBlank && cold === null) continue;      /* 冷值非空但非整数：整点忽略 */
+    let skip = 0;
+    const rates = { kdp: KC.NONE, up: KC.NONE, dn: KC.NONE };
+    for (let a = 0; a < KC.AXES.length; a++) {
+      const ax = KC.AXES[a];
+      const seg = raw[ax].trim();
+      if (seg === '') { skip |= KC.SKIP[ax]; continue; }   /* 留空：该轴跳过此点 */
+      const v = parseIntStrict(seg);
+      if (v === null) { bad = true; break; }
+      rates[ax] = v;
+    }
+    if (bad) break;
+    out.push({ cold: coldBlank ? null : cold, kdp: rates.kdp, up: rates.up, dn: rates.dn, skip: skip });
+  }
+  return bad ? [] : out;
+}
+
+/* ---------- 格式化 ---------- */
+function fmt(v) {
+  if (v === null || v === undefined || !isFinite(v)) return '—';
+  const r = Math.round(v * 100) / 100;
+  return Math.abs(r - Math.round(r)) < 1e-9 ? String(Math.round(r)) : r.toFixed(2);
+}
+
+/* ---------- 编辑器 ---------- */
+const editorEl = document.getElementById('editor');
+function renderEditor() {
+  editorEl.innerHTML = '';
+  if (state.clusters.length === 0) {
+    const d = document.createElement('div');
+    d.className = 'emptycluster';
+    d.textContent = '当前没有簇（0 簇）→ 全段倍率恒为 100（不削）';
+    editorEl.appendChild(d);
+    return;
+  }
+  state.clusters.forEach((cl, ci) => {
+    const card = document.createElement('div');
+    card.className = 'cluster';
+
+    const head = document.createElement('div');
+    head.className = 'chead';
+    const sw = document.createElement('span');
+    sw.className = 'swatch';
+    sw.style.background = 'var(' + SERIES[ci % SERIES.length] + ')';
+    head.appendChild(sw);
+    const t = document.createElement('span');
+    t.className = 't';
+    t.textContent = '簇 ' + (ci + 1);
+    head.appendChild(t);
+    const sp = document.createElement('span'); sp.className = 'grow'; sp.style.flex = '1'; head.appendChild(sp);
+    const del = document.createElement('button');
+    del.className = 'btn sm danger'; del.textContent = '删除簇';
+    del.onclick = () => { state.clusters.splice(ci, 1); renderAll(); };
+    head.appendChild(del);
+    card.appendChild(head);
+
+    const tbl = document.createElement('table');
+    tbl.className = 'ptable';
+    tbl.innerHTML = '<thead><tr><th style="width:23%">冷值</th><th>KDP</th><th>升</th><th>降</th><th></th></tr></thead>';
+    const tb = document.createElement('tbody');
+    cl.points.forEach((p, pi) => {
+      const tr = document.createElement('tr');
+      if (p.cold.trim() === '') tr.className = 'placeholder';
+      ['cold', 'kdp', 'up', 'dn'].forEach(field => {
+        const td = document.createElement('td');
+        const inp = document.createElement('input');
+        inp.type = 'text';
+        inp.inputMode = 'numeric';
+        inp.autocomplete = 'off';
+        inp.value = p[field];
+        inp.placeholder = field === 'cold' ? '留空' : '留空';
+        inp.dataset.ci = ci; inp.dataset.pi = pi; inp.dataset.field = field;
+        inp.addEventListener('input', onCellInput);
+        td.appendChild(inp);
+        tr.appendChild(td);
+      });
+      const tdop = document.createElement('td');
+      tdop.className = 'op';
+      const x = document.createElement('button');
+      x.className = 'btn icon'; x.textContent = '×'; x.title = '删除该行';
+      x.onclick = () => { state.clusters[ci].points.splice(pi, 1); renderAll(); };
+      tdop.appendChild(x);
+      tr.appendChild(tdop);
+      tb.appendChild(tr);
+    });
+    tbl.appendChild(tb);
+    card.appendChild(tbl);
+
+    const foot = document.createElement('div');
+    foot.className = 'cefoot';
+    const add = document.createElement('button');
+    add.className = 'btn sm'; add.textContent = '+ 增加行';
+    add.onclick = () => { state.clusters[ci].points.push(newRow('', '', '', '')); renderAll(); };
+    foot.appendChild(add);
+    card.appendChild(foot);
+
+    editorEl.appendChild(card);
+  });
+}
+
+function onCellInput(ev) {
+  const inp = ev.target;
+  const ci = +inp.dataset.ci, pi = +inp.dataset.pi, field = inp.dataset.field;
+  state.clusters[ci].points[pi][field] = inp.value;
+  const s = inp.value.trim();
+  inp.classList.toggle('bad', s !== '' && parseIntStrict(s) === null);
+  const tr = inp.closest('tr');
+  if (tr) tr.className = (state.clusters[ci].points[pi].cold.trim() === '') ? 'placeholder' : '';
+  renderChart();
+}
+
+/* ---------- 轴切换 / 开关 ---------- */
+const axisSeg = document.getElementById('axisSeg');
+function renderAxisSeg() {
+  axisSeg.innerHTML = '';
+  [['kdp', 'KDP'], ['up', '升'], ['dn', '降']].forEach(([ax, label]) => {
+    const b = document.createElement('button');
+    b.className = 'btn sm';
+    b.textContent = label;
+    b.setAttribute('aria-pressed', String(state.axis === ax));
+    b.onclick = () => { state.axis = ax; renderAxisSeg(); renderChart(); };
+    axisSeg.appendChild(b);
+  });
+}
+
+function toggleBtn(id, key) {
+  const b = document.getElementById(id);
+  const sync = () => b.setAttribute('aria-pressed', String(state[key]));
+  b.onclick = () => { state[key] = !state[key]; sync(); renderChart(); };
+  sync();
+}
+
+/* ---------- 刻度 ---------- */
+function niceTicks(lo, hi, count) {
+  if (!(hi > lo)) { hi = lo + 1; }
+  const raw = (hi - lo) / count;
+  const mag = Math.pow(10, Math.floor(Math.log10(raw)));
+  const norm = raw / mag;
+  let step = norm <= 1 ? 1 : norm <= 2 ? 2 : norm <= 5 ? 5 : 10;
+  step *= mag;
+  const start = Math.floor(lo / step) * step;
+  const end = Math.ceil(hi / step) * step;
+  const ticks = [];
+  for (let v = start; v <= end + step * 1e-6; v += step) ticks.push(+v.toFixed(6));
+  return { ticks: ticks, lo: start, hi: end };
+}
+
+/* ---------- 图表 ---------- */
+const svg = document.getElementById('chart');
+const tip = document.getElementById('tip');
+const SVG_W = 820, SVG_H = 460;
+const M = { l: 58, r: 92, t: 18, b: 48 };
+const PW = SVG_W - M.l - M.r, PH = SVG_H - M.t - M.b;
+
+let last = null;   /* 最近一次计算的绘图上下文 */
+
+function renderChart() {
+  const clusterPts = state.clusters.map(buildPoints);
+  const curves = KC.activeCurves(clusterPts);
+
+  /* 定义域 */
+  let maxCold = null, minCold = null;
+  for (let ci = 0; ci < state.clusters.length; ci++) {
+    for (const r of state.clusters[ci].points) {
+      const c = parseIntStrict(r.cold);
+      if (c === null) continue;
+      if (maxCold === null || c > maxCold) maxCold = c;
+      if (minCold === null || c < minCold) minCold = c;
+    }
+  }
+  let xMax;
+  if (state.autoRange) xMax = (maxCold === null) ? 100 : Math.max(1, maxCold);
+  else xMax = Math.max(255, maxCold === null ? 0 : maxCold);
+  let clamped = false;
+  if (xMax > 1500) { xMax = 1500; clamped = true; }
+  const xMin = state.autoRange && minCold !== null && minCold < 0 ? minCold : 0;
+  if (xMax <= xMin) xMax = xMin + 1;
+
+  /* 逐 x 采样 */
+  const xs = [];
+  for (let x = xMin; x <= xMax; x++) xs.push(x);
+  const eff = [], has = [], shadow = [], mean = [];
+  const rawVals = curves.map(() => []);
+  for (let i = 0; i < xs.length; i++) {
+    const s = KC.sample(curves, xs[i], state.axis);
+    eff.push(s.eff); has.push(s.has); shadow.push(s.shadow); mean.push(s.mean);
+    for (let k = 0; k < curves.length; k++) rawVals[k].push(KC.lerp(curves[k], xs[i], state.axis));
+  }
+
+  /* y 定义域 */
+  let lo = Infinity, hi = -Infinity;
+  const consider = arr => { for (const v of arr) { if (v < lo) lo = v; if (v > hi) hi = v; } };
+  consider(eff);
+  if (state.showMean) consider(mean);
+  if (state.showRaw) rawVals.forEach(consider);
+  for (let i = 0; i < xs.length; i++) if (has[i]) { if (shadow[i] < lo) lo = shadow[i]; if (shadow[i] > hi) hi = shadow[i]; }
+  if (!isFinite(lo)) { lo = 0; hi = 100; }
+  if (hi - lo < 12) { const c = (hi + lo) / 2; lo = c - 6; hi = c + 6; }
+  const pad = (hi - lo) * 0.08;
+  const yt = niceTicks(lo - pad, hi + pad, 5);
+  const yLo = yt.lo, yHi = yt.hi;
+
+  const X = x => M.l + (x - xMin) / (xMax - xMin) * PW;
+  const Y = v => M.t + (yHi - v) / (yHi - yLo) * PH;
+  const f = n => Math.round(n * 10) / 10;
+
+  const parts = [];
+  /* 网格 */
+  for (const t of yt.ticks) {
+    parts.push('<line x1="' + M.l + '" y1="' + f(Y(t)) + '" x2="' + (SVG_W - M.r) + '" y2="' + f(Y(t)) + '" stroke="var(--grid)" stroke-width="1"/>');
+  }
+  /* x 刻度 */
+  const xt = niceTicks(xMin, xMax, 7);
+  for (const t of xt.ticks) {
+    if (t < xMin - 1e-9 || t > xMax + 1e-9) continue;
+    const px = f(X(t));
+    parts.push('<line x1="' + px + '" y1="' + M.t + '" x2="' + px + '" y2="' + (M.t + PH) + '" stroke="var(--grid)" stroke-width="1"/>');
+    parts.push('<text x="' + px + '" y="' + (M.t + PH + 18) + '" fill="var(--muted)" font-size="11" text-anchor="middle">' + t + '</text>');
+  }
+  /* y 刻度文字 */
+  for (const t of yt.ticks) {
+    parts.push('<text x="' + (M.l - 8) + '" y="' + (f(Y(t)) + 4) + '" fill="var(--muted)" font-size="11" text-anchor="end">' + fmt(t) + '</text>');
+  }
+  /* 坐标轴 */
+  parts.push('<line x1="' + M.l + '" y1="' + M.t + '" x2="' + M.l + '" y2="' + (M.t + PH) + '" stroke="var(--axis)" stroke-width="1"/>');
+  parts.push('<line x1="' + M.l + '" y1="' + (M.t + PH) + '" x2="' + (SVG_W - M.r) + '" y2="' + (M.t + PH) + '" stroke="var(--axis)" stroke-width="1"/>');
+  parts.push('<text x="' + (M.l + PW / 2) + '" y="' + (SVG_H - 8) + '" fill="var(--muted)" font-size="11.5" text-anchor="middle">冷值</text>');
+  parts.push('<text x="14" y="' + (M.t + PH / 2) + '" fill="var(--muted)" font-size="11.5" text-anchor="middle" transform="rotate(-90 14 ' + (M.t + PH / 2) + ')">倍率 ×100</text>');
+
+  /* 各簇原始曲线（细、淡） */
+  const endLabels = [];
+  if (state.showRaw) {
+    for (let k = 0; k < curves.length; k++) {
+      const color = 'var(' + SERIES[k % SERIES.length] + ')';
+      let d = '';
+      for (let i = 0; i < xs.length; i++) d += (i ? 'L' : 'M') + f(X(xs[i])) + ' ' + f(Y(rawVals[k][i]));
+      parts.push('<path d="' + d + '" fill="none" stroke="' + color + '" stroke-width="1.6" stroke-linejoin="round" opacity="0.55"/>');
+      endLabels.push({ y: Y(rawVals[k][xs.length - 1]), text: '簇' + (k + 1), color: color });
+    }
+  }
+
+  /* 各候选平均值参考线（点线，中性色） */
+  if (state.showMean) {
+    let d = '';
+    for (let i = 0; i < xs.length; i++) d += (i ? 'L' : 'M') + f(X(xs[i])) + ' ' + f(Y(mean[i]));
+    parts.push('<path d="' + d + '" fill="none" stroke="var(--muted)" stroke-width="1.5" stroke-dasharray="1.5 3.5" stroke-linecap="round"/>');
+  }
+
+  /* 被舍弃候选（同色虚线，仅在不生效区间；两端接在实线上） */
+  let i = 0;
+  while (i < xs.length) {
+    if (!has[i]) { i++; continue; }
+    let a = i;
+    while (i < xs.length && has[i]) i++;
+    const b = i - 1;
+    const leftIdx = a > 0 ? a - 1 : 0;
+    const rightIdx = b < xs.length - 1 ? b + 1 : xs.length - 1;
+    const seg = [[leftIdx, eff[leftIdx]]];
+    const from = Math.max(a, leftIdx + 1);
+    const to = Math.min(b, rightIdx - 1);
+    for (let x = from; x <= to; x++) seg.push([x, shadow[x]]);
+    seg.push([rightIdx, eff[rightIdx]]);
+    let d = '';
+    for (let s = 0; s < seg.length; s++) d += (s ? 'L' : 'M') + f(X(xs[seg[s][0]])) + ' ' + f(Y(seg[s][1]));
+    parts.push('<path d="' + d + '" fill="none" stroke="var(--ink)" stroke-width="2.4" stroke-dasharray="6 5" stroke-linejoin="round" stroke-linecap="round" opacity="0.92"/>');
+  }
+
+  /* 生效值曲线（实线，连续、同色） */
+  let dEff = '';
+  for (let k = 0; k < xs.length; k++) dEff += (k ? 'L' : 'M') + f(X(xs[k])) + ' ' + f(Y(eff[k]));
+  parts.push('<path d="' + dEff + '" fill="none" stroke="var(--ink)" stroke-width="2.6" stroke-linejoin="round" stroke-linecap="round"/>');
+
+  /* 簇末端直接标注（避免仅靠颜色识别） */
+  endLabels.sort((p, q) => p.y - q.y);
+  for (let k = 1; k < endLabels.length; k++) if (endLabels[k].y - endLabels[k - 1].y < 13) endLabels[k].y = endLabels[k - 1].y + 13;
+  for (const L of endLabels) {
+    parts.push('<text x="' + (SVG_W - M.r + 7) + '" y="' + f(L.y + 4) + '" fill="' + L.color + '" font-size="11" font-weight="600">' + L.text + '</text>');
+  }
+
+  /* 悬停图层 */
+  parts.push('<g id="hoverLayer"></g>');
+  parts.push('<rect id="hitArea" x="' + M.l + '" y="' + M.t + '" width="' + PW + '" height="' + PH + '" fill="transparent" style="cursor:crosshair"/>');
+
+  svg.innerHTML = parts.join('');
+  last = { xs: xs, xMin: xMin, xMax: xMax, eff: eff, has: has, shadow: shadow, mean: mean, rawVals: rawVals, curves: curves, X: X, Y: Y };
+  bindHover();
+  renderLegend(curves);
+  renderTable();
+
+  const nRaw = state.clusters.length, nAct = curves.length;
+  let note = '当前取值轴：' + AXIS_LABEL[state.axis] + '　·　簇共 ' + nRaw + ' 个，其中有效（非空）' + nAct + ' 个。';
+  if (nRaw !== nAct) note += ' 空簇/全占位簇不参与取值。';
+  if (clamped) note += ' （横轴已截断到 1500 显示）';
+  document.getElementById('note').textContent = note;
+}
+
+function renderLegend(curves) {
+  const el = document.getElementById('legend');
+  const items = [];
+  items.push('<span class="lg"><svg width="26" height="12"><line x1="1" y1="6" x2="25" y2="6" stroke="var(--ink)" stroke-width="2.6" stroke-linecap="round"/></svg>生效值（选中那一条）</span>');
+  items.push('<span class="lg"><svg width="26" height="12"><line x1="1" y1="6" x2="25" y2="6" stroke="var(--ink)" stroke-width="2.4" stroke-dasharray="6 5" stroke-linecap="round"/></svg>被舍弃的候选（同色虚线，仅在不生效处）</span>');
+  if (state.showMean) items.push('<span class="lg"><svg width="26" height="12"><line x1="1" y1="6" x2="25" y2="6" stroke="var(--muted)" stroke-width="1.8" stroke-dasharray="1.5 3.5" stroke-linecap="round"/></svg>各候选平均值</span>');
+  if (state.showRaw && curves.length) {
+    for (let k = 0; k < curves.length; k++) {
+      items.push('<span class="lg"><i class="swatch" style="width:11px;height:3px;border-radius:2px;display:inline-block;background:var(' + SERIES[k % SERIES.length] + ')"></i>簇' + (k + 1) + ' 原始曲线</span>');
+    }
+  }
+  el.innerHTML = items.join('');
+}
+
+/* ---------- 悬停 ---------- */
+function bindHover() {
+  const layer = svg.querySelector('#hoverLayer');
+  const hit = svg.querySelector('#hitArea');
+  if (!layer || !hit) return;
+  const move = ev => {
+    const rect = svg.getBoundingClientRect();
+    const px = ev.clientX - rect.left;
+    const sx = px / rect.width * SVG_W;
+    const t = (sx - M.l) / PW;
+    let x = Math.round(last.xMin + t * (last.xMax - last.xMin));
+    x = Math.max(last.xMin, Math.min(last.xMax, x));
+    const i = x - last.xMin;
+    const pxX = f(last.X(x));
+    layer.innerHTML =
+      '<line x1="' + pxX + '" y1="' + M.t + '" x2="' + pxX + '" y2="' + (M.t + PH) + '" stroke="var(--axis)" stroke-width="1" stroke-dasharray="3 3"/>' +
+      '<circle cx="' + pxX + '" cy="' + f(last.Y(last.eff[i])) + '" r="4.5" fill="var(--surface-1)" stroke="var(--ink)" stroke-width="2.2"/>' +
+      (last.has[i] ? '<circle cx="' + pxX + '" cy="' + f(last.Y(last.shadow[i])) + '" r="4" fill="var(--surface-1)" stroke="var(--ink)" stroke-width="2" stroke-dasharray="2.5 2.5"/>' : '');
+    showTip(x, i, pxX / SVG_W * 100);
+  };
+  hit.addEventListener('mousemove', move);
+  hit.addEventListener('mouseleave', () => { layer.innerHTML = ''; tip.classList.remove('on'); });
+}
+
+function showTip(x, i, leftPct) {
+  const rows = [];
+  rows.push('<div class="tr"><span class="sw solid"></span><span class="k">生效值</span><span class="v">' + fmt(last.eff[i]) + '</span></div>');
+  if (last.has[i]) rows.push('<div class="tr"><span class="sw dash"></span><span class="k">被舍弃候选</span><span class="v">' + fmt(last.shadow[i]) + '</span></div>');
+  rows.push('<div class="tr"><span class="sw dot"></span><span class="k">候选平均值</span><span class="v">' + fmt(last.mean[i]) + '</span></div>');
+  last.curves.forEach((c, k) => {
+    rows.push('<div class="tr"><span class="sw" style="background:var(' + SERIES[k % SERIES.length] + ')"></span><span class="k">簇' + (k + 1) + '</span><span class="v">' + fmt(last.rawVals[k][i]) + '</span></div>');
+  });
+  tip.innerHTML = '<div class="th">冷值 ' + x + '　·　' + AXIS_LABEL[state.axis] + '</div>' + rows.join('');
+  const wrap = svg.parentElement;
+  tip.style.left = Math.max(4, Math.min(wrap.clientWidth - 168, leftPct / 100 * wrap.clientWidth + 12)) + 'px';
+  tip.style.top = '14px';
+  tip.classList.add('on');
+}
+
+/* ---------- 数据表 ---------- */
+function renderTable() {
+  const card = document.getElementById('tableCard');
+  card.style.display = state.showTable ? '' : 'none';
+  if (!state.showTable) return;
+  const clusterPts = state.clusters.map(buildPoints);
+  const curves = KC.activeCurves(clusterPts);
+  const set = new Set([last.xMin, last.xMax]);
+  for (const cl of clusterPts) for (const p of cl) if (p.cold !== null) set.add(p.cold);
+  const cols = [...set].filter(v => v >= last.xMin && v <= last.xMax).sort((a, b) => a - b);
+  let html = '<table class="data"><thead><tr><th>冷值</th><th>生效值</th><th>被舍弃候选</th><th>候选平均值</th>' +
+    curves.map((c, k) => '<th>簇' + (k + 1) + '</th>').join('') + '</tr></thead><tbody>';
+  for (const x of cols) {
+    const s = KC.sample(curves, x, state.axis);
+    html += '<tr><td>' + x + '</td><td>' + fmt(s.eff) + '</td><td>' + (s.has ? fmt(s.shadow) : '—') + '</td><td>' + fmt(s.mean) + '</td>' +
+      s.cand.map(v => '<td>' + fmt(v) + '</td>').join('') + '</tr>';
+  }
+  html += '</tbody></table>';
+  document.getElementById('tbl').innerHTML = html;
+}
+
+/* ---------- 内置自测（摘自 ki_cut_golden.json 的代表用例） ---------- */
+const SELF_TESTS = [
+  { name: 'multi3_ctl_100', cold: 100, clusters: [[[50, 80, 60, 60], [150, 60, 90, 100]], [[50, 70, 70, 40], [150, 50, 80, 90]], [[50, 55, 50, 30], [150, 45, 60, 70]]], kdp: 60, up: 75, dn: 65 },
+  { name: 'multi3_ctl_50', cold: 50, clusters: [[[50, 80, 60, 60], [150, 60, 90, 100]], [[50, 70, 70, 40], [150, 50, 80, 90]], [[50, 55, 50, 30], [150, 45, 60, 70]]], kdp: 70, up: 60, dn: 40 },
+  { name: 'multi3_ctl_150', cold: 150, clusters: [[[50, 80, 60, 60], [150, 60, 90, 100]], [[50, 70, 70, 40], [150, 50, 80, 90]], [[50, 55, 50, 30], [150, 45, 60, 70]]], kdp: 50, up: 80, dn: 90 },
+  { name: 'multi3_axis_neutral_c0', cold: 100, clusters: [[[50, 80, null, 60], [150, 60, null, 100]], [[50, 70, 70, 40], [150, 50, 80, 90]], [[50, 55, 50, 30], [150, 45, 60, 70]]], kdp: 60, up: 75, dn: 65 },
+  { name: 'multi4_tie_take_smaller', cold: 100, clusters: [[[100, 50, 50, 50]], [[100, 70, 70, 70]], [[100, 90, 90, 90]], [[100, 110, 110, 110]]], kdp: 70, up: 70, dn: 70 },
+  { name: 'multi2_mid_100', cold: 100, clusters: [[[50, 80, 50, 60], [150, 60, 90, 100]], [[50, 70, 70, 40], [150, 50, 80, 90]]], kdp: 60, up: 70, dn: 65 },
+  { name: 'empty_multi_min_100', cold: 100, clusters: [[[50, 80, null, 60], [150, 60, null, 100]], [[50, 70, 70, 40], [150, 50, 80, 90]]], kdp: 60, up: 75, dn: 65 },
+  { name: 'empty_single_point_up', cold: 100, clusters: [[[100, 30, null, 50]]], kdp: 30, up: 100, dn: 50 },
+  { name: 'empty_clusters_all_neutral', cold: 100, clusters: [], kdp: 100, up: 100, dn: 100 },
+  { name: 'unsorted_dedup_keep_first', cold: 100, clusters: [[[100, 71, 78, 79], [1, 100, 100, 50], [40, 100, 100, 100], [100, 999, 999, 999], [190, 100, 50, 65]]], kdp: 71, up: 78, dn: 79 }
+];
+
+function goldenToCurves(clusters) {
+  return KC.activeCurves(clusters.map(cl => cl.map(pt => {
+    const skip = (pt[1] === null ? KC.SKIP.kdp : 0) | (pt[2] === null ? KC.SKIP.up : 0) | (pt[3] === null ? KC.SKIP.dn : 0);
+    return { cold: pt[0], kdp: pt[1] === null ? KC.NONE : pt[1], up: pt[2] === null ? KC.NONE : pt[2], dn: pt[3] === null ? KC.NONE : pt[3], skip: skip };
+  })));
+}
+
+function runSelftest() {
+  const tol = 0.05;
+  let pass = 0, fail = 0;
+  const fails = [];
+  for (const t of SELF_TESTS) {
+    const got = KC.evalAt(goldenToCurves(t.clusters), t.cold);
+    const ok = Math.abs(got.kdp - t.kdp) <= tol && Math.abs(got.up - t.up) <= tol && Math.abs(got.dn - t.dn) <= tol;
+    if (ok) pass++;
+    else {
+      fail++;
+      fails.push('<li><code>' + t.name + '</code>：期望 kdp/up/dn = ' + t.kdp + '/' + t.up + '/' + t.dn + '，实得 ' + fmt(got.kdp) + '/' + fmt(got.up) + '/' + fmt(got.dn) + '</li>');
+    }
+  }
+  const out = document.getElementById('selfOut');
+  out.innerHTML = '<div class="sum ' + (fail ? 'fail' : 'pass') + '">PASS ' + pass + ' / FAIL ' + fail + '（共 ' + SELF_TESTS.length + ' 条，容差 ' + tol + '）</div>' +
+    (fail ? '<ul>' + fails.join('') + '</ul>' : '<div class="small muted">全部与 golden 期望值一致。</div>');
+}
+
+/* ---------- 统一渲染 ---------- */
+function renderAll() { renderEditor(); renderAxisSeg(); renderChart(); }
+
+/* ---------- 初始化 ---------- */
+(function init() {
+  const pc = document.getElementById('presets');
+  PRESETS.forEach((p, i) => {
+    const b = document.createElement('button');
+    b.className = 'btn sm'; b.textContent = p.name;
+    b.onclick = () => loadPreset(i);
+    pc.appendChild(b);
+  });
+  document.getElementById('addCluster').onclick = () => { state.clusters.push(newCluster(null)); renderAll(); };
+  toggleBtn('tMean', 'showMean');
+  toggleBtn('tRaw', 'showRaw');
+  toggleBtn('tAuto', 'autoRange');
+  document.getElementById('tTable').onclick = () => {
+    state.showTable = !state.showTable;
+    document.getElementById('tTable').setAttribute('aria-pressed', String(state.showTable));
+    renderTable();
+  };
+  document.getElementById('runSelf').onclick = runSelftest;
+  document.getElementById('themeBtn').onclick = () => {
+    const cur = document.documentElement.getAttribute('data-theme');
+    const next = cur === 'dark' ? 'light' : 'dark';
+    document.documentElement.setAttribute('data-theme', next);
+  };
+  loadPreset(3);   /* 默认：三簇场景，最能体现「离均值最近」 */
+  runSelftest();
+})();
+</script>
+</body>
+</html>

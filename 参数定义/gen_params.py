@@ -121,6 +121,61 @@ def _field_product(field):
     return out
 
 
+def _ui_plain(s):
+    """界面化：去掉 markdown 强调/代码标记（文档专属，浮窗不渲染）。"""
+    return s.replace("**", "").replace("`", "").strip()
+
+
+_UI_DROP = ("由界面补写",)      # 只对配置文件成立的话
+
+
+def _ui_clean(lines):
+    """confNote 原文 → 界面浮窗可用文本：去段标（--- 标题 ---）、去前导空白、去配置文件专属标记与句子。"""
+    out = []
+    for raw in lines:
+        s = _ui_plain(raw)
+        if not s:
+            continue
+        if re.fullmatch(r"-{2,}.*-{2,}", s):        # --- 小节标题 --- （配置文件里的分隔，界面不需要）
+            continue
+        s = s.lstrip("#").strip()                   # 配置文件行首注释标记
+        if not s or any(d in s for d in _UI_DROP):
+            continue
+        out.append(s)
+    return out
+
+
+def _ui_note(entry):
+    """由定义里的注释原文构建界面浮窗用的 uiNote（有序小节）；无任何注释时返回 []（则该键不输出 uiNote）。
+
+    小节：作用（docDesc，缺则 desc）· 填写指导（confNote 清洗后）· 取值（rangeNote）·
+    默认（defaultNote/factoryNote）· 生效条件（requires/hiddenWhen）。
+    """
+    nodes = []
+    doc = _ui_plain(entry.get("docDesc") or entry.get("desc") or "")
+    if doc:
+        nodes.append({"title": "作用", "text": doc})
+    guide = _ui_clean(entry.get("confNote") or [])
+    if guide:
+        nodes.append({"title": "填写指导", "text": "\n".join(guide)})
+    if entry.get("rangeNote"):
+        nodes.append({"title": "取值", "text": _ui_plain(entry["rangeNote"])})
+    defaults = [_ui_plain(entry[k]) for k in ("defaultNote", "factoryNote") if entry.get(k)]
+    if defaults:
+        nodes.append({"title": "默认", "text": "\n".join(defaults)})
+    conds = []
+    if entry.get("requires"):
+        conds.append("需先开启：" + " / ".join(entry["requires"]))
+    if entry.get("hiddenWhen"):
+        conds.append("以下键任一为 1 时本项隐藏：" + " / ".join(entry["hiddenWhen"]))
+    if conds:
+        nodes.append({"title": "生效条件", "text": "\n".join(conds)})
+    # 「有注释才输出」：定义里写了 docDesc 或 confNote 才输出；都没有的键不产出 uiNote（逐字节不变）。
+    if not nodes or not (entry.get("docDesc") or entry.get("confNote")):
+        return []
+    return nodes
+
+
 def build_params_json(definition):
     """由定义构建界面消费的 params.json（键序完全由定义决定，保证幂等）。"""
     keys_out = {}
@@ -148,6 +203,11 @@ def build_params_json(definition):
         for opt in ("defaultNote", "factoryNote", "rangeNote"):
             if entry.get(opt):
                 item[opt] = entry[opt]
+        # 界面「说明浮窗」用的注释小节（顺序：作用 / 填写指导 / 取值 / 默认 / 生效条件）；
+        # 只有定义里写了 docDesc/confNote 的键才输出，其余键产物逐字节不变。
+        ui = _ui_note(entry)
+        if ui:
+            item["uiNote"] = ui
         fields = entry.get("fields")
         item["fields"] = [_field_product(f) for f in fields] if fields else None
         # 表键（type=table）：界面按 rowPrefix 拼配置键、按 rowFields 校验逐字段、用 defaultRows 初始化表

@@ -38,6 +38,21 @@
     <string name="config_path_note">路径提示：%1$s</string>
 
     <!--
+        ===== 参数说明浮窗（点输入框获焦 / 开关行标题后的「?」） =====
+        正文块优先取 params.json 的 uiNote（参数定义侧的注释原文）；缺失时用下面这几条把既有字段
+        （desc/范围/单位/默认/生效条件）拼成回退内容，见 ConfigKeyRow.HintOverlay。
+    -->
+    <string name="config_hint_icon">?</string>
+    <string name="config_hint_action">查看参数说明</string>
+    <string name="config_hint_section_desc">作用</string>
+    <string name="config_hint_section_fill">填写指导</string>
+    <string name="config_hint_default">默认值 %1$s</string>
+    <string name="config_hint_requires">仅 %1$s=1 时生效</string>
+    <string name="config_hint_values">取值：%1$s</string>
+    <string name="config_hint_path_type">路径字符串</string>
+    <string name="config_hint_switch_type">开关（0/1）</string>
+
+    <!--
         ===== KI 分段倍率表（type=table 的键） =====
         表头/簇/点的文案只此一份；点行内三个框的浮起说明由 KiCutTableEditor 从定义 rowFields[].label 取，
         不在这里另写一遍（否则定义一改，界面就与定义分家）。

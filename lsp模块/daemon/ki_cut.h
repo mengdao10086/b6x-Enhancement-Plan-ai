@@ -14,8 +14,9 @@
  *      **不作为控制点**——从该轴的控制点序列中剔除，折线由相邻的两个未留空控制点直接连线。
  *   3. 折线 L(x)（逐轴）：在该轴控制点序列内相邻点线性插值；x ≤ 该轴最小冷值取首点、x ≥ 最大冷值
  *      取末点（两端平推）；该轴一个控制点都没有 → 该轴恒为 KI_CUT_NONE（100 = 不削）。
- *   4. 多簇逐轴取**最小**倍率（倍率更小 = 削减更大）；无有效簇 → KI_CUT_NONE。
- * 倍率口径：×100（100 = 不削，0 = 完全压死）。冷值恒为控制点（必填、无留空）。
+ *   4. 多簇逐轴取**离各簇候选平均值最近**的那一簇的值（「重合」处不再一律取最小）；并列取更小倍率
+ *      （与旧「取最小」在 2 簇时逐位一致）；无有效簇 → KI_CUT_NONE。
+ * 倍率口径：×100（100 = 不削，0 = 完全压死）。
  */
 #ifndef KI_CUT_H
 #define KI_CUT_H
@@ -119,24 +120,61 @@ static int ki_cut_cluster_eval(const KiCutPoint *in, int n, int cold,
 }
 
 /**
- * 多簇求值：各簇分别求值后逐轴取**最小**倍率（倍率小 = 削减大）。无有效簇 → 三轴均 KI_CUT_NONE。
- * 返回有效簇数。
+ * 等距判定容差：`|d1-d2|` 落在浮点舍入噪声内即视为等距。
+ * 必要性见「两簇恒等距」：2 簇时两候选到均值数学上等距，但 float32 下 `m-v1` 与 `v2-m` 各自舍入，
+ * 差值可达 ~几 ulp（实测 1.9e-6），精确比较会**反过来选中较大值**。eps=1e-3 远超该噪声（值域 0~200，
+ * 舍入误差 ≤ ~1e-4）、又远小于任何有意义的倍率差（判据容差 0.05）。
+ */
+#define KI_CUT_TIE_EPS 1.0e-3f
+
+/**
+ * 取「离 target 更近」者；**等距（含浮点舍入噪声）时取「更小」倍率**（= 更保守、削减更大）。
+ * 两条相加/相减顺序固定，保证与 Java 镜像逐位一致。
+ */
+static float ki_cut_nearer(float cur, float cand, float target) {
+    float dc = cur  - target; if (dc < 0.0f) dc = -dc;
+    float dn = cand - target; if (dn < 0.0f) dn = -dn;
+    float diff = (dc > dn) ? (dc - dn) : (dn - dc);
+    if (diff <= KI_CUT_TIE_EPS) return (cand < cur) ? cand : cur;   // 等距（含舍入）→ 取更小
+    return (dn < dc) ? cand : cur;
+}
+
+/**
+ * 多簇求值：各簇分别求值后，逐轴取**离各簇候选平均值最近**的那一簇的值（「重合」处不再一律取最小）；
+ * 等距取更小倍率。无有效簇 → 三轴均 KI_CUT_NONE。返回有效簇数。
  */
 static int ki_cut_eval(const KiCutCluster *cs, int ncl, int cold,
                        float *kdp, float *up, float *dn) {
-    float mk = (float)KI_CUT_NONE, mu = (float)KI_CUT_NONE, md = (float)KI_CUT_NONE;
+    // 第一遍：各轴候选之和与簇数（求平均值）
+    float sk = 0.0f, su = 0.0f, sd = 0.0f;
     int used = 0;
     for (int i = 0; i < ncl; i++) {
         float ck, cu, cd;
         if (!ki_cut_cluster_eval(cs[i].pts, cs[i].n, cold, &ck, &cu, &cd)) continue;
-        if (used == 0 || ck < mk) mk = ck;
-        if (used == 0 || cu < mu) mu = cu;
-        if (used == 0 || cd < md) md = cd;
+        sk += ck; su += cu; sd += cd;
         used++;
     }
-    *kdp = mk;
-    *up  = mu;
-    *dn  = md;
+    if (used == 0) {
+        *kdp = (float)KI_CUT_NONE;
+        *up  = (float)KI_CUT_NONE;
+        *dn  = (float)KI_CUT_NONE;
+        return 0;
+    }
+    float mk = sk / (float)used, mu = su / (float)used, md = sd / (float)used;
+    // 第二遍：逐轴取离均值最近者（等距取更小）
+    float bk = 0.0f, bu = 0.0f, bd = 0.0f;
+    int first = 1;
+    for (int i = 0; i < ncl; i++) {
+        float ck, cu, cd;
+        if (!ki_cut_cluster_eval(cs[i].pts, cs[i].n, cold, &ck, &cu, &cd)) continue;
+        if (first) { bk = ck; bu = cu; bd = cd; first = 0; continue; }
+        bk = ki_cut_nearer(bk, ck, mk);
+        bu = ki_cut_nearer(bu, cu, mu);
+        bd = ki_cut_nearer(bd, cd, md);
+    }
+    *kdp = bk;
+    *up  = bu;
+    *dn  = bd;
     return used;
 }
 

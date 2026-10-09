@@ -1,0 +1,34 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    参数说明浮窗的说明卡（浮层里唯一亮的那块，见 ConfigKeyRow.HintOverlay）。
+    内容：标题（参数名）+ 若干「小标题 + 正文」块——正文块由 HintOverlay 按 params.json 的 uiNote
+    （缺失时回退到 desc/范围/单位等既有字段）动态加进 @id/config_hint_body，按序渲染。
+    宽与位置由 HintOverlay 就地测量后写进 LayoutParams；这里给 wrap_content 只是"未被回写时"的兜底。
+    卡片外观沿用主题的 materialCardViewStyle（与分组卡同源），不在这里写死颜色/圆角以外的样式。
+    本卡整体不可点击（点了当没点），触摸的吞/放行由浮层根视图统一判定（见 HintOverlay#onTouch）。
+-->
+<com.google.android.material.card.MaterialCardView xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
+    android:layout_width="wrap_content"
+    android:layout_height="wrap_content"
+    app:cardCornerRadius="@dimen/card_radius">
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="vertical"
+        android:padding="@dimen/card_padding">
+
+        <TextView
+            android:id="@+id/config_hint_title"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:textAppearance="@style/TextAppearance.B6XTempCtrl.SectionTitle" />
+
+        <LinearLayout
+            android:id="@+id/config_hint_body"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical" />
+    </LinearLayout>
+</com.google.android.material.card.MaterialCardView>

@@ -1,5 +1,6 @@
 package com.example.waspwingtempctrl.ui;
 
+import android.content.Context;
 import android.text.Editable;
 import android.text.InputType;
 import android.text.TextUtils;
@@ -12,6 +13,7 @@ import android.widget.TextView;
 
 import androidx.annotation.NonNull;
 import androidx.annotation.Nullable;
+import androidx.appcompat.app.AlertDialog;
 
 import com.example.waspwingtempctrl.ConfigStore.FieldMeta;
 import com.example.waspwingtempctrl.ConfigStore.KeyMeta;
@@ -24,7 +26,8 @@ import java.util.List;
 
 /**
  * 分段倍率表的编辑器：以「簇」为块（{@code item_ki_cut_cluster.xml}），块内以「点」为行
- * （{@code item_ki_cut_point.xml}，每点四个数字：冷值 / KDP 倍率 / 升倍率 / 降倍率）。支持增删簇与增删点。
+ * （{@code item_ki_cut_point.xml}，每点四个数字：冷值 / KDP 倍率 / 升倍率 / 降倍率）。支持增删簇、增删点、
+ * 拆分簇。
  *
  * <p><b>数据是「值 = 多行文本」</b>（每行一簇、行内四元组重复，见 {@link KiCutTable}）：本类只管把
  * 文本渲染成控件、把控件读回文本；落盘与算法都在别处（{@link com.example.waspwingtempctrl.ConfigStore}
@@ -33,24 +36,28 @@ import java.util.List;
  *
  * <p><b>不打扰正在编辑的用户</b>：{@link #setClusters} 先与控件当前内容比对，一致就什么都不做
  * （同 {@code ConfigKeyRow} 的 setTextIfChanged 口径）——否则每次快照上屏都会重建控件、把光标顶掉。
- * 增删簇/点只在用户点击那一刻重建（那时重建正是预期）。
+ * 增删簇/点/拆分只在用户点击那一刻重建（那时重建正是预期）。
+ *
+ * <p><b>每簇行间与首尾的高亮横线</b>（{@code item_ki_cut_insert_line.xml}）是真实兄弟视图，与点行不重叠，
+ * 故触摸天然无冲突。常态点线＝在该处插入一条「四元组全空」的新行；进入<b>拆分态</b>（点「拆分簇」）后，
+ * 同一批线改为「在此拆分」，且点行本身＝该行由上下两簇共享。整表在 0 簇时显示「还没有簇」空态与「添加簇」。
  */
 final class KiCutTableEditor {
 
-    /** 与宿主的交互面：任何一次改动（编辑、增删、失焦）都要重绘曲线并排入写盘。 */
+    /** 与宿主的交互面：任何一次改动（编辑、增删、拆分、失焦）都要重绘曲线并排入写盘。 */
     interface Listener {
 
         /** 编辑事件类型（决定曲线重算与写盘的时机）。 */
         enum EditKind {
             /** 框内文本变化（编辑中）：曲线按 1 秒防抖重算；写盘仍走 1200ms 防抖队列。 */
             TYPING,
-            /** 增删簇/点（值完整）：曲线立刻重算；写盘仍走防抖队列。 */
+            /** 增删簇/点、拆分（值完整）：曲线立刻重算；写盘仍走防抖队列。 */
             STRUCTURAL,
             /** 失焦提交：取消未触发的定时器，收敛后立刻重算曲线并立刻写盘。 */
             COMMIT
         }
 
-        /** 用户改了表（编辑数字、增删簇/点，或失焦提交）。 */
+        /** 用户改了表（编辑数字、增删簇/点、拆分，或失焦提交）。 */
         void onEdited(@NonNull EditKind kind);
 
         /** 一句人话反馈（命中上限之类）。 */
@@ -66,16 +73,27 @@ final class KiCutTableEditor {
     private final Listener listener;
     private final LayoutInflater inflater;
     private final LinearLayout clustersBox;
+    private final View emptyState;
     private final List<ClusterBlock> blocks = new ArrayList<>();
 
     /** true 时忽略控件回调：程序化回填不该被当成用户改动作业。 */
     private boolean suppress;
+
+    /** 当前处于「拆分态」的簇块（同一时刻至多一个）；null = 无常态。任何重建都会清空它。 */
+    @Nullable
+    private ClusterBlock splitBlock;
 
     KiCutTableEditor(@NonNull KeyMeta meta, @NonNull View root, @NonNull Listener listener) {
         this.meta = meta;
         this.listener = listener;
         this.inflater = LayoutInflater.from(root.getContext());
         this.clustersBox = root.findViewById(R.id.ki_cut_clusters);
+        this.emptyState = root.findViewById(R.id.ki_cut_empty_state);
+        View emptyAdd = root.findViewById(R.id.ki_cut_empty_add);
+        if (emptyAdd != null) {
+            // 删到 0 簇后没任何簇块（「添加簇」按钮原本挂在每个簇块底部），故空态自带一枚补回入口
+            emptyAdd.setOnClickListener(v -> onAddCluster(0));
+        }
     }
 
     // ==================== 值 ⇄ 控件 ====================
@@ -90,7 +108,7 @@ final class KiCutTableEditor {
         return collect(true);
     }
 
-    /** 控件当前内容，<b>不收敛</b>：增删簇/点重建控件时用，保留用户正在输入的原文。 */
+    /** 控件当前内容，<b>不收敛</b>：增删簇/点、拆分前取一次现状再重建时用，保留用户正在输入的原文。 */
     @NonNull
     private List<KiCutTable.Cluster> getClustersRaw() {
         return collect(false);
@@ -101,7 +119,12 @@ final class KiCutTableEditor {
         for (ClusterBlock block : blocks) {
             KiCutTable.Cluster cluster = new KiCutTable.Cluster();
             for (PointRow row : block.rows) {
-                int cold = parseInt(row.cold, 0);
+                // 冷值框为空 = 占位行（{@code hasCold=false}，整点不生效，仅原样往返），冷值不参与求值
+                boolean hasCold = !isEmpty(row.cold);
+                int cold = hasCold ? parseInt(row.cold, 0) : 0;
+                if (clamp && hasCold) {
+                    cold = clampField(cold, 0);
+                }
                 int kdp = parseInt(row.kdp, KiCutTable.NEUTRAL);
                 int up = parseInt(row.up, KiCutTable.NEUTRAL);
                 int dn = parseInt(row.dn, KiCutTable.NEUTRAL);
@@ -117,12 +140,11 @@ final class KiCutTableEditor {
                     skip |= KiCutTable.SKIP_DN;
                 }
                 if (clamp) {
-                    cold = clampField(cold, 0);
                     kdp = clampField(kdp, 1);
                     up = clampField(up, 2);
                     dn = clampField(dn, 3);
                 }
-                cluster.points.add(new KiCutTable.Point(cold, kdp, up, dn, skip));
+                cluster.points.add(new KiCutTable.Point(cold, hasCold, kdp, up, dn, skip));
             }
             out.add(cluster);
         }
@@ -161,6 +183,7 @@ final class KiCutTableEditor {
 
     private void rebuild(@NonNull List<KiCutTable.Cluster> clusters) {
         suppress = true;
+        splitBlock = null;   // 重建后控件全新，拆分态一并退出
         try {
             clustersBox.removeAllViews();
             blocks.clear();
@@ -192,10 +215,29 @@ final class KiCutTableEditor {
         listener.onEdited(Listener.EditKind.STRUCTURAL);
     }
 
+    /** 删一个簇：先弹窗确认（不可撤销），确认后才真的删。允许删到 0 簇（＝全段全 100）。 */
     private void onDeleteCluster(int index) {
         List<KiCutTable.Cluster> model = getClustersRaw();
-        if (index < 0 || index >= model.size() || model.size() <= 1) {
-            return;   // 至少留一簇：全删会让配置里没有 KI_CUT_N 行，重读时又回落到出厂行
+        if (index < 0 || index >= model.size()) {
+            return;
+        }
+        Context context = clustersBox.getContext();
+        AlertDialog dialog = new AlertDialog.Builder(context)
+                .setTitle(R.string.config_ki_cut_del_cluster_confirm_title)
+                .setMessage(R.string.config_ki_cut_del_cluster_confirm_message)
+                .setPositiveButton(R.string.config_ki_cut_del_cluster_confirm_ok,
+                        (d, which) -> deleteClusterNow(index))
+                .setNegativeButton(R.string.config_ki_cut_del_cluster_confirm_cancel, null)
+                .create();
+        // 点弹窗外部即取消（AppCompat AlertDialog 默认不随点外触摸取消，须显式设置）
+        dialog.setCanceledOnTouchOutside(true);
+        dialog.show();
+    }
+
+    private void deleteClusterNow(int index) {
+        List<KiCutTable.Cluster> model = getClustersRaw();
+        if (index < 0 || index >= model.size()) {
+            return;   // 确认期间表已变（外部重置等）：放弃，不删错
         }
         model.remove(index);
         rebuild(model);
@@ -233,8 +275,115 @@ final class KiCutTableEditor {
 
     /** 新增点的初值：冷值取定义下限（取不到为 0），KDP/升/降都是 100（不削），三轴均非留空。 */
     private KiCutTable.Point newDefaultPoint() {
-        return new KiCutTable.Point(minOf(0, 0), KiCutTable.NEUTRAL, KiCutTable.NEUTRAL,
+        return new KiCutTable.Point(minOf(0, 0), true, KiCutTable.NEUTRAL, KiCutTable.NEUTRAL,
                 KiCutTable.NEUTRAL, 0);
+    }
+
+    /** 高亮横线插入的新行：四元组全空（冷值留空＝占位行，三条倍率置留空），渲染成四个空框。 */
+    private static KiCutTable.Point blankPoint() {
+        return new KiCutTable.Point(0, false, KiCutTable.NEUTRAL, KiCutTable.NEUTRAL,
+                KiCutTable.NEUTRAL, KiCutTable.SKIP_KDP | KiCutTable.SKIP_UP | KiCutTable.SKIP_DN);
+    }
+
+    /** 在某簇 {@code at} 位置插入一条全空行（横线常态点击）。 */
+    private void insertBlankRow(int clusterIndex, int at) {
+        List<KiCutTable.Cluster> model = getClustersRaw();
+        if (clusterIndex < 0 || clusterIndex >= model.size()) {
+            return;
+        }
+        List<KiCutTable.Point> points = model.get(clusterIndex).points;
+        if (points.size() >= MAX_POINTS) {
+            listener.notifyUser(clustersBox.getContext().getString(
+                    R.string.config_ki_cut_limit_point, MAX_POINTS));
+            return;
+        }
+        points.add(Math.max(0, Math.min(at, points.size())), blankPoint());
+        rebuild(model);
+        listener.onEdited(Listener.EditKind.STRUCTURAL);
+    }
+
+    // ==================== 拆分簇 ====================
+
+    /** 点「拆分簇」：在本簇的拆分态与常态之间切换（同一时刻只有一个簇处于拆分态）。 */
+    private void onSplitToggle(@NonNull ClusterBlock block) {
+        splitBlock = (splitBlock == block) ? null : block;
+        applySplitVisuals();
+    }
+
+    /** 拆分态视觉：本簇的线与行的可点语义切换（线＝拆分、行＝共享），并在块底显示一句话提示。 */
+    private void applySplitVisuals() {
+        Context context = clustersBox.getContext();
+        for (ClusterBlock block : blocks) {
+            boolean splitting = block == splitBlock;
+            int lineColor = context.getColor(
+                    splitting ? R.color.ki_cut_insert_line_split : R.color.ki_cut_insert_line);
+            for (int i = 0; i < block.lines.size(); i++) {
+                View holder = block.lines.get(i);
+                boolean edge = i == 0 || i == block.lines.size() - 1;
+                // 首尾线在拆分态无意义（会把簇切成空的一侧），隐藏掉
+                holder.setVisibility(splitting && edge ? View.GONE : View.VISIBLE);
+                View bar = holder.findViewById(R.id.ki_cut_line_bar);
+                if (bar != null) {
+                    bar.setBackgroundColor(lineColor);
+                }
+                holder.setContentDescription(context.getString(
+                        splitting ? R.string.config_ki_cut_split_line : R.string.config_ki_cut_insert_line));
+            }
+            for (PointRow row : block.rows) {
+                row.hit.setVisibility(splitting ? View.VISIBLE : View.GONE);
+                // 拆分态该行可点＝共享拆分；常态命中层不可见，此描述不起作用
+                row.hit.setContentDescription(context.getString(R.string.config_ki_cut_split_row));
+            }
+            block.splitHint.setVisibility(splitting ? View.VISIBLE : View.GONE);
+        }
+    }
+
+    /** 点横线：常态＝在该处插一行；拆分态＝在此常规拆分。 */
+    private void onLineClicked(@NonNull ClusterBlock block, int at) {
+        int index = indexOf(block);
+        if (block == splitBlock) {
+            // 常规拆分：上簇 = 该线以上的点，下簇 = 该线以下的点
+            splitCluster(index, at, at);
+        } else {
+            insertBlankRow(index, at);
+        }
+    }
+
+    /** 点行：拆分态下＝该行同属上下两簇（共享行）。 */
+    private void onRowClicked(@NonNull ClusterBlock block, int rowIndex) {
+        if (block == splitBlock) {
+            // 共享拆分：上簇 = [0..row]，下簇 = [row..n-1]，该行两簇各一份
+            splitCluster(indexOf(block), rowIndex + 1, rowIndex);
+        }
+    }
+
+    /**
+     * 把某簇切成两簇：上簇取 {@code points[0,upperEnd)}、下簇取 {@code points[lowerStart,n)}；两者都要非空，
+     * 且切后簇数不超上限。
+     */
+    private void splitCluster(int clusterIndex, int upperEnd, int lowerStart) {
+        List<KiCutTable.Cluster> model = getClustersRaw();
+        if (clusterIndex < 0 || clusterIndex >= model.size()) {
+            return;
+        }
+        List<KiCutTable.Point> points = model.get(clusterIndex).points;
+        int n = points.size();
+        if (upperEnd <= 0 || upperEnd > n || lowerStart < 0 || lowerStart >= n) {
+            return;   // 会让某一侧没有点：拒绝
+        }
+        if (blocks.size() >= MAX_CLUSTERS) {
+            listener.notifyUser(clustersBox.getContext().getString(
+                    R.string.config_ki_cut_limit_cluster, MAX_CLUSTERS));
+            return;
+        }
+        KiCutTable.Cluster upper = new KiCutTable.Cluster();
+        upper.points.addAll(points.subList(0, upperEnd));
+        KiCutTable.Cluster lower = new KiCutTable.Cluster();
+        lower.points.addAll(points.subList(lowerStart, n));
+        model.set(clusterIndex, upper);
+        model.add(clusterIndex + 1, lower);
+        rebuild(model);   // rebuild 会清掉拆分态
+        listener.onEdited(Listener.EditKind.STRUCTURAL);
     }
 
     // ==================== 建块 ====================
@@ -244,21 +393,34 @@ final class KiCutTableEditor {
         ClusterBlock block = new ClusterBlock(view);
         boolean firstCluster = blocks.isEmpty();
         blocks.add(block);
-        block.deleteButton.setOnClickListener(v -> onDeleteCluster(indexOf(block)));
+        block.deleteClusterButton.setOnClickListener(v -> onDeleteCluster(indexOf(block)));
         block.addPointButton.setOnClickListener(v -> onAddPoint(indexOf(block)));
         // 「添加簇」在每个簇块底部：新簇插在本块之后（不是追加到末尾），其后各簇整体下移
         block.addClusterButton.setOnClickListener(v -> onAddCluster(indexOf(block) + 1));
+        block.splitClusterButton.setOnClickListener(v -> onSplitToggle(block));
         for (KiCutTable.Point point : cluster.points) {
+            addInsertLine(block);   // 行之前一条
             addPointRow(block, point, firstCluster && block.rows.isEmpty());
         }
+        addInsertLine(block);       // 末行之后一条
         clustersBox.addView(view);
+    }
+
+    /** 追加一条可点高亮横线（其插入位置 = 当前行数，即它落在已有各行之下、下一条行之上）。 */
+    private void addInsertLine(@NonNull ClusterBlock block) {
+        View holder = inflater.inflate(R.layout.item_ki_cut_insert_line, block.pointsBox, false);
+        int at = block.rows.size();
+        holder.setOnClickListener(v -> onLineClicked(block, at));
+        block.lines.add(holder);
+        block.pointsBox.addView(holder);
     }
 
     private void addPointRow(@NonNull ClusterBlock block, @NonNull KiCutTable.Point point,
                              boolean showHints) {
         View view = inflater.inflate(R.layout.item_ki_cut_point, block.pointsBox, false);
         PointRow row = new PointRow(view);
-        row.cold.setText(String.valueOf(point.cold));
+        // 冷值留空（占位行）渲染成空框，其余渲染数值
+        row.cold.setText(point.hasCold ? String.valueOf(point.cold) : "");
         // 留空轴渲染成空框（与「空 = 留空」一一对应），非留空轴渲染数值
         row.kdp.setText(KiCutTable.isSkipped(point, KiCutTable.AXIS_KDP) ? "" : String.valueOf(point.kdp));
         row.up.setText(KiCutTable.isSkipped(point, KiCutTable.AXIS_UP) ? "" : String.valueOf(point.up));
@@ -269,6 +431,8 @@ final class KiCutTableEditor {
         row.up.addTextChangedListener(watcher());
         row.dn.addTextChangedListener(watcher());
         row.deleteButton.setOnClickListener(v -> onDeletePoint(indexOf(block), block.rows.indexOf(row)));
+        // 拆分态下点行＝共享拆分：命中层只在拆分态可见，故与输入框无触摸冲突
+        row.hit.setOnClickListener(v -> onRowClicked(block, block.rows.indexOf(row)));
         // 失焦才把数字收敛进定义范围（越界/空值都钳回来），免得把非法值写进配置；
         // 聚焦时不动——否则刚点进框就把内容改掉、光标跳位。收敛后交给宿主：取消防抖定时器、
         // 立刻重算曲线并立刻写盘（见 Listener.EditKind.COMMIT）。
@@ -326,18 +490,24 @@ final class KiCutTableEditor {
         }
     }
 
-    /** 触底按钮置灰：只剩一簇/一点时不能删；到上限时不能再加（「添加簇」按钮每个簇块各一枚）。 */
+    /**
+     * 刷新按钮与空态：「添加簇」「拆分簇」到上限时置灰（拆分还要求本簇至少两个点）；
+     * 删除簇恒可用（允许删到 0 簇）；每簇仅剩一个点时不能删点。0 簇时显示空态与补回入口。
+     */
     private void refreshButtons() {
-        boolean multiCluster = blocks.size() > 1;
         boolean canAddCluster = blocks.size() < MAX_CLUSTERS;
         for (ClusterBlock block : blocks) {
-            block.deleteButton.setEnabled(multiCluster);
             block.addClusterButton.setEnabled(canAddCluster);
+            block.splitClusterButton.setEnabled(canAddCluster && block.rows.size() >= 2);
+            block.deleteClusterButton.setEnabled(true);
             block.addPointButton.setEnabled(block.rows.size() < MAX_POINTS);
             boolean multiPoint = block.rows.size() > 1;
             for (PointRow row : block.rows) {
                 row.deleteButton.setEnabled(multiPoint);
             }
+        }
+        if (emptyState != null) {
+            emptyState.setVisibility(blocks.isEmpty() ? View.VISIBLE : View.GONE);
         }
     }
 
@@ -367,14 +537,16 @@ final class KiCutTableEditor {
     }
 
     /**
-     * 是否有<b>冷值框</b>为空（编辑中的半截态）：有则曲线不重算、配置也不写盘（见 {@link Listener}）。
+     * 是否存在<b>半截态</b>行：冷值框为空、<b>但至少填了一个倍率框</b>。
      *
-     * <p>倍率框为空是<b>合法值</b>（该轴留空），不算半截态——故此处只看冷值（冷值必填）。
+     * <p>供宿主决定「编辑中是否重算曲线/写盘」（冷值必填）。<b>「四个框全空」不算半截态</b>——那是一整行
+     * 「留空」（各倍率均不生效，语义见 {@link KiCutTable}），属于合法值；只有「冷值空、倍率有值」才是
+     * 打到一半的中间态（防打字清空冷值的那一刻被误存）。
      */
     boolean hasEmptyCold() {
         for (ClusterBlock block : blocks) {
             for (PointRow row : block.rows) {
-                if (isEmpty(row.cold)) {
+                if (isEmpty(row.cold) && !(isEmpty(row.kdp) && isEmpty(row.up) && isEmpty(row.dn))) {
                     return true;
                 }
             }
@@ -447,7 +619,7 @@ final class KiCutTableEditor {
         }
     }
 
-    /** 一个点行（四个数字框 + 删除）。 */
+    /** 一个点行（四个数字框 + 删除 + 拆分态命中层）。 */
     private final class PointRow {
         final View view;
         final EditText cold;
@@ -459,6 +631,8 @@ final class KiCutTableEditor {
         final TextInputLayout upBox;
         final TextInputLayout dnBox;
         final View deleteButton;
+        /** 覆盖整行的透明命中层：仅拆分态可见，让「点行＝共享拆分」不被输入框抢走触摸。 */
+        final View hit;
 
         PointRow(View view) {
             this.view = view;
@@ -471,6 +645,7 @@ final class KiCutTableEditor {
             this.upBox = view.findViewById(R.id.ki_cut_up_box);
             this.dnBox = view.findViewById(R.id.ki_cut_dn_box);
             this.deleteButton = view.findViewById(R.id.ki_cut_point_del);
+            this.hit = view.findViewById(R.id.ki_cut_point_hit);
             this.cold.setInputType(InputType.TYPE_CLASS_NUMBER);
             this.kdp.setInputType(InputType.TYPE_CLASS_NUMBER);
             this.up.setInputType(InputType.TYPE_CLASS_NUMBER);
@@ -478,15 +653,19 @@ final class KiCutTableEditor {
         }
     }
 
-    /** 一个簇块（表头 + 点行容器 + 底部行：添加点 / 添加簇）。 */
+    /** 一个簇块（表头 + 点行/横线容器 + 底部行：添加点 / 添加簇 / 拆分簇 / 删除簇 + 拆分态提示）。 */
     private final class ClusterBlock {
         final View view;
         final TextView title;
         final LinearLayout pointsBox;
         final MaterialButton addPointButton;
         final MaterialButton addClusterButton;
-        final MaterialButton deleteButton;
+        final MaterialButton splitClusterButton;
+        final MaterialButton deleteClusterButton;
+        final TextView splitHint;
         final List<PointRow> rows = new ArrayList<>();
+        /** 本簇的插入横线，顺序即位置（长度恒为 rows.size()+1）。 */
+        final List<View> lines = new ArrayList<>();
 
         ClusterBlock(View view) {
             this.view = view;
@@ -494,7 +673,9 @@ final class KiCutTableEditor {
             this.pointsBox = view.findViewById(R.id.ki_cut_cluster_points);
             this.addPointButton = view.findViewById(R.id.ki_cut_cluster_add_point);
             this.addClusterButton = view.findViewById(R.id.ki_cut_cluster_add_cluster);
-            this.deleteButton = view.findViewById(R.id.ki_cut_cluster_del);
+            this.splitClusterButton = view.findViewById(R.id.ki_cut_cluster_split);
+            this.deleteClusterButton = view.findViewById(R.id.ki_cut_cluster_del);
+            this.splitHint = view.findViewById(R.id.ki_cut_split_hint);
         }
     }
 }

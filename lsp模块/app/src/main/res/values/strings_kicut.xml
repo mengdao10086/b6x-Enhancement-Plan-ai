@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    分段倍率表（编辑器）新增文案。
+    此键族的既有文案都在 G 包独占的 strings_config.xml 里，本包不得改那个文件，
+    故本包新增的文案一律集中在此（既有条目仍只读引用 strings_config.xml）。
+-->
+<resources>
+    <string name="config_ki_cut_split_cluster">拆分簇</string>
+    <string name="config_ki_cut_split_hint">拆分中：点横线＝在此拆分；点行＝该行由上下两簇共享（再点「拆分簇」退出）</string>
+    <string name="config_ki_cut_empty_hint">还没有簇，全段都不削减（全 100）</string>
+
+    <!-- 无障碍：横线与点行在两种语义下的说明 -->
+    <string name="config_ki_cut_insert_line">在此插入一行</string>
+    <string name="config_ki_cut_split_line">在此拆分簇</string>
+    <string name="config_ki_cut_split_row">以此为上下两簇的共享行</string>
+
+    <!-- 删除簇确认弹窗 -->
+    <string name="config_ki_cut_del_cluster_confirm_title">删除这个簇？</string>
+    <string name="config_ki_cut_del_cluster_confirm_message">该簇的所有倍率点会一并移除，且不可撤销。</string>
+    <string name="config_ki_cut_del_cluster_confirm_ok">删除</string>
+    <string name="config_ki_cut_del_cluster_confirm_cancel">取消</string>
+</resources>

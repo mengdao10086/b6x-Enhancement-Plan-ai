@@ -1,6 +1,8 @@
 package com.example.waspwingtempctrl.ui;
 
+import android.app.Activity;
 import android.content.Context;
+import android.content.ContextWrapper;
 import android.content.res.Configuration;
 import android.content.res.Resources;
 import android.content.res.TypedArray;
@@ -13,8 +15,17 @@ import android.text.Layout;
 import android.text.TextUtils;
 import android.text.TextWatcher;
 import android.util.TypedValue;
+import android.view.Gravity;
+import android.view.LayoutInflater;
+import android.view.MotionEvent;
 import android.view.View;
 import android.view.ViewGroup;
+import android.view.ViewParent;
+import android.view.ViewTreeObserver;
+import android.view.animation.PathInterpolator;
+import android.widget.FrameLayout;
+import android.widget.LinearLayout;
+import android.widget.ScrollView;
 import android.widget.TextView;
 
 import androidx.annotation.NonNull;
@@ -27,6 +38,7 @@ import com.example.waspwingtempctrl.ConfigStore.ConfText;
 import com.example.waspwingtempctrl.ConfigStore.FieldMeta;
 import com.example.waspwingtempctrl.ConfigStore.KeyMeta;
 import com.example.waspwingtempctrl.ConfigStore.OptionMeta;
+import com.example.waspwingtempctrl.ConfigStore.UiNote;
 import com.example.waspwingtempctrl.ConfigStore.Value;
 import com.example.waspwingtempctrl.R;
 import com.example.waspwingtempctrl.StartupTiming;
@@ -242,27 +254,33 @@ final class ConfigKeyRow {
      * 参数名的竖直对齐：<b>与控件本体的竖直中点对齐，不再考虑浮起说明的高度</b>。
      *
      * <p>有输入框的行（int / multi 数值；参数名与框<b>同行</b>）：把名字的垂直中心钉到框体的几何中点——
-     * 框高恒为 {@code @dimen/field_height}(36dp)，框顶 = 行顶 + 本行无 hint 时的
-     * {@code @dimen/config_field_nohint_top_gap}(1dp)（见 {@link #applyNoHintBoxGeometry}）。hint 在不在
-     * 都不进这个算式：hint 只把框内可视描边下压 ≈7dp，不改控件本身的位置。
+     * 框高 = 无 hint 时 {@code @dimen/config_field_nohint_height}(30dp)、有 hint 时 {@code @dimen/field_height}(36dp)；
+     * 框顶 = 行顶 + 无 hint 时的 {@code @dimen/config_field_nohint_top_gap}(1dp)（见 {@link #applyNoHintBoxGeometry}）。
+     * hint 在不在都不进这个算式：hint 只把框内可视描边下压 ≈7dp，不改控件本身的位置。
      *
-     * <p>其余行<b>不钉</b>：path 的框吃满整行、独占一行，参数名在它<b>上一行</b>（与框不同行，见
-     * {@link #fieldFillsRow}）；enum 的分段开关不是输入框（{@code wrap_content}，没有"框体"）。
-     * 这两类仍按行高居中并整体下移 {@code @dimen/config_label_shift}（原 {@code shiftLabelInNonSwitchRow}
-     * 的口径，逐值不变）；开关行（{@link KeyMeta#isSwitch()}）、表行、以及首字段为布尔的 multi 不参与对齐。
+     * <p>path 的框吃满整行、独占一行，参数名在它<b>上一行</b>（与框不同行，见 {@link #fieldFillsRow}）——
+     * 按行高居中并整体下移 {@code @dimen/config_label_shift}（原 {@code shiftLabelInNonSwitchRow} 的口径，逐值不变）。
+     * <b>enum 行不再下移</b>：它的分段开关是 {@code wrap_content} 的控件、与参数名同行，两者都按行高居中即
+     * 同心对齐（原先多下移 3dp 正是「默认页面」那一行低一截的原因）。开关行（{@link KeyMeta#isSwitch()}）、
+     * 表行、以及首字段为布尔的 multi 不参与对齐。
      */
     private void alignLabelToField() {
         if (meta.isSwitch() || meta.isTable() || (meta.isMulti() && meta.fields.get(0).bool)) {
             return;
         }
-        if (meta.isEnum() || fieldFillsRow) {
+        if (fieldFillsRow) {
             labelView.setTranslationY(
                     root.getResources().getDimensionPixelSize(R.dimen.config_label_shift));
             return;
         }
+        if (meta.isEnum()) {
+            // 分段开关与参数名同行、都按行高居中 → 同心对齐；不再额外下移（见方法注释）
+            return;
+        }
         int boxTop = noHintBox
                 ? root.getResources().getDimensionPixelSize(R.dimen.config_field_nohint_top_gap) : 0;
-        int boxHalf = root.getResources().getDimensionPixelSize(R.dimen.field_height) / 2;
+        int boxHalf = root.getResources().getDimensionPixelSize(
+                noHintBox ? R.dimen.config_field_nohint_height : R.dimen.field_height) / 2;
         root.setVerticalCenterAt(labelView, boxTop + boxHalf);
     }
 
@@ -351,6 +369,7 @@ final class ConfigKeyRow {
             addToTail(switchRoot);
             switchView = switchRoot.findViewById(R.id.config_key_switch);
             switchView.setVisibility(View.VISIBLE);
+            addHintIcon();
             switchView.setOnCheckedChangeListener((button, checked) -> {
                 if (suppressChange) {
                     return;
@@ -839,9 +858,9 @@ final class ConfigKeyRow {
             Context context = block.getContext();
             int coldMax = KiCutData.coldMax(context);
             List<KiCutTable.Cluster> clusters = editor.getClusters();
-            chart.setCurves(KiCutTable.minCurve(clusters, coldMax, KiCutTable.AXIS_UP),
-                    KiCutTable.minCurve(clusters, coldMax, KiCutTable.AXIS_DN),
-                    KiCutTable.minCurve(clusters, coldMax, KiCutTable.AXIS_KDP),
+            chart.setCurves(KiCutChartView.Series.of(clusters, coldMax, KiCutTable.AXIS_UP),
+                    KiCutChartView.Series.of(clusters, coldMax, KiCutTable.AXIS_DN),
+                    KiCutChartView.Series.of(clusters, coldMax, KiCutTable.AXIS_KDP),
                     coldMax, targetCold, xTicksOf(clusters, coldMax));
         }
 
@@ -965,10 +984,13 @@ final class ConfigKeyRow {
         }
         placeCaption(fieldView, captionView, caption, hoistCaption);
 
-        // 失焦即提交：钳制后的值回写控件并落盘（path 的落盘时机也只有这一处）
+        // 失焦即提交（钳制后的值回写控件并落盘；path 的落盘时机也只有这一处）；获焦即弹参数说明浮窗
         input.setOnFocusChangeListener((v, hasFocus) -> {
-            if (!hasFocus) {
+            if (hasFocus) {
+                showHint(fieldView);
+            } else {
                 commit(true);
+                HintOverlay.dismissFor(meta.key);
             }
         });
         input.setOnEditorActionListener((v, actionId, event) -> {
@@ -979,14 +1001,15 @@ final class ConfigKeyRow {
     }
 
     /**
-     * 无浮起说明的框（int / path）的竖直几何：<b>正文上下等距</b> + 框顶与行上界留
-     * {@code @dimen/config_field_nohint_top_gap}。由 {@link #addField} 只在空 hint（= 无说明的
-     * int/path）时调用——<b>有 hint 的字段（multi / enum / 表点行）不走这里</b>，仍沿用
-     * {@code item_config_field.xml} 里那套上下不对称内边距与 material 给 inputFrame 的 ≈7dp 顶外边距，
+     * 无浮起说明的框（int / path）的竖直几何：<b>比有说明的框矮 {@code @dimen/config_field_nohint_height}(30dp)</b>、
+     * <b>正文上下等距</b>、框顶与行上界留 {@code @dimen/config_field_nohint_top_gap}(1dp)。由 {@link #addField}
+     * 只在空 hint（= 无说明的 int/path）时调用——<b>有 hint 的字段（multi / enum / 表点行）不走这里</b>，
+     * 仍用 {@code @dimen/field_height}(36dp) 与 {@code item_config_field.xml} 那套上下不对称内边距，
      * 几何逐值不变。
      *
-     * <p>上下内边距取与下边同档的 {@code @dimen/config_field_pad_nohint}(2dp)：两者之和 = 4dp，
-     * 内容区可用高 = 36 − 4 = 32dp（比有说明行的 29dp 大 3dp）；正文在内容区里居中即框的几何中心，
+     * <p>框高从 36dp 压到 30dp（−6dp）：无说明的框不需要给浮起说明留位，行高随之从 ≈37dp 降到 ≈31dp。
+     * 上下内边距取与下边同档的 {@code @dimen/config_field_pad_nohint}(2dp)：两者之和 = 4dp，
+     * 内容区可用高 = 30 − 4 = 26dp（正文行盒 16sp≈18.75dp 仍居得下）；正文在内容区里居中即框的几何中心，
      * 到上下边框因此等距。算式见 {@code item_config_field.xml} 顶部注释。
      */
     private void applyNoHintBoxGeometry(@NonNull TextInputEditText input,
@@ -996,8 +1019,11 @@ final class ConfigKeyRow {
         noHintBox = true;
         ViewGroup.LayoutParams lp = layout.getLayoutParams();
         if (lp instanceof ViewGroup.MarginLayoutParams) {
-            ((ViewGroup.MarginLayoutParams) lp).topMargin =
-                    root.getResources().getDimensionPixelSize(R.dimen.config_field_nohint_top_gap);
+            ViewGroup.MarginLayoutParams mlp = (ViewGroup.MarginLayoutParams) lp;
+            mlp.topMargin = root.getResources().getDimensionPixelSize(R.dimen.config_field_nohint_top_gap);
+            // 压 6dp：无说明的框不给浮起说明留位，比有说明的框矮一档（@dimen/config_field_nohint_height）
+            mlp.height = root.getResources().getDimensionPixelSize(R.dimen.config_field_nohint_height);
+            layout.requestLayout();
         }
     }
 
@@ -1490,5 +1516,438 @@ final class ConfigKeyRow {
 
     private void hideStatus() {
         statusView.setVisibility(View.GONE);
+    }
+
+    // ==================== 参数说明浮窗 ====================
+
+    /**
+     * 开关行标题后的「?」：点了走与输入框获焦<b>完全相同</b>的说明浮窗（见 {@link HintOverlay}）。
+     * 作为 leading 子视图插在参数名之后（此刻尾段的开关已在 index 1，插在它前面 → 落在标题右侧、
+     * 开关左侧）；不标 trailing，故与标题同行。无新 drawable：用「?」字符 + 边框水波纹。
+     */
+    private void addHintIcon() {
+        Resources res = root.getResources();
+        TextView icon = new TextView(root.getContext());
+        int box = res.getDimensionPixelSize(R.dimen.config_hint_icon_size);
+        icon.setLayoutParams(new ViewGroup.LayoutParams(box, box));
+        icon.setText(R.string.config_hint_icon);
+        icon.setTextSize(TypedValue.COMPLEX_UNIT_PX, res.getDimension(R.dimen.text_body));
+        icon.setGravity(Gravity.CENTER);
+        icon.setContentDescription(root.getContext().getString(R.string.config_hint_action));
+        icon.setTextColor(ContextCompat.getColor(root.getContext(), R.color.app_on_surface_variant));
+        TypedValue ripple = new TypedValue();
+        if (root.getContext().getTheme().resolveAttribute(
+                android.R.attr.selectableItemBackgroundBorderless, ripple, true)) {
+            icon.setBackgroundResource(ripple.resourceId);
+        }
+        icon.setClickable(true);
+        icon.setOnClickListener(v -> showHint(icon));
+        root.addView(icon, 1);
+        ViewGroup.LayoutParams lp = icon.getLayoutParams();
+        if (lp instanceof ViewGroup.MarginLayoutParams) {
+            ((ViewGroup.MarginLayoutParams) lp).setMarginStart(
+                    res.getDimensionPixelSize(R.dimen.space_xs));
+        }
+    }
+
+    /** 弹参数说明浮窗（锚在触发控件上）。取不到 Activity 时安全跳过，几何与其它功能不受影响。 */
+    private void showHint(@NonNull View anchor) {
+        Activity activity = activityOf(anchor.getContext());
+        if (activity != null) {
+            HintOverlay.show(activity, meta, anchor);
+        }
+    }
+
+    /** 沿 {@link ContextWrapper} 链上溯 Activity（浮层要挂到它的内容根上）；取不到返回 null。 */
+    @Nullable
+    private static Activity activityOf(@NonNull Context context) {
+        Context c = context;
+        while (c instanceof ContextWrapper) {
+            if (c instanceof Activity) {
+                return (Activity) c;
+            }
+            c = ((ContextWrapper) c).getBaseContext();
+        }
+        return null;
+    }
+
+    /** 说明浮窗的一段：小标题（可为空）+ 正文。 */
+    private static final class HintSection {
+        final String title;
+        final String text;
+
+        HintSection(String title, String text) {
+            this.title = title;
+            this.text = text;
+        }
+    }
+
+    /**
+     * 参数说明浮窗：点输入框（获焦）或开关行的「?」时，在 Activity 内容根（{@code android.R.id.content}）
+     * 上叠一层全屏浮层（压暗 + 说明卡）并渐入；<b>不拦截任何操作</b>——
+     * <ul>
+     *   <li>落在<b>说明卡上</b>：吞掉（点了当没点），保持显示；</li>
+     *   <li>落在<b>触发控件</b>（输入框 /「?」）上：放行（事件落到下面的真实控件），保持显示；</li>
+     *   <li>落在<b>别处</b>（含从别处起滑）：放行<b>并</b>渐隐——渐隐与这次操作并行，不吞掉它。</li>
+     * </ul>
+     * 键盘是另一个窗口，本浮层收不到它的触摸，点键盘不受影响。
+     *
+     * <p>「放行」靠本浮层在非卡片区域<b>不消费</b>触摸（{@link ViewGroup} 会把事件继续派给兄弟子视图）——
+     * 这也是不采用 {@code PopupWindow} 的原因：窗外的触摸会被它消费后再消失，下层拿不到这次手势。
+     *
+     * <p>实例在进程内至多一个（同一时刻只有一页在操作）；由 {@link #show} 复用/重建，{@link #hide()}
+     * 渐隐后移除。取不到内容根/锚点时不挂浮层（安全退化）。浮层不请求焦点、不动既有键盘逻辑。
+     */
+    private static final class HintOverlay {
+
+        /** 入/退场时长（ms），均 ≤300：入场强 ease-out，退场 ease-out。 */
+        private static final int IN_MS = 220;
+        private static final int OUT_MS = 150;
+        /** 入场位移（dp）：从下往上 8dp 浮起；起始缩放 0.98（不从 0 起）。 */
+        private static final float IN_TRANSLATE_DP = 8f;
+        private static final float IN_SCALE = 0.98f;
+
+        private static HintOverlay current;
+
+        private final ViewGroup host;
+        private final FrameLayout overlay;
+        private final View scrim;
+        private final View card;
+        private final TextView titleView;
+        private final LinearLayout bodyView;
+        private final ViewTreeObserver.OnScrollChangedListener scrollListener = this::reposition;
+
+        private String key = "";
+        private View anchor;
+        private ScrollView scrollView;
+        private boolean showing;
+
+        /**
+         * 弹浮窗：同内容根则复用、换根则重建。{@code activity} 的 {@code android.R.id.content}
+         * 取不到即安全跳过。
+         */
+        static void show(@NonNull Activity activity, @NonNull KeyMeta meta, @NonNull View anchor) {
+            ViewGroup host = activity.findViewById(android.R.id.content);
+            if (host == null) {
+                return;
+            }
+            if (current == null || current.host != host) {
+                if (current != null) {
+                    current.removeNow();
+                }
+                current = new HintOverlay(host, activity);
+            }
+            current.bind(meta, anchor);
+        }
+
+        /** 触发它的那个输入框失焦时收起（键不符则不动）——键盘收起等场景由这里兜底。 */
+        static void dismissFor(@NonNull String key) {
+            if (current != null && current.showing && key.equals(current.key)) {
+                current.hide();
+            }
+        }
+
+        private HintOverlay(@NonNull ViewGroup host, @NonNull Context context) {
+            this.host = host;
+            overlay = new FrameLayout(context);
+            overlay.setLayoutParams(new ViewGroup.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+            // 不聚焦、不抢焦点：否则会打断既有键盘/焦点行为
+            overlay.setClickable(false);
+            overlay.setFocusable(false);
+            overlay.setFocusableInTouchMode(false);
+
+            scrim = new View(context);
+            scrim.setLayoutParams(new FrameLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+            scrim.setBackgroundColor(ContextCompat.getColor(context, R.color.config_scrim));
+            scrim.setAlpha(0f);
+            overlay.addView(scrim);
+
+            card = LayoutInflater.from(context).inflate(R.layout.item_config_hint_popup, overlay, false);
+            overlay.addView(card);
+            titleView = card.findViewById(R.id.config_hint_title);
+            bodyView = card.findViewById(R.id.config_hint_body);
+
+            overlay.setOnTouchListener(this::onTouch);
+            overlay.addOnAttachStateChangeListener(new View.OnAttachStateChangeListener() {
+                @Override
+                public void onViewAttachedToWindow(View v) {
+                }
+
+                @Override
+                public void onViewDetachedFromWindow(View v) {
+                    if (current == HintOverlay.this) {
+                        unregisterScroll();
+                        current = null;
+                    }
+                }
+            });
+            host.addView(overlay);
+        }
+
+        /** 绑定内容与锚点：换键则换文本，随后重定位并渐入。 */
+        private void bind(@NonNull KeyMeta meta, @NonNull View anchor) {
+            this.key = meta.key;
+            this.anchor = anchor;
+            titleView.setText(meta.label);
+            bodyView.removeAllViews();
+            Context ctx = card.getContext();
+            List<HintSection> sections = hintSections(meta, ctx);
+            for (int i = 0; i < sections.size(); i++) {
+                addSection(ctx, sections.get(i), i == 0);
+            }
+            registerScroll(anchor);
+            showing = true;
+            overlay.post(this::layoutAndShow);
+        }
+
+        /**
+         * 触摸分发：只在按下时判定落点。卡片内吞掉（当没点）；触发控件上放行、不消失；
+         * 别处放行并渐隐——返回 false 即「未消费」，事件继续派给下面的真实视图，原操作照常。
+         */
+        private boolean onTouch(View v, MotionEvent ev) {
+            if (ev.getActionMasked() != MotionEvent.ACTION_DOWN) {
+                return false;
+            }
+            if (hit(card, ev)) {
+                return true;
+            }
+            if (anchor != null && hit(anchor, ev)) {
+                return false;
+            }
+            hide();
+            return false;
+        }
+
+        /** 事件坐标落点（窗口坐标）是否在 {@code view} 的窗口矩形内。 */
+        private static boolean hit(@NonNull View view, @NonNull MotionEvent ev) {
+            if (view.getWidth() <= 0 || view.getHeight() <= 0) {
+                return false;
+            }
+            int[] loc = new int[2];
+            view.getLocationInWindow(loc);
+            float x = ev.getRawX();
+            float y = ev.getRawY();
+            return x >= loc[0] && x < loc[0] + view.getWidth()
+                    && y >= loc[1] && y < loc[1] + view.getHeight();
+        }
+
+        /** 摆放好后再渐入（首次/换键用；滚动跟随只重定位、不再渐入）。 */
+        private void layoutAndShow() {
+            if (reposition()) {
+                animateIn();
+            }
+        }
+
+        /** 量卡、就近锚定（默认贴锚点上方，放不下翻到下方）并摆好。返回是否成功摆放。 */
+        private boolean reposition() {
+            if (overlay.getParent() == null || anchor == null) {
+                return false;
+            }
+            Resources res = card.getResources();
+            int pad = res.getDimensionPixelSize(R.dimen.config_hint_popup_margin);
+            int availW = Math.max(0, overlay.getWidth() - 2 * pad);
+            int maxW = Math.min(availW,
+                    res.getDimensionPixelSize(R.dimen.config_hint_popup_max_width));
+            card.measure(
+                    View.MeasureSpec.makeMeasureSpec(maxW, View.MeasureSpec.AT_MOST),
+                    View.MeasureSpec.makeMeasureSpec(0, View.MeasureSpec.UNSPECIFIED));
+            int cw = Math.min(card.getMeasuredWidth(), availW);
+            int ch = card.getMeasuredHeight();
+
+            int[] aLoc = new int[2];
+            int[] rLoc = new int[2];
+            anchor.getLocationInWindow(aLoc);
+            overlay.getLocationInWindow(rLoc);
+            int ax = aLoc[0] - rLoc[0];
+            int ay = aLoc[1] - rLoc[1];
+            int offset = res.getDimensionPixelSize(R.dimen.config_hint_popup_offset);
+            int left = clamp(ax, pad, Math.max(pad, overlay.getWidth() - pad - cw));
+            int above = ay - offset - ch;
+            int top = above >= pad ? above : (ay + anchor.getHeight() + offset);
+            top = clamp(top, pad, Math.max(pad, overlay.getHeight() - pad - ch));
+
+            FrameLayout.LayoutParams lp = (FrameLayout.LayoutParams) card.getLayoutParams();
+            lp.width = cw;
+            lp.height = ch;
+            lp.leftMargin = left;
+            lp.topMargin = top;
+            card.setLayoutParams(lp);
+            return true;
+        }
+
+        /** 渐入：只动 alpha / translationY / 一次性 scale，强 ease-out。 */
+        private void animateIn() {
+            float d = overlay.getResources().getDisplayMetrics().density;
+            PathInterpolator easeOut = new PathInterpolator(0.05f, 0.7f, 0.1f, 1f);
+            card.setAlpha(0f);
+            card.setTranslationY(IN_TRANSLATE_DP * d);
+            card.setScaleX(IN_SCALE);
+            card.setScaleY(IN_SCALE);
+            // withEndAction(null)：清掉可能残留的退场收尾（快速"渐隐后又被重新唤起"时，旧收尾会误删浮层）
+            card.animate().alpha(1f).translationY(0f).scaleX(1f).scaleY(1f)
+                    .setDuration(IN_MS).setInterpolator(easeOut).withEndAction(null).start();
+            scrim.animate().alpha(1f).setDuration(IN_MS).setInterpolator(easeOut).start();
+        }
+
+        /** 渐隐并移除（与正在进行的手势并行，不阻塞、不吞事件）。 */
+        private void hide() {
+            if (!showing) {
+                return;
+            }
+            showing = false;
+            PathInterpolator easeOut = new PathInterpolator(0.05f, 0.7f, 0.1f, 1f);
+            // 收尾先复核 showing：期间若又被 bind() 唤起，就不该把它移除
+            card.animate().alpha(0f).setDuration(OUT_MS).setInterpolator(easeOut)
+                    .withEndAction(() -> {
+                        if (!showing) {
+                            remove();
+                        }
+                    }).start();
+            scrim.animate().alpha(0f).setDuration(OUT_MS).setInterpolator(easeOut).start();
+        }
+
+        private void remove() {
+            unregisterScroll();
+            host.removeView(overlay);
+            if (current == this) {
+                current = null;
+            }
+        }
+
+        /** 立即移除（换内容根时用，不走退场动画）。 */
+        private void removeNow() {
+            showing = false;
+            unregisterScroll();
+            host.removeView(overlay);
+            if (current == this) {
+                current = null;
+            }
+        }
+
+        /** 页面滚动（含键盘弹起时的 {@code ImeReveal} 平滑滚动）时跟随重定位。 */
+        private void registerScroll(@NonNull View anchor) {
+            if (scrollView != null) {
+                return;
+            }
+            ViewParent p = anchor.getParent();
+            while (p != null && !(p instanceof ScrollView)) {
+                p = p.getParent();
+            }
+            if (!(p instanceof ScrollView)) {
+                return;
+            }
+            scrollView = (ScrollView) p;
+            scrollView.getViewTreeObserver().addOnScrollChangedListener(scrollListener);
+        }
+
+        private void unregisterScroll() {
+            if (scrollView != null) {
+                scrollView.getViewTreeObserver().removeOnScrollChangedListener(scrollListener);
+                scrollView = null;
+            }
+        }
+
+        private void addSection(@NonNull Context ctx, @NonNull HintSection section, boolean first) {
+            Resources res = ctx.getResources();
+            if (!section.title.isEmpty()) {
+                TextView st = new TextView(ctx);
+                st.setText(section.title);
+                st.setTextAppearance(ctx, R.style.TextAppearance_B6XTempCtrl_Caption);
+                st.setTextColor(ContextCompat.getColor(ctx, R.color.brand_primary));
+                LinearLayout.LayoutParams slp = new LinearLayout.LayoutParams(
+                        ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+                slp.topMargin = first ? 0 : res.getDimensionPixelSize(R.dimen.space_s);
+                st.setLayoutParams(slp);
+                bodyView.addView(st);
+            }
+            TextView bt = new TextView(ctx);
+            bt.setText(section.text);
+            bt.setTextColor(ContextCompat.getColor(ctx, R.color.app_on_surface));
+            LinearLayout.LayoutParams blp = new LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+            blp.topMargin = section.title.isEmpty()
+                    ? (first ? 0 : res.getDimensionPixelSize(R.dimen.space_s))
+                    : res.getDimensionPixelSize(R.dimen.space_xs);
+            bt.setLayoutParams(blp);
+            bodyView.addView(bt);
+        }
+
+        /**
+         * 浮窗内容：优先用参数定义侧给的 {@code uiNote}（有序的「小标题 + 正文」块）；
+         * 缺失/为空时回退到既有字段拼装（作用 = desc；填写指导 = 取值/范围/单位/默认/生效条件/界面自用）。
+         * 回退是必需的：K1 未落地 {@code uiNote} 时浮窗不能空白。
+         */
+        private static List<HintSection> hintSections(@NonNull KeyMeta meta, @NonNull Context ctx) {
+            List<HintSection> out = new ArrayList<>();
+            if (meta.uiNote != null && !meta.uiNote.isEmpty()) {
+                for (UiNote note : meta.uiNote) {
+                    out.add(new HintSection(note.title, note.text));
+                }
+                return out;
+            }
+            if (!meta.desc.isEmpty()) {
+                out.add(new HintSection(ctx.getString(R.string.config_hint_section_desc), meta.desc));
+            }
+            String guide = fallbackGuide(meta, ctx);
+            if (!guide.isEmpty()) {
+                out.add(new HintSection(ctx.getString(R.string.config_hint_section_fill), guide));
+            }
+            return out;
+        }
+
+        /** 回退用的「填写指导」：把既有字段拼成一段多行文本。 */
+        private static String fallbackGuide(@NonNull KeyMeta meta, @NonNull Context ctx) {
+            List<String> parts = new ArrayList<>();
+            if (meta.isEnum()) {
+                List<String> values = new ArrayList<>();
+                for (OptionMeta option : meta.options) {
+                    values.add(option.label);
+                }
+                if (!values.isEmpty()) {
+                    parts.add(ctx.getString(R.string.config_hint_values, TextUtils.join(" / ", values)));
+                }
+            } else if (meta.isPath()) {
+                parts.add(ctx.getString(R.string.config_hint_path_type));
+            } else if (meta.isSwitch()) {
+                parts.add(ctx.getString(R.string.config_hint_switch_type));
+            } else if (meta.isMulti()) {
+                if (meta.fields != null) {
+                    List<String> fields = new ArrayList<>();
+                    for (FieldMeta field : meta.fields) {
+                        fields.add(field.min != null && field.max != null
+                                ? field.label + " " + field.min + "~" + field.max : field.label);
+                    }
+                    parts.add(ctx.getString(R.string.config_hint_values, TextUtils.join("；", fields)));
+                }
+            } else {
+                Integer min = meta.min(0);
+                Integer max = meta.max(0);
+                if (min != null && max != null) {
+                    parts.add(ctx.getString(R.string.config_range,
+                            String.valueOf(min), String.valueOf(max)));
+                }
+            }
+            if (!meta.unit.isEmpty()) {
+                parts.add(meta.unit);
+            }
+            if (!meta.unitNote.isEmpty()) {
+                parts.add(meta.unitNote);
+            }
+            parts.add(ctx.getString(R.string.config_hint_default, meta.defaultValue.format()));
+            if (!meta.requires.isEmpty()) {
+                parts.add(ctx.getString(R.string.config_hint_requires,
+                        TextUtils.join("、", meta.requires)));
+            }
+            if (!meta.daemonConsumes) {
+                parts.add(ctx.getString(R.string.config_ui_only));
+            }
+            return TextUtils.join("\n", parts);
+        }
+
+        private static int clamp(int value, int lo, int hi) {
+            return value < lo ? lo : (value > hi ? hi : value);
+        }
     }
 }

@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    分段倍率表（编辑器）自用尺寸。
+    此键族的既有条目都写在 G 包独占的 dimens_config.xml 里，本包不得改那个文件，
+    故本包新增的尺寸一律集中在此（既有条目仍只读引用 dimens_config.xml）。
+-->
+<resources>
+    <!-- 点行四个数字框的高与字号：本轮缩小（原 @dimen/field_height 36dp / @dimen/config_field_text_size 16sp）。
+         删除按钮沿用 @dimen/ki_cut_del_size（30dp）与本高相等，行内垂直居中。 -->
+    <dimen name="ki_cut_point_height">30dp</dimen>
+    <dimen name="ki_cut_point_text_size">15sp</dimen>
+
+    <!-- 插入横线：可见线粗 2dp，外面套 24dp 全宽触摸区（≥ 同排可点按钮量级，不能只 1px） -->
+    <dimen name="ki_cut_insert_line_touch">24dp</dimen>
+    <dimen name="ki_cut_insert_line_thickness">2dp</dimen>
+</resources>

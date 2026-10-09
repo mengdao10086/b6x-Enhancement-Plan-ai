@@ -1399,12 +1399,25 @@ static void apply_cpu_affinity(void) {
         for (int c = 0; c < CPU_SETSIZE; c++) CPU_SET(c, &clusters[0]);
         nclusters = 1;
     }
-    // 簇划分写进日志，供真机核对（探测源与每个簇的核集合都如实报出）
-    write_log("CPU 亲和 簇划分 %d 个（来源 %s）", nclusters, cluster_src);
-    for (int i = 0; i < nclusters; i++) {
-        char one[128];
-        cpu_set_format(&clusters[i], one, sizeof(one));
-        write_log("CPU 亲和 簇 c%d = %s", i, one);
+    // 簇划分写进日志，供真机核对（探测源与每个簇的核集合都如实报出）。
+    // 合并为**一条**，且与上次一致时**不重复打印**——否则每次配置热重载（5s 周期）都会刷屏。
+    static char cpu_aff_clusters[256];
+    {
+        char line[256];
+        int off = snprintf(line, sizeof(line), "簇划分 %d 个（来源 %s）", nclusters, cluster_src);
+        for (int i = 0; i < nclusters; i++) {
+            if (off < 0 || (size_t)off >= sizeof(line)) break;
+            char one[64];
+            cpu_set_format(&clusters[i], one, sizeof(one));
+            int w = snprintf(line + off, sizeof(line) - (size_t)off, " c%d=%s", i, one);
+            if (w < 0) break;
+            off += w;
+        }
+        if (strcmp(cpu_aff_clusters, line) != 0) {
+            write_log("CPU 亲和 %s", line);
+            strncpy(cpu_aff_clusters, line, sizeof(cpu_aff_clusters) - 1);
+            cpu_aff_clusters[sizeof(cpu_aff_clusters) - 1] = '\0';
+        }
     }
 
     // 展开配置值：非法 → 回落代码默认（不静默沿用旧值，否则用户改错一个字符看不出没生效）
@@ -1452,11 +1465,12 @@ static void apply_cpu_affinity(void) {
         snprintf(cur_dir, sizeof(cur_dir), "%s%s", CPUSET_DIR, group);
     else
         snprintf(cur_dir, sizeof(cur_dir), "%s", CPUSET_DIR);
+    char mig[400] = "";   // 本次迁组结果（未迁组则空）
     cpu_set_t cur_set;
     if (!read_dir_cpus(cur_dir, &cur_set) || !cpu_set_covers(&cur_set, &want)) {
         char landed[320] = "";
         if (cpuset_migrate_self(&want, landed, sizeof(landed)))
-            write_log("CPU 亲和 迁组 %s → %s", cur_dir, landed);
+            snprintf(mig, sizeof(mig), "迁组 %s → %s", cur_dir, landed);
         else
             write_log("CPU 亲和 迁组失败（当前组 %s 不覆盖 %s，且无可迁入组）→ 只设亲和",
                       cur_dir, want_str);
@@ -1469,12 +1483,25 @@ static void apply_cpu_affinity(void) {
     // 读回：实际可运行的核 = cpuset 组 cpus ∩ 自身亲和，只有读回的值才是事实
     char allowed[64] = "读取失败";
     char now_group[256] = "";
+    int has_group = read_self_cpuset_group(now_group, sizeof(now_group));
     read_status_field("Cpus_allowed_list:", allowed, sizeof(allowed));
-    if (read_self_cpuset_group(now_group, sizeof(now_group)))
-        write_log("CPU 亲和 读回 Cpus_allowed_list=%s cpuset=%s（本次请求 %s）",
-                  allowed, now_group, want_str);
+
+    // 结果合并为**一条**（迁组 + 读回 + 请求），与本机上次一致则不重复打印（同上，防热重载刷屏）
+    static char cpu_aff_result[512];
+    char line[512];
+    int off = 0;
+    if (mig[0]) off += snprintf(line + off, sizeof(line) - (size_t)off, "%s ", mig);
+    if (has_group)
+        snprintf(line + off, sizeof(line) - (size_t)off,
+                 "读回 Cpus_allowed_list=%s cpuset=%s（本次请求 %s）", allowed, now_group, want_str);
     else
-        write_log("CPU 亲和 读回 Cpus_allowed_list=%s（本次请求 %s）", allowed, want_str);
+        snprintf(line + off, sizeof(line) - (size_t)off,
+                 "读回 Cpus_allowed_list=%s（本次请求 %s）", allowed, want_str);
+    if (strcmp(cpu_aff_result, line) != 0) {
+        write_log("CPU 亲和 %s", line);
+        strncpy(cpu_aff_result, line, sizeof(cpu_aff_result) - 1);
+        cpu_aff_result[sizeof(cpu_aff_result) - 1] = '\0';
+    }
 }
 
 // ======================== 可执行文件名提取 ========================
@@ -2921,9 +2948,16 @@ static int ki_cut_tok_int(const char *p, size_t len, int *out) {
 /**
  * 解析一行 PID_CUT_<簇号>：**仅逗号分隔**的重复四元组「冷值,KDP倍率,升倍率,降倍率」。
  * **每段按逗号切分、允许留空**（两次逗号之间什么都不写）：三个倍率字段留空 = 该点在该轴上
- * 不作为控制点（求值时剔除，语义与实现见 ki_cut.h）；冷值是横坐标、必填。
- * 逐字段按生成头给出的边界钳位。**冷值**留空或非整数 → 该点整点忽略；**倍率位**非空且非整数 →
- * 整行忽略（保持该簇上次值）。整行忽略的其它情形：段数非 4 的整数倍、整行无任何有效点。
+ * 不作为控制点（求值时剔除，语义与实现见 ki_cut.h）。
+ * 逐字段按生成头给出的边界钳位。
+ *
+ * <b>「空表」哨兵（0 簇 = 全段不削）与「解析失败」严格区分</b>：
+ *   · **值整体为空/仅空白**（`PID_CUT_1=`）或无有效点且**所有点冷值都留空**（如 `PID_CUT_1=,,,`）
+ *     → **清空该簇**（ki_cut_cnt = 0），即该簇不产生任何削减；这是用户「删光/清空该行」的落盘形态。
+ *   · **冷值非空但非整数**（打错字，如 `PID_CUT_1=abc,100,100,50`）或**倍率位非空非整数**或
+ *     段数非 4 的整数倍 → **整行忽略、保持该簇上次值**（绝不静默清空）。
+ *   · 冷值留空的单个点＝占位点（该点整点忽略），与其它有效点混在同一行时只忽略该点、其余照常装载。
+ *
  * 超过 KI_CUT_MAX_POINTS 点的多余部分忽略（并记一条日志）。纯空格分隔（无逗号）的行会因段数
  * 不符而被忽略。排序与同冷值取舍在求值时做（ki_cut_normalize）。
  */
@@ -2933,6 +2967,17 @@ static void ki_cut_parse_row(const char *idx_str, const char *val_str) {
     if (endp == idx_str || idx < 1 || idx > KI_CUT_MAX_CLUSTERS) {
         write_log("配置 PID_CUT 簇号非法（%s），已忽略该行", idx_str);
         return;
+    }
+    // 值整体为空/仅空白 = 「清空该簇」哨兵（与解析失败区分：这不是打错字，是显式清空）
+    {
+        const char *p = val_str;
+        while (*p == ' ' || *p == '\t') p++;
+        if (*p == '\0') {
+            ki_cut_cnt[idx - 1] = 0;
+            pidcut_new_seen[idx - 1] = 1;   // 新键优先：清空后不被旧键回填
+            write_log("配置 PID_CUT_%ld 值为空 → 清空该簇（全段不削）", idx);
+            return;
+        }
     }
     // 按逗号切分整行（空段保留，视为该字段留空）；段数上限 = 满点数 × 四元组宽度
     const char *tok[KI_CUT_MAX_POINTS * 4];
@@ -2960,12 +3005,19 @@ static void ki_cut_parse_row(const char *idx_str, const char *val_str) {
     }
     // 先解析到临时数组，全部有效后才提交，避免中途失败把该簇写成"新旧混合"
     KiCutPoint tmp[KI_CUT_MAX_POINTS];
-    int np = 0;
+    int np = 0;        // 有效点（冷值已填且合法）
+    int nblank = 0;    // 冷值留空的占位点
+    int nbad = 0;      // 冷值非空但非整数（打错字）
     for (int i = 0; i + 3 < ntok; i += 4) {
+        if (tlen[i] == 0) {                                  // 冷值留空 = 占位点（该点整点不生效）
+            nblank++;
+            continue;
+        }
         int cold;
-        if (!ki_cut_tok_int(tok[i], tlen[i], &cold)) {
-            write_log("配置 PID_CUT_%ld 第 %d 点冷值留空或非整数，已忽略该点", idx, i / 4 + 1);
-            continue;                                        // 冷值必填（横坐标）：整点忽略
+        if (!ki_cut_tok_int(tok[i], tlen[i], &cold)) {       // 冷值非空但非整数：打错字
+            write_log("配置 PID_CUT_%ld 第 %d 点冷值非整数，已忽略该点", idx, i / 4 + 1);
+            nbad++;
+            continue;
         }
         KiCutPoint pk;
         pk.cold = clamp(cold, CFG_MIN_PID_CUT_F1, CFG_MAX_PID_CUT_F1);
@@ -2990,7 +3042,14 @@ static void ki_cut_parse_row(const char *idx_str, const char *val_str) {
         tmp[np++] = pk;
     }
     if (np == 0) {
-        write_log("配置 PID_CUT_%ld 未含有效点，已忽略整行", idx);
+        if (nblank > 0 && nbad == 0) {
+            // 全为留空占位（如 `,,,`）→ 清空该簇（与「值整体为空」等价；打错字不在这一支）
+            ki_cut_cnt[idx - 1] = 0;
+            pidcut_new_seen[idx - 1] = 1;
+            write_log("配置 PID_CUT_%ld 全为留空占位 → 清空该簇（全段不削）", idx);
+            return;
+        }
+        write_log("配置 PID_CUT_%ld 未含有效点，已忽略整行", idx);   // 解析失败：保持该簇上次值
         return;
     }
     for (int k = 0; k < np; k++) ki_cut_rows[idx - 1][k] = tmp[k];

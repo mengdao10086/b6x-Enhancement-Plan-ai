@@ -36,6 +36,9 @@
     <color name="state_error">#B3261E</color>
     <color name="state_error_container">#F9DEDC</color>
 
+    <!-- 参数说明浮窗的压暗层：全屏压暗（含被点输入框本身），只有说明卡是亮的。35% 黑，深浅色共用。 -->
+    <color name="config_scrim">#59000000</color>
+
     <!-- ===== 徽标（"未生效" / "已生效"） ===== -->
     <color name="badge_muted_bg">#E4E9EA</color>
     <color name="badge_muted_fg">#4A5254</color>
