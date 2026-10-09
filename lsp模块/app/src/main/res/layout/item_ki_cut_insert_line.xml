@@ -1,12 +1,13 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!--
     分段倍率表的一条「高亮横线」：可见细线 @dimen/ki_cut_insert_line_thickness(6dp)、全宽。
-    上下各 @dimen/ki_cut_insert_line_gap(4dp) 是**透明留白**，既是视觉上贴住相邻点行的「几乎无空隙」，
-    也是把可点区外扩到 14dp 全宽的手段（等价「透明扩展」；不用 TouchDelegate，避免命中区叠到 24dp 的输入框上）。
+    上下各 @dimen/ki_cut_insert_line_gap(2dp) 是**透明留白**：视觉上线的边缘正好贴住输入框（零间隙，读不出留白），
+    同时把可点区外扩到 10dp。KiCutTableEditor 再用**负外边距**（-2dp）把这段留白压进相邻点行，故它在布局里
+    只占 6dp——模式态「框 24dp + 线 6dp ＝ 常态行高 30dp」，整表总高不变；多出的 2dp 只吃掉输入框外沿。
     由 KiCutTableEditor 现场 inflate 后 addView 进 ki_cut_cluster_points，夹在各点行之间与首尾。
     <b>默认隐藏</b>（visibility=gone）：只有进入「插入态」（点「添加点」）或「拆分态」（点「拆分簇」）才显示；
-    常态点线＝该处插一行全空行，拆分态改色为拆分线＝在此拆分。
-    触摸区只有这一层可点（内层细线不设监听，触摸自然落到外层），且它与点行是兄弟视图、互不重叠，故不会误触输入框。
+    插入态点线＝该处插一行全空行，拆分态改色为拆分线＝在此拆分。
+    触摸区只有这一层可点（内层细线不设监听，触摸自然落到外层），且它与点行是兄弟视图，故不会误触输入框正文区。
 -->
 <LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
     android:id="@+id/ki_cut_line_holder"

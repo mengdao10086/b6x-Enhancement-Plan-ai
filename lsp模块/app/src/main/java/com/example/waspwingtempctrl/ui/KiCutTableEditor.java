@@ -1,12 +1,17 @@
 package com.example.waspwingtempctrl.ui;
 
+import android.app.Activity;
 import android.content.Context;
+import android.content.ContextWrapper;
 import android.text.Editable;
 import android.text.InputType;
 import android.text.TextUtils;
 import android.text.TextWatcher;
 import android.view.LayoutInflater;
+import android.view.MotionEvent;
 import android.view.View;
+import android.view.ViewGroup;
+import android.view.ViewParent;
 import android.widget.EditText;
 import android.widget.LinearLayout;
 import android.widget.TextView;
@@ -88,10 +93,17 @@ final class KiCutTableEditor {
     /** 「拆分态」所在簇的下标（-1 = 无）：此时本簇的横线改色显示、点行＝共享拆分。两种模式互斥。 */
     private int splitModeIndex = -1;
 
+    /** 整张「PID 分段倍率表」块（含曲线）：用于判定「点表内 / 表外」。 */
+    private final View tableRoot;
+    /** 模式态铺在整页内容根上的透明观察层：点表外即退出该模式；永不消费事件（见 {@link #showCaptureLayer()}）。 */
+    @Nullable
+    private View captureLayer;
+
     KiCutTableEditor(@NonNull KeyMeta meta, @NonNull View root, @NonNull Listener listener) {
         this.meta = meta;
         this.listener = listener;
         this.inflater = LayoutInflater.from(root.getContext());
+        this.tableRoot = root;
         this.clustersBox = root.findViewById(R.id.ki_cut_clusters);
         this.emptyState = root.findViewById(R.id.ki_cut_empty_state);
         View emptyAdd = root.findViewById(R.id.ki_cut_empty_add);
@@ -99,8 +111,17 @@ final class KiCutTableEditor {
             // 删到 0 簇后没任何簇块（「添加簇」按钮原本挂在每个簇块底部），故空态自带一枚补回入口
             emptyAdd.setOnClickListener(v -> onAddCluster(0));
         }
-        // 点表内空白处退出插入/拆分态（点簇块背景亦同，见 addClusterBlock）
-        clustersBox.setOnClickListener(v -> exitModes());
+        // 视图被移除时保证观察层不残留
+        clustersBox.addOnAttachStateChangeListener(new View.OnAttachStateChangeListener() {
+            @Override
+            public void onViewAttachedToWindow(View v) {
+            }
+
+            @Override
+            public void onViewDetachedFromWindow(View v) {
+                hideCaptureLayer();
+            }
+        });
     }
 
     // ==================== 值 ⇄ 控件 ====================
@@ -360,15 +381,95 @@ final class KiCutTableEditor {
                 holder.setContentDescription(context.getString(
                         splitting ? R.string.config_ki_cut_split_line : R.string.config_ki_cut_insert_line));
             }
+            // 压缩＝横线占用的高度：模式态框压到 24dp（+ 线 6dp = 常态行高 30dp），并关掉浮起列名
+            int boxHeight = context.getResources().getDimensionPixelSize(active
+                    ? R.dimen.ki_cut_point_height_compact : R.dimen.ki_cut_point_height);
             for (PointRow row : block.rows) {
                 row.hit.setVisibility(splitting ? View.VISIBLE : View.GONE);
                 // 拆分态该行可点＝共享拆分；其余时候命中层不可见，此描述不起作用
                 row.hit.setContentDescription(context.getString(R.string.config_ki_cut_split_row));
+                row.applyCompact(active, boxHeight);
             }
             block.modeHint.setVisibility(active ? View.VISIBLE : View.GONE);
             block.modeHint.setText(splitting
                     ? R.string.config_ki_cut_split_hint : R.string.config_ki_cut_insert_hint);
         }
+        syncCaptureLayer();
+    }
+
+    // ==================== 点表外退出模式 ====================
+
+    /** 有模式则铺观察层、无模式则撤走；幂等。 */
+    private void syncCaptureLayer() {
+        if (insertModeIndex >= 0 || splitModeIndex >= 0) {
+            showCaptureLayer();
+        } else {
+            hideCaptureLayer();
+        }
+    }
+
+    /**
+     * 在整页内容根（{@code android.R.id.content}）上叠一层全屏透明观察层：它<b>永不消费事件</b>
+     * （{@code onTouch} 恒返回 false），只在按下时判断「是否落在倍率表之外」——是则退出模式（<b>不吞那次点击</b>，
+     * 事件照常落到下面的控件）。故「点表内」不会误退出，「点表外」等效再点一次按钮。找不到宿主 Activity 时静默跳过。
+     */
+    private void showCaptureLayer() {
+        if (captureLayer != null) {
+            return;
+        }
+        Activity activity = activityOf(clustersBox.getContext());
+        if (activity == null) {
+            return;
+        }
+        ViewGroup content = activity.findViewById(android.R.id.content);
+        if (content == null) {
+            return;
+        }
+        View layer = new View(activity);
+        layer.setOnTouchListener((v, event) -> {
+            if (event.getActionMasked() == MotionEvent.ACTION_DOWN && !insideTable(event)) {
+                // 退出会撤掉本层，故延后到本次触摸派发之外执行
+                clustersBox.post(this::exitModes);
+            }
+            return false;   // 不消费：点表内照常落到输入框/按钮，点表外也照常落到下面的控件
+        });
+        content.addView(layer, new ViewGroup.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+        captureLayer = layer;
+    }
+
+    private void hideCaptureLayer() {
+        View layer = captureLayer;
+        if (layer == null) {
+            return;
+        }
+        captureLayer = null;
+        ViewParent parent = layer.getParent();
+        if (parent instanceof ViewGroup) {
+            ((ViewGroup) parent).removeView(layer);
+        }
+    }
+
+    /** 触点是否落在整张倍率表块内（含曲线）。 */
+    private boolean insideTable(@NonNull MotionEvent event) {
+        int[] loc = new int[2];
+        tableRoot.getLocationOnScreen(loc);
+        float x = event.getRawX();
+        float y = event.getRawY();
+        return x >= loc[0] && x < loc[0] + tableRoot.getWidth()
+                && y >= loc[1] && y < loc[1] + tableRoot.getHeight();
+    }
+
+    @Nullable
+    private static Activity activityOf(@Nullable Context context) {
+        Context c = context;
+        while (c instanceof ContextWrapper) {
+            if (c instanceof Activity) {
+                return (Activity) c;
+            }
+            c = ((ContextWrapper) c).getBaseContext();
+        }
+        return null;
     }
 
     /** 点横线：插入态＝在该处插一行；拆分态＝在此常规拆分。 */
@@ -433,8 +534,6 @@ final class KiCutTableEditor {
         // 「添加簇」在每个簇块底部：新簇插在本块之后（不是追加到末尾），其后各簇整体下移
         block.addClusterButton.setOnClickListener(v -> onAddCluster(indexOf(block) + 1));
         block.splitClusterButton.setOnClickListener(v -> onSplitToggle(block));
-        // 点本簇空白处（表头等非子控件区域）退出插入/拆分态
-        block.view.setOnClickListener(v -> exitModes());
         for (KiCutTable.Point point : cluster.points) {
             addInsertLine(block);   // 行之前一条
             addPointRow(block, point, firstCluster && block.rows.isEmpty());
@@ -443,11 +542,26 @@ final class KiCutTableEditor {
         clustersBox.addView(view);
     }
 
-    /** 追加一条可点高亮横线（其插入位置 = 当前行数，即它落在已有各行之下、下一条行之上）。 */
+    /**
+     * 追加一条可点高亮横线（其插入位置 = 当前行数，即它落在已有各行之下、下一条行之上）。
+     *
+     * <p>用<b>负外边距</b>把它上下各 2dp 的透明留白压进相邻点行：视觉上线的边缘正好贴住输入框（零间隙）、
+     * 且它在布局里只占 6dp（＝可见线高），故模式态「框 24dp + 线 6dp ＝ 常态行高 30dp」；命中区却是
+     * 6dp＋上下各 2dp＝10dp。多出的 2dp 只吃掉输入框外沿（正文区域不受影响）。
+     */
     private void addInsertLine(@NonNull ClusterBlock block) {
         View holder = inflater.inflate(R.layout.item_ki_cut_insert_line, block.pointsBox, false);
         int at = block.rows.size();
         holder.setOnClickListener(v -> onLineClicked(block, at));
+        ViewGroup.LayoutParams params = holder.getLayoutParams();
+        if (params instanceof LinearLayout.LayoutParams) {
+            int gap = clustersBox.getResources()
+                    .getDimensionPixelSize(R.dimen.ki_cut_insert_line_gap);
+            LinearLayout.LayoutParams lp = (LinearLayout.LayoutParams) params;
+            lp.topMargin = -gap;
+            lp.bottomMargin = -gap;
+            holder.setLayoutParams(lp);
+        }
         block.lines.add(holder);
         block.pointsBox.addView(holder);
     }
@@ -666,6 +780,8 @@ final class KiCutTableEditor {
         final View deleteButton;
         /** 覆盖整行的透明命中层：仅拆分态可见，让「点行＝共享拆分」不被输入框抢走触摸。 */
         final View hit;
+        /** 四个框（改动高度/列名的统一入口）。 */
+        final TextInputLayout[] boxes;
 
         PointRow(View view) {
             this.view = view;
@@ -679,10 +795,34 @@ final class KiCutTableEditor {
             this.dnBox = view.findViewById(R.id.ki_cut_dn_box);
             this.deleteButton = view.findViewById(R.id.ki_cut_point_del);
             this.hit = view.findViewById(R.id.ki_cut_point_hit);
+            this.boxes = new TextInputLayout[]{coldBox, kdpBox, upBox, dnBox};
             this.cold.setInputType(InputType.TYPE_CLASS_NUMBER);
             this.kdp.setInputType(InputType.TYPE_CLASS_NUMBER);
             this.up.setInputType(InputType.TYPE_CLASS_NUMBER);
             this.dn.setInputType(InputType.TYPE_CLASS_NUMBER);
+        }
+
+        /**
+         * 常态/模式态切换：四个框与删除按钮一并改成 {@code boxHeight}（常态 30dp、模式态 24dp），
+         * 模式态另关掉浮起列名（否则「列名 + 数字」在压缩高度里装不下、数字被裁），退出模式恢复列名。
+         * 只对**有列名**的框动 {@code setHintEnabled}（同一张表只有第一个点行带列名，其余框本就没有列名）。
+         */
+        void applyCompact(boolean compact, int boxHeight) {
+            for (TextInputLayout box : boxes) {
+                setHeight(box, boxHeight);
+                if (!TextUtils.isEmpty(box.getHint())) {
+                    box.setHintEnabled(!compact);
+                }
+            }
+            setHeight(deleteButton, boxHeight);
+        }
+
+        private void setHeight(@NonNull View v, int height) {
+            ViewGroup.LayoutParams lp = v.getLayoutParams();
+            if (lp != null && lp.height != height) {
+                lp.height = height;
+                v.setLayoutParams(lp);
+            }
         }
     }
 

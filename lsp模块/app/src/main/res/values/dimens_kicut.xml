@@ -5,13 +5,14 @@
     故本包新增的尺寸一律集中在此（既有条目仍只读引用 dimens_config.xml）。
 -->
 <resources>
-    <!-- 点行四个数字框的高与字号：本轮缩到 24dp（原 36dp）；删除按钮仍用 @dimen/ki_cut_del_size(30dp)，
-         故整行高度仍由它撑到 30dp。24dp 配 15sp 数字余量很紧，真机是否裁字待验（见交付报告未验证项）。 -->
-    <dimen name="ki_cut_point_height">24dp</dimen>
+    <!-- 点行四个数字框的高与字号：常态 30dp（列名照常浮起）；删除按钮常态也 30dp，行高即 30dp。 -->
+    <dimen name="ki_cut_point_height">30dp</dimen>
+    <!-- 模式态（插入/拆分）框高：＝常态 30dp − 横线占用高度 6dp，故「框 + 线」合计仍 30dp，整表总高不变。
+         此高度配 15sp 数字需同时关掉浮起列名（见 KiCutTableEditor#applyModeVisuals），否则装不下。 -->
+    <dimen name="ki_cut_point_height_compact">24dp</dimen>
     <dimen name="ki_cut_point_text_size">15sp</dimen>
 
-    <!-- 插入/拆分横线：可见线粗 6dp（原 2dp 的 3 倍）；
-         上下各 4dp 透明留白＝触摸外扩（等价「透明扩展」，不用 TouchDelegate，以免把命中区叠到 24dp 的输入框上、误触）。 -->
+    <!-- 插入/拆分横线：可见线粗 6dp；上下各 2dp 透明留白＝命中区外扩（配合负外边距，视觉上仍是零间隙、不吃行高）。 -->
     <dimen name="ki_cut_insert_line_thickness">6dp</dimen>
-    <dimen name="ki_cut_insert_line_gap">4dp</dimen>
+    <dimen name="ki_cut_insert_line_gap">2dp</dimen>
 </resources>
