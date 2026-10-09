@@ -19,11 +19,14 @@
     android:background="@color/app_surface_container_high"
     android:orientation="vertical">
 
+    <!-- 表头行的 2dp 下内边距：给首条横线上抬让位（否则首条横线顶到标题、第 1 行的浮起列名不够露）。
+         是本块唯一的内部留白，其余仍不设内边距。 -->
     <LinearLayout
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
         android:gravity="center_vertical"
-        android:orientation="horizontal">
+        android:orientation="horizontal"
+        android:paddingBottom="2dp">
 
         <TextView
             android:id="@+id/ki_cut_cluster_title"

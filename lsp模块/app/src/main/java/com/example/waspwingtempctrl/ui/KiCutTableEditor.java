@@ -381,14 +381,14 @@ final class KiCutTableEditor {
                 holder.setContentDescription(context.getString(
                         splitting ? R.string.config_ki_cut_split_line : R.string.config_ki_cut_insert_line));
             }
-            // 压缩＝横线占用的高度：模式态框压到 30dp（+ 线 6dp = 常态行高 36dp），并关掉浮起列名
+            // 压缩＝横线占用的高度：模式态框压到 30dp（+ 线净占 6dp = 常态行高 36dp）；列名不关，压缩靠框高变矮
             int boxHeight = context.getResources().getDimensionPixelSize(active
                     ? R.dimen.ki_cut_point_height_compact : R.dimen.ki_cut_point_height);
             for (PointRow row : block.rows) {
                 row.hit.setVisibility(splitting ? View.VISIBLE : View.GONE);
                 // 拆分态该行可点＝共享拆分；其余时候命中层不可见，此描述不起作用
                 row.hit.setContentDescription(context.getString(R.string.config_ki_cut_split_row));
-                row.applyCompact(active, boxHeight);
+                row.applyHeight(boxHeight);
             }
             block.modeHint.setVisibility(active ? View.VISIBLE : View.GONE);
             block.modeHint.setText(splitting
@@ -539,33 +539,58 @@ final class KiCutTableEditor {
             addPointRow(block, point, firstCluster && block.rows.isEmpty());
         }
         addInsertLine(block);       // 末行之后一条
+        applyLineMargins(block);    // 全部横线到位后统一定位（要知道首/末）
         clustersBox.addView(view);
     }
 
     /**
      * 追加一条可点高亮横线（其插入位置 = 当前行数，即它落在已有各行之下、下一条行之上）。
-     *
-     * <p>用<b>负外边距</b>把它上下各 2dp 的透明留白压进相邻点行：视觉上线的边缘正好贴住输入框（零间隙）、
-     * 且它在布局里只占 6dp（＝可见线高），故模式态「框 30dp + 线 6dp ＝ 常态行高 36dp」；命中区却是
-     * 6dp＋上下各 2dp＝10dp。多出的 2dp 只吃掉输入框外沿（正文区域不受影响）。
-     * <b>贴紧的前提</b>：模式态四个框必须都 setHintEnabled(false)（见 {@link PointRow#applyCompact}），
-     * 去掉 material 给浮起说明预留的 ≈7dp 顶隙，否则框体被顶隙下压、横线上方会露空。
+     * 外观（线粗、上下留白）由 {@code item_ki_cut_insert_line.xml} 给；<b>纵向位置</b>则由
+     * {@link #applyLineMargins} 在全部横线到位后统一算（首/中/末三种口径）。
      */
     private void addInsertLine(@NonNull ClusterBlock block) {
         View holder = inflater.inflate(R.layout.item_ki_cut_insert_line, block.pointsBox, false);
         int at = block.rows.size();
         holder.setOnClickListener(v -> onLineClicked(block, at));
-        ViewGroup.LayoutParams params = holder.getLayoutParams();
-        if (params instanceof LinearLayout.LayoutParams) {
-            int gap = clustersBox.getResources()
-                    .getDimensionPixelSize(R.dimen.ki_cut_insert_line_gap);
-            LinearLayout.LayoutParams lp = (LinearLayout.LayoutParams) params;
-            lp.topMargin = -gap;
-            lp.bottomMargin = -gap;
-            holder.setLayoutParams(lp);
-        }
         block.lines.add(holder);
         block.pointsBox.addView(holder);
+    }
+
+    /**
+     * 给本簇各条横线定位：<b>净占用恒 = 「常态行高 − 模式态框高」</b>（36−30 = 6dp），故「框 + 线」逐行与常态等高、
+     * 整表总高不变。三条横线的上下口径不同，各自用外边距把 4dp 的线挪到视觉正中：
+     * <ul>
+     *   <li><b>中间</b>（行与行之间）：框体顶部有 ≈7dp 浮起说明留白，两框的「框体」之间其实是 7dp＋6dp 槽 = 13dp，
+     *       故整体下移约半个留白（{@code ki_cut_insert_line_shift}）才落在两框正中；</li>
+     *   <li><b>首条</b>（首行之上）：下方紧挨第 1 行的浮起列名（列名骑在框顶、向上伸出约 7dp），
+     *       故不跟中间那条一起下移、且再抬到槽顶，给列名让出完整空间；</li>
+     *   <li><b>末条</b>（末行之下）：下方是动作行（无框、无留白），按 6dp 槽本身居中即可。</li>
+     * </ul>
+     */
+    private void applyLineMargins(@NonNull ClusterBlock block) {
+        android.content.res.Resources res = clustersBox.getResources();
+        int gap = res.getDimensionPixelSize(R.dimen.ki_cut_insert_line_gap);          // 线槽上下透明留白
+        int thickness = res.getDimensionPixelSize(R.dimen.ki_cut_insert_line_thickness);
+        int net = res.getDimensionPixelSize(R.dimen.ki_cut_point_height)
+                - res.getDimensionPixelSize(R.dimen.ki_cut_point_height_compact);      // 横线净占用高（= 框的压缩量）
+        int shift = res.getDimensionPixelSize(R.dimen.ki_cut_insert_line_shift);       // 中间条的下移量
+        int wrap = 2 * gap + thickness;                                                // 线槽自身高（= padding + 线）
+        int last = block.lines.size() - 1;
+        for (int j = 0; j <= last; j++) {
+            View holder = block.lines.get(j);
+            ViewGroup.LayoutParams p = holder.getLayoutParams();
+            if (!(p instanceof LinearLayout.LayoutParams)) {
+                continue;
+            }
+            // 线的落点 = topMargin + gap（线槽内的上留白）；目标是让 4dp 的线落在期望处：
+            int desiredTop = (j == 0) ? 0                         // 首条：抬到槽顶，给第 1 行列名让位
+                    : (j == last) ? (net - thickness) / 2         // 末条：在 6dp 槽内居中
+                    : shift;                                      // 中间：下移半个留白，落在两框正中
+            LinearLayout.LayoutParams lp = (LinearLayout.LayoutParams) p;
+            lp.topMargin = desiredTop - gap;
+            lp.bottomMargin = net - wrap - lp.topMargin;          // 保证净占用恰为 net，逐行等高
+            holder.setLayoutParams(lp);
+        }
     }
 
     private void addPointRow(@NonNull ClusterBlock block, @NonNull KiCutTable.Point point,
@@ -805,21 +830,16 @@ final class KiCutTableEditor {
         }
 
         /**
-         * 常态/模式态切换：四个框与删除按钮一并改成 {@code boxHeight}（常态 36dp、模式态 30dp），
-         * 模式态另关掉浮起列名（否则「列名 + 数字」在压缩高度里装不下、数字被裁），退出模式恢复列名。
+         * 常态/模式态切换：四个框与删除按钮一并改成 {@code boxHeight}（常态 36dp、模式态 30dp）。
          *
-         * <p><b>必须对「全部」四个框无条件 {@code setHintEnabled(!compact)}，不能用 {@code getHint()} 当守卫。</b>
-         * material 的 {@code setHintEnabled(false)} 会把 hint 字段置空（并把它挪成 EditText 的占位符），
-         * 而 {@code getHint()} 在 {@code hintEnabled=false} 时恒返回 null——于是「本框有列名」这个判断在
-         * 第一次关闭后就再也为真不了，退出模式时 {@code setHintEnabled(true)} 永远不会被调用、列名回不来
-         * （原先的 bug：只有整表 rebuild 造出新控件才恢复）。{@code setHintEnabled} 自身幂等（值未变即早返回），
-         * 对本就没有列名的框也只是去掉/恢复 material 给浮起说明预留的 ≈7dp 顶隙，无副作用；
-         * 而那 7dp 顶隙正是「压缩后数字被裁、横线上方留空」的根源，故无列名的框也必须一起关。
+         * <p><b>不动浮起列名</b>：列名两种模式都保持显示（{@code setHintEnabled} 一开一关反而会把
+         * hint 挪进 EditText、退出后回不来）。压缩靠「框高 30dp 仍装得下列名 + 16sp 数字」——框体顶部
+         * 那段 ≈7dp 留白两态都在，故常态绘制框 29dp、模式态 23dp，压缩一眼看得出；若关掉列名，
+         * 绘制框反而从 29dp 变满高 30dp，看上去「没压缩」。
          */
-        void applyCompact(boolean compact, int boxHeight) {
+        void applyHeight(int boxHeight) {
             for (TextInputLayout box : boxes) {
                 setHeight(box, boxHeight);
-                box.setHintEnabled(!compact);
             }
             setHeight(deleteButton, boxHeight);
         }
