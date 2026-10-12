@@ -206,7 +206,23 @@ final class ConfigGroupBinder {
         // 展开/收起按逻辑 2 做高度补间（系统关动画或宽度不可知时由 Motion 直接落位）；
         // 箭头用同一次返回的时长驱动——两者同生共灭，不另设箭头常量
         final long duration = Motion.animateHeight(body, value);
-        divider.setVisibility(value ? View.VISIBLE : View.GONE);
+        // 分隔线随同一次面板时长与曲线淡入/淡出，与面板同步（面板直接落位 duration<0、或系统关动效时
+        // 也直接落位，不另设常量）。收起补间的收尾里再置 GONE——此刻它已 alpha=0，收尾只是彻底移出让位
+        if (duration >= 0 && Motion.enabled(card.getContext())) {
+            divider.setVisibility(View.VISIBLE);
+            divider.setAlpha(value ? 0f : 1f);
+            divider.animate().alpha(value ? 1f : 0f).setDuration(duration)
+                    .setInterpolator(Motion.panelInterpolator())
+                    .withEndAction(() -> {
+                        if (!value) {
+                            divider.setVisibility(View.GONE);
+                        }
+                    }).start();
+        } else {
+            divider.animate().cancel();
+            divider.setAlpha(1f);
+            divider.setVisibility(value ? View.VISIBLE : View.GONE);
+        }
         // 一副图标两种状态：图标本身指向右，展开时顺时针转 90° 指向下；走统一动效口径
         Motion.rotate(arrowView, value ? ARROW_EXPANDED_ROTATION : 0f, duration);
         arrowView.setContentDescription(card.getContext().getString(

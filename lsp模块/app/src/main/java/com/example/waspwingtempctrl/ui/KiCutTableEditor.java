@@ -78,6 +78,12 @@ final class KiCutTableEditor {
     /** 每簇点数上限。 */
     static final int MAX_POINTS = 32;
 
+    /**
+     * 进入插入/拆分态时，簇内模式相关元素（横线、模式提示）的淡入时长（ms）。
+     * <b>几何一律瞬时</b>——框高、横线占位、块内边距全不走补间，故「整表总高恒等于常态」这条不变式逐帧成立。
+     */
+    private static final int MODE_FADE_MS = 160;
+
     private final KeyMeta meta;
     private final Listener listener;
     private final LayoutInflater inflater;
@@ -355,10 +361,29 @@ final class KiCutTableEditor {
         applyModeVisuals();
     }
 
+    /** 淡入一个模式相关元素（系统关动效时直接置为可见）；只动 alpha，几何不动。 */
+    private static void fadeInModeElement(View v) {
+        if (!Motion.enabled(v.getContext())) {
+            v.setAlpha(1f);
+            return;
+        }
+        v.animate().cancel();
+        v.setAlpha(0f);
+        v.animate().alpha(1f).setDuration(MODE_FADE_MS).setInterpolator(Motion.easeOut()).start();
+    }
+
+    /** 立即收起一个模式相关元素（几何瞬时；取消可能在跑的淡入并复位 alpha），用于退出模式。 */
+    private static void hideModeElement(View v) {
+        v.animate().cancel();
+        v.setAlpha(1f);
+        v.setVisibility(View.GONE);
+    }
+
     /**
      * 模式视觉：<b>横线默认隐藏</b>，只有处于插入/拆分态的簇才显示——插入态横线用常态色（开关绿）、
      * 点线＝在该处插入；拆分态横线改色（红）、点线＝在此拆分，且该簇点行的命中层可见（点行＝共享拆分）。
-     * 块底提示按模式改文案。
+     * 块底提示按模式改文案。<b>显隐的几何逐帧瞬时</b>（见 {@link #MODE_FADE_MS}），只有模式相关元素的
+     * alpha 做一小段淡入，消掉「啪地出现」的生硬感。
      */
     private void applyModeVisuals() {
         Context context = clustersBox.getContext();
@@ -376,8 +401,15 @@ final class KiCutTableEditor {
             for (int j = 0; j < block.lines.size(); j++) {
                 View holder = block.lines.get(j);
                 boolean edge = j == 0 || j == block.lines.size() - 1;
-                // 拆分态首尾线无意义（会把簇切成空的一侧），隐藏掉；其余按是否处于模式决定显隐
-                holder.setVisibility(active && !(splitting && edge) ? View.VISIBLE : View.GONE);
+                // 拆分态首尾线无意义（会把簇切成空的一侧），隐藏掉；其余按是否处于模式决定显隐。
+                // 显隐（占位几何）瞬时到位，只把出现那一刻做一段 alpha 淡入
+                boolean lineVisible = active && !(splitting && edge);
+                if (lineVisible) {
+                    holder.setVisibility(View.VISIBLE);
+                    fadeInModeElement(holder);
+                } else {
+                    hideModeElement(holder);
+                }
                 View bar = holder.findViewById(R.id.ki_cut_line_bar);
                 if (bar != null) {
                     bar.setBackgroundColor(lineColor);
@@ -394,7 +426,12 @@ final class KiCutTableEditor {
                 row.hit.setContentDescription(context.getString(R.string.config_ki_cut_split_row));
                 row.applyHeight(boxHeight);
             }
-            block.modeHint.setVisibility(active ? View.VISIBLE : View.GONE);
+            if (active) {
+                block.modeHint.setVisibility(View.VISIBLE);
+                fadeInModeElement(block.modeHint);
+            } else {
+                hideModeElement(block.modeHint);
+            }
             block.modeHint.setText(splitting
                     ? R.string.config_ki_cut_split_hint : R.string.config_ki_cut_insert_hint);
             // 归零：模式态相对常态的「多出/缺少」高 = 行数×(常态框高 − 本态框高) − 可见线数×线净占高，

@@ -1474,14 +1474,75 @@ final class ConfigKeyRow {
      * （其 {@code requires} 为空，故徽标不受影响）。
      */
     void refreshHiddenState() {
+        boolean shouldHide = false;
         for (String dependency : meta.hiddenWhen) {
             Value value = host.effectiveValue(dependency);
             if (value != null && value.intAt(0) != 0) {
-                root.setVisibility(View.GONE);
-                return;
+                shouldHide = true;
+                break;
             }
         }
-        root.setVisibility(View.VISIBLE);
+        final int target = shouldHide ? View.GONE : View.VISIBLE;
+        if (root.getVisibility() == target) {
+            return;   // 可见性没变：不动（首次建表/首次铺快照时通常正落在这条上）
+        }
+        // 显隐做成布局过渡（下方内容不跟着跳）；两道门不过时由 setVisibility 直接落位
+        if (canAnimateHiddenToggle()) {
+            Motion.beginLayoutChange((ViewGroup) root.getParent(), hiddenToggleDeltaPx());
+        }
+        root.setVisibility(target);
+    }
+
+    /**
+     * 整行显隐能不能走动画。<b>两道门</b>：
+     * <ul>
+     *   <li><b>门①（容器折叠态）</b>：键行容器不可见（分组收起）时直接落位——折叠体没有已布局几何，
+     *       量不出落点，与展开体的同口径判据一致；</li>
+     *   <li><b>门②（首次建表/首次铺快照）</b>：容器尚未量出宽高（还没排版）时不动画，防启动时闪一下。</li>
+     * </ul>
+     * 两道门不过 → 返回 false，调用方直接 {@code setVisibility} 落位，行为与改动前逐帧一致。
+     */
+    private boolean canAnimateHiddenToggle() {
+        ViewParent parent = root.getParent();
+        if (!(parent instanceof ViewGroup)) {
+            return false;
+        }
+        ViewGroup container = (ViewGroup) parent;
+        if (container.getVisibility() != View.VISIBLE) {
+            return false;   // 门①：容器折叠/不可见
+        }
+        return container.getWidth() > 0 && container.getHeight() > 0;   // 门②：容器已排版
+    }
+
+    /**
+     * 本次显隐的位移量（px），仅用于给布局过渡定时长（落点由框架的 bounds 过渡自算）。
+     * 收起时用已布局实高；展开时行还 {@code GONE}、无实高，就在容器内容宽上量一次自然高
+     * （测完即还原 {@code lp.height}，不改最终状态）。
+     */
+    private int hiddenToggleDeltaPx() {
+        if (root.getVisibility() == View.VISIBLE && root.getHeight() > 0) {
+            return root.getHeight();
+        }
+        if (!(root.getParent() instanceof View)) {
+            return 0;
+        }
+        View container = (View) root.getParent();
+        int width = container.getWidth() - container.getPaddingLeft() - container.getPaddingRight();
+        if (width <= 0) {
+            return 0;
+        }
+        ViewGroup.LayoutParams lp = root.getLayoutParams();
+        int oldHeight = lp == null ? ViewGroup.LayoutParams.WRAP_CONTENT : lp.height;
+        if (lp != null) {
+            lp.height = ViewGroup.LayoutParams.WRAP_CONTENT;
+        }
+        root.measure(View.MeasureSpec.makeMeasureSpec(width, View.MeasureSpec.EXACTLY),
+                View.MeasureSpec.makeMeasureSpec(0, View.MeasureSpec.UNSPECIFIED));
+        int measured = root.getMeasuredHeight();
+        if (lp != null) {
+            lp.height = oldHeight;
+        }
+        return measured;
     }
 
     /**
@@ -1606,8 +1667,8 @@ final class ConfigKeyRow {
      */
     private static final class HintOverlay {
 
-        /** 入/退场时长（ms），均 ≤300：入场强 ease-out，退场 ease-out。 */
-        private static final int IN_MS = 220;
+        /** 入/退场时长（ms），均 ≤300：入场强 ease-out，退场 ease-out（退场比入场快，满足进出不对称）。 */
+        private static final int IN_MS = 200;
         private static final int OUT_MS = 150;
         /** 入场位移（dp）：从下往上 8dp 浮起；起始缩放 0.98（不从 0 起）。 */
         private static final float IN_TRANSLATE_DP = 8f;
@@ -1820,7 +1881,7 @@ final class ConfigKeyRow {
             scrim.animate().alpha(1f).setDuration(IN_MS).setInterpolator(easeOut).start();
         }
 
-        /** 渐隐并移除（与正在进行的手势并行，不阻塞、不吞事件）。 */
+        /** 渐隐并移除（与正在进行的手势并行，不阻塞、不吞事件）。退场与入场同向（一起收一点 scale）。 */
         private void hide() {
             if (!showing) {
                 return;
@@ -1828,7 +1889,8 @@ final class ConfigKeyRow {
             showing = false;
             PathInterpolator easeOut = new PathInterpolator(0.05f, 0.7f, 0.1f, 1f);
             // 收尾先复核 showing：期间若又被 bind() 唤起，就不该把它移除
-            card.animate().alpha(0f).setDuration(OUT_MS).setInterpolator(easeOut)
+            card.animate().alpha(0f).scaleX(IN_SCALE).scaleY(IN_SCALE)
+                    .setDuration(OUT_MS).setInterpolator(easeOut)
                     .withEndAction(() -> {
                         if (!showing) {
                             remove();

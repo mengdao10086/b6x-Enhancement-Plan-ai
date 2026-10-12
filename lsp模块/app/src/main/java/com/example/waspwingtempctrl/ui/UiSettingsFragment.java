@@ -237,6 +237,9 @@ public class UiSettingsFragment extends Fragment
             contentBox.addView(empty);
         }
         contentBox.addView(ConfigResetBar.create(inflater, contentBox, this).view());
+        // 内容首次露面淡入（控制器在本回调之后才把内容容器置为可见）：只动 alpha/translationY，不动布局，
+        // 故「建满一次露出」的口径不变——每一帧露出的都是建满的完整内容，只是半透明
+        Motion.revealFadeIn(contentBox);
     }
 
     /**

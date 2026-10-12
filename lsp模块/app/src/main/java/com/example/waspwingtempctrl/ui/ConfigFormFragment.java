@@ -204,7 +204,9 @@ public class ConfigFormFragment extends Fragment
      */
     @Override
     public void onFormBuilt(int groupCount) {
-        // 本页无需在此做事
+        // 参数区首次露面淡入（控制器在本回调之后才把它置为可见）：只动 alpha/translationY，不动布局，
+        // 故「建满一次露出」的口径不变——每一帧露出的都是建满的完整参数区，只是半透明
+        Motion.revealFadeIn(groupContainer);
     }
 
     /**

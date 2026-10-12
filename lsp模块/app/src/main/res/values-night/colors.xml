@@ -2,7 +2,8 @@
 <!--
     深色配色：与 values/colors.xml 一一同名，只换值。
     这样 themes.xml 只需一份（引用颜色名即可自动跟随明暗）。
-    不要在此新增颜色名，也不要在 values/colors.xml 缺失同名项。
+    只允许覆盖 values/colors.xml 里已有的色名，不许在此造新色名；
+    values/colors.xml 里有、这里不写的，即两色共用同一个值。
 -->
 <resources>
 
@@ -31,6 +32,10 @@
     <color name="state_warn">#F2B457</color>
     <color name="state_error">#FFB4AB</color>
     <color name="state_error_container">#5C1510</color>
+
+    <!-- 参数说明浮窗的压暗层：深底上叠黑更容易糊成一片、说明卡也压不出对比，故比浅色（35%）更深一档到 50%。
+         本文件唯一的「浅色有、深色只覆盖值」项——深色需要不同强度，不是漏项。 -->
+    <color name="config_scrim">#80000000</color>
 
     <!-- ===== 徽标 ===== -->
     <color name="badge_muted_bg">#2A3133</color>

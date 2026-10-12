@@ -156,6 +156,38 @@ public final class Motion {
     }
 
     /**
+     * 与面板高度补间同曲线（{@link #panelCurve}，含界面参数喂入的强度）：供需要「跟随面板」的元素
+     * （如分组卡展开时那条分隔线的淡入淡出）复用时序与曲线，做到与面板同步、不另设曲线。只读访问器，
+     * 不改动曲线本身。
+     */
+    static Interpolator panelInterpolator() {
+        return panelCurve;
+    }
+
+    /** 表单首次露面淡入的时长（ms）与起始下移（dp）。 */
+    private static final long REVEAL_MS = 150L;
+    private static final float REVEAL_TRANSLATE_DP = 6f;
+
+    /**
+     * 表单首次露面的入场：容器从「透明 + 下移 {@link #REVEAL_TRANSLATE_DP}dp」淡入到位
+     * （{@link #REVEAL_MS}ms，强 ease-out）。<b>只动 alpha / translationY，不改布局</b>，故「建满一次露出」
+     * 的口径不变——每一帧露出的都是建满的完整表单，只是半透明，绝不出现半成品。
+     *
+     * <p>系统关掉动效时不做任何事（容器保持默认可见态，等价于直接露面）。调用时机：{@code onFormBuilt}
+     * 里设初始态（此刻容器尚未被置为可见），补间延到下一帧再起——那时其宿主已把它置为可见。
+     */
+    static void revealFadeIn(View container) {
+        if (container == null || !enabled(container.getContext())) {
+            return;
+        }
+        float d = container.getResources().getDisplayMetrics().density;
+        container.setAlpha(0f);
+        container.setTranslationY(REVEAL_TRANSLATE_DP * d);
+        container.post(() -> container.animate().alpha(1f).translationY(0f)
+                .setDuration(REVEAL_MS).setInterpolator(EASE_OUT).start());
+    }
+
+    /**
      * 系统是否允许播放动效（动画/过渡时长缩放均不为 0）。取不到设置时按"允许"处理——
      * 宁可有动画，不误关。
      */
