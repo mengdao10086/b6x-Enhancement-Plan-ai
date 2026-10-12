@@ -9,6 +9,7 @@ import android.widget.TextView;
 
 import androidx.annotation.NonNull;
 import androidx.annotation.Nullable;
+import androidx.appcompat.app.AlertDialog;
 import androidx.fragment.app.Fragment;
 import androidx.fragment.app.FragmentManager;
 
@@ -18,7 +19,11 @@ import com.example.waspwingtempctrl.ConfigStore.Snapshot;
 import com.example.waspwingtempctrl.ConfigStore.Value;
 import com.example.waspwingtempctrl.PageAware;
 import com.example.waspwingtempctrl.R;
+import com.google.android.material.button.MaterialButton;
 import com.google.android.material.snackbar.Snackbar;
+
+import java.util.ArrayList;
+import java.util.List;
 
 /**
  * 配置 + 曲线合并页（页签「配置 · 曲线」）：由 {@link ConfigStore}（背后是 assets/params.json）
@@ -53,6 +58,10 @@ public class ConfigFormFragment extends Fragment
     private TextView selfCheckView;
     /** 诊断信息头部：数据文件信息（由曲线区回调填充）。 */
     private TextView dataFileView;
+    /** 诊断区「清理旧版遗留键」按钮：仅当最近快照里存在可清理候选时可见。 */
+    private MaterialButton cleanupButton;
+    /** 最近一次上屏的快照（清理按钮据它取候选）。 */
+    private Snapshot lastSnapshot;
     /** 曲线区（子 Fragment）；页面视图销毁后置空。 */
     private ChartFragment chart;
 
@@ -78,6 +87,8 @@ public class ConfigFormFragment extends Fragment
         errorText = root.findViewById(R.id.config_error_text);
         selfCheckView = root.findViewById(R.id.config_diag_selfcheck);
         dataFileView = root.findViewById(R.id.config_diag_datafile_text);
+        cleanupButton = root.findViewById(R.id.config_diag_cleanup);
+        cleanupButton.setOnClickListener(v -> onCleanupClicked());
         // 滚动条常显（fadeScrollbars=false）+ 加粗到 scrollbar_size，按住即可拖动
         ScrollbarDrag.attach(root);
         ensureChartFragment();
@@ -234,6 +245,7 @@ public class ConfigFormFragment extends Fragment
      * 一次算定（见 {@link ConfigFormController#rowKeyCount()}），不会因展开先后而变。见 app 逻辑说明.md §6.1。
      */
     private void renderSelfCheck(Snapshot snapshot) {
+        lastSnapshot = snapshot;
         ConfigStore store = form.store();
         int renderedRowCount = form.rowKeyCount();
         int renderedMasterCount = form.masterKeyCount();
@@ -257,6 +269,56 @@ public class ConfigFormFragment extends Fragment
         }
         selfCheckView.setText(sb);
         selfCheckView.setVisibility(View.VISIBLE);
+        refreshCleanupButton(snapshot);
+    }
+
+    /**
+     * 按快照里「可清理的旧版遗留键」置显清理按钮：有候选才露出，文案带候选数。候选来自
+     * {@link Snapshot#removableKeys}（界面与 c-daemon 都不认的死键 + 可安全删除的遗留族键）。
+     */
+    private void refreshCleanupButton(@NonNull Snapshot snapshot) {
+        if (cleanupButton == null) {
+            return;
+        }
+        int n = snapshot.removableKeys.size();
+        if (n == 0) {
+            cleanupButton.setVisibility(View.GONE);
+            return;
+        }
+        cleanupButton.setText(getString(R.string.config_cleanup_button, n));
+        cleanupButton.setVisibility(View.VISIBLE);
+    }
+
+    /**
+     * 点「清理旧版遗留键」：逐条列出候选（有据可查的旧键附「→ 现名 / （已删除）」标注，无据的只列键名，
+     * 绝不臆造），确认后交 {@link ConfigFormController#cleanupLegacyKeys} 走后端原子删除 + 备份。
+     * 候选的判据已保证「界面与 c-daemon 都不读」——这本身就是可安全删除的证明。
+     */
+    private void onCleanupClicked() {
+        Snapshot snapshot = lastSnapshot;
+        if (snapshot == null || snapshot.removableKeys.isEmpty() || pageRoot == null) {
+            return;
+        }
+        final List<String> keys = new ArrayList<>(snapshot.removableKeys);
+        ConfigStore store = form.store();
+        StringBuilder sb = new StringBuilder();
+        for (String key : keys) {
+            String note = store.legacyNote(key);
+            sb.append("· ").append(key);
+            if (!note.isEmpty()) {
+                sb.append(' ').append(note);
+            }
+            sb.append('\n');
+        }
+        AlertDialog dialog = new AlertDialog.Builder(requireContext())
+                .setTitle(getString(R.string.config_cleanup_dialog_title, keys.size()))
+                .setMessage(getString(R.string.config_cleanup_dialog_message, sb.toString().trim()))
+                .setPositiveButton(R.string.config_cleanup_confirm,
+                        (d, which) -> form.cleanupLegacyKeys(keys))
+                .setNegativeButton(R.string.config_cleanup_cancel, null)
+                .create();
+        dialog.setCanceledOnTouchOutside(true);   // 点弹窗外部即取消（与 ConfigResetBar 同口径）
+        dialog.show();
     }
 
     // ==================== ChartFragment.Host ====================
@@ -298,6 +360,8 @@ public class ConfigFormFragment extends Fragment
         errorText = null;
         selfCheckView = null;
         dataFileView = null;
+        cleanupButton = null;
+        lastSnapshot = null;
         chart = null;   // 子 Fragment 实例仍在（视图随本页一起销毁），只是不再从这里驱动它
         super.onDestroyView();
     }

@@ -585,6 +585,29 @@ final class ConfigFormController implements ConfigKeyRow.Host, ConfigWriteQueue.
         }
     }
 
+    /**
+     * 清理旧版遗留键（{@link Snapshot#removableKeys} 的候选）：在共享 I/O 线程上原子删除 + 备份，
+     * 回主线程重读并整体刷一遍（值不变，只刷自检与诊断）。候选由页面给出，{@link ConfigStore#removeKeys}
+     * 只删配置里确实存在的行、并二次判空。守 I3：只经 {@link ConfigStore} 写，不碰文件、不拼 shell。
+     */
+    void cleanupLegacyKeys(@NonNull List<String> keys) {
+        if (!viewAlive || store == null || io.isShutdown()) {
+            return;
+        }
+        final List<String> copy = new ArrayList<>(keys);
+        submit(() -> {
+            final ConfigStore.RemoveResult result = store.removeKeys(copy);
+            final Snapshot snapshot = store.read();
+            main.post(() -> {
+                if (!viewAlive || !built) {
+                    return;
+                }
+                applySnapshot(snapshot);
+                page.notifyUser(result.describe(), !result.ok);
+            });
+        });
+    }
+
     private void submit(@NonNull Runnable task) {
         if (io.isShutdown()) {
             return;

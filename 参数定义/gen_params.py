@@ -256,6 +256,30 @@ def build_params_json(definition):
         },
         "groups": groups_out,
         "keys": keys_out,
+        "compat": _compat_product(definition),
+    }
+
+
+def _compat_product(definition):
+    """定义里的 compat 段 → 产物里逐字段原样透传（缺段时给空壳，产物仍自洽）。
+
+    只放界面要用的三块：daemonAccept（判据）/ cleanup（清理候选）/ renames（旧名标注）。
+    段内 notes 是定义内部溯源，不进产物（与其它段的 notes 同口径）。
+    """
+    c = definition.get("compat") or {}
+    accept = c.get("daemonAccept") or {}
+    cleanup = c.get("cleanup") or {}
+    return {
+        "daemonAccept": {
+            "prefixes": list(accept.get("prefixes", [])),
+            "exact": list(accept.get("exact", [])),
+        },
+        "cleanup": {
+            "prefixes": list(cleanup.get("prefixes", [])),
+            "exact": list(cleanup.get("exact", [])),
+            "counterparts": dict(cleanup.get("counterparts", {})),
+        },
+        "renames": dict(c.get("renames", {})),
     }
 
 
@@ -991,6 +1015,91 @@ def table_binding_problems(entry, c_text, h_text):
     return probs
 
 
+def _c_key_accept(c_text, gen_text):
+    """tempctrl.c 里按 key 比较的 strncmp 接受集（前缀 / 整键），宏名就地展开。
+
+    只认 `strncmp(key, …)`——锚在 `key` 上，避免把 strncmp(q,…)/strncmp(p,…) 等非「键比较」处
+    （迁移函数里对行字符串的比较）误当接受集。前缀 = 以 '_' 结尾者，其余按整键收。
+    """
+    smac = dict(parse_c_string_macros(c_text))
+    smac.update(parse_c_string_macros(gen_text))
+    prefixes, exact = set(), set()
+    for m in re.finditer(r'strncmp\(\s*key\s*,\s*(?:"([^"]*)"|(\w+))\s*,', c_text):
+        lit, ident = m.group(1), m.group(2)
+        val = lit if lit is not None else smac.get(ident, "")
+        if not val:
+            continue
+        (prefixes if val.endswith("_") else exact).add(val)
+    return prefixes, exact
+
+
+def audit_compat(definition, findings):
+    """compat.daemonAccept 与 tempctrl.c 真实接受集双向核对（防两处漂移）。"""
+    def err(msg):
+        findings.append(("ERROR", msg))
+
+    def info(msg):
+        findings.append(("INFO", msg))
+
+    compat = definition.get("compat")
+    if not compat:
+        err("定义缺少 compat 段（未定义键判据 / 遗留键清理的单一来源）")
+        return
+    accept = compat.get("daemonAccept") or {}
+    declared_prefixes = set(accept.get("prefixes", []))
+    declared_exact = set(accept.get("exact", []))
+    exempted = accept.get("exempted") or {}
+    if not isinstance(exempted, dict):
+        err("compat.daemonAccept.exempted 应为「键 → 理由」的对象")
+        exempted = {}
+    table_prefixes = set(e.get("rowPrefix") for e in definition["keys"]
+                         if e.get("type") == "table" and e.get("rowPrefix"))
+
+    c_src = next(s for s in SOURCES if s.id == "c")
+    c_text = read_text(source_path(c_src))
+    gen_text = read_text(product_path(product_by_id("c-header")))
+    c_prefixes, c_exact = _c_key_accept(c_text, gen_text)
+    c_all = c_prefixes | c_exact
+
+    # 方向 1：声明的（界面判「未定义」要用的）必须真被 C 接受
+    for p in sorted(declared_prefixes):
+        if p not in c_prefixes:
+            err("compat.daemonAccept.prefixes 声明了 %r，但 tempctrl.c 未按此前缀接受键" % p)
+    for e in sorted(declared_exact):
+        if e not in c_exact:
+            err("compat.daemonAccept.exact 声明了 %r，但 tempctrl.c 未接受该整键" % e)
+
+    # 方向 2：C 接受的每一项（非表前缀）必须被「声明 ∪ 表前缀 ∪ 豁免」覆盖，否则判据会漏
+    for p in sorted(c_prefixes):
+        if p not in declared_prefixes and p not in table_prefixes and p not in exempted:
+            err("tempctrl.c 接受的键前缀 %r 既未在 compat.daemonAccept 声明、也不是表前缀、"
+                "也未列入 exempted" % p)
+    for e in sorted(c_exact):
+        if e not in declared_exact and e not in exempted:
+            err("tempctrl.c 接受的整键 %r 未在 compat.daemonAccept.exact 声明、也未列入 exempted" % e)
+
+    # 豁免项自身必须成立：真是 C 的接受项、不在声明里、且写了理由
+    for name, reason in sorted(exempted.items()):
+        if name not in c_all:
+            err("compat.daemonAccept.exempted 含 %r，但 tempctrl.c 并不接受它（豁免失效，应删）" % name)
+        if name in declared_prefixes or name in declared_exact:
+            err("compat.daemonAccept.exempted 含 %r，但它同时又出现在声明里（自相矛盾）" % name)
+        if not str(reason).strip():
+            err("compat.daemonAccept.exempted 的 %r 未写理由" % name)
+
+    # 清理族前缀必须落在已声明接受集内（清理只碰「C 端认得」或「两边都不认」的键）
+    cleanup = compat.get("cleanup") or {}
+    for p in sorted(set(cleanup.get("prefixes", []))):
+        if p not in declared_prefixes:
+            err("compat.cleanup.prefixes 含 %r，但它不在 daemonAccept.prefixes 里" % p)
+    for _old, new in sorted((cleanup.get("counterparts") or {}).items()):
+        if new not in table_prefixes:
+            err("compat.cleanup.counterparts 的现表前缀 %r 不是任何表的 rowPrefix" % new)
+    info("compat：C 接受 %s；界面判据声明 %s / 表前缀 %s / 有意豁免 %s"
+         % (sorted(c_all), sorted(declared_prefixes | declared_exact),
+            sorted(table_prefixes), sorted(exempted)))
+
+
 def audit(definition, verbose=True):
     """三源漂移审计。返回 findings 列表；每项 (级别, 文本)，级别 ∈ ERROR/INFO。"""
     paths = {s.id: source_path(s) for s in SOURCES}
@@ -1238,6 +1347,7 @@ def audit(definition, verbose=True):
     # ---- 4. R4 包名单一来源 / R6 本项目包名 ----
     audit_packages(definition, findings)
     audit_app_package(definition, findings)
+    audit_compat(definition, findings)
 
     return findings
 

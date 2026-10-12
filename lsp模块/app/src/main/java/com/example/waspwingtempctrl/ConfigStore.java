@@ -12,12 +12,16 @@ import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
+import java.text.SimpleDateFormat;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
+import java.util.Date;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 import java.util.TreeMap;
@@ -69,6 +73,20 @@ public final class ConfigStore {
     private final List<GroupMeta> groups = new ArrayList<>();
     /** 表型键（定义里 {@code type:"table"} 的那些）：读盘时按 {@code rowPrefix} 认领多行。 */
     private final List<KeyMeta> tables = new ArrayList<>();
+
+    // ==================== compat 段（未定义键判据 + 遗留键清理，来自 params.json） ====================
+    /** C 端认得、界面参数表没有的键前缀（命中即不算「未定义」）。 */
+    private final List<String> compatAcceptPrefixes = new ArrayList<>();
+    /** C 端认得、界面参数表没有的整键（同上）。 */
+    private final Set<String> compatAcceptExact = new HashSet<>();
+    /** 清理候选的键族：前缀（其后须为数字）/ 整键。 */
+    private final List<String> compatCleanupPrefixes = new ArrayList<>();
+    private final Set<String> compatCleanupExact = new HashSet<>();
+    /** 清理候选前缀 → 现表前缀（{@code KI_CUT_} → {@code PID_CUT_}）：同号现表行存在时该旧行才可删。 */
+    private final Map<String, String> compatCleanupCounterparts = new LinkedHashMap<>();
+    /** 旧键名 → 现名 / 下落（确认弹窗标注；无据的键不在此表，界面只列键名）。 */
+    private final Map<String, String> compatRenames = new LinkedHashMap<>();
+
     private final String configFileNameFromDef;
     private String loadError = "";
 
@@ -190,14 +208,20 @@ public final class ConfigStore {
     public static final class Snapshot {
         public final Map<String, Value> values;
         public final List<String> unknownKeys;
+        /**
+         * 可清理的旧版遗留键：{@code unknownKeys}（界面与 cdaemon 都不认的死键）加上「可安全删除的
+         * 遗留族键」（如其现表同号行已存在的旧倍率表行）。清理按钮的候选，按定义顺序去重。
+         */
+        public final List<String> removableKeys;
         public final boolean exists;
         public final long mtimeMs;
         public final List<String> notes;
 
-        Snapshot(Map<String, Value> values, List<String> unknownKeys, boolean exists,
-                 long mtimeMs, List<String> notes) {
+        Snapshot(Map<String, Value> values, List<String> unknownKeys, List<String> removableKeys,
+                 boolean exists, long mtimeMs, List<String> notes) {
             this.values = Collections.unmodifiableMap(values);
             this.unknownKeys = Collections.unmodifiableList(unknownKeys);
+            this.removableKeys = Collections.unmodifiableList(removableKeys);
             this.exists = exists;
             this.mtimeMs = mtimeMs;
             this.notes = Collections.unmodifiableList(notes);
@@ -267,7 +291,7 @@ public final class ConfigStore {
         for (KeyMeta meta : keys.values()) {
             values.put(meta.key, meta.defaultValue);
         }
-        return new Snapshot(values, new ArrayList<>(), exists, mtimeMs,
+        return new Snapshot(values, new ArrayList<>(), new ArrayList<>(), exists, mtimeMs,
                 new ArrayList<>(Collections.singletonList(note)));
     }
 
@@ -283,6 +307,8 @@ public final class ConfigStore {
         List<String> notes = new ArrayList<>();
         Set<String> seenUnknown = new HashSet<>();
         LinkedHashMap<String, Value> fromFile = new LinkedHashMap<>();
+        // 文件里出现过的全部键（含未定义的）：清理动作要拿它判「现表同号行是否已存在」与「谁是死键」
+        Set<String> present = new LinkedHashSet<>();
         // 表型键的行：逻辑键 → （行号 → 值片段），行号升序即簇号；同行号重复时后写覆盖（与 C 端按行顺序覆盖一致）
         LinkedHashMap<String, TreeMap<Integer, String>> tableRows = new LinkedHashMap<>();
         for (String line : ConfText.splitLines(text)) {
@@ -291,6 +317,7 @@ public final class ConfigStore {
                 continue;
             }
             String rawKey = ConfText.trimRight(line.substring(ConfText.lineStartOf(line), eq));
+            present.add(rawKey);
             String rawVal = line.substring(eq + 1);
             KeyMeta meta = keys.get(rawKey);
             if (meta == null) {
@@ -305,7 +332,9 @@ public final class ConfigStore {
                     rows.put(row, ConfText.trimRight(rawVal));
                     continue;
                 }
-                if (seenUnknown.add(rawKey)) {
+                // 判据（见 app/逻辑说明.md §3.3）：界面不认 **且** cdaemon 也不认，才是「未定义键」。
+                // cdaemon 认得的（compat.daemonAccept 的前缀 / 整键）不算未定义。
+                if (!isCdaemonAccepted(rawKey) && seenUnknown.add(rawKey)) {
                     unknown.add(rawKey);
                 }
                 continue;
@@ -322,7 +351,85 @@ public final class ConfigStore {
             Value v = fromFile.get(meta.key);
             values.put(meta.key, v != null ? v : meta.defaultValue);
         }
-        return new Snapshot(values, unknown, true, mtimeMs, notes);
+        return new Snapshot(values, unknown, removableOf(present, unknown), true, mtimeMs, notes);
+    }
+
+    /**
+     * 可清理的旧版遗留键：死键（{@code unknown}，界面与 cdaemon 都不认）加上「可安全删除的遗留族键」。
+     * 遗留族键（{@code compat.cleanup}）按前缀 / 整键命中；前缀族的某行仅在其「现表同号行」已存在于
+     * 本文件时才可删——否则它是 C 端的迁移源（读兼容 + 一次性改写），删了会丢那段旧配置，须保留。
+     * 不碰「cdaemon 认得的活键」（如任意 {@code DEBUG_*}）：它们不是遗留族，留着不碍事。
+     */
+    private List<String> removableOf(Set<String> present, List<String> unknown) {
+        List<String> out = new ArrayList<>(unknown);
+        Set<String> seen = new HashSet<>(unknown);
+        for (String key : present) {
+            if (seen.contains(key) || !isCleanupCandidate(key)) {
+                continue;
+            }
+            String counterpart = cleanupCounterpartOf(key);
+            if (counterpart != null && !present.contains(counterpart)) {
+                continue;   // 现表同号行不存在 → 迁移源，保留
+            }
+            if (seen.add(key)) {
+                out.add(key);
+            }
+        }
+        return out;
+    }
+
+    /** 该键是否命中清理候选（前缀 + 数字，或整键）。 */
+    private boolean isCleanupCandidate(String key) {
+        return cleanupPrefixOf(key) != null || compatCleanupExact.contains(key);
+    }
+
+    /** 命中的清理前缀（其后须为数字）；不命中返回 null。 */
+    private String cleanupPrefixOf(String key) {
+        for (String prefix : compatCleanupPrefixes) {
+            if (key.length() > prefix.length() && key.startsWith(prefix)
+                    && isAllDigits(key.substring(prefix.length()))) {
+                return prefix;
+            }
+        }
+        return null;
+    }
+
+    /**
+     * 该遗留键的「现表同号行」键名（{@code KI_CUT_3} → {@code PID_CUT_3}）；整键族无同号行则返回 null
+     * （null = 恒可删，如 {@code KI_CUT_SMOOTH}）。前缀未配 counterparts 时也返回 null。
+     */
+    private String cleanupCounterpartOf(String key) {
+        String prefix = cleanupPrefixOf(key);
+        if (prefix == null) {
+            return null;
+        }
+        String counterpartPrefix = compatCleanupCounterparts.get(prefix);
+        if (counterpartPrefix == null || counterpartPrefix.isEmpty()) {
+            return null;
+        }
+        return counterpartPrefix + key.substring(prefix.length());
+    }
+
+    /**
+     * 落盘前重算的迁移源守卫：前缀族遗留键仅在其「现表同号行」仍存在于<b>当前文件</b>时才可删；
+     * 其余（两边都不认的死键、整键族遗留键）恒可删。见 {@link #removeKeys}。
+     */
+    private boolean guardAllows(String key, Set<String> present) {
+        String counterpart = cleanupCounterpartOf(key);
+        return counterpart == null || present.contains(counterpart);
+    }
+
+    /** 该键是否被 cdaemon 认得（compat.daemonAccept 的前缀 / 整键）；界面参数表外的键据此不算未定义。 */
+    private boolean isCdaemonAccepted(String key) {
+        if (compatAcceptExact.contains(key)) {
+            return true;
+        }
+        for (String prefix : compatAcceptPrefixes) {
+            if (key.length() > prefix.length() && key.startsWith(prefix)) {
+                return true;
+            }
+        }
+        return false;
     }
 
     /** 行键（{@code rowPrefix} + 数字）属于哪张表；不是任何表的行键时返回 null。 */
@@ -694,6 +801,152 @@ public final class ConfigStore {
         return sb.toString();
     }
 
+    // ==================== 遗留键清理 ====================
+
+    /**
+     * 旧键名 → 现名 / 下落的界面标注（{@code compat.renames}）。无记录返回空串——界面据此只列键名、
+     * 绝不臆造新名。见 app/逻辑说明.md §3.6。
+     */
+    public String legacyNote(String key) {
+        String note = compatRenames.get(key);
+        return note == null ? "" : note;
+    }
+
+    /** 一次遗留键清理的结果（{@link #describe()} 出人话）。 */
+    public static final class RemoveResult {
+        public final boolean ok;
+        /** 实际删除的配置行数。 */
+        public final int removedLines;
+        /** 备份文件绝对路径（可恢复）；无备份为 null。 */
+        public final String backupPath;
+        public final String error;
+
+        RemoveResult(boolean ok, int removedLines, String backupPath, String error) {
+            this.ok = ok;
+            this.removedLines = removedLines;
+            this.backupPath = backupPath;
+            this.error = error;
+        }
+
+        static RemoveResult failure(String error) {
+            return new RemoveResult(false, 0, null, error);
+        }
+
+        public String describe() {
+            if (!ok) {
+                return "清理失败：" + error;
+            }
+            return "已清理 " + removedLines + " 行遗留键"
+                    + (backupPath == null ? "" : "（已备份：" + backupPath + "）");
+        }
+    }
+
+    /**
+     * 删除给定的遗留键行（候选见 {@link Snapshot#removableKeys}），一次原子写。
+     *
+     * <p><b>为什么安全</b>：候选只含「界面与 cdaemon 都不认」的死键，以及「可安全删除的遗留族键」
+     * （其现表同号行已存在）——没有任何一方会读它们。删前先把要删的行写成一份备份文件（可恢复），
+     * 再原子替换 {@code profile.conf}。写入一律走本类的「临时文件 → fsync → rename」（I3）。
+     */
+    public RemoveResult removeKeys(List<String> keys) {
+        if (!definitionsLoaded()) {
+            return RemoveResult.failure("参数定义未加载：" + loadError);
+        }
+        if (keys.isEmpty()) {
+            return RemoveResult.failure("没有要清理的键");
+        }
+        if (!exists()) {
+            return RemoveResult.failure("配置文件不存在");
+        }
+        Set<String> target = new HashSet<>(keys);
+        String text;
+        try {
+            byte[] raw = readAllBytes(configFile);
+            text = new String(raw, StandardCharsets.UTF_8);
+            if (!Arrays.equals(text.getBytes(StandardCharsets.UTF_8), raw)) {
+                return RemoveResult.failure("配置文件不是合法 UTF-8，拒绝改写以免损坏内容");
+            }
+        } catch (IOException e) {
+            return RemoveResult.failure("读取失败：" + e.getMessage());
+        }
+        List<String> lines = ConfText.splitLines(text);
+        // 落盘前按<b>当前文件</b>重算一遍「迁移源守卫」：弹窗确认到落盘之间，配置可能已被别的路径改过
+        // （如 PID_CUT_<n> 被删）。若仍按旧快照删 KI_CUT_<n>，会丢掉那段还没迁走的旧配置——故在此重算，
+        // 不满足守卫的行一律保留（删不删以"落盘那一刻的磁盘状态"为准，不是以弹窗那一刻为准）。
+        Set<String> present = new HashSet<>();
+        for (String line : lines) {
+            int eq = ConfText.configLineEq(line);
+            if (eq >= 0) {
+                present.add(ConfText.trimRight(line.substring(ConfText.lineStartOf(line), eq)));
+            }
+        }
+        List<String> kept = new ArrayList<>();
+        List<String> removed = new ArrayList<>();
+        for (String line : lines) {
+            int eq = ConfText.configLineEq(line);
+            String rawKey = eq < 0 ? null
+                    : ConfText.trimRight(line.substring(ConfText.lineStartOf(line), eq));
+            if (rawKey != null && target.contains(rawKey) && guardAllows(rawKey, present)) {
+                removed.add(line);
+            } else {
+                kept.add(line);
+            }
+        }
+        if (removed.isEmpty()) {
+            return RemoveResult.failure("配置里已没有这些键（可能已被清理）");
+        }
+        String backupPath;
+        try {
+            backupPath = writeRemovedBackup(removed);
+        } catch (IOException e) {
+            return RemoveResult.failure("备份失败（未改动配置）：" + e.getMessage());
+        }
+        try {
+            writeAtomic(String.join("\n", kept));
+        } catch (IOException e) {
+            return RemoveResult.failure("写盘失败：" + e.getMessage());
+        }
+        memo = null;   // 文件已改：作废快照缓存，下次 read() 按新指纹重读
+        return new RemoveResult(true, removed.size(), backupPath, "");
+    }
+
+    /** 把删掉的行写进一份带时间戳的备份文件（同目录原子写）；返回其绝对路径。 */
+    private String writeRemovedBackup(List<String> removedLines) throws IOException {
+        File dir = configFile.getParentFile();
+        if (dir != null && !dir.isDirectory() && !dir.mkdirs()) {
+            throw new IOException("目录不可用：" + dir);
+        }
+        String stamp = new SimpleDateFormat("yyyyMMdd-HHmmss", Locale.US).format(new Date());
+        File backup = new File(dir, CONFIG_FILE_NAME + ".removed-" + stamp + ".bak");
+        int n = 2;
+        while (backup.exists()) {
+            backup = new File(dir, CONFIG_FILE_NAME + ".removed-" + stamp + "-" + n + ".bak");
+            n++;
+        }
+        String content = "# 「清理旧版遗留键」删除的内容（"
+                + new SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.US).format(new Date()) + "）\n"
+                + "# 需要恢复时，把下面的行贴回 profile.conf 并保存即可。\n"
+                + String.join("\n", removedLines) + "\n";
+        File tmp = new File(dir, backup.getName() + ".tmp");
+        FileOutputStream fos = null;
+        try {
+            fos = new FileOutputStream(tmp, false);
+            fos.write(content.getBytes(StandardCharsets.UTF_8));
+            fos.flush();
+            fos.getFD().sync();
+        } finally {
+            if (fos != null) {
+                fos.close();
+            }
+        }
+        if (!tmp.renameTo(backup)) {
+            //noinspection ResultOfMethodCallIgnored
+            tmp.delete();
+            throw new IOException("备份文件替换失败：" + backup);
+        }
+        return backup.getAbsolutePath();
+    }
+
     // ==================== 内部：定义解析 ====================
 
     private void parseDefinitions(JSONObject root) {
@@ -731,11 +984,72 @@ public final class ConfigStore {
                     tables.add(meta);
                 }
             }
+            parseCompat(root.optJSONObject("compat"));
         } catch (Exception e) {
             loadError = "params.json 解析失败：" + e.getMessage();
             keys.clear();
             groups.clear();
             tables.clear();
+        }
+    }
+
+    /**
+     * 读 {@code params.json} 的 {@code compat} 段（未定义键判据与遗留键清理的单一来源）。
+     * 缺段时全表留空 → 判据退回「只看界面参数表」、清理动作无候选（安全退化，不抛错）。
+     */
+    private void parseCompat(JSONObject compat) {
+        if (compat == null) {
+            return;
+        }
+        JSONObject accept = compat.optJSONObject("daemonAccept");
+        if (accept != null) {
+            readStringArray(accept.optJSONArray("prefixes"), compatAcceptPrefixes);
+            readStringSet(accept.optJSONArray("exact"), compatAcceptExact);
+        }
+        JSONObject cleanup = compat.optJSONObject("cleanup");
+        if (cleanup != null) {
+            readStringArray(cleanup.optJSONArray("prefixes"), compatCleanupPrefixes);
+            readStringSet(cleanup.optJSONArray("exact"), compatCleanupExact);
+            JSONObject counterparts = cleanup.optJSONObject("counterparts");
+            if (counterparts != null) {
+                java.util.Iterator<String> it = counterparts.keys();
+                while (it.hasNext()) {
+                    String oldPrefix = it.next();
+                    compatCleanupCounterparts.put(oldPrefix, counterparts.optString(oldPrefix, ""));
+                }
+            }
+        }
+        JSONObject renames = compat.optJSONObject("renames");
+        if (renames != null) {
+            java.util.Iterator<String> it = renames.keys();
+            while (it.hasNext()) {
+                String oldKey = it.next();
+                compatRenames.put(oldKey, renames.optString(oldKey, ""));
+            }
+        }
+    }
+
+    private static void readStringArray(JSONArray arr, List<String> out) {
+        if (arr == null) {
+            return;
+        }
+        for (int i = 0; i < arr.length(); i++) {
+            String s = arr.optString(i, "");
+            if (!s.isEmpty()) {
+                out.add(s);
+            }
+        }
+    }
+
+    private static void readStringSet(JSONArray arr, Set<String> out) {
+        if (arr == null) {
+            return;
+        }
+        for (int i = 0; i < arr.length(); i++) {
+            String s = arr.optString(i, "");
+            if (!s.isEmpty()) {
+                out.add(s);
+            }
         }
     }
 

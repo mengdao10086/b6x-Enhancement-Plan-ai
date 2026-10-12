@@ -103,4 +103,16 @@
     <string name="config_diag_render_mismatch">键渲染自检：本页 %1$d + 设置页 %2$d + 组头开关 %3$d ≠ 定义 %4$d 项（键表可能已变更）</string>
     <string name="config_diag_action_refresh">刷新诊断</string>
     <string name="config_unknown_keys">配置含未定义键（界面不显示，写入时也不会改动）：%1$s</string>
+
+    <!--
+        清理旧版遗留键：诊断区内的一枚动作按钮（仅当配置里存在候选时才可见）。
+        候选 = 界面不显示、且 c-daemon 当前实现也不依赖的旧版键（其作用已由现键承担或已取消）。
+        按钮文案带候选数，故纯文本（布局默认）与带 %1$d（Java 置显）各一条。
+    -->
+    <string name="config_cleanup_button_plain">清理旧版遗留键</string>
+    <string name="config_cleanup_button">清理旧版遗留键（%1$d）</string>
+    <string name="config_cleanup_dialog_title">清理 %1$d 个旧版遗留键？</string>
+    <string name="config_cleanup_dialog_message">下列键是旧版本遗留项：界面不显示它们，其作用已由现键承担（或已取消），c-daemon 的当前实现也不依赖它们。将从配置里删除这些行；删除前会先把它们备份到应用私有目录，可恢复。\n\n%1$s</string>
+    <string name="config_cleanup_confirm">清理</string>
+    <string name="config_cleanup_cancel">取消</string>
 </resources>

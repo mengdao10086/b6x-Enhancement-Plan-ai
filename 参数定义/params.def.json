@@ -36,6 +36,47 @@
     "rollingMaxLines": 720,
     "sourceNote": "段内字段仅供本文件与审计脚本使用，不进产物。档位 = 曲线数据文件的滚动行数上限（720 行）与每 1s 一行的写入节奏共同决定：N 秒窗口 = 最近 N 行；默认档位 360 由界面自行持久化。"
   },
+  "compat": {
+    "notes": [
+      "【用途】「未定义键」判据与「清理旧版遗留键」动作的单一来源（R1）。本段由 gen_params.py 写进产物，界面读取。",
+      "daemonAccept：C 守护进程认得、但界面参数表里没有的键（前缀 / 整键）。判据 = 界面认 或 命中本表 → 不算「未定义键」。",
+      "daemonAccept.exempted：C 端接受、但**有意不**计入判据的键（附理由）。gen_params.py 的 audit 把「C 的接受集」拆成「声明 ∪ 表前缀 ∪ 豁免」三方，任一 C 接受项不在其中即报错；豁免项自身必须真是 C 的接受项、且不在声明里。",
+      "cleanup：清理动作的候选键族。counterparts 给出「旧表前缀 → 现表前缀」；某行键仅在其现表同号行已存在时才可删，否则它是 C 端的迁移源、必须保留。",
+      "renames：旧键名 → 现名或下落的界面标注。只列有据可查者；无据的键不在此表，界面只列键名、绝不臆造新名。这是给用户确认弹窗看的文本，不得写源文件名 / 宏名 / C 符号名。"
+    ],
+    "daemonAccept": {
+      "prefixes": ["KI_CUT_"],
+      "exact": ["KI_CUT_SMOOTH"],
+      "exempted": {
+        "DEBUG_": "C 端对任意 DEBUG_*（除 DEBUG_ENABLED）只静默消费、不产生任何效果；界面不据此判定为「已定义」，以保留对 DEBUG 拼写错的告警。"
+      }
+    },
+    "cleanup": {
+      "prefixes": ["KI_CUT_"],
+      "exact": ["KI_CUT_SMOOTH"],
+      "counterparts": {"KI_CUT_": "PID_CUT_"}
+    },
+    "renames": {
+      "FAN_RPM_ROUND_UNIT": "→ RATE_LIMIT_FAN",
+      "PID_KI_DYN_T": "（已删除）",
+      "PID_KI_DYN_GATE": "（已删除）",
+      "PID_KI_DYN_WIN": "（已删除）",
+      "WEBUI_GAP_SEC": "→ UI_GAP_SEC",
+      "WEBUI_LABEL_MERGE_PX": "→ UI_LABEL_MERGE_PX",
+      "WEBUI_RPM_AXIS_MIN": "→ UI_RPM_AXIS_MIN",
+      "WEBUI_CURVE_FILTER": "→ UI_CURVE_FILTER",
+      "UI_LABEL_MERGE_PX": "（已删除）",
+      "PID_COLD_DYN_IN": "（已删除）",
+      "PID_COLD_DYN_OUT": "（已删除）",
+      "PID_COLD_DYN_W": "（已删除）",
+      "PID_COLD_DYN_MAP": "（已删除）",
+      "PID_SPEED_NL_THR": "→ PID_SPEED",
+      "PID_SPEED_NL_EXP": "→ PID_SPEED",
+      "UI_ANIM_SPEED": "→ UI_ANIM_TUNING",
+      "KI_CUT_1": "→ PID_CUT_1",
+      "KI_CUT_SMOOTH": "（已删除）"
+    }
+  },
   "groups": [
     {
       "id": "debug",

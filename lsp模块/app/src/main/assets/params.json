@@ -2510,5 +2510,46 @@
       ],
       "fields": null
     }
+  },
+  "compat": {
+    "daemonAccept": {
+      "prefixes": [
+        "KI_CUT_"
+      ],
+      "exact": [
+        "KI_CUT_SMOOTH"
+      ]
+    },
+    "cleanup": {
+      "prefixes": [
+        "KI_CUT_"
+      ],
+      "exact": [
+        "KI_CUT_SMOOTH"
+      ],
+      "counterparts": {
+        "KI_CUT_": "PID_CUT_"
+      }
+    },
+    "renames": {
+      "FAN_RPM_ROUND_UNIT": "→ RATE_LIMIT_FAN",
+      "PID_KI_DYN_T": "（已删除）",
+      "PID_KI_DYN_GATE": "（已删除）",
+      "PID_KI_DYN_WIN": "（已删除）",
+      "WEBUI_GAP_SEC": "→ UI_GAP_SEC",
+      "WEBUI_LABEL_MERGE_PX": "→ UI_LABEL_MERGE_PX",
+      "WEBUI_RPM_AXIS_MIN": "→ UI_RPM_AXIS_MIN",
+      "WEBUI_CURVE_FILTER": "→ UI_CURVE_FILTER",
+      "UI_LABEL_MERGE_PX": "（已删除）",
+      "PID_COLD_DYN_IN": "（已删除）",
+      "PID_COLD_DYN_OUT": "（已删除）",
+      "PID_COLD_DYN_W": "（已删除）",
+      "PID_COLD_DYN_MAP": "（已删除）",
+      "PID_SPEED_NL_THR": "→ PID_SPEED",
+      "PID_SPEED_NL_EXP": "→ PID_SPEED",
+      "UI_ANIM_SPEED": "→ UI_ANIM_TUNING",
+      "KI_CUT_1": "→ PID_CUT_1",
+      "KI_CUT_SMOOTH": "（已删除）"
+    }
   }
 }

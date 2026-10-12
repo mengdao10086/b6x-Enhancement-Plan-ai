@@ -195,6 +195,17 @@
                         android:layout_height="wrap_content"
                         android:layout_marginTop="@dimen/space_s"
                         android:text="@string/config_diag_action_refresh" />
+
+                    <!-- 清理旧版遗留键：仅当配置里存在「可清理」的键时才可见（ConfigFormFragment 按快照置显）。
+                         确认后经 ConfigStore 原子删除并留备份，不在此直接碰文件（守 I3）。 -->
+                    <com.google.android.material.button.MaterialButton
+                        android:id="@+id/config_diag_cleanup"
+                        style="@style/Widget.Material3.Button.TextButton"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="@dimen/space_xs"
+                        android:text="@string/config_cleanup_button_plain"
+                        android:visibility="gone" />
                 </LinearLayout>
             </LinearLayout>
         </com.google.android.material.card.MaterialCardView>
