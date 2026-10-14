@@ -74,12 +74,13 @@
 | `diagnose_status.sh` | 散热器无反应诊断脚本（设备端一键排查） |
 | `参考资料/完整修复历程.md` | BLE 4 层 Bug 修复全记录 + B8X 分析 |
 | `参考资料/magisk-lsp合并路线.md` | 由「Magisk 模块 + 直接改 APK」转为 LSPosed 模块路线的思想与实现 |
-| `参考资料/decompile/通用.md` | 反编译技术文档索引 + 跨 app 通用内容（所有 app 分析索引）；**不进 git** |
-| `参考资料/decompile/b6_devtool/反编译分析.md` | 开发者工具 App 内部运行逻辑分析；**不进 git** |
-| `参考资料/decompile/` | 各工具反编译产物与逐 app 分析（`b6_devtool/`、`b6_overclock_v2/`、`b7_overclock_v3/`、`b8x/`；**不进 git**，索引见 `通用.md`） |
+| `参考资料/decompile/通用.md` | 反编译技术文档索引 + 跨 app 通用内容（所有 app 分析索引）；**分析 md 进 git** |
+| `参考资料/decompile/b6_devtool/反编译分析.md` | 开发者工具 App 内部运行逻辑分析；**分析 md 进 git** |
+| `参考资料/decompile/` | 各工具反编译产物与逐 app 分析（`b6_devtool/`、`b6_overclock_v2/`、`b7_overclock_v3/`、`b8x/`；**分析 md 进 git，反编译二进制产物不进 git**，索引见 `通用.md`） |
 | `参考资料/c_historical_sources/` | tempctrl 历史版本源码（单独追踪） |
 | `参考资料/smali_patching_attempts/` | smali 工具链产物（失败尝试，工具 jar 已并入集中 `D:\tools\`；不进 git） |
 | `.github/workflows/build.yml` | CI 单一构建链：编译 C → 注入 APK assets → 出唯一交付物 APK |
+| `逻辑图/看门狗运行流程.md` | 看门狗运行流程（service.d 脚本 + 双向保活 + 自动更新） |
 
 
 ### 工具路径
