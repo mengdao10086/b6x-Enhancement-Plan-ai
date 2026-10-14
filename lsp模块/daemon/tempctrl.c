@@ -999,10 +999,26 @@ static int load_config(const char *path) {
 }
 
 // ======================== CPU 亲和（把配置落到进程上） ========================
-// 时机（启动 + 配置热重载）、取值语法（c0/c123 或核号）、顺序（先迁 cpuset 组后设亲和）、
+// 时机（启动 + 配置热重载 + 低频重申）、取值语法（c0/c123 或核号）、顺序（先迁 cpuset 组后设亲和）、
 // 边界（只迁自身、不改组的 cpus）见 逻辑说明.md「CPU_AFFINITY 的生效时机」。
 #define CPUSET_DIR "/dev/cpuset"   // 本机 cpuset v1 挂载点（mountinfo：/dev/cpuset rw,cpuset,noprefix）
 #define CPU_CLUSTER_MAX 8          // 簇数上限（手机 SoC 实际 ≤4；簇号只取单个十进制数字）
+// 低频重申 / 重试间隔（秒）：见 cpu_affinity_reassert()。只在既有的 5s 节拍上被调用、且内部自限流，
+// 真读 /proc/self/cgroup 至多每 300s 一次——不新增独立轮询、不改变任何控制时序。
+#define CPU_AFF_REASSERT_SEC 300
+
+// 上次读回并记入日志的 cpuset 组路径（如 "/" 或 "/top-app/main"），仅低频重申用它判"是否被改回"。
+static char cpu_aff_last_group[256] = "";
+// 「上次应用留下了什么异常 / 没做到什么」的原因摘要（**空串 = 一切按请求做到**）。
+// 这是**全文件唯一**的降级状态位，覆盖 apply_cpu_affinity() 内**所有**异常与回落：
+//   配置值非法→回落默认、与本机核无交集→回落默认、读不到本机核编号、
+//   迁组写 cgroup.procs 失败、设亲和失败、读回未覆盖请求（多条用"；且"连接）。
+//   ① 它决定要不要定期重试（见 cpu_affinity_reassert）；
+//   ② 它决定日志什么时候打——只在**状态变化**时打一条（进入降级打一条、原因变了再打一条、
+//      恢复打一条；持续同一原因不再重复打）。
+// 为什么必须只有一个位：重试周期 300s，任一异常若各自带一个"是否已记过"的位，就会各按各的
+// 节拍刷日志（拒写机型约 288 行/天）。合并成一个 reason 串后，全文件只有这一处降级状态。
+static char cpu_aff_reason[512] = "";
 
 // 本段一律用核集合（cpu_set_t）表达目标核，不再用「[lo,hi] 连续区间」——
 // 簇模式的各簇未必相邻（如 c0c2 跳过中间簇），区间表达不了。
@@ -1063,21 +1079,18 @@ static void cpu_set_format(const cpu_set_t *set, char *out, size_t size) {
     if (n == 0 && size) snprintf(out, size, "-");
 }
 
-/** 十六进制数字 → 值；非十六进制返回 -1 */
-static int hex_digit(char ch) {
-    if (ch >= '0' && ch <= '9') return ch - '0';
-    if (ch >= 'a' && ch <= 'f') return ch - 'a' + 10;
-    if (ch >= 'A' && ch <= 'F') return ch - 'A' + 10;
-    return -1;
-}
-
 /**
- * 解析核集合文本。allow_mask=1（内核侧）认 cpulist / 空白分隔 / 十六进制掩码三种形态；
- * allow_mask=0（配置值）只认核号，字母一律判非法。纯数字掩码与核号无法区分，故只把含 a~f 的
- * token 认作掩码，误读由上层「各簇并集必须等于 present」校验挡掉（见 逻辑说明.md「CPU_AFFINITY 的已知限制」②）。
- * 返回 1=解析出至少一个核；0=空串或形态不符。
+ * 解析核集合文本（cpulist）：**逗号或空白分隔的若干项，每项是核号 "N" 或区间 "N-M"**。
+ *   "0,5"   → {0, 5}
+ *   "0-5"   → {0,1,2,3,4,5}
+ *   "0,2-5" → {0} ∪ {2,3,4,5}      ← 项与区间可混写
+ *   "0 5"   → {0, 5}（空格与逗号同为分隔符，**不是**区间 0~5）
+ * 内核侧文件（present、cpuset 的 cpus、related_cpus/affected_cpus）与配置值**都是这一种形态**，
+ * 故不再兼容十六进制位掩码（那是早期 cgroup cpuset 的形态，本 ROM 的 noprefix 挂载不用它；
+ * 留着一来是死代码，二来含 a~f 的 token 会被误判）。
+ * 返回 1=解析出至少一个核；0=空串或形态不符（调用方按"本形态不可信"降级）。
  */
-static int cpu_list_parse(const char *s, cpu_set_t *set, int allow_mask) {
+static int cpu_list_parse(const char *s, cpu_set_t *set) {
     CPU_ZERO(set);
     if (!s) return 0;
     int any = 0;
@@ -1092,19 +1105,6 @@ static int cpu_list_parse(const char *s, cpu_set_t *set, int allow_mask) {
         if (len == 0 || len >= sizeof(buf)) return 0;
         memcpy(buf, tok, len);
         buf[len] = '\0';
-
-        if (allow_mask && strpbrk(buf, "abcdefABCDEF")) {   // 十六进制掩码（仅内核侧认）
-            int shift = 0;
-            for (int i = (int)len - 1; i >= 0; i--) {
-                int d = hex_digit(buf[i]);
-                if (d < 0) return 0;
-                for (int b = 0; b < 4; b++)
-                    if ((d & (1 << b)) && shift + b < CPU_SETSIZE) CPU_SET(shift + b, set);
-                shift += 4;
-            }
-            any = 1;
-            continue;
-        }
 
         char *end = NULL;                            // 核号：N 或 N-M
         long a = strtol(buf, &end, 10);
@@ -1123,7 +1123,7 @@ static int cpu_list_parse(const char *s, cpu_set_t *set, int allow_mask) {
     return any ? 1 : 0;
 }
 
-/** 读一个核集合文件（内容形如 "0-7" / "0-3,5" / "0 1 2 3" / "0f"）；读不到或形态不符返回 0 */
+/** 读一个核集合文件（cpulist，形如 "0-7" / "0-3,5" / "0 1 2 3"）；读不到或形态不符返回 0 */
 static int cpu_list_read(const char *path, cpu_set_t *set) {
     FILE *f = fopen(path, "r");
     if (!f) return 0;
@@ -1131,7 +1131,7 @@ static int cpu_list_read(const char *path, cpu_set_t *set) {
     size_t n = fread(buf, 1, sizeof(buf) - 1, f);
     buf[n] = '\0';
     fclose(f);
-    return cpu_list_parse(buf, set, 1);   // 内核侧：三种形态都认
+    return cpu_list_parse(buf, set);
 }
 
 /** 读某 cpuset 组的 cpus（组目录绝对路径） */
@@ -1164,7 +1164,12 @@ static int read_self_cpuset_group(char *out, size_t size) {
     return found;
 }
 
-/** 把自身 pid 写进 <dir>/cgroup.procs（迁移自身；本段唯一的 cgroup 写操作） */
+/**
+ * 把自身 pid 写进 <dir>/cgroup.procs —— 迁移整个线程组（本段唯一的 cgroup 写操作）。
+ * 只在**根组**（CPUSET_DIR）用：根组的 cpus 恒为全部在线核，且与 ROM 的组命名无关，
+ * 因此不需要探测组名、也不需要遍历组目录。旧实现还有"根组写不进就递归扫子组"的兜底，
+ * 但写失败通常是 SELinux 拒写，换个子组一样失败，故已删。
+ */
 static int cpuset_join(const char *dir) {
     char path[320];
     snprintf(path, sizeof(path), "%s/cgroup.procs", dir);
@@ -1177,49 +1182,12 @@ static int cpuset_join(const char *dir) {
     return wr == n;
 }
 
-/**
- * 在 base 下最多递归 depth 层，找第一个 cpus 覆盖目标核集合且非 top-app 的组并迁入。
- * 覆盖是必需条件：迁进 cpus 不含目标核的组，亲和仍会被夹在组外核上，等于没迁。
- */
-static int cpuset_migrate_scan(const char *base, int depth, const cpu_set_t *want,
-                               char *landed, size_t size) {
-    DIR *d = opendir(base);
-    if (!d) return 0;
-    struct dirent *ent;
-    int done = 0;
-    while (!done && (ent = readdir(d)) != NULL) {
-        if (ent->d_name[0] == '.') continue;
-        if (strncmp(ent->d_name, "top-app", 7) == 0) continue;   // 要离开的组，迁回去等于没迁
-        char dir[320];
-        snprintf(dir, sizeof(dir), "%s/%s", base, ent->d_name);
-        struct stat st;
-        if (stat(dir, &st) != 0 || !S_ISDIR(st.st_mode)) continue;
-        cpu_set_t cset;
-        if (read_dir_cpus(dir, &cset) && cpu_set_covers(&cset, want) && cpuset_join(dir)) {
-            snprintf(landed, size, "%s", dir);
-            done = 1;
-        } else if (depth > 0 && cpuset_migrate_scan(dir, depth - 1, want, landed, size)) {
-            done = 1;
-        }
-    }
-    closedir(d);
-    return done;
-}
-
-/** 迁出到 cpus 覆盖目标核集合的组：首选根组（名字无关、最稳），写不进再扫子组；成功返回 1 */
-static int cpuset_migrate_self(const cpu_set_t *want, char *landed, size_t size) {
-    if (cpuset_join(CPUSET_DIR)) {
-        snprintf(landed, size, "%s", CPUSET_DIR);
-        return 1;
-    }
-    return cpuset_migrate_scan(CPUSET_DIR, 1, want, landed, size);
-}
-
 // ---- 簇探测（从内核拓扑现算，不写死机型核数表）----
 // 编号规则（含 cpu0 的簇 = c0，其余按首核号升序）见 逻辑说明.md「CPU_AFFINITY 的生效时机」。
+// 只留一个探测源：cpufreq policy（每个频率域 = 一个簇）。旧实现另有 cpu_capacity 与
+// physical_package_id 两级兜底，但两者跨机型都不可靠（容量可能全核同值；物理封装在多数 ARM
+// 内核全核同为 0，只能产出"单簇"= 与降级等价），留着等于用"降级"冒充"探测成功"。
 #define CLUSTER_SRC_POLICY   "cpufreq/policy"                 // 每 policy 一个频率域 = 一个簇（日志出处）
-#define CLUSTER_SRC_CAPACITY "cpu_capacity"                   // 同容量 = 同簇（兼作 sysfs 叶子名与日志出处）
-#define CLUSTER_SRC_PACKAGE  "topology/physical_package_id"   // 同封装 = 同簇（兼作 sysfs 叶子名与日志出处）
 #define CLUSTER_SRC_SINGLE   "单簇(降级)"                     // 探测失败：c0 = 本机全部核，等于不限制
 
 /**
@@ -1284,37 +1252,8 @@ static int clusters_probe_policy(cpu_set_t *clusters, const cpu_set_t *present) 
     return clusters_accept(clusters, n, present) ? n : 0;
 }
 
-/** 探测源 2/3 共用：按"每核一个整数"的 sysfs 属性分组（值相同 = 同簇）；任一核读不到就弃用本源 */
-static int clusters_probe_by_key(cpu_set_t *clusters, const cpu_set_t *present, const char *leaf) {
-    long vals[CPU_CLUSTER_MAX];
-    int n = 0;
-    for (int c = 0; c < CPU_SETSIZE; c++) {
-        if (!CPU_ISSET(c, present)) continue;
-        char path[320];
-        snprintf(path, sizeof(path), "/sys/devices/system/cpu/cpu%d/%s", c, leaf);
-        FILE *f = fopen(path, "r");
-        if (!f) return 0;
-        long v = 0;
-        int ok = fscanf(f, "%ld", &v) == 1;
-        fclose(f);
-        if (!ok) return 0;
-        int idx = -1;
-        for (int i = 0; i < n; i++)
-            if (vals[i] == v) { idx = i; break; }
-        if (idx < 0) {
-            if (n >= CPU_CLUSTER_MAX) return 0;
-            idx = n;
-            vals[n] = v;
-            CPU_ZERO(&clusters[n]);
-            n++;
-        }
-        CPU_SET(c, &clusters[idx]);
-    }
-    return clusters_accept(clusters, n, present) ? n : 0;
-}
-
 /**
- * 探测簇划分：依次试「cpufreq policy → cpu_capacity → physical_package_id」，全失败则单簇降级
+ * 探测簇划分：只看 cpufreq policy 目录；探不到就**单簇降级**
  * （c0 = 本机全部核，等于不限制——宁可不管，也不把用户限到错误的核上）。
  * 返回簇数（≥1）；连本机核集合都读不到时返回 0，由调用方按"全部核"处理。*src 回传出处供日志。
  */
@@ -1323,10 +1262,6 @@ static int clusters_probe(cpu_set_t *clusters, const char **src) {
     if (!cpu_list_read("/sys/devices/system/cpu/present", &present)) return 0;
     int n = clusters_probe_policy(clusters, &present);
     if (n > 0) { *src = CLUSTER_SRC_POLICY; return n; }
-    n = clusters_probe_by_key(clusters, &present, CLUSTER_SRC_CAPACITY);
-    if (n > 0) { *src = CLUSTER_SRC_CAPACITY; return n; }
-    n = clusters_probe_by_key(clusters, &present, CLUSTER_SRC_PACKAGE);
-    if (n > 0) { *src = CLUSTER_SRC_PACKAGE; return n; }
     clusters[0] = present;
     *src = CLUSTER_SRC_SINGLE;
     return 1;
@@ -1335,8 +1270,9 @@ static int clusters_probe(cpu_set_t *clusters, const char **src) {
 /**
  * 配置值 → 目标核集合。返回 1=成功；0=非法（整串丢弃，调用方回落默认）。
  * 语法：首字符 c（只认小写）= 簇模式，c 后每一位数字一个簇号，含非数字/簇号超本机簇数都算非法；
- * 否则核号：单值 N、区间 N-M、逗号或空白分隔的列表；此外"恰好两个空白分隔的十进制核号"按旧写法
- * 解释成区间 N~M（迁移期不改变已部署设备的行为）。
+ * 否则按核号：**逗号分隔的项，每项是核号 N 或区间 N-M**（`0,5` / `0-5` / `0,2-5`）；
+ * 空格与逗号同为分隔符（`0 5` = `0,5` = 核 0 和核 5 两个核，**不是**区间）——保留空格形态只为不让旧配置炸。
+ * 注意：旧实现把"两个空白分隔的十进制核号"额外解释成区间 0~5，该分支已删。
  */
 static int affinity_expand(const char *spec, const cpu_set_t *clusters, int nclusters,
                            cpu_set_t *out) {
@@ -1352,17 +1288,7 @@ static int affinity_expand(const char *spec, const cpu_set_t *clusters, int nclu
         }
         return 1;
     }
-    // 旧写法 "N M"：整串没有 ',' 与 '-'，且恰好是"数字 空白 数字"时按区间解释
-    if (!strchr(spec, ',') && !strchr(spec, '-')) {
-        int a = 0, b = 0;
-        char tail[2] = "";
-        if (sscanf(spec, "%d %d %1s", &a, &b, tail) == 2) {
-            if (a < 0 || b < a) return 0;
-            for (int c = a; c <= b && c < CPU_SETSIZE; c++) CPU_SET(c, out);
-            return 1;
-        }
-    }
-    return cpu_list_parse(spec, out, 0);             // 单值 0 / 区间 0-1 / 列表 0,2-3（配置值不认掩码）
+    return cpu_list_parse(spec, out);                // 单值 0 / 区间 0-1 / 列表 0,2-3
 }
 
 /** 读 /proc/self/status 里 "字段:"（含冒号，如 "Cpus_allowed_list:"）后的值；找到返回 1 */
@@ -1384,11 +1310,37 @@ static int read_status_field(const char *field, char *out, size_t size) {
 }
 
 /**
+ * 把一段"没做到 / 回落了"的事实追加进降级原因（多条之间用"；且 "连接）。
+ * **本函数不打任何日志**：何时打、打几条，统一由 apply_cpu_affinity() 末尾那**一个**降级状态机
+ * 决定——否则 300s 的定期重试会把同一原因反复刷进日志（拒写机型约 288 行/天）。
+ */
+static void cpu_aff_note(char *reason, size_t size, const char *fmt, ...) {
+    size_t used = strlen(reason);
+    if (used + 1 >= size) return;                       // 已满：丢弃后续（原因串只作诊断用）
+    if (used > 0) {
+        int w = snprintf(reason + used, size - used, "；且 ");
+        if (w < 0 || (size_t)w >= size - used) { reason[size - 1] = '\0'; return; }
+        used += (size_t)w;
+    }
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(reason + used, size - used, fmt, ap);
+    va_end(ap);
+    reason[size - 1] = '\0';
+}
+
+/**
  * 把 affinity_spec 应用到自身进程。
- * 降级：值非法、或与本机核集合无交集 → 回落代码默认并记日志；簇探测失败 → 单簇（c0 = 全部核）；
- * 迁组失败 → 只设亲和；实际生效范围一律以读回的 Cpus_allowed_list 为准，故这里不写"已生效"。
+ * 迁组：**固定迁到 cpuset 根组**（CPUSET_DIR）——根组的 cpus 恒为全部在线核，且组名与 ROM 无关，
+ * 所以不探测组名、不遍历组目录；当前组已覆盖目标核集合时无需迁组（组已是上限，直接设亲和即可）。
+ * 降级：值非法、或与本机核集合无交集 → 回落代码默认；簇探测失败 → 单簇（c0 = 全部核）；
+ * 迁组失败（如 SELinux 拒写）、设亲和失败 → 只保留能做的部分。实际生效范围一律以读回的
+ * Cpus_allowed_list 为准，故这里不写"已生效"——请求被 cpuset 夹取或写入失败时，读回的就是事实。
+ * **日志**：本函数内**所有**异常/降级都不单独打日志，一律用 cpu_aff_note() 记进同一个 reason，
+ * 由末尾那**一个**降级状态机按"状态变化"打一条（见 cpu_aff_reason）。
  */
 static void apply_cpu_affinity(void) {
+    char reason[512] = "";   // 本次"没做到 / 回落了"的原因摘要；空 = 全部按请求做到
     // 簇划分：含 cpu0 的簇 = c0，其余按首核号升序（探测失败 = 单簇，见 clusters_probe）
     cpu_set_t clusters[CPU_CLUSTER_MAX];
     const char *cluster_src = CLUSTER_SRC_SINGLE;
@@ -1423,10 +1375,12 @@ static void apply_cpu_affinity(void) {
     // 展开配置值：非法 → 回落代码默认（不静默沿用旧值，否则用户改错一个字符看不出没生效）
     cpu_set_t want;
     if (!affinity_expand(affinity_spec, clusters, nclusters, &want)) {
-        write_log("CPU 亲和 配置值非法(%s) → 回落默认 %s", affinity_spec, CFG_DEFAULT_CPU_AFFINITY);
+        cpu_aff_note(reason, sizeof(reason), "配置值非法(%s) → 回落默认 %s",
+                     affinity_spec, CFG_DEFAULT_CPU_AFFINITY);
         reset_cpu_affinity_defaults();
         if (!affinity_expand(affinity_spec, clusters, nclusters, &want)) {
-            write_log("CPU 亲和 默认值 %s 也展开失败 → 按 0 号簇处理", CFG_DEFAULT_CPU_AFFINITY);
+            cpu_aff_note(reason, sizeof(reason), "默认值 %s 也展开失败 → 按 0 号簇处理",
+                         CFG_DEFAULT_CPU_AFFINITY);
             want = clusters[0];
         }
     }
@@ -1436,20 +1390,20 @@ static void apply_cpu_affinity(void) {
     if (!cpu_list_read("/sys/devices/system/cpu/present", &present)) {
         char w_str[128];
         cpu_set_format(&want, w_str, sizeof(w_str));
-        write_log("CPU 亲和 读不到本机核编号 → 按配置核集合 %s 直接设置", w_str);
+        cpu_aff_note(reason, sizeof(reason), "读不到本机核编号 → 按配置核集合 %s 直接设置", w_str);
     } else {
         cpu_set_intersect(&want, &present);
         if (cpu_set_empty(&want)) {
             char p_str[128];
             cpu_set_format(&present, p_str, sizeof(p_str));
-            write_log("CPU 亲和 配置核集合与本机核 %s 无交集 → 回落默认 %s",
-                      p_str, CFG_DEFAULT_CPU_AFFINITY);
+            cpu_aff_note(reason, sizeof(reason), "配置核集合与本机核 %s 无交集 → 回落默认 %s",
+                         p_str, CFG_DEFAULT_CPU_AFFINITY);
             reset_cpu_affinity_defaults();
             if (!affinity_expand(affinity_spec, clusters, nclusters, &want))
                 want = clusters[0];
             cpu_set_intersect(&want, &present);
             if (cpu_set_empty(&want)) {
-                write_log("CPU 亲和 默认核集合与本机核也无交集 → 仍按默认设置，结果以读回为准");
+                cpu_aff_note(reason, sizeof(reason), "默认核集合与本机核也无交集 → 仍按默认设置，结果以读回为准");
                 want = clusters[0];
             }
         }
@@ -1458,7 +1412,8 @@ static void apply_cpu_affinity(void) {
     char want_str[128];
     cpu_set_format(&want, want_str, sizeof(want_str));
 
-    // 先迁组：当前组 cpus 已覆盖目标核集合时无需迁组（组已是上限，直接设亲和即可）
+    // 先迁组：固定迁到 cpuset 根组（根组 cpus 恒为全部在线核、组名与 ROM 无关 → 不探测、不扫组）。
+    // 当前组 cpus 已覆盖目标核集合时无需迁组（组已是上限，直接设亲和即可）。
     char group[256] = "/";
     char cur_dir[320];
     if (read_self_cpuset_group(group, sizeof(group)))
@@ -1468,17 +1423,19 @@ static void apply_cpu_affinity(void) {
     char mig[400] = "";   // 本次迁组结果（未迁组则空）
     cpu_set_t cur_set;
     if (!read_dir_cpus(cur_dir, &cur_set) || !cpu_set_covers(&cur_set, &want)) {
-        char landed[320] = "";
-        if (cpuset_migrate_self(&want, landed, sizeof(landed)))
-            snprintf(mig, sizeof(mig), "迁组 %s → %s", cur_dir, landed);
+        if (cpuset_join(CPUSET_DIR))
+            snprintf(mig, sizeof(mig), "迁组 %s → %s", cur_dir, CPUSET_DIR);
         else
-            write_log("CPU 亲和 迁组失败（当前组 %s 不覆盖 %s，且无可迁入组）→ 只设亲和",
-                      cur_dir, want_str);
+            // 只记原因、不当场打日志：与其余异常共用同一个降级状态机（见函数末），
+            // 否则 300s 重试会让 SELinux 拒写的机型每 5 分钟刷一条（约 288 行/天）。
+            cpu_aff_note(reason, sizeof(reason),
+                         "迁组失败（当前组 %s 不覆盖 %s，写 %s/cgroup.procs 未成功）",
+                         cur_dir, want_str, CPUSET_DIR);
     }
 
     // 设亲和：被 cpuset 夹取时调用会成功但结果被收窄，故后面必须读回
     if (sched_setaffinity(0, sizeof(cpu_set_t), &want) != 0)
-        write_log("CPU 亲和 设置失败 errno=%d(%s)", errno, strerror(errno));
+        cpu_aff_note(reason, sizeof(reason), "设亲和失败 errno=%d(%s)", errno, strerror(errno));
 
     // 读回：实际可运行的核 = cpuset 组 cpus ∩ 自身亲和，只有读回的值才是事实
     char allowed[64] = "读取失败";
@@ -1502,6 +1459,77 @@ static void apply_cpu_affinity(void) {
         strncpy(cpu_aff_result, line, sizeof(cpu_aff_result) - 1);
         cpu_aff_result[sizeof(cpu_aff_result) - 1] = '\0';
     }
+
+    // 记下本次读回的组路径，供低频重申判断"是否被 ROM 改回去了"（见 cpu_affinity_reassert）。
+    // 读不到组路径时置空 = 不看"变没变"；重试不受影响（由 cpu_aff_reason 驱动）。
+    if (has_group) {
+        strncpy(cpu_aff_last_group, now_group, sizeof(cpu_aff_last_group) - 1);
+        cpu_aff_last_group[sizeof(cpu_aff_last_group) - 1] = '\0';
+    } else {
+        cpu_aff_last_group[0] = '\0';
+    }
+
+    // 目标是否真的拿到：**读回的核集合 ⊇ 请求集合**才算拿到（cpuset 的 cpus 是硬上限，
+    // 被组夹住时读回必然小于请求；/proc/self/status 读不到时解析失败，同样按"没拿到"处理）。
+    // 与前面的异常并进同一个 reason（谁先记谁在前，多条用"；且"连接）。
+    cpu_set_t got;
+    if (!(cpu_list_parse(allowed, &got) && cpu_set_covers(&got, &want)))
+        cpu_aff_note(reason, sizeof(reason), "读回 %s 未覆盖请求 %s", allowed, want_str);
+
+    // 降级状态机（**唯一**的降级状态位 = cpu_aff_reason）：只在**状态变化**时记日志——
+    // 进入降级打一条、原因变了再打一条、恢复打一条；"持续同一原因"不再重复打。
+    // reason 里带着**具体是哪种错**（配置值非法 / 无交集 / 迁组失败 / 设亲和失败 / 读回不覆盖），
+    // 不笼统化成一句"未达目标"。不做这一步，300s 的定期重试会让同一条原因每 5 分钟刷一行。
+    if (reason[0]) {
+        if (strcmp(reason, cpu_aff_reason) != 0) {
+            write_log("CPU 亲和 异常：%s（cpuset 组 %s）→ 每 %d 秒重试",
+                      reason, has_group ? now_group : "?", CPU_AFF_REASSERT_SEC);
+            strncpy(cpu_aff_reason, reason, sizeof(cpu_aff_reason) - 1);
+            cpu_aff_reason[sizeof(cpu_aff_reason) - 1] = '\0';
+        }
+    } else if (cpu_aff_reason[0]) {
+        write_log("CPU 亲和 已恢复：读回 %s（请求 %s）", allowed, want_str);
+        cpu_aff_reason[0] = '\0';
+    }
+}
+
+/**
+ * 低频重申 / 重试：一次性迁组有两种"静默失效"——ROM 事后把进程重新分类回 top-app/main（组路径变了），
+ * 或本来就迁不进去（SELinux 拒写、被 cpuset 夹取）。前者只需在"变了"时动作，后者要定期再试一次。
+ * 后者的判据是 apply 侧留下的那个降级状态串（含配置/环境类异常，见 cpu_aff_reason）。
+ *
+ * 频率与开销（为什么是 300s、为什么不另起轮询）：
+ *   本函数只在**既有的 5s 节拍**上被调用（1s 主循环里的 5s 控制块 + 等待设备循环，各一处），
+ *   且内部自限流：除首次外绝大多数调用只做一次 time() 比较（vDSO，微秒级）；真读
+ *   /proc/self/cgroup 至多每 CPU_AFF_REASSERT_SEC（300s）一次。**不新增线程/定时器，不改变控制时序**。
+ *   取 300s：重试是兜底而非主路径，且失败态下每次重试都要写 cgroup.procs + sched_setaffinity，
+ *   间隔太短没有意义；被 ROM 改回后的纠正延迟上界 = 300s + 一个 5s 节拍。
+ *
+ * 触发条件（任一即重做一次完整应用）：
+ *   ① 组路径与上次读回的不一致 → 被 ROM 改回去了；
+ *   ② 上次应用留下了异常 / 没达目标（cpu_aff_reason 非空）→ 定期重试。
+ * 两者都不刷日志：①只在真的变了时打一条；②的"失败/恢复"由 apply_cpu_affinity() 按状态变化各打一条。
+ * 返回 1=本次重做了；0=未到点 / 无需动作。
+ */
+static int cpu_affinity_reassert(void) {
+    static time_t last = 0;
+    time_t now = time(NULL);
+    if (last == 0) { last = now; return 0; }        // 首次只记时刻：启动那次已由 main() 应用过
+    if (now - last < CPU_AFF_REASSERT_SEC) return 0;
+    last = now;
+
+    int need = 0;
+    if (cpu_aff_last_group[0] != '\0') {            // 有上次读回的组路径才谈得上"变没变"
+        char group[256] = "";
+        if (read_self_cpuset_group(group, sizeof(group)) && strcmp(group, cpu_aff_last_group) != 0) {
+            write_log("CPU 亲和 组由 %s 变为 %s → 重做一次", cpu_aff_last_group, group);
+            need = 1;
+        }
+    }
+    if (cpu_aff_reason[0]) need = 1;                // 上次没达目标（reason 非空）：定期重试；日志由 apply 侧按状态变化打
+    if (!need) return 0;
+    apply_cpu_affinity();
+    return 1;
 }
 
 // ======================== 可执行文件名提取 ========================
@@ -4339,6 +4367,9 @@ int main(int argc, char *argv[]) {
         // 那是"按当前设备刷新上限"的活，选到设备时 select_active_device 之后自会刷一次。
         // CPU 亲和与设备无关（apply_cpu_affinity 只读配置与自身），故这里补一次即可。
         if (config_retry_if_needed()) apply_cpu_affinity();
+        // CPU 亲和低频重申：等待设备这段可能很久（开机早期甚至一直等不到设备），
+        // 同样挂在既有的 5s 节拍上、由函数内部自限流（真读 /proc/self/cgroup 至多每 300s 一次）。
+        cpu_affinity_reassert();
         // 断连自动开蓝牙：与卸载自清理同理必须放在本循环内——蓝牙未开时正好停在本循环（连不上设备），
         // 若不在此处轮询，钩子写的开蓝牙请求将永远得不到执行。
         poll_bt_request();
@@ -4416,6 +4447,14 @@ int main(int argc, char *argv[]) {
             // -1.5 看门狗反向保活：必须排在本块内所有 `continue`（断联/无设备）之前——两处 continue
             //      之后的代码在无 BLE 时不执行，放后面就会出现"最需要它的时候它不跑"。内部 60s 门控。
             maybe_keepalive_watchdog();
+
+            // -1.55 CPU 亲和低频重申：ROM 若把进程重新分类回 top-app/main（等），一次性迁组会
+            //       静默失效（日志里也看不出），故低频复查一次、变了就重做。同样必须排在本块内
+            //       所有 `continue` 之前——断联/无设备时本块会 continue，主循环不跑，但那正是
+            //       驻留最久的状态，漏在这里就会出现"改回了也没人管"。函数内部自限流：
+            //       真读 /proc/self/cgroup 至多每 300s 一次，其余调用只做一次时间比较；
+            //       除了"被改回"，上次没达目标时也在这里定期重试。
+            cpu_affinity_reassert();
 
             // 0. CPU thermal_zone 周期重扫（移入 5s 控制块：全量扫描 ~100 个 zone 阻塞近 1s，
             //    不在 1s 采集热路径 write_webui_data 内触发）
