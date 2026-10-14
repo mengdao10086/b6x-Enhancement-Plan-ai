@@ -284,8 +284,9 @@ def _compat_product(definition):
 
 
 def render_params_json(definition):
+    # 紧凑输出（无缩进/无多余空格）：语义不变，仅减小落盘体积（APK 内该资产约省 1.6 KB）
     return json.dumps(build_params_json(definition), ensure_ascii=False,
-                      indent=2) + "\n"
+                      separators=(",", ":")) + "\n"
 
 
 # --------------------------------------------------------------------------

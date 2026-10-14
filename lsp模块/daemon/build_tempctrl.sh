@@ -36,9 +36,11 @@ fi
 SRC="$1"
 OUT="$2"
 
+# -Oz 代替 -O2：体积优先（守护程序是 5s 周期的轻负载循环，性能余量充足）；
+# --icf=safe：lld 的安全等同代码折叠，只合并确定等价的函数，不做 --icf=all 的激进合并。
 "$CC" \
-    -O2 \
+    -Oz \
     -ffunction-sections -fdata-sections \
-    -Wl,--gc-sections -Wl,--strip-all \
+    -Wl,--gc-sections -Wl,--strip-all -Wl,--icf=safe \
     -fno-unwind-tables -fno-asynchronous-unwind-tables \
     -o "$OUT" "$SRC" -lm

@@ -39,6 +39,15 @@ android {
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
             )
+
+            // assets/dexopt/baseline.prof(+.profm) 实测 1,694 字节且为 STORED，
+            // 全部来自 appcompat/material 等外部依赖带的 baseline-prof.txt。
+            // 忽略外部依赖的 baseline profile 即可不再产出该资产（本项目无自建 profile）。
+            optimization {
+                baselineProfile {
+                    ignoreFromAllExternalDependencies = true
+                }
+            }
         }
     }
 
@@ -58,6 +67,23 @@ android {
                 "META-INF/*.version"
             )
         }
+    }
+
+    // 资源侧密度裁剪：库里 5 档密度（mdpi/hdpi/xhdpi/xxhdpi/xxxhdpi）的 appcompat
+    // .9.png/图标各存一份，实测共 70,899 字节（STORED，1:1 落包）。只留 xxhdpi 一档、
+    // 其余交给系统按密度缩放，约省 4/5。
+    // 注意：resConfigs/resourceConfigurations 在 aapt2（aapt>=21）已不支持密度过滤，
+    // 只能用 aapt2 的 --preferred-density（单档）。
+    androidResources {
+        additionalParameters("--preferred-density", "xxhdpi")
+    }
+
+    // AGP 会把依赖树加密写进 APK 签名块（DependencyInfoBlock，实测 3,907 字节），
+    // 仅供 Google Play 做 SDK 索引。本模块走 GitHub Release 侧载、不上架 Play，
+    // 关掉后签名块按 4096 对齐会从 8192 降到 4096。
+    dependenciesInfo {
+        includeInApk = false
+        includeInBundle = false
     }
 }
 
