@@ -2,7 +2,7 @@
 <!--
     参数说明浮窗的说明卡（浮层里唯一亮的那块，见 ConfigKeyRow.HintOverlay）。
     内容：标题（参数名）+ 若干「小标题 + 正文」块——正文块由 HintOverlay 按 params.json 的 uiNote
-    （缺失时回退到 desc/范围/单位等既有字段）动态加进 @id/config_hint_body，按序渲染。
+    动态加进 @id/config_hint_body，按序渲染。
     尺寸：宽固定 4/5 屏宽、高上限 1/4 屏高（由 HintOverlay 就地测量后写进 LayoutParams）；
     **内容超出高度上限时由内层 ScrollView 承接滚动**——所以卡里套一层 ScrollView，超出可上下滚。
     触摸：卡本体（含滚动、点击）正常消费——把"不拦截"限定为「只有卡以外的区域才放行」，

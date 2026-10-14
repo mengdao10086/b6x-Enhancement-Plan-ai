@@ -86,14 +86,6 @@ public final class KiCutTable {
 
         public Cluster() {
         }
-
-        public Cluster(List<Point> initial) {
-            points.addAll(initial);
-        }
-
-        public boolean isEmpty() {
-            return points.isEmpty();
-        }
     }
 
     private KiCutTable() {
@@ -254,18 +246,6 @@ public final class KiCutTable {
 
     // ==================== 求值 ====================
 
-    /**
-     * 一个冷值上的输出倍率：逐轴按 {@link #axisEffective} 取「离该轴整段参照值 M 最近」的候选（并列取更小）；
-     * 该轴无参评簇时返回 {@link #NEUTRAL}。
-     *
-     * @return {@code {升倍率, 降倍率}}（×100 口径，未取整——与 C 端同为浮点）
-     */
-    @NonNull
-    public static float[] evaluate(@NonNull List<Cluster> clusters, int cold) {
-        List<Curve> cs = activeCurves(clusters);
-        return new float[]{axisEffective(cs, cold, AXIS_UP), axisEffective(cs, cold, AXIS_DN)};
-    }
-
     /** 有效簇（含 ≥1 个填了冷值的点）对应的曲线；占位行-only 的簇不算（与 C 端「清空该簇」一致）。 */
     @NonNull
     private static List<Curve> activeCurves(@NonNull List<Cluster> clusters) {
@@ -317,93 +297,11 @@ public final class KiCutTable {
     }
 
     /**
-     * 单轴多簇生效值：参评簇 = 该轴有控制点的簇（全留空簇不参评）；逐候选取离整段参照值 M 最近者
-     * （并列取更小）；只有一个候选则恒取它（直通，与 M 无关）；无参评簇 → {@link #NEUTRAL}。
-     * 与 C 端 {@code ki_cut_axis_eval} 逐语句一致。
-     */
-    private static float axisEffective(@NonNull List<Curve> cs, int cold, int axis) {
-        List<Curve> part = axisParticipants(cs, axis);
-        if (part.isEmpty()) {
-            return NEUTRAL;
-        }
-        float m = axisMean(part, axis);
-        float best = part.get(0).value(cold, axis);
-        for (int i = 1; i < part.size(); i++) {
-            best = nearer(best, part.get(i).value(cold, axis), m);
-        }
-        return best;
-    }
-
-    /**
-     * 曲线图上「实际生效」的一条线：{@code x = 0 … xMax} 逐格取该生效值（逐轴取离整段参照值最近者）。
-     * 语义与 C 端 {@code ki_cut_eval} 逐位对齐。
-     *
-     * @param axis 取值轴，见 {@link #AXIS_UP} / {@link #AXIS_DN} / {@link #AXIS_KDP}
-     */
-    @NonNull
-    public static float[] effectiveCurve(@NonNull List<Cluster> clusters, int xMax, int axis) {
-        List<Curve> part = axisParticipants(activeCurves(clusters), axis);
-        float m = axisMean(part, axis);
-        float[] out = new float[Math.max(0, xMax) + 1];
-        float[] sample = new float[3];
-        for (int x = 0; x < out.length; x++) {
-            sampleAt(part, x, axis, m, sample);
-            out[x] = sample[0];
-        }
-        return out;
-    }
-
-    /** {@link #effectiveCurve} 的兼容别名（旧名如此；语义同为「生效曲线」）。 */
-    @NonNull
-    public static float[] minCurve(@NonNull List<Cluster> clusters, int xMax, int axis) {
-        return effectiveCurve(clusters, xMax, axis);
-    }
-
-    /**
-     * 「不生效候选」曲线：{@code x = 0 … xMax} 逐格给出该轴不生效候选里离生效值最近的那个值；
-     * 该处没有不生效候选时 = {@link #effectiveCurve} 的值（与实线重合）。供 K2 画同色虚线。
-     *
-     * @param axis 取值轴，见 {@link #AXIS_UP} / {@link #AXIS_DN} / {@link #AXIS_KDP}
-     */
-    @NonNull
-    public static float[] shadowCurve(@NonNull List<Cluster> clusters, int xMax, int axis) {
-        List<Curve> part = axisParticipants(activeCurves(clusters), axis);
-        float m = axisMean(part, axis);
-        float[] out = new float[Math.max(0, xMax) + 1];
-        float[] sample = new float[3];
-        for (int x = 0; x < out.length; x++) {
-            sampleAt(part, x, axis, m, sample);
-            out[x] = sample[2];
-        }
-        return out;
-    }
-
-    /**
-     * 该轴逐整数冷值处「是否存在不生效候选」（true = 该处画同色虚线）。粒度 = 逐整数冷值；
-     * K2 若想画「段」，把连续 true 的极大区间并起来即可。
-     *
-     * @param axis 取值轴，见 {@link #AXIS_UP} / {@link #AXIS_DN} / {@link #AXIS_KDP}
-     */
-    @NonNull
-    public static boolean[] inactiveMask(@NonNull List<Cluster> clusters, int xMax, int axis) {
-        List<Curve> part = axisParticipants(activeCurves(clusters), axis);
-        float m = axisMean(part, axis);
-        boolean[] out = new boolean[Math.max(0, xMax) + 1];
-        float[] sample = new float[3];
-        for (int x = 0; x < out.length; x++) {
-            sampleAt(part, x, axis, m, sample);
-            out[x] = sample[1] != 0f;
-        }
-        return out;
-    }
-
-    /**
      * 一次性算齐某轴逐 x 的三份并行数据（三个数组长度须相等，通常 = {@code xMax + 1}，由调用方提供并装填）：
      * {@code value[x]} = 生效值、{@code shadow[x]} = 离生效值最近的「不生效候选」值（无候选处 = 生效值）、
      * {@code inactive[x]} = 该处是否存在不生效候选。
      *
-     * <p>结果与分别调 {@link #effectiveCurve} / {@link #shadowCurve} / {@link #inactiveMask} 逐位相同，
-     * 但只建一次 {@link #activeCurves}、参评簇子表与整段参照值 M 也只算一次。供
+     * <p>只建一次 {@link #activeCurves}、参评簇子表与整段参照值 M 也只算一次。供
      * {@code KiCutChartView.Series.of} 一次取齐三条曲线数据。
      *
      * @param axis 取值轴，见 {@link #AXIS_UP} / {@link #AXIS_DN} / {@link #AXIS_KDP}

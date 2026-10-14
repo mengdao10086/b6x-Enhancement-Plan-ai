@@ -107,10 +107,8 @@ start() {
     sleep 2
     if running; then
         # PID 取自与 running() 同一个判据（bin_pids），不再用 pgrep -f "$BIN"：
-        # 那个子串匹配可能先命中"命令行里出现过该路径"的别的进程，导致 renice 打到别人身上、
-        # 日志里的 pid 也不是守护进程的。
+        # 那个子串匹配可能先命中"命令行里出现过该路径"的别的进程，日志里的 pid 就不是守护进程的。
         pid=$(bin_pids | head -1)
-        renice -n -20 -p "$pid" > /dev/null 2>&1
         log "已启动 tempctrl（pid=$pid）"
         return 0
     fi

@@ -201,7 +201,7 @@
         <b>验收例（页内预设「★ 两簇不交叉（用户验收例）」）：</b>簇1 左 70 / 右 90，簇2 左 60 / 右 80 → M = (70+90+60+80)/4 = <b>75</b>（两段都是直线且跨度相同，故 M ＝ 四个端点值的平均）。<br>
         左段：|70−75|=5 &lt; |60−75|=15 → 生效 <b>70</b>（取较高的那条，已不再是「取最小」）；右段：|80−75|=5 &lt; |90−75|=15 → 生效 <b>80</b>；中点：|80−75| = |70−75| → 并列 → 取更小 <b>70</b>。<br>
         <b>为什么废弃「逐点平均」：</b>逐点平均 M(x)=(a(x)+b(x))/2 时，两候选到 M(x) 恒等距 → 只剩并列、规则失效。改成<b>整段一个常数 M</b> 后才有区分度。<br>
-        <b>实现口径：</b>与源逐句一致（<code>ki_cut_axis_eval</code> / <code>KiCutTable.axisEffective</code>）：M 用梯形公式在整数冷值上求和；等距判定用 <code>TIE_EPS = 1e-3</code>，并列取更小倍率。
+        <b>实现口径：</b>与源逐句一致（<code>ki_cut_axis_eval</code> / <code>KiCutTable.fillCurves</code>）：M 用梯形公式在整数冷值上求和；等距判定用 <code>TIE_EPS = 1e-3</code>，并列取更小倍率。
       </div>
     </div>
   </details>
@@ -266,7 +266,7 @@
         <h2>数据表（当前取值轴）</h2>
         <div class="inner"><div class="tblscroll" id="tbl"></div></div>
       </div>
-      <p class="small muted" style="margin:0">虚线口径：每个冷值上画「<b>离生效值最近的那一条不生效候选</b>」（对应 KiCutTable.shadowCurve），故虚线多数时候紧贴实线，只在候选值互相合并/交换的冷值处明显凸出。实线＝每个冷值选中的那一方连成的折线；在两簇「选中方切换」的冷值处，两候选本身取值不同，实线会出现<b>竖向跳变</b>（例：验收例在 x=100 由并列取更小跳到 70）。</p>
+      <p class="small muted" style="margin:0">虚线口径：每个冷值上画「<b>离生效值最近的那一条不生效候选</b>」（对应 KiCutTable.fillCurves 的 shadow 输出），故虚线多数时候紧贴实线，只在候选值互相合并/交换的冷值处明显凸出。实线＝每个冷值选中的那一方连成的折线；在两簇「选中方切换」的冷值处，两候选本身取值不同，实线会出现<b>竖向跳变</b>（例：验收例在 x=100 由并列取更小跳到 70）。</p>
       <p class="small muted" id="note" style="margin:0"></p>
     </main>
   </div>

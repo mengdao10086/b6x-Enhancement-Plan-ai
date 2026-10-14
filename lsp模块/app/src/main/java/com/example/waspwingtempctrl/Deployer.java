@@ -388,7 +388,7 @@ public final class Deployer {
     private Status buildStatus(Map<String, String> kv, boolean suOk, String expectedBin,
                                String expectedScript, List<String> notes) {
         if (kv.containsKey("MD5TOOL") && "0".equals(kv.get("MD5TOOL"))) {
-            notes.add("设备缺少 md5sum，无法比对内容哈希（判定退化为存在性检查）");
+            notes.add("设备缺少 md5sum，无法比对内容哈希，部署判据无从通过，一律判为未部署");
         }
         String scriptPath = kv.get("SCRIPT");
         if (scriptPath == null) {
@@ -760,7 +760,7 @@ public final class Deployer {
             return new Attempt(false, true, kv, "未启动");
         }
         steps.add((viaWatchdog ? "已由看门狗启动 tempctrl（PID " : "已拉起新实例（PID ")
-                + nvl(kv.get("NEW_PID")) + "，已 renice -20）");
+                + nvl(kv.get("NEW_PID")) + "）");
         steps.add("温控空窗约 0~" + (KILL_WAIT_LOOPS + KILL9_WAIT_LOOPS)
                 + " 秒（只等旧实例退出；C 端无启动延时）");
         return new Attempt(true, true, kv, "");
@@ -1327,7 +1327,6 @@ public final class Deployer {
                 + "    [ -n \"$NEW_PID\" ] && break\n"
                 + "  done\n"
                 + "fi\n"
-                + "if [ -n \"$NEW_PID\" ]; then renice -n -20 -p \"$NEW_PID\" > /dev/null 2>&1; fi\n"
                 // 4) 新 PID 必须与旧的不同，否则只是"读到了同一个残留进程"
                 + "if [ -n \"$NEW_PID\" ] && [ \"$NEW_PID\" = \"$OLD_PID\" ]; then NEW_PID=\"\"; fi\n"
                 + "if [ -n \"$NEW_PID\" ]; then echo STARTED=1; else echo STARTED=0; fi\n"

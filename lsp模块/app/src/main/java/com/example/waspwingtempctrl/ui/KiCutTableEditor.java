@@ -50,7 +50,7 @@ import java.util.function.Consumer;
  *   <li><b>插入态</b>（点「添加点」）：点线＝在该处插入一条「四元组全空」的新行（不再直接追加到末尾）；</li>
  *   <li><b>拆分态</b>（点「拆分簇」）：点线＝在此常规拆分，点行本身＝该行由上下两簇共享。</li>
  * </ul>
- * 两种模式互斥；再点同一按钮、点表内空白处、或发生增删/拆分即退出。整表在 0 簇时显示「还没有簇」空态与「添加簇」。
+ * 两种模式互斥；再点同一按钮、点表外、或发生增删/拆分即退出。整表在 0 簇时显示「还没有簇」空态与「添加簇」。
  */
 final class KiCutTableEditor {
 
@@ -396,7 +396,7 @@ final class KiCutTableEditor {
         applyModeVisuals();
     }
 
-    /** 退出插入/拆分态（点表内空白处、或重建后下标越界时）。 */
+    /** 退出插入/拆分态（由观察层在点表外时调用；重建后的下标越界由 {@link #rebuild} 清退）。 */
     private void exitModes() {
         if (insertModeIndex < 0 && splitModeIndex < 0) {
             return;
@@ -900,7 +900,6 @@ final class KiCutTableEditor {
 
     /** 一个点行（四个数字框 + 删除 + 拆分态命中层）。 */
     private final class PointRow {
-        final View view;
         final EditText cold;
         final EditText kdp;
         final EditText up;
@@ -916,7 +915,6 @@ final class KiCutTableEditor {
         final TextInputLayout[] boxes;
 
         PointRow(View view) {
-            this.view = view;
             this.cold = view.findViewById(R.id.ki_cut_cold);
             this.kdp = view.findViewById(R.id.ki_cut_kdp);
             this.up = view.findViewById(R.id.ki_cut_up);

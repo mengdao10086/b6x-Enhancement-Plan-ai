@@ -1758,7 +1758,7 @@ final class ConfigKeyRow {
             titleView.setText(meta.label);
             bodyView.removeAllViews();
             Context ctx = card.getContext();
-            List<HintSection> sections = hintSections(meta, ctx);
+            List<HintSection> sections = hintSections(meta);
             for (int i = 0; i < sections.size(); i++) {
                 addSection(ctx, sections.get(i), i == 0);
             }
@@ -1955,76 +1955,15 @@ final class ConfigKeyRow {
             bodyView.addView(bt);
         }
 
-        /**
-         * 浮窗内容：优先用参数定义侧给的 {@code uiNote}（有序的「小标题 + 正文」块）；
-         * 缺失/为空时回退到既有字段拼装（作用 = desc；填写指导 = 取值/范围/单位/默认/生效条件/界面自用）。
-         * 回退是必需的：K1 未落地 {@code uiNote} 时浮窗不能空白。
-         */
-        private static List<HintSection> hintSections(@NonNull KeyMeta meta, @NonNull Context ctx) {
+        /** 浮窗内容：取参数定义侧给的 {@code uiNote}（有序的「小标题 + 正文」块）；缺失/为空时浮窗只有标题。 */
+        private static List<HintSection> hintSections(@NonNull KeyMeta meta) {
             List<HintSection> out = new ArrayList<>();
             if (meta.uiNote != null && !meta.uiNote.isEmpty()) {
                 for (UiNote note : meta.uiNote) {
                     out.add(new HintSection(note.title, note.text));
                 }
-                return out;
-            }
-            if (!meta.desc.isEmpty()) {
-                out.add(new HintSection(ctx.getString(R.string.config_hint_section_desc), meta.desc));
-            }
-            String guide = fallbackGuide(meta, ctx);
-            if (!guide.isEmpty()) {
-                out.add(new HintSection(ctx.getString(R.string.config_hint_section_fill), guide));
             }
             return out;
-        }
-
-        /** 回退用的「填写指导」：把既有字段拼成一段多行文本。 */
-        private static String fallbackGuide(@NonNull KeyMeta meta, @NonNull Context ctx) {
-            List<String> parts = new ArrayList<>();
-            if (meta.isEnum()) {
-                List<String> values = new ArrayList<>();
-                for (OptionMeta option : meta.options) {
-                    values.add(option.label);
-                }
-                if (!values.isEmpty()) {
-                    parts.add(ctx.getString(R.string.config_hint_values, TextUtils.join(" / ", values)));
-                }
-            } else if (meta.isPath()) {
-                parts.add(ctx.getString(R.string.config_hint_path_type));
-            } else if (meta.isSwitch()) {
-                parts.add(ctx.getString(R.string.config_hint_switch_type));
-            } else if (meta.isMulti()) {
-                if (meta.fields != null) {
-                    List<String> fields = new ArrayList<>();
-                    for (FieldMeta field : meta.fields) {
-                        fields.add(field.min != null && field.max != null
-                                ? field.label + " " + field.min + "~" + field.max : field.label);
-                    }
-                    parts.add(ctx.getString(R.string.config_hint_values, TextUtils.join("；", fields)));
-                }
-            } else {
-                Integer min = meta.min(0);
-                Integer max = meta.max(0);
-                if (min != null && max != null) {
-                    parts.add(ctx.getString(R.string.config_range,
-                            String.valueOf(min), String.valueOf(max)));
-                }
-            }
-            if (!meta.unit.isEmpty()) {
-                parts.add(meta.unit);
-            }
-            if (!meta.unitNote.isEmpty()) {
-                parts.add(meta.unitNote);
-            }
-            parts.add(ctx.getString(R.string.config_hint_default, meta.defaultValue.format()));
-            if (!meta.requires.isEmpty()) {
-                parts.add(ctx.getString(R.string.config_hint_requires,
-                        TextUtils.join("、", meta.requires)));
-            }
-            if (!meta.daemonConsumes) {
-                parts.add(ctx.getString(R.string.config_ui_only));
-            }
-            return TextUtils.join("\n", parts);
         }
 
         private static int clamp(int value, int lo, int hi) {

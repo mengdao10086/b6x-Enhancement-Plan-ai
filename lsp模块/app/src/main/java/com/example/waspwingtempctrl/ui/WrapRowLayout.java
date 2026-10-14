@@ -18,13 +18,16 @@ import java.util.Arrays;
  *
  * <h3>三种子视图</h3>
  * <ul>
- *   <li><b>leading</b>（缺省）：从行左界起依次排，列距 {@code wrapColGap}，放不下换行。</li>
+ *   <li><b>leading</b>（缺省）：从行左界起依次排，列距 {@code wrapColGap}（该 XML 属性当前全仓
+ *       未被设置，列距恒取缺省 {@code @dimen/space_m}），放不下换行。</li>
  *   <li><b>trailing</b>：连续的一串 trailing 构成「尾段」，每行都贴本行<b>行尾（右界）</b>对齐；
  *       分配按「换行偏好顺序」逐档尝试（详见 {@link #placeTailRun}）——<b>能用整行解决就不混排，
  *       混排只在连整行都放不下时才用</b>（① ~ ⑤ 明细见 app/逻辑说明.md §7.7）。</li>
  *   <li><b>fullLine</b>：独占一行且铺满可用宽（measure 用 {@code EXACTLY}），不与其他子视图同行。</li>
  * </ul>
  * 另有 {@code breakBefore}：在其之前强制换行（对 trailing 者，本串尾段就此断开、另起一串）。
+ * <b>注</b>：尾段侧这两条 {@code breakBefore} 语义保留、但当前无调用方行使——{@code setBreakBefore}
+ * 仅作用于 leading 成员，且无布局 XML 设 {@code wrapBreakBefore}。
  * 行距 {@code wrapRowGap}（缺省 = 列距）。行内一律垂直居中，唯一例外是
  * {@link #setVerticalCenterAt} 标记过的子视图（垂直中心钉在行顶之下固定偏移处）。
  *
@@ -312,6 +315,8 @@ public final class WrapRowLayout extends ViewGroup {
      * 每一行（含与参数名同行的那一段）都贴行右界；返回下一个待处理子视图的下标。
      *
      * <p>段内再声明 {@code breakBefore} 者另起一串；段首声明 {@code breakBefore} 时本段不与参数名同行。
+     * 两条尾段侧语义保留、但当前无调用方行使（{@code setBreakBefore} 仅作用于 leading，无 XML 设
+     * {@code wrapBreakBefore}）。
      */
     private int placeTailRun(Pass pass, int start, LayoutParams first) {
         if (pass.rowClosed) {

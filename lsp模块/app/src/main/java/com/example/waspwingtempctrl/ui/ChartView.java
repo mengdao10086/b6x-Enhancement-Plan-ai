@@ -1,7 +1,6 @@
 package com.example.waspwingtempctrl.ui;
 
 import android.content.Context;
-import android.content.res.Configuration;
 import android.content.res.Resources;
 import android.content.res.Resources.Theme;
 import android.graphics.Canvas;
@@ -188,12 +187,6 @@ public class ChartView extends View {
     }
 
     @Override
-    public void onConfigurationChanged(Configuration newConfig) {
-        super.onConfigurationChanged(newConfig);
-        refreshThemeColors();
-    }
-
-    @Override
     protected void onSizeChanged(int w, int h, int oldw, int oldh) {
         super.onSizeChanged(w, h, oldw, oldh);
         rebuild();
@@ -247,6 +240,8 @@ public class ChartView extends View {
             return;
         }
         // 接缝（转速圆点允许下越界的下限）：以绘图区下沿外扩、再被画布下沿收住，圆点才不被裁（见 §7.3）
+        // 注：PAD_B_DP(4) < SEAM_EXTRA_DP + SEAM_BOTTOM_DP(4+5) 时首项恒大于次项，故此处实际恒取
+        // h − SEAM_BOTTOM_DP·density，SEAM_EXTRA_DP 当前对结果无影响（保留为口径锚点）。
         fSeamY = Math.min(fPadT + fH + SEAM_EXTRA_DP * density, h - SEAM_BOTTOM_DP * density);
 
         titleLeft = getContext().getString(R.string.chart_axis_left);

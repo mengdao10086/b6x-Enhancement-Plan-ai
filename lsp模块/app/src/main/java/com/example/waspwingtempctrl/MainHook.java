@@ -1164,15 +1164,6 @@ public class MainHook implements IXposedHookLoadPackage {
                     }
                 }
             });
-            XposedHelpers.findAndHookMethod(android.app.Activity.class, "onDestroy", new XC_MethodHook() {
-                @Override
-                protected void beforeHookedMethod(MethodHookParam param) {
-                    if (isMainActivity(param.thisObject)
-                            && currentGuideActivity == param.thisObject) {
-                        currentGuideActivity = null;
-                    }
-                }
-            });
             Class<?> b6ExpAct = lpparam.classLoader.loadClass("com.example.extool.B6ExperimentalActivity");
             XposedHelpers.findAndHookMethod(b6ExpAct, "onCreate", new XC_MethodHook() {
                 @Override
@@ -1956,17 +1947,12 @@ public class MainHook implements IXposedHookLoadPackage {
             forceReconnect();
             return;
         }
-        // ③ 达上限：设备锁死，停止自动重连 + 写状态文件提示强制重启 App
+        // ③ 达上限：设备锁死，停止自动重连
         reconnectPending = false;
         if (!deviceLockedAlerted) {
             deviceLockedAlerted = true;
             XposedBridge.log(TAG + " 设备锁死: 连续 " + STALL_RECONNECT_MAX
                     + " 次重连仍无回传，停止自动重连，请强制重启 App（散热器重启无效）");
-            try {
-                FileOutputStream fos = new FileOutputStream(currentStatusFile, true);
-                fos.write("DEVICE_LOCKED=1\n".getBytes());
-                fos.close();
-            } catch (Throwable t) { /* 状态文件写入失败忽略 */ }
         }
     }
 
@@ -2016,7 +2002,7 @@ public class MainHook implements IXposedHookLoadPackage {
             // ═══ 双信号并行判断、独立处置 ═══
             boolean queueStalled = getCommandQueueSize() > QUEUE_STALL_THRESHOLD;
             boolean deviceStalled = (cold == stallLastCold && rpm == stallLastRpm
-                    && dispatchStallCount >= DISPATCH_STALL_LIMIT && lastBcastColdLv >= 0);
+                    && dispatchStallCount >= DISPATCH_STALL_LIMIT);
 
             // ① 队列堆积 → 消费协程疑似崩溃，守护线程接管消费（不再依赖重连）
             if (queueStalled) startConsumerThreadIfNeeded();

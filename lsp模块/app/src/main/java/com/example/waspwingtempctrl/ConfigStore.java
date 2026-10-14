@@ -214,11 +214,7 @@ public final class ConfigStore {
         return keys.get(key);
     }
 
-    public String configFileName() {
-        return configFileNameFromDef;
-    }
-
-    /** 键总数（定义里现有 57；界面可据此自检）。 */
+    /** 键总数（定义里现有 55；界面可据此自检）。 */
     public int keyCount() {
         return keys.size();
     }
@@ -1067,7 +1063,7 @@ public final class ConfigStore {
         /**
          * 界面说明块（{@code params.json} 的 {@code uiNote[]}）：<b>有序</b>的「小标题 + 正文」列表，
          * 由参数定义侧生成（配置注释原文，按界面调用需要优化过）。无注释的键为空表。
-         * 界面说明浮窗优先渲染它，空表时回退到 {@link #desc} / 范围 / 单位等既有字段（见 ConfigKeyRow）。
+         * 界面说明浮窗按它逐段渲染；空表时浮窗只有标题（见 ConfigKeyRow）。
          */
         public final List<UiNote> uiNote;
         public final String unit;
@@ -1477,8 +1473,8 @@ public final class ConfigStore {
     }
 
     /**
-     * 纯文本改写层（不引用任何 Android API，可在桌面 JVM 上直接跑测试）：「改单键逐字节可复现」
-     * 的唯一实现点。详见 app/逻辑说明.md §3.2。
+     * 纯文本改写层（不引用任何 Android API）：「改单键逐字节可复现」的唯一实现点。
+     * 详见 app/逻辑说明.md §3.2。
      */
     public static final class ConfText {
 
@@ -1819,8 +1815,7 @@ public final class ConfigStore {
     }
 
     /**
-     * 解析 {@code uiNote[]}：有序的「小标题 + 正文」块。缺失、为空、非对象或正文为空的项都跳过；
-     * 结果为空表时界面据此回退到既有字段（见 ConfigKeyRow）。
+     * 解析 {@code uiNote[]}：有序的「小标题 + 正文」块。缺失、为空、非对象或正文为空的项都跳过。
      */
     private static List<UiNote> parseUiNote(JSONArray a) {
         List<UiNote> out = new ArrayList<>();

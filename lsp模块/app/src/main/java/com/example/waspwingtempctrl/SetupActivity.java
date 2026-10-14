@@ -3,8 +3,6 @@ package com.example.waspwingtempctrl;
 import android.content.Context;
 import android.content.Intent;
 import android.os.Bundle;
-import android.os.Handler;
-import android.os.Looper;
 import android.os.Process;
 import android.view.View;
 import android.view.ViewTreeObserver;
@@ -85,9 +83,8 @@ public class SetupActivity extends AppCompatActivity {
     private static final AtomicBoolean WARMED = new AtomicBoolean();
     /** 预热算出的落页页序号；{@code -1} = 还没算出来。static、不随 Activity 重建清零。 */
     private static final AtomicInteger LANDING_INDEX = new AtomicInteger(-1);
-    private static final Handler MAIN = new Handler(Looper.getMainLooper());
 
-    /** 落页判定的等待上界（毫秒）：超时即由占位页顶上、判定回来再纠正（取值理由见 {@code app/逻辑说明.md} §5.1）。 */
+    /** 落页判定的等待上界（毫秒）：超时即落 {@link #DEFAULT_START_TAB}、此后不再纠正（取值理由见 {@code app/逻辑说明.md} §5.1）。 */
     private static final long LANDING_WAIT_MS = 50L;
 
     private BottomNavigationView nav;
@@ -198,9 +195,8 @@ public class SetupActivity extends AppCompatActivity {
                 LANDING_INDEX.set(landing);
                 StartupTiming.mark(StartupTiming.MARK_LANDING_WAKE);
                 landingDone.countDown();   // 判定一到手就放行主线程
-                // 拷一份给 lambda 捕获：上面的 try/catch 有两处赋值，landing 本身不是 effectively final
-                final int landingForMain = landing;
-                MAIN.post(() -> activity.applyLanding(landingForMain));
+                // 到此为止，不再有"判定回来再跳页纠正"：等不到时主线程已落默认页，这里再补一次跳页本身
+                // 也是一次可见跳页、与不做预判差别极小；判定先到时 settleInitialPage 已按判定落页。
             });
         }
         // 曲线预热：进程级只跑一次（判定不在此列，每次 onCreate 都要跑）
@@ -273,8 +269,10 @@ public class SetupActivity extends AppCompatActivity {
     // ==================== 启动落页 ====================
 
     /**
-     * 落页（{@code onCreate} 调一次）：进程重建取回上次那一页；冷启动有界等判定一手，等不到先用
-     * 占位页、判定到达后 {@link #applyLanding} 纠正。不播放入场动画。见 {@code app/逻辑说明.md} §5.1。
+     * 落页（{@code onCreate} 调一次）：进程重建取回上次那一页；<b>冷启动有界等判定一手——等到了才按
+     * 判定落页，等不到就落 {@link #DEFAULT_START_TAB}</b>，此后<b>不再纠正</b>（去掉"判定回来再跳页"
+     * 的补正：那次补正本身也是一次可见跳页，与不做预判差别极小）。不播放入场动画。
+     * 并行结构与 50ms 上界的理由见 {@code app/逻辑说明.md} §5.1。
      *
      * @param landingDone 预热线程的落页判定同步点；{@code null} = 本次不需要判定（进程重建）
      */
@@ -297,7 +295,7 @@ public class SetupActivity extends AppCompatActivity {
 
     /**
      * 取落页判定：本进程早先已算过就直接用、一秒不等；否则有界等预热线程一手（{@link #LANDING_WAIT_MS}
-     * 是硬上界）。返回 {@code -1} = 没等到，调用方用占位页顶上。见 {@code app/逻辑说明.md} §5.1。
+     * 是硬上界）。返回 {@code -1} = 没等到，调用方落 {@link #DEFAULT_START_TAB}（<b>不再有后续纠正</b>）。
      */
     private static int awaitLanding(CountDownLatch landingDone) {
         // 记账（旁路）：主线程进有界等待那一刻（与"判定放行"相减 = onCreate 里白等的那段）
@@ -312,22 +310,6 @@ public class SetupActivity extends AppCompatActivity {
             Thread.currentThread().interrupt();   // 中断不吞：按"没等到"立刻返回，不再续等
         }
         return LANDING_INDEX.get();
-    }
-
-    /** 预热线程算出的落页判定到达（主线程）：纠正占位页；与当前页相同时什么都不做（不闪）。 */
-    private void applyLanding(int index) {
-        // 越界就不纠正，停在占位页：判定的两个来源都是 indexOf（见 landingPageIndex），
-        // menu_bottom.xml 与 MENU_IDS 一旦漂移就会返回 -1，取下标前必须与 settleInitialPage 同口径地拦一道
-        if (pager == null || isDestroyed() || index < 0 || index >= MENU_IDS.length) {
-            return;
-        }
-        if (index == pager.getCurrentItem()) {
-            return;
-        }
-        syncing = true;
-        pager.setCurrentItem(index, false);
-        nav.setSelectedItemId(MENU_IDS[index]);
-        syncing = false;
     }
 
     /**

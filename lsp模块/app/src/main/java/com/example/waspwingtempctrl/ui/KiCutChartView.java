@@ -1,7 +1,6 @@
 package com.example.waspwingtempctrl.ui;
 
 import android.content.Context;
-import android.content.res.Configuration;
 import android.graphics.Canvas;
 import android.graphics.DashPathEffect;
 import android.graphics.Paint;
@@ -28,7 +27,7 @@ import java.util.Locale;
  * 定标仍按 ×100 口径喂值，只在刻度标签上 ÷100 显示成原始倍率（{@code 0.5} / {@code 1} / {@code 1.5} …）。
  * 「100 = 不削」基准线恒画：中性值并入取值范围，故它总落在可视区内。
  *
- * <p>数据由调用方用 {@link KiCutTable#minCurve} 本地重算好后经 {@link #setCurves} 送上主线程，
+ * <p>数据由调用方用 {@link KiCutTable#fillCurves} 本地重算好后经 {@link #setCurves} 送上主线程，
  * <b>本控件不读文件、不做算法</b>；纵轴定标与其刻度标签在 {@link #setCurves} 里算好并缓存，onDraw 只消费。
  */
 final class KiCutChartView extends View {
@@ -116,18 +115,8 @@ final class KiCutChartView extends View {
     private float[] axisTicks = new float[0];
     private String[] axisLabels = new String[0];
 
-    public KiCutChartView(Context context) {
-        super(context);
-        init();
-    }
-
     public KiCutChartView(Context context, @Nullable AttributeSet attrs) {
         super(context, attrs);
-        init();
-    }
-
-    public KiCutChartView(Context context, @Nullable AttributeSet attrs, int defStyleAttr) {
-        super(context, attrs, defStyleAttr);
         init();
     }
 
@@ -168,18 +157,6 @@ final class KiCutChartView extends View {
             tickLabels[i] = label(xTicks[i]);
         }
         fitAxis();
-        invalidate();
-    }
-
-    @Override
-    public void onConfigurationChanged(Configuration newConfig) {
-        super.onConfigurationChanged(newConfig);
-        float d = getResources().getDisplayMetrics().density;
-        if (d != density) {
-            density = d;
-            init();
-        }
-        colorsReady = false;
         invalidate();
     }
 

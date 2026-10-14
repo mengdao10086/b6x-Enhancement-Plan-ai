@@ -358,12 +358,15 @@ public final class RootShell {
         Process process = null;
         try {
             process = Runtime.getRuntime().exec(new String[]{"su", "-v"});
-            BufferedWriter writer = new BufferedWriter(
-                    new OutputStreamWriter(process.getOutputStream(), StandardCharsets.UTF_8));
-            // 结束标记：与 Scene 的写法一致
-            writer.write("exit 0\nexit 0\n");
-            writer.flush();
-            writer.close();
+            // su -v 打印版本后即退出、不解析 stdin，故无需写任何脚本内容；只需关掉 stdin 给它一个 EOF。
+            // 关闭动作单独兜异常：它与下面的读同处一个 try 时，一旦 write/close 抛 broken pipe（su -v 已退出），
+            // 会被 catch 整段判成"嗅探失败"，把一次本来成功的嗅探作废，且 close 永不执行、只能等超时。
+            // 关不掉 stdin 无所谓：stdout 照读，嗅探判定不受影响。
+            try {
+                process.getOutputStream().close();
+            } catch (IOException ignored) {
+                // su -v 可能已退出：忽略
+            }
             String out = readBounded(process.getInputStream(), SNIFF_TIMEOUT_MS);
             String upper = out.trim().toUpperCase(Locale.ROOT);
             if (upper.contains("MAGISK")) {
