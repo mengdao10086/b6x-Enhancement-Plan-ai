@@ -77,6 +77,12 @@ public class StatusFragment extends Fragment implements PageAware {
      */
     private static volatile String versionLine;
 
+    /**
+     * 「同步清单」本进程是否已<b>成功</b>刷新过：清单只随 APK 变化，成功一次即不再重复读盘；
+     * 失败（返回非 null）不置位，下次探测仍会重试。与 {@link #versionLine} 同族，都是"进程内只做一次"。
+     */
+    private static volatile boolean syncManifestDone;
+
     private TextView statusView;
     /** 换字交叉淡入的"旧文本"层（{@code status_text_stack} 内的装饰层，默认 GONE）。 */
     private TextView statusOutgoingView;
@@ -95,7 +101,7 @@ public class StatusFragment extends Fragment implements PageAware {
 
     /** 操作记录是否展开（默认收起）。 */
     private boolean logExpanded;
-    /** 本实例是否已做过「首次探测（含 root 尝试）」。 */
+    /** 本实例是否已起过「首次探测（含 root 尝试）」；由 {@link #firstProbeIfNeeded()} 置真。 */
     private boolean firstProbeDone;
     /** 后台任务里置位、主线程回调读取：本次刚拿到 root 授权，需弹部署确认。 */
     private volatile boolean rootJustGranted;
@@ -111,6 +117,10 @@ public class StatusFragment extends Fragment implements PageAware {
     private volatile boolean deployFailed;
     /** 上次探测的开始时刻（手动与静默共用）；静默刷新据此节流。内存态，进程重启即失效。 */
     private long lastProbeAtMs;
+    /** 上次写入 prefs 的 root 可用性；配合 {@link #rootOkSeen} 做到"值没变就不重复落盘"。 */
+    private boolean lastRootOk;
+    /** {@link #lastRootOk} 是否已取过值（false = 尚未取过，取过一次后置真）。 */
+    private boolean rootOkSeen;
     /** 淡入淡出代号：每次新动画递增，回调里对不上号即作废（连续刷新时两段动画不交叠）。 */
     private int fadeGeneration;
     /** 动作代号：每次起跑自增，收尾复位忙态时对不上号即作废（同 {@link #fadeGeneration} 的手法）。见 {@code app/逻辑说明.md} §8.1。 */
@@ -172,30 +182,27 @@ public class StatusFragment extends Fragment implements PageAware {
         // PageScrollView.yieldVerticalDragTo：没有内层可滚动区，就不存在手势相争。
         // 页面根保持 PageScrollView（配置页的曲线拖柄仍在用它）。
 
-        // 首次探测（含那一次 root 尝试）在这里起跑，不留给 onResume —— 冷启动时本页已被建出来
-        // （三页一并建，见类注释），故"进 app"就等于这一行；firstProbeDone 挡住视图重建时的重入。
-        // 紧随其后的 onResume 只剩静默刷新，并被 30 秒节流挡下（runAsync 起跑即记账）。
-        if (!firstProbeDone) {
-            firstProbeDone = true;
-            firstProbe();
-        }
+        // 首次探测不在这里跑：本页首次可见时才探，见 firstProbeIfNeeded()。
     }
 
     @Override
     public void onPageVisible(boolean visible) {
-        // 非当前页只是被压到 STARTED（不派发 onPause），故这里不做刷新：
-        // 刷新由 onViewCreated（首次探测）与 onResume（其后，已节流）负责；这里只把在跑的淡入淡出收掉。
         if (!visible) {
+            // 离屏只需收掉动画：本页没有任何定时器要停。
             cancelFade();
+            return;
         }
+        firstProbeIfNeeded();
     }
 
     @Override
     public void onResume() {
         super.onResume();
-        // 首次探测已由 onViewCreated 起跑（含那一次 root 尝试，见那里的注释），这里只剩静默刷新：
-        // 外壳每切回本页都会派发 onResume，走静默路径（不写记录、不碰文本、不做动画），
-        // 手动路径的动画/记录不该被切页触发；冷启动时刚探过，会被 30 秒节流挡下，不会多跑一趟 su。
+        // 首次可见时先起首探（见 firstProbeIfNeeded），否则走静默刷新（不写记录、不碰文本、不做动画）；
+        // 手动路径的动画/记录不该被切页触发；静默刷新被 30 秒节流挡下，不会多跑一趟 su。
+        if (firstProbeIfNeeded()) {
+            return;
+        }
         refreshStatus(false);
     }
 
@@ -219,6 +226,24 @@ public class StatusFragment extends Fragment implements PageAware {
     // ==================== 动作（全部在后台线程） ====================
 
     // context 一律在主线程取出后捕获进闭包：后台线程里再调 requireContext() 会在已 detach 时抛异常。
+
+    /**
+     * 本页首次可见时起跑首次探测（含那一次 root 尝试），只此一次。
+     *
+     * <p>触发点两个（{@code onResume} 与 {@code onPageVisible(true)}），用 {@link #firstProbeDone} 去重：
+     * 谁先到谁跑，后来者不再跑。冷启动落页<b>不是</b>本页时两者都不触发，不为看不见的页面白跑 su。
+     * 见 app/逻辑说明.md §8.1。
+     *
+     * @return true = 本次刚起跑了首次探测（调用方据此跳过紧随的静默刷新，避免多跑一趟 su）
+     */
+    private boolean firstProbeIfNeeded() {
+        if (firstProbeDone) {
+            return false;
+        }
+        firstProbeDone = true;
+        firstProbe();
+        return true;
+    }
 
     /** 首次探测：先试一次 root（只此一次），再探部署状态。静默路径（不写记录、不做动画）。 */
     private void firstProbe() {
@@ -287,12 +312,28 @@ public class StatusFragment extends Fragment implements PageAware {
         } else {
             head = "";
         }
-        // 同步清单只在这一处刷新：它是"APK 换了"才会变的东西，顺路做掉即可（失败才占一行）
-        final String manifestNote = deployer.writeSyncManifestIfNeeded();
+        // 同步清单只随 APK 变（进程存活期内 APK 不可能变）：成功刷新过就不再重复读盘，失败仍重试
+        final String manifestNote;
+        if (syncManifestDone) {
+            manifestNote = null;
+        } else {
+            manifestNote = deployer.writeSyncManifestIfNeeded();
+            if (manifestNote == null) {
+                syncManifestDone = true;   // 成功（含"无需刷新"）：本进程不再重复
+            }
+        }
         armDeployPrompt(app, status);
         rememberDeployedBinMd5(app, status);
-        // 顺手记下本次探测的 root 可用性：落页判定下次冷启动据此判"root 尚未取得"（见 app/逻辑说明.md §5.1）
-        Deployer.rememberRootState(app, status.suOk);
+        // 顺手记下本次探测的 root 可用性：落页判定下次冷启动据此判"root 尚未取得"（见 app/逻辑说明.md §5.1）。
+        // 值没变就不重复落盘（首次先取盘上现值对一次，避免"首轮恰等于默认值 → 漏写"）。本方法在后台线程。
+        if (!rootOkSeen) {
+            lastRootOk = !Deployer.rootNotYetGranted(app);
+            rootOkSeen = true;
+        }
+        if (status.suOk != lastRootOk) {
+            Deployer.rememberRootState(app, status.suOk);
+            lastRootOk = status.suOk;
+        }
         return head + (manifestNote == null ? "" : manifestNote + "\n") + status.describe();
     }
 
@@ -512,9 +553,10 @@ public class StatusFragment extends Fragment implements PageAware {
                     final int kind = pendingPrompt;
                     pendingPrompt = PROMPT_NONE;
                     if (kind == PROMPT_HASH_MISMATCH) {
-                        showHashMismatchPrompt();
+                        showDeployRequest(R.string.status_hash_title, R.string.status_hash_message);
                     } else if (kind == PROMPT_NOT_DEPLOYED) {
-                        showNotDeployedPrompt();
+                        showDeployRequest(R.string.status_notdeployed_title,
+                                R.string.status_notdeployed_message);
                     } else {
                         showNotRunningPrompt();
                     }
@@ -688,16 +730,13 @@ public class StatusFragment extends Fragment implements PageAware {
         }
     }
 
-    /** 二进制与 APK 内不一致：请求重新部署（去重见 {@link #armDeployPrompt}）。 */
-    private void showHashMismatchPrompt() {
-        showDeployRequestPrompt(R.string.status_hash_title, R.string.status_hash_message,
-                R.string.status_action_deploy, this::deploy);
-    }
-
-    /** 从没部署过：请求一键部署（**不自动装** —— 用户此前从没同意过部署）。 */
-    private void showNotDeployedPrompt() {
-        showDeployRequestPrompt(R.string.status_notdeployed_title, R.string.status_notdeployed_message,
-                R.string.status_action_deploy, this::deploy);
+    /**
+     * 请求部署：「二进制与 APK 内不一致」与「从没部署过」两种情形共用——两者的动作都是「一键部署」、
+     * 仅文案不同（去重见 {@link #armDeployPrompt}）。「从没部署过」这一支**不自动装**：用户此前从没
+     * 同意过部署，只弹窗请求。第三种情形（进程没在跑）动作不同，见 {@link #showNotRunningPrompt()}。
+     */
+    private void showDeployRequest(int titleRes, int messageRes) {
+        showDeployRequestPrompt(titleRes, messageRes, R.string.status_action_deploy, this::deploy);
     }
 
     /** 二进制就位但进程没在跑：请求拉起（动作是"拉起 daemon"，不是重装一遍）。 */

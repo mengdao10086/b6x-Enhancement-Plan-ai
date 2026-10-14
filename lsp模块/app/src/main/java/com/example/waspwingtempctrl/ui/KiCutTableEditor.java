@@ -28,6 +28,7 @@ import com.google.android.material.textfield.TextInputLayout;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.function.Consumer;
 
 /**
  * 分段倍率表的编辑器：以「簇」为块（{@code item_ki_cut_cluster.xml}），块内以「点」为行
@@ -105,6 +106,24 @@ final class KiCutTableEditor {
     @Nullable
     private View captureLayer;
 
+    /** 所有数字框共用的文本监听器（无状态，只读外层 {@code suppress}，发 TYPING）。 */
+    private final TextWatcher watcher = new TextWatcher() {
+        @Override
+        public void beforeTextChanged(CharSequence s, int start, int count, int after) {
+        }
+
+        @Override
+        public void onTextChanged(CharSequence s, int start, int before, int count) {
+        }
+
+        @Override
+        public void afterTextChanged(Editable s) {
+            if (!suppress) {
+                listener.onEdited(Listener.EditKind.TYPING);
+            }
+        }
+    };
+
     KiCutTableEditor(@NonNull KeyMeta meta, @NonNull View root, @NonNull Listener listener) {
         this.meta = meta;
         this.listener = listener;
@@ -153,24 +172,29 @@ final class KiCutTableEditor {
         for (ClusterBlock block : blocks) {
             KiCutTable.Cluster cluster = new KiCutTable.Cluster();
             for (PointRow row : block.rows) {
+                // 每个框的文本只读一次（首尾空白已剔除），空值判定与取值共用
+                String coldText = readField(row.cold);
+                String kdpText = readField(row.kdp);
+                String upText = readField(row.up);
+                String dnText = readField(row.dn);
                 // 冷值框为空 = 占位行（{@code hasCold=false}，整点不生效，仅原样往返），冷值不参与求值
-                boolean hasCold = !isEmpty(row.cold);
-                int cold = hasCold ? parseInt(row.cold, 0) : 0;
+                boolean hasCold = !coldText.isEmpty();
+                int cold = hasCold ? parseIntText(coldText, 0) : 0;
                 if (clamp && hasCold) {
                     cold = clampField(cold, 0);
                 }
-                int kdp = parseInt(row.kdp, KiCutTable.NEUTRAL);
-                int up = parseInt(row.up, KiCutTable.NEUTRAL);
-                int dn = parseInt(row.dn, KiCutTable.NEUTRAL);
+                int kdp = parseIntText(kdpText, KiCutTable.NEUTRAL);
+                int up = parseIntText(upText, KiCutTable.NEUTRAL);
+                int dn = parseIntText(dnText, KiCutTable.NEUTRAL);
                 // 倍率框为空 = 该轴留空（该点在该轴不作为控制点）：置 skip 位，写回时空 token 原样保留
                 int skip = 0;
-                if (isEmpty(row.kdp)) {
+                if (kdpText.isEmpty()) {
                     skip |= KiCutTable.SKIP_KDP;
                 }
-                if (isEmpty(row.up)) {
+                if (upText.isEmpty()) {
                     skip |= KiCutTable.SKIP_UP;
                 }
-                if (isEmpty(row.dn)) {
+                if (dnText.isEmpty()) {
                     skip |= KiCutTable.SKIP_DN;
                 }
                 if (clamp) {
@@ -232,7 +256,8 @@ final class KiCutTableEditor {
             }
             refreshTitles();
             refreshButtons();
-            applyModeVisuals();
+            // 整表刚重建：控件处于 XML 默认态，无模式时无需逐元素复位（判据见 applyModeVisuals）
+            applyModeVisuals(true);
         } finally {
             suppress = false;
         }
@@ -240,20 +265,41 @@ final class KiCutTableEditor {
 
     // ==================== 增删 ====================
 
+    /**
+     * 结构编辑的统一收口：取一次现状（不收敛）→ 就地改模型 → 整表重建 → 通知宿主（值完整）。
+     * 各编辑的<b>前置校验</b>（下标越界、达到上限、半截拒绝）留在各自方法里，本方法只管「改完收尾」这一步。
+     */
+    private void mutateStructural(@NonNull Consumer<List<KiCutTable.Cluster>> edit) {
+        List<KiCutTable.Cluster> model = getClustersRaw();
+        edit.accept(model);
+        rebuild(model);
+        listener.onEdited(Listener.EditKind.STRUCTURAL);
+    }
+
+    /** 簇数到上限的人话提示。 */
+    private void notifyClusterLimit() {
+        listener.notifyUser(clustersBox.getContext().getString(
+                R.string.config_ki_cut_limit_cluster, MAX_CLUSTERS));
+    }
+
+    /** 点数到上限的人话提示。 */
+    private void notifyPointLimit() {
+        listener.notifyUser(clustersBox.getContext().getString(
+                R.string.config_ki_cut_limit_point, MAX_POINTS));
+    }
+
     /** 在 {@code afterIndex} 簇之后插入一个新簇（其后的簇整体下移，行序同步）。 */
     private void onAddCluster(int afterIndex) {
         if (blocks.size() >= MAX_CLUSTERS) {
-            listener.notifyUser(clustersBox.getContext().getString(
-                    R.string.config_ki_cut_limit_cluster, MAX_CLUSTERS));
+            notifyClusterLimit();
             return;
         }
-        List<KiCutTable.Cluster> model = getClustersRaw();
-        KiCutTable.Cluster fresh = new KiCutTable.Cluster();
-        fresh.points.add(newDefaultPoint());
-        int at = Math.max(0, Math.min(afterIndex, model.size()));
-        model.add(at, fresh);
-        rebuild(model);
-        listener.onEdited(Listener.EditKind.STRUCTURAL);
+        mutateStructural(model -> {
+            KiCutTable.Cluster fresh = new KiCutTable.Cluster();
+            fresh.points.add(newDefaultPoint());
+            int at = Math.max(0, Math.min(afterIndex, model.size()));
+            model.add(at, fresh);
+        });
     }
 
     /** 删一个簇：先弹窗确认（不可撤销），确认后才真的删。允许删到 0 簇（＝全段全 100）。 */
@@ -276,40 +322,31 @@ final class KiCutTableEditor {
     }
 
     private void deleteClusterNow(int index) {
-        List<KiCutTable.Cluster> model = getClustersRaw();
-        if (index < 0 || index >= model.size()) {
+        if (index < 0 || index >= blocks.size()) {
             return;   // 确认期间表已变（外部重置等）：放弃，不删错
         }
-        model.remove(index);
-        rebuild(model);
-        listener.onEdited(Listener.EditKind.STRUCTURAL);
+        mutateStructural(model -> model.remove(index));
     }
 
     /** 点「添加点」：只切换本簇的插入态（显示行间横线），不再直接追加行——点某条横线才在该处插入。 */
     private void onInsertToggle(@NonNull ClusterBlock block) {
-        int index = indexOf(block);
-        insertModeIndex = (insertModeIndex == index) ? -1 : index;
-        splitModeIndex = -1;   // 两种模式互斥
-        applyModeVisuals();
+        toggleMode(block, false);
     }
 
     private void onDeletePoint(int index, int rowIndex) {
-        List<KiCutTable.Cluster> model = getClustersRaw();
-        if (index < 0 || index >= model.size()) {
+        if (index < 0 || index >= blocks.size()) {
             return;
         }
-        List<KiCutTable.Point> points = model.get(index).points;
-        if (rowIndex < 0 || rowIndex >= points.size()) {
+        int pointCount = blocks.get(index).rows.size();
+        if (rowIndex < 0 || rowIndex >= pointCount) {
             return;
         }
-        if (points.size() == 1) {
+        if (pointCount == 1) {
             // 删掉最后一个点 = 删除整簇（复用既有删除簇路径：确认弹窗 + 「删到 0 簇」的处理）
             onDeleteCluster(index);
             return;
         }
-        points.remove(rowIndex);
-        rebuild(model);
-        listener.onEdited(Listener.EditKind.STRUCTURAL);
+        mutateStructural(model -> model.get(index).points.remove(rowIndex));
     }
 
     /** 新增点的初值：冷值取定义下限（取不到为 0），KDP/升/降都是 100（不削），三轴均非留空。 */
@@ -326,28 +363,36 @@ final class KiCutTableEditor {
 
     /** 在某簇 {@code at} 位置插入一条全空行（横线常态点击）。 */
     private void insertBlankRow(int clusterIndex, int at) {
-        List<KiCutTable.Cluster> model = getClustersRaw();
-        if (clusterIndex < 0 || clusterIndex >= model.size()) {
+        if (clusterIndex < 0 || clusterIndex >= blocks.size()) {
             return;
         }
-        List<KiCutTable.Point> points = model.get(clusterIndex).points;
-        if (points.size() >= MAX_POINTS) {
-            listener.notifyUser(clustersBox.getContext().getString(
-                    R.string.config_ki_cut_limit_point, MAX_POINTS));
+        if (blocks.get(clusterIndex).rows.size() >= MAX_POINTS) {
+            notifyPointLimit();
             return;
         }
-        points.add(Math.max(0, Math.min(at, points.size())), blankPoint());
-        rebuild(model);
-        listener.onEdited(Listener.EditKind.STRUCTURAL);
+        mutateStructural(model -> {
+            List<KiCutTable.Point> points = model.get(clusterIndex).points;
+            points.add(Math.max(0, Math.min(at, points.size())), blankPoint());
+        });
     }
 
     // ==================== 拆分簇 ====================
 
     /** 点「拆分簇」：在本簇的拆分态与常态之间切换（同一时刻只有一个簇处于某一种模式）。 */
     private void onSplitToggle(@NonNull ClusterBlock block) {
+        toggleMode(block, true);
+    }
+
+    /** 切换某簇的模式态：{@code split=false} 走插入态、{@code split=true} 走拆分态；两种模式互斥（只留其一）。 */
+    private void toggleMode(@NonNull ClusterBlock block, boolean split) {
         int index = indexOf(block);
-        splitModeIndex = (splitModeIndex == index) ? -1 : index;
-        insertModeIndex = -1;   // 两种模式互斥
+        if (split) {
+            splitModeIndex = (splitModeIndex == index) ? -1 : index;
+            insertModeIndex = -1;   // 两种模式互斥
+        } else {
+            insertModeIndex = (insertModeIndex == index) ? -1 : index;
+            splitModeIndex = -1;   // 两种模式互斥
+        }
         applyModeVisuals();
     }
 
@@ -386,18 +431,45 @@ final class KiCutTableEditor {
      * alpha 做一小段淡入，消掉「啪地出现」的生硬感。
      */
     private void applyModeVisuals() {
+        applyModeVisuals(false);
+    }
+
+    /**
+     * @param justRebuilt 整表刚重建（控件处于 XML 默认态）；<b>退出模式的路径传 {@code false}</b>，它必须完整复位、绝不早退。
+     */
+    private void applyModeVisuals(boolean justRebuilt) {
+        boolean anyActive = insertModeIndex >= 0 || splitModeIndex >= 0;
+        // 稳态早退判据 justRebuilt && !anyActive。可跳过的：对 GONE 视图重设 alpha/描述/文案、把内边距设回
+        // basePad（XML 本就是这些值，不可观测）。**不可跳过的是框高归位**——删除按钮 XML 高 30dp
+        // （@dimen/ki_cut_del_size），整趟复位会以 applyHeight(常态框高 36dp) 把它撑到与输入框同高；
+        // 少了这一步，早退与整趟复位两条路径的几何就不同。故此处仍遍历一遍 applyHeight。
+        if (justRebuilt && !anyActive) {
+            int normalBox = clustersBox.getResources().getDimensionPixelSize(R.dimen.ki_cut_point_height);
+            for (ClusterBlock block : blocks) {
+                for (PointRow row : block.rows) {
+                    row.applyHeight(normalBox);
+                }
+            }
+            syncCaptureLayer();
+            return;
+        }
         Context context = clustersBox.getContext();
         int normalBox = context.getResources().getDimensionPixelSize(R.dimen.ki_cut_point_height);
         int compactBox = context.getResources().getDimensionPixelSize(R.dimen.ki_cut_point_height_compact);
         int lineNet = normalBox - compactBox;   // 单条线净占高（= 单行压缩量）
         int basePad = context.getResources().getDimensionPixelSize(R.dimen.ki_cut_cluster_pad_bottom);
+        int colorNormal = context.getColor(R.color.ki_cut_insert_line);
+        int colorSplit = context.getColor(R.color.ki_cut_insert_line_split);
+        String lineDescInsert = context.getString(R.string.config_ki_cut_insert_line);
+        String lineDescSplit = context.getString(R.string.config_ki_cut_split_line);
+        String rowDesc = context.getString(R.string.config_ki_cut_split_row);
         for (int i = 0; i < blocks.size(); i++) {
             ClusterBlock block = blocks.get(i);
             boolean inserting = i == insertModeIndex;
             boolean splitting = i == splitModeIndex;
             boolean active = inserting || splitting;
-            int lineColor = context.getColor(
-                    splitting ? R.color.ki_cut_insert_line_split : R.color.ki_cut_insert_line);
+            int lineColor = splitting ? colorSplit : colorNormal;
+            String lineDesc = splitting ? lineDescSplit : lineDescInsert;
             for (int j = 0; j < block.lines.size(); j++) {
                 View holder = block.lines.get(j);
                 boolean edge = j == 0 || j == block.lines.size() - 1;
@@ -414,16 +486,14 @@ final class KiCutTableEditor {
                 if (bar != null) {
                     bar.setBackgroundColor(lineColor);
                 }
-                holder.setContentDescription(context.getString(
-                        splitting ? R.string.config_ki_cut_split_line : R.string.config_ki_cut_insert_line));
+                holder.setContentDescription(lineDesc);
             }
             // 压缩＝横线占用的高度：模式态框压到 30dp（+ 线净占 6dp = 常态行高 36dp）；列名不关，压缩靠框高变矮
-            int boxHeight = context.getResources().getDimensionPixelSize(active
-                    ? R.dimen.ki_cut_point_height_compact : R.dimen.ki_cut_point_height);
+            int boxHeight = active ? compactBox : normalBox;
             for (PointRow row : block.rows) {
                 row.hit.setVisibility(splitting ? View.VISIBLE : View.GONE);
                 // 拆分态该行可点＝共享拆分；其余时候命中层不可见，此描述不起作用
-                row.hit.setContentDescription(context.getString(R.string.config_ki_cut_split_row));
+                row.hit.setContentDescription(rowDesc);
                 row.applyHeight(boxHeight);
             }
             if (active) {
@@ -551,29 +621,27 @@ final class KiCutTableEditor {
      * 且切后簇数不超上限。
      */
     private void splitCluster(int clusterIndex, int upperEnd, int lowerStart) {
-        List<KiCutTable.Cluster> model = getClustersRaw();
-        if (clusterIndex < 0 || clusterIndex >= model.size()) {
+        if (clusterIndex < 0 || clusterIndex >= blocks.size()) {
             return;
         }
-        List<KiCutTable.Point> points = model.get(clusterIndex).points;
-        int n = points.size();
+        int n = blocks.get(clusterIndex).rows.size();
         if (upperEnd <= 0 || upperEnd > n || lowerStart < 0 || lowerStart >= n) {
             return;   // 会让某一侧没有点：拒绝
         }
         if (blocks.size() >= MAX_CLUSTERS) {
-            listener.notifyUser(clustersBox.getContext().getString(
-                    R.string.config_ki_cut_limit_cluster, MAX_CLUSTERS));
+            notifyClusterLimit();
             return;
         }
-        KiCutTable.Cluster upper = new KiCutTable.Cluster();
-        upper.points.addAll(points.subList(0, upperEnd));
-        KiCutTable.Cluster lower = new KiCutTable.Cluster();
-        lower.points.addAll(points.subList(lowerStart, n));
-        model.set(clusterIndex, upper);
-        model.add(clusterIndex + 1, lower);
         splitModeIndex = -1;   // 拆分已完成，退出拆分态（插入态不在此列，其下标已越界也会被 rebuild 清掉）
-        rebuild(model);
-        listener.onEdited(Listener.EditKind.STRUCTURAL);
+        mutateStructural(model -> {
+            List<KiCutTable.Point> points = model.get(clusterIndex).points;
+            KiCutTable.Cluster upper = new KiCutTable.Cluster();
+            upper.points.addAll(points.subList(0, upperEnd));
+            KiCutTable.Cluster lower = new KiCutTable.Cluster();
+            lower.points.addAll(points.subList(lowerStart, n));
+            model.set(clusterIndex, upper);
+            model.add(clusterIndex + 1, lower);
+        });
     }
 
     // ==================== 建块 ====================
@@ -659,46 +727,38 @@ final class KiCutTableEditor {
         row.up.setText(KiCutTable.isSkipped(point, KiCutTable.AXIS_UP) ? "" : String.valueOf(point.up));
         row.dn.setText(KiCutTable.isSkipped(point, KiCutTable.AXIS_DN) ? "" : String.valueOf(point.dn));
         applyHints(row, showHints);
-        row.cold.addTextChangedListener(watcher());
-        row.kdp.addTextChangedListener(watcher());
-        row.up.addTextChangedListener(watcher());
-        row.dn.addTextChangedListener(watcher());
+        row.cold.addTextChangedListener(watcher);
+        row.kdp.addTextChangedListener(watcher);
+        row.up.addTextChangedListener(watcher);
+        row.dn.addTextChangedListener(watcher);
         row.deleteButton.setOnClickListener(v -> onDeletePoint(indexOf(block), block.rows.indexOf(row)));
         // 拆分态下点行＝共享拆分：命中层只在拆分态可见，故与输入框无触摸冲突
         row.hit.setOnClickListener(v -> onRowClicked(block, block.rows.indexOf(row)));
         // 失焦才把数字收敛进定义范围（越界/空值都钳回来），免得把非法值写进配置；
         // 聚焦时不动——否则刚点进框就把内容改掉、光标跳位。收敛后交给宿主：取消防抖定时器、
         // 立刻重算曲线并立刻写盘（见 Listener.EditKind.COMMIT）。
-        row.cold.setOnFocusChangeListener((v, hasFocus) -> {
-            if (!hasFocus) {
-                if (!isEmpty(row.cold)) {
-                    clampOnBlur(row.cold, 0);
-                }
-                // 冷值必填：留空时**不补值、不写盘**，只发 COMMIT——commit 里 read() 见空冷值返回 null，
-                // 于是走 restoreInputs() 还原磁盘原值并提示「已恢复」，绝不把空冷值补成下限悄悄写盘。
-                listener.onEdited(Listener.EditKind.COMMIT);
-            }
-        });
-        row.kdp.setOnFocusChangeListener((v, hasFocus) -> {
-            if (!hasFocus) {
-                clampOnBlur(row.kdp, 1);
-                listener.onEdited(Listener.EditKind.COMMIT);
-            }
-        });
-        row.up.setOnFocusChangeListener((v, hasFocus) -> {
-            if (!hasFocus) {
-                clampOnBlur(row.up, 2);
-                listener.onEdited(Listener.EditKind.COMMIT);
-            }
-        });
-        row.dn.setOnFocusChangeListener((v, hasFocus) -> {
-            if (!hasFocus) {
-                clampOnBlur(row.dn, 3);
-                listener.onEdited(Listener.EditKind.COMMIT);
-            }
-        });
+        bindFocus(row.cold, 0);
+        bindFocus(row.kdp, 1);
+        bindFocus(row.up, 2);
+        bindFocus(row.dn, 3);
         block.rows.add(row);
         block.pointsBox.addView(view);
+    }
+
+    /**
+     * 失焦收敛：{@code idx != 0} 恒调 {@link #clampOnBlur}；{@code idx == 0}（冷值）仅在非空时收敛——留空则
+     * 只发 COMMIT，commit 里 read() 见空冷值返回 null，走 restoreInputs() 还原磁盘原值并提示「已恢复」。
+     */
+    private void bindFocus(@NonNull EditText field, int idx) {
+        field.setOnFocusChangeListener((v, hasFocus) -> {
+            if (hasFocus) {
+                return;
+            }
+            if (idx != 0 || !isEmpty(field)) {
+                clampOnBlur(field, idx);
+            }
+            listener.onEdited(Listener.EditKind.COMMIT);
+        });
     }
 
     /**
@@ -746,25 +806,6 @@ final class KiCutTableEditor {
 
     // ==================== 输入处理 ====================
 
-    private TextWatcher watcher() {
-        return new TextWatcher() {
-            @Override
-            public void beforeTextChanged(CharSequence s, int start, int count, int after) {
-            }
-
-            @Override
-            public void onTextChanged(CharSequence s, int start, int before, int count) {
-            }
-
-            @Override
-            public void afterTextChanged(Editable s) {
-                if (!suppress) {
-                    listener.onEdited(Listener.EditKind.TYPING);
-                }
-            }
-        };
-    }
-
     /**
      * 是否存在<b>半截态</b>行：冷值框为空、<b>但至少填了一个倍率框</b>。
      *
@@ -783,9 +824,15 @@ final class KiCutTableEditor {
         return false;
     }
 
-    private static boolean isEmpty(@NonNull EditText field) {
+    /** 框内文本一次读出（首尾空白已剔除；无文本 → 空串），供空值判定与解析共用。 */
+    @NonNull
+    private static String readField(@NonNull EditText field) {
         Editable editable = field.getText();
-        return editable == null || editable.toString().trim().isEmpty();
+        return editable == null ? "" : editable.toString().trim();
+    }
+
+    private static boolean isEmpty(@NonNull EditText field) {
+        return readField(field).isEmpty();
     }
 
     /**
@@ -836,8 +883,11 @@ final class KiCutTableEditor {
 
     /** 宽松解析：空/非数字取回退值（编辑中的中间态不落盘，见 {@link #getClusters}）。 */
     private static int parseInt(@NonNull EditText field, int fallback) {
-        Editable editable = field.getText();
-        String text = editable == null ? "" : editable.toString().trim();
+        return parseIntText(readField(field), fallback);
+    }
+
+    /** 已剔除空白的文本 → 整数：空或非数字取回退值。 */
+    private static int parseIntText(@NonNull String text, int fallback) {
         if (TextUtils.isEmpty(text)) {
             return fallback;
         }

@@ -29,9 +29,6 @@ import java.util.List;
  */
 final class ConfigGroupBinder {
 
-    /** 展开态的箭头旋转角：图标指向右，顺时针 90° 即指向下（收起态不转）。 */
-    private static final float ARROW_EXPANDED_ROTATION = 90f;
-
     private final View card;
     /** 键行容器（item_config_group.xml）：本类只用它的 addView 与 setVisibility。 */
     private final WrapRowLayout body;
@@ -223,10 +220,8 @@ final class ConfigGroupBinder {
             divider.setAlpha(1f);
             divider.setVisibility(value ? View.VISIBLE : View.GONE);
         }
-        // 一副图标两种状态：图标本身指向右，展开时顺时针转 90° 指向下；走统一动效口径
-        Motion.rotate(arrowView, value ? ARROW_EXPANDED_ROTATION : 0f, duration);
-        arrowView.setContentDescription(card.getContext().getString(
-                value ? R.string.config_action_collapse : R.string.config_action_expand));
+        // 一副图标两种状态：展开转 90° 指向下、收起指右，走统一动效口径（角度/描述口径在 Motion.syncExpandArrow）
+        Motion.syncExpandArrow(arrowView, value, duration);
     }
 
     /**

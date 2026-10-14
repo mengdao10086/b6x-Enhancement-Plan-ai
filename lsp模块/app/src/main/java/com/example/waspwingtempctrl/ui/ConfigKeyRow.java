@@ -178,6 +178,8 @@ final class ConfigKeyRow {
     private final Renderer renderer;
     /** 挂到行级的字段说明行（单值键才有）：它不在尾段里，压暗要单独处理。 */
     private final List<TextView> rowCaptions = new ArrayList<>();
+    /** 跟随依赖压暗的键内控件清单：构建期取一次存住（{@link Renderer#dimTargets()} 的内容在建行后固定）。 */
+    private final List<View> dimTargetsCache;
     /** 键内控件的插入位（下标 0 恒是参数名，尾段依次排在它后面、行级文本之前）。 */
     private int tailCount;
     private final float dimAlpha;
@@ -204,9 +206,7 @@ final class ConfigKeyRow {
                                @NonNull ViewSource views) {
         // 行"整行独占"由 item_config_row.xml 根标签上的 app:wrapFullLine 声明（父容器读它当标记），
         // 键内换行交给同一个容器，本类不再向容器声明任何几何。
-        long startedAt = StartupTiming.accBegin(StartupTiming.FORM_SUB_INFLATE);
-        WrapRowLayout root = (WrapRowLayout) views.inflate(R.layout.item_config_row, parent);
-        StartupTiming.accEnd(StartupTiming.FORM_SUB_INFLATE, startedAt);
+        WrapRowLayout root = (WrapRowLayout) inflateTimed(views, R.layout.item_config_row, parent);
         return new ConfigKeyRow(root, meta, host, groupShowsUiOnly, views);
     }
 
@@ -246,6 +246,7 @@ final class ConfigKeyRow {
 
         renderer = createRenderer();
         renderer.build();
+        dimTargetsCache = renderer.dimTargets();
         alignLabelToField();
         applySwitchRowGap();
     }
@@ -363,9 +364,7 @@ final class ConfigKeyRow {
         public void build() {
             // 开关是尾段成员，与输入框 / 字段走同一条路：按需建出（item_config_key_switch.xml）后
             // 挂上并标 trailing（见 #addToTail）——非 switch 型的键行因此不再白建一个 MaterialSwitch
-            long startedAt = StartupTiming.accBegin(StartupTiming.FORM_SUB_INFLATE);
-            View switchRoot = views.inflate(R.layout.item_config_key_switch, root);
-            StartupTiming.accEnd(StartupTiming.FORM_SUB_INFLATE, startedAt);
+            View switchRoot = inflateTimed(views, R.layout.item_config_key_switch, root);
             addToTail(switchRoot);
             switchView = switchRoot.findViewById(R.id.config_key_switch);
             switchView.setVisibility(View.VISIBLE);
@@ -421,15 +420,11 @@ final class ConfigKeyRow {
 
         @Override
         public void build() {
-            long startedAt = StartupTiming.accBegin(StartupTiming.FORM_SUB_INFLATE);
-            group = (MaterialButtonToggleGroup) views.inflate(R.layout.item_config_enum_group, root);
-            StartupTiming.accEnd(StartupTiming.FORM_SUB_INFLATE, startedAt);
+            group = (MaterialButtonToggleGroup) inflateTimed(views, R.layout.item_config_enum_group, root);
             addToTail(group);
             for (OptionMeta option : meta.options) {
-                startedAt = StartupTiming.accBegin(StartupTiming.FORM_SUB_INFLATE);
-                MaterialButton button = (MaterialButton) views.inflate(
-                        R.layout.item_chart_window_button, group);
-                StartupTiming.accEnd(StartupTiming.FORM_SUB_INFLATE, startedAt);
+                MaterialButton button = (MaterialButton) inflateTimed(
+                        views, R.layout.item_chart_window_button, group);
                 // 按钮的 id 是"取值 ↔ 控件"的唯一纽带（组按 id 报选中项）
                 button.setId(View.generateViewId());
                 button.setText(option.label);
@@ -757,9 +752,7 @@ final class ConfigKeyRow {
 
         @Override
         public void build() {
-            long startedAt = StartupTiming.accBegin(StartupTiming.FORM_SUB_INFLATE);
-            block = views.inflate(R.layout.item_config_ki_cut, root);
-            StartupTiming.accEnd(StartupTiming.FORM_SUB_INFLATE, startedAt);
+            block = inflateTimed(views, R.layout.item_config_ki_cut, root);
             addFullLine(block);
             chart = block.findViewById(R.id.ki_cut_chart);
             editor = new KiCutTableEditor(meta, block, new KiCutTableEditor.Listener() {
@@ -913,6 +906,15 @@ final class ConfigKeyRow {
 
     // ==================== 键内控件：建、说明落位、量宽 ====================
 
+    /** 造一件控件并记账（{@code FORM_SUB_INFLATE} 只有这一处落点）：取视图优先走预制造件，见 {@link ViewSource}。 */
+    @NonNull
+    private static View inflateTimed(@NonNull ViewSource views, int layoutRes, @NonNull ViewGroup parent) {
+        long startedAt = StartupTiming.accBegin(StartupTiming.FORM_SUB_INFLATE);
+        View view = views.inflate(layoutRes, parent);
+        StartupTiming.accEnd(StartupTiming.FORM_SUB_INFLATE, startedAt);
+        return view;
+    }
+
     /** int / multi 的数值字段：说明 + 单位/范围说明，每次输入都排入防抖队列（失焦时钳制回写）。 */
     private Field addNumberField(@NonNull String hint, @NonNull String caption,
                                  boolean hoistCaption) {
@@ -923,9 +925,7 @@ final class ConfigKeyRow {
 
     /** 布尔字段（multi 键里值为 0/1 的字段）：字段名 + 开关，取布尔那份字段布局。 */
     private Field addBoolField(@NonNull FieldMeta fieldMeta) {
-        long startedAt = StartupTiming.accBegin(StartupTiming.FORM_SUB_INFLATE);
-        View fieldView = views.inflate(R.layout.item_config_field_switch, root);
-        StartupTiming.accEnd(StartupTiming.FORM_SUB_INFLATE, startedAt);
+        View fieldView = inflateTimed(views, R.layout.item_config_field_switch, root);
         addToTail(fieldView);
 
         View switchRow = fieldView.findViewById(R.id.config_field_switch_row);
@@ -960,9 +960,7 @@ final class ConfigKeyRow {
     private Field addField(@NonNull String hint, @NonNull String caption,
                            boolean hoistCaption, boolean path) {
         // 数值 / 路径字段取数值那一份字段布局，布尔字段走 addBoolField（两份见 item_config_field*.xml）
-        long startedAt = StartupTiming.accBegin(StartupTiming.FORM_SUB_INFLATE);
-        View fieldView = views.inflate(R.layout.item_config_field, root);
-        StartupTiming.accEnd(StartupTiming.FORM_SUB_INFLATE, startedAt);
+        View fieldView = inflateTimed(views, R.layout.item_config_field, root);
         addToTail(fieldView);
 
         TextInputLayout layout = fieldView.findViewById(R.id.config_field_layout);
@@ -1355,19 +1353,29 @@ final class ConfigKeyRow {
             }
         }
 
-        Value onDisk = host.diskValue(meta.key);
-        if (onDisk != null && ui.equals(onDisk)) {
-            // 值未变则不写：连 mtime 都不碰，避免无谓触发 C 端重载
-            host.queue().cancel(meta.key);
-            host.onPendingChange();
-            return;
-        }
-        host.queue().schedule(meta.key, ui);
-        host.onPendingChange();
-        if (fromBlur) {
+        if (writeOrCancel(meta, host, ui) && fromBlur) {
             // 失焦立刻写：提交后触发一次冲刷（冲刷"全部"待写键——见 app 逻辑说明.md §3.2 的口径与理由）
             host.queue().flushNow();
         }
+    }
+
+    /**
+     * 「值未变不写」的共用落点：与磁盘值相同就撤掉待写项、不同就排入防抖队列，随后通知依赖徽标刷新。
+     * 改数值 / 切布尔子开关 / 点分段开关 / 拨整键开关四路提交共用。见 app 逻辑说明.md §3.2。
+     *
+     * @return true = 值有变、已排入待写；false = 值未变、已撤掉待写项
+     */
+    private static boolean writeOrCancel(@NonNull KeyMeta meta, @NonNull Host host, @NonNull Value value) {
+        Value onDisk = host.diskValue(meta.key);
+        if (onDisk != null && value.equals(onDisk)) {
+            // 值未变则不写：连 mtime 都不碰，避免无谓触发 C 端重载
+            host.queue().cancel(meta.key);
+            host.onPendingChange();
+            return false;
+        }
+        host.queue().schedule(meta.key, value);
+        host.onPendingChange();
+        return true;
     }
 
     /**
@@ -1385,13 +1393,7 @@ final class ConfigKeyRow {
             return;
         }
         Value ui = host.store().assess(meta.key, raw).uiValue;
-        Value onDisk = host.diskValue(meta.key);
-        if (onDisk != null && ui.equals(onDisk)) {
-            host.queue().cancel(meta.key);
-        } else {
-            host.queue().schedule(meta.key, ui);
-        }
-        host.onPendingChange();
+        writeOrCancel(meta, host, ui);
     }
 
     /**
@@ -1408,13 +1410,7 @@ final class ConfigKeyRow {
             return;
         }
         Value next = Value.ofText(value);
-        Value onDisk = host.diskValue(meta.key);
-        if (onDisk != null && next.equals(onDisk)) {
-            host.queue().cancel(meta.key);
-        } else {
-            host.queue().schedule(meta.key, next);
-        }
-        host.onPendingChange();
+        writeOrCancel(meta, host, next);
     }
 
     /** 开关的提交：0/1 只有两个完整状态，切换即排入防抖队列。 */
@@ -1427,13 +1423,7 @@ final class ConfigKeyRow {
             return;
         }
         Value value = Value.ofInt(target);
-        Value onDisk = host.diskValue(meta.key);
-        if (onDisk != null && value.equals(onDisk)) {
-            host.queue().cancel(meta.key);
-        } else {
-            host.queue().schedule(meta.key, value);
-        }
-        host.onPendingChange();
+        writeOrCancel(meta, host, value);
     }
 
     // ==================== 依赖状态 ====================
@@ -1451,7 +1441,7 @@ final class ConfigKeyRow {
         labelView.setAlpha(alpha);
         descView.setAlpha(alpha);
         noteView.setAlpha(alpha);
-        for (View target : renderer.dimTargets()) {
+        for (View target : dimTargetsCache) {
             target.setAlpha(alpha);
         }
         // 挂到行级的字段说明行不在尾段里，压暗要单独来一遍（否则它比周围亮）

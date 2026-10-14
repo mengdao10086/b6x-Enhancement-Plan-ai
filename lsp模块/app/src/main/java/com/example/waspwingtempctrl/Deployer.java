@@ -376,9 +376,9 @@ public final class Deployer {
     }
 
     /**
-     * 由一趟 su 回吐的 {@code KEY=VALUE} 组装 {@link Status}。三条路径共用：{@link #probe()}（探测趟）、
-     * {@link #deploy()}（写盘趟末尾自带回吐）、{@link #startDaemon()}（拉起趟末尾自带回吐）——
-     * 后两者不再"另起一趟 su 再探一次"（见 app/逻辑说明.md §2.1、§8.1）。
+     * 由一趟 su 回吐的 {@code KEY=VALUE} 组装 {@link Status}。各回吐趟共用：{@link #probe()}（独立探测趟）、
+     * {@link #deploy()}、{@link #startDaemon()}、{@link #stopDaemon()}、{@link #uninstall()}——
+     * 除 probe 外都在各自脚本末尾接 {@code probeTail}，不另起一趟 su（见 app/逻辑说明.md §2.1、§8.1）。
      *
      * @param suOk           该趟是否拿到正常退出码
      * @param expectedBin    APK 内二进制期望 md5（空串=不可比）
@@ -682,7 +682,8 @@ public final class Deployer {
             steps.add("私有目录运行时产物未删（进程可能仍在跑）");
         }
 
-        Status st = probe();
+        Status st = buildStatus(kv, true, md5OfAssetOrEmpty(appContext, BIN_ASSET),
+                md5OfAssetOrEmpty(appContext, SCRIPT_ASSET), new ArrayList<>());
         return new Result(!st.deployed, "卸载部署", steps, "", st);
     }
 
@@ -806,7 +807,9 @@ public final class Deployer {
                         : "已停止运行中的 tempctrl（PID " + daemonPid + "）")
                 : "警告：" + KILL_WAIT_LOOPS + " 秒内未能确认 tempctrl 已退出");
         boolean ok = watchdogStopped && daemonStopped;
-        return new Result(ok, "停止daemon", steps, ok ? "" : "有进程未确认退出，见步骤", probe());
+        Status st = buildStatus(kv, true, md5OfAssetOrEmpty(appContext, BIN_ASSET),
+                md5OfAssetOrEmpty(appContext, SCRIPT_ASSET), new ArrayList<>());
+        return new Result(ok, "停止daemon", steps, ok ? "" : "有进程未确认退出，见步骤", st);
     }
 
     /** 诊断串：部署状态 + 配置状态 + root 诊断。阻塞。部署段与状态区同一份文本（describe）。 */
@@ -1123,8 +1126,8 @@ public final class Deployer {
 
     /**
      * 探测的状态回吐段（<b>不含</b> {@link #pidsPreamble()}）：存在性 / 可执行 / md5 工具 / 二进制与脚本 md5 /
-     * c-daemon 与看门狗 PID。与 {@link #probe()} 共用；部署趟与拉起趟也把它接在末尾——
-     * "写完盘顺便报状态"，省掉一场独立的 su 往返（见 app/逻辑说明.md §2.1、§8.1）。
+     * c-daemon 与看门狗 PID。与 {@link #probe()} 共用；部署 / 拉起 / 停止 / 卸载趟也把它接在末尾——
+     * "顺手报状态"，省掉一场独立的 su 往返（见 app/逻辑说明.md §2.1、§8.1）。
      */
     private static String probeTail() {
         return "[ -e \"$BIN\" ] && echo BIN_EXISTS=1 || echo BIN_EXISTS=0\n"
@@ -1265,7 +1268,8 @@ public final class Deployer {
                 + "# 旧版迁移残留 tempctrl_last_dev（daemon 侧预创建已删、无人读写）：顺手清掉。见 app/逻辑说明.md §2.4\n"
                 + "rm -f /data/local/tmp/tempctrl_last_dev\n"
                 + "# 私有目录不可用时 c-daemon 的兜底日志落点（/cache/<二进制名>.log），可能残留\n"
-                + "rm -f /cache/tempctrl.log\n";
+                + "rm -f /cache/tempctrl.log\n"
+                + probeTail();
     }
 
     /**
@@ -1340,7 +1344,8 @@ public final class Deployer {
                 // $BIN 找，用 wd_pids（某个参数恰好等于候选脚本路径，见 pidsPreamble）。
                 // 不先杀它，它下一轮 tick 就会把刚停掉的守护进程再拉起来，「停止」不成立。
                 + killAndWaitSnippet("wd_pids", "WATCHDOG")
-                + killAndWaitSnippet("bin_pids", "DAEMON");
+                + killAndWaitSnippet("bin_pids", "DAEMON")
+                + probeTail();
     }
 
     /**

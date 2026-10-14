@@ -30,9 +30,6 @@ import java.util.concurrent.RejectedExecutionException;
  */
 final class ConfigDiagnostics {
 
-    /** 展开态的箭头旋转角：图标指向右，顺时针 90° 即指向下（收起态不转，同分组卡头）。 */
-    private static final float ARROW_EXPANDED_ROTATION = 90f;
-
     private final ConfigStore store;
     private final ExecutorService io;
     private final Handler main;
@@ -99,11 +96,9 @@ final class ConfigDiagnostics {
             stateView.setText(lastState + timingBlock());
             duration = Motion.animateHeight(body, true);
         }
-        // 一副图标两种状态：图标本身指向右，展开时顺时针转 90° 指向下（同分组卡头）；
-        // 时长来自上面那一次面板计算（面板直接落位时 duration<0，箭头也直接落位）
-        Motion.rotate(arrowView, value ? ARROW_EXPANDED_ROTATION : 0f, duration);
-        arrowView.setContentDescription(body.getContext().getString(
-                value ? R.string.config_action_collapse : R.string.config_action_expand));
+        // 一副图标两种状态：展开转 90° 指向下、收起指右；时长来自上面那一次面板计算
+        // （面板直接落位时 duration<0，箭头也直接落位）。角度与无障碍描述口径统一在 Motion.syncExpandArrow
+        Motion.syncExpandArrow(arrowView, value, duration);
     }
 
     /**

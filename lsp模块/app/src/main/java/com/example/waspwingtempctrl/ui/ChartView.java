@@ -63,9 +63,9 @@ public class ChartView extends View {
     private final Paint axisTextPaint = new Paint(); // 右轴刻度 / 轴标题（左对齐）
     private final Paint seriesPaint = new Paint();
     private final Paint haloPaint = new Paint();     // 文字 halo（STROKE）
-    private final Paint labelPaint = new Paint();    // 文字填充（FILL）
-    private final Paint dotPaint = new Paint();      // 圆点填充
-    private final Paint dotHaloPaint = new Paint();  // 圆点外圈（STROKE）
+    private final Paint labelPaint = new Paint();
+    private final Paint dotPaint = new Paint();
+    private final Paint dotHaloPaint = new Paint();
 
     private final ChartSeries[] series = ChartSeries.createAll();
 
@@ -74,7 +74,7 @@ public class ChartView extends View {
     private int colorBg;
     private int colorGrid;
     private int colorAxis;
-    private int[] seriesColors = new int[series.length];
+    private final int[] seriesColors = new int[series.length];
     private boolean colorsReady;
 
     private ChartWindow window;
@@ -209,9 +209,6 @@ public class ChartView extends View {
         // 网格线走主题分隔线色（可见度论证见 app/逻辑说明.md §7.5）
         colorGrid = res.getColor(R.color.app_outline_variant, theme);
         colorAxis = res.getColor(R.color.chart_axis, theme);
-        if (seriesColors.length != series.length) {
-            seriesColors = new int[series.length];
-        }
         for (int i = 0; i < series.length; i++) {
             seriesColors[i] = res.getColor(series[i].colorRes, theme);
         }
@@ -389,10 +386,6 @@ public class ChartView extends View {
         float cSpan = rAxis.max - rAxis.min;
         rightText = new String[vals.length];
         for (int i = 0; i < vals.length; i++) {
-            if (!(lSpan > 0f) || !(cSpan > 0f)) {
-                rightText[i] = "";
-                continue;
-            }
             int n = Math.round(rAxis.min + cSpan * (vals[i] - lAxis.min) / lSpan);
             if (n < rAxis.min) {
                 n = (int) Math.floor(rAxis.min);
@@ -497,13 +490,6 @@ public class ChartView extends View {
 
         for (ChartLabelOp e : entries) {
             e.w = tickPaint.measureText(e.text);
-            e.tx = e.x + LABEL_GAP_DP * density;
-            if (e.tx + e.w > fPadL + fW) {
-                e.tx = e.x - LABEL_GAP_DP * density - e.w;
-            }
-            if (e.tx < 2f * density) {
-                e.tx = 2f * density;
-            }
         }
         Collections.sort(entries, (a, b) -> Float.compare(a.y, b.y));
 
@@ -560,12 +546,6 @@ public class ChartView extends View {
         for (int ci = 0; ci < groups.size(); ci++) {
             List<ChartLabelOp> cl = groups.get(ci);
             float ly = groupLy.get(ci);
-            if (cl.size() == 1) {
-                ChartLabelOp e = cl.get(0);
-                textOps.add(new ChartLabelOp(e.text, e.tx, ly, e.color));
-                dotOps.add(new ChartDotOp(e.x, e.y, e.color));
-                continue;
-            }
             float tx = clusterTx(cl, sep);
             for (int i = 0; i < cl.size(); i++) {
                 ChartLabelOp e = cl.get(i);
@@ -621,7 +601,7 @@ public class ChartView extends View {
         }
     }
 
-    /** 合并组的横向起点：成员锚点 x 的均值 + 间距，右越界翻到左侧，左界钳到 2dp（横向口径不变）。 */
+    /** 组的横向起点：成员锚点 x 的均值 + 间距，右越界翻到左侧，左界钳到 2dp。 */
     private float clusterTx(List<ChartLabelOp> cl, float sep) {
         float cx = 0f;
         for (ChartLabelOp e : cl) {
@@ -671,7 +651,6 @@ public class ChartView extends View {
             return;
         }
 
-        // 1) 网格横线 + 左轴刻度 + 右轴刻度 + 轴标题
         gridPaint.setColor(colorGrid);
         tickPaint.setColor(colorAxis);
         tickPaint.setTextSize(TICK_TEXT_DP * density);
@@ -695,7 +674,7 @@ public class ChartView extends View {
         // 左轴标题左沿与左侧刻度数字的左沿平齐（数字是右对齐的，左沿按最宽那条算）
         canvas.drawText(titleLeft, titleLeftX, fPadT - 7f * density, axisTextPaint);
 
-        // 2) 折线：先左轴系列，再右轴系列（后画者压先画者）
+        // 折线先左轴、后右轴（后画者压先画者）
         if (paths != null) {
             for (int pass = 0; pass < 2; pass++) {
                 int wantAxis = pass == 0 ? ChartSeries.AXIS_LEFT : ChartSeries.AXIS_RIGHT;
@@ -709,7 +688,7 @@ public class ChartView extends View {
             }
         }
 
-        // 4) 标注：先用背景色描边（halo）再填色，避免曲线穿过字形时同色糊在一起
+        // 标注先描边（halo）再填色，避免曲线穿过字形时同色糊在一起
         if (labels != null) {
             haloPaint.setColor(colorBg);
             haloPaint.setStrokeWidth(HALO_WIDTH_DP * density);
@@ -717,12 +696,11 @@ public class ChartView extends View {
             haloPaint.setTextSize(TICK_TEXT_DP * density);   // 与 labelPaint 同字号，见 init
             for (ChartLabelOp e : labels) {
                 labelPaint.setColor(e.color);
-                canvas.drawText(e.text, e.x, e.y, haloPaint);   // STROKE 画笔 = 描边
-                canvas.drawText(e.text, e.x, e.y, labelPaint);  // FILL 画笔 = 填色
+                canvas.drawText(e.text, e.x, e.y, haloPaint);
+                canvas.drawText(e.text, e.x, e.y, labelPaint);
             }
         }
 
-        // 5) 头部圆点：填系列色 + 背景色外圈
         if (dots != null) {
             dotHaloPaint.setColor(colorBg);
             float r = DOT_RADIUS_DP * density;
@@ -742,8 +720,6 @@ public class ChartView extends View {
         final int color;
         /** 文本宽度（rebuild 测量，合并成簇时用）。 */
         float w;
-        /** 左对齐起点（rebuild 算好）。 */
-        float tx;
 
         ChartLabelOp(String text, float x, float y, int color) {
             this.text = text;
@@ -753,7 +729,6 @@ public class ChartView extends View {
         }
     }
 
-    /** 一个头部圆点。 */
     private static final class ChartDotOp {
         final float x;
         final float y;

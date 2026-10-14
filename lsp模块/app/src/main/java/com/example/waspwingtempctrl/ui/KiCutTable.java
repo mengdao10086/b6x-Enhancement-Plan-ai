@@ -322,12 +322,7 @@ public final class KiCutTable {
      * 与 C 端 {@code ki_cut_axis_eval} 逐语句一致。
      */
     private static float axisEffective(@NonNull List<Curve> cs, int cold, int axis) {
-        List<Curve> part = new ArrayList<>();
-        for (Curve c : cs) {
-            if (c.hasAxis(axis)) {
-                part.add(c);
-            }
-        }
+        List<Curve> part = axisParticipants(cs, axis);
         if (part.isEmpty()) {
             return NEUTRAL;
         }
@@ -347,11 +342,12 @@ public final class KiCutTable {
      */
     @NonNull
     public static float[] effectiveCurve(@NonNull List<Cluster> clusters, int xMax, int axis) {
-        List<Curve> cs = activeCurves(clusters);
+        List<Curve> part = axisParticipants(activeCurves(clusters), axis);
+        float m = axisMean(part, axis);
         float[] out = new float[Math.max(0, xMax) + 1];
         float[] sample = new float[3];
         for (int x = 0; x < out.length; x++) {
-            axisSample(cs, x, axis, sample);
+            sampleAt(part, x, axis, m, sample);
             out[x] = sample[0];
         }
         return out;
@@ -371,11 +367,12 @@ public final class KiCutTable {
      */
     @NonNull
     public static float[] shadowCurve(@NonNull List<Cluster> clusters, int xMax, int axis) {
-        List<Curve> cs = activeCurves(clusters);
+        List<Curve> part = axisParticipants(activeCurves(clusters), axis);
+        float m = axisMean(part, axis);
         float[] out = new float[Math.max(0, xMax) + 1];
         float[] sample = new float[3];
         for (int x = 0; x < out.length; x++) {
-            axisSample(cs, x, axis, sample);
+            sampleAt(part, x, axis, m, sample);
             out[x] = sample[2];
         }
         return out;
@@ -389,35 +386,67 @@ public final class KiCutTable {
      */
     @NonNull
     public static boolean[] inactiveMask(@NonNull List<Cluster> clusters, int xMax, int axis) {
-        List<Curve> cs = activeCurves(clusters);
+        List<Curve> part = axisParticipants(activeCurves(clusters), axis);
+        float m = axisMean(part, axis);
         boolean[] out = new boolean[Math.max(0, xMax) + 1];
         float[] sample = new float[3];
         for (int x = 0; x < out.length; x++) {
-            axisSample(cs, x, axis, sample);
+            sampleAt(part, x, axis, m, sample);
             out[x] = sample[1] != 0f;
         }
         return out;
     }
 
     /**
-     * 逐轴逐 x 的采样：{@code out = {生效值, 是否有不生效候选(0/1), 最近的不生效候选值}}。
-     * 生效值 = 参评簇（该轴有控制点）里离整段参照值 M 最近者（并列取更小）；无参评簇 → NEUTRAL、无候选。
+     * 一次性算齐某轴逐 x 的三份并行数据（三个数组长度须相等，通常 = {@code xMax + 1}，由调用方提供并装填）：
+     * {@code value[x]} = 生效值、{@code shadow[x]} = 离生效值最近的「不生效候选」值（无候选处 = 生效值）、
+     * {@code inactive[x]} = 该处是否存在不生效候选。
+     *
+     * <p>结果与分别调 {@link #effectiveCurve} / {@link #shadowCurve} / {@link #inactiveMask} 逐位相同，
+     * 但只建一次 {@link #activeCurves}、参评簇子表与整段参照值 M 也只算一次。供
+     * {@code KiCutChartView.Series.of} 一次取齐三条曲线数据。
+     *
+     * @param axis 取值轴，见 {@link #AXIS_UP} / {@link #AXIS_DN} / {@link #AXIS_KDP}
      */
-    private static void axisSample(@NonNull List<Curve> cs, int x, int axis,
-                                   @NonNull float[] out) {
+    public static void fillCurves(@NonNull List<Cluster> clusters, int xMax, int axis,
+                                  @NonNull float[] value, @NonNull float[] shadow,
+                                  @NonNull boolean[] inactive) {
+        List<Curve> part = axisParticipants(activeCurves(clusters), axis);
+        float m = axisMean(part, axis);
+        float[] sample = new float[3];
+        for (int x = 0; x < value.length; x++) {
+            sampleAt(part, x, axis, m, sample);
+            value[x] = sample[0];
+            inactive[x] = sample[1] != 0f;
+            shadow[x] = sample[2];
+        }
+    }
+
+    /** 该轴参评的簇子表（该轴 ≥1 个未留空控制点；全留空簇不参评）；逐 x 采样前算一次复用。 */
+    @NonNull
+    private static List<Curve> axisParticipants(@NonNull List<Curve> cs, int axis) {
         List<Curve> part = new ArrayList<>();
         for (Curve c : cs) {
             if (c.hasAxis(axis)) {
                 part.add(c);
             }
         }
+        return part;
+    }
+
+    /**
+     * 逐 x 采样（参评簇子表与整段参照值 M 由调用方一次算好后传入，故逐点<b>零分配</b>）：
+     * {@code out = {生效值, 是否有不生效候选(0/1), 最近的不生效候选值}}。生效值 = 参评簇里离 M 最近者
+     * （并列取更小）；无参评簇 → NEUTRAL、无候选。
+     */
+    private static void sampleAt(@NonNull List<Curve> part, int x, int axis, float m,
+                                 @NonNull float[] out) {
         if (part.isEmpty()) {
             out[0] = NEUTRAL;
             out[1] = 0f;
             out[2] = NEUTRAL;
             return;
         }
-        float m = axisMean(part, axis);
         float best = part.get(0).value(x, axis);
         for (int i = 1; i < part.size(); i++) {
             best = nearer(best, part.get(i).value(x, axis), m);

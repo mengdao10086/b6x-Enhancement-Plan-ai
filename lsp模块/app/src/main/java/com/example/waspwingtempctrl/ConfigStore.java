@@ -1,6 +1,10 @@
 package com.example.waspwingtempctrl;
 
 import android.content.Context;
+import android.system.ErrnoException;
+import android.system.Os;
+import android.system.OsConstants;
+import android.system.StructStat;
 
 import org.json.JSONArray;
 import org.json.JSONObject;
@@ -11,10 +15,14 @@ import java.io.FileInputStream;
 import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
+import java.nio.ByteBuffer;
+import java.nio.charset.CharacterCodingException;
+import java.nio.charset.CodingErrorAction;
 import java.nio.charset.StandardCharsets;
 import java.text.SimpleDateFormat;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Collection;
 import java.util.Collections;
 import java.util.Date;
 import java.util.HashSet;
@@ -68,8 +76,16 @@ public final class ConfigStore {
     private final File filesDir;
     private final File configFile;
 
+    /**
+     * {@link #isPathAlignedWithDaemon()} 的结果缓存：{@code filesDir}（构造后不变）与
+     * {@code DAEMON_PRIVATE_DIR}（常量）比较而来，故结果在进程内恒定，算一次即可。
+     */
+    private volatile Boolean pathAligned;
+
     /** params.json 顺序的键表。 */
     private final LinkedHashMap<String, KeyMeta> keys = new LinkedHashMap<>();
+    /** {@link #keys()} 的不可变视图（构造后 {@link #keys} 不再变动，故只建一次）。 */
+    private final List<KeyMeta> keysView;
     private final List<GroupMeta> groups = new ArrayList<>();
     /** 表型键（定义里 {@code type:"table"} 的那些）：读盘时按 {@code rowPrefix} 认领多行。 */
     private final List<KeyMeta> tables = new ArrayList<>();
@@ -112,6 +128,7 @@ public final class ConfigStore {
         if (root != null) {
             parseDefinitions(root);
         }
+        this.keysView = Collections.unmodifiableList(new ArrayList<>(keys.values()));
         StartupTiming.span(StartupTiming.DEF_LOAD, startedAt);
     }
 
@@ -150,16 +167,25 @@ public final class ConfigStore {
      * 返回 false 即守护进程读不到本类写的配置，界面必须如实告警。护栏由来见 app/逻辑说明.md §3.1。
      */
     public boolean isPathAlignedWithDaemon() {
+        Boolean cached = pathAligned;
+        if (cached != null) {
+            return cached;
+        }
+        boolean aligned = false;
         // 只做字面比较会误报：Context.getFilesDir() 在设备上通常是 /data/user/0/<包名>/files，
         // 而 C 端硬编码 /data/data/<包名>/files（/data/data 是前者的符号链接，同一目录）。
         try {
             if (filesDir.getCanonicalPath().equals(new File(DAEMON_PRIVATE_DIR).getCanonicalPath())) {
-                return true;
+                aligned = true;
             }
         } catch (IOException ignored) {
             // 取不到规范路径时退回字面比较
         }
-        return filesDir.getAbsolutePath().equals(DAEMON_PRIVATE_DIR);
+        if (!aligned) {
+            aligned = filesDir.getAbsolutePath().equals(DAEMON_PRIVATE_DIR);
+        }
+        pathAligned = aligned;
+        return aligned;
     }
 
     /** C 端会去找的配置文件绝对路径（不管是否与 app 侧一致）。 */
@@ -180,7 +206,7 @@ public final class ConfigStore {
 
     /** 全部键元数据，按 params.json 顺序。 */
     public List<KeyMeta> keys() {
-        return Collections.unmodifiableList(new ArrayList<>(keys.values()));
+        return keysView;
     }
 
     /** 未知键返回 null（界面必须按 null 处理，不得静默当默认值）。 */
@@ -242,18 +268,19 @@ public final class ConfigStore {
      * <p>指纹未变时返回的<b>就是上一份快照</b>，故它与 {@link Snapshot} 自己的字段一样只读。
      */
     public Snapshot read() {
-        String fingerprint = configFingerprint();
+        StructStat stat = statConfig();
+        String fingerprint = fingerprintOf(stat);
         Memo cached = memo;
         if (cached != null && fingerprint.equals(cached.fingerprint)) {
             return cached.snapshot;
         }
-        if (!exists()) {
+        if (stat == null) {
             Snapshot absent = allDefaults(false, 0L,
                     "配置不存在，以下为出厂默认值：" + configFile.getAbsolutePath());
             memo = new Memo(fingerprint, absent);   // 文件一出现指纹就变，不会读到旧账
             return absent;
         }
-        long mtime = configFile.lastModified();
+        long mtime = stat.st_mtime * 1000L;
         // 记账（旁路）：只量"真读盘 + 真解析"这一段（上面几处命中 memo / 文件不存在都已早退）。
         // 首次写入胜出，故并发时只认本次进程里先完成的那一次
         long startedAt = StartupTiming.now();
@@ -279,10 +306,22 @@ public final class ConfigStore {
      * 共用口径与理由见 app/逻辑说明.md §3.5。
      */
     public String configFingerprint() {
-        if (!configFile.isFile()) {
-            return "-";
+        return fingerprintOf(statConfig());
+    }
+
+    /** 一次 stat 取到配置文件属性；文件不存在或非普通文件时返回 null。 */
+    private StructStat statConfig() {
+        try {
+            StructStat st = Os.stat(configFile.getAbsolutePath());
+            return OsConstants.S_ISREG(st.st_mode) ? st : null;
+        } catch (ErrnoException e) {
+            return null;
         }
-        return configFile.lastModified() + ":" + configFile.length();
+    }
+
+    /** 指纹串 {@code mtime(ms):size}；{@code null} = 文件不存在。{@code st_mtime} 为秒，×1000 转毫秒。 */
+    private static String fingerprintOf(StructStat st) {
+        return st == null ? "-" : (st.st_mtime * 1000L) + ":" + st.st_size;
     }
 
     /** 读不到盘时的快照：每个定义键取出厂默认值，附一条说明（{@link #read()} 的两条退化路径共用）。 */
@@ -563,42 +602,38 @@ public final class ConfigStore {
         if (changes == null || changes.isEmpty()) {
             return WriteResult.failure("没有要写入的键");
         }
-        for (String key : changes.keySet()) {
-            KeyMeta meta = keys.get(key);
-            if (meta == null) {
-                return WriteResult.failure("未知键（params.json 未定义）：" + key);
-            }
-            if (changes.get(key) == null) {
-                return WriteResult.failure("键 " + key + " 的值为 null");
-            }
-        }
-        String text;
-        boolean fileExists = exists();
-        if (fileExists) {
-            try {
-                byte[] raw = readAllBytes(configFile);
-                text = new String(raw, StandardCharsets.UTF_8);
-                if (!Arrays.equals(text.getBytes(StandardCharsets.UTF_8), raw)) {
-                    return WriteResult.failure("配置文件不是合法 UTF-8，拒绝改写以免损坏内容");
-                }
-            } catch (IOException e) {
-                return WriteResult.failure("读取失败：" + e.getMessage());
-            }
-        } else {
-            text = header();
-        }
-
         LinkedHashMap<String, String> pending = new LinkedHashMap<>();
         LinkedHashMap<String, String> appendComments = new LinkedHashMap<>();
         // 表型键的落点：逻辑键 → 行键前缀。它的值是多行文本，由 ConfText 展开成 rowPrefix1/2/… 多行
         LinkedHashMap<String, String> families = new LinkedHashMap<>();
         for (Map.Entry<String, Value> e : changes.entrySet()) {
             KeyMeta meta = keys.get(e.getKey());
+            if (meta == null) {
+                return WriteResult.failure("未知键（params.json 未定义）：" + e.getKey());
+            }
+            if (e.getValue() == null) {
+                return WriteResult.failure("键 " + e.getKey() + " 的值为 null");
+            }
             pending.put(e.getKey(), e.getValue().format());
             appendComments.put(e.getKey(), meta.label);
             if (meta.isTable() && !meta.rowPrefix.isEmpty()) {
                 families.put(e.getKey(), meta.rowPrefix);
             }
+        }
+        String text;
+        boolean fileExists = exists();
+        if (fileExists) {
+            try {
+                String decoded = decodeUtf8OrNull(readAllBytes(configFile));
+                if (decoded == null) {
+                    return WriteResult.failure("配置文件不是合法 UTF-8，拒绝改写以免损坏内容");
+                }
+                text = decoded;
+            } catch (IOException e) {
+                return WriteResult.failure("读取失败：" + e.getMessage());
+            }
+        } else {
+            text = header();
         }
         ConfText.Edit edit = ConfText.apply(text, pending, appendComments, families);
         int replaced = edit.replaced;
@@ -608,7 +643,7 @@ public final class ConfigStore {
             return new WriteResult(true, false, false, replaced, appended, configFile.lastModified(), "", "");
         }
         try {
-            writeAtomic(edit.text);
+            atomicWrite(configFile, edit.text);
         } catch (IOException e) {
             return WriteResult.failure(e.getMessage());
         }
@@ -664,7 +699,7 @@ public final class ConfigStore {
         }
         String text = sb.toString();
         try {
-            writeAtomic(text);
+            atomicWrite(configFile, text);
         } catch (IOException e) {
             return WriteResult.failure(e.getMessage());
         }
@@ -861,11 +896,11 @@ public final class ConfigStore {
         Set<String> target = new HashSet<>(keys);
         String text;
         try {
-            byte[] raw = readAllBytes(configFile);
-            text = new String(raw, StandardCharsets.UTF_8);
-            if (!Arrays.equals(text.getBytes(StandardCharsets.UTF_8), raw)) {
+            String decoded = decodeUtf8OrNull(readAllBytes(configFile));
+            if (decoded == null) {
                 return RemoveResult.failure("配置文件不是合法 UTF-8，拒绝改写以免损坏内容");
             }
+            text = decoded;
         } catch (IOException e) {
             return RemoveResult.failure("读取失败：" + e.getMessage());
         }
@@ -902,7 +937,7 @@ public final class ConfigStore {
             return RemoveResult.failure("备份失败（未改动配置）：" + e.getMessage());
         }
         try {
-            writeAtomic(String.join("\n", kept));
+            atomicWrite(configFile, String.join("\n", kept));
         } catch (IOException e) {
             return RemoveResult.failure("写盘失败：" + e.getMessage());
         }
@@ -913,9 +948,6 @@ public final class ConfigStore {
     /** 把删掉的行写进一份带时间戳的备份文件（同目录原子写）；返回其绝对路径。 */
     private String writeRemovedBackup(List<String> removedLines) throws IOException {
         File dir = configFile.getParentFile();
-        if (dir != null && !dir.isDirectory() && !dir.mkdirs()) {
-            throw new IOException("目录不可用：" + dir);
-        }
         String stamp = new SimpleDateFormat("yyyyMMdd-HHmmss", Locale.US).format(new Date());
         File backup = new File(dir, CONFIG_FILE_NAME + ".removed-" + stamp + ".bak");
         int n = 2;
@@ -927,23 +959,7 @@ public final class ConfigStore {
                 + new SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.US).format(new Date()) + "）\n"
                 + "# 需要恢复时，把下面的行贴回 profile.conf 并保存即可。\n"
                 + String.join("\n", removedLines) + "\n";
-        File tmp = new File(dir, backup.getName() + ".tmp");
-        FileOutputStream fos = null;
-        try {
-            fos = new FileOutputStream(tmp, false);
-            fos.write(content.getBytes(StandardCharsets.UTF_8));
-            fos.flush();
-            fos.getFD().sync();
-        } finally {
-            if (fos != null) {
-                fos.close();
-            }
-        }
-        if (!tmp.renameTo(backup)) {
-            //noinspection ResultOfMethodCallIgnored
-            tmp.delete();
-            throw new IOException("备份文件替换失败：" + backup);
-        }
+        atomicWrite(backup, content);
         return backup.getAbsolutePath();
     }
 
@@ -1003,13 +1019,13 @@ public final class ConfigStore {
         }
         JSONObject accept = compat.optJSONObject("daemonAccept");
         if (accept != null) {
-            readStringArray(accept.optJSONArray("prefixes"), compatAcceptPrefixes);
-            readStringSet(accept.optJSONArray("exact"), compatAcceptExact);
+            readStringCollection(accept.optJSONArray("prefixes"), compatAcceptPrefixes);
+            readStringCollection(accept.optJSONArray("exact"), compatAcceptExact);
         }
         JSONObject cleanup = compat.optJSONObject("cleanup");
         if (cleanup != null) {
-            readStringArray(cleanup.optJSONArray("prefixes"), compatCleanupPrefixes);
-            readStringSet(cleanup.optJSONArray("exact"), compatCleanupExact);
+            readStringCollection(cleanup.optJSONArray("prefixes"), compatCleanupPrefixes);
+            readStringCollection(cleanup.optJSONArray("exact"), compatCleanupExact);
             JSONObject counterparts = cleanup.optJSONObject("counterparts");
             if (counterparts != null) {
                 java.util.Iterator<String> it = counterparts.keys();
@@ -1029,19 +1045,8 @@ public final class ConfigStore {
         }
     }
 
-    private static void readStringArray(JSONArray arr, List<String> out) {
-        if (arr == null) {
-            return;
-        }
-        for (int i = 0; i < arr.length(); i++) {
-            String s = arr.optString(i, "");
-            if (!s.isEmpty()) {
-                out.add(s);
-            }
-        }
-    }
-
-    private static void readStringSet(JSONArray arr, Set<String> out) {
+    /** 把 JSON 字符串数组里的非空项读进 {@code out}（List / Set 通用）。 */
+    private static void readStringCollection(JSONArray arr, Collection<String> out) {
         if (arr == null) {
             return;
         }
@@ -1300,7 +1305,7 @@ public final class ConfigStore {
                 sb.append("：范围 ").append(rawMin).append('~').append(rawMax);
             }
             if (!requires.isEmpty()) {
-                sb.append("；仅 ").append(joinEach(requires, "=1、")).append("=1 时生效");
+                sb.append("；仅 ").append(join(requires, "=1、")).append("=1 时生效");
             }
             return sb.toString();
         }
@@ -1554,7 +1559,13 @@ public final class ConfigStore {
                 }
             }
 
-            StringBuilder sb = new StringBuilder(String.join("\n", out));
+            StringBuilder sb = new StringBuilder();
+            for (int i = 0; i < out.size(); i++) {
+                if (i > 0) {
+                    sb.append('\n');
+                }
+                sb.append(out.get(i));
+            }
             int appended = 0;
             if (matched.size() < pending.size()) {
                 if (sb.length() > 0 && sb.charAt(sb.length() - 1) != '\n') {
@@ -1691,13 +1702,13 @@ public final class ConfigStore {
         }
     }
 
-    /** 原子替换：同目录临时文件 → fsync → rename。 */
-    private void writeAtomic(String content) throws IOException {
-        File dir = configFile.getParentFile();
+    /** 原子替换：同目录临时文件 → write → flush → fsync → rename（I3 原子写语义的唯一实现点）。 */
+    private static void atomicWrite(File target, String content) throws IOException {
+        File dir = target.getParentFile();
         if (dir != null && !dir.isDirectory() && !dir.mkdirs()) {
             throw new IOException("目录不可用：" + dir);
         }
-        File tmp = new File(dir, CONFIG_FILE_NAME + ".tmp");
+        File tmp = new File(dir, target.getName() + ".tmp");
         FileOutputStream fos = null;
         try {
             fos = new FileOutputStream(tmp, false);
@@ -1713,12 +1724,12 @@ public final class ConfigStore {
                 }
             }
         }
-        if (!tmp.renameTo(configFile)) {
+        if (!tmp.renameTo(target)) {
             // rename 失败（极少见）→ 不留下半截文件，删掉临时文件并明确报错
             if (!tmp.delete()) {
                 throw new IOException("rename 失败且临时文件无法删除：" + tmp);
             }
-            throw new IOException("rename 失败：" + tmp + " → " + configFile);
+            throw new IOException("rename 失败：" + tmp + " → " + target);
         }
     }
 
@@ -1858,12 +1869,20 @@ public final class ConfigStore {
         return sb.toString();
     }
 
-    private static String joinEach(List<String> list, String itemSuffix) {
-        StringBuilder sb = new StringBuilder();
-        for (int i = 0; i < list.size(); i++) {
-            sb.append(list.get(i)).append(itemSuffix);
+    /**
+     * 严格 UTF-8 解码：字节不是合法 UTF-8 时返回 null。
+     * 不能用 {@code new String(bytes, UTF_8)}——它会把非法字节悄悄换成 U+FFFD，据此改写会损坏内容。
+     */
+    private static String decodeUtf8OrNull(byte[] raw) {
+        try {
+            return StandardCharsets.UTF_8.newDecoder()
+                    .onMalformedInput(CodingErrorAction.REPORT)
+                    .onUnmappableCharacter(CodingErrorAction.REPORT)
+                    .decode(ByteBuffer.wrap(raw))
+                    .toString();
+        } catch (CharacterCodingException e) {
+            return null;
         }
-        return sb.toString();
     }
 
     static byte[] readAllBytes(File file) throws IOException {

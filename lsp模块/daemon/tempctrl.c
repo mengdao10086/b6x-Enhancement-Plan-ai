@@ -1810,19 +1810,27 @@ static void update_active_limits(void) {
     }
 }
 
+// active status 文件的 mtime 缓存：read_cooler_params 每次成功打开时刷新（打开失败清 0），
+// 供 is_app_alive 复用。0 = 本拍尚未成功读到。
+static time_t active_status_mtime = 0;
+
 /**
  * 读取 active_device 对应的状态文件中的散热器回传参数
  * 在仲裁确定 active_device 后调用
  */
 static void read_cooler_params(void) {
     const char *path = (active_device == DEVICE_B7X) ? status_file_path_b7 : status_file_path_b6;
+    active_status_mtime = 0;   // 本拍先置未知；下面成功打开后刷新
 
-    // 先重置所有参数
     cooler_hot_temp = -1; cooler_cold_temp = -1;
     cooler_rpm_real = -1; cooler_cold_real = -1;
 
     FILE *f = fopen(path, "r");
     if (!f) return;
+    {   // 复用已打开的 fd 取 mtime（is_app_alive 同拍紧随其后调用，见其注释）
+        struct stat fst;
+        if (fstat(fileno(f), &fst) == 0) active_status_mtime = fst.st_mtime;
+    }
     char line[64];
     int run_mode_seen = 0;   // 本帧是否读到 RUN_MODE（与 COLD_REAL 同块写入，lastWaspWingInfo 就绪才有）
     while (fgets(line, sizeof(line), f)) {
@@ -1907,7 +1915,7 @@ static int read_battery_temp(void) {
         mtime_changed = 1;
         batt_temp_mtime = st.st_mtime;
     }
-    batt_temp_updated = (val != batt_cached_temp) || mtime_changed;   // 值或 mtime 任一变化
+    batt_temp_updated = (val != batt_cached_temp) || mtime_changed;
     batt_cached_temp = val;
     return val;
 }
@@ -1984,7 +1992,7 @@ typedef struct { int id; int raw; } ZoneReading;
 static int cmp_zone_desc(const void *a, const void *b) {
     int da = ((const ZoneReading*)a)->raw;
     int db = ((const ZoneReading*)b)->raw;
-    return (da < db) - (da > db);   // 降序
+    return (da < db) - (da > db);
 }
 
 /**
@@ -2315,7 +2323,7 @@ static int should_skip_dispatch(int mode, int target, int windOC, int cold, int 
         if (cold == cooler_cold_real && send_rpm == cooler_rpm_real) {
             debug_log(debug_exec, "skip 已到位：目标冷%d RPM%d == 回传冷%d RPM%d，跳过下发",
                       cold, send_rpm, cooler_cold_real, cooler_rpm_real);
-            return 1;   // 散热器实际已到位
+            return 1;
         }
 
         int diff = cold - cooler_cold_real;
@@ -2365,12 +2373,17 @@ static int should_skip_dispatch(int mode, int target, int windOC, int cold, int 
  * LSP 每 1 秒写一次 status 文件，mtime 超时即判进程死
  */
 static int is_app_alive(void) {
-    const char *path = (active_device == DEVICE_B7X) ? status_file_path_b7 : status_file_path_b6;
-    struct stat st;
-    if (stat(path, &st) != 0) return 0;
-    time_t now = time(NULL);
-    int alive = (now - st.st_mtime <= STATUS_TIMEOUT);
-    return alive;
+    // 复用本拍 read_cooler_params 打开 active 状态文件时读到的 mtime（两个调用点都在同一拍紧随其后，
+    // 陈旧度上界 = 一条主循环语句之间）。未读到（打开失败 / 尚未调用）则自行 stat。判定口径
+    //（now − mtime ≤ STATUS_TIMEOUT）与单位不变。
+    time_t mt = active_status_mtime;
+    if (mt == 0) {
+        const char *path = (active_device == DEVICE_B7X) ? status_file_path_b7 : status_file_path_b6;
+        struct stat st;
+        if (stat(path, &st) != 0) return 0;
+        mt = st.st_mtime;
+    }
+    return (time(NULL) - mt <= STATUS_TIMEOUT);
 }
 
 // ======================== 双 app 存活仲裁 ========================
@@ -2388,7 +2401,7 @@ static void app_process_scan(const char *pkgs[], int alive[], int count) {
     char buf[4096];
     int found_all = 0;
     while (!found_all && (de = readdir(d)) != NULL) {
-        if (de->d_name[0] < '0' || de->d_name[0] > '9') continue;   // 只扫数字 PID
+        if (de->d_name[0] < '0' || de->d_name[0] > '9') continue;
         char path[64];
         snprintf(path, sizeof(path), "/proc/%s/cmdline", de->d_name);
         int fd = open(path, O_RDONLY);
@@ -2829,7 +2842,6 @@ static void watchdog_check(void) {
 static void evict_app_if_eligible(int alive, const char *keep, const char *pkg) {
     if (alive && keep != pkg && !is_foreground_pkg(pkg)) {
         write_log("app 仲裁 强制停止 %s（保留 %s）", pkg, keep);
-        // 输出重定向到 /dev/null
         run_cmd_silent(AM_BIN " force-stop %s > /dev/null 2>&1", pkg);
     }
 }
@@ -2850,6 +2862,13 @@ static void arbitrate_apps(void) {
         scan_orig[scan_n] = i;
         scan_n++;
     }
+    // 短路：候选 ≤1 且自动拉起关闭时，本函数后续不可能改变任何结论——scan_n ≤1 → 至多一个包可存活
+    // → old+new+far_in ≤1 <2，必在下方 `if (old_alive + new_alive + far_in < 2) return;` 处返回，
+    // 永不进入淘汰分支；唯一另一分支「三方全灭 → launch_last_app(1)」在 APP_LAUNCH_ENABLED=0 时
+    // 于其入口立即 return。故零可观测副作用（含 install_cache_mark：该缓存「只写 1、不改 alive[]/
+    // found_all 语义」，scan_n≤1 时被扫包的缓存非 0，跳过最多少一次 1→1 幂等写，或 unknown→1——
+    // 后者只影响自动拉起路径下 app_installed() 免一次 pm 探测，而该路径正被本条件排除）。
+    if (scan_n <= 1 && !APP_LAUNCH_ENABLED) return;
     int alive[3] = { 0, 0, 0 };
     if (scan_n > 0) {
         int scan_alive[3];
@@ -2894,11 +2913,6 @@ static void arbitrate_apps(void) {
 // ======================== 已删除机制（Gear / PID 方差门控） ========================
 // 原「电池温度分档控制 / 紧急恢复期推进 / CPU 紧急干预 / 电流-挡位映射 / Gear 温度预测 /
 // PID 方差门控」等成套机制已删除，函数名与职责见 逻辑说明.md「已删除机制索引」。
-
-/**
- * 紧急退出恢复期阶段推进：冷却周期递减，到期推进 P1→P2→P3→正常。
- * 不受电池温度读取失败影响（battery_control 入口先调用，冷却期也能走完各阶段）。
- */
 
 // ======================== 输入补偿 ========================
 
@@ -3665,7 +3679,6 @@ static int try_align_actual(void) {
  * 沿用内存实际值；不立即下发（由 rate_limited_execute 限速）。见 逻辑说明.md「主循环逻辑→短断联保留状态」。
  */
 static void reconnect_align(void) {
-    // 清空温度窗口累积标志
     batt_changed_since_ctrl = 0;
     batt_window_changed = 0;
 
@@ -3864,6 +3877,7 @@ static void main_loop(void) {
 // 每 WEBUI_COMPACT_EVERY 行压缩一次（删最旧行，文件 720~780 行）。
 #define WEBUI_COMPACT_EVERY 60   // 每追加 60 行（≈60s）压缩一次，文件最多膨胀到 720+60=780 行
 static int webui_lines_since_compact = 0;   // 自上次压缩以来追加的行数
+static FILE *webui_fp = NULL;              // WebUI 曲线文件的常驻追加句柄（"a"=O_APPEND）
 
 /**
  * 每 1 秒采集一次并写入 WebUI 曲线数据文件（滚动保留 720 行）。
@@ -3882,14 +3896,19 @@ static void write_webui_data(void) {
     // 温度采集/缓存不受影响，5s 控制块仍用新鲜缓存。
     if (!app_ble_connected || !is_app_alive()) return;
 
-    // 快速路径：追加 1 行到文件（mtime 每 1s 更新）
-    FILE *wf = fopen(WEBUI_DATA_PATH, "a");
-    if (wf) {
-        fprintf(wf, WEBUI_ROW_FMT,
-                (long)time(NULL), batt, cpu,
-                cooler_hot_temp, cooler_cold_temp,
-                cooler_rpm_real, cooler_cold_real, actual_cold);
-        fclose(wf);
+    // 追加 1 行到常驻句柄；O_APPEND 使压缩段用 "w" 截断后写入仍落在新 EOF。写失败（文件被外部
+    // 删除/替换等）时关句柄，下一拍重开。
+    if (!webui_fp) webui_fp = fopen(WEBUI_DATA_PATH, "a");
+    if (webui_fp) {
+        if (fprintf(webui_fp, WEBUI_ROW_FMT,
+                    (long)time(NULL), batt, cpu,
+                    cooler_hot_temp, cooler_cold_temp,
+                    cooler_rpm_real, cooler_cold_real, actual_cold) >= 0) {
+            fflush(webui_fp);   // 立即落盘：界面按秒读取
+        } else {
+            fclose(webui_fp);
+            webui_fp = NULL;
+        }
     }
     webui_lines_since_compact++;
 
@@ -4046,7 +4065,7 @@ static int watchdog_alive(void) {
     char buf[4096];
     int alive = 0;
     while (!alive && (de = readdir(d)) != NULL) {
-        if (de->d_name[0] < '0' || de->d_name[0] > '9') continue;   // 只扫数字 PID
+        if (de->d_name[0] < '0' || de->d_name[0] > '9') continue;
         char path[64];
         snprintf(path, sizeof(path), "/proc/%s/cmdline", de->d_name);
         int fd = open(path, O_RDONLY);
@@ -4487,6 +4506,7 @@ int main(int argc, char *argv[]) {
 
 exit:
     close_cpu_zone_fds();   // 释放 thermal zone 常驻 fd（进程退出本会回收，显式关闭便于自查无泄漏）
+    if (webui_fp) fclose(webui_fp);   // 释放曲线文件常驻句柄
     if (log_fp) fclose(log_fp);
     return 0;
 }

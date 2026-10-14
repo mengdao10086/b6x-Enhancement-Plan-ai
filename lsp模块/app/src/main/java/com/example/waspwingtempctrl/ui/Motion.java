@@ -6,6 +6,8 @@ import android.animation.ValueAnimator;
 import android.content.Context;
 import android.os.Build;
 import android.provider.Settings;
+import android.transition.AutoTransition;
+import android.transition.TransitionManager;
 import android.util.TypedValue;
 import android.view.Display;
 import android.view.View;
@@ -14,10 +16,10 @@ import android.view.ViewParent;
 import android.view.WindowManager;
 import android.view.animation.Interpolator;
 import android.view.animation.PathInterpolator;
+import android.widget.ImageView;
 import android.widget.TextView;
 
-import androidx.transition.AutoTransition;
-import androidx.transition.TransitionManager;
+import com.example.waspwingtempctrl.R;
 
 import java.util.WeakHashMap;
 
@@ -287,6 +289,31 @@ public final class Motion {
                 .start();
     }
 
+    /** 展开态的箭头旋转角：图标指向右，顺时针 90° 即指向下（收起态不转，复位指右）。各可展开条共用这一处口径。 */
+    private static final float ARROW_EXPANDED_ROTATION = 90f;
+
+    /**
+     * 展开/收起的「展开箭头」同步：以面板同一次返回的 {@code durationMs} 把箭头转到展开角
+     * （{@link #ARROW_EXPANDED_ROTATION}）或复位，并同步无障碍描述（展开 = 可收起、收起 = 可展开）。
+     *
+     * <p>把「角度选择 + 旋转 + 换无障碍描述」这三步收敛到一处，角度/时长/曲线口径逐位沿用
+     * {@link #rotate(View, float, long)}（与所在面板同曲线同时长），本方法不新增任何动效常量。
+     * 面板本体的量高/补间仍由调用方负责（各处的正文准备时序不同），本方法只做与面板同生共灭的
+     * 箭头那一段，须在拿到 {@link #animateHeight(View, boolean)} 的返回值之后调用。
+     *
+     * @param arrow 展开箭头视图（{@code null} 时什么都不做）
+     * @param expanded true = 展开（转 90° 指向下）；false = 收起（复位指右）
+     * @param durationMs 与所在面板同一次的动画时长（毫秒）；{@code <0} = 该面板本次未走动画，箭头直接落位
+     */
+    static void syncExpandArrow(ImageView arrow, boolean expanded, long durationMs) {
+        if (arrow == null) {
+            return;
+        }
+        rotate(arrow, expanded ? ARROW_EXPANDED_ROTATION : 0f, durationMs);
+        arrow.setContentDescription(arrow.getContext().getString(
+                expanded ? R.string.config_action_collapse : R.string.config_action_expand));
+    }
+
     /**
      * 展开/收起一个 {@code wrap_content} 容器：按逻辑 2 的时长逐帧改其高度。
      *
@@ -478,6 +505,11 @@ public final class Motion {
     /**
      * 开一段带逻辑 2 时长的布局过渡：调用方先调本方法、随后再改可见性/内容，平台会把边界变化按
      * 算出的时长补间过去。系统关掉动效时不动（调用方直接改状态即可）。
+     *
+     * <p>用平台自带的 {@code android.transition}（{@link AutoTransition} + {@link TransitionManager}，
+     * API 19+，minSdk 25 满足）：过渡语义为边界变化 + 淡入淡出。本类的曲线（{@link SlowEndsCurve}，
+     * 实现 {@link Interpolator}）经 API 22+ 的 {@code Interpolator extends TimeInterpolator} 直接喂入
+     * {@link android.transition.Transition#setInterpolator}。
      */
     static void beginLayoutChange(ViewGroup root, float deltaPx) {
         if (root == null || !enabled(root.getContext())) {

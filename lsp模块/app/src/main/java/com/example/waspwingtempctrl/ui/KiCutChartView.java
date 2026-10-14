@@ -51,9 +51,14 @@ final class KiCutChartView extends View {
         /** 按轴现算三份数据（只委托 {@link KiCutTable}；本控件仍不读文件、不做算法）。 */
         @NonNull
         static Series of(@NonNull List<KiCutTable.Cluster> clusters, int xMax, int axis) {
-            return new Series(KiCutTable.effectiveCurve(clusters, xMax, axis),
-                    KiCutTable.shadowCurve(clusters, xMax, axis),
-                    KiCutTable.inactiveMask(clusters, xMax, axis));
+            // 三份并行数据一趟算齐：只建一次 activeCurves、只扫一趟。逐轴各算一次——三个 Series.of
+            // 由 ConfigKeyRow 分别调用，跨轴共享 activeCurves 须改该冻结文件，故不共享
+            int n = Math.max(0, xMax) + 1;
+            float[] value = new float[n];
+            float[] shadow = new float[n];
+            boolean[] inactive = new boolean[n];
+            KiCutTable.fillCurves(clusters, xMax, axis, value, shadow, inactive);
+            return new Series(value, shadow, inactive);
         }
 
         /** 空数据（仅作字段默认值；{@link #setCurves} 上屏前不绘制）。 */
@@ -82,6 +87,10 @@ final class KiCutChartView extends View {
     private final Paint targetPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
     /** 「不生效段」的虚线效果（口径与「当前冷值」竖虚线一致）；在 {@link #init()} 里按当前密度建。 */
     private DashPathEffect dashEffect;
+    /** onDraw 复用的折线路径（§7：onDraw 内不重建 Path）；每段画完即 reset 重填，不跨帧持有几何。 */
+    private final Path pathFull = new Path();
+    /** onDraw 复用的「不生效段」虚线路径（同上）。 */
+    private final Path pathInactive = new Path();
 
     private float density;
     private int colorGrid;
@@ -99,6 +108,8 @@ final class KiCutChartView extends View {
     private int target = -1;
     /** 横轴刻度（表里各点冷值 ∪ {0, xMax}，去重升序）；由 {@link #setCurves} 注入、onDraw 消费。 */
     private int[] ticks = new int[0];
+    /** 横轴每个刻度的文本（与 {@link #ticks} 一一对应）；{@link #setCurves} 预生成，onDraw 只消费（§7 零分配）。 */
+    private String[] tickLabels = new String[0];
 
     // ---- setCurves 产物：纵轴定标与其刻度；onDraw 只消费 ----
     private ChartAxis axis;
@@ -151,6 +162,11 @@ final class KiCutChartView extends View {
         this.xMax = Math.max(1, xMax);
         this.target = target;
         this.ticks = xTicks;
+        // 刻度文本一次算好，onDraw 只读（不在 onDraw 里做 String.format）
+        this.tickLabels = new String[xTicks.length];
+        for (int i = 0; i < xTicks.length; i++) {
+            tickLabels[i] = label(xTicks[i]);
+        }
         fitAxis();
         invalidate();
     }
@@ -227,7 +243,9 @@ final class KiCutChartView extends View {
             return;
         }
         float pad = PAD_DP * density;
-        float labelH = -textPaint.getFontMetrics().ascent + textPaint.getFontMetrics().descent;
+        // 字号/字体本帧内不变：FontMetrics 取一次复用（其值只依赖字号与字体，与颜色/对齐无关）
+        final Paint.FontMetrics fm = textPaint.getFontMetrics();
+        float labelH = -fm.ascent + fm.descent;
         float labelW = 0f;
         for (String s : axisLabels) {
             labelW = Math.max(labelW, textPaint.measureText(s));
@@ -242,7 +260,6 @@ final class KiCutChartView extends View {
         }
 
         // 纵轴网格 + 刻度（原始倍率标签）；y 由 ChartAxis 定标给出
-        Paint.FontMetrics fm = textPaint.getFontMetrics();
         textPaint.setColor(colorAxis);
         textPaint.setTextAlign(Paint.Align.RIGHT);
         gridPaint.setColor(colorGrid);
@@ -258,10 +275,10 @@ final class KiCutChartView extends View {
 
         // 横轴刻度 + 刻度数字：刻度由调用方给定（表里各点冷值 ∪ {0, xMax}），不抽稀、允许重叠
         textPaint.setTextAlign(Paint.Align.CENTER);
-        for (int x : ticks) {
-            float px = gridX(x, plotL, plotR);
+        for (int i = 0; i < ticks.length; i++) {
+            float px = gridX(ticks[i], plotL, plotR);
             canvas.drawLine(px, plotT, px, plotB, gridPaint);
-            String text = label(x);
+            String text = tickLabels[i];   // 预生成，不在 onDraw 里 String.format
             float half = textPaint.measureText(text) / 2f;
             canvas.drawText(text, Math.min(Math.max(px, half), w - half), h - pad / 2f, textPaint);
         }
@@ -291,25 +308,25 @@ final class KiCutChartView extends View {
     private void drawSeries(Canvas canvas, Series s, Paint paint, float plotL, float plotR,
                             float plotT, float plotB) {
         paint.setPathEffect(null);
-        canvas.drawPath(fullPath(s.value, plotL, plotR, plotT, plotB), paint);
+        canvas.drawPath(fullPath(pathFull, s.value, plotL, plotR, plotT, plotB), paint);
         paint.setPathEffect(dashEffect);
-        canvas.drawPath(inactiveRunsPath(s, plotL, plotR, plotT, plotB), paint);
+        canvas.drawPath(inactiveRunsPath(pathInactive, s, plotL, plotR, plotT, plotB), paint);
         paint.setPathEffect(null);
     }
 
-    /** 整条折线（逐格连起来）。 */
-    private Path fullPath(float[] values, float plotL, float plotR, float plotT, float plotB) {
-        Path p = new Path();
+    /** 整条折线（逐格连起来）；写入复用的 {@code out}（先 reset），故 onDraw 内不新建 Path。 */
+    private Path fullPath(Path out, float[] values, float plotL, float plotR, float plotT, float plotB) {
+        out.reset();
         for (int x = 0; x < values.length; x++) {
             float px = gridX(x, plotL, plotR);
             float py = axis.y(values[x], plotT, plotB - plotT);
             if (x == 0) {
-                p.moveTo(px, py);
+                out.moveTo(px, py);
             } else {
-                p.lineTo(px, py);
+                out.lineTo(px, py);
             }
         }
-        return p;
+        return out;
     }
 
     /**
@@ -319,8 +336,8 @@ final class KiCutChartView extends View {
      * {@code x=0} 或 {@code x=xMax}，那一侧无法外延，此时**该端点格改用生效值**（{@code value}），
      * 令虚线端点落回实线、不悬空——同时保留「此处存在一个被舍弃的候选」的信息。
      */
-    private Path inactiveRunsPath(Series s, float plotL, float plotR, float plotT, float plotB) {
-        Path p = new Path();
+    private Path inactiveRunsPath(Path out, Series s, float plotL, float plotR, float plotT, float plotB) {
+        out.reset();
         int n = s.value.length;
         int x = 0;
         while (x < n) {
@@ -342,13 +359,13 @@ final class KiCutChartView extends View {
                 float px = gridX(i, plotL, plotR);
                 float py = axis.y(v, plotT, plotB - plotT);
                 if (i == from) {
-                    p.moveTo(px, py);
+                    out.moveTo(px, py);
                 } else {
-                    p.lineTo(px, py);
+                    out.lineTo(px, py);
                 }
             }
         }
-        return p;
+        return out;
     }
 
     private static boolean inactiveAt(boolean[] inactive, int x) {

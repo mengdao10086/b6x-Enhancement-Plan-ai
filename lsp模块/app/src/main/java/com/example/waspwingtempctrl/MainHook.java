@@ -58,9 +58,11 @@ public class MainHook implements IXposedHookLoadPackage {
     // 落点选择与冷启动自动连接的说明见 app/逻辑说明.md §1.6；在 handleLoadPackage 里赋值。
     private static String lastDevFile = null;
     private static final String AUTO_LAUNCH_EXTRA = "b6x_auto_launch";               // tempctrl 拉起 app 时携带的标志
-    // 广播 Action（按 appKind 选择）
     private static final String ACTION_TEMP_B6 = "com.flydigi.SET_TEMPERATURE";      // B6X 温控广播
     private static final String ACTION_TEMP_B7 = "com.flydigi.SET_TEMPERATURE_B7";   // B7X 温控广播
+    // setRunMode 方法名候选（按 app 类型选；B7X 混淆为 W）
+    private static final String[] SET_RUN_MODE_NAMES_B6 = {"setRunMode"};
+    private static final String[] SET_RUN_MODE_NAMES_B7 = {"setRunMode", "W"};
 
     private static Object capturedWaspWingMgr = null;  // 构造函数钩子捕获的实例
     private static int appKind = 0;      // 当前进程 app 类型：6=B6X, 7=B7X；按包名判定后恒为 6/7，
@@ -188,7 +190,6 @@ public class MainHook implements IXposedHookLoadPackage {
 
     private static void registerTemperatureReceiver(Context ctx) {
         try {
-            // B6X 用 B6 的 Action，B7X 用 B7 的 Action
             String action = (appKind == 7) ? ACTION_TEMP_B7 : ACTION_TEMP_B6;
             IntentFilter filter = new IntentFilter(action);
             ctx.registerReceiver(new BroadcastReceiver() {
@@ -263,7 +264,7 @@ public class MainHook implements IXposedHookLoadPackage {
 
     /** 断连类事件门控：边沿触发（每断连周期 1 条）+ 10s 硬冷却。 */
     private static boolean disconnectLogAllowed() {
-        if (disconnectLogged) return false;                      // 本断连周期已记
+        if (disconnectLogged) return false;
         long now = System.currentTimeMillis();
         if (now - lastDisconnectLogAt < DISCONNECT_LOG_COOLDOWN_MS) return false;
         disconnectLogged = true;
@@ -328,7 +329,6 @@ public class MainHook implements IXposedHookLoadPackage {
     }
 
     // ========== 双文件状态写入 ==========
-    // 根据 appKind 写对应文件（b6x.status 或 _b7x.status）
     // tempctrl 通过 stat() 检查文件 mtime 判断进程存活
     private static synchronized void writeStatusFile() {
         try {
@@ -603,8 +603,8 @@ public class MainHook implements IXposedHookLoadPackage {
      */
     private static void maybeScanReconnect() {
         long now = System.currentTimeMillis();
-        if (scanInFlight) return;                                     // 已有一次自扫在进行
-        if (now - lastScanReconnectAt < SCAN_RECONNECT_COOLDOWN_MS) return;  // 冷却未到
+        if (scanInFlight) return;
+        if (now - lastScanReconnectAt < SCAN_RECONNECT_COOLDOWN_MS) return;
         final BluetoothDevice target = lastDevice;
         if (target == null) return;
         final String targetAddr = target.getAddress();
@@ -816,7 +816,7 @@ public class MainHook implements IXposedHookLoadPackage {
         if (appKind == 6) hookB6Diagnostics(lpparam);    // 修复 #3/#4 + 诊断钩子（仅 B6X）
         hookCommonDisconnect(lpparam);                // 公共 BLE 断联（双设备）
         hookRunFetchLoopCpuFix(lpparam);              // runFetchLoop CPU 满载修复（双设备）
-        if (appKind == 6) hookB6Activity(lpparam);       // 唤醒 + 自动进入设置界面（仅 B6X）
+        if (appKind == 6) hookB6Activity(lpparam);       // 自动进入设置界面（仅 B6X）
         hookWaspWingManagerCapture(lpparam);          // 捕获 WaspWingManager 实例（双设备）
         hookSyncConnectedController(lpparam);         // static controller 同步到已连接实例（仅 B6X）
         hookGattConnectTimeoutClose(lpparam);         // 加固一：连接超时补 gatt.close（双设备）
@@ -855,7 +855,6 @@ public class MainHook implements IXposedHookLoadPackage {
                     @Override
                     protected void afterHookedMethod(MethodHookParam param) {
                         try {
-                            // 先记录连接状态，再停扫描
                             markConnected(null);  // onDeviceConnected 无 gatt 参数，不保存设备引用
                             try {
                                 Object controller = param.thisObject;
@@ -884,14 +883,12 @@ public class MainHook implements IXposedHookLoadPackage {
                             BluetoothDevice device = (BluetoothDevice) param.args[0];
                             Object vm = param.thisObject;
 
-                            // 停止扫描
                             XposedHelpers.callMethod(vm, "stopScan");
 
                             if (device != null) {
                                 String name = device.getName();
                                 String addr = device.getAddress();
 
-                                // 更新基础 LiveData
                                 Object nameMd = XposedHelpers.getObjectField(
                                         vm, "_bluetoothNameLiveData");
                                 XposedHelpers.callMethod(nameMd, "postValue", name);
@@ -914,6 +911,23 @@ public class MainHook implements IXposedHookLoadPackage {
                         }
                     }
                 });
+    }
+
+    /** SDK 与 App 层 onDeviceInfoUpdate 共用的回调体。 */
+    private static final XC_MethodHook infoUpdateHook = new XC_MethodHook() {
+        @Override
+        protected void beforeHookedMethod(MethodHookParam param) {
+            handleInfoUpdate(param.args[0]);
+        }
+    };
+
+    /** 捕获全参数回传 + 重置重连新鲜度标记 + 型号识别 + 屏蔽 App 自修复。 */
+    private static void handleInfoUpdate(Object info) {
+        lastWaspWingInfo = info;    // 捕获散热器全参数回传
+        reconnectPending = false;   // 收到新回传，重连新鲜度验证通过
+        stallReconnectCount = 0;    // 设备恢复响应，清零连续无回传重连计数
+        updateModelFromInfo(info);  // 型号识别 + 同步 BLE_OWNER_LAST
+        blockSelfRepair(info);      // 改 experimentalRunModeValue 使 self-repair 跳过（须在原方法前）
     }
 
     /** 修复 #3/#4 + 诊断钩子（仅 B6X） */
@@ -943,7 +957,7 @@ public class MainHook implements IXposedHookLoadPackage {
             // ===== 诊断钩子（调试用，保留） =====
             // 公共断连钩子（BluetoothGatt.disconnect 双设备通用）已覆盖。
 
-            // 诊断 0：BluetoothGatt.discoverServices() — 验证是否被调用
+            // BluetoothGatt.discoverServices() 诊断
             XposedHelpers.findAndHookMethod(
                     BluetoothGatt.class, "discoverServices",
                     new XC_MethodHook() {
@@ -966,7 +980,7 @@ public class MainHook implements IXposedHookLoadPackage {
                     });
             XposedBridge.log(TAG + " 已钩住 BluetoothGatt.discoverServices");
 
-            // 诊断 3a：LeDataInteractionController.connect()
+            // LeDataInteractionController.connect() 诊断
             XposedHelpers.findAndHookMethod(leCtrl, "connect",
                     new XC_MethodHook() {
                         @Override
@@ -993,18 +1007,9 @@ public class MainHook implements IXposedHookLoadPackage {
                     });
             XposedBridge.log(TAG + " 已钩住 LeDataInteractionController.connect");
 
-            // 诊断 3b：GattCallback 服务发现 — 是否完成
+            // GattCallback（远程断联检测 onConnectionStateChange 用）
             Class<?> gattCb = lpparam.classLoader.loadClass(
                     "com.flydigi.sdk.bluetooth.LeDataInteractionController$mGattCallback$1");
-            XposedHelpers.findAndHookMethod(gattCb, "onServicesDiscovered",
-                    BluetoothGatt.class, int.class, new XC_MethodHook() {
-                        @Override
-                        protected void beforeHookedMethod(MethodHookParam param) {
-                            XposedBridge.log(TAG + " [诊断] onServicesDiscovered 被调用了"
-                                    + " status=" + param.args[1]);
-                        }
-                    });
-            XposedBridge.log(TAG + " 已钩住 GattCallback.onServicesDiscovered");
 
             // 远程 BLE 断联检测（散热器超出范围/关机/蓝牙异常断开时的回调）
             XposedHelpers.findAndHookMethod(gattCb, "onConnectionStateChange",
@@ -1023,7 +1028,7 @@ public class MainHook implements IXposedHookLoadPackage {
                     });
             XposedBridge.log(TAG + " 已钩住 GattCallback.onConnectionStateChange（远程断联检测）");
 
-            // 诊断 3d：controller 的 onGattConnected
+            // controller 的 onGattConnected（BLE 状态恢复）
             XposedHelpers.findAndHookMethod(wingCtrl, "onGattConnected",
                     BluetoothGatt.class, new XC_MethodHook() {
                         @Override
@@ -1032,66 +1037,18 @@ public class MainHook implements IXposedHookLoadPackage {
                             // 重连路径也刷新 CONNECTED_AT；并保存设备引用
                             markConnected(gatt);
                             autoEnterSetup();  // 引导页可见时自动进入设置界面
-                            // [底层]：GATT 层连接确认；同一次连接的权威日志在控制器层 onDeviceConnected
-                            XposedBridge.log(TAG + " [底层] BLE 已连接（onGattConnected）"
-                                    + " device=" + (lastDevice != null ? lastDevice.getAddress() : "null"));
                             writeStatusFile();  // 连接事件立刻写 status 文件
-                            // 检查 discoverServices 结果（诊断：常态输出）
-                            if (gatt != null) {
-                                XposedBridge.log(TAG + " [诊断]   services="
-                                        + (gatt.getServices() != null ? gatt.getServices().size() : 0));
-                            }
                         }
                     });
             XposedBridge.log(TAG + " 已钩住 WaspWingDataInteractionController.onGattConnected（BLE 状态恢复）");
 
-            // 诊断 3c：SDK ViewModel 的 onGattConnected
-            XposedHelpers.findAndHookMethod(sdkVm, "onGattConnected",
-                    BluetoothDevice.class, new XC_MethodHook() {
-                        @Override
-                        protected void afterHookedMethod(MethodHookParam param) {
-                            BluetoothDevice d = (BluetoothDevice) param.args[0];
-                            Object thisVm = param.thisObject;
-                            Object ld = XposedHelpers.getObjectField(thisVm, "_connectedLiveData");
-                            Object val = XposedHelpers.callMethod(ld, "getValue");
-                            XposedBridge.log(TAG + " [诊断] SDK.onGattConnected"
-                                    + " device=" + (d != null ? d.getAddress() : "null")
-                                    + " _connectedLiveData=" + (val != null ? "有值" : "null"));
-                        }
-                    });
-            XposedBridge.log(TAG + " 已钩住 SDK WaspwingViewModel.onGattConnected");
-
-            // SDK onDeviceInfoUpdate — 只留一次，验证数据到达
             XposedHelpers.findAndHookMethod(sdkVm, "onDeviceInfoUpdate",
-                    waspInfoCls, new XC_MethodHook() {
-                        @Override
-                        protected void beforeHookedMethod(MethodHookParam param) {
-                            Object info = param.args[0];
-                            lastWaspWingInfo = info;    // 捕获散热器全参数回传
-                            reconnectPending = false;   // 收到新回传，重连新鲜度验证通过
-                            stallReconnectCount = 0;    // 设备恢复响应，清零连续无回传重连计数
-                            updateModelFromInfo(info);  // 型号识别 + 同步 BLE_OWNER_LAST
-                            // 改 experimentalRunModeValue 使 self-repair 跳过；须在原方法前
-                            blockSelfRepair(info);
-                        }
-                    });
+                    waspInfoCls, infoUpdateHook);
             XposedBridge.log(TAG + " 已钩住 SDK WaspwingViewModel.onDeviceInfoUpdate（beforeHook）");
 
             // App 层 WaspWingViewModel.onDeviceInfoUpdate — 自修复
-            // 方法先 postValue 再查 experimentalRunModeValue；须在原方法前
             XposedHelpers.findAndHookMethod(appVm, "onDeviceInfoUpdate",
-                    waspInfoCls, new XC_MethodHook() {
-                        @Override
-                        protected void beforeHookedMethod(MethodHookParam param) {
-                            Object info = param.args[0];
-                            lastWaspWingInfo = info;
-                            reconnectPending = false;   // 收到新回传，重连新鲜度验证通过
-                            stallReconnectCount = 0;    // 设备恢复响应，清零连续无回传重连计数
-                            updateModelFromInfo(info);  // 型号识别 + 同步 BLE_OWNER_LAST
-                            // 设 experimentalRunModeValue = realCold + 1，防自修
-                            blockSelfRepair(info);
-                        }
-                    });
+                    waspInfoCls, infoUpdateHook);
             XposedBridge.log(TAG + " 已钩住 App WaspWingViewModel.onDeviceInfoUpdate（beforeHook）");
 
         } catch (Throwable t) {
@@ -1155,7 +1112,6 @@ public class MainHook implements IXposedHookLoadPackage {
                                     }
                                 };
 
-                        // 把原队列中已有数据搬过来
                         if (originalQueue instanceof ConcurrentLinkedQueue) {
                             ConcurrentLinkedQueue<?> src =
                                     (ConcurrentLinkedQueue<?>) originalQueue;
@@ -1183,30 +1139,8 @@ public class MainHook implements IXposedHookLoadPackage {
         }
     }
 
-    /** B6X 专属：智能温控唤醒 + 启动自动进入设置界面 */
+    /** B6X 专属：启动自动进入设置界面 */
     private static void hookB6Activity(XC_LoadPackage.LoadPackageParam lpparam) {
-        // ========== 智能温控唤醒：B6ExperimentalActivity.onResume
-        hookClassMethod(lpparam.classLoader, "com.example.extool.B6ExperimentalActivity",
-                "onResume", "B6ExperimentalActivity.onResume", "钩 B6ExperimentalActivity 失败",
-                new XC_MethodHook() {
-                    @Override
-                    protected void afterHookedMethod(MethodHookParam param) {
-                        try {
-                            Object vm = XposedHelpers.callMethod(param.thisObject, "getViewModel");
-                            Object connLd = XposedHelpers.getObjectField(vm, "_connectLiveData");
-                            Boolean isConnected = (Boolean) XposedHelpers.callMethod(connLd, "getValue");
-
-                            if (isConnected != null && isConnected) {
-                                XposedBridge.log(TAG + " onResume + BLE 已连接");
-                            } else {
-                                XposedBridge.log(TAG + " onResume 但 BLE 未连接，不唤醒");
-                            }
-                        } catch (Throwable t) {
-                            XposedBridge.log(TAG + " onResume 检查 BLE 状态失败: " + t.getMessage());
-                        }
-                    }
-                });
-
         // ========== B6X 启动自动进入设置界面（事件驱动） ==========
         // 钩 Activity 基类生命周期，isMainActivity 识别 MainActivity；
         // enteredSetup：已进入设置则不再自动跳
@@ -1918,9 +1852,7 @@ public class MainHook implements IXposedHookLoadPackage {
         } catch (Throwable t) {
             // 字段缺失/不可访问时忽略（不影响 setRunMode 主流程）
         }
-        String[] names = (appKind == 7)
-                ? new String[]{"setRunMode", "W"}
-                : new String[]{"setRunMode"};
+        String[] names = (appKind == 7) ? SET_RUN_MODE_NAMES_B7 : SET_RUN_MODE_NAMES_B6;
         Throwable last = null;
         for (String n : names) {
             try {
@@ -2214,14 +2146,21 @@ public class MainHook implements IXposedHookLoadPackage {
         return null;
     }
 
+    private static volatile Class<?> sMainActivityClass = null;   // 已解析的 MainActivity 类（成功才缓存）
+
     /**
      * 判断对象是否为 B6X app 的 MainActivity（编译期无 app 类）。
      * 改用 app 类加载器 loadClass + isInstance（无子类）。
+     * 首次解析成功后缓存类；解析失败不缓存（如 B7X 包无该类）。
      */
     private static boolean isMainActivity(Object obj) {
         try {
-            Class<?> cls = obj.getClass().getClassLoader()
-                    .loadClass("com.example.extool.MainActivity");
+            Class<?> cls = sMainActivityClass;
+            if (cls == null) {
+                cls = obj.getClass().getClassLoader()
+                        .loadClass("com.example.extool.MainActivity");
+                sMainActivityClass = cls;
+            }
             return cls.isInstance(obj);
         } catch (Throwable t) {
             return false;
@@ -2236,24 +2175,7 @@ public class MainHook implements IXposedHookLoadPackage {
         if (!bleConnected || enteredSetup || currentGuideActivity == null) return;
         final Activity act = currentGuideActivity;
         currentGuideActivity = null;  // 先清空去重
-        try {
-            final Class<?> b6ExpCls = act.getClassLoader()
-                    .loadClass("com.example.extool.B6ExperimentalActivity");
-            act.runOnUiThread(new Runnable() {
-                @Override
-                public void run() {
-                    try {
-                        Intent intent = new Intent(act, b6ExpCls);
-                        act.startActivity(intent);
-                        act.finish();
-                    } catch (Throwable t) {
-                        XposedBridge.log(TAG + " 自动进入设置界面失败: " + t.getMessage());
-                    }
-                }
-            });
-        } catch (Throwable t) {
-            XposedBridge.log(TAG + " 自动进入设置界面 loadClass 失败: " + t.getMessage());
-        }
+        enterSetupActivity(act, true, "自动进入设置界面", null);
     }
 
     /**
@@ -2264,6 +2186,18 @@ public class MainHook implements IXposedHookLoadPackage {
         if (enteredSetup || bleConnected || currentGuideActivity == null) return;
         final Activity act = currentGuideActivity;
         currentGuideActivity = null;  // 先清空去重
+        enterSetupActivity(act, false, "冷启动进入设置界面", "冷启动自动进入设置界面（自动连接）");
+    }
+
+    /**
+     * 进入 B6ExperimentalActivity 的公共实现。
+     *
+     * @param finishGuide   true=进入后 finish 引导页（autoEnterSetup 语义）
+     * @param failLogPrefix 失败日志前缀（"自动进入设置界面" / "冷启动进入设置界面"）
+     * @param okLog         成功日志；null 时不打
+     */
+    private static void enterSetupActivity(final Activity act, final boolean finishGuide,
+                                           final String failLogPrefix, final String okLog) {
         try {
             final Class<?> b6ExpCls = act.getClassLoader()
                     .loadClass("com.example.extool.B6ExperimentalActivity");
@@ -2273,14 +2207,15 @@ public class MainHook implements IXposedHookLoadPackage {
                     try {
                         Intent intent = new Intent(act, b6ExpCls);
                         act.startActivity(intent);
-                        XposedBridge.log(TAG + " 冷启动自动进入设置界面（自动连接）");
+                        if (finishGuide) act.finish();
+                        if (okLog != null) XposedBridge.log(TAG + " " + okLog);
                     } catch (Throwable t) {
-                        XposedBridge.log(TAG + " 冷启动进入设置界面失败: " + t.getMessage());
+                        XposedBridge.log(TAG + " " + failLogPrefix + "失败: " + t.getMessage());
                     }
                 }
             });
         } catch (Throwable t) {
-            XposedBridge.log(TAG + " 冷启动进入设置界面 loadClass 失败: " + t.getMessage());
+            XposedBridge.log(TAG + " " + failLogPrefix + " loadClass 失败: " + t.getMessage());
         }
     }
 

@@ -315,11 +315,10 @@ public final class WrapRowLayout extends ViewGroup {
      */
     private int placeTailRun(Pass pass, int start, LayoutParams first) {
         if (pass.rowClosed) {
-            flushRow(pass);     // 同理：上一串尾段已收掉本行，这一串另起一行
+            flushRow(pass);
         }
         int end = collectTail(pass, start);
         if (pass.rowEnd == pass.rowStart) {
-            // 本行没有参数名可同行：整段占本行一行，放不下才折行
             placeTailWholeOrWrapped(pass, start, end);
             pass.rowClosed = true;
             return end;
@@ -335,20 +334,28 @@ public final class WrapRowLayout extends ViewGroup {
         }
         // 同行那一段的边界 = 第 fit 个可见项之后的下标（口径同 visibleCount；GONE 不进这一段）
         int beside = fit > 0 ? endOfVisiblePrefix(start, end, fit) : start;
+        // 切分只与区间有关、与 lines 无关：算一次即可
+        int[] wholeEnds = tailLineEnds(pass, start, end);
+        int[] besideEnds = null;
         for (int lines = 1; lines <= visible; lines++) {
-            if (tailLineEnds(pass, start, end).length <= lines) {
+            if (wholeEnds.length <= lines) {
                 // ②④⑥…：参数名独占一行，全部字段切成 ≤ lines 整行（能用整行解决就不混排）
                 flushRow(pass);
                 placeTailLines(pass, start, end);
                 pass.rowClosed = true;
                 return end;
             }
-            if (beside > start && tailLineEnds(pass, beside, end).length <= lines) {
-                // ③⑤⑦…：同行放得下的先放，其余切成 ≤ lines 整行
-                placeTailOnRow(pass, start, beside);
-                placeTailLines(pass, beside, end);
-                pass.rowClosed = true;
-                return end;
+            if (beside > start) {
+                if (besideEnds == null) {
+                    besideEnds = tailLineEnds(pass, beside, end);
+                }
+                if (besideEnds.length <= lines) {
+                    // ③⑤⑦…：同行放得下的先放，其余切成 ≤ lines 整行
+                    placeTailOnRow(pass, start, beside);
+                    placeTailLines(pass, beside, end);
+                    pass.rowClosed = true;
+                    return end;
+                }
             }
         }
         // lines 到项数时每项各占一行必可行，故上面必然已返回；这里只是兜底（同样不越界、不死循环）
@@ -360,7 +367,8 @@ public final class WrapRowLayout extends ViewGroup {
 
     /** 本行空着时的尾段：整段放得下就占本行一行（贴右界），否则段内贪婪折行。 */
     private void placeTailWholeOrWrapped(Pass pass, int start, int end) {
-        if (tailWidthOf(start, end) <= pass.rowLimit) {
+        measureTailSpan(pass, start, end);
+        if (pass.tailWidth <= pass.rowLimit) {
             placeTailOnRow(pass, start, end);
         } else {
             placeTailLines(pass, start, end);
@@ -371,8 +379,7 @@ public final class WrapRowLayout extends ViewGroup {
     private void placeTailOnRow(Pass pass, int from, int to) {
         pass.tailStart = from;
         pass.tailEnd = to;
-        pass.tailWidth = tailWidthOf(from, to);
-        pass.tailHeight = tailHeightOf(from, to);
+        measureTailSpan(pass, from, to);
         flushRow(pass);
     }
 
@@ -484,22 +491,13 @@ public final class WrapRowLayout extends ViewGroup {
         return Arrays.copyOf(ends, lines);
     }
 
-    /** 尾段区间 {@code [from,to)} 的宽（含段内列距与各成员外边距）。 */
-    private int tailWidthOf(int from, int to) {
+    /**
+     * 尾段区间 {@code [from,to)} 的宽与高，一次遍历同时算出：宽含段内列距与各成员外边距，
+     * 高取各成员占用高最大（见 {@link #occupiedHeight}）；跳过 GONE。结果写入
+     * {@link Pass#tailWidth} / {@link Pass#tailHeight}。
+     */
+    private void measureTailSpan(Pass pass, int from, int to) {
         int width = 0;
-        for (int i = from; i < to; i++) {
-            View child = getChildAt(i);
-            if (child.getVisibility() == GONE) {
-                continue;
-            }
-            LayoutParams lp = (LayoutParams) child.getLayoutParams();
-            width += (width > 0 ? colGap : 0) + outerWidth(child, lp);
-        }
-        return width;
-    }
-
-    /** 尾段区间 {@code [from,to)} 的高（各成员占用高取最大，见 {@link #occupiedHeight}）。 */
-    private int tailHeightOf(int from, int to) {
         int height = 0;
         for (int i = from; i < to; i++) {
             View child = getChildAt(i);
@@ -507,24 +505,28 @@ public final class WrapRowLayout extends ViewGroup {
                 continue;
             }
             LayoutParams lp = (LayoutParams) child.getLayoutParams();
+            width += (width > 0 ? colGap : 0) + outerWidth(child, lp);
             height = Math.max(height, occupiedHeight(child, lp));
         }
-        return height;
+        pass.tailWidth = width;
+        pass.tailHeight = height;
     }
 
     /** 尾段的每一行都贴行右界摆放（切分口径见 {@link #tailLineEnds}）。 */
     private void placeTailLines(Pass pass, int start, int end) {
         int lineStart = start;
         for (int lineEnd : tailLineEnds(pass, start, end)) {
-            int lineWidth = tailWidthOf(lineStart, lineEnd);
-            int lineHeight = tailHeightOf(lineStart, lineEnd);
-            if (lineWidth > 0) {                      // 只有 GONE 的"行"不占高度
+            // 量入 pass.tailWidth/Height：此处尾段缓冲为空（tailStart==tailEnd），这两个值只写不读
+            measureTailSpan(pass, lineStart, lineEnd);
+            if (pass.tailWidth > 0) {                     // 只有 GONE 的"行"不占高度
                 if (pass.place) {
-                    layoutTail(pass, lineStart, lineEnd, lineWidth, lineHeight);
+                    layoutSpan(pass, lineStart, lineEnd,
+                            Math.max(getPaddingLeft(), pass.rowRight - pass.tailWidth),
+                            pass.tailHeight);
                 }
-                pass.bottom = pass.y + lineHeight;
-                pass.contentWidth = Math.max(pass.contentWidth, lineWidth);
-                pass.y += lineHeight + rowGap;
+                pass.bottom = pass.y + pass.tailHeight;
+                pass.contentWidth = Math.max(pass.contentWidth, pass.tailWidth);
+                pass.y += pass.tailHeight + rowGap;
             }
             lineStart = lineEnd;
         }
@@ -586,8 +588,9 @@ public final class WrapRowLayout extends ViewGroup {
         if (hasLeading || hasTail) {
             int height = Math.max(pass.rowHeight, pass.tailHeight);
             if (pass.place) {
-                layoutLeading(pass, height);
-                layoutTail(pass, pass.tailStart, pass.tailEnd, pass.tailWidth, height);
+                layoutSpan(pass, pass.rowStart, pass.rowEnd, getPaddingLeft(), height);
+                layoutSpan(pass, pass.tailStart, pass.tailEnd,
+                        Math.max(getPaddingLeft(), pass.rowRight - pass.tailWidth), height);
             }
             pass.bottom = pass.y + height;
             // 本行宽：两段同行时是"并排所需宽"（与判据同源），只有一段时就是那一段
@@ -607,27 +610,13 @@ public final class WrapRowLayout extends ViewGroup {
         pass.rowClosed = false;
     }
 
-    /** 摆当前行的 leading 子视图：从行左界起依次排。 */
-    private void layoutLeading(Pass pass, int rowHeight) {
-        int x = getPaddingLeft();
-        boolean first = true;
-        for (int i = pass.rowStart; i < pass.rowEnd; i++) {
-            View child = getChildAt(i);
-            if (child.getVisibility() == GONE) {
-                continue;
-            }
-            LayoutParams lp = (LayoutParams) child.getLayoutParams();
-            if (!first) {
-                x += colGap;
-            }
-            x = placeChild(child, lp, x, pass.y, rowHeight);
-            first = false;
-        }
-    }
-
-    /** 摆尾段的一行：整体右对齐（贴行尾，不越过行左界）。 */
-    private void layoutTail(Pass pass, int start, int end, int lineWidth, int rowHeight) {
-        int x = Math.max(getPaddingLeft(), pass.rowRight - lineWidth);
+    /**
+     * 摆区间 {@code [start,end)} 内的子视图：从 {@code startX} 起依次排，相邻之间留一个列距，跳过 GONE。
+     *
+     * <p>leading 段传行左界 {@code getPaddingLeft()}；尾段传「行右界 − 段宽」= 贴行右界、不越行左界。
+     */
+    private void layoutSpan(Pass pass, int start, int end, int startX, int rowHeight) {
+        int x = startX;
         boolean first = true;
         for (int i = start; i < end; i++) {
             View child = getChildAt(i);
