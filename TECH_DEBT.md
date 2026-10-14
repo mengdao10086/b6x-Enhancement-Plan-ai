@@ -65,15 +65,14 @@
 ### 6. 界面改配置无效、日志不再更新（2026-09-24 记录，2026-09-28 修复）
 
 根因：`main()` 首次探测私有目录失败即把 `config_path` 置空，而**全工程唯一的热重载点**以该路径非空为门禁 → 永不重试、永不自愈，只有重启进程才恢复。
-修法：抽出 `config_retry_if_needed()`（60s 节流），在等设备循环与 `main_loop()` 步骤 0 各调一次（等设备循环只补 CPU 亲和）；脚本第 1 节改为「亮屏**且**私有目录就绪」，600s 兜底放行。**触发条件（开机早期 CE 未解锁）仍是假设**，判据见 §8。
+修法：抽出 `config_retry_if_needed()`（60s 节流），在等设备循环与 `main_loop()` 步骤 0 各调一次（等设备循环只补 CPU 亲和）；脚本第 1 节改为「亮屏**且**私有目录就绪」，600s 兜底放行。
 
 ### 7. 反向保活把 daemon 卡死：判活恒假阴 + 拉起永久阻塞（2026-09-27 真机发现，2026-09-28 修复）
 
 根因：① `watchdog_alive()` 用 `strstr()` 搜 `/proc/<pid>/cmdline`，而该文件是 **NUL 分隔**的 → 实际只搜到 `argv[0]`，看门狗（`sh <脚本路径>`）恒判「未见」，去抖与拉起冷却全被绕开；② `spawn_watchdog()` 直接 `execv` 整份常驻脚本再用 `waitpid` 等它，而 `signal()` 带 `SA_RESTART` 使 3s 超时失效 → 永久阻塞在 `wait4`，主循环停摆。
-修法：判活改**逐参数整等**；拉起改 **double-fork + `WNOHANG` 轮询**（只回收必然速退的中间层）。**真机判据**：停摆时 `/proc/<pid>/syscall` 首字段 = 260、`task/*/children` 里有 `sh <脚本路径>`。用户已真机确认「拉起daemon 不再等满 5 秒再走 `kill -9`」。同一类坑在 `send_am_broadcast()` 一并修掉（改 `sigaction` 且不置 `SA_RESTART`）。**未验证**：逐参数整等判活的真机命中率与假阴频率；`am` 的真 3s 超时是否确能打断 `waitpid`。
+修法：判活改**逐参数整等**；拉起改 **double-fork + `WNOHANG` 轮询**（只回收必然速退的中间层）；同一类坑在 `send_am_broadcast()` 一并修掉（改 `sigaction` 且不置 `SA_RESTART`）。
 
 ### 8. 看门狗识别与开机时序：同源缺陷（2026-09-28 真机发现并修复）
 
-主因：app 侧 `wd_pids()` 的 `grep -l '^sh$' /proc/[0-9]*/comm` 前置过滤把**开机那条看门狗**（真机 comm=`busybox`、cmdline=`/data/adb/ksu/bin/busybox sh <脚本>`）整条滤掉 → pid 列表为空 → 停止片段直接判「已停稳」并**假报成功**（≤300s 后 daemon 又被拉回），而「拉起daemon / 一键部署 / 更新脚本」还会再拉一个 comm=`sh` 的看门狗 → 双实例常驻。
-其余同源项：app 侧 comm 白名单**只做省 fork 的快筛**、一个都没命中时全量兜底（身份判据与 C 侧统一为「某参数**整等于**候选完整路径」，仅存差异是 C 侧额外接受裸脚本名）；状态区补「sh-watchdog」一行（0 / 1 / ≥2 三态）；单实例锁增加 `/data/local/tmp/tempctrl.lock` 兜底（两把任一被占即以退出码 2 退出）；`host_app_uninstalled()` 只在 `pm` 明确答"不存在"时计数；脚本 `stop_old()` 的 `pkill -f` 改为 `bin_pids()`。
-**未验证（真机）**：解锁后应出现「配置 延迟加载成功」日志（**注意日志可能整程落在 `/cache/tempctrl.log`**，只 grep 私有目录那份会误判）；未解锁期不再出现两个 daemon、不再自毁。
+根因：app 侧 `wd_pids()` 的 `grep -l '^sh$' /proc/[0-9]*/comm` 前置过滤把**开机那条看门狗**（真机 comm=`busybox`、cmdline=`/data/adb/ksu/bin/busybox sh <脚本>`）整条滤掉 → pid 列表为空 → 停止片段直接判「已停稳」并**假报成功**（≤300s 后 daemon 又被拉回），而「拉起daemon / 一键部署 / 更新脚本」还会再拉一个 comm=`sh` 的看门狗 → 双实例常驻。
+修法：app 侧 comm 白名单只做省 fork 的快筛、未命中时全量兜底，身份判据与 C 侧统一为「某参数**整等于**候选完整路径」（仅存差异是 C 侧额外接受裸脚本名）；状态区补「sh-watchdog」一行（0 / 1 / ≥2 三态）；单实例锁增加 `/data/local/tmp/tempctrl.lock` 兜底（两把任一被占即以退出码 2 退出）；`host_app_uninstalled()` 只在 `pm` 明确答"不存在"时计数；脚本 `stop_old()` 的 `pkill -f` 改为 `bin_pids()`。

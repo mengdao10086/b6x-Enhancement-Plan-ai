@@ -54,7 +54,7 @@ C 守护程序（`tempctrl`）与 `service.d` 拉起脚本由 APK 内的部署�
 │       └── 逻辑说明.md   ← C 源码设计与逻辑的唯一权威文档
 ├── 参数定义/             ← 配置键的单一来源 + 生成/校验脚本
 ├── 参考资料/             ← BLE 修复历程与反编译分析
-│   ├── decompile/       ← 各 app 反编译产物 + 逐 app 反编译分析（索引 `通用.md`；**不进 git**）
+│   ├── decompile/       ← 各 app 反编译产物 + 逐 app 反编译分析（索引 `通用.md`；**分析 md 进 git，反编译二进制产物不进 git**）
 │   └── magisk-lsp合并路线.md ← 由 Magisk 模块改为 LSPosed 模块路线的来龙去脉
 ├── .github/workflows/   ← CI 自动构建
 ├── CHANGELOG.md         ← 版本更新日志
