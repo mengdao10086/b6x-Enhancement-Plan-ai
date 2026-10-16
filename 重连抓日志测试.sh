@@ -1,116 +1,180 @@
 #!/system/bin/sh
-# 飞智温控增强 — 重连抓日志测试脚本
+# 飞智温控增强 — 重连抓日志测试脚本 v2（P0 观测修复）
 #
-# 用途：真机复现「长时间断联后后台无法重连」时，一次性抓齐判定所需信息：
-#   ① 宿主进程存活（pid；同一 pid 贯穿 = 进程未重启）
-#   ② 模块 logcat（LSPosedFramework 标签）——含 connect() 进入/退出、预探测、自扫结束、断连、后台重连尝试
-#   ③ 蓝牙栈连接/GATT/扫描状态（dumpsys bluetooth_manager）
-#   ④ 宿主 app 的运行时权限（BLUETOOTH_CONNECT / BLUETOOTH_SCAN 是否 granted）
-#   ⑤ status 文件（/data/local/tmp/tempctrl_*.status）
-#   ⑥ 自扫诊断汇总行（判定 R1/R2/R4 的关键）
+# 目的：一次运行抓「未连 → 打开 App 触发连接 → 已连」两个状态，覆盖 v1 最大的盲区
+#       （症状发生在「用户手动打开 App 那一刻」，v1 只在设备不在场时抓，窗口结束才让用户拿回设备）。
+#
+# 相对 v1 的修复（依据 .claude/subagent方案存放区/重连卡死-分析B.md）：
+#   ① 死模式：v1 [6] 的成功判据 `[底层] BLE 已连接` 的发射点已被 v3.0 删除（dee5adca 里有、HEAD 里没有）
+#      → 本版不再依赖它，改用客观事实判成功：status 文件 BLE=1 / dumpsys STATE_CONNECTED / SDK 的 FlyBle 日志。
+#   ② 假阴性：v1 [6] 在末尾又跑了一次 `logcat -d`，与 [2] 是两次独立 dump，中间夹两次 dumpsys 刷屏
+#      → [6] 空不代表事件没发生。本版：dump 一次落盘到文件，[2]/[6] 共读同一份文件。
+#   ③ 新增抓取：
+#      · 宿主 SDK 日志 tag `FlyBle`——App 以 debug=true 初始化 SDK（App.smali:61-63 → Logger.inDebugMode=true），
+#        故 SDK 的 Logger 会进 logcat；门禁被挡时打 "gatt has been connected with other device"（这是根因实证钥匙）。
+#      · 完整 dumpsys bluetooth_manager（含 GATT Client 段；v1 被 head -200 砍掉）。
+#      · 模块的「后台重连尝试 / 重连循环心跳 / 设备锁死」行（v1 漏抓）。
+#      · dump 前后行数，自证有没有被环形缓冲轮转。
 #
 # 用法（设备端，需 root）：
-#   推荐步骤：先让散热器断联（关机/走远）并保持后台或灭屏 ≥3min，
-#             再 su -c 'sh <脚本绝对路径> [抓取秒数] [包名]'
-#   抓取秒数默认 180；包名默认 B6X 宿主 com.flydigi.waspwing.experimental。
-#   （脚本会先落一份「运行前缓冲」——即上面那段 ≥3min 断联日志——再清缓冲进入抓取窗口。）
-#
-# 落点：手机端放 /storage/emulated/0/一键另存/测试/，或 adb push 到 /data/local/tmp/。
-# 输出：与脚本同目录的「重连抓日志结果.log」（前缀一致）。
+#   su -c 'sh <脚本绝对路径> [未连秒数] [提示等待秒数] [已连秒数] [包名]'
+#   默认：未连 90s、提示等待 20s、已连 90s、包名 com.flydigi.waspwing.experimental
+#   落点：手机端 /storage/emulated/0/一键另存/测试/ ，或 adb push 到 /data/local/tmp/
+#   输出：与脚本同目录的
+#         「重连抓日志结果.log」（人看的报告）
+#         「重连抓日志原始-未连.log」「重连抓日志原始-已连.log」（原始 dump，供 [2]/[6] 共读）
 
 DIR=$(dirname "$0")
 OUT="$DIR/重连抓日志结果.log"
-SEC="${1:-180}"
-PKG="${2:-com.flydigi.waspwing.experimental}"
-TAG="LSPosedFramework"
+RAW_OFF="$DIR/重连抓日志原始-未连.log"
+RAW_ON="$DIR/重连抓日志原始-已连.log"
+SEC_OFF="${1:-90}"
+WAIT_ON="${2:-20}"
+SEC_ON="${3:-90}"
+PKG="${4:-com.flydigi.waspwing.experimental}"
+TAG_MOD="LSPosedFramework"
+TAG_SDK="FlyBle"
 
 log() { echo "$1" | tee -a "$OUT"; }
+count_lines() { wc -l < "$1" 2>/dev/null | tr -d ' '; }
 
 # 每次运行重开头（覆盖上一份结果）
 : > "$OUT" 2>/dev/null || { echo "无法写入 $OUT（检查脚本所在目录权限）" >&2; exit 1; }
+: > "$RAW_OFF" 2>/dev/null || { echo "无法写入 $RAW_OFF（检查脚本所在目录权限）" >&2; exit 1; }
+: > "$RAW_ON" 2>/dev/null || { echo "无法写入 $RAW_ON（检查脚本所在目录权限）" >&2; exit 1; }
 
-log "==================== 重连抓日志 $(date) ===================="
-log "抓取时长=${SEC}s　包名=${PKG}　脚本目录=${DIR}"
+log "==================== 重连抓日志 v2 $(date) ===================="
+log "未连=${SEC_OFF}s　提示等待=${WAIT_ON}s　已连=${SEC_ON}s　包名=${PKG}　脚本目录=${DIR}"
+log ""
+log "---- [0] 流程 ----"
+log "   1) 先让散热器断联（关机/走远）并保持后台/灭屏 ≥3min（设备不在场、连不上）"
+log "   2) 运行本脚本：先采一段「未连」"
+log "   3) 脚本会停下来提示，此时【打开 App 触发一次连接】"
+log "   4) 脚本再采一段「已连」（覆盖你手动打开 App 那一刻）"
+log ""
 
-# ---- [0] 先落一份「运行前缓冲」再清空，进入抓取窗口 ----
+# ---- 加大环形缓冲（best-effort；避免 LSPosedFramework 行被 SDK 的 FlyBle debug 日志挤出）----
+logcat -G 16M 2>/dev/null || log "(logcat -G 16M 失败，继续；若下方出现行数骤降即为缓冲轮转)"
+
+# ================= 阶段 1：未连 =================
 log ""
-log "---- [0] 复现步骤 ----"
-log "   1) 先让散热器断联（关机/走远），并保持后台/灭屏 ≥3min"
-log "   2) 运行本脚本：先落一份运行前缓冲，再在下面窗口内继续保持断联（默认 ${SEC}s）"
-log ""
-log "--- 运行前缓冲（logcat -d，清空前）---"
-logcat -d -v time -s "$TAG" 2>/dev/null | tee -a "$OUT"
-log "(清空缓冲，进入抓取窗口)"
+log "========== [1] 未连阶段（采 ${SEC_OFF}s，保持设备不在场/连不上）=========="
 logcat -c 2>/dev/null || log "(logcat -c 失败，继续)"
 i=0
-while [ "$i" -lt "$SEC" ]; do
+while [ "$i" -lt "$SEC_OFF" ]; do
     sleep 5
     i=$((i + 5))
-    log "  …剩余 $((SEC - i))s"
+    log "  …未连剩余 $((SEC_OFF - i))s"
+done
+PID_OFF=$(pidof "$PKG" 2>/dev/null || ps -A 2>/dev/null | grep -w "$PKG" | awk '{print $2}' | head -1)
+log "宿主 pid（未连）=${PID_OFF:-（空=已退出/未找到）}"
+logcat -d -v time > "$RAW_OFF" 2>/dev/null
+log "原始 dump 已落盘：$RAW_OFF（行数=$(count_lines "$RAW_OFF")）"
+log "status（未连）："
+cat /data/local/tmp/tempctrl_b6x.status 2>/dev/null | tee -a "$OUT"
+log ""
+
+# ================= 阶段 2：提示用户开 App =================
+log "################################################################"
+log "#                                                              #"
+log "#   现在请【打开 App（$PKG）】触发一次连接                      #"
+log "#                                                              #"
+log "################################################################"
+log "  （倒计时 ${WAIT_ON}s：请在这一段内打开 App；开完不用关，脚本会继续采「已连」）"
+i=0
+while [ "$i" -lt "$WAIT_ON" ]; do
+    sleep 5
+    i=$((i + 5))
+    log "  …开 App 倒计时 $((WAIT_ON - i))s"
 done
 
-# ---- [1] 宿主进程存活 ----
+# ================= 阶段 3：已连 =================
 log ""
-log "========== [1] 宿主进程存活 =========="
-PID=$(pidof "$PKG" 2>/dev/null || ps -A 2>/dev/null | grep -w "$PKG" | awk '{print $2}' | head -1)
-log "宿主进程 pid=${PID:-（空=已退出/未找到）}"
-log "（同一 pid 贯穿全程 = 进程未重启 → 「陈旧挂起对象」路线的先决条件成立）"
+log "========== [3] 已连阶段（采 ${SEC_ON}s，覆盖你打开 App 那一刻）=========="
+i=0
+while [ "$i" -lt "$SEC_ON" ]; do
+    sleep 5
+    i=$((i + 5))
+    log "  …已连剩余 $((SEC_ON - i))s"
+done
+PID_ON=$(pidof "$PKG" 2>/dev/null || ps -A 2>/dev/null | grep -w "$PKG" | awk '{print $2}' | head -1)
+log "宿主 pid（已连）=${PID_ON:-（空=已退出/未找到）}"
+log "（pid 与未连阶段不同 = 期间 App 进程重启过；相同 = 未重启）"
+logcat -d -v time > "$RAW_ON" 2>/dev/null
+log "原始 dump 已落盘：$RAW_ON（行数=$(count_lines "$RAW_ON")）"
+log "status（已连）："
+cat /data/local/tmp/tempctrl_b6x.status 2>/dev/null | tee -a "$OUT"
 
-# ---- [2] 模块 logcat ----
+# ================= 分析段：全部对「原始 dump 文件」grep（不再二次 dump，消除假阴性）=================
 log ""
-log "========== [2] 模块 logcat（tag=$TAG）=========="
-logcat -d -v time -s "$TAG" 2>/dev/null | tee -a "$OUT"
-log "(若此处为空：模块日志 tag 可能不同，尝试：logcat -d | grep -iE 'waspwingtempctrl|LSPosed')"
+log "========== [4] 模块 logcat（tag=$TAG_MOD，读原始文件）=========="
+log "--- 未连阶段 ---"
+grep -F "$TAG_MOD" "$RAW_OFF" 2>/dev/null | tail -40 | tee -a "$OUT"
+log "--- 已连阶段 ---"
+grep -F "$TAG_MOD" "$RAW_ON" 2>/dev/null | tail -40 | tee -a "$OUT"
 
-# ---- [3] 蓝牙栈状态 ----
 log ""
-log "========== [3] dumpsys bluetooth_manager（连接/GATT/扫描）=========="
+log "========== [5] 宿主 SDK logcat（tag=$TAG_SDK；门禁被挡时的钥匙）=========="
+log "--- 未连阶段 ---"
+grep -F "$TAG_SDK" "$RAW_OFF" 2>/dev/null | tail -40 | tee -a "$OUT"
+log "--- 已连阶段 ---"
+grep -F "$TAG_SDK" "$RAW_ON" 2>/dev/null | tail -40 | tee -a "$OUT"
+
+log ""
+log "========== [6] dumpsys bluetooth_manager（连接/GATT Client/扫描）=========="
 if command -v dumpsys >/dev/null 2>&1; then
-    dumpsys bluetooth_manager 2>/dev/null | grep -iE "gatt|connect|scan|Device|address" | head -200 | tee -a "$OUT"
+    DUMP="$DIR/.bt_dumpsys.tmp"
+    dumpsys bluetooth_manager > "$DUMP" 2>/dev/null
+    log "--- 连接态（STATE_/ConnectionState）---"
+    grep -iE "ConnectionState|STATE_CONNECTED|STATE_DISCONNECTED|STATE_CONNECTING" "$DUMP" 2>/dev/null | head -40 | tee -a "$OUT"
+    log "--- GATT Client 段（v1 被 head 砍掉的关键证据）---"
+    grep -inE "gatt client|client map|Client:|CONNECTING" "$DUMP" 2>/dev/null | head -60 | tee -a "$OUT"
+    log "--- 扫描（自扫签名 = LOW_LATENCY + DeviceAddress）---"
+    grep -inE "LOW_LATENCY|DeviceAddress=|Filter .* results|ScanMode=" "$DUMP" 2>/dev/null | tail -30 | tee -a "$OUT"
+    rm -f "$DUMP" 2>/dev/null
 else
     log "(dumpsys 不可用)"
 fi
 
-# ---- [4] 宿主 app 运行时权限 ----
 log ""
-log "========== [4] 宿主 app 运行时权限（$PKG）=========="
+log "========== [7] 宿主 app 运行时权限（$PKG）=========="
 if command -v dumpsys >/dev/null 2>&1; then
     dumpsys package "$PKG" 2>/dev/null | grep -iE "BLUETOOTH_CONNECT|BLUETOOTH_SCAN" | tee -a "$OUT"
-    log "--- 权限授予一览（granted= 行）---"
-    dumpsys package "$PKG" 2>/dev/null | grep -iE "granted=" | head -40 | tee -a "$OUT"
-else
-    log "(dumpsys 不可用)"
 fi
 
-# ---- [5] status 文件 ----
+# ================= [8] 关键判定行摘录：全部 grep 同一份原始文件 =================
 log ""
-log "========== [5] status 文件 =========="
-for f in /data/local/tmp/tempctrl_b6x.status /data/local/tmp/tempctrl_b7x.status; do
-    log "--- $f ---"
-    cat "$f" 2>/dev/null | tee -a "$OUT"
-    [ -s "$f" ] || log "(不存在或为空)"
-done
+log "========== [8] 关键判定行摘录（对原始文件 grep，非二次 dump）=========="
+log "--- 【钥匙】SDK 门禁被挡：gatt has been connected with other device ---"
+grep -F "gatt has been connected with other device" "$RAW_ON" 2>/dev/null | tee -a "$OUT"
+log "--- 模块 心跳 / 重连尝试（判断「循环在跑 vs 停了」）---"
+grep -E "重连循环心跳|后台重连尝试" "$RAW_ON" 2>/dev/null | tee -a "$OUT"
+log "--- 模块 设备锁死 ---"
+grep -F "设备锁死" "$RAW_ON" 2>/dev/null | tee -a "$OUT"
+log "--- 模块 自扫（R1/R2/R4 判别）---"
+grep -E "自扫结束|自扫命中|硬自愈|地址不符|回调异常|取地址异常" "$RAW_ON" 2>/dev/null | tee -a "$OUT"
+log "--- 模块 connect() 进入 / 退出 ---"
+grep -E "connect\(\) 进入|connect\(\) 退出" "$RAW_ON" 2>/dev/null | tee -a "$OUT"
+log "--- 模块 断连 ---"
+grep -E "BLE 断联|BLE 已连接" "$RAW_ON" 2>/dev/null | tee -a "$OUT"
+log "--- 模块 预探测 / R2 命中 / GATE-A / 异常留痕 / 状态自愈 ---"
+grep -E "预探测|R2 命中|GATE-A|异常留痕|状态自愈" "$RAW_ON" 2>/dev/null | tee -a "$OUT"
 
-# ---- [6] 关键判定行摘录 ----
-log ""
-log "========== [6] 关键判定行摘录 =========="
-LOG_DUMP=$(logcat -d -s "$TAG" 2>/dev/null)
-log "--- connect() 退出（是否有 gatt / throwable）---"
-echo "$LOG_DUMP" | grep "connect() 退出" | tee -a "$OUT"
-log "--- 预探测 / R2 命中 / GATE-A ---"
-echo "$LOG_DUMP" | grep -E "预探测|R2 命中|GATE-A|异常留痕" | tee -a "$OUT"
-log "--- 自扫（R1/R2/R4 判别）---"
-echo "$LOG_DUMP" | grep -E "自扫结束|硬自愈|地址不符|回调异常|取地址异常" | tee -a "$OUT"
-log "--- 断连 ---"
-echo "$LOG_DUMP" | grep "BLE 断联" | tee -a "$OUT"
-log "--- 成功连接（修好判据）---"
-echo "$LOG_DUMP" | grep "\[底层\] BLE 已连接" | tee -a "$OUT"
 log ""
 log "判定指引："
-log "  · 自扫结束 回调=0                       → 设备不在场 R1（环境，非代码）"
-log "  · connect() 退出 throwable=SecurityException 或 预探测/回调异常(取地址) → R2 命中（陈旧对象/权限门禁）"
-log "  · 自扫结束 回调>0 地址不符>0            → R4（比较/脱敏）"
-log "  · [底层] BLE 已连接 且未手动开 App      → 修复生效"
+log "  · 若【钥匙】行（gatt has been connected with other device）在你打开 App 那段反复出现"
+log "    → 根因「共享控制器 mDataConnectState 门禁被占/卡死」得到实证。"
+log "  · 若 status 出现 BLE=1 / dumpsys 出现 STATE_CONNECTED，但【钥匙】行也大量出现"
+log "    → 门禁在「被挡」与「放行」间抖动（占用），对应「要等一段比较长的时间」。"
+log "  · 若全程无【钥匙】行且 status 始终 BLE=0 → 门禁不是主因，转查 GATT Client 段 / 句柄 / 冻结。"
+log "  · 若模块「重连循环心跳」缺失而自扫仍在跑 → 区分「循环停了」与「没尝试」（心跳 5min 限频，窗口需够长）。"
+log ""
+
+# 自证：原始文件是否有被环形缓冲轮转（未连与已连 dump 的行数对比）
+log "自证：原始 dump 行数　未连=$(count_lines "$RAW_OFF")　已连=$(count_lines "$RAW_ON")"
+log "（若「已连」行数明显小于「未连」且时间跨度更短，警惕缓冲轮转；必要时加大 logcat -G 后重抓）"
 
 log ""
-log "==================== 抓取完成，结果见：$OUT ===================="
+log "==================== 抓取完成 ===================="
+log "结果：$OUT"
+log "原始：$RAW_OFF　$RAW_ON"

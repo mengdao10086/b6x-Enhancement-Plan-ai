@@ -145,6 +145,31 @@ public class MainHook implements IXposedHookLoadPackage {
     private static volatile boolean scanInFlight = false;  // 自扫进行中（回调线程与 tick 线程共享）
     private static volatile long lastScanReconnectAt = 0;  // 上次自扫发起时刻（冷却计时，markConnected 清零）
 
+    // ========== P1：门禁有界自解 + 发令降频 + 设置页退让（见 app/逻辑说明.md §1.2）==========
+    // stuckStateTicks：tick 线程自增、markConnected（SDK hook 线程）复位 → 跨线程，故 volatile（同 reconnectFailStreak）。
+    // lastStuckClearAt：仅 tick 线程读写 → 不加 volatile；setupRetreatUntil 由 Activity 主线程写、tick 线程读 → volatile。
+    private static volatile int stuckStateTicks = 0;  // readConnectState() 连续 ∈{1,2} 的秒数（tick 自增 / markConnected 复位）
+    private static long lastStuckClearAt = 0;      // 上次「有界清状态」动作时刻（限频计时）
+    private static volatile long setupRetreatUntil = 0;  // 设置页进前台后的发令退让截止时刻（ms）
+    private static final int RECONNECT_BACKOFF_AFTER = 6;            // 连续失败达此值 → 发令降频
+    private static final int RECONNECT_BACKOFF_INTERVAL_TICKS = 30;  // 降频态发令节拍（秒）
+    private static final int STUCK_STATE_CLEAR_AFTER_TICKS = 30;     // state∈{1,2} 连续达此秒数才清（>SDK 5s 建连超时，不误拆）
+    private static final long STUCK_STATE_CLEAR_COOLDOWN_MS = 60 * 1000;  // 清状态动作限频
+    private static final long SETUP_RETREAT_MS = 25 * 1000;          // 设置页进前台后的发令退让窗口
+
+    // ========== R1·任务2：不受限频的 state 观测（30s 一条，仅 tick 线程读写）==========
+    // 动机：`后台重连尝试`/`重连循环心跳` 是 5min 限频，上线后分不清「修好了」与「本来就会好」、
+    // 也分不清 state「卡 2」与「争用」。此观测不受 5min 限频，但按 30s 节流（每秒读 state、30s 才输出）。
+    private static int lastObservedState = Integer.MIN_VALUE;  // 上次观测到的 state（哨兵=未观测过）
+    private static long observedStateSince = 0;                // 进入当前 state 的时刻（ms，算持续时长）
+    private static long lastStateObsLogAt = 0;                 // 上次输出时刻（30s 节流）
+    private static final long STATE_OBS_LOG_INTERVAL_MS = 30 * 1000;  // 观测输出间隔（不刷屏：≤2 条/分）
+
+    // ========== R1·任务3：App 陈旧「已连接」标志自愈 ==========
+    // 设置页 ViewModel（onResume 捕获）；其 `_connectLiveData` 陈旧为 true 时 App 会拒绝发起连接。
+    private static volatile Object appSettingsViewModel = null;
+    private static long lastAppHealLogAt = 0;   // 自愈日志限频（App 主线程被卡死时 getValue 不更新，防每秒刷）
+
     // ========== 断连自动开蓝牙（BT_AUTO_ENABLE_SEC）==========
     // 触发点：maybeScanReconnect 的「蓝牙未开启」分支（tick 线程）。一律交守护进程（root）执行，
     // 钩子只写请求；限频＝两次之间至少间隔 N 秒（0=关闭），时间戳落盘以跨宿主进程重启有效。
@@ -424,9 +449,17 @@ public class MainHook implements IXposedHookLoadPackage {
                     tick++;
                     writeStatusFile();   // 每 1 秒写一次 status（供 daemon 3s 判死 + 曲线页）
 
-                    // ═══ 后台自动重连（亮屏 5s / 息屏 10s，见 app/逻辑说明.md §1.2）═══
+                    // ① 有界清状态：断连期每秒查一次门禁是否卡死（独立于发令；设置页退让期间照常运行）
+                    //    任务3：同时做 App 陈旧「已连接」标志的自愈（门控为「可证不一致」，见方法注释）
+                    if (!bleConnected) {
+                        maybeClearStuckControllerState();
+                        maybeHealAppStaleConnectedFlag();
+                    }
+
+                    // ═══ 后台自动重连（亮屏 5s / 息屏 10s；连续失败≥6 降频 30s，见 app/逻辑说明.md §1.2）═══
                     // 设备锁死（多次重连无回传）时停止自动重连，等用户强制重启 App
                     if (!bleConnected && lastDevice != null && !deviceLockedAlerted
+                            && System.currentTimeMillis() >= setupRetreatUntil   // ③ 设置页退让窗口内不发令
                             && tick % reconnectIntervalTicks(tick) == 0) {
                         tryReconnectOnce();   // 只发令 + 连续失败转自扫重连（见 app/逻辑说明.md §1.2）
                     }
@@ -740,6 +773,134 @@ public class MainHook implements IXposedHookLoadPackage {
         return (state < 0) ? "?" : String.valueOf(state);
     }
 
+    /**
+     * ① 有界清状态（P1 核心修复）：门禁卡死的自解。SDK 的 {@code connectWith()} 在控制器
+     * {@code mDataConnectState ∈ {1,2}} 时静默 return，模块重连与 App 手动连接都会被挡死。
+     * 每秒查一次：state 连续 ∈{1,2} 达 {@link #STUCK_STATE_CLEAR_AFTER_TICKS}s（用 tick 计数，不 sleep）
+     * 即判卡死 → 走 SDK 自己的断连入口清状态。用 ∈{1,2} 而非「非 0」，排除读失败 -1 误清。
+     * 仅在 tick 线程调用。
+     */
+    private static void maybeClearStuckControllerState() {
+        if (appClassLoader == null) { stuckStateTicks = 0; return; }
+        Object dic;
+        try {
+            Class<?> mgrCls = XposedHelpers.findClass(reconnectMgrClassName(), appClassLoader);
+            dic = XposedHelpers.getStaticObjectField(mgrCls, dicFieldName());
+        } catch (Throwable t) {
+            stuckStateTicks = 0;   // 取不到控制器：不计时、不动作
+            return;
+        }
+        int st = readConnectState(dic);
+        observeConnectState(st);   // 任务2：不受限频的 state 观测（30s 一条）
+        if (st != 1 && st != 2) {   // 0=空闲、-1=读失败、其它：一律清零
+            stuckStateTicks = 0;
+            return;
+        }
+        stuckStateTicks++;
+        if (stuckStateTicks < STUCK_STATE_CLEAR_AFTER_TICKS) return;
+        long now = System.currentTimeMillis();
+        if (now - lastStuckClearAt < STUCK_STATE_CLEAR_COOLDOWN_MS) return;
+        // ①(a) 可证非 App 在用：设置页刚进前台的退让窗口内不拆（让 App 的手动连接先试）。
+        //   30s 门限 > 25s 退让窗口，两条天然相容——窗口过后本动作照常可运行。计数不清零（窗口一过即生效）。
+        if (now < setupRetreatUntil) return;
+        lastStuckClearAt = now;
+        stuckStateTicks = 0;
+        clearStuckControllerState(dic);
+    }
+
+    /**
+     * 任务2：不受 5min 限频的 state 观测。每次调用（断连期每秒）读一次 state，但**每
+     * {@link #STATE_OBS_LOG_INTERVAL_MS}(30s) 才输出一条**，输出当前 state 与该值「已持续」秒数：
+     * 持续秒数很小 ⇒ 门禁在快速翻转（争用）；持续秒数逐条增大且 state=2 ⇒ 卡死。据此可分辨
+     * 「卡 2 vs 争用」并验收「有界清状态」是否生效。仅 tick 线程调用（无并发）。
+     */
+    private static void observeConnectState(int st) {
+        long now = System.currentTimeMillis();
+        if (st != lastObservedState) {
+            lastObservedState = st;
+            observedStateSince = now;
+        }
+        if (now - lastStateObsLogAt < STATE_OBS_LOG_INTERVAL_MS) return;
+        lastStateObsLogAt = now;
+        XposedBridge.log(TAG + " 状态观测: state=" + stateDesc(st)
+                + " 已持续 " + ((now - observedStateSince) / 1000) + "s");
+    }
+
+    /**
+     * 调 SDK 自己的断连入口把 {@code mDataConnectState} 置 0（<b>严禁裸写该字段</b>）：
+     * 首选 {@code disconnectManually()}（其 {@code onGattDisconnected} 同步置 0 + close），
+     * 退回 {@code disconnectGatt()}；都失败只记一条，60s 后由限频重试。
+     *
+     * <p><b>调用后复读 state 再定日志措辞</b>：SDK 的 {@code disconnectManually()} 内部
+     * {@code if (mBluetoothGatt != null)}，gatt 为空时纯空转、state 清不掉——「调用不抛异常」不等于
+     * 「已清」。故以复读到的 state 判定成功/未清，避免日志误导（真机排障时关键）。
+     */
+    private static void clearStuckControllerState(Object dic) {
+        String entry = null;
+        try {
+            XposedHelpers.callMethod(dic, "disconnectManually");
+            entry = "disconnectManually()";
+        } catch (Throwable t) {
+            try {
+                XposedHelpers.callMethod(dic, "disconnectGatt");
+                entry = "disconnectGatt()";
+            } catch (Throwable t2) {
+                XposedBridge.log(TAG + " 有界清状态失败: " + t2.getClass().getSimpleName()
+                        + ": " + t2.getMessage());
+                return;
+            }
+        }
+        int after = readConnectState(dic);   // 复读：不以「调用不抛异常」当成功
+        if (after == 0) {
+            XposedBridge.log(TAG + " 有界清状态: 调 SDK " + entry + " 后 state→0，门禁已清");
+        } else {
+            XposedBridge.log(TAG + " 有界清状态: 调 SDK " + entry + " 后 state 仍=" + stateDesc(after)
+                    + "（gatt 为空时该入口空转、清不掉；60s 后重试）");
+        }
+    }
+
+    /**
+     * 任务3：宿主 App 陈旧「已连接」标志自愈。App 的 {@code B6ExperimentalActivity.onResume} 有守卫
+     * 「{@code connectLiveData != true} 才 {@code tryConnect()}」；该标志由 SDK 回调置位（连上→true、
+     * 断开→false），若断连回调丢失则**陈旧为 true** → App 自认已连、拒绝发起任何连接（只有 kill 复位）。
+     *
+     * <p><b>门控为「可证不一致」</b>（三条同时成立才动手，不靠时间猜测）：模块 {@code bleConnected==false}
+     * （本方法仅在断连期由 tick 调用）且 SDK {@code state==0}（地面真值——App 真已连时 state==2，**绝不触发**）
+     * 且 App {@code connectLiveData==true}。复位动作是 {@code postValue(false)}（线程安全）：App 自己的
+     * LiveData 观察者（{@code B6ExperimentalActivity$onCreate$2}：值为 false 即 {@code tryConnect()}）
+     * 随即走 App 自己的扫描重连路径——**模块不替 App 连，只让 App 愿意连**。
+     *
+     * <p>不复位 SDK/模块状态、不调 {@code tryConnect()}：后者在标志仍为 true 时会走 {@code disconnect()} 分支
+     * （App 的 {@code tryConnect} 是「已连→断 / 未连→扫」），且 {@code scan()} 需当前顶层是 FragmentActivity，
+     * 均不可取。字段名 {@code _connectLiveData}（{@code BluetoothViewModel}，{@code MutableLiveData}）。
+     */
+    private static void maybeHealAppStaleConnectedFlag() {
+        Object vm = appSettingsViewModel;
+        if (vm == null || appClassLoader == null) return;
+        try {
+            Object liveData = XposedHelpers.getObjectField(vm, "_connectLiveData");
+            if (liveData == null) return;
+            if (!Boolean.TRUE.equals(XposedHelpers.callMethod(liveData, "getValue"))) {
+                return;   // App 未自认已连 → 无需自愈
+            }
+            Class<?> mgrCls = XposedHelpers.findClass(reconnectMgrClassName(), appClassLoader);
+            Object dic = XposedHelpers.getStaticObjectField(mgrCls, dicFieldName());
+            if (readConnectState(dic) != 0) return;   // SDK 非空闲 → 不动（App 真已连时绝不触发）
+            XposedHelpers.callMethod(liveData, "postValue", Boolean.FALSE);
+            // 日志限频（复用 RECONNECT_LOG_INTERVAL_MS）：postValue→getValue 生效需 App 主线程执行 setValue，
+            //   若主线程被卡死（ANR），getValue 长期仍为 true ⇒ 门控每拍通过；不限频会每秒一条。动作幂等、无需限频。
+            long now = System.currentTimeMillis();
+            if (now - lastAppHealLogAt >= RECONNECT_LOG_INTERVAL_MS) {
+                lastAppHealLogAt = now;
+                XposedBridge.log(TAG + " App 陈旧已连接标志自愈: connectLiveData true→false"
+                        + "（模块已断连、SDK state=0；App 将自行重连）");
+            }
+        } catch (Throwable t) {
+            logReconnectExOnce("App 陈旧标志自愈失败 " + t.getClass().getSimpleName()
+                    + ": " + t.getMessage());
+        }
+    }
+
     /** "后台重连尝试"日志限频（RECONNECT_LOG_INTERVAL_MS 一条）；返回本次是否输出。 */
     private static boolean reconnectAttemptLogAllowed() {
         long now = System.currentTimeMillis();
@@ -761,12 +922,18 @@ public class MainHook implements IXposedHookLoadPackage {
     }
 
     /**
-     * 后台重连节奏：亮屏 5s、息屏 10s（由来、取法缓存与失败兜底见 app/逻辑说明.md §1.2）。
+     * 后台重连节奏：亮屏 5s、息屏 10s；连续失败达 {@link #RECONNECT_BACKOFF_AFTER} 次则降频为
+     * {@link #RECONNECT_BACKOFF_INTERVAL_TICKS}s（由来、取法缓存与失败兜底见 app/逻辑说明.md §1.2）。
      *
      * @param tick 1Hz tick 计数（等价秒数）
      * @return 本次 tick 的重连间隔（秒）
      */
     private static int reconnectIntervalTicks(int tick) {
+        // ② 发令降频：连续失败达阈值 → 节拍固定 30s（连上由 markConnected 复位 reconnectFailStreak）；
+        //    判据是「连续失败次数」，与自扫结果无关（见 app/逻辑说明.md §1.2）。
+        if (reconnectFailStreak >= RECONNECT_BACKOFF_AFTER) {
+            return RECONNECT_BACKOFF_INTERVAL_TICKS;
+        }
         if (tick - screenProbedAtTick >= SCREEN_PROBE_TICKS) {
             screenProbedAtTick = tick;
             Boolean interactive = null;   // null = 未取到 → 兜底亮屏
@@ -1169,6 +1336,20 @@ public class MainHook implements IXposedHookLoadPackage {
                 @Override
                 protected void afterHookedMethod(MethodHookParam param) {
                     enteredSetup = true;  // 已进入过设置界面，此后不再自动跳
+                }
+            });
+            // ③ 前台退让：设置页进入前台后 SETUP_RETREAT_MS 内不发令，把门禁让给 App 的手动连接
+            //   （有界清状态 ① 不受此窗口影响，仍每秒照常运行——见 app/逻辑说明.md §1.2）
+            XposedHelpers.findAndHookMethod(b6ExpAct, "onResume", new XC_MethodHook() {
+                @Override
+                protected void afterHookedMethod(MethodHookParam param) {
+                    setupRetreatUntil = System.currentTimeMillis() + SETUP_RETREAT_MS;
+                    // 任务3：捕获设置页 ViewModel（其 _connectLiveData 供 tick 侧做陈旧标志自愈）
+                    try {
+                        appSettingsViewModel = XposedHelpers.callMethod(param.thisObject, "getViewModel");
+                    } catch (Throwable t) { /* 捕获失败仅使自愈不生效，不影响退让 */ }
+                    XposedBridge.log(TAG + " 设置页进入前台：退让发令 "
+                            + (SETUP_RETREAT_MS / 1000) + "s（有界清状态仍照常）");
                 }
             });
             XposedBridge.log(TAG + " 已钩住 Activity 基类生命周期（MainActivity 自动进入设置界面）");
@@ -1825,7 +2006,10 @@ public class MainHook implements IXposedHookLoadPackage {
             return;
         }
 
-        // 状态自愈兜底：GATT 已就绪但 state≠2 时强制同步 state=2
+        // 状态自愈兜底：GATT 已就绪但 state≠2 时强制同步 state=2。
+        // 风险登记（不改行为）：这是全仓唯一「裸写」SDK mDataConnectState 的位置（受 gatt!=null && st!=2 双重约束）。
+        //   若此写入与 SDK 自身状态机不一致（gatt 实为陈旧/已断），会造成「模块以为已连、SDK 实为未连」的去同步，
+        //   属独立审查 F9 与 B 报告点名的风险来源之一。保留既有语义，仅登记。
         try {
             // 字段名由常量表按 app 类型选择
             String dicField = dicFieldName(), stateField = stateFieldName(), gattField = gattFieldName();
@@ -2288,6 +2472,7 @@ public class MainHook implements IXposedHookLoadPackage {
         lastReconnectExLogAt = 0;        // 新连接：重置连接期异常限频（异常计数 reconnectExCount 累计不清）
         needFreshObject = false;          // 新连接：设备对象已新鲜，无需再换
         reconnectFailStreak = 0;         // 新连接：连续失败归零（断开自扫的触发）
+        stuckStateTicks = 0;             // 新连接：门禁卡死计时归零（严格化「连续 ≥30s」，防跨连接累计）
         lastScanReconnectAt = 0;         // 新连接：重置自扫重连冷却（下次断连达阈值即可再扫）
         bleConnectedTimestamp = System.currentTimeMillis() / 1000L;
         if (connectedModel != 6 && connectedModel != 7)

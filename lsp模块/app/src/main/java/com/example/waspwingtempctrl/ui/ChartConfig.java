@@ -42,7 +42,7 @@ final class ChartConfig {
     static final int FALLBACK_ROLLING_MAX_LINES = 720;
 
     /** 断联判定阈值（秒）——{@code UI_GAP_SEC} 第 1 值。 */
-    int gapDetectSec = 2;
+    int gapDetectSec = 3;
     /** 空白封顶（秒）——{@code UI_GAP_SEC} 第 2 值。 */
     int gapMaxSec = 15;
     /** 左轴转速下限（RPM）——{@code UI_RPM_AXIS_MIN}；0 = 关闭。 */
@@ -107,10 +107,10 @@ final class ChartConfig {
             notes.add("读取 profile.conf 失败（" + t.getClass().getSimpleName() + "），曲线参数全部使用默认值");
             return;
         }
-        // 断联：两个字段都要求 > 0，否则各自回落 2 / 15（口径见 app/逻辑说明.md §7.2〈断联空白〉）
-        int detect = field(store, snap, "UI_GAP_SEC", 0, 2);
+        // 断联：两个字段都要求 > 0，否则各自回落 3 / 15（口径见 app/逻辑说明.md §7.2〈断联空白〉）
+        int detect = field(store, snap, "UI_GAP_SEC", 0, 3);
         int maxSec = field(store, snap, "UI_GAP_SEC", 1, 15);
-        gapDetectSec = detect > 0 ? detect : 2;
+        gapDetectSec = detect > 0 ? detect : 3;
         gapMaxSec = maxSec > 0 ? maxSec : 15;
         // 转速下限：负值一律归 0 = 关闭（口径见 app/逻辑说明.md §7.3〈双纵轴〉）
         rpmAxisMin = Math.max(0, field(store, snap, "UI_RPM_AXIS_MIN", 0, 3000));

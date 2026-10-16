@@ -362,6 +362,7 @@ static int watchdog_last_cmd  = -1;     // 上周期下发制冷值（未达目�
 static long watchdog_last_kill_at = 0;  // 上次 kill 时间戳（冷却防风暴）
 static time_t last_launch_attempt = 0;  // 上次「真正 am start」时刻（拉起冷却用；仅发出 am start 时推进）
 static time_t last_launch_probe_at = 0; // 上次「探测链」（屏检+进程扫描）执行时刻：独立节流，见 APP_LAUNCH_PROBE_INTERVAL
+static time_t last_unfreeze_attempt = 0; // 上次「重下 am unfreeze」时刻（存活但被冻结兜底的限频；仅真正下发时推进）
 static time_t last_disconnect_time = 0; // 最近一次断联时间戳（0=未处于断联）。定义上移至此：launch_last_app
                                         // 的断联初期探测节流要读它，故须先于其声明；清零仍在 reconnect_align
 static time_t last_arbitrate = 0;       // 上次 app 存活仲裁时间（ARBITRATE_INTERVAL 节流）
@@ -388,6 +389,13 @@ static int last_screen_off = 0;          // 上次观察到的屏幕状态：1=�
 // 息屏不受影响——屏幕门禁的 APP_LAUNCH_PROBE_OFF_INTERVAL(10s) 在入口之后生效，故息屏实际仍 10s。
 #define APP_LAUNCH_PROBE_FAST_INTERVAL 5    // 断联初期探测间隔（秒）
 #define APP_LAUNCH_PROBE_FAST_WINDOW   60   // 断联初期窗口（秒）
+
+// 「存活但被冻结」兜底（maybe_unfreeze_frozen_app）：status 心跳停滞但进程仍在 /proc 时，
+// 重下 `am unfreeze --sticky <pkg>` 的最小间隔（秒，硬编码常量）。首拍即触发
+// （last_unfreeze_attempt 初值 0），成功后 app 恢复写心跳、立刻退出该分支故不会反复下发；
+// 仅在下发未奏效（命令失败 / 被立刻重新冻结）时才按本间隔重试，把开销封顶在 ≤2 次/分钟
+// （远低于每 5s 一次的探测节拍，也不会反复起进程）。
+#define UNFREEZE_RETRY_INTERVAL 30
 
 // 说明：屏检不再单独缓存。is_screen_awake() 唯一调用点在 launch_last_app 的屏幕门禁内，其频率已由
 // 上面的 APP_LAUNCH_PROBE_INTERVAL（+ 息屏时的 APP_LAUNCH_PROBE_OFF_INTERVAL）统一限流；
@@ -2189,6 +2197,33 @@ static const char *const BROADCAST_EXTRAS[] = {
 #define BROADCAST_VAL_MAX   12   // 整型 extra 字符串缓冲（int 最长 11 字符 + NUL）
 
 /**
+ * 限时（3 秒）回收子进程：超时则 SIGKILL 强杀并回收，避免僵尸。
+ * 抽自 send_am_broadcast 既有的「sigaction + alarm + waitpid」写法，供多处 am 命令共用
+ * （现由 send_am_broadcast 与 am_unfreeze_app 调用）。必须显式 sigaction 且 sa_flags=0——
+ * 本文件 signal() 是 BSD 语义带 SA_RESTART，会重启 waitpid 使超时分支成死代码
+ * （详见 逻辑说明.md「看门狗反向保活」）。
+ * @return 1=已正常回收（*out_status 有效）；0=超时（已强杀回收，*out_status 无意义）
+ */
+static int wait_child_timeout(pid_t pid, int *out_status) {
+    struct sigaction sa;
+    memset(&sa, 0, sizeof(sa));
+    sa.sa_handler = alarm_handler;
+    sigemptyset(&sa.sa_mask);
+    sa.sa_flags = 0;                     // 关键：不置 SA_RESTART，waitpid 才会被闹钟打断
+    sigaction(SIGALRM, &sa, NULL);
+    alarm(3);
+    int r = waitpid(pid, out_status, 0);
+    alarm(0);                            // 先撤闹钟：之后不再需要（也不该）被打断
+    signal(SIGALRM, SIG_DFL);
+    if (r == -1) {
+        kill(pid, SIGKILL);
+        waitpid(pid, NULL, 0);           // 强杀后回收，避免僵尸
+        return 0;
+    }
+    return 1;
+}
+
+/**
  * 通过 am broadcast 下发控制参数到 LSPosed 模块（fork+exec，3s 超时）
  */
 static void send_am_broadcast(int mode, int target, int windOC, int coldOC, int windLevel) {
@@ -2232,22 +2267,10 @@ static void send_am_broadcast(int mode, int target, int windOC, int coldOC, int 
         execv(AM_BIN, argv);
         _exit(127);
     }
-    // 父进程：限时等待子进程（3 秒超时）。必须显式 sigaction 且 sa_flags=0——
-    // 本文件 signal() 是 BSD 语义带 SA_RESTART，会重启 waitpid 使超时分支成死代码（详见 逻辑说明.md「看门狗反向保活」）。
-    struct sigaction sa;
-    memset(&sa, 0, sizeof(sa));
-    sa.sa_handler = alarm_handler;
-    sigemptyset(&sa.sa_mask);
-    sa.sa_flags = 0;                     // 关键：不置 SA_RESTART，waitpid 才会被闹钟打断
-    sigaction(SIGALRM, &sa, NULL);
-    alarm(3);
+    // 父进程：限时（3 秒）等待子进程；超时/异常只记日志、不影响主循环。
     int status;
-    int r = waitpid(pid, &status, 0);
-    alarm(0);                            // 先撤闹钟再记日志：后面不需要（也不该）再被打断
-    if (r == -1) {
+    if (!wait_child_timeout(pid, &status)) {
         write_log("am broadcast 超时");
-        kill(pid, SIGKILL);
-        waitpid(pid, NULL, 0);           // 强杀后回收，避免僵尸
     } else if (WIFEXITED(status) && WEXITSTATUS(status) != 0) {
         // am 退出码非零 → 广播未送达，需让故障可见
         write_log("am broadcast 失败：退出码 %d（广播未送达）", WEXITSTATUS(status));
@@ -2257,7 +2280,6 @@ static void send_am_broadcast(int mode, int target, int windOC, int coldOC, int 
         debug_log(debug_exec, "am broadcast 已发送 mode=%d target=%d windOC=%d coldOC=%d windLevel=%d",
                   mode, target, windOC, coldOC, windLevel);
     }
-    signal(SIGALRM, SIG_DFL);
 }
 
 /**
@@ -2717,6 +2739,48 @@ static int am_start_app(const char *pkg) {
                  AM_BIN " start -a android.intent.action.MAIN -c android.intent.category.LAUNCHER "
                  "-p %s --es b6x_auto_launch 1 > /dev/null 2>&1", pkg);
     return system(cmd);
+}
+
+/** 重下 `am unfreeze --sticky <pkg>`（fork+exec，3s 超时；复用 wait_child_timeout）。返回退出码，-1=超时/fork 失败/被信号杀 */
+static int am_unfreeze_app(const char *pkg) {
+    pid_t pid = fork();
+    if (pid < 0) return -1;
+    if (pid == 0) {
+        int fd = open("/dev/null", O_WRONLY);
+        if (fd >= 0) {
+            dup2(fd, STDOUT_FILENO);
+            dup2(fd, STDERR_FILENO);
+            close(fd);
+        }
+        // 绝对路径 execv（同 am 广播）；--sticky = 解冻状态保持到该进程生命周期结束
+        char *argv[] = { (char *)"am", (char *)"unfreeze", (char *)"--sticky", (char *)pkg, NULL };
+        execv(AM_BIN, argv);
+        _exit(127);
+    }
+    int status;
+    if (!wait_child_timeout(pid, &status)) return -1;   // 超时已强杀回收
+    return WIFEXITED(status) ? WEXITSTATUS(status) : -1;
+}
+
+/**
+ * 「存活但被冻结」兜底：status 心跳停滞（>STATUS_TIMEOUT）但目标 app 进程仍在 /proc
+ * ⇒ 判为被系统 cached-freezer 冻结（SIGSTOP 使进程内 LSP 心跳线程一并停摆，故 status 不再被写）
+ * ⇒ 只重下一次 `am unfreeze --sticky <pkg>`（廉价、不动 app 生命周期）。
+ *
+ * 不改变「app 存活时 daemon 不干预」口径：不 am start、不 force-stop；进程不存在（真死）时
+ * 直接返回，交给既有拉起链（launch_last_app）。失败只记日志、不中断主循环。
+ * 限频 UNFREEZE_RETRY_INTERVAL：首拍即触发，之后按间隔重试，不会每 5s 一次。
+ */
+static void maybe_unfreeze_frozen_app(void) {
+    time_t now = time(NULL);
+    if (now - last_unfreeze_attempt < UNFREEZE_RETRY_INTERVAL) return;   // 限频
+    const char *pkg = resolve_launch_pkg();
+    int alive = 0;
+    app_process_scan(&pkg, &alive, 1);   // 复用合并遍历；单包扫描
+    if (!alive) return;                  // 进程不存在 = 真死，走拉起链，不在此处理
+    last_unfreeze_attempt = now;         // 仅真正下发前推进冷却
+    int rc = am_unfreeze_app(pkg);
+    write_log("存活但被冻结：%s 心跳停滞但进程仍在，重下解冻 rc=%d", pkg, rc);
 }
 
 /**
@@ -4514,6 +4578,10 @@ int main(int argc, char *argv[]) {
                     last_disconnect_time = time(NULL);   // 断联起点（重连汇总行用）
                     write_log("%s 连接丢失", device_tag_of(active_device));
                 }
+                // 心跳停滞（app_proc_ok=0）但进程仍在 = 疑似被冻结 → 只重下 unfreeze 解冻，
+                // 不改「app 存活时 daemon 不干预」口径（不 am start；真死则交给下面拉起链）。
+                // 仅在心跳停滞时判冻结：BLE 断开但心跳新鲜（app_proc_ok=1）是正常断连，不是冻结。
+                if (!app_proc_ok) maybe_unfreeze_frozen_app();
                 launch_last_app(0);   // 断联时也尝试拉起散热器 app（无 app 存活时真正拉起；存活时 debug 提示）
                                       // 传 0：本处无「已确认全灭」的已知结论，由内部自行单包扫描
                 app_was_alive = 0;  // 复活后走 reconnect_align 重新对齐实际值
