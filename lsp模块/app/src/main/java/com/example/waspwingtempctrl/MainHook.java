@@ -8,7 +8,6 @@ import android.bluetooth.BluetoothGatt;
 import android.bluetooth.BluetoothManager;
 import android.bluetooth.le.BluetoothLeScanner;
 import android.bluetooth.le.ScanCallback;
-import android.bluetooth.le.ScanFilter;
 import android.bluetooth.le.ScanResult;
 import android.bluetooth.le.ScanSettings;
 import android.content.BroadcastReceiver;
@@ -28,6 +27,8 @@ import java.util.Collections;
 import java.util.Iterator;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentLinkedQueue;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicLong;
 import java.lang.reflect.Method;
 import java.util.UUID;
 
@@ -145,17 +146,15 @@ public class MainHook implements IXposedHookLoadPackage {
     private static volatile boolean scanInFlight = false;  // 自扫进行中（回调线程与 tick 线程共享）
     private static volatile long lastScanReconnectAt = 0;  // 上次自扫发起时刻（冷却计时，markConnected 清零）
 
-    // ========== P1：门禁有界自解 + 发令降频 + 设置页退让（见 app/逻辑说明.md §1.2）==========
+    // ========== P1：门禁有界自解 + 发令降频（见 app/逻辑说明.md §1.2）==========
     // stuckStateTicks：tick 线程自增、markConnected（SDK hook 线程）复位 → 跨线程，故 volatile（同 reconnectFailStreak）。
-    // lastStuckClearAt：仅 tick 线程读写 → 不加 volatile；setupRetreatUntil 由 Activity 主线程写、tick 线程读 → volatile。
+    // lastStuckClearAt：仅 tick 线程读写 → 不加 volatile。
     private static volatile int stuckStateTicks = 0;  // readConnectState() 连续 ∈{1,2} 的秒数（tick 自增 / markConnected 复位）
     private static long lastStuckClearAt = 0;      // 上次「有界清状态」动作时刻（限频计时）
-    private static volatile long setupRetreatUntil = 0;  // 设置页进前台后的发令退让截止时刻（ms）
     private static final int RECONNECT_BACKOFF_AFTER = 6;            // 连续失败达此值 → 发令降频
     private static final int RECONNECT_BACKOFF_INTERVAL_TICKS = 30;  // 降频态发令节拍（秒）
     private static final int STUCK_STATE_CLEAR_AFTER_TICKS = 30;     // state∈{1,2} 连续达此秒数才清（>SDK 5s 建连超时，不误拆）
     private static final long STUCK_STATE_CLEAR_COOLDOWN_MS = 60 * 1000;  // 清状态动作限频
-    private static final long SETUP_RETREAT_MS = 25 * 1000;          // 设置页进前台后的发令退让窗口
 
     // ========== R1·任务2：不受限频的 state 观测（30s 一条，仅 tick 线程读写）==========
     // 动机：`后台重连尝试`/`重连循环心跳` 是 5min 限频，上线后分不清「修好了」与「本来就会好」、
@@ -165,10 +164,13 @@ public class MainHook implements IXposedHookLoadPackage {
     private static long lastStateObsLogAt = 0;                 // 上次输出时刻（30s 节流）
     private static final long STATE_OBS_LOG_INTERVAL_MS = 30 * 1000;  // 观测输出间隔（不刷屏：≤2 条/分）
 
-    // ========== R1·任务3：App 陈旧「已连接」标志自愈 ==========
-    // 设置页 ViewModel（onResume 捕获）；其 `_connectLiveData` 陈旧为 true 时 App 会拒绝发起连接。
-    private static volatile Object appSettingsViewModel = null;
-    private static long lastAppHealLogAt = 0;   // 自愈日志限频（App 主线程被卡死时 getValue 不更新，防每秒刷）
+    // ========== M2：SDK 扫描自锁（inScanning）解除 + 扫描侧观测 ==========
+    // 动机：SDK 的「正在扫描」标志在 startLeScan() 内先置 true、唯一清除点是 stopScan()（只在连接成功后触发）；
+    //   一次被拒/被停的扫描 → 标志留真 → 其后所有 startScan() 被「已经在扫描中了」静默拒 → 死锁只能 kill。
+    //   本块在「App 请求扫描且标志已为真」时，走 SDK 自身 stopScan() 入口清标志、放行本次扫描（不裸写字段）。
+    private static final AtomicInteger scanRejectCount = new AtomicInteger();  // 扫描入口到达时标志已为真的累计次数（= 若模块不介入则会被 SDK 拒的次数；钩子线程写 / tick 读）
+    private static final AtomicLong lastScanUnlockAt = new AtomicLong();       // 上次解自锁动作时刻（限频计时；CAS 保证并发下只放行一次）
+    private static final long SCAN_UNLOCK_MIN_INTERVAL_MS = 5000;  // 解自锁动作限频（防 App 连发请求时反复停/起）
 
     // ========== 断连自动开蓝牙（BT_AUTO_ENABLE_SEC）==========
     // 触发点：maybeScanReconnect 的「蓝牙未开启」分支（tick 线程）。一律交守护进程（root）执行，
@@ -449,17 +451,14 @@ public class MainHook implements IXposedHookLoadPackage {
                     tick++;
                     writeStatusFile();   // 每 1 秒写一次 status（供 daemon 3s 判死 + 曲线页）
 
-                    // ① 有界清状态：断连期每秒查一次门禁是否卡死（独立于发令；设置页退让期间照常运行）
-                    //    任务3：同时做 App 陈旧「已连接」标志的自愈（门控为「可证不一致」，见方法注释）
+                    // ① 有界清状态：断连期每秒查一次门禁是否卡死（独立于发令）
                     if (!bleConnected) {
                         maybeClearStuckControllerState();
-                        maybeHealAppStaleConnectedFlag();
                     }
 
                     // ═══ 后台自动重连（亮屏 5s / 息屏 10s；连续失败≥6 降频 30s，见 app/逻辑说明.md §1.2）═══
                     // 设备锁死（多次重连无回传）时停止自动重连，等用户强制重启 App
                     if (!bleConnected && lastDevice != null && !deviceLockedAlerted
-                            && System.currentTimeMillis() >= setupRetreatUntil   // ③ 设置页退让窗口内不发令
                             && tick % reconnectIntervalTicks(tick) == 0) {
                         tryReconnectOnce();   // 只发令 + 连续失败转自扫重连（见 app/逻辑说明.md §1.2）
                     }
@@ -657,6 +656,8 @@ public class MainHook implements IXposedHookLoadPackage {
             if (scanner == null) { logScanSkip("扫描器不可用"); return; }
 
             final ScanCallback cb = new ScanCallback() {
+                // 注：下方 ScanSettings 未设 setReportDelay ⇒ 批模式不启用，onBatchScanResults 不会被调用，故只需覆写
+                //     onScanResult。若将来启用 setReportDelay，须一并覆写 onBatchScanResults 做同样的软件地址筛选。
                 @Override
                 public void onScanResult(int callbackType, ScanResult result) {
                     if (!scanInFlight) return;   // 命中/超时后、stopScan 生效前的迟到回调：丢弃（防重复汇总/重复连接）
@@ -705,7 +706,6 @@ public class MainHook implements IXposedHookLoadPackage {
                     logScanSummary();
                 }
             };
-            ScanFilter filter = new ScanFilter.Builder().setDeviceAddress(targetAddr).build();
             ScanSettings settings = new ScanSettings.Builder()
                     .setScanMode(ScanSettings.SCAN_MODE_LOW_LATENCY).build();
             scanCallbackCount = 0;         // P3：本轮诊断计数归零
@@ -713,7 +713,9 @@ public class MainHook implements IXposedHookLoadPackage {
             scanAddrErrCount = 0;
             scanAddrThrewLogCount = 0;
             scanInFlight = true;
-            scanner.startScan(Collections.singletonList(filter), settings, cb);
+            // 广扫（空过滤）：本 ROM 对「带设备地址过滤」的扫描要求特权权限、直接拒绝（MIUI PERMISSION DENIED），
+            //   使模块永远拿不到新设备对象。改空过滤后过门（同 SDK 自身做法），再在回调里按地址软件筛选。
+            scanner.startScan(Collections.emptyList(), settings, cb);
             XposedBridge.log(TAG + " 后台重连硬自愈: 连续 " + reconnectFailStreak
                     + " 次未连上，启动扫描取新设备对象重连 -> " + targetAddr);
             // 超时兜底停扫（找到设备时已在回调里置 scanInFlight=false，这里只兜超时）
@@ -755,7 +757,7 @@ public class MainHook implements IXposedHookLoadPackage {
     private static void logScanSummary() {
         XposedBridge.log(TAG + " 后台重连硬自愈: 自扫结束 回调=" + scanCallbackCount
                 + " 地址不符=" + scanAddrMismatchCount + " 回调异常=" + scanAddrErrCount
-                + "（回调=0 表示扫描器未收到任何广播 → 设备不在场 R1）");
+                + "（回调=0：未收到广播——可能是设备不在场、扫描被系统拒绝或扫描未真正下发，需结合 ScanController 日志判别）");
     }
 
     /** 读控制器连接状态：B6X=mDataConnectState，B7X=E；dic 为 null 或读取失败 → -1。 */
@@ -771,6 +773,16 @@ public class MainHook implements IXposedHookLoadPackage {
     /** 状态值的人类可读描述（-1=不可读），仅用于日志。 */
     private static String stateDesc(int state) {
         return (state < 0) ? "?" : String.valueOf(state);
+    }
+
+    /** 读控制器扫描标志：B6X=inScanning，B7X=f16228r；dic 为 null 或读取失败 → false。仅用于观测。 */
+    private static boolean readInScanning(Object dic) {
+        if (dic == null) return false;
+        try {
+            return XposedHelpers.getBooleanField(dic, inScanningFieldName());
+        } catch (Throwable t) {
+            return false;
+        }
     }
 
     /**
@@ -791,7 +803,7 @@ public class MainHook implements IXposedHookLoadPackage {
             return;
         }
         int st = readConnectState(dic);
-        observeConnectState(st);   // 任务2：不受限频的 state 观测（30s 一条）
+        observeConnectState(st, readInScanning(dic));   // 任务2：不受限频的观测（30s 一条；含扫描侧 inScanning）
         if (st != 1 && st != 2) {   // 0=空闲、-1=读失败、其它：一律清零
             stuckStateTicks = 0;
             return;
@@ -800,21 +812,20 @@ public class MainHook implements IXposedHookLoadPackage {
         if (stuckStateTicks < STUCK_STATE_CLEAR_AFTER_TICKS) return;
         long now = System.currentTimeMillis();
         if (now - lastStuckClearAt < STUCK_STATE_CLEAR_COOLDOWN_MS) return;
-        // ①(a) 可证非 App 在用：设置页刚进前台的退让窗口内不拆（让 App 的手动连接先试）。
-        //   30s 门限 > 25s 退让窗口，两条天然相容——窗口过后本动作照常可运行。计数不清零（窗口一过即生效）。
-        if (now < setupRetreatUntil) return;
         lastStuckClearAt = now;
         stuckStateTicks = 0;
         clearStuckControllerState(dic);
     }
 
     /**
-     * 任务2：不受 5min 限频的 state 观测。每次调用（断连期每秒）读一次 state，但**每
-     * {@link #STATE_OBS_LOG_INTERVAL_MS}(30s) 才输出一条**，输出当前 state 与该值「已持续」秒数：
-     * 持续秒数很小 ⇒ 门禁在快速翻转（争用）；持续秒数逐条增大且 state=2 ⇒ 卡死。据此可分辨
-     * 「卡 2 vs 争用」并验收「有界清状态」是否生效。仅 tick 线程调用（无并发）。
+     * 任务2：不受 5min 限频的观测。每次调用（断连期每秒）读一次，但**每
+     * {@link #STATE_OBS_LOG_INTERVAL_MS}(30s) 才输出一条**，输出当前 state 与该值「已持续」秒数，
+     * 并附带扫描侧信号（{@code inScanning} 标志 + 被拒累计次数，M2 观测扩展）：
+     * 持续秒数很小 ⇒ 门禁在快速翻转（争用）；持续秒数逐条增大且 state=2 ⇒ 卡死；inScanning=true 而
+     * 长时间无进展 ⇒ 扫描侧卡死（M2）。据此可分辨「卡 2 vs 争用」并验收两项修复是否生效。
+     * 仅 tick 线程调用（无并发）。
      */
-    private static void observeConnectState(int st) {
+    private static void observeConnectState(int st, boolean scanning) {
         long now = System.currentTimeMillis();
         if (st != lastObservedState) {
             lastObservedState = st;
@@ -823,7 +834,8 @@ public class MainHook implements IXposedHookLoadPackage {
         if (now - lastStateObsLogAt < STATE_OBS_LOG_INTERVAL_MS) return;
         lastStateObsLogAt = now;
         XposedBridge.log(TAG + " 状态观测: state=" + stateDesc(st)
-                + " 已持续 " + ((now - observedStateSince) / 1000) + "s");
+                + " 已持续 " + ((now - observedStateSince) / 1000) + "s"
+                + " inScanning=" + scanning + " 自锁命中累计=" + scanRejectCount.get());
     }
 
     /**
@@ -856,48 +868,6 @@ public class MainHook implements IXposedHookLoadPackage {
         } else {
             XposedBridge.log(TAG + " 有界清状态: 调 SDK " + entry + " 后 state 仍=" + stateDesc(after)
                     + "（gatt 为空时该入口空转、清不掉；60s 后重试）");
-        }
-    }
-
-    /**
-     * 任务3：宿主 App 陈旧「已连接」标志自愈。App 的 {@code B6ExperimentalActivity.onResume} 有守卫
-     * 「{@code connectLiveData != true} 才 {@code tryConnect()}」；该标志由 SDK 回调置位（连上→true、
-     * 断开→false），若断连回调丢失则**陈旧为 true** → App 自认已连、拒绝发起任何连接（只有 kill 复位）。
-     *
-     * <p><b>门控为「可证不一致」</b>（三条同时成立才动手，不靠时间猜测）：模块 {@code bleConnected==false}
-     * （本方法仅在断连期由 tick 调用）且 SDK {@code state==0}（地面真值——App 真已连时 state==2，**绝不触发**）
-     * 且 App {@code connectLiveData==true}。复位动作是 {@code postValue(false)}（线程安全）：App 自己的
-     * LiveData 观察者（{@code B6ExperimentalActivity$onCreate$2}：值为 false 即 {@code tryConnect()}）
-     * 随即走 App 自己的扫描重连路径——**模块不替 App 连，只让 App 愿意连**。
-     *
-     * <p>不复位 SDK/模块状态、不调 {@code tryConnect()}：后者在标志仍为 true 时会走 {@code disconnect()} 分支
-     * （App 的 {@code tryConnect} 是「已连→断 / 未连→扫」），且 {@code scan()} 需当前顶层是 FragmentActivity，
-     * 均不可取。字段名 {@code _connectLiveData}（{@code BluetoothViewModel}，{@code MutableLiveData}）。
-     */
-    private static void maybeHealAppStaleConnectedFlag() {
-        Object vm = appSettingsViewModel;
-        if (vm == null || appClassLoader == null) return;
-        try {
-            Object liveData = XposedHelpers.getObjectField(vm, "_connectLiveData");
-            if (liveData == null) return;
-            if (!Boolean.TRUE.equals(XposedHelpers.callMethod(liveData, "getValue"))) {
-                return;   // App 未自认已连 → 无需自愈
-            }
-            Class<?> mgrCls = XposedHelpers.findClass(reconnectMgrClassName(), appClassLoader);
-            Object dic = XposedHelpers.getStaticObjectField(mgrCls, dicFieldName());
-            if (readConnectState(dic) != 0) return;   // SDK 非空闲 → 不动（App 真已连时绝不触发）
-            XposedHelpers.callMethod(liveData, "postValue", Boolean.FALSE);
-            // 日志限频（复用 RECONNECT_LOG_INTERVAL_MS）：postValue→getValue 生效需 App 主线程执行 setValue，
-            //   若主线程被卡死（ANR），getValue 长期仍为 true ⇒ 门控每拍通过；不限频会每秒一条。动作幂等、无需限频。
-            long now = System.currentTimeMillis();
-            if (now - lastAppHealLogAt >= RECONNECT_LOG_INTERVAL_MS) {
-                lastAppHealLogAt = now;
-                XposedBridge.log(TAG + " App 陈旧已连接标志自愈: connectLiveData true→false"
-                        + "（模块已断连、SDK state=0；App 将自行重连）");
-            }
-        } catch (Throwable t) {
-            logReconnectExOnce("App 陈旧标志自愈失败 " + t.getClass().getSimpleName()
-                    + ": " + t.getMessage());
         }
     }
 
@@ -979,6 +949,7 @@ public class MainHook implements IXposedHookLoadPackage {
 
         // 各修复分区按固定顺序注册（顺序影响 Xposed 回调执行次序，不可随意调整）
         hookControllerStopScan(lpparam);              // 修复 #1：控制器层停扫描（双设备）
+        hookControllerScanEntry(lpparam);             // M2：扫描入口解 SDK 扫描自锁（双设备）
         if (appKind == 6) hookB6ViewModelFix(lpparam);   // 修复 #2：ViewModel LiveData（仅 B6X）
         if (appKind == 6) hookB6Diagnostics(lpparam);    // 修复 #3/#4 + 诊断钩子（仅 B6X）
         hookCommonDisconnect(lpparam);                // 公共 BLE 断联（双设备）
@@ -1014,7 +985,12 @@ public class MainHook implements IXposedHookLoadPackage {
         }
     }
 
-    /** 修复 #1：控制器层 — 设备连接后停扫描（双设备共用） */
+    /**
+     * 修复 #1：控制器层 — 设备连接后停扫描（保底）。B6X 连接成功点 =
+     * {@code AbstractBluetoothController.onDeviceConnected}；B7X 的 {@code AbstractBluetoothController}
+     * **无** {@code onDeviceConnected}（连接成功点在 {@code com.flydigi.sdk.waspwing.a.S1}），故 B7X 侧在
+     * {@code hookB7Obfuscated} 的 S1 钩子里调同一个 {@link #stopControllerScan}（见 app/逻辑说明.md §1.5）。
+     */
     private static void hookControllerStopScan(XC_LoadPackage.LoadPackageParam lpparam) {
         hookClassMethod(lpparam.classLoader, "com.flydigi.sdk.bluetooth.AbstractBluetoothController",
                 "onDeviceConnected", "AbstractBluetoothController.onDeviceConnected", "钩控制器失败",
@@ -1023,17 +999,64 @@ public class MainHook implements IXposedHookLoadPackage {
                     protected void afterHookedMethod(MethodHookParam param) {
                         try {
                             markConnected(null);  // onDeviceConnected 无 gatt 参数，不保存设备引用
-                            try {
-                                Object controller = param.thisObject;
-                                XposedHelpers.callMethod(controller, "stopScan");
-                                XposedHelpers.setBooleanField(controller, "inScanning", false);
-                            } catch (Throwable t) {
-                                XposedBridge.log(TAG + " 控制器停扫描失败(忽略): " + t.getMessage());
-                            }
+                            stopControllerScan(param.thisObject);
                             XposedBridge.log(TAG + " 控制器：扫描已停止，" + getDeviceLabel() + " BLE 已连接");
                             writeStatusFile();  // 连接事件立刻写 status 文件
                         } catch (Throwable t) {
                             XposedBridge.log(TAG + " 控制器修复异常: " + t.getMessage());
+                        }
+                    }
+                });
+    }
+
+    /**
+     * 连接成功后停扫描（保底）：走 SDK 自身 stopScan 入口（B6X {@code stopScan()} / B7X {@code F0()}），
+     * 并复位扫描标志（B6X {@code inScanning} / B7X {@code f16228r}）。方法名/字段名按 appKind 分流
+     * （见 {@link #stopScanMethodName} / {@link #inScanningFieldName}）；B6X 在 {@code onDeviceConnected}、
+     * B7X 在 {@code a.S1} 各自的连接成功点调用。失败只记日志、不上抛（保持调用方流程）。
+     */
+    private static void stopControllerScan(Object controller) {
+        try {
+            XposedHelpers.callMethod(controller, stopScanMethodName());
+            XposedHelpers.setBooleanField(controller, inScanningFieldName(), false);
+        } catch (Throwable t) {
+            XposedBridge.log(TAG + " 控制器停扫描失败(忽略): " + t.getMessage());
+        }
+    }
+
+    /**
+     * M2：SDK 扫描自锁解除。SDK 的「正在扫描」标志（B6X {@code inScanning} / B7X {@code f16228r}）在
+     * {@code startLeScan()}（B7X {@code A0()}）内先置 true、唯一清除点是 {@code stopScan()}（B7X {@code F0()}），
+     * 而后者只在连接成功后触发。一次被拒/被停的扫描即让标志留真 ⇒ 其后所有扫描请求被「已经在扫描中了」静默拒
+     * ⇒ 死锁只能 kill。本钩子在扫描入口处：若标志已为真（本次请求将被拒），走 SDK 自身 stopScan() 入口清标志、
+     * 放行本次扫描（<b>不裸写字段</b>）。只在「App 主动请求扫描且标志已为真」时动作；此时会**先停掉当前扫描再放行
+     * 新请求**——若当前扫描是正常进行中的（App 又发了一次请求），等价于中断后重启，因原请求本就会被 SDK 拒，
+     * 代价可忽略。双设备共用：方法名按 appKind 分流（见 scanEntryMethodName / stopScanMethodName / inScanningFieldName）。
+     */
+    private static void hookControllerScanEntry(XC_LoadPackage.LoadPackageParam lpparam) {
+        hookClassMethod(lpparam.classLoader, "com.flydigi.sdk.bluetooth.AbstractBluetoothController",
+                scanEntryMethodName(), "AbstractBluetoothController." + scanEntryMethodName() + "（扫描入口·解自锁）",
+                "钩扫描入口失败",
+                new XC_MethodHook() {
+                    @Override
+                    protected void beforeHookedMethod(MethodHookParam param) {
+                        try {
+                            Object controller = param.thisObject;
+                            if (!XposedHelpers.getBooleanField(controller, inScanningFieldName())) {
+                                return;   // 标志为假 = 正常路径，不动作
+                            }
+                            scanRejectCount.incrementAndGet();   // 本次请求到达时标志已为真（若不介入则会被 SDK 以「已经在扫描中了」拒）：计数
+                            long now = System.currentTimeMillis();
+                            long prev = lastScanUnlockAt.get();
+                            if (now - prev < SCAN_UNLOCK_MIN_INTERVAL_MS) return;   // 限频（CAS 保证并发下只放行一次）
+                            if (!lastScanUnlockAt.compareAndSet(prev, now)) return;
+                            // SDK 自身入口：清标志 + 停残留扫描（蓝牙不支持时 SDK 会提前返回、清不动，属极端场景，扫描本就无意义）
+                            XposedHelpers.callMethod(controller, stopScanMethodName());
+                            XposedBridge.log(TAG + " 扫描自锁已清: " + inScanningFieldName()
+                                    + " true→false（App 扫描请求放行）");
+                        } catch (Throwable t) {
+                            logReconnectExOnce("扫描入口解自锁异常 " + t.getClass().getSimpleName()
+                                    + ": " + t.getMessage());
                         }
                     }
                 });
@@ -1332,24 +1355,12 @@ public class MainHook implements IXposedHookLoadPackage {
                 }
             });
             Class<?> b6ExpAct = lpparam.classLoader.loadClass("com.example.extool.B6ExperimentalActivity");
-            XposedHelpers.findAndHookMethod(b6ExpAct, "onCreate", new XC_MethodHook() {
+            // 宿主签名为 onCreate(Landroid/os/Bundle;)V —— 必须传 Bundle.class，否则本钩子注册失败（此前漏参即此因）。
+            //   注：本轮删除「设置页退让」onResume 钩子后，onCreate 已是本 try 内最后一个钩子，其失败不再连带后续钩子。
+            XposedHelpers.findAndHookMethod(b6ExpAct, "onCreate", Bundle.class, new XC_MethodHook() {
                 @Override
                 protected void afterHookedMethod(MethodHookParam param) {
                     enteredSetup = true;  // 已进入过设置界面，此后不再自动跳
-                }
-            });
-            // ③ 前台退让：设置页进入前台后 SETUP_RETREAT_MS 内不发令，把门禁让给 App 的手动连接
-            //   （有界清状态 ① 不受此窗口影响，仍每秒照常运行——见 app/逻辑说明.md §1.2）
-            XposedHelpers.findAndHookMethod(b6ExpAct, "onResume", new XC_MethodHook() {
-                @Override
-                protected void afterHookedMethod(MethodHookParam param) {
-                    setupRetreatUntil = System.currentTimeMillis() + SETUP_RETREAT_MS;
-                    // 任务3：捕获设置页 ViewModel（其 _connectLiveData 供 tick 侧做陈旧标志自愈）
-                    try {
-                        appSettingsViewModel = XposedHelpers.callMethod(param.thisObject, "getViewModel");
-                    } catch (Throwable t) { /* 捕获失败仅使自愈不生效，不影响退让 */ }
-                    XposedBridge.log(TAG + " 设置页进入前台：退让发令 "
-                            + (SETUP_RETREAT_MS / 1000) + "s（有界清状态仍照常）");
                 }
             });
             XposedBridge.log(TAG + " 已钩住 Activity 基类生命周期（MainActivity 自动进入设置界面）");
@@ -1540,6 +1551,7 @@ public class MainHook implements IXposedHookLoadPackage {
                             // 型号未知按包名兜底，随后 X.getDeviceCode() 修正
                             markConnected((BluetoothGatt) param.args[0]);
                             captureInfoFromController(param.thisObject);
+                            stopControllerScan(param.thisObject);   // B7X 连接成功后停扫描（对齐 B6X 的 hookControllerStopScan）
                             // static controller(f50991b) 只在 init 赋值
                             // （E≠2 时命令被丢弃）；连接成功时同步 static 到当前实例（E 已=2）
                             try {
@@ -1964,6 +1976,12 @@ public class MainHook implements IXposedHookLoadPackage {
     private static String stateFieldName() { return (appKind == 7) ? "E" : "mDataConnectState"; }
     /** gatt 字段名：B6X=mBluetoothGatt，B7X=I */
     private static String gattFieldName() { return (appKind == 7) ? "I" : "mBluetoothGatt"; }
+    /** 扫描标志字段名：B6X=inScanning，B7X=f16228r（AbstractBluetoothController，双设备同构） */
+    private static String inScanningFieldName() { return (appKind == 7) ? "f16228r" : "inScanning"; }
+    /** 扫描入口方法名（无参，内部检查并拒绝重复扫描）：B6X=startLeScan，B7X=A0 */
+    private static String scanEntryMethodName() { return (appKind == 7) ? "A0" : "startLeScan"; }
+    /** 停扫描方法名（无参，唯一清除扫描标志处）：B6X=stopScan，B7X=F0 */
+    private static String stopScanMethodName() { return (appKind == 7) ? "F0" : "stopScan"; }
 
     /** 连接者编码：B6X=1/2（老/新 app），farsef=型号(6/7) */
     private static int bleOwnerCode() {

@@ -8,7 +8,7 @@
 #   ① 死模式：v1 [6] 的成功判据 `[底层] BLE 已连接` 的发射点已被 v3.0 删除（dee5adca 里有、HEAD 里没有）
 #      → 本版不再依赖它，改用客观事实判成功：status 文件 BLE=1 / dumpsys STATE_CONNECTED / SDK 的 FlyBle 日志。
 #   ② 假阴性：v1 [6] 在末尾又跑了一次 `logcat -d`，与 [2] 是两次独立 dump，中间夹两次 dumpsys 刷屏
-#      → [6] 空不代表事件没发生。本版：dump 一次落盘到文件，[2]/[6] 共读同一份文件。
+#      → [6] 空不代表事件没发生。本版：两阶段各 dump 一次落盘到文件，分析段共读同一批文件（不再二次 dump）。
 #   ③ 新增抓取：
 #      · 宿主 SDK 日志 tag `FlyBle`——App 以 debug=true 初始化 SDK（App.smali:61-63 → Logger.inDebugMode=true），
 #        故 SDK 的 Logger 会进 logcat；门禁被挡时打 "gatt has been connected with other device"（这是根因实证钥匙）。
@@ -22,7 +22,7 @@
 #   落点：手机端 /storage/emulated/0/一键另存/测试/ ，或 adb push 到 /data/local/tmp/
 #   输出：与脚本同目录的
 #         「重连抓日志结果.log」（人看的报告）
-#         「重连抓日志原始-未连.log」「重连抓日志原始-已连.log」（原始 dump，供 [2]/[6] 共读）
+#         「重连抓日志原始-未连.log」「重连抓日志原始-已连.log」（原始 dump，供分析段共读）
 
 DIR=$(dirname "$0")
 OUT="$DIR/重连抓日志结果.log"
@@ -75,6 +75,9 @@ cat /data/local/tmp/tempctrl_b6x.status 2>/dev/null | tee -a "$OUT"
 log ""
 
 # ================= 阶段 2：提示用户开 App =================
+# 清缓冲：使「开App后」dump（RAW_ON）只含阶段 2+3，与「未连」dump（RAW_OFF，阶段 1）互斥。
+# 落点在阶段 2 开头（不是阶段 3）：M2 事件（FlyBle「已经在扫描中了」）发生在阶段 2，清早了会丢掉它。
+logcat -c 2>/dev/null || log "(logcat -c 失败，继续)"
 log "################################################################"
 log "#                                                              #"
 log "#   现在请【打开 App（$PKG）】触发一次连接                      #"
@@ -142,23 +145,54 @@ if command -v dumpsys >/dev/null 2>&1; then
     dumpsys package "$PKG" 2>/dev/null | grep -iE "BLUETOOTH_CONNECT|BLUETOOTH_SCAN" | tee -a "$OUT"
 fi
 
-# ================= [8] 关键判定行摘录：全部 grep 同一份原始文件 =================
+# ================= [8] 关键判定行摘录：对两阶段原始文件各 grep 一遍 =================
+# 阶段 2 起已清缓冲 → RAW_OFF=未连(阶段1)、RAW_ON=开App后(阶段2+3)，两文件互斥；故须各读一遍，勿只读 RAW_ON。
+scan_key() {   # scan_key <grep选项> <模式>：对未连/开App后两段各 grep 一次
+    log "    · 未连段（RAW_OFF）："
+    grep "$@" "$RAW_OFF" 2>/dev/null | tee -a "$OUT"
+    log "    · 开App后段（RAW_ON）："
+    grep "$@" "$RAW_ON" 2>/dev/null | tee -a "$OUT"
+}
+
 log ""
 log "========== [8] 关键判定行摘录（对原始文件 grep，非二次 dump）=========="
 log "--- 【钥匙】SDK 门禁被挡：gatt has been connected with other device ---"
-grep -F "gatt has been connected with other device" "$RAW_ON" 2>/dev/null | tee -a "$OUT"
+scan_key -F "gatt has been connected with other device"
 log "--- 模块 心跳 / 重连尝试（判断「循环在跑 vs 停了」）---"
-grep -E "重连循环心跳|后台重连尝试" "$RAW_ON" 2>/dev/null | tee -a "$OUT"
+scan_key -E "重连循环心跳|后台重连尝试"
 log "--- 模块 设备锁死 ---"
-grep -F "设备锁死" "$RAW_ON" 2>/dev/null | tee -a "$OUT"
+scan_key -F "设备锁死"
 log "--- 模块 自扫（R1/R2/R4 判别）---"
-grep -E "自扫结束|自扫命中|硬自愈|地址不符|回调异常|取地址异常" "$RAW_ON" 2>/dev/null | tee -a "$OUT"
+scan_key -E "自扫结束|自扫命中|硬自愈|地址不符|回调异常|取地址异常"
 log "--- 模块 connect() 进入 / 退出 ---"
-grep -E "connect\(\) 进入|connect\(\) 退出" "$RAW_ON" 2>/dev/null | tee -a "$OUT"
+scan_key -E "connect\(\) 进入|connect\(\) 退出"
 log "--- 模块 断连 ---"
-grep -E "BLE 断联|BLE 已连接" "$RAW_ON" 2>/dev/null | tee -a "$OUT"
+scan_key -E "BLE 断联|BLE 已连接"
 log "--- 模块 预探测 / R2 命中 / GATE-A / 异常留痕 / 状态自愈 ---"
-grep -E "预探测|R2 命中|GATE-A|异常留痕|状态自愈" "$RAW_ON" 2>/dev/null | tee -a "$OUT"
+scan_key -E "预探测|R2 命中|GATE-A|异常留痕|状态自愈"
+
+# ================= [9] 扫描侧判读：M1（模块自扫被 MIUI 拒）/ M2（SDK inScanning 自锁）=================
+# 对「未连」(RAW_OFF=阶段1) /「开App后」(RAW_ON=阶段2+3) 两态各判一遍，全部读原始 dump（不再二次 logcat -d）。
+scan_side() {
+    pname="$1"; pfile="$2"
+    log "--- [$pname] MIUI 特权扫描拒绝（M1 钥匙）---"
+    grep -F "MIUI PERMISSION DENIED" "$pfile" 2>/dev/null | tee -a "$OUT"
+    log "    计数：MIUI PERMISSION DENIED = $(grep -cF "MIUI PERMISSION DENIED" "$pfile" 2>/dev/null)"
+    log "--- [$pname] 特权权限门（带 mDeviceAddress= 的过滤=被拒候选；空过滤 [] =放行对照）---"
+    grep -F "enforcePrivilegedPermissionIfNeeded" "$pfile" 2>/dev/null | tail -20 | tee -a "$OUT"
+    log "    计数：带地址过滤（mDeviceAddress=） = $(grep -F "enforcePrivilegedPermissionIfNeeded" "$pfile" 2>/dev/null | grep -cF "mDeviceAddress=")"
+    log "    计数：空过滤（enforcePrivilegedPermissionIfNeeded([])） = $(grep -cF "enforcePrivilegedPermissionIfNeeded([])" "$pfile" 2>/dev/null)"
+    log "--- [$pname] 扫描起停 / 后台停扫（M2 触发候选）---"
+    grep -F "Start scan with filters" "$pfile" 2>/dev/null | tail -10 | tee -a "$OUT"
+    grep -E "MSG_STOP_BLE_SCAN|CHECK_BACKGROUND_TIMEOUT|unregistering scanner" "$pfile" 2>/dev/null | tail -15 | tee -a "$OUT"
+    log "--- [$pname] SDK 扫描标志（inScanning 代理：已经在扫描中了 / 开始扫描 / 停止扫描）---"
+    grep -E "已经在扫描中了|开始扫描|停止扫描" "$pfile" 2>/dev/null | tail -20 | tee -a "$OUT"
+}
+
+log ""
+log "========== [9] 扫描侧判读（M1：模块自扫被 MIUI 拒；M2：SDK inScanning 自锁）=========="
+scan_side 未连 "$RAW_OFF"
+scan_side 开App后 "$RAW_ON"
 
 log ""
 log "判定指引："
@@ -168,11 +202,18 @@ log "  · 若 status 出现 BLE=1 / dumpsys 出现 STATE_CONNECTED，但【钥�
 log "    → 门禁在「被挡」与「放行」间抖动（占用），对应「要等一段比较长的时间」。"
 log "  · 若全程无【钥匙】行且 status 始终 BLE=0 → 门禁不是主因，转查 GATT Client 段 / 句柄 / 冻结。"
 log "  · 若模块「重连循环心跳」缺失而自扫仍在跑 → 区分「循环停了」与「没尝试」（心跳 5min 限频，窗口需够长）。"
+log "  · 【M1】若「未连」段反复出现 MIUI PERMISSION DENIED 且「带地址过滤」计数 > 0"
+log "    → 模块自扫被 MIUI 拒（M1 成立）：模块拿不到新设备对象 → 模块侧连不回来。"
+log "  · 【M2】若「开App后」段出现 FlyBle「已经在扫描中了」而全程无「开始扫描」"
+log "    → SDK inScanning 自锁（M2 成立）：App 的 scan() 被静默拒绝，需 kill 才能恢复。"
+log "  · 若「未连」段 MIUI PERMISSION DENIED 计数 = 0 且「带地址过滤」计数 = 0"
+log "    → 模块自扫未下发（或 ROM 不校验），M1 不成立，转查模块自扫起停。"
 log ""
 
-# 自证：原始文件是否有被环形缓冲轮转（未连与已连 dump 的行数对比）
-log "自证：原始 dump 行数　未连=$(count_lines "$RAW_OFF")　已连=$(count_lines "$RAW_ON")"
-log "（若「已连」行数明显小于「未连」且时间跨度更短，警惕缓冲轮转；必要时加大 logcat -G 后重抓）"
+# 自证：两阶段 dump 行数。阶段 2 起已清缓冲 → RAW_ON 只含阶段 2+3、不再累计 RAW_OFF，
+#   故两段互斥、行数不再有「RAW_ON 应 ≥ RAW_OFF」的关系（勿再按累计口径判读）。
+log "自证：原始 dump 行数　未连(阶段1)=$(count_lines "$RAW_OFF")　开App后(阶段2+3)=$(count_lines "$RAW_ON")"
+log "（两段各覆盖各自阶段；任一段为 0 或骤降 → 警惕 logcat -c/-d 失败或缓冲轮转，必要时加大 logcat -G 后重抓）"
 
 log ""
 log "==================== 抓取完成 ===================="
