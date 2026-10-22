@@ -112,11 +112,12 @@ static int CPU_TEMP_DIVISOR = 100;    // CPU 温度原始值 m°C，÷100 转 0.
 static int BATT_CURRENT_DIVISOR = 10000;  // 电池电流原始值 µA ÷ 此值 → 0.01A
 
 // --- CPU 温度扫描范围（可配置）---
-// 首次运行在此范围内扫描有效的 thermal_zone，后续只扫命中的 zone
+// 按此范围建立有效 zone 候选名单，后续只扫名单内的 zone；区间变化时重建名单
 static int CPU_ZONE_MIN = 0;
 static int CPU_ZONE_MAX = 99;
-static int cpu_zone_rescan_sec = 60;   // CPU thermal_zone 全量重扫间隔（秒，CPU_ZONE_RESCAN 第一值，默认 60）
-static int cpu_zone_keep = 10;         // 保留温度值个数（CPU_ZONE_RESCAN 第二值，默认 10）
+static int cpu_zone_rescan_cycles = 12;   // CPU_ZONE_RESCAN 第一值：全量重扫间隔（控制周期，1 周期=5 秒，默认 12=60 秒）
+static int cpu_zone_keep = 10;            // 保留温度值个数（CPU_ZONE_RESCAN 第二值，默认 10）
+static int cpu_zone_list_dirty = 0;       // 1=CPU_ZONE 区间刚变化，需重建候选名单
 
 // --- CPU 亲和核集合（可配置；单一输入位：簇 c0/c123 或核号 0 / 0-1 / 0,2-3）---
 // 静态初值必须写字面量（默认值审计按字面量比对，写成宏会被跳过）；理由见 逻辑说明.md「CPU_AFFINITY 的生效时机」。
@@ -368,6 +369,8 @@ static time_t last_arbitrate = 0;       // 上次 app 存活仲裁时间（ARBIT
 static int app_launch_cooldown = 60;    // APP_LAUNCH_COOLDOWN：两次拉起最小间隔（秒，默认 60）
 static int app_launch_screen_gate_enabled = 1;  // APP_LAUNCH_SCREEN_GATE 第一值：屏幕门禁开关
 static int app_launch_screen_dozing_on  = 0;    // 第二值：Dozing 是否算亮屏（默认 0）
+static int legacy_screen_gate_logged    = 0;    // 旧三值行只提示一次（避免每轮配置热重载刷屏）
+static int legacy_rescan_logged         = 0;    // CPU_ZONE_RESCAN 旧秒值迁移只提示一次
 static time_t last_probe_off_at = 0;     // 上次确认息屏（并完成屏检）的时刻：息屏退避锚点，见 APP_LAUNCH_PROBE_OFF_INTERVAL
 static int last_screen_off = 0;          // 上次观察到的屏幕状态：1=息屏（含按配置算灭的 Dozing），0=亮屏/未知。初值=亮屏
 
@@ -385,7 +388,7 @@ static int last_screen_off = 0;          // 上次观察到的屏幕状态：1=�
 // 断联初期的探测加速（见 launch_last_app 入口）：断联后 APP_LAUNCH_PROBE_FAST_WINDOW 秒内，探测间隔
 // 收窄到 APP_LAUNCH_PROBE_FAST_INTERVAL；计时起点是 last_disconnect_time（断联起点，重连由 reconnect_align
 // 清零）。**只加快既有探测节奏**：该链只在 App 进程已死时才真正 am start，本改动不新增任何拉起/重启动作。
-// 息屏不受影响——屏幕门禁的 APP_LAUNCH_PROBE_OFF_INTERVAL(10s) 在入口之后生效，故息屏实际仍 10s。
+// 息屏受入口节流与息屏闸门共同约束：取 12s 与 10s 中较大者，故息屏→亮屏最长滞后约 12s（见 launch_last_app 内注释）。
 #define APP_LAUNCH_PROBE_FAST_INTERVAL 5    // 断联初期探测间隔（秒）
 #define APP_LAUNCH_PROBE_FAST_WINDOW   60   // 断联初期窗口（秒）
 
@@ -471,6 +474,7 @@ static void ki_cut_parse_row(const char *idx_str, const char *val_str);  // pars
 static int  parse_legacy_pidcut_cfg(const char *key, const char *val_str);  // load_config 调用（旧 KI_CUT_* 键兼容），定义在 KI 削减区
 static void apply_legacy_pidcut(void);     // load_config 调用（旧键按新键优先生效），定义在 KI 削减区
 static int  migrate_pid_cut_config(const char *path);   // load_config 调用（旧键一次性迁移写回），定义在 KI 削减区
+static int  migrate_rescan_unit_config(const char *path, int cycles);  // load_config 调用（旧秒值一次性迁移写回），定义在 KI 削减区
 static void reset_ki_cut_defaults(void);   // reset_perf_layer_defaults 与 main 调用，定义在 KI 削减区
 static void install_cache_mark(const char *pkg);   // /proc 命中正向标记（定义在安装缓存区，供 app_process_scan 调用）
 
@@ -609,8 +613,17 @@ static void parse_debug_cfg(const char *key, int val) {
     else if (strcmp(key, "DEBUG_LAUNCH") == 0)  debug_launch = (val != 0);
 }
 
+/** CPU_ZONE_RESCAN 解析状态：单位标记 + 旧秒值迁移结果（load_config 与 parse_sysfs_cfg 共用） */
+struct RescanCfgState {
+    int unit_is_cycles;    // 1=文件头带 cfg-unit 标记，第一值按控制周期解释
+    int legacy_seen;       // 1=读到无标记的旧秒值
+    int legacy_sec;        // 旧值（日志用）
+    int converted_cycles;  // 迁移后的周期数
+};
+
 /** sysfs 路径与缩放层（SYSFS_ENABLED=1 时）；解析方式由 SYSFS_CFG_KEYS 表驱动 */
-static void parse_sysfs_cfg(const char *key, int val, const char *val_str) {
+static void parse_sysfs_cfg(const char *key, int val, const char *val_str,
+                            struct RescanCfgState *rescan) {
     const struct SysfsCfgKey *e = sysfs_key_lookup(key);
     if (!e) return;
     switch (e->kind) {
@@ -622,14 +635,31 @@ static void parse_sysfs_cfg(const char *key, int val, const char *val_str) {
         break;
     case SK_ZONE: {
         int a = CPU_ZONE_MIN, b = CPU_ZONE_MAX;
-        if (sscanf(val_str, "%d %d", &a, &b) >= 2) { CPU_ZONE_MIN = clamp(a,0,99); CPU_ZONE_MAX = clamp(b,0,99); }
+        if (sscanf(val_str, "%d %d", &a, &b) >= 2) {
+            int old_min = CPU_ZONE_MIN, old_max = CPU_ZONE_MAX;
+            CPU_ZONE_MIN = clamp(a, 0, 99);
+            CPU_ZONE_MAX = clamp(b, 0, 99);
+            if (CPU_ZONE_MIN != old_min || CPU_ZONE_MAX != old_max) cpu_zone_list_dirty = 1;
+        }
         break;
     }
     case SK_RESCAN: {
-        // 双值：重扫间隔（秒） 保留温度值个数
-        int a = cpu_zone_rescan_sec, b = cpu_zone_keep;
+        // 双值：重扫间隔（控制周期，1 周期=5 秒） 保留温度值个数
+        int a = cpu_zone_rescan_cycles, b = cpu_zone_keep;
         int n = sscanf(val_str, "%d %d", &a, &b);
-        if (n >= 1) cpu_zone_rescan_sec = clamp(a, 5, 3600);
+        if (n >= 1) {
+            int cycles = a;
+            if (!rescan->unit_is_cycles) {
+                // 旧配置单位是「秒」：向上取整换算为控制周期，保持原有重扫节奏
+                cycles = (a > 0) ? (a + 4) / 5 : 0;
+                if (cycles < 1) cycles = 1;
+                if (cycles > 720) cycles = 720;
+                rescan->legacy_seen = 1;
+                rescan->legacy_sec = a;
+                rescan->converted_cycles = cycles;
+            }
+            cpu_zone_rescan_cycles = clamp(cycles, 1, 720);
+        }
         if (n >= 2) cpu_zone_keep = clamp(b, 1, 64);
         break;
     }
@@ -831,6 +861,8 @@ static void reset_perf_layer_defaults(void) {
 /** SYSFS 层取值位 → 代码默认值（int 位见 CFG_SYSFS_DEFAULTS；文本键另行处理） */
 static void reset_sysfs_layer_defaults(void) {
     CFG_SYSFS_DEFAULTS(CFG_RESET_ROW)
+    // 区间/重扫参数已回落默认：标记重建 zone 候选名单（下一次 5 秒控制周期）
+    cpu_zone_list_dirty = 1;
     // 路径键：3 个用生成头的默认值宏（char[] 不能整型赋值），strncpy 后必须补 NUL
     strncpy(BATT_TEMP_PATH, CFG_DEFAULT_BATT_TEMP_PATH, sizeof(BATT_TEMP_PATH) - 1);
     BATT_TEMP_PATH[sizeof(BATT_TEMP_PATH) - 1] = '\0';
@@ -865,7 +897,11 @@ static int load_config(const char *path) {
     int perf_enabled = 1;
     int found_debug = 0;
     int found_sysfs = 0;
+    struct RescanCfgState rescan = {0};
     while (fgets(line, sizeof(line), f)) {
+        // 单位标记是注释行，config_parse_line 会跳过，故在解析前单独识别
+        if (strstr(line, "cfg-unit: CPU_ZONE_RESCAN=cycles") != NULL)
+            rescan.unit_is_cycles = 1;
         char *key;
         char *val_str = config_parse_line(line, &key);
         if (!val_str) continue;
@@ -882,12 +918,26 @@ static int load_config(const char *path) {
         } else if (strcmp(key, "APP_LAUNCH_COOLDOWN") == 0) {
             app_launch_cooldown = clamp(atoi(val_str), 0, 3600);  // 两次拉起最小间隔（秒，0=不冷却）
         } else if (strcmp(key, "APP_LAUNCH_SCREEN_GATE") == 0) {
-            // 屏幕门禁（二值：开关 Dozing是否算亮屏）；仅 mWakefulness=Awake 才拉起
-            // 注：旧三值行（开关 读取失败默认值 Dozing）按二值口径取前两个 token，中间的旧值即被当成 Dozing
-            int on = app_launch_screen_gate_enabled, dz = app_launch_screen_dozing_on;
-            int n = sscanf(val_str, "%d %d", &on, &dz);
-            if (n >= 1) app_launch_screen_gate_enabled = (on != 0);
-            if (n >= 2) app_launch_screen_dozing_on  = (dz != 0);
+            // 屏幕门禁（二值：开关 Dozing是否算亮屏）；仅 mWakefulness=Awake（或按配置算亮屏的 Dozing）才拉起
+            // 旧三值行「开关 读取失败默认值 Dozing」：按原语义取第一、第三值（第二值已废弃），并记一次日志。
+            int on = app_launch_screen_gate_enabled;
+            int legacy_fail_default = 1;
+            int dz = app_launch_screen_dozing_on;
+            int n = sscanf(val_str, "%d %d %d", &on, &legacy_fail_default, &dz);
+            if (n >= 3) {
+                app_launch_screen_gate_enabled = (on != 0);
+                app_launch_screen_dozing_on    = (dz != 0);
+                if (!legacy_screen_gate_logged) {
+                    write_log("配置 APP_LAUNCH_SCREEN_GATE 旧三值行（开关=%d 读取失败默认值=%d Dozing=%d）：按原语义取第一、第三值；第二值已废弃，读取失败固定按可拉起兜底",
+                              on, legacy_fail_default, dz);
+                    legacy_screen_gate_logged = 1;
+                }
+            } else {
+                dz = app_launch_screen_dozing_on;
+                n = sscanf(val_str, "%d %d", &on, &dz);
+                if (n >= 1) app_launch_screen_gate_enabled = (on != 0);
+                if (n >= 2) app_launch_screen_dozing_on  = (dz != 0);
+            }
         } else if (strcmp(key, "UI_BACK_HIDE") == 0) {
             // 界面键里唯一被守护进程读取的一个：本机不消费，只转写标志文件供钩子读取。
             // 与 APP_LAUNCH_ENABLED 同理，必须在第一遍读掉——否则 PERF/DEBUG/SYSFS 全关时本函数会提前 return。
@@ -960,7 +1010,7 @@ static int load_config(const char *path) {
 
         // --- sysfs 路径与缩放层（SYSFS_ENABLED=1 时加载，独立于性能/调试总开关） ---
         if (found_sysfs && is_sysfs_key(key)) {
-            parse_sysfs_cfg(key, val, val_str);
+            parse_sysfs_cfg(key, val, val_str, &rescan);
             continue;
         }
 
@@ -997,6 +1047,20 @@ static int load_config(const char *path) {
         }
     }
     legacy_pidcut_seen = 0;
+
+    // CPU_ZONE_RESCAN 旧单位（秒）一次性迁移：写回周期数并追加单位标记。
+    // 失败保留内存中的迁移值；下次加载按旧秒值重算，结果幂等。
+    if (rescan.legacy_seen) {
+        if (!legacy_rescan_logged) {
+            write_log("配置 CPU_ZONE_RESCAN 旧值 %d 秒 → 迁移为 %d 个控制周期（5 秒/周期）",
+                      rescan.legacy_sec, rescan.converted_cycles);
+            legacy_rescan_logged = 1;
+        }
+        if (migrate_rescan_unit_config(path, rescan.converted_cycles)) {
+            struct stat mst;
+            if (stat(path, &mst) == 0) config_mtime = mst.st_mtime;
+        }
+    }
 
     return 1;   // 已读完并解析
 }
@@ -1960,7 +2024,7 @@ static int cpu_zone_valid[CPU_ZONE_MAX_CACHE];   // 首次全量扫描发现的�
 static int cpu_zone_valid_count = 0;
 static int cpu_zone_count = 0;
 static int cpu_zone_scanned = 0;
-static time_t cpu_zone_last_scan = 0;        // 上次全量扫描时间（每 cpu_zone_rescan_sec 秒重扫一次）
+static time_t cpu_zone_last_scan = 0;        // 上次全量扫描时间（每 cpu_zone_rescan_cycles 秒重扫一次）
 
 // —— 保留 zone 的常驻 fd（性能优化）——
 // 稳态每秒读取 cpu_zone_cache 里保留的 zone 时不再反复 fopen：各持一个常驻 fd，
@@ -2027,7 +2091,8 @@ static int cmp_zone_desc(const void *a, const void *b) {
 }
 
 /**
- * 扫描 thermal_zone，保留最高温的 cpu_zone_keep 个。首次真全量（建固定候选名单），后续只在名单内重排。
+ * 扫描 thermal_zone，保留最高温的 cpu_zone_keep 个。
+ * 首次、或 CPU_ZONE 区间变化时做全量扫描重建候选名单；其余周期只在名单内重排。
  * 全量扫描 ~100 个 zone 阻塞近 1s，故周期重扫放 5s 控制块（见 逻辑说明.md「注意事项」）。
  */
 static void rescan_cpu_zones(void) {
@@ -2035,8 +2100,8 @@ static void rescan_cpu_zones(void) {
     ZoneReading readings[CPU_ZONE_MAX_CACHE];
     int count = 0;
 
-    if (!cpu_zone_scanned) {
-        // 首次：真全量扫描 CPU_ZONE_MIN~MAX，记录所有能读到有效值（正数）的 zone 为固定候选名单
+    if (!cpu_zone_scanned || cpu_zone_list_dirty) {
+        // 首次/区间变化：全量扫描当前 CPU_ZONE_MIN~MAX，重建有效 zone 候选名单
         for (int i = CPU_ZONE_MIN; i <= CPU_ZONE_MAX; i++) {
             int raw = read_thermal_zone_raw(i);
             if (raw < 0) continue;
@@ -2048,8 +2113,9 @@ static void rescan_cpu_zones(void) {
         }
         cpu_zone_valid_count = count;
         for (int i = 0; i < count; i++) cpu_zone_valid[i] = readings[i].id;
+        cpu_zone_list_dirty = 0;
     } else {
-        // 后续重扫：只在首次有效候选名单内读值重排，不扫描区间外、不发现新 zone；
+        // 后续重扫：只在有效候选名单内读值重排，不扫描区间外、不发现新 zone；
         // 名单中本轮无效（≤0/读失败）的 zone 不入列。无回退全量兜底。
         for (int i = 0; i < cpu_zone_valid_count; i++) {
             int raw = read_thermal_zone_raw(cpu_zone_valid[i]);
@@ -2076,16 +2142,20 @@ static void rescan_cpu_zones(void) {
         debug_log(debug_sensor, "thermal_zone 扫描 无可读 zone（路径 %s），CPU 紧急无法触发",
                   CPU_TEMP_PATH_FMT);
     } else {
-        debug_log(debug_sensor, "thermal_zone 扫描 有效 %d 个，保留 %d 个最高温（%ds 后重扫）",
-                  count, keep, cpu_zone_rescan_sec);
+        debug_log(debug_sensor, "thermal_zone 扫描 有效 %d 个，保留 %d 个最高温（%d 个控制周期≈%d 秒后重扫）",
+                  count, keep, cpu_zone_rescan_cycles, cpu_zone_rescan_cycles * 5);
     }
 }
 
-/** 周期重扫（5s 控制块调用）：距上次全量扫描达到 cpu_zone_rescan_sec 时重建保留列表 */
+/** 周期重扫（5s 控制块调用）：区间变化立即重建；否则距上次扫描达到配置周期数时重建 */
 static void maybe_rescan_cpu_zones(void) {
+    if (cpu_zone_list_dirty) {   // CPU_ZONE 区间变化：不等重扫间隔
+        rescan_cpu_zones();
+        return;
+    }
     if (!cpu_zone_scanned) return;   // 首次扫描由 read_cpu_temp_max 同步完成
     time_t now = time(NULL);
-    if (now - cpu_zone_last_scan < cpu_zone_rescan_sec) return;
+    if (now - cpu_zone_last_scan < (time_t)cpu_zone_rescan_cycles * 5) return;
     rescan_cpu_zones();
 }
 
@@ -3174,6 +3244,31 @@ static void apply_legacy_pidcut(void) {
 }
 
 /**
+ * 提交配置改写：刷新并关闭临时文件，按原文件属主/权限对齐后 rename 覆盖。
+ * 属主/权限必须对齐（daemon 以 root 运行，临时文件默认 root 属主；不对齐则 rename 后 app 写不进配置）。
+ * 返回 1=已覆盖；0=失败（已删除临时文件，保留原文件）。
+ */
+static int commit_config_rewrite(const char *path, const char *tmp, FILE *g,
+                                 const struct stat *st, const char *what) {
+    fflush(g);
+    int m1 = fchmod(fileno(g), st->st_mode & 07777);
+    int m2 = fchown(fileno(g), st->st_uid, st->st_gid);
+    fclose(g);
+    if (m1 != 0 || m2 != 0) {
+        write_log("配置 %s：无法对齐属主/权限（chmod=%d chown=%d），已放弃写回：%s",
+                  what, m1, m2, path);
+        remove(tmp);
+        return 0;
+    }
+    if (rename(tmp, path) != 0) {
+        write_log("配置 %s 写回失败（rename），保留原文件：%s", what, path);
+        remove(tmp);
+        return 0;
+    }
+    return 1;
+}
+
+/**
  * 一次性迁移写回（方案 B）：把配置文件里的旧键就地改名——
  *   KI_CUT_<簇号>=<三元组> → PID_CUT_<簇号>=<四元组>（每点补 KDP 倍率 100=不削）；
  *   KI_CUT_SMOOTH=… → 整行删除（该键已废弃）；其余行原样保留。
@@ -3266,25 +3361,66 @@ static int migrate_pid_cut_config(const char *path) {
     fclose(f);
 
     if (!changed) { fclose(g); remove(tmp); return 0; }
-
-    fflush(g);
-    // 属主/权限必须对齐原文件：daemon 以 root 运行，临时文件默认 root 属主；不对齐则 rename 后 app 再也写不进该配置。
-    // 校验返回；任一失败即放弃写回（保留原文件与属主，读兼容仍生效），避免把配置落成 app 写不了的 root 文件。
-    int m1 = fchmod(fileno(g), st.st_mode & 07777);
-    int m2 = fchown(fileno(g), st.st_uid, st.st_gid);
-    fclose(g);
-    if (m1 != 0 || m2 != 0) {
-        write_log("配置 旧键迁移：无法对齐属主/权限（chmod=%d chown=%d），已放弃写回：%s", m1, m2, path);
-        remove(tmp);
-        return 0;
-    }
-
-    if (rename(tmp, path) != 0) {
-        write_log("配置 旧键迁移写回失败（rename），保留原文件：%s", path);
-        remove(tmp);
-        return 0;
-    }
+    if (!commit_config_rewrite(path, tmp, g, &st, "旧键迁移")) return 0;
     write_log("配置 旧键 KI_CUT_* 已迁移为 PID_CUT_*（并清除已废弃的 KI_CUT_SMOOTH）");
+    return 1;
+}
+
+/**
+ * 旧 CPU_ZONE_RESCAN（秒）→ 控制周期的一次性写回：
+ *   替换第一值为迁移后的周期数，保留第二值；文件末尾追加单位标记。
+ * 原子性/属主处理与旧键迁移一致；失败保留原文件，内存中的迁移值仍生效。
+ */
+static int migrate_rescan_unit_config(const char *path, int cycles) {
+    FILE *f = fopen(path, "r");
+    if (!f) return 0;
+    struct stat st;
+    if (stat(path, &st) != 0) { fclose(f); return 0; }
+
+    char tmp[300];
+    snprintf(tmp, sizeof(tmp), "%s.mig", path);
+    FILE *g = fopen(tmp, "w");
+    if (!g) { fclose(f); return 0; }
+
+    int changed = 0;
+    int has_marker = 0;
+    int migrated_from_sec = 0;
+    char line[640];
+    while (fgets(line, sizeof(line), f)) {
+        if (strstr(line, "cfg-unit: CPU_ZONE_RESCAN=cycles") != NULL) has_marker = 1;
+        char *p = line;
+        while (*p == ' ' || *p == '\t') p++;
+        if (*p != '#' && strncmp(p, "CPU_ZONE_RESCAN", 15) == 0) {
+            const char *q = p + 15;
+            while (*q == ' ' || *q == '\t') q++;
+            if (*q == '=') {
+                int old_sec = 0, keep = 0;
+                int n = sscanf(q + 1, "%d %d", &old_sec, &keep);
+                if (n >= 2) {
+                    keep = clamp(keep, 1, 64);
+                    snprintf(line, sizeof(line), "CPU_ZONE_RESCAN=%d %d\n", cycles, keep);
+                    migrated_from_sec = old_sec;
+                } else if (n == 1) {
+                    snprintf(line, sizeof(line), "CPU_ZONE_RESCAN=%d\n", cycles);
+                    migrated_from_sec = old_sec;
+                } else {
+                    fputs(line, g);
+                    continue;
+                }
+                changed = 1;
+                fputs(line, g);
+                continue;
+            }
+        }
+        fputs(line, g);
+    }
+    fclose(f);
+
+    if (!changed) { fclose(g); remove(tmp); return 0; }
+    if (!has_marker) fputs("\n# cfg-unit: CPU_ZONE_RESCAN=cycles\n", g);
+    if (!commit_config_rewrite(path, tmp, g, &st, "CPU_ZONE_RESCAN 单位迁移")) return 0;
+    write_log("配置 CPU_ZONE_RESCAN 旧值 %d 秒 → 已写回为 %d 个控制周期并追加单位标记",
+              migrated_from_sec, cycles);
     return 1;
 }
 
@@ -3905,6 +4041,9 @@ static void main_loop(void) {
         // 亲和同样按重载后的值重算（CPU_AFFINITY 可能被改，也可能随层关闭被复位为默认）
         apply_cpu_affinity();
     }
+
+    // 0.4. CPU_ZONE 区间变化 → 本周期立即重建候选名单（全量扫描约 1s，仍在 5s 控制块内）
+    if (cpu_zone_list_dirty) rescan_cpu_zones();
 
     // 0.5. 热端过温 → 制冷削减（先于 PID 决策，本周期即生效）
     update_hot_derate();

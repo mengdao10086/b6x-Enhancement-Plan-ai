@@ -231,6 +231,16 @@ final class ConfigFormController implements ConfigKeyRow.Host, ConfigWriteQueue.
         }
     }
 
+    /**
+     * 「参数定义」行的两态文案（收起 / 展开）：数字由页面算（见 {@link ConfigFormFragment#renderSelfCheck}），
+     * 诊断区只负责按当前展开态上屏。诊断区没建（页面没有折叠体）时安全忽略。
+     */
+    void setDefsSummary(@NonNull CharSequence collapsed, @NonNull CharSequence expanded) {
+        if (diagnostics != null) {
+            diagnostics.setDefsSummary(collapsed, expanded);
+        }
+    }
+
     // ==================== 建表：卡头先露，行随后 ====================
 
     /** 段二兜底延时（毫秒）：pre-draw 迟迟不派发时，到点也把行建出来（见 {@link #scheduleRowsPhase}）。 */

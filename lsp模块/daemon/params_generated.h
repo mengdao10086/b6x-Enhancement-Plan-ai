@@ -124,8 +124,8 @@
 #define CFG_MAX_CPU_ZONE_1 99
 #define CFG_MIN_CPU_ZONE_2 0  /* C 变量 CPU_ZONE_MAX */
 #define CFG_MAX_CPU_ZONE_2 99
-#define CFG_MIN_CPU_ZONE_RESCAN_1 5  /* C 变量 cpu_zone_rescan_sec */
-#define CFG_MAX_CPU_ZONE_RESCAN_1 3600
+#define CFG_MIN_CPU_ZONE_RESCAN_1 1  /* C 变量 cpu_zone_rescan_cycles */
+#define CFG_MAX_CPU_ZONE_RESCAN_1 720
 #define CFG_MIN_CPU_ZONE_RESCAN_2 1  /* C 变量 cpu_zone_keep */
 #define CFG_MAX_CPU_ZONE_RESCAN_2 64
 #define CFG_MIN_LOG_MAX 0  /* C 变量 LOG_MAX */
@@ -211,7 +211,7 @@
     X(CPU_TEMP_DIVISOR, 100) \
     X(CPU_ZONE_MIN, 0) \
     X(CPU_ZONE_MAX, 99) \
-    X(cpu_zone_rescan_sec, 60) \
+    X(cpu_zone_rescan_cycles, 12) \
     X(cpu_zone_keep, 10) \
     X(LOG_MAX, 16256)
 
