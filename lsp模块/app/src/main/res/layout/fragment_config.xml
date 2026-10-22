@@ -101,22 +101,9 @@
                 android:layout_height="wrap_content"
                 android:orientation="vertical">
 
-                <!-- 诊断区标题：保留原「诊断信息」一行，折叠概要行在它下方 -->
-                <TextView
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:paddingStart="@dimen/card_padding"
-                    android:paddingTop="@dimen/card_padding"
-                    android:paddingEnd="@dimen/card_padding"
-                    android:text="@string/config_diag_title"
-                    android:textAppearance="@style/TextAppearance.B6XTempCtrl.SectionTitle" />
-
-                <!--
-                    概要行（始终可见）：参数定义 + 键渲染自检结论合成一句，右侧只有小三角。
-                    清理按钮不塞进本行（加了自检数字后太挤），改到折叠体下方独立一行。
-                -->
+                <!-- 「诊断信息」= 整块展开/收起控制器（点标题行或右侧三角） -->
                 <LinearLayout
-                    android:id="@+id/config_diag_summary"
+                    android:id="@+id/config_diag_header"
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
                     android:background="?attr/selectableItemBackground"
@@ -125,22 +112,20 @@
                     android:gravity="center_vertical"
                     android:minHeight="@dimen/row_min_height"
                     android:orientation="horizontal"
-                    android:paddingStart="@dimen/card_padding"
-                    android:paddingEnd="@dimen/card_padding"
-                    android:paddingBottom="@dimen/card_padding">
+                    android:padding="@dimen/card_padding">
 
                     <TextView
-                        android:id="@+id/config_diag_defs"
                         android:layout_width="0dp"
                         android:layout_height="wrap_content"
                         android:layout_weight="1"
-                        android:textAppearance="@style/TextAppearance.B6XTempCtrl.Caption" />
+                        android:text="@string/config_diag_title"
+                        android:textAppearance="@style/TextAppearance.B6XTempCtrl.SectionTitle" />
 
-                    <!-- 展开三角：收起指右、展开由 ConfigDiagnostics 转 90° 指下；16dp 小一档 -->
+                    <!-- 展开三角：收起指右、展开由 ConfigDiagnostics 转 90° 指下 -->
                     <ImageView
                         android:id="@+id/config_diag_arrow"
-                        android:layout_width="@dimen/config_selfcheck_arrow_box"
-                        android:layout_height="@dimen/config_selfcheck_arrow_box"
+                        android:layout_width="@dimen/arrow_box"
+                        android:layout_height="@dimen/arrow_box"
                         android:layout_marginStart="@dimen/space_s"
                         android:contentDescription="@string/config_action_expand"
                         android:scaleType="fitCenter"
@@ -151,8 +136,8 @@
                 <!--
                     折叠体：默认整块隐藏（明细属排障内容，不该常驻参数区上方）。
                     自上而下：数据文件信息（原曲线页信息条，由 ChartFragment 经 ChartFragment.Host
-                    回调提供，曲线卡内不再重复）→ 配置诊断正文（落点/未定义键数量/提示）→ mtime
-                    → 启动耗时折叠行 → 刷新按钮。自检结论已在上面概要行，不在本体内重复。
+                    回调提供，曲线卡内不再重复）→ 配置诊断正文（配置文件/C端路径/未定义键/提示）
+                    → 参数定义行（自身可展开，内挂 mtime）→ 启动耗时行（自身可展开）→ 刷新按钮。
                 -->
                 <LinearLayout
                     android:id="@+id/config_diag_body"
@@ -187,13 +172,51 @@
                         android:textAppearance="@style/TextAppearance.B6XTempCtrl.Mono"
                         android:textIsSelectable="true" />
 
-                    <!-- mtime 并入正文块：紧跟配置文件 / C 端路径之后的同一块，保留长按整段复制 -->
+                    <!--
+                        参数定义行：块内的一行可展开项（不是整块概要），放在正文块之后；
+                        字号 1.5×、触控高 ≥48dp，右侧小三角展开它自己的内容（配置 mtime）。
+                    -->
+                    <LinearLayout
+                        android:id="@+id/config_diag_defs_row"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="@dimen/space_s"
+                        android:background="?attr/selectableItemBackground"
+                        android:clickable="true"
+                        android:focusable="true"
+                        android:gravity="center_vertical"
+                        android:minHeight="@dimen/diag_fold_min_height"
+                        android:orientation="horizontal"
+                        android:paddingTop="@dimen/space_s"
+                        android:paddingBottom="@dimen/space_s">
+
+                        <TextView
+                            android:id="@+id/config_diag_defs"
+                            android:layout_width="0dp"
+                            android:layout_height="wrap_content"
+                            android:layout_weight="1"
+                            android:textAppearance="@style/TextAppearance.B6XTempCtrl.Caption"
+                            android:textSize="@dimen/diag_fold_text_size" />
+
+                        <ImageView
+                            android:id="@+id/config_diag_defs_arrow"
+                            android:layout_width="@dimen/config_selfcheck_arrow_box"
+                            android:layout_height="@dimen/config_selfcheck_arrow_box"
+                            android:layout_marginStart="@dimen/space_s"
+                            android:contentDescription="@string/config_action_expand"
+                            android:scaleType="fitCenter"
+                            android:src="@drawable/ic_triangle"
+                            app:tint="?attr/colorOnSurfaceVariant" />
+                    </LinearLayout>
+
+                    <!-- 参数定义的展开内容：配置 mtime（默认收起；保留长按整段复制） -->
                     <TextView
                         android:id="@+id/config_diag_mtime"
                         android:layout_width="match_parent"
                         android:layout_height="wrap_content"
-                        android:layout_marginTop="@dimen/space_xs"
-                        android:textAppearance="@style/TextAppearance.B6XTempCtrl.Caption" />
+                        android:layout_marginBottom="@dimen/space_xs"
+                        android:textAppearance="@style/TextAppearance.B6XTempCtrl.Caption"
+                        android:visibility="gone" />
 
                     <!--
                         启动耗时：与键渲染自检同一套折叠交互——收起只报首帧，右侧小三角点开列各段明细。
@@ -205,8 +228,13 @@
                         android:layout_height="wrap_content"
                         android:layout_marginTop="@dimen/space_s"
                         android:background="?attr/selectableItemBackground"
+                        android:clickable="true"
+                        android:focusable="true"
                         android:gravity="center_vertical"
+                        android:minHeight="@dimen/diag_fold_min_height"
                         android:orientation="horizontal"
+                        android:paddingTop="@dimen/space_s"
+                        android:paddingBottom="@dimen/space_s"
                         android:visibility="gone">
 
                         <TextView
@@ -214,7 +242,8 @@
                             android:layout_width="0dp"
                             android:layout_height="wrap_content"
                             android:layout_weight="1"
-                            android:textAppearance="@style/TextAppearance.B6XTempCtrl.Caption" />
+                            android:textAppearance="@style/TextAppearance.B6XTempCtrl.Caption"
+                            android:textSize="@dimen/diag_fold_text_size" />
 
                         <ImageView
                             android:id="@+id/config_diag_timing_arrow"

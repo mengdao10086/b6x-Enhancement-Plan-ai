@@ -38,7 +38,9 @@ final class ConfigDiagnostics {
     private final View body;
     private final ImageView arrowView;
     private final TextView mtimeView;
-    /** 参数定义行（与「清理旧版遗留键」按钮同排）：定义只加载一次，构造时定一次即可。 */
+    /** 参数定义行（块内可展开项）：文字由页面写合并文案，展开内容是配置 mtime。 */
+    private final View defsRow;
+    private final ImageView defsArrow;
     private final TextView defsView;
     private final TextView stateView;
     /** 启动耗时折叠行：收起只显示一行概要（首帧），点开才列各段明细。 */
@@ -49,6 +51,8 @@ final class ConfigDiagnostics {
     private final TextView datafileView;
 
     private boolean expanded;
+    /** 参数定义行自己的展开态（内容 = 配置 mtime）。 */
+    private boolean defsExpanded;
     /** 启动耗时明细是否展开；概要为空（一个槽都没记）时恒为 false。 */
     private boolean timingExpanded;
     /** 最近一次上屏的配置诊断正文：面板展开时直接用它上屏，不再向后台要一份。 */
@@ -80,10 +84,14 @@ final class ConfigDiagnostics {
         arrowView = pageRoot.findViewById(R.id.config_diag_arrow);
         mtimeView = pageRoot.findViewById(R.id.config_diag_mtime);
         TextCopy.copyOnLongPress(mtimeView);
+        defsRow = pageRoot.findViewById(R.id.config_diag_defs_row);
+        defsArrow = pageRoot.findViewById(R.id.config_diag_defs_arrow);
         defsView = pageRoot.findViewById(R.id.config_diag_defs);
         // 兜底文本：定义加载失败时也要有一行可读内容；正常路径由 ConfigFormFragment 换成
         // 「参数定义 + 键渲染自检结论」合成的一句（分项数字只有页面知道）
         defsView.setText(store.describeDefinitions());
+        defsRow.setOnClickListener(v -> toggleDefs());
+        TextCopy.copyOnLongPress(defsRow, defsView::getText);
         stateView = pageRoot.findViewById(R.id.config_diag_text);
         datafileView = pageRoot.findViewById(R.id.config_diag_datafile_text);
         timingRow = pageRoot.findViewById(R.id.config_diag_timing_row);
@@ -94,9 +102,8 @@ final class ConfigDiagnostics {
         timingRow.setOnClickListener(v -> toggleTiming());
         refreshTimingSummary();
 
-        // 概要行（参数定义 + 自检结论）是唯一的展开入口；清理按钮是它的子控件，点击按钮不会冒泡到这里
-        pageRoot.findViewById(R.id.config_diag_summary).setOnClickListener(v -> setExpanded(!expanded));
-        TextCopy.copyOnLongPress(pageRoot.findViewById(R.id.config_diag_summary), defsView::getText);
+        // 「诊断信息」标题行控制整块；参数定义行只控制它自己的 mtime
+        pageRoot.findViewById(R.id.config_diag_header).setOnClickListener(v -> setExpanded(!expanded));
         pageRoot.findViewById(R.id.config_diag_refresh).setOnClickListener(v -> refresh());
         setExpanded(false);
     }
@@ -167,7 +174,14 @@ final class ConfigDiagnostics {
         }
     }
 
-    /** 点启动耗时行：展开看各段明细，再点收起（三角随之转，与故障自检行同一档时长）。 */
+    /** 点参数定义行：展开/收起它自己的内容（配置 mtime），三角与高度同一次动画。 */
+    private void toggleDefs() {
+        defsExpanded = !defsExpanded;
+        long duration = Motion.animateHeight(mtimeView, defsExpanded);
+        Motion.syncExpandArrow(defsArrow, defsExpanded, duration);
+    }
+
+    /** 点启动耗时行：展开看各段明细，再点收起（三角随之转，与参数定义行同一档时长）。 */
     private void toggleTiming() {
         if (StartupTiming.summary().isEmpty()) {
             return;
