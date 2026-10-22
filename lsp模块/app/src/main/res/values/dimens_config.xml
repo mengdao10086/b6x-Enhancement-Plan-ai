@@ -152,8 +152,23 @@
     <dimen name="config_hint_popup_offset">8dp</dimen>
 
     <!--
-        开关行标题后的「?」图标盒（点击弹参数说明浮窗）：24dp，与展开三角 @dimen/arrow_box 同档；
+        参数名后的「?」图标盒（点击弹参数说明浮窗）：24dp，与展开三角 @dimen/arrow_box 同档；
         可点区域由行高（开关行 @dimen/field_height 36dp）兜底。
     -->
     <dimen name="config_hint_icon_size">24dp</dimen>
+
+    <!--
+        ===== 两列行（「日志 & 调试」组，见 ConfigGroupBinder / WrapRowLayout#setHalfLine） =====
+        半行宽 = (行可用宽 − 容器列距) / 2；一行自然宽 ≈ 参数名 + 列距 + 「?」+ 列距 + 开关。
+        常规行在 360dp 机型上自然宽约 172dp（5 字参数名）、半格只有约 146dp，故两列行单独收紧三处：
+          · 「?」盒 24 → 20dp（字号同降到 @dimen/text_caption 12sp）；
+          · 行内列距 12 → @dimen/config_two_col_col_gap 4dp（只改行根，容器列距不动）；
+          · 开关左边距 4 → 0（尾部 −@dimen/switch_trim_end 保留）。
+        三处合计约省 28dp；仍放不下的行由容器按实测退回整行（不做固定阈值判断）。
+    -->
+    <dimen name="config_hint_icon_size_compact">20dp</dimen>
+    <dimen name="config_two_col_col_gap">4dp</dimen>
+
+    <!-- 键渲染自检行右侧的展开小三角：比标题/分组头的 @dimen/arrow_box(24dp) 小一档，不抢正文。 -->
+    <dimen name="config_selfcheck_arrow_box">16dp</dimen>
 </resources>

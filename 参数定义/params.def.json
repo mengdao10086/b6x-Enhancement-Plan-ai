@@ -42,7 +42,7 @@
       "daemonAccept：C 守护进程认得、但界面参数表里没有的键（前缀 / 整键）。判据 = 界面认 或 命中本表 → 不算「未定义键」。",
       "daemonAccept.exempted：C 端接受、但**有意不**计入判据的键（附理由）。gen_params.py 的 audit 把「C 的接受集」拆成「声明 ∪ 表前缀 ∪ 豁免」三方，任一 C 接受项不在其中即报错；豁免项自身必须真是 C 的接受项、且不在声明里。",
       "cleanup：清理动作的候选键族。counterparts 给出「旧表前缀 → 现表前缀」；某行键仅在其现表同号行已存在时才可删，否则它是 C 端的迁移源、必须保留。",
-      "renames：旧键名 → 现名或下落的界面标注。只列有据可查者；无据的键不在此表，界面只列键名、绝不臆造新名。这是给用户确认弹窗看的文本，不得写源文件名 / 宏名 / C 符号名。"
+      "renames：旧键名 → 现名 / 下落 / 处置说明的界面标注。只列能给出可信说明的键（有据可查的旧名，或已确认不再使用但来源不明的键）；其余键不在此表，界面只列键名、绝不臆造新名。这是给用户确认弹窗看的文本，不得写源文件名 / 宏名 / C 符号名。"
     ],
     "daemonAccept": {
       "prefixes": ["KI_CUT_"],
@@ -65,6 +65,7 @@
       "WEBUI_LABEL_MERGE_PX": "→ UI_LABEL_MERGE_PX",
       "WEBUI_RPM_AXIS_MIN": "→ UI_RPM_AXIS_MIN",
       "WEBUI_CURVE_FILTER": "→ UI_CURVE_FILTER",
+      "WEBUI_AUTOSAVE": "→ UI_AUTOSAVE（已删除）",
       "UI_LABEL_MERGE_PX": "（已删除）",
       "PID_COLD_DYN_IN": "（已删除）",
       "PID_COLD_DYN_OUT": "（已删除）",
@@ -73,6 +74,8 @@
       "PID_SPEED_NL_THR": "→ PID_SPEED",
       "PID_SPEED_NL_EXP": "→ PID_SPEED",
       "UI_ANIM_SPEED": "→ UI_ANIM_TUNING",
+      "UI_ANIM_RATE": "（来源不明，已废弃）",
+      "UI_ANIM_START_MS": "（来源不明，已废弃）",
       "KI_CUT_1": "→ PID_CUT_1",
       "KI_CUT_SMOOTH": "（已删除）"
     }
@@ -321,7 +324,7 @@
       "factory": [250, 50, 10],
       "min": null,
       "max": null,
-      "rangeNote": "范围逐字段见 fields",
+      "rangeNote": "每周期最大变化量 50~2000 RPM/周期 · 防抖阈值 0~2000 RPM/周期 · 风扇转速取整单位(RPM) 1~500",
       "requires": ["PERF_ENABLED"],
       "daemonConsumes": true,
       "fields": [
@@ -338,7 +341,7 @@
       "label": "制冷强度限速",
       "desc": "升速 = 基础值 + dev × 倍率 / 10，降速 = 基础值 − dev × 倍率 / 10（dev = 电池温度 − 基准温度，有符号），负值取 0=禁止该方向；|目标 − 回传| < 死区时升降都不下发，死区豁免有方向（要升只看距上限、要降只看距下限，该方向余量 < ceil(死区×1.5) 时才放行）",
       "docOrder": 36,
-      "docDesc": "制冷片强度限速 + 最小变化幅度（三值：基础值 倍率 最小变化幅度，原 `COLD_DEADZONE` 并入第三值）。升速 = 基础值 + d × 倍率 / 10，降速 = 基础值 − d × 倍率 / 10（d = 有符号温差，0.1°C）；负值禁止该方向（≥37.5°C 禁降 / ≤32.5°C 禁升）。基础值范围 1~194，倍率范围 1~100，最小变化幅度范围 1~50（目标与制冷实际 `\\|差值\\|` < 死区时上升下降都不下发；死区豁免有方向——要升只看「上限−回传」、要降只看「回传−下限」，该方向余量 < `ceil(死区×1.5)` 时才豁免，故贴近上限的下降 / 贴近下限的上升不豁免）。热端过温削减的下发边界钳制可绕过此禁降与死区，见「热端过温制冷削减」节",
+      "docDesc": "制冷片强度限速 + 最小变化幅度（三值：基础值 倍率 最小变化幅度，原 `COLD_DEADZONE` 并入第三值）。升速 = 基础值 + d × 倍率 / 10，降速 = 基础值 − d × 倍率 / 10（d = 有符号温差，0.1°C）；负值禁止该方向（≥37.5°C 禁降 / ≤32.5°C 禁升）。基础值范围 1~194，倍率范围 1~100，最小变化幅度范围 1~50（目标与制冷实际 `|差值|` < 死区时上升下降都不下发；死区豁免有方向——要升只看「上限−回传」、要降只看「回传−下限」，该方向余量 < `ceil(死区×1.5)` 时才豁免，故贴近上限的下降 / 贴近下限的上升不豁免）。热端过温削减的下发边界钳制可绕过此禁降与死区，见「热端过温制冷削减」节",
       "confNote": [
         "制冷强度限速 + 变化死区（三值）：基础值 1~194 · 倍率 1~100 · 死区 1~50；死区豁免有方向（升看距上限、降看距下限）",
         "  升速 = 基础值 + dev × 倍率 / 10，降速 = 基础值 − dev × 倍率 / 10",
@@ -351,7 +354,7 @@
       "factory": [25, 10, 3],
       "min": null,
       "max": null,
-      "rangeNote": "范围逐字段见 fields",
+      "rangeNote": "基础值 1~194 制冷强度档位（0~194 硬件原始档位值） · 倍率 1~100 · 死区 1~50 制冷强度档位",
       "requires": ["PERF_ENABLED"],
       "daemonConsumes": true,
       "fields": [
@@ -369,7 +372,7 @@
       "desc": "断联时长 < N×5 秒时保留 PID 状态（积分/误差等）；超过 N×5 秒或设为 0 → 完整重置并进入待对齐",
       "cTable": "perf-int",
       "docOrder": 13,
-      "docDesc": "断联保留状态周期数（范围 0~30，×5 秒，默认 3=15 秒）。断联少于 N 个控制周期不重置 PID 状态（ki/kdp/target/误差），仍以散热器回传实际值对齐 `actual_cold`/`actual_rpm`，输出连续不跳变；长断联或=0 时完整重置。详见 [主循环逻辑](#主循环逻辑)",
+      "docDesc": "断联保留状态周期数（范围 0~30，×5 秒，默认 3=15 秒）。断联少于 N 个控制周期不重置 PID 状态（ki/kdp/target/误差），仍以散热器回传实际值对齐 `actual_cold`/`actual_rpm`，输出连续不跳变；长断联或=0 时完整重置。详见「主循环逻辑」一节",
       "confNote": [
         "--- 断联保留 ---",
         "断联保留 PID 状态的周期数（0~30，默认 3 = 15 秒）：断联时长 < N×5 秒时保留积分/误差等状态，输出不跳变",
@@ -450,7 +453,7 @@
       "factory": [40, 150],
       "min": null,
       "max": null,
-      "rangeNote": "范围逐字段见 fields",
+      "rangeNote": "起始强度 0~194 制冷强度档位 · 指数 50~500",
       "requires": ["PERF_ENABLED"],
       "daemonConsumes": true,
       "fields": [
@@ -474,7 +477,7 @@
       "factory": [350, 450],
       "min": null,
       "max": null,
-      "rangeNote": "范围逐字段见 fields",
+      "rangeNote": "最低温度 200~500 0.1°C · 最高温度 200~500 0.1°C",
       "requires": ["PERF_ENABLED"],
       "daemonConsumes": true,
       "fields": [
@@ -525,7 +528,7 @@
       "factory": [2000, 6000, 6000],
       "min": null,
       "max": null,
-      "rangeNote": "范围逐字段见 fields",
+      "rangeNote": "最低转速 1000~6000 RPM · 最高转速(B6X) 1000~6000 RPM · 最高转速(B7X) 2000~8000 RPM",
       "requires": ["PERF_ENABLED"],
       "daemonConsumes": true,
       "fields": [
@@ -557,7 +560,7 @@
       "factory": [450, 5, 5],
       "min": null,
       "max": null,
-      "rangeNote": "范围逐字段见 fields",
+      "rangeNote": "阈值(0.1°C) 350~700 · 倍率=恢复值 1~20 · 冷却周期数(×5s) 0~20 控制周期（1 周期 = 5 秒）",
       "requires": ["PERF_ENABLED"],
       "daemonConsumes": true,
       "fields": [
@@ -612,7 +615,7 @@
       "factory": [20, 30],
       "min": null,
       "max": null,
-      "rangeNote": "范围逐字段见 fields",
+      "rangeNote": "升速率 1~1000 · 降速率 1~1000",
       "requires": ["PERF_ENABLED"],
       "daemonConsumes": true,
       "fields": [
@@ -640,7 +643,7 @@
       "factory": [100, 20, 100],
       "min": null,
       "max": null,
-      "rangeNote": "范围逐字段见 fields",
+      "rangeNote": "速度倍率 0~1000 · 速度非线性阈值 10~100 · 速度非线性强度 0~400",
       "requires": ["PERF_ENABLED"],
       "daemonConsumes": true,
       "fields": [
@@ -670,7 +673,7 @@
       "factory": [20, 10, 15],
       "min": null,
       "max": null,
-      "rangeNote": "范围逐字段见 fields",
+      "rangeNote": "目标系数 1~1000 · 目标平滑(%) 1~100 · 目标上限(0.1°C) 1~100",
       "requires": ["PERF_ENABLED"],
       "daemonConsumes": true,
       "fields": [
@@ -688,7 +691,7 @@
       "desc": "温度未变且上次 |ch| ≤ 阈值/10 时整轮冻结（积分/KDP/动态目标均不更新）；默认 2=0.2°C",
       "cTable": "perf-int",
       "docOrder": 21,
-      "docDesc": "跳过重算的 ch 阈值（0.1°C，1~100）。温度未变且 `\\|last_ch\\|≤` 此值 → 整轮冻结",
+      "docDesc": "跳过重算的 ch 阈值（0.1°C，1~100）。温度未变且 `|last_ch|≤` 此值 → 整轮冻结",
       "confNote": [
         "--- 稳态冻结 ---",
         "稳态冻结阈值（1~100，0.1°C，默认 2=0.2°C）：温度未变且上次 |ch| ≤ 阈值/10 时整轮冻结",
@@ -725,7 +728,7 @@
       "factory": [25, 30, 100],
       "min": null,
       "max": null,
-      "rangeNote": "范围逐字段见 fields",
+      "rangeNote": "平滑系数(%) 1~100 · 除数 5~200 · 偏移量(0.1°C) 0~500",
       "requires": ["PERF_ENABLED"],
       "daemonConsumes": true,
       "fields": [
@@ -742,7 +745,7 @@
       "label": "PID 目标方向性滤波",
       "desc": "目标量级增大（远离基线）用「远离 α」求快，否则用「回归 α」求稳；默认 1 20 10 = 远离 0.2、回归 0.1；开关=0 时退回 PID_TARGET 第 2 值的单一 α",
       "docOrder": 20,
-      "docDesc": "目标 EMA 方向性滤波（三值：开关 · 远离基线alpha% · 回归基线alpha%）。alpha 动态：目标量级回升(远离基线，\\|raw_target\\|>\\|pid_target_f\\|)用\"远离alpha\"求快、回落(回归基线)用\"回归alpha\"求稳；默认远离 20=0.2、回归 10=0.1",
+      "docDesc": "目标 EMA 方向性滤波（三值：开关 · 远离基线alpha% · 回归基线alpha%）。alpha 动态：目标量级回升(远离基线，|raw_target|>|pid_target_f|)用\"远离alpha\"求快、回落(回归基线)用\"回归alpha\"求稳；默认远离 20=0.2、回归 10=0.1",
       "confNote": [
         "--- 动态目标方向性滤波（仅 PID 生效）---",
         "三值：开关 · 远离基线 α% [1~100] · 回归基线 α% [1~100]",
@@ -755,7 +758,7 @@
       "factory": [1, 20, 10],
       "min": null,
       "max": null,
-      "rangeNote": "范围逐字段见 fields",
+      "rangeNote": "开关 0/1 · 远离基线 α(%) 1~100 · 回归基线 α(%) 1~100",
       "requires": ["PERF_ENABLED"],
       "daemonConsumes": true,
       "fields": [
@@ -785,7 +788,7 @@
       "factory": [1, 1000],
       "min": null,
       "max": null,
-      "rangeNote": "范围逐字段见 fields",
+      "rangeNote": "开关 0/1 · 回溯速度权重 100~1000",
       "requires": ["PERF_ENABLED"],
       "daemonConsumes": true,
       "fields": [
@@ -812,7 +815,7 @@
       "factory": [1, 190, 190],
       "min": null,
       "max": null,
-      "rangeNote": "范围逐字段见 fields",
+      "rangeNote": "下限 0~194 制冷强度档位 · 上限(B6X) 0~194 制冷强度档位 · 上限(B7X) 1~255 制冷强度档位",
       "requires": ["PERF_ENABLED"],
       "daemonConsumes": true,
       "fields": [
@@ -1040,7 +1043,7 @@
       "factory": [0, 99],
       "min": null,
       "max": null,
-      "rangeNote": "范围逐字段见 fields",
+      "rangeNote": "最小 zone 0~99 thermal_zone 编号 · 最大 zone 0~99 thermal_zone 编号",
       "requires": ["SYSFS_ENABLED"],
       "daemonConsumes": true,
       "fields": [
@@ -1069,7 +1072,7 @@
       "factory": [60, 10],
       "min": null,
       "max": null,
-      "rangeNote": "范围逐字段见 fields",
+      "rangeNote": "重扫间隔(秒) 5~3600 · 保留温度值个数 1~64 个（zone 个数）",
       "requires": ["SYSFS_ENABLED"],
       "daemonConsumes": true,
       "fields": [
@@ -1216,7 +1219,7 @@
       "factory": [1, 0],
       "min": null,
       "max": null,
-      "rangeNote": "范围逐字段见 fields",
+      "rangeNote": "开关 0/1 · Dozing 算亮屏 0/1",
       "requires": ["APP_LAUNCH_ENABLED"],
       "daemonConsumes": true,
       "fields": [
@@ -1316,7 +1319,7 @@
       "factory": [3, 15],
       "min": null,
       "max": null,
-      "rangeNote": "范围逐字段见 fields；本组为界面专用参数（守护进程不读取），范围取自界面实现，不来自 C 端 clamp",
+      "rangeNote": "断联判定阈值 1~120 秒 · 空白最大宽度 1~600 秒；本组为界面专用参数（守护进程不读取），范围取自界面实现，不来自 C 端 clamp",
       "requires": [],
       "daemonConsumes": false,
       "fields": [
@@ -1345,7 +1348,7 @@
       "factory": [32, 240, 60],
       "min": null,
       "max": null,
-      "rangeNote": "范围逐字段见 fields；本组为界面专用参数（守护进程不读取），范围取自界面实现，不来自 C 端 clamp",
+      "rangeNote": "速率 10~100 dp/ms · 起步时间 0~600 毫秒 · 慢速启停强度 0~100 %；本组为界面专用参数（守护进程不读取），范围取自界面实现，不来自 C 端 clamp",
       "requires": [],
       "daemonConsumes": false,
       "fields": [
@@ -1394,7 +1397,7 @@
       "factory": [15, 5],
       "min": null,
       "max": null,
-      "rangeNote": "范围逐字段见 fields；本组为界面专用参数（守护进程不读取），范围取自界面实现，不来自 C 端 clamp",
+      "rangeNote": "每遍权重 α 0~100 · 最小步长 0~100；本组为界面专用参数（守护进程不读取），范围取自界面实现，不来自 C 端 clamp",
       "requires": [],
       "daemonConsumes": false,
       "fields": [

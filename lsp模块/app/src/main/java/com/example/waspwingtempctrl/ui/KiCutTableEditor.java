@@ -318,6 +318,7 @@ final class KiCutTableEditor {
                 .create();
         // 点弹窗外部即取消（AppCompat AlertDialog 默认不随点外触摸取消，须显式设置）
         dialog.setCanceledOnTouchOutside(true);
+        TextCopy.makeMessageSelectable(dialog);
         dialog.show();
     }
 
@@ -975,11 +976,13 @@ final class KiCutTableEditor {
             this.view = view;
             this.title = view.findViewById(R.id.ki_cut_cluster_title);
             this.pointsBox = view.findViewById(R.id.ki_cut_cluster_points);
+            TextCopy.copyOnLongPress(this.title);
             this.addPointButton = view.findViewById(R.id.ki_cut_cluster_add_point);
             this.addClusterButton = view.findViewById(R.id.ki_cut_cluster_add_cluster);
             this.splitClusterButton = view.findViewById(R.id.ki_cut_cluster_split);
             this.deleteClusterButton = view.findViewById(R.id.ki_cut_cluster_del);
             this.modeHint = view.findViewById(R.id.ki_cut_split_hint);
+            TextCopy.copyOnLongPress(this.modeHint);
         }
     }
 }

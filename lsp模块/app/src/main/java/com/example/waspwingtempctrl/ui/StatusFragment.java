@@ -99,6 +99,15 @@ public class StatusFragment extends Fragment implements PageAware {
     /** 三张卡的共同父容器：文本行数变化时的高度补间在这个范围内做。 */
     private ViewGroup contentRoot;
 
+    /**
+     * 操作记录的文本模型：选中期间不往 {@link #logView} 写，但这里照常累积最新全文，
+     * 选择一结束就补上（否则跳过的那几条记录会永久丢失）。
+     */
+    private String logText = "";
+    /** 选中期间被推迟上屏的状态文本；选择结束后由 {@link #flushPendingStatus()} 补。 */
+    @Nullable
+    private String pendingStatusText;
+
     /** 操作记录是否展开（默认收起）。 */
     private boolean logExpanded;
     /** 本实例是否已起过「首次探测（含 root 尝试）」；由 {@link #firstProbeIfNeeded()} 置真。 */
@@ -154,8 +163,12 @@ public class StatusFragment extends Fragment implements PageAware {
         progress = view.findViewById(R.id.status_progress);
         contentRoot = view.findViewById(R.id.status_content);
 
-        view.findViewById(R.id.action_log_header).setOnClickListener(
-                v -> setLogExpanded(!logExpanded));
+        View logHeader = view.findViewById(R.id.action_log_header);
+        TextView logTitle = view.findViewById(R.id.action_log_title);
+        logHeader.setOnClickListener(v -> setLogExpanded(!logExpanded));
+        // 长按卡头复制标题：长按与点击挂在同一个 View 上，由框架按按压时长分流（长按后抬起不再触发展开）。
+        // 箭头不消费触摸，点它照旧随卡头展开；这条既有行为不变
+        TextCopy.copyOnLongPress(logHeader, logTitle::getText);
         setLogExpanded(false);
 
         // 操作记录归档：每进程起一次会话（淘汰旧归档 + 记住起点）；
@@ -193,6 +206,8 @@ public class StatusFragment extends Fragment implements PageAware {
             return;
         }
         firstProbeIfNeeded();
+        // 选中期间攒下的结果，回到本页时若无选择就补上
+        flushPendingStatus();
     }
 
     @Override
@@ -435,6 +450,8 @@ public class StatusFragment extends Fragment implements PageAware {
      */
     private static void showDismissOnOutside(AlertDialog dialog) {
         dialog.setCanceledOnTouchOutside(true);
+        // 正文（含 su 诊断全文）可长按选中复制；必须在 show() 之前挂，onShow 里才取得到 message
+        TextCopy.makeMessageSelectable(dialog);
         dialog.show();
     }
 
@@ -673,6 +690,13 @@ public class StatusFragment extends Fragment implements PageAware {
         if (view == null || !isAdded()) {
             return;
         }
+        // 正选中时推迟上屏：setText 会清掉选择与手柄。结果不丢——存起来，选择一结束就补
+        if (TextCopy.isSelecting(view)) {
+            pendingStatusText = text;
+            TextCopy.runWhenSelectionEnds(view, this::flushPendingStatus);
+            return;
+        }
+        pendingStatusText = null;
         if (outgoing == null || !Motion.enabled(view.getContext())) {
             // 系统关掉动画（或叠放层缺失）：直接换文本，信息先可读
             cancelFade();
@@ -714,6 +738,16 @@ public class StatusFragment extends Fragment implements PageAware {
             outgoing.setVisibility(View.GONE);
             outgoing.setAlpha(1f);
         }).start();
+    }
+
+    /** 把选中期间推迟的状态文本补上（选择已结束或页面重新可见时调用）。 */
+    private void flushPendingStatus() {
+        String pending = pendingStatusText;
+        if (pending == null || statusView == null || TextCopy.isSelecting(statusView)) {
+            return;
+        }
+        pendingStatusText = null;
+        swapStatusTextAnimated(pending);
     }
 
     /** 作废在跑的淡入淡出、复位两层文本的透明度并收起叠放层（离开本页 / 视图销毁时收尾）。 */
@@ -768,12 +802,16 @@ public class StatusFragment extends Fragment implements PageAware {
             return;
         }
         String line = "[" + TIME_FMT.format(new Date()) + "] " + text;
-        String old = logView.getText().toString();
-        String merged = line + "\n\n" + old;
-        if (merged.length() > 8000) {
-            merged = merged.substring(0, 8000) + "\n…（已截断）";
+        logText = line + "\n\n" + logText;
+        if (logText.length() > 8000) {
+            logText = logText.substring(0, 8000) + "\n…（已截断）";
         }
-        logView.setText(merged);
+        // 正选中时不写视图（setText 会清掉选择与手柄），但模型照常累积，选择结束后补上
+        if (TextCopy.isSelecting(logView)) {
+            TextCopy.runWhenSelectionEnds(logView, this::flushPendingLog);
+        } else {
+            logView.setText(logText);
+        }
         if (archive != null) {
             archive.append(line);
             // 落盘后立刻重算：折叠态下份数/占用不再停在进页面时的旧值。
@@ -782,10 +820,20 @@ public class StatusFragment extends Fragment implements PageAware {
         }
     }
 
+    /** 选中结束后把操作记录的最新全文补进视图。 */
+    private void flushPendingLog() {
+        if (logView != null && !TextCopy.isSelecting(logView)) {
+            logView.setText(logText);
+        }
+    }
+
     /** 刷新归档提示行（进入本页、展开操作记录时各刷一次）。 */
     private void refreshArchiveHint() {
         if (archiveHintView == null || archive == null) {
             return;
+        }
+        if (TextCopy.isSelecting(archiveHintView)) {
+            return;   // 选中期间不重写；选择结束后下一次刷新补上
         }
         OpLog.Info info = archive.snapshot();
         final String text;

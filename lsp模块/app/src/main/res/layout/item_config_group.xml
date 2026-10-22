@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!--
-    一个分组卡片 = 卡头（标题 + "未生效"徽标 + 组头开关 + 展开箭头）+ 分隔线 + 键行容器。
+    一个分组卡片 = 卡头（标题 + 总开关「?」+ "未生效"徽标 + 组头开关 + 展开箭头）+ 分隔线 + 键行容器。
     卡片样式来自主题 materialCardViewStyle（Widget.B6XTempCtrl.Card），本文件不写死颜色/圆角。
     组头开关只在 role=master 的组出现；webui 组已搬到设置页（ConfigGroupBinder 仍支持 master 为 null）。
     徽标默认 gone：本组存在"依赖未满足"的键时由 ConfigGroupBinder 显示一次（行内不再逐键标注）。
@@ -33,12 +33,19 @@
             android:orientation="horizontal"
             android:padding="@dimen/card_padding">
 
+            <!-- 标题宽由文字决定（不再吃满剩余宽）：总开关的「?」由 ConfigGroupBinder 插在 index 1，
+                 即紧贴标题右侧；其后那枚 0dp 权重的 Space 把徽标 / 开关 / 箭头推到行尾。
+                 两段职责分开，标题短时「?」也不会被甩到开关旁边。 -->
             <TextView
                 android:id="@+id/config_group_title"
-                android:layout_width="0dp"
+                android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
-                android:layout_weight="1"
                 android:textAppearance="@style/TextAppearance.B6XTempCtrl.SectionTitle" />
+
+            <Space
+                android:layout_width="0dp"
+                android:layout_height="1dp"
+                android:layout_weight="1" />
 
             <TextView
                 android:id="@+id/config_group_badge"

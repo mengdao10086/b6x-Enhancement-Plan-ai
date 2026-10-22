@@ -51,7 +51,8 @@
                 android:layout_height="wrap_content"
                 android:layout_marginTop="@dimen/space_xs"
                 android:text="@string/log_loading"
-                android:textAppearance="@style/TextAppearance.B6XTempCtrl.Caption" />
+                android:textAppearance="@style/TextAppearance.B6XTempCtrl.Caption"
+                android:textIsSelectable="true" />
         </LinearLayout>
     </com.google.android.material.card.MaterialCardView>
 
@@ -126,6 +127,7 @@
                 android:layout_marginStart="@dimen/space_s"
                 android:layout_marginTop="@dimen/space_xs"
                 android:textAppearance="@style/TextAppearance.B6XTempCtrl.Caption"
+                android:textIsSelectable="true"
                 android:visibility="gone" />
 
             <FrameLayout
@@ -172,6 +174,7 @@
                     android:padding="@dimen/space_l"
                     android:gravity="center"
                     android:textAppearance="@style/TextAppearance.B6XTempCtrl.Caption"
+                    android:textIsSelectable="true"
                     android:visibility="gone" />
 
                 <!--

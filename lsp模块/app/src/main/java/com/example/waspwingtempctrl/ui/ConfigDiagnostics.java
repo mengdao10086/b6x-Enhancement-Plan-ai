@@ -24,7 +24,8 @@ import java.util.concurrent.RejectedExecutionException;
  * （含配置文件路径与大小、落点是否与守护进程一致、参数定义加载情况、未定义键与读取提示）与配置 mtime。
  * 调用方已读过盘时把那份快照传进来（{@link #refresh(Snapshot)}），本区不再多读一次 {@code profile.conf}。
  *
- * <p>整块默认折叠（收起态下只登记欠账、不上屏）；启动耗时追加在正文之后；不提供任何写动作（I5）。
+ * <p>整块默认折叠（收起态下只登记欠账、不上屏）；启动耗时是正文之下一行独立的可折叠行
+ * （收起只报首帧，点开列各段明细）；不提供任何写动作（I5）。
  * 只调 {@link ConfigStore} 的公开接口，读取在后台线程、主线程只做渲染。
  * 设计口径（收起欠账 / 在途排队 / 复用快照）见 app 逻辑说明.md §6.5。
  */
@@ -37,12 +38,20 @@ final class ConfigDiagnostics {
     private final View body;
     private final ImageView arrowView;
     private final TextView mtimeView;
+    /** 参数定义行（与「清理旧版遗留键」按钮同排）：定义只加载一次，构造时定一次即可。 */
+    private final TextView defsView;
     private final TextView stateView;
+    /** 启动耗时折叠行：收起只显示一行概要（首帧），点开才列各段明细。 */
+    private final View timingRow;
+    private final ImageView timingArrow;
+    private final TextView timingView;
     /** 同体上方的「数据文件信息」行（曲线区经 ChartFragment.Host 写）：只读来判它此刻是不是还停在占位。 */
     private final TextView datafileView;
 
     private boolean expanded;
-    /** 最近一次上屏的配置诊断正文（不含启动耗时段）：展开时用它重算一次追加段（见 {@link #setExpanded}）。 */
+    /** 启动耗时明细是否展开；概要为空（一个槽都没记）时恒为 false。 */
+    private boolean timingExpanded;
+    /** 最近一次上屏的配置诊断正文：面板展开时直接用它上屏，不再向后台要一份。 */
     private String lastState;
     /** 在途标记：一次刷新（后台取数 + 主线程上屏）没跑完就不再起第二个。 */
     private boolean refreshInFlight;
@@ -70,10 +79,24 @@ final class ConfigDiagnostics {
         body = pageRoot.findViewById(R.id.config_diag_body);
         arrowView = pageRoot.findViewById(R.id.config_diag_arrow);
         mtimeView = pageRoot.findViewById(R.id.config_diag_mtime);
+        TextCopy.copyOnLongPress(mtimeView);
+        defsView = pageRoot.findViewById(R.id.config_diag_defs);
+        // 兜底文本：定义加载失败时也要有一行可读内容；正常路径由 ConfigFormFragment 换成
+        // 「参数定义 + 键渲染自检结论」合成的一句（分项数字只有页面知道）
+        defsView.setText(store.describeDefinitions());
         stateView = pageRoot.findViewById(R.id.config_diag_text);
         datafileView = pageRoot.findViewById(R.id.config_diag_datafile_text);
+        timingRow = pageRoot.findViewById(R.id.config_diag_timing_row);
+        timingArrow = pageRoot.findViewById(R.id.config_diag_timing_arrow);
+        timingView = pageRoot.findViewById(R.id.config_diag_timing);
+        // 短按展开、长按复制同挂整行（子 TextView 挂长按会消费触摸，整行点击就收不到）
+        TextCopy.copyOnLongPress(timingRow, timingView::getText);
+        timingRow.setOnClickListener(v -> toggleTiming());
+        refreshTimingSummary();
 
-        pageRoot.findViewById(R.id.config_diag_header).setOnClickListener(v -> setExpanded(!expanded));
+        // 概要行（参数定义 + 自检结论）是唯一的展开入口；清理按钮是它的子控件，点击按钮不会冒泡到这里
+        pageRoot.findViewById(R.id.config_diag_summary).setOnClickListener(v -> setExpanded(!expanded));
+        TextCopy.copyOnLongPress(pageRoot.findViewById(R.id.config_diag_summary), defsView::getText);
         pageRoot.findViewById(R.id.config_diag_refresh).setOnClickListener(v -> refresh());
         setExpanded(false);
     }
@@ -93,7 +116,7 @@ final class ConfigDiagnostics {
         } else {
             // 有现成正文：**先上屏、再量高**——量高发生在正文之上，展开时长与终点才是最终实高（末尾不跳）。
             // 只读几个静态槽位，无 IO、无后台线程
-            stateView.setText(lastState + timingBlock());
+            stateView.setText(lastState);
             duration = Motion.animateHeight(body, true);
         }
         // 一副图标两种状态：展开转 90° 指向下、收起指右；时长来自上面那一次面板计算
@@ -127,12 +150,31 @@ final class ConfigDiagnostics {
     }
 
     /**
-     * 启动耗时段的追加形态：正文之后空一行接上；没量到任何一段（{@link StartupTiming#report()} 为空）
-     * 就一个字符都不加，既有诊断文本保持逐字不变。
+     * 启动耗时折叠行：概要为空（一个槽都没记）时整行不显示；收起态每次刷新都更新概要，
+     * 展开态保持用户正在看的那份明细、不被后台刷新打断。
      */
-    private static String timingBlock() {
-        String report = StartupTiming.report();
-        return report.isEmpty() ? "" : "\n\n" + report;
+    private void refreshTimingSummary() {
+        String summary = StartupTiming.summary();
+        boolean expandable = !summary.isEmpty();
+        timingRow.setVisibility(expandable ? View.VISIBLE : View.GONE);
+        timingRow.setClickable(expandable);
+        if (!expandable) {
+            timingExpanded = false;
+        }
+        if (!timingExpanded) {
+            timingView.setText(summary);
+            Motion.syncExpandArrow(timingArrow, false, -1L);
+        }
+    }
+
+    /** 点启动耗时行：展开看各段明细，再点收起（三角随之转，与故障自检行同一档时长）。 */
+    private void toggleTiming() {
+        if (StartupTiming.summary().isEmpty()) {
+            return;
+        }
+        timingExpanded = !timingExpanded;
+        timingView.setText(timingExpanded ? StartupTiming.report() : StartupTiming.summary());
+        Motion.syncExpandArrow(timingArrow, timingExpanded, 180L);
     }
 
     /** 后台重读诊断信息（落点一致性 / 参数定义 / 未定义键 / mtime）：没有现成快照，自己读一次。 */
@@ -181,7 +223,8 @@ final class ConfigDiagnostics {
                 public void run() {
                     try {
                         final Snapshot snapshot = known != null ? known : store.read();
-                        final String state = store.describeState(snapshot);
+                        // 参数定义行由本类单独上屏（与清理按钮同排），正文只放落点/数量/提示
+                        final String state = store.describePathsAndNotes(snapshot);
                         main.post(new Runnable() {
                             @Override
                             public void run() {
@@ -228,10 +271,15 @@ final class ConfigDiagnostics {
             return;
         }
         lastState = state;
-        // 正文之后追加启动耗时（旁路数据，只读几个静态槽位；没量到就什么都不加）
-        stateView.setText(state + timingBlock());
+        // 正选中时跳过本轮：setText 会清掉选择与手柄；选择结束后补上这一版正文
+        if (TextCopy.isSelecting(stateView)) {
+            TextCopy.runWhenSelectionEnds(stateView, () -> stateView.setText(lastState));
+        } else {
+            stateView.setText(state);
+        }
         // 记账（旁路）：诊断正文上屏那一刻（首次写入胜出；诊断区在折叠体内，与首屏无关）
         StartupTiming.mark(StartupTiming.MARK_DIAG_APPLY);
+        refreshTimingSummary();
         if (snapshot.exists) {
             String time = new SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.getDefault())
                     .format(new Date(snapshot.mtimeMs));

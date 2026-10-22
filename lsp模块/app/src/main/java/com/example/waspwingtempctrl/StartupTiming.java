@@ -267,6 +267,28 @@ public final class StartupTiming {
     // ==================== 展示 ====================
 
     /**
+     * 折叠态的一行概要：优先给「首帧」这个端到端读数（各段并行、耗时不可相加，故没有真正的"总耗时"）；
+     * 未记到首帧时退回落页判定的耗时；一个槽都没记过返回空串（调用方据此不显示这一行）。
+     *
+     * <p>取「首帧」的理由见 {@code app/逻辑说明.md} §5.3：它是唯一能代表"从 onCreate 首行到页面可见"
+     * 的单个时间点，其余槽位是并行分段，相加没有意义。
+     */
+    public static String summary() {
+        if (!anyRecorded()) {
+            return "";
+        }
+        long firstFrame = VALUES.get(MARK_FIRST_DRAW * 2);
+        if (firstFrame >= 0) {
+            return "启动耗时：首帧 " + firstFrame + " ms";
+        }
+        long landing = VALUES.get(LANDING * 2 + 1);
+        if (landing >= 0) {
+            return "启动耗时：落页判定 " + landing + " ms";
+        }
+        return "启动耗时：已记录（点开看各段）";
+    }
+
+    /**
      * 拼展示文本（多行，不带前后空行；调用方自己接在既有文本之后）。
      *
      * <p>一个槽都没记过就返回空串（调用方据此不追加）。整体套 try/catch：本方法只用于展示，

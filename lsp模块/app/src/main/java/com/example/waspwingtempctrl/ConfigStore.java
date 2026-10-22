@@ -816,20 +816,51 @@ public final class ConfigStore {
      * @param snap 已读到的快照（调用方负责它确实是最近一次读取的结果）
      */
     public String describeState(Snapshot snap) {
-        StringBuilder sb = new StringBuilder();
-        sb.append("配置文件: ").append(configFile.getAbsolutePath())
-                .append(exists() ? "（存在，" + configFile.length() + " B）" : "（不存在）").append('\n');
-        sb.append("C 端路径: ").append(daemonConfigPath())
-                .append(isPathAlignedWithDaemon() ? "（一致）" : "（不一致！守护进程读不到 app 写的配置）").append('\n');
-        sb.append("参数定义: ").append(PARAMS_ASSET).append(" · ")
-                .append(loadError.isEmpty() ? keyCount() + " 键" : loadError).append('\n');
+        StringBuilder sb = new StringBuilder(describePaths()).append('\n')
+                .append(describeDefinitions()).append('\n');
+        appendUnknownAndNotes(sb, snap);
+        return sb.toString();
+    }
+
+    /** 配置落点两行（配置文件 / C 端路径）：诊断正文的前两行，不含定义与提示。 */
+    public String describePaths() {
+        return "配置文件: " + configFile.getAbsolutePath()
+                + (exists() ? "（存在，" + configFile.length() + " B）" : "（不存在）")
+                + '\n'
+                + "C 端路径: " + daemonConfigPath()
+                + (isPathAlignedWithDaemon() ? "（一致）" : "（不一致！守护进程读不到 app 写的配置）");
+    }
+
+    /**
+     * 参数定义一行（文件名 + 键数 / 加载失败原因）：配置页把它单独摆一行，右侧同行放「清理旧版遗留键」。
+     */
+    public String describeDefinitions() {
+        return "参数定义: " + PARAMS_ASSET + " · "
+                + (loadError.isEmpty() ? keyCount() + " 键" : loadError);
+    }
+
+    /**
+     * 配置落点 + 未定义键数量 + 读取提示（不含参数定义行）：界面把定义行单独摆一行后，
+     * 正文用这一份，避免同一行内容出现两次。
+     */
+    public String describePathsAndNotes(Snapshot snap) {
+        StringBuilder sb = new StringBuilder(describePaths()).append('\n');
+        appendUnknownAndNotes(sb, snap);
+        return sb.toString();
+    }
+
+    /**
+     * 未定义键（<b>只报数量</b>，名单只在「清理旧版遗留键」的确认弹窗里逐条出现）与读取提示，各占一行。
+     * 名单不在这里罗列，也不在界面其它位置重复。
+     */
+    private static void appendUnknownAndNotes(StringBuilder sb, Snapshot snap) {
         if (!snap.unknownKeys.isEmpty()) {
-            sb.append("未定义键: ").append(join(snap.unknownKeys, ", ")).append('\n');
+            sb.append("未定义键: ").append(snap.unknownKeys.size())
+                    .append(" 项（不影响使用）").append('\n');
         }
         for (String note : snap.notes) {
             sb.append("提示: ").append(note).append('\n');
         }
-        return sb.toString();
     }
 
     // ==================== 遗留键清理 ====================

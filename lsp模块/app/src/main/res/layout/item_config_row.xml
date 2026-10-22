@@ -8,8 +8,10 @@
         （本文件里一个都不常驻；switch 型的开关按需 inflate item_config_key_switch.xml，
         该文件头部注释同时是"开关几何"那一份口径）。
       · 说明 / 备注 / 状态（fullLine）：各占一行、按整行宽折行；不可见者容器会跳过，不留空行。
-    本行在分组卡 body 里也整行独占：app:wrapFullLine 由 body 读出（参数之间不并排，并排/换行
-    只发生在键内部的字段之间）。
+    本行在分组卡 body 里默认整行独占：app:wrapFullLine 由 body 读出（参数之间默认不并排，
+    并排/换行只发生在键内部的字段之间）。「日志 & 调试」组开启两列时，ConfigGroupBinder 会清掉
+    该整行标记并改标半行（见 WrapRowLayout#setHalfLine），由容器逐行实测决定半格还是整行；
+    该组参数名后的「?」同时改用 20dp 的紧凑盒（见 ConfigKeyRow#attachHintIcon）。
 
     行距 wrapRowGap 取 @dimen/space_xs(4dp)：说明 / 备注 / 状态三行原本各带 space_xs 的 topMargin，
     现在这段间距由容器按行距给。行距必须小于 body 的行距 @dimen/config_key_row_gap(6dp)，

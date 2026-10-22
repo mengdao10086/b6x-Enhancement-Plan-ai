@@ -274,11 +274,20 @@ public class LogFragment extends Fragment implements PageAware {
         if (infoView == null) {
             return;
         }
-        infoView.setText(buildInfoText(snap));
-        statView.setText(buildStatText(snap));
+        // 正在选中的控件本轮不重写：setText 会清掉选择与手柄。其余控件照常刷新，选择结束后下一轮自动补上
+        if (!TextCopy.isSelecting(infoView)) {
+            infoView.setText(buildInfoText(snap));
+        }
+        if (!TextCopy.isSelecting(statView)) {
+            statView.setText(buildStatText(snap));
+        }
         updateCountView(snap, keyword);
 
         if (!snap.ok) {
+            // 选中期间不切视图：visible/gone 的切换同样会结束选择
+            if (hasSelectionInList()) {
+                return;
+            }
             // 失败：原样展示诊断，列表与跟随入口全部让位
             adapter.submit(java.util.Collections.emptyList());
             failureView.setText(getString(R.string.log_failure_title) + "\n\n" + snap.failureText);
@@ -289,6 +298,11 @@ public class LogFragment extends Fragment implements PageAware {
             return;
         }
 
+        // 选中期间不重绑列表：notifyDataSetChanged 会 rebind 可见行并 setText，选择与手柄一起消失。
+        // 这里只暂停列表本身，信息行/统计行已在上方按各自的选择状态单独处理
+        if (hasSelectionInList()) {
+            return;
+        }
         failureScroll.setVisibility(View.GONE);
         listView.setVisibility(View.VISIBLE);
         adapter.submit(snap.lines);
@@ -310,6 +324,23 @@ public class LogFragment extends Fragment implements PageAware {
             lastFollowCount = count;
         }
         updateFollowButton();
+    }
+
+    /**
+     * 列表里是否有行正被选中。选中期间不重绑列表（rebind 会 setText 并清掉选择与手柄）；
+     * 只认已附着在屏幕上的行——滚出屏幕的行会被回收，其选择也随滚动结束，不需要拦。
+     */
+    private boolean hasSelectionInList() {
+        if (listView == null) {
+            return false;
+        }
+        for (int i = 0; i < listView.getChildCount(); i++) {
+            View child = listView.getChildAt(i);
+            if (child instanceof TextView && ((TextView) child).hasSelection()) {
+                return true;
+            }
+        }
+        return false;
     }
 
     private void updateFollowButton() {
@@ -354,6 +385,9 @@ public class LogFragment extends Fragment implements PageAware {
 
     /** 命中计数只在有关键词时才有意义；无关键词时行数信息统一在「日志文件」卡的统计行。 */
     private void updateCountView(LogTailReader.Snapshot snap, String keyword) {
+        if (TextCopy.isSelecting(countView)) {
+            return;   // 选中期间不改文本/可见性；选择结束后下一轮刷新补上
+        }
         boolean filtered = snap.ok && !keyword.isEmpty();
         countView.setVisibility(filtered ? View.VISIBLE : View.GONE);
         countView.setText(filtered ? getString(R.string.log_count_hit_fmt, snap.lines.size()) : "");

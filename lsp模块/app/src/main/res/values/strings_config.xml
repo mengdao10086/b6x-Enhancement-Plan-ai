@@ -82,19 +82,18 @@
     <string name="config_reset_failed">重置「%1$s」失败：%2$s</string>
 
     <!-- ===== 诊断区 ===== -->
-    <string name="config_diag_title">诊断信息</string>
     <string name="config_diag_mtime">配置 mtime：%1$s</string>
     <string name="config_diag_mtime_missing">配置 mtime：配置文件不存在</string>
     <!--
-        自检口径 = 每个定义键都要有可编辑入口，三处入口相加应等于定义键数：
+        诊断折叠块的概要行 = 参数定义 + 键渲染自检结论（始终可见）：
           本页 = 本页键行（role=setting，不含 webui 组）
           设置页 = webui 组的键（搬到独立设置页，来源同 UiSettingsFragment.webuiKeys()）
           组头开关 = role=master 的键（由 ConfigGroupBinder 渲染成卡头开关）
+        三处入口相加应等于定义键数；不等时用 mismatch 那条如实提示。
     -->
-    <string name="config_diag_render_ok">键渲染自检：本页 %1$d + 设置页 %2$d + 组头开关 %3$d = 定义 %4$d 项</string>
-    <string name="config_diag_render_mismatch">键渲染自检：本页 %1$d + 设置页 %2$d + 组头开关 %3$d ≠ 定义 %4$d 项（键表可能已变更）</string>
+    <string name="config_diag_defs_ok">参数定义: %1$s · 本页 %2$d + 设置页 %3$d + 组头开关 %4$d = %5$d</string>
+    <string name="config_diag_defs_mismatch">参数定义: %1$s · 本页 %2$d + 设置页 %3$d + 组头开关 %4$d ≠ %5$d（键表可能已变更）</string>
     <string name="config_diag_action_refresh">刷新诊断</string>
-    <string name="config_unknown_keys">配置含未定义键（界面不显示，写入时也不会改动）：%1$s</string>
 
     <!--
         清理旧版遗留键：诊断区内的一枚动作按钮（仅当配置里存在候选时才可见）。

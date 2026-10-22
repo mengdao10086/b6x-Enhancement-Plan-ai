@@ -23,9 +23,14 @@ import java.util.List;
  *
  * <p>组头开关即 {@code role=master} 的键（<b>也是普通键</b>，改它同样走"改即存"），走
  * {@link ConfigKeyRow#commitSwitch}；master 为 null 的组（"未分组"兜底组、设置页的 {@code webui} 组）
- * 卡头不放开关键。两个"整组一句话"的标注（未生效 / 界面自用）都只在卡头出现一次。
+ * 卡头不放开关键。**总开关也有「?」**（紧贴卡头标题右侧，复用 {@link ConfigKeyRow#attachHintIcon}）。
+ * 两个"整组一句话"的标注（未生效 / 界面自用）都只在卡头出现一次。
  * <b>键行全建、展开只切可见性</b>：行由 {@link #buildRows()} 一次建满，{@link #setExpanded} 只切可见性，
  * 展开从不现场建控件。设计理由见 app 逻辑说明.md §6.1。
+ *
+ * <p><b>两列</b>（目前只有「日志 &amp; 调试」组）：本类把该组的键行改标 `halfLine`（见
+ * {@link WrapRowLayout#setHalfLine}），由容器逐行实测决定两项并排还是独占整行；行同时以紧凑几何建
+ * （{@link ConfigKeyRow#create} 的 {@code compact}）。组样式由控制器按 {@code groups[].id} 传入。
  */
 final class ConfigGroupBinder {
 
@@ -47,6 +52,8 @@ final class ConfigGroupBinder {
     private final List<ConfigKeyRow> rows = new ArrayList<>();
     /** 组内有键「界面自用」（daemonConsumes=false）：卡头标一次，行内不再逐条重复。 */
     private final boolean uiOnly;
+    /** 本组按键行两列排（组样式由控制器按组 id 决定；键数不足 2 时不生效）。 */
+    private final boolean twoColumn;
 
     private boolean expanded;
 
@@ -55,16 +62,19 @@ final class ConfigGroupBinder {
 
     static ConfigGroupBinder create(@NonNull ViewGroup parent, @NonNull String title,
                                     @Nullable KeyMeta masterMeta, @NonNull List<KeyMeta> keyMetas,
-                                    @NonNull ConfigKeyRow.Host host, @NonNull ViewSource views) {
+                                    @NonNull ConfigKeyRow.Host host, @NonNull ViewSource views,
+                                    boolean twoColumn) {
         long startedAt = StartupTiming.accBegin(StartupTiming.FORM_SUB_INFLATE);
         View card = views.inflate(R.layout.item_config_group, parent);
         StartupTiming.accEnd(StartupTiming.FORM_SUB_INFLATE, startedAt);
-        return new ConfigGroupBinder(card, title, masterMeta, keyMetas, host, views);
+        return new ConfigGroupBinder(card, title, masterMeta, keyMetas, host, views, twoColumn);
     }
 
     private ConfigGroupBinder(View card, String title, KeyMeta masterMeta,
-                              List<KeyMeta> keyMetas, ConfigKeyRow.Host host, ViewSource views) {
+                              List<KeyMeta> keyMetas, ConfigKeyRow.Host host, ViewSource views,
+                              boolean twoColumn) {
         this.card = card;
+        this.twoColumn = twoColumn;
         this.masterMeta = masterMeta;
         this.views = views;
         this.host = host;
@@ -89,6 +99,12 @@ final class ConfigGroupBinder {
                 }
                 ConfigKeyRow.commitSwitch(masterSwitch, masterMeta, host);
             });
+            // 总开关的「?」紧贴标题右侧：item_config_group.xml 的标题宽已改 wrap_content，
+            // 其后一枚 0dp 权重的 Space 把徽标 / 开关 / 箭头推到行尾，故 index 1 正好落在标题与 Space 之间。
+            View header = card.findViewById(R.id.config_group_header);
+            if (header instanceof ViewGroup) {
+                ConfigKeyRow.attachHintIcon((ViewGroup) header, 1, masterMeta, false);
+            }
         }
 
         // "有任一"键界面自用（daemonConsumes=false）就在卡头标一次，行内不再重复；
@@ -103,7 +119,11 @@ final class ConfigGroupBinder {
         uiOnly = hasUiOnly;
         uiBadgeView.setVisibility(hasUiOnly ? View.VISIBLE : View.GONE);
 
-        card.findViewById(R.id.config_group_header).setOnClickListener(v -> setExpanded(!expanded));
+        View groupHeader = card.findViewById(R.id.config_group_header);
+        groupHeader.setOnClickListener(v -> setExpanded(!expanded));
+        // 长按卡头复制标题：长按与点击挂在同一个 View 上，由框架按按压时长分流（长按后抬起不再触发展开）。
+        // 不挂到内部标题 TextView 上——子控件会消费触摸，卡头的点击就收不到了。
+        TextCopy.copyOnLongPress(groupHeader, titleView::getText);
         setExpanded(false);
     }
 
@@ -233,11 +253,18 @@ final class ConfigGroupBinder {
      * 那一段尤其贵）。
      */
     void buildRows() {
+        // 一键的组不排两列：半格左对齐只剩一个孤项，观感不如整行
+        final boolean twoColumnRows = twoColumn && keyMetas.size() >= 2;
         for (KeyMeta meta : keyMetas) {
-            ConfigKeyRow row = ConfigKeyRow.create(body, meta, host, uiOnly, views);
+            ConfigKeyRow row = ConfigKeyRow.create(body, meta, host, uiOnly, views, twoColumnRows);
             long startedAt = StartupTiming.accBegin(StartupTiming.FORM_SUB_ATTACH);
             body.addView(row.view());
             StartupTiming.accEnd(StartupTiming.FORM_SUB_ATTACH, startedAt);
+            if (twoColumnRows) {
+                // 行 XML 里写着整行独占：先清掉，再改标半行（放不放得下由容器逐行实测）
+                body.setFullLine(row.view(), false);
+                body.setHalfLine(row.view(), true);
+            }
             rows.add(row);
         }
     }

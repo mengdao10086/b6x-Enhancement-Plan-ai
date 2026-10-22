@@ -234,6 +234,7 @@ public class UiSettingsFragment extends Fragment
             empty.setText(R.string.config_settings_empty);
             empty.setTextAppearance(inflater.getContext(),
                     R.style.TextAppearance_B6XTempCtrl_Caption);
+            TextCopy.copyOnLongPress(empty);
             contentBox.addView(empty);
         }
         contentBox.addView(ConfigResetBar.create(inflater, contentBox, this).view());

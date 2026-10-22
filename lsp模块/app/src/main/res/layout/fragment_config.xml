@@ -101,8 +101,12 @@
                 android:layout_height="wrap_content"
                 android:orientation="vertical">
 
+                <!--
+                    概要行（始终可见）：参数定义 + 键渲染自检结论合成一句，右侧只有小三角。
+                    清理按钮不塞进本行（加了自检数字后太挤），改到折叠体下方独立一行。
+                -->
                 <LinearLayout
-                    android:id="@+id/config_diag_header"
+                    android:id="@+id/config_diag_summary"
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
                     android:background="?attr/selectableItemBackground"
@@ -114,19 +118,17 @@
                     android:padding="@dimen/card_padding">
 
                     <TextView
+                        android:id="@+id/config_diag_defs"
                         android:layout_width="0dp"
                         android:layout_height="wrap_content"
                         android:layout_weight="1"
-                        android:text="@string/config_diag_title"
-                        android:textAppearance="@style/TextAppearance.B6XTempCtrl.SectionTitle" />
+                        android:textAppearance="@style/TextAppearance.B6XTempCtrl.Caption" />
 
-                    <!-- 展开三角：矢量图标，收起态指右、展开态由 ConfigDiagnostics 旋转 90° 指下。
-                         图标盒锁 @dimen/arrow_box（24dp），本行才是 24 + 12×2 = 48dp，
-                         与分组卡头同高（同 item_config_group.xml 的处理） -->
+                    <!-- 展开三角：收起指右、展开由 ConfigDiagnostics 转 90° 指下；16dp 小一档 -->
                     <ImageView
                         android:id="@+id/config_diag_arrow"
-                        android:layout_width="@dimen/arrow_box"
-                        android:layout_height="@dimen/arrow_box"
+                        android:layout_width="@dimen/config_selfcheck_arrow_box"
+                        android:layout_height="@dimen/config_selfcheck_arrow_box"
                         android:layout_marginStart="@dimen/space_s"
                         android:contentDescription="@string/config_action_expand"
                         android:scaleType="fitCenter"
@@ -135,10 +137,10 @@
                 </LinearLayout>
 
                 <!--
-                    折叠体：默认整块隐藏（诊断信息与键渲染自检都属排障内容，不该常驻参数区上方）。
+                    折叠体：默认整块隐藏（明细属排障内容，不该常驻参数区上方）。
                     自上而下：数据文件信息（原曲线页信息条，由 ChartFragment 经 ChartFragment.Host
-                    回调提供，曲线卡内不再重复）→ 键渲染自检 → 配置诊断正文（落点/未知键/mtime）。
-                    自检单独一个 TextView：config_diag_text 每次刷新都被 ConfigDiagnostics 整段覆盖。
+                    回调提供，曲线卡内不再重复）→ mtime → 配置诊断正文（落点/未定义键数量/提示）
+                    → 启动耗时折叠行 → 刷新按钮。自检结论已在上面概要行，不在本体内重复。
                 -->
                 <LinearLayout
                     android:id="@+id/config_diag_body"
@@ -166,14 +168,6 @@
                         android:textIsSelectable="true" />
 
                     <TextView
-                        android:id="@+id/config_diag_selfcheck"
-                        android:layout_width="match_parent"
-                        android:layout_height="wrap_content"
-                        android:layout_marginTop="@dimen/space_s"
-                        android:textAppearance="@style/TextAppearance.B6XTempCtrl.Caption"
-                        android:visibility="gone" />
-
-                    <TextView
                         android:id="@+id/config_diag_mtime"
                         android:layout_width="match_parent"
                         android:layout_height="wrap_content"
@@ -188,6 +182,38 @@
                         android:textAppearance="@style/TextAppearance.B6XTempCtrl.Mono"
                         android:textIsSelectable="true" />
 
+                    <!--
+                        启动耗时：与键渲染自检同一套折叠交互——收起只报首帧，右侧小三角点开列各段明细。
+                        整行默认隐藏，一个耗时槽都没记录时不显示。
+                    -->
+                    <LinearLayout
+                        android:id="@+id/config_diag_timing_row"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="@dimen/space_s"
+                        android:background="?attr/selectableItemBackground"
+                        android:gravity="center_vertical"
+                        android:orientation="horizontal"
+                        android:visibility="gone">
+
+                        <TextView
+                            android:id="@+id/config_diag_timing"
+                            android:layout_width="0dp"
+                            android:layout_height="wrap_content"
+                            android:layout_weight="1"
+                            android:textAppearance="@style/TextAppearance.B6XTempCtrl.Caption" />
+
+                        <ImageView
+                            android:id="@+id/config_diag_timing_arrow"
+                            android:layout_width="@dimen/config_selfcheck_arrow_box"
+                            android:layout_height="@dimen/config_selfcheck_arrow_box"
+                            android:layout_marginStart="@dimen/space_xs"
+                            android:contentDescription="@string/config_action_expand"
+                            android:scaleType="fitCenter"
+                            android:src="@drawable/ic_triangle"
+                            app:tint="?attr/colorOnSurfaceVariant" />
+                    </LinearLayout>
+
                     <com.google.android.material.button.MaterialButton
                         android:id="@+id/config_diag_refresh"
                         style="@style/Widget.Material3.Button.TextButton"
@@ -196,14 +222,33 @@
                         android:layout_marginTop="@dimen/space_s"
                         android:text="@string/config_diag_action_refresh" />
 
-                    <!-- 清理旧版遗留键：仅当配置里存在「可清理」的键时才可见（ConfigFormFragment 按快照置显）。
-                         确认后经 ConfigStore 原子删除并留备份，不在此直接碰文件（守 I3）。 -->
+                </LinearLayout>
+
+                <!--
+                    清理旧版遗留键：诊断折叠块下方的独立一行（不随明细收起），靠右。
+                    高度在代码里按概要行文字行高的 150% 设置，颜色沿用原 TextButton 样式。
+                -->
+                <LinearLayout
+                    android:id="@+id/config_diag_cleanup_row"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="@dimen/space_xs"
+                    android:gravity="end|center_vertical"
+                    android:orientation="horizontal"
+                    android:paddingStart="@dimen/card_padding"
+                    android:paddingEnd="@dimen/card_padding"
+                    android:paddingBottom="@dimen/card_padding"
+                    android:visibility="gone">
+
                     <com.google.android.material.button.MaterialButton
                         android:id="@+id/config_diag_cleanup"
                         style="@style/Widget.Material3.Button.TextButton"
                         android:layout_width="wrap_content"
                         android:layout_height="wrap_content"
-                        android:layout_marginTop="@dimen/space_xs"
+                        android:minWidth="0dp"
+                        android:minHeight="0dp"
+                        android:paddingTop="0dp"
+                        android:paddingBottom="0dp"
                         android:text="@string/config_cleanup_button_plain"
                         android:visibility="gone" />
                 </LinearLayout>

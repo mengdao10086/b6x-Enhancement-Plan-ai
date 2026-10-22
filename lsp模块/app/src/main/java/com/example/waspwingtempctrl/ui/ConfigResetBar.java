@@ -123,6 +123,7 @@ final class ConfigResetBar {
                 .setNegativeButton(R.string.config_reset_cancel, null)
                 .create();
         dialog.setCanceledOnTouchOutside(true);
+        TextCopy.makeMessageSelectable(dialog);
         dialog.show();
     }
 

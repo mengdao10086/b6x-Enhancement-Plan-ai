@@ -237,6 +237,12 @@ final class ConfigFormController implements ConfigKeyRow.Host, ConfigWriteQueue.
     private static final long ROWS_PHASE_FALLBACK_MS = 1500L;
 
     /**
+     * 按键行两列排的组 id（{@code params.json} 的 {@code groups[].id}）：目前只有「日志 &amp; 调试」。
+     * <b>判据用 id 不用标题</b>——标题是文案、会变；id 是定义里的稳定标识。
+     */
+    private static final String TWO_COLUMN_GROUP_ID = "debug";
+
+    /**
      * 把本页的表单建出来（预热与首读都回来、视图也在时才做，只做一次）。三条路：定义没到位 → 如实报错；
      * 数据没回来 → 等 {@link #onLoaded}；都齐了 → 建表。<b>建表分两段</b>（段一卡头先露面、段二行随后）
      * 与"默认展开的页不分段"的口径见 app 逻辑说明.md §5.2。
@@ -443,7 +449,7 @@ final class ConfigFormController implements ConfigKeyRow.Host, ConfigWriteQueue.
             if (master != null) {
                 covered.add(master.key);
             }
-            addGroup(container, page.groupTitle(group), master, keyMetas);
+            addGroup(container, page.groupTitle(group), group.id, master, keyMetas);
         }
 
         if (page.showsUngroupedGroup()) {
@@ -457,7 +463,7 @@ final class ConfigFormController implements ConfigKeyRow.Host, ConfigWriteQueue.
             if (!orphans.isEmpty()) {
                 addGroup(container,
                         container.getContext().getString(R.string.config_group_ungrouped),
-                        null, orphans);
+                        null, null, orphans);
             }
         }
     }
@@ -468,12 +474,15 @@ final class ConfigFormController implements ConfigKeyRow.Host, ConfigWriteQueue.
      * {@link Page#onFormBuilt} 给空态提示）。
      */
     private void addGroup(@NonNull ViewGroup container, @NonNull String title,
-                          @Nullable KeyMeta master, @NonNull List<KeyMeta> keyMetas) {
+                          @Nullable String groupId, @Nullable KeyMeta master,
+                          @NonNull List<KeyMeta> keyMetas) {
         if (keyMetas.isEmpty() && master == null) {
             return;
         }
+        // 组样式按 id 判定：取不到（未分组兜底）或 id 不匹配 → 常规整行
+        boolean twoColumn = TWO_COLUMN_GROUP_ID.equals(groupId);
         ConfigGroupBinder binder = ConfigGroupBinder.create(container, title, master,
-                keyMetas, this, views);
+                keyMetas, this, views, twoColumn);
         long startedAt = StartupTiming.accBegin(StartupTiming.FORM_SUB_ATTACH);
         container.addView(binder.card());
         StartupTiming.accEnd(StartupTiming.FORM_SUB_ATTACH, startedAt);

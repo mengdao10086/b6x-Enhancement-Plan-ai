@@ -24,6 +24,10 @@ import java.util.Arrays;
  *       分配按「换行偏好顺序」逐档尝试（详见 {@link #placeTailRun}）——<b>能用整行解决就不混排，
  *       混排只在连整行都放不下时才用</b>（① ~ ⑤ 明细见 app/逻辑说明.md §7.7）。</li>
  *   <li><b>fullLine</b>：独占一行且铺满可用宽（measure 用 {@code EXACTLY}），不与其他子视图同行。</li>
+ *   <li><b>halfLine</b>：两列流式。<b>先按可用宽量自然宽</b>：放得进半行就以半行宽参与 leading 排布
+ *       （两项正好占满一行，第三项自动换行）；放不下就以整行宽独占一行。<b>逐行按实测判定</b>，
+ *       故窄屏、长内容、系统字体放大只会让放不下的那一行退回整行，其余行仍是两列；
+ *       旋转 / 分屏后每次 measure 重新判定。见 {@link #setHalfLine}。</li>
  * </ul>
  * 另有 {@code breakBefore}：在其之前强制换行（对 trailing 者，本串尾段就此断开、另起一串）。
  * <b>注</b>：尾段侧这两条 {@code breakBefore} 语义保留、但当前无调用方行使——{@code setBreakBefore}
@@ -63,6 +67,9 @@ public final class WrapRowLayout extends ViewGroup {
         /** 本子视图独占一行且铺满可用宽。 */
         boolean fullLine;
 
+        /** 本子视图参与「两列流式」：放得进半行用半行宽，放不下退回整行（见 {@link #setHalfLine}）。 */
+        boolean halfLine;
+
         /** 本子视图之前强制换行。 */
         boolean breakBefore;
 
@@ -96,6 +103,7 @@ public final class WrapRowLayout extends ViewGroup {
             TypedArray a = context.obtainStyledAttributes(attrs, R.styleable.WrapRowLayout_Layout);
             trailing = a.getBoolean(R.styleable.WrapRowLayout_Layout_wrapTrailing, false);
             fullLine = a.getBoolean(R.styleable.WrapRowLayout_Layout_wrapFullLine, false);
+            halfLine = false;   // 无 XML 属性：只由 setHalfLine 施加
             breakBefore = a.getBoolean(R.styleable.WrapRowLayout_Layout_wrapBreakBefore, false);
             verticalCenterAt = VERTICAL_CENTER_UNSET;
             a.recycle();
@@ -110,6 +118,7 @@ public final class WrapRowLayout extends ViewGroup {
             super(source);
             trailing = source.trailing;
             fullLine = source.fullLine;
+            halfLine = source.halfLine;
             breakBefore = source.breakBefore;
             verticalCenterAt = source.verticalCenterAt;
             rowGapCap = source.rowGapCap;
@@ -124,8 +133,8 @@ public final class WrapRowLayout extends ViewGroup {
         }
     }
 
-    /** 列距（同一行内相邻子视图之间，含尾段内部）。 */
-    private final int colGap;
+    /** 列距（同一行内相邻子视图之间，含尾段内部）。可由 {@link #setColGap} 在测量前改写。 */
+    private int colGap;
 
     /** 行距（上下两行之间）。缺省 = 列距，可由 XML 属性 {@code app:wrapRowGap} 单独指定。 */
     private final int rowGap;
@@ -166,6 +175,32 @@ public final class WrapRowLayout extends ViewGroup {
             return;
         }
         lp.fullLine = value;
+        requestLayout();
+    }
+
+    /**
+     * 标记子视图参与「两列流式」（见类注释的 halfLine）：<b>放得进半行就用半行宽、放不下退回整行</b>，
+     * 判据是子视图自己的自然宽与半行宽的实测比较，不做固定阈值判断。须在子视图被测量前调用；
+     * 与 {@link #setFullLine} 互斥（同时为真时 halfLine 优先，fullLine 不再生效）。
+     */
+    public void setHalfLine(@NonNull View child, boolean value) {
+        LayoutParams lp = paramsOf(child);
+        if (lp.halfLine == value) {
+            return;
+        }
+        lp.halfLine = value;
+        requestLayout();
+    }
+
+    /**
+     * 改本容器同一行内的列距（像素）。<b>只给「紧凑两列」的行用</b>（{@code ConfigKeyRow} 在
+     * 建行时把自己的行根压低），须在子视图被测量前调用；行距 {@code rowGap} 不跟着改。
+     */
+    void setColGap(int px) {
+        if (colGap == px) {
+            return;
+        }
+        colGap = px;
         requestLayout();
     }
 
@@ -273,9 +308,23 @@ public final class WrapRowLayout extends ViewGroup {
             }
             LayoutParams lp = (LayoutParams) child.getLayoutParams();
             if (!pass.place) {
-                measureChild(child, lp, pass.rowLimit);
+                if (lp.halfLine) {
+                    measureHalfLineChild(child, lp, pass.rowLimit);
+                } else {
+                    measureChild(child, lp, pass.rowLimit);
+                }
             }
-            if (lp.fullLine) {
+            if (lp.halfLine) {
+                // 半行：放得下就与本行已有的半格并排（leading 规则自带换行），放不下就独占整行。
+                // 判据只看实测宽——measure 与 layout 两趟读到的是同一个结果。
+                if (fitsHalf(child, pass.rowLimit)) {
+                    placeLeading(pass, index, child, lp);
+                } else {
+                    flushRow(pass);
+                    placeFullLine(pass, child, lp, index);
+                }
+                index++;
+            } else if (lp.fullLine) {
                 flushRow(pass);
                 placeFullLine(pass, child, lp, index);
                 index++;
@@ -653,6 +702,31 @@ public final class WrapRowLayout extends ViewGroup {
                         + Math.max(0, (rowHeight - lp.topMargin - lp.bottomMargin - height) / 2);
         child.layout(childLeft, childTop, childLeft + width, childTop + height);
         return childLeft + width + lp.rightMargin;
+    }
+
+    /**
+     * 量一个半行子视图：<b>先按可用宽量自然宽</b>（{@code AT_MOST}，与普通 leading 同一口径），
+     * 再按「自然宽 ≤ 半行宽」二选一重量——放得下用半行宽、放不下用整行宽，两者都是 {@code EXACTLY}。
+     * 重量一次是必须的：半行宽下子视图内部会按新宽重新折行，高度随之变化。
+     */
+    private void measureHalfLineChild(View child, LayoutParams lp, int rowLimit) {
+        measureChild(child, lp, rowLimit);
+        int width = fitsHalf(child, rowLimit) ? halfWidth(rowLimit) : rowLimit;
+        int available = Math.max(0, width - lp.leftMargin - lp.rightMargin);
+        child.measure(MeasureSpec.makeMeasureSpec(available, MeasureSpec.EXACTLY),
+                ViewGroup.getChildMeasureSpec(
+                        MeasureSpec.makeMeasureSpec(0, MeasureSpec.UNSPECIFIED), 0, lp.height));
+    }
+
+    /** 半行宽：两格 + 一个列距正好占满一行；不足半格时为 0（调用方据此退回整行）。 */
+    private int halfWidth(int rowLimit) {
+        return Math.max(0, (rowLimit - colGap) / 2);
+    }
+
+    /** 已量出的自然宽是否放得进半行（{@code 0} = 连半格都排不出来，一律退回整行）。 */
+    private boolean fitsHalf(View child, int rowLimit) {
+        int half = halfWidth(rowLimit);
+        return half > 0 && child.getMeasuredWidth() <= half;
     }
 
     /**

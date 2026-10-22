@@ -62,6 +62,9 @@ import java.util.TreeSet;
  *
  * <p>形态（配合 {@link WrapRowLayout}：参数名 lead、键内控件 trailing、行级文本 fullLine）、
  * 字段宽、说明画笔、落盘四条规则、"未生效"只压暗不重复标注等详见 app 逻辑说明.md §6.1。
+ *
+ * <p><b>参数名后的「?」六型都有</b>（见 {@link #attachHintIcon}）：点了与输入框获焦走同一个
+ * 说明浮窗（{@link HintOverlay}）。卡头总开关的「?」由 {@code ConfigGroupBinder} 复用同一助手。
  */
 final class ConfigKeyRow {
 
@@ -185,6 +188,14 @@ final class ConfigKeyRow {
     private final float dimAlpha;
     /** 说明的防截断安全量（@dimen/config_hint_slack）：见 {@link #measuredFieldWidth}。 */
     private final int hintFitGuard;
+    /** 参数名后的「?」（点开参数说明浮窗）：六型都有；依赖未满足时跟随整行压暗。 */
+    @Nullable
+    private TextView hintIcon;
+    /**
+     * 紧凑行（只用于两列模式）：图标 20dp/12sp、行内列距 4dp、开关左边距 0。
+     * 目的只有一条——让「参数名 + ? + 开关」挤得进半行；常规行一个字都不改。
+     */
+    private final boolean compact;
     /** 数值字段的最小宽：见 {@link #measuredFieldWidth}。 */
     private final int minFieldWidth;
 
@@ -203,19 +214,20 @@ final class ConfigKeyRow {
      */
     static ConfigKeyRow create(@NonNull ViewGroup parent, @NonNull KeyMeta meta,
                                @NonNull ConfigKeyRow.Host host, boolean groupShowsUiOnly,
-                               @NonNull ViewSource views) {
+                               @NonNull ViewSource views, boolean compact) {
         // 行"整行独占"由 item_config_row.xml 根标签上的 app:wrapFullLine 声明（父容器读它当标记），
         // 键内换行交给同一个容器，本类不再向容器声明任何几何。
         WrapRowLayout root = (WrapRowLayout) inflateTimed(views, R.layout.item_config_row, parent);
-        return new ConfigKeyRow(root, meta, host, groupShowsUiOnly, views);
+        return new ConfigKeyRow(root, meta, host, groupShowsUiOnly, views, compact);
     }
 
     private ConfigKeyRow(WrapRowLayout root, KeyMeta meta, Host host, boolean groupShowsUiOnly,
-                         ViewSource views) {
+                         ViewSource views, boolean compact) {
         this.root = root;
         this.meta = meta;
         this.host = host;
         this.views = views;
+        this.compact = compact;
         Resources res = root.getResources();
         dimAlpha = readDimAlpha(res);
         hintFitGuard = res.getDimensionPixelSize(R.dimen.config_hint_slack);
@@ -225,6 +237,12 @@ final class ConfigKeyRow {
         descView = root.findViewById(R.id.config_key_desc);
         noteView = root.findViewById(R.id.config_key_note);
         statusView = root.findViewById(R.id.config_key_status);
+        // 配置页文字只做长按整段复制，不开系统选择：这些控件紧邻输入框，开选择会把它们拉进焦点体系，
+        // 干扰键盘避让；点标题/开关的既有手势也不会被长按复制影响
+        TextCopy.copyOnLongPress(labelView);
+        TextCopy.copyOnLongPress(descView);
+        TextCopy.copyOnLongPress(noteView);
+        TextCopy.copyOnLongPress(statusView);
         // switchView 不在这里取：它由 SwitchRenderer 按需建出（见该类 build）
 
         labelView.setText(meta.label);
@@ -244,8 +262,15 @@ final class ConfigKeyRow {
             noteView.setVisibility(View.VISIBLE);
         }
 
+        if (compact) {
+            // 两列行的一格很窄：行内列距压到 4dp（只改这一行，容器行距不动）
+            root.setColGap(res.getDimensionPixelSize(R.dimen.config_two_col_col_gap));
+        }
         renderer = createRenderer();
         renderer.build();
+        // 「?」统一在行骨架建：必须在 build 之后——尾段用的 tailCount 下标以"参数名在 index 0"为前提，
+        // 提前插进来会把尾段控件错位。插在 index 1 = 参数名之后、首个尾段控件之前。
+        hintIcon = attachHintIcon(root, 1, meta, compact);
         dimTargetsCache = renderer.dimTargets();
         alignLabelToField();
         applySwitchRowGap();
@@ -368,7 +393,13 @@ final class ConfigKeyRow {
             addToTail(switchRoot);
             switchView = switchRoot.findViewById(R.id.config_key_switch);
             switchView.setVisibility(View.VISIBLE);
-            addHintIcon();
+            if (compact) {
+                // 两列行的一格很窄：开关左侧的 4dp 让给参数名与「?」（尾部修边 -6dp 保留）
+                ViewGroup.LayoutParams slp = switchRoot.getLayoutParams();
+                if (slp instanceof ViewGroup.MarginLayoutParams) {
+                    ((ViewGroup.MarginLayoutParams) slp).setMarginStart(0);
+                }
+            }
             switchView.setOnCheckedChangeListener((button, checked) -> {
                 if (suppressChange) {
                     return;
@@ -937,6 +968,7 @@ final class ConfigKeyRow {
         } else {
             fieldLabel.setText(fieldMeta.label);
         }
+        TextCopy.copyOnLongPress(fieldLabel);
         MaterialSwitch boolSwitch = fieldView.findViewById(R.id.config_field_switch);
         boolSwitch.setOnCheckedChangeListener((button, checked) -> {
             if (suppressChange) {
@@ -981,11 +1013,12 @@ final class ConfigKeyRow {
             input.setInputType(InputType.TYPE_CLASS_TEXT);
         }
         placeCaption(fieldView, captionView, caption, hoistCaption);
+        TextCopy.copyOnLongPress(captionView);
 
         // 失焦即提交（钳制后的值回写控件并落盘；path 的落盘时机也只有这一处）；获焦即弹参数说明浮窗
         input.setOnFocusChangeListener((v, hasFocus) -> {
             if (hasFocus) {
-                showHint(fieldView);
+                showHintFor(meta, fieldView);
             } else {
                 commit(true);
                 HintOverlay.dismissFor(meta.key);
@@ -1441,6 +1474,9 @@ final class ConfigKeyRow {
         labelView.setAlpha(alpha);
         descView.setAlpha(alpha);
         noteView.setAlpha(alpha);
+        if (hintIcon != null) {
+            hintIcon.setAlpha(alpha);   // 「?」不在尾段也不在行级文本里，压暗要单独来一遍
+        }
         for (View target : dimTargetsCache) {
             target.setAlpha(alpha);
         }
@@ -1572,37 +1608,49 @@ final class ConfigKeyRow {
     // ==================== 参数说明浮窗 ====================
 
     /**
-     * 开关行标题后的「?」：点了走与输入框获焦<b>完全相同</b>的说明浮窗（见 {@link HintOverlay}）。
-     * 作为 leading 子视图插在参数名之后（此刻尾段的开关已在 index 1，插在它前面 → 落在标题右侧、
-     * 开关左侧）；不标 trailing，故与标题同行。无新 drawable：用「?」字符 + 边框水波纹。
+     * 在 {@code parent} 的第 {@code index} 个位置插一枚「?」（leading、不标 trailing，故与参数名同行）：
+     * 点了走与输入框获焦<b>完全相同</b>的说明浮窗（见 {@link HintOverlay}）。无新 drawable：
+     * 「?」字符 + 边框水波纹。
+     *
+     * <p>两个调用处共用这一个助手：键行（六型都有）与分组卡头的总开关。取不到 Activity 时
+     * {@link #showHintFor} 安全跳过。
+     *
+     * @param compact 两列行：图标盒 20dp、字号 12sp、左边距 0（常规行 24dp / 14sp / 4dp）
+     * @return 建出的图标（键行存着它，依赖未满足时跟随整行压暗）
      */
-    private void addHintIcon() {
-        Resources res = root.getResources();
-        TextView icon = new TextView(root.getContext());
-        int box = res.getDimensionPixelSize(R.dimen.config_hint_icon_size);
+    @NonNull
+    static TextView attachHintIcon(@NonNull ViewGroup parent, int index,
+                                   @NonNull KeyMeta meta, boolean compact) {
+        Resources res = parent.getResources();
+        Context context = parent.getContext();
+        TextView icon = new TextView(context);
+        int box = res.getDimensionPixelSize(compact
+                ? R.dimen.config_hint_icon_size_compact : R.dimen.config_hint_icon_size);
         icon.setLayoutParams(new ViewGroup.LayoutParams(box, box));
         icon.setText(R.string.config_hint_icon);
-        icon.setTextSize(TypedValue.COMPLEX_UNIT_PX, res.getDimension(R.dimen.text_body));
+        icon.setTextSize(TypedValue.COMPLEX_UNIT_PX,
+                res.getDimension(compact ? R.dimen.text_caption : R.dimen.text_body));
         icon.setGravity(Gravity.CENTER);
-        icon.setContentDescription(root.getContext().getString(R.string.config_hint_action));
-        icon.setTextColor(ContextCompat.getColor(root.getContext(), R.color.app_on_surface_variant));
+        icon.setContentDescription(context.getString(R.string.config_hint_action));
+        icon.setTextColor(ContextCompat.getColor(context, R.color.app_on_surface_variant));
         TypedValue ripple = new TypedValue();
-        if (root.getContext().getTheme().resolveAttribute(
+        if (context.getTheme().resolveAttribute(
                 android.R.attr.selectableItemBackgroundBorderless, ripple, true)) {
             icon.setBackgroundResource(ripple.resourceId);
         }
         icon.setClickable(true);
-        icon.setOnClickListener(v -> showHint(icon));
-        root.addView(icon, 1);
+        icon.setOnClickListener(v -> showHintFor(meta, icon));
+        parent.addView(icon, index);
         ViewGroup.LayoutParams lp = icon.getLayoutParams();
         if (lp instanceof ViewGroup.MarginLayoutParams) {
             ((ViewGroup.MarginLayoutParams) lp).setMarginStart(
-                    res.getDimensionPixelSize(R.dimen.space_xs));
+                    compact ? 0 : res.getDimensionPixelSize(R.dimen.space_xs));
         }
+        return icon;
     }
 
     /** 弹参数说明浮窗（锚在触发控件上）。取不到 Activity 时安全跳过，几何与其它功能不受影响。 */
-    private void showHint(@NonNull View anchor) {
+    private static void showHintFor(@NonNull KeyMeta meta, @NonNull View anchor) {
         Activity activity = activityOf(anchor.getContext());
         if (activity != null) {
             HintOverlay.show(activity, meta, anchor);
@@ -1730,6 +1778,8 @@ final class ConfigKeyRow {
             overlay.addView(card);
             titleView = card.findViewById(R.id.config_hint_title);
             bodyView = card.findViewById(R.id.config_hint_body);
+            // 浮层正文只做长按整段复制，不改浮层「点外即收」的既有交互
+            TextCopy.copyOnLongPress(titleView);
 
             overlay.setOnTouchListener(this::onTouch);
             overlay.addOnAttachStateChangeListener(new View.OnAttachStateChangeListener() {
@@ -1941,6 +1991,7 @@ final class ConfigKeyRow {
                         ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
                 slp.topMargin = first ? 0 : res.getDimensionPixelSize(R.dimen.space_s);
                 st.setLayoutParams(slp);
+                TextCopy.copyOnLongPress(st);
                 bodyView.addView(st);
             }
             TextView bt = new TextView(ctx);
@@ -1952,6 +2003,7 @@ final class ConfigKeyRow {
                     ? (first ? 0 : res.getDimensionPixelSize(R.dimen.space_s))
                     : res.getDimensionPixelSize(R.dimen.space_xs);
             bt.setLayoutParams(blp);
+            TextCopy.copyOnLongPress(bt);
             bodyView.addView(bt);
         }
 

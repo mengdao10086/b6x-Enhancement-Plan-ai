@@ -119,7 +119,15 @@ public class MainHook implements IXposedHookLoadPackage {
         return sMainHandler;
     }
     private static final int AUTO_LAUNCH_TIMEOUT_MS = 2000;        // 兜底：自动进入设置失败时仍退后台
-    private static volatile boolean enteredSetup = false;         // 本进程是否已进入过设置界面
+    private static volatile boolean enteredSetup = false;         // 本前台会话是否已进入过设置界面
+    // ========== 前台会话判定：每次进入前台跳一次设置页（见 app/逻辑说明.md §1.6）==========
+    // resumedActivityCount：当前处于 resumed 的 Activity 数（0=无前台 Activity）。onResume +1 / onPause -1。
+    private static final AtomicInteger resumedActivityCount = new AtomicInteger();
+    // appBackgrounded：最后一个 Activity 停止且计数归零（非返回/旋转）→ 退后台待定标记；
+    //   只武装、不改 enteredSetup，由下一次 onResume 按「设置页 / 引导页」两条路径消费。
+    private static volatile boolean appBackgrounded = false;
+    // setupResumeHookReady：设置页 onResume 钩子注册成功才启用复位机制；失败则退回进程级行为（降级不更坏）。
+    private static volatile boolean setupResumeHookReady = false;
 
     // ========== 后台自动重连 ==========
     private static volatile BluetoothDevice lastDevice = null;      // 上次连接的 BLE 设备
@@ -1332,13 +1340,23 @@ public class MainHook implements IXposedHookLoadPackage {
     /** B6X 专属：启动自动进入设置界面 */
     private static void hookB6Activity(XC_LoadPackage.LoadPackageParam lpparam) {
         // ========== B6X 启动自动进入设置界面（事件驱动） ==========
-        // 钩 Activity 基类生命周期，isMainActivity 识别 MainActivity；
-        // enteredSetup：已进入设置则不再自动跳
+        // 行为：每次 App 进入前台跳一次设置页（冷启动 / 后台切回）；同一前台会话内从设置页返回引导页不再弹回。
+        // 判据：resumedActivityCount 归零 + 最后一个 Activity 停止且非返回/旋转 → 退后台待定标记；
+        //       下次 onResume 消费：设置页置 enteredSetup=true，引导页开新会话后再自动进入。
         try {
             XposedHelpers.findAndHookMethod(android.app.Activity.class, "onResume", new XC_MethodHook() {
                 @Override
                 protected void afterHookedMethod(MethodHookParam param) {
+                    resumedActivityCount.incrementAndGet();
                     if (isMainActivity(param.thisObject)) {
+                        // 从后台切回引导页：开新一轮前台会话，允许本次自动进入（第一条消费路径）
+                        if (appBackgrounded && setupResumeHookReady) {
+                            appBackgrounded = false;
+                            if (enteredSetup) {
+                                enteredSetup = false;
+                                XposedBridge.log(TAG + " 前台会话重新开始：enteredSetup 复位");
+                            }
+                        }
                         currentGuideActivity = (Activity) param.thisObject;
                         autoEnterSetup();  // 已连接则立即跳；未连接则等 onGattConnected 触发
                         autoStartSetup();  // 冷启动自动进入设置界面；其 onResume 会 tryConnect()
@@ -1348,6 +1366,9 @@ public class MainHook implements IXposedHookLoadPackage {
             XposedHelpers.findAndHookMethod(android.app.Activity.class, "onPause", new XC_MethodHook() {
                 @Override
                 protected void beforeHookedMethod(MethodHookParam param) {
+                    if (resumedActivityCount.decrementAndGet() < 0) {
+                        resumedActivityCount.set(0);   // 钩子晚装等异常时序的防御性钳位
+                    }
                     if (isMainActivity(param.thisObject)
                             && currentGuideActivity == param.thisObject) {
                         currentGuideActivity = null;
@@ -1366,6 +1387,44 @@ public class MainHook implements IXposedHookLoadPackage {
             XposedBridge.log(TAG + " 已钩住 Activity 基类生命周期（MainActivity 自动进入设置界面）");
         } catch (Throwable t) {
             XposedBridge.log(TAG + " 钩自动进入设置界面失败: " + t.getMessage());
+        }
+
+        // ========== 前台会话判定：退后台只武装待定标记（独立 try，失败退回进程级行为） ==========
+        try {
+            XposedHelpers.findAndHookMethod(android.app.Activity.class, "onStop", new XC_MethodHook() {
+                @Override
+                protected void afterHookedMethod(MethodHookParam param) {
+                    try {
+                        if (resumedActivityCount.get() != 0) return;   // 仍有前台 Activity：页面切换，不是退后台
+                        Activity act = (Activity) param.thisObject;
+                        // 返回键 finish、旋转重建都不算退后台；对话框只有 onPause、分屏/可见 PiP 不会 onStop
+                        if (act.isFinishing() || act.isChangingConfigurations()) return;
+                        appBackgrounded = true;   // 只武装；是否复位 enteredSetup 由下次 onResume 决定
+                    } catch (Throwable t) {
+                        // 判定失败按「未退后台」处理：不复位，等同当前进程级行为
+                    }
+                }
+            });
+            XposedBridge.log(TAG + " 已钩住 Activity.onStop（前台会话结束判定）");
+        } catch (Throwable t) {
+            XposedBridge.log(TAG + " 钩 Activity.onStop 失败（自动进入设置界面退回进程级行为）: " + t.getMessage());
+        }
+
+        // ========== 设置页 onResume：补「切回时人已在设置页」漏口（第二条消费路径） ==========
+        try {
+            Class<?> b6ExpAct = lpparam.classLoader.loadClass("com.example.extool.B6ExperimentalActivity");
+            XposedHelpers.findAndHookMethod(b6ExpAct, "onResume", new XC_MethodHook() {
+                @Override
+                protected void afterHookedMethod(MethodHookParam param) {
+                    enteredSetup = true;       // 此刻人就在设置页 = 本次前台会话已进过
+                    appBackgrounded = false;   // 消费退后台标记：返回引导页不会弹回
+                }
+            });
+            setupResumeHookReady = true;
+            XposedBridge.log(TAG + " 已钩住 B6ExperimentalActivity.onResume（设置页 = 已进入判定）");
+        } catch (Throwable t) {
+            setupResumeHookReady = false;   // 闸门关闭：退后台标记永不消费，enteredSetup 保持进程级语义
+            XposedBridge.log(TAG + " 钩设置页 onResume 失败（自动进入设置界面退回进程级行为）: " + t.getMessage());
         }
     }
 
