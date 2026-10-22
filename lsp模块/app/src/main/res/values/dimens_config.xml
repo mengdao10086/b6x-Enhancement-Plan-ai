@@ -173,9 +173,8 @@
     <dimen name="config_selfcheck_arrow_box">16dp</dimen>
 
     <!--
-        诊断块内「参数定义」「启动耗时」两类可展开行：字号 1.5×（12sp → 18sp），
-        最小触控高度 48dp，上下 padding 由布局补足（与正文小字区分、便于点按）。
+        诊断块内「参数定义」「启动耗时」两类可展开行：字号与普通行一致（不另设 textSize），
+        只把最小触控高度抬到 48dp，上下 padding 由布局补足（便于点按）。
     -->
-    <dimen name="diag_fold_text_size">18sp</dimen>
     <dimen name="diag_fold_min_height">48dp</dimen>
 </resources>

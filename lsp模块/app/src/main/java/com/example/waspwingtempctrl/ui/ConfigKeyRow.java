@@ -1615,7 +1615,8 @@ final class ConfigKeyRow {
      * <p>两个调用处共用这一个助手：键行（六型都有）与分组卡头的总开关。取不到 Activity 时
      * {@link #showHintFor} 安全跳过。
      *
-     * @param compact 两列行：图标盒 20dp、字号 12sp、左边距 0（常规行 24dp / 14sp / 4dp）
+     * @param compact 两列行：图标盒 20dp、字号 12sp（常规行 24dp / 14sp）。两种行的左边距都补到
+     *                「与参数名相距 @dimen/space_xs」：键行容器自己会加一个列距，这里把它抵掉
      * @return 建出的图标（键行存着它，依赖未满足时跟随整行压暗）
      */
     @NonNull
@@ -1643,8 +1644,14 @@ final class ConfigKeyRow {
         parent.addView(icon, index);
         ViewGroup.LayoutParams lp = icon.getLayoutParams();
         if (lp instanceof ViewGroup.MarginLayoutParams) {
-            ((ViewGroup.MarginLayoutParams) lp).setMarginStart(
-                    compact ? 0 : res.getDimensionPixelSize(R.dimen.space_xs));
+            // 键行容器在图标之前还会再加一个自己的列距（常规 12dp、两列 4dp）：抵消掉它，只留 space_xs，
+            // 六型的「?」与参数名之间因此都是同一个间距（与卡头总开关的「?」一致）。卡头是 LinearLayout、
+            // 没有列距，那边不需要补偿。
+            int start = res.getDimensionPixelSize(R.dimen.space_xs);
+            if (parent instanceof WrapRowLayout) {
+                start -= ((WrapRowLayout) parent).colGap();
+            }
+            ((ViewGroup.MarginLayoutParams) lp).setMarginStart(start);
         }
         return icon;
     }

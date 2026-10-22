@@ -54,8 +54,10 @@ public class ConfigFormFragment extends Fragment
     private ViewGroup groupContainer;
     private View errorCard;
     private TextView errorText;
-    /** 诊断折叠块的概要行文字：参数定义 + 键渲染自检结论合成一句，始终可见。 */
+    /** 参数定义行（诊断折叠块内）：收起态只写「参数定义 + 文件名」。 */
     private TextView defsView;
+    /** 参数定义行的展开内容：键渲染自检的三项计数与结论。 */
+    private TextView defsCountsView;
     /** 诊断信息头部：数据文件信息（由曲线区回调填充）。 */
     private TextView dataFileView;
     /** 「清理旧版遗留键」所在行与按钮：仅当最近快照里存在可清理候选时整行可见。 */
@@ -87,6 +89,7 @@ public class ConfigFormFragment extends Fragment
         errorCard = root.findViewById(R.id.config_error_card);
         errorText = root.findViewById(R.id.config_error_text);
         defsView = root.findViewById(R.id.config_diag_defs);
+        defsCountsView = root.findViewById(R.id.config_diag_defs_counts);
         dataFileView = root.findViewById(R.id.config_diag_datafile_text);
         cleanupRow = root.findViewById(R.id.config_diag_cleanup_row);
         cleanupButton = root.findViewById(R.id.config_diag_cleanup);
@@ -249,8 +252,8 @@ public class ConfigFormFragment extends Fragment
     /**
      * 键渲染自检：<b>每个定义键都要有可编辑入口</b>——本页键行（role=setting）、设置页的键
      * （{@code webui} 组）或组头开关（role=master）。三个分项在建表时一次算定（见
-     * {@link ConfigFormController#rowKeyCount()}），不会因展开先后而变。结论并入诊断折叠块的
-     * 概要行（参数定义 + 本页/设置页/组头开关 = 定义），不再单独占一行。见 app 逻辑说明.md §6.1。
+     * {@link ConfigFormController#rowKeyCount()}），不会因展开先后而变。结论写进诊断块的「参数定义」行：
+     * 该行收起只报文件名，点开才显示本页/设置页/组头开关三项计数，不再单独占一行。见 app 逻辑说明.md §6.1。
      */
     private void renderSelfCheck(Snapshot snapshot) {
         lastSnapshot = snapshot;
@@ -261,10 +264,12 @@ public class ConfigFormFragment extends Fragment
         int renderedSettingsCount = UiSettingsFragment.webuiKeys(store).size();
         int defined = store.keyCount();
         int rendered = renderedRowCount + renderedSettingsCount + renderedMasterCount;
-        defsView.setText(rendered == defined
-                ? getString(R.string.config_diag_defs_ok, ConfigStore.PARAMS_ASSET,
+        // 收起态只报文件名；三项计数与结论进「参数定义」行的展开内容（见 ConfigDiagnostics#toggleDefs）
+        defsView.setText(getString(R.string.config_diag_defs_name, ConfigStore.PARAMS_ASSET));
+        defsCountsView.setText(rendered == defined
+                ? getString(R.string.config_diag_defs_counts_ok,
                         renderedRowCount, renderedSettingsCount, renderedMasterCount, defined)
-                : getString(R.string.config_diag_defs_mismatch, ConfigStore.PARAMS_ASSET,
+                : getString(R.string.config_diag_defs_counts_mismatch,
                         renderedRowCount, renderedSettingsCount, renderedMasterCount, defined));
         refreshCleanupButton(snapshot);
     }

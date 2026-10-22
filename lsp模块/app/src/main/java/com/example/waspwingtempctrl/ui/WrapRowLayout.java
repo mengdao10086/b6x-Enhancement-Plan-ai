@@ -204,6 +204,15 @@ public final class WrapRowLayout extends ViewGroup {
         requestLayout();
     }
 
+    /**
+     * 本容器当前的列距（像素）：行内除首个之外，每个子视图之前都由本容器补上这段间距。
+     * 供「要紧贴前一个子视图」的控件在设外边距时抵消它（如键行参数名后的「?」，见
+     * {@code ConfigKeyRow#attachHintIcon}）。
+     */
+    int colGap() {
+        return colGap;
+    }
+
     /** 标记子视图之前强制换行。须在子视图被测量前调用。 */
     public void setBreakBefore(@NonNull View child, boolean value) {
         LayoutParams lp = paramsOf(child);

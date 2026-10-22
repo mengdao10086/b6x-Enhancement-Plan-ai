@@ -24,8 +24,9 @@ import java.util.concurrent.RejectedExecutionException;
  * （含配置文件路径与大小、落点是否与守护进程一致、参数定义加载情况、未定义键与读取提示）与配置 mtime。
  * 调用方已读过盘时把那份快照传进来（{@link #refresh(Snapshot)}），本区不再多读一次 {@code profile.conf}。
  *
- * <p>整块默认折叠（收起态下只登记欠账、不上屏）；启动耗时是正文之下一行独立的可折叠行
- * （收起只报首帧，点开列各段明细）；不提供任何写动作（I5）。
+ * <p>整块默认折叠（收起态下只登记欠账、不上屏）；块内配置 mtime 是常显行，参数定义行与启动耗时
+ * 各是一行独立的可折叠行（前者收起只报文件名、点开看键渲染自检计数；后者收起只报首帧、点开列各段明细）；
+ * 不提供任何写动作（I5）。
  * 只调 {@link ConfigStore} 的公开接口，读取在后台线程、主线程只做渲染。
  * 设计口径（收起欠账 / 在途排队 / 复用快照）见 app 逻辑说明.md §6.5。
  */
@@ -38,10 +39,12 @@ final class ConfigDiagnostics {
     private final View body;
     private final ImageView arrowView;
     private final TextView mtimeView;
-    /** 参数定义行（块内可展开项）：文字由页面写合并文案，展开内容是配置 mtime。 */
+    /** 参数定义行（块内可展开项）：收起态文字由页面写成「参数定义 + 文件名」，展开内容是键渲染自检计数。 */
     private final View defsRow;
     private final ImageView defsArrow;
     private final TextView defsView;
+    /** 参数定义行的展开内容：本页 / 设置页 / 组头开关三项计数（由页面写入）。 */
+    private final TextView defsCountsView;
     private final TextView stateView;
     /** 启动耗时折叠行：收起只显示一行概要（首帧），点开才列各段明细。 */
     private final View timingRow;
@@ -51,7 +54,7 @@ final class ConfigDiagnostics {
     private final TextView datafileView;
 
     private boolean expanded;
-    /** 参数定义行自己的展开态（内容 = 配置 mtime）。 */
+    /** 参数定义行自己的展开态（内容 = 键渲染自检计数）。 */
     private boolean defsExpanded;
     /** 启动耗时明细是否展开；概要为空（一个槽都没记）时恒为 false。 */
     private boolean timingExpanded;
@@ -87,9 +90,12 @@ final class ConfigDiagnostics {
         defsRow = pageRoot.findViewById(R.id.config_diag_defs_row);
         defsArrow = pageRoot.findViewById(R.id.config_diag_defs_arrow);
         defsView = pageRoot.findViewById(R.id.config_diag_defs);
-        // 兜底文本：定义加载失败时也要有一行可读内容；正常路径由 ConfigFormFragment 换成
-        // 「参数定义 + 键渲染自检结论」合成的一句（分项数字只有页面知道）
-        defsView.setText(store.describeDefinitions());
+        defsCountsView = pageRoot.findViewById(R.id.config_diag_defs_counts);
+        TextCopy.copyOnLongPress(defsCountsView);
+        // 兜底文本：定义没加载起来时也要有一行可读内容（失败原因由页面写进同一格）；
+        // 正常路径由 ConfigFormFragment 写成「参数定义 + 文件名」，计数只进展开内容（分项数字只有页面知道）
+        defsView.setText(pageRoot.getContext().getString(
+                R.string.config_diag_defs_name, ConfigStore.PARAMS_ASSET));
         defsRow.setOnClickListener(v -> toggleDefs());
         TextCopy.copyOnLongPress(defsRow, defsView::getText);
         stateView = pageRoot.findViewById(R.id.config_diag_text);
@@ -102,7 +108,7 @@ final class ConfigDiagnostics {
         timingRow.setOnClickListener(v -> toggleTiming());
         refreshTimingSummary();
 
-        // 「诊断信息」标题行控制整块；参数定义行只控制它自己的 mtime
+        // 「诊断信息」标题行控制整块；参数定义行只控制它自己的计数，mtime 是常显行、不随它收起
         pageRoot.findViewById(R.id.config_diag_header).setOnClickListener(v -> setExpanded(!expanded));
         pageRoot.findViewById(R.id.config_diag_refresh).setOnClickListener(v -> refresh());
         setExpanded(false);
@@ -174,10 +180,10 @@ final class ConfigDiagnostics {
         }
     }
 
-    /** 点参数定义行：展开/收起它自己的内容（配置 mtime），三角与高度同一次动画。 */
+    /** 点参数定义行：展开/收起它自己的内容（键渲染自检计数），三角与高度同一次动画。 */
     private void toggleDefs() {
         defsExpanded = !defsExpanded;
-        long duration = Motion.animateHeight(mtimeView, defsExpanded);
+        long duration = Motion.animateHeight(defsCountsView, defsExpanded);
         Motion.syncExpandArrow(defsArrow, defsExpanded, duration);
     }
 

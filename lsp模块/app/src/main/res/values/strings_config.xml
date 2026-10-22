@@ -86,14 +86,15 @@
     <string name="config_diag_mtime">配置 mtime：%1$s</string>
     <string name="config_diag_mtime_missing">配置 mtime：配置文件不存在</string>
     <!--
-        诊断折叠块的概要行 = 参数定义 + 键渲染自检结论（始终可见）：
+        参数定义行：收起态只报文件名，点开才看键渲染自检的分项计数。
           本页 = 本页键行（role=setting，不含 webui 组）
           设置页 = webui 组的键（搬到独立设置页，来源同 UiSettingsFragment.webuiKeys()）
           组头 = role=master 的键（由 ConfigGroupBinder 渲染成卡头开关）
         三处入口相加应等于定义键数；不等时用 mismatch 那条如实提示。
     -->
-    <string name="config_diag_defs_ok">参数定义: %1$s · 本页 %2$d + 设置页 %3$d + 组头 %4$d = %5$d</string>
-    <string name="config_diag_defs_mismatch">参数定义: %1$s · 本页 %2$d + 设置页 %3$d + 组头 %4$d ≠ %5$d（键表可能已变更）</string>
+    <string name="config_diag_defs_name">参数定义: %1$s</string>
+    <string name="config_diag_defs_counts_ok">本页 %1$d + 设置页 %2$d + 组头 %3$d = %4$d</string>
+    <string name="config_diag_defs_counts_mismatch">本页 %1$d + 设置页 %2$d + 组头 %3$d ≠ %4$d（键表可能已变更）</string>
     <string name="config_diag_action_refresh">刷新诊断</string>
 
     <!--
