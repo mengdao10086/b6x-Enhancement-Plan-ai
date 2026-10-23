@@ -295,8 +295,11 @@ final class ConfigKeyRow {
             return;
         }
         if (fieldFillsRow) {
-            labelView.setTranslationY(
-                    root.getResources().getDimensionPixelSize(R.dimen.config_label_shift));
+            int shift = root.getResources().getDimensionPixelSize(R.dimen.config_label_shift);
+            labelView.setTranslationY(shift);
+            if (hintIcon != null) {
+                hintIcon.setTranslationY(shift);   // 「?」跟随参数名一同下移，两者始终同一条中线
+            }
             return;
         }
         if (meta.isEnum()) {
@@ -307,7 +310,12 @@ final class ConfigKeyRow {
                 ? root.getResources().getDimensionPixelSize(R.dimen.config_field_nohint_top_gap) : 0;
         int boxHalf = root.getResources().getDimensionPixelSize(
                 noHintBox ? R.dimen.config_field_nohint_height : R.dimen.field_height) / 2;
-        root.setVerticalCenterAt(labelView, boxTop + boxHalf);
+        int center = boxTop + boxHalf;
+        root.setVerticalCenterAt(labelView, center);
+        if (hintIcon != null) {
+            // 「?」用同一个锚：控件换行导致行高塌陷时，它仍与参数名同一条中线（不再被行高居中带走）
+            root.setVerticalCenterAt(hintIcon, center);
+        }
     }
 
     /**
@@ -562,10 +570,9 @@ final class ConfigKeyRow {
                     fields.add(addBoolField(fieldMeta));
                     continue;
                 }
-                // ConfigStore.FieldMeta 没有字段级 unitNote，界面不自行读 assets（I1/I3 边界）
-                // 故多值字段只显示 unit 能拿到的部分。
                 fields.add(addNumberField(fieldMeta.label,
-                        joinParts(fieldMeta.unit, rangeText(i)), false));
+                        joinParts(joinParts(fieldMeta.unit, rangeText(i)), fieldMeta.unitNote),
+                        false));
             }
         }
 

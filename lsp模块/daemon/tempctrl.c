@@ -400,7 +400,9 @@ static int last_screen_off = 0;          // 上次观察到的屏幕状态：1=�
 // 界面 → 钩子的唯一通道（两进程不共享内存，方向与 status 文件相反）；见 README「界面开关文件协议」。
 #define UIPREFS_PATH "/data/local/tmp/tempctrl_uiprefs"
 static int back_hide_enabled     = 1;    // UI_BACK_HIDE：1=返回键收后台（默认），0=恢复系统默认退出
+static int gate_le_enabled       = 1;    // UI_GATE_LE：1=连接期把目标地址视为 BLE 设备（默认），0=恢复原行为
 static int uiprefs_last_back_hide = -1;  // 上次已写出的值（-1 = 尚未写过，首轮必写一次）
+static int uiprefs_last_gate_le   = -1;  // 同上的 GATE_LE 记录（哨兵=尚未写过）
 static int uiprefs_last_bt_sec    = -2147483647;  // 同上的 BT_ON_SEC 记录（哨兵=尚未写过）
 static int uiprefs_fail_logged    = 0;   // 写失败只记一条日志，避免每轮重复刷屏
 
@@ -538,7 +540,10 @@ static char *config_parse_line(char *line, char **out_key) {
     *eq = '\0';
     *out_key = p;
     trim_right(p);
-    return eq + 1;
+    // 值也在此统一裁剪（含 fgets 保留的 '\n'/'\r'）：多值键按逗号切分后，最后一个 token 会带着
+    // 行尾换行，被严格整数校验判成"非整数"而整行失效（如 PID_CUT_）。所有键的取值都经过这里，
+    // 下游不再各自容忍换行。
+    return trim_value(eq + 1);
 }
 
 // ======================== 配置解析（表驱动 + 分段函数） ========================
@@ -800,13 +805,14 @@ static int parse_common_cfg(const char *key, int val, const char *val_str) {
 }
 
 /**
- * 把界面侧开关转写成 /data/local/tmp 标志文件（BACK_HIDE=0/1、BT_ON_SEC=<秒>），供宿主进程里的钩子读取。
+ * 把界面侧开关转写成 /data/local/tmp 标志文件（BACK_HIDE=0/1、GATE_LE=0/1、BT_ON_SEC=<秒>），供宿主进程里的钩子读取。
  *
  * <p>只在值变化时写；写失败不更新「已写出」记录，下一轮配置重载会重试，且只记一条日志。
  * 先写 .tmp 再 rename，避免钩子读到半行。
  */
 static void publish_uiprefs(void) {
     if (back_hide_enabled == uiprefs_last_back_hide
+            && gate_le_enabled == uiprefs_last_gate_le
             && bt_auto_enable_sec == uiprefs_last_bt_sec) {
         return;
     }
@@ -815,12 +821,13 @@ static void publish_uiprefs(void) {
     FILE *f = fopen(tmp, "w");
     if (!f) {
         if (!uiprefs_fail_logged) {
-            write_log("界面开关 标志文件不可写 %s（返回键后台化将按默认值生效）", UIPREFS_PATH);
+            write_log("界面开关 标志文件不可写 %s（界面开关将按默认值生效）", UIPREFS_PATH);
             uiprefs_fail_logged = 1;
         }
         return;
     }
     fprintf(f, "BACK_HIDE=%d\n", back_hide_enabled ? 1 : 0);
+    fprintf(f, "GATE_LE=%d\n", gate_le_enabled ? 1 : 0);
     fprintf(f, "BT_ON_SEC=%d\n", bt_auto_enable_sec);
     fclose(f);
     if (rename(tmp, UIPREFS_PATH) != 0) {
@@ -832,6 +839,7 @@ static void publish_uiprefs(void) {
         return;
     }
     uiprefs_last_back_hide = back_hide_enabled;
+    uiprefs_last_gate_le = gate_le_enabled;
     uiprefs_last_bt_sec = bt_auto_enable_sec;
     uiprefs_fail_logged = 0;
 }
@@ -885,6 +893,75 @@ static void reset_cpu_affinity_defaults(void) {
     affinity_spec[sizeof(affinity_spec) - 1] = '\0';
 }
 
+/** 第一遍预读的层总开关（其余预读键直接写全局变量） */
+struct PrepassCfg {
+    int perf_enabled;   // PERF_ENABLED（默认 1）
+    int debug_enabled;  // DEBUG_ENABLED
+    int sysfs_enabled;  // SYSFS_ENABLED
+};
+
+/**
+ * 第一遍预读键的**唯一名单与处理入口**：层总开关，以及不受层开关管辖的基础设施键。
+ * <p>out != NULL：第一遍读取并生效；out == NULL：第二遍只判断「是否属于预读集合」用于跳过。
+ * 两遍共用本函数，新增预读键只在此加一行——不得在第二遍另抄一份键名列表，否则漏改会让
+ * 已消费的键落进「未识别键」日志。
+ * @return 1=属于预读集合；0=不属于
+ */
+static int config_apply_prepass_key(struct PrepassCfg *out, const char *key, const char *val_str) {
+    if (strcmp(key, "PERF_ENABLED") == 0) {
+        if (out) out->perf_enabled = atoi(val_str) != 0;
+    } else if (strcmp(key, "DEBUG_ENABLED") == 0) {
+        if (out) out->debug_enabled = atoi(val_str) != 0;
+    } else if (strcmp(key, "SYSFS_ENABLED") == 0) {
+        if (out) out->sysfs_enabled = atoi(val_str) != 0;   // sysfs 路径与缩放独立大类
+    } else if (strcmp(key, "APP_LAUNCH_ENABLED") == 0) {
+        if (out) APP_LAUNCH_ENABLED = (atoi(val_str) != 0);   // 任何模式下都生效（含 PERF=0/DEBUG=0）
+    } else if (strcmp(key, "APP_WATCHDOG") == 0) {
+        if (out) app_watchdog_cycles = clamp(atoi(val_str), 0, 120);   // 锁死自动重启停滞周期数（0=关闭）
+    } else if (strcmp(key, "APP_LAUNCH_COOLDOWN") == 0) {
+        if (out) app_launch_cooldown = clamp(atoi(val_str), 0, 3600);  // 两次拉起最小间隔（秒，0=不冷却）
+    } else if (strcmp(key, "APP_LAUNCH_SCREEN_GATE") == 0) {
+        // 屏幕门禁（二值：开关 Dozing是否算亮屏）；仅 mWakefulness=Awake（或按配置算亮屏的 Dozing）才拉起
+        // 旧三值行「开关 读取失败默认值 Dozing」：按原语义取第一、第三值（第二值已废弃），并记一次日志。
+        if (!out) return 1;
+        int on = app_launch_screen_gate_enabled;
+        int legacy_fail_default = 1;
+        int dz = app_launch_screen_dozing_on;
+        int n = sscanf(val_str, "%d %d %d", &on, &legacy_fail_default, &dz);
+        if (n >= 3) {
+            app_launch_screen_gate_enabled = (on != 0);
+            app_launch_screen_dozing_on    = (dz != 0);
+            if (!legacy_screen_gate_logged) {
+                write_log("配置 APP_LAUNCH_SCREEN_GATE 旧三值行（开关=%d 读取失败默认值=%d Dozing=%d）：按原语义取第一、第三值；第二值已废弃，读取失败固定按可拉起兜底",
+                          on, legacy_fail_default, dz);
+                legacy_screen_gate_logged = 1;
+            }
+        } else {
+            dz = app_launch_screen_dozing_on;
+            n = sscanf(val_str, "%d %d", &on, &dz);
+            if (n >= 1) app_launch_screen_gate_enabled = (on != 0);
+            if (n >= 2) app_launch_screen_dozing_on  = (dz != 0);
+        }
+    } else if (strcmp(key, "UI_BACK_HIDE") == 0) {
+        // 界面键里唯一被守护进程读取的一个：本机不消费，只转写标志文件供钩子读取。
+        // 与 APP_LAUNCH_ENABLED 同理，必须在第一遍读掉——否则 PERF/DEBUG/SYSFS 全关时本函数会提前 return。
+        if (out) back_hide_enabled = (atoi(val_str) != 0);
+    } else if (strcmp(key, "UI_GATE_LE") == 0) {
+        // 同 UI_BACK_HIDE：本机不消费，只转写 GATE_LE= 供宿主钩子读取（类型门禁放行）
+        if (out) gate_le_enabled = (atoi(val_str) != 0);
+    } else if (strcmp(key, "WD_KEEPALIVE") == 0) {
+        // 反向保活开关：与 UI_BACK_HIDE 同理必须在第一遍读掉（它是基础设施，不受 PERF/DEBUG/SYSFS 层开关管辖，
+        // 三层全关时本函数会提前 return，那时也必须已生效）。
+        if (out) wd_keepalive_enabled = (atoi(val_str) != 0);
+    } else if (strcmp(key, "BT_AUTO_ENABLE_SEC") == 0) {
+        // 断连自动开蓝牙间隔（秒，0=关闭）：同 UI_BACK_HIDE，必须第一遍读掉以便转写进 uiprefs。
+        if (out) bt_auto_enable_sec = clamp(atoi(val_str), 0, 3600);
+    } else {
+        return 0;
+    }
+    return 1;
+}
+
 static int load_config(const char *path) {
     FILE *f = fopen(path, "r");
     if (!f) {
@@ -894,9 +971,7 @@ static int load_config(const char *path) {
     // --- 第一遍：预读 PERF_ENABLED 和 DEBUG_ENABLED（全扫描，不受配置顺序影响）---
     // 须容纳最长配置行 PID_CUT_<n> 满 32 点（四元组，最长 ≈522 字节含换行），故取 640
     char line[640];
-    int perf_enabled = 1;
-    int found_debug = 0;
-    int found_sysfs = 0;
+    struct PrepassCfg pre = {1, 0, 0};   // 见 config_apply_prepass_key
     struct RescanCfgState rescan = {0};
     while (fgets(line, sizeof(line), f)) {
         // 单位标记是注释行，config_parse_line 会跳过，故在解析前单独识别
@@ -905,51 +980,7 @@ static int load_config(const char *path) {
         char *key;
         char *val_str = config_parse_line(line, &key);
         if (!val_str) continue;
-        if (strcmp(key, "PERF_ENABLED") == 0) {
-            perf_enabled = atoi(val_str) != 0;
-        } else if (strcmp(key, "DEBUG_ENABLED") == 0) {
-            found_debug = atoi(val_str) != 0;
-        } else if (strcmp(key, "SYSFS_ENABLED") == 0) {
-            found_sysfs = atoi(val_str) != 0;   // sysfs 路径与缩放独立大类
-        } else if (strcmp(key, "APP_LAUNCH_ENABLED") == 0) {
-            APP_LAUNCH_ENABLED = (atoi(val_str) != 0);   // 任何模式下都生效（含 PERF=0/DEBUG=0）
-        } else if (strcmp(key, "APP_WATCHDOG") == 0) {
-            app_watchdog_cycles = clamp(atoi(val_str), 0, 120);   // 锁死自动重启停滞周期数（0=关闭）
-        } else if (strcmp(key, "APP_LAUNCH_COOLDOWN") == 0) {
-            app_launch_cooldown = clamp(atoi(val_str), 0, 3600);  // 两次拉起最小间隔（秒，0=不冷却）
-        } else if (strcmp(key, "APP_LAUNCH_SCREEN_GATE") == 0) {
-            // 屏幕门禁（二值：开关 Dozing是否算亮屏）；仅 mWakefulness=Awake（或按配置算亮屏的 Dozing）才拉起
-            // 旧三值行「开关 读取失败默认值 Dozing」：按原语义取第一、第三值（第二值已废弃），并记一次日志。
-            int on = app_launch_screen_gate_enabled;
-            int legacy_fail_default = 1;
-            int dz = app_launch_screen_dozing_on;
-            int n = sscanf(val_str, "%d %d %d", &on, &legacy_fail_default, &dz);
-            if (n >= 3) {
-                app_launch_screen_gate_enabled = (on != 0);
-                app_launch_screen_dozing_on    = (dz != 0);
-                if (!legacy_screen_gate_logged) {
-                    write_log("配置 APP_LAUNCH_SCREEN_GATE 旧三值行（开关=%d 读取失败默认值=%d Dozing=%d）：按原语义取第一、第三值；第二值已废弃，读取失败固定按可拉起兜底",
-                              on, legacy_fail_default, dz);
-                    legacy_screen_gate_logged = 1;
-                }
-            } else {
-                dz = app_launch_screen_dozing_on;
-                n = sscanf(val_str, "%d %d", &on, &dz);
-                if (n >= 1) app_launch_screen_gate_enabled = (on != 0);
-                if (n >= 2) app_launch_screen_dozing_on  = (dz != 0);
-            }
-        } else if (strcmp(key, "UI_BACK_HIDE") == 0) {
-            // 界面键里唯一被守护进程读取的一个：本机不消费，只转写标志文件供钩子读取。
-            // 与 APP_LAUNCH_ENABLED 同理，必须在第一遍读掉——否则 PERF/DEBUG/SYSFS 全关时本函数会提前 return。
-            back_hide_enabled = (atoi(val_str) != 0);
-        } else if (strcmp(key, "WD_KEEPALIVE") == 0) {
-            // 反向保活开关：与 UI_BACK_HIDE 同理必须在第一遍读掉（它是基础设施，不受 PERF/DEBUG/SYSFS 层开关管辖，
-            // 三层全关时本函数会提前 return，那时也必须已生效）。
-            wd_keepalive_enabled = (atoi(val_str) != 0);
-        } else if (strcmp(key, "BT_AUTO_ENABLE_SEC") == 0) {
-            // 断连自动开蓝牙间隔（秒，0=关闭）：同 UI_BACK_HIDE，必须第一遍读掉以便转写进 uiprefs。
-            bt_auto_enable_sec = clamp(atoi(val_str), 0, 3600);
-        }
+        config_apply_prepass_key(&pre, key, val_str);   // 名单与第二遍跳过共用同一函数
     }
 
     // 转写要在下面的前置处理与提前 return 之前完成（总开关全关时也要发布）
@@ -963,31 +994,31 @@ static int load_config(const char *path) {
 
     // 层开关 1→0 边沿：该层运行时参数回落代码默认值（首次加载 last_* = -1，不触发）。
     // 复位点必须在下面「三层全关提前 return」之前：三层全关时第二遍不跑，只有这里能复位。
-    if (last_perf_enabled == 1 && !perf_enabled) {
+    if (last_perf_enabled == 1 && !pre.perf_enabled) {
         reset_perf_layer_defaults();
         write_log("配置 性能参数层关闭 → 运行时参数回落代码默认值");
     }
-    if (last_sysfs_enabled == 1 && !found_sysfs) {
+    if (last_sysfs_enabled == 1 && !pre.sysfs_enabled) {
         reset_sysfs_layer_defaults();
         write_log("配置 sysfs 层关闭 → 运行时参数回落代码默认值");
     }
-    last_perf_enabled  = perf_enabled;
-    last_sysfs_enabled = found_sysfs;
+    last_perf_enabled  = pre.perf_enabled;
+    last_sysfs_enabled = pre.sysfs_enabled;
 
     // debug_mode 需在提前 return 前更新（PERF=0 且 DEBUG=0 时也清零）
-    if (found_debug) {
+    if (pre.debug_enabled) {
         debug_mode = 1;
         write_log("配置 调试日志 开启");
     } else {
         debug_mode = 0;
     }
 
-    if (!perf_enabled && !found_debug && !found_sysfs) {
+    if (!pre.perf_enabled && !pre.debug_enabled && !pre.sysfs_enabled) {
         fclose(f);   // PERF/DEBUG/SYSFS 全关：跳过解析
         return 1;    // 文件已读到（内容就是"全关"），算加载成功，不要再触发重试
     }
 
-    if (perf_enabled) {
+    if (pre.perf_enabled) {
         write_log("配置 自定义性能参数 启用");
     }
 
@@ -1000,6 +1031,8 @@ static int load_config(const char *path) {
         char *key;
         char *val_str = config_parse_line(line, &key);
         if (!val_str) continue;
+        // 第一遍已消费的键：按同一名单跳过（apply=NULL 只查集合，不重复生效），不落「未识别键」
+        if (config_apply_prepass_key(NULL, key, val_str)) continue;
         int val = atoi(val_str);
 
         // --- DEBUG 子开关：仅 DEBUG_ENABLED=1 时解析 ---
@@ -1009,13 +1042,13 @@ static int load_config(const char *path) {
         }
 
         // --- sysfs 路径与缩放层（SYSFS_ENABLED=1 时加载，独立于性能/调试总开关） ---
-        if (found_sysfs && is_sysfs_key(key)) {
+        if (pre.sysfs_enabled && is_sysfs_key(key)) {
             parse_sysfs_cfg(key, val, val_str, &rescan);
             continue;
         }
 
         // --- 性能参数：仅 PERF_ENABLED=1 时解析（不含 DEBUG_*/sysfs 路径键） ---
-        if (!perf_enabled) continue;
+        if (!pre.perf_enabled) continue;
 
         // 旧键兼容（永久）：KI_CUT_<簇号>（三元组）与已废弃的 KI_CUT_SMOOTH，见 parse_legacy_pidcut_cfg
         if (parse_legacy_pidcut_cfg(key, val_str)) continue;
@@ -1029,7 +1062,7 @@ static int load_config(const char *path) {
 
     // CPU_AFFINITY 缺键时回落代码默认（其余键沿用"缺键 = 保持上次值"）：该键的默认值就是
     // "未配置时应生效的区间"，沿用旧值会让手删该行后仍留着旧区间
-    if (found_sysfs && !affinity_cfg_seen) reset_cpu_affinity_defaults();
+    if (pre.sysfs_enabled && !affinity_cfg_seen) reset_cpu_affinity_defaults();
 
     apply_legacy_pidcut();   // 旧键生效：仅填充本轮未被新键 PID_CUT_ 占用的簇（新键优先）
 

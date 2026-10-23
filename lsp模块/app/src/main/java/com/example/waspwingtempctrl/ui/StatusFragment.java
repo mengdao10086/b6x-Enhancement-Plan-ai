@@ -365,17 +365,31 @@ public class StatusFragment extends Fragment implements PageAware {
     /**
      * 部署：直接上屏 {@link Deployer#deploy()} 自己带回的状态（不再补一次 probe），随后按
      * {@link Deployer.Result#placementsOk} 决定要不要自动「点」一次拉起daemon；部署失败时清掉一次性去重标记。
+     * 开始即把忙态文案写进状态区（避免只有进度条、看起来像卡住），结束未出结果时恢复原文本。
      * 判据与理由见 {@code app/逻辑说明.md} §8.1 与 §2.2。
      */
     private void deploy() {
         daemonStoppedByUser = false;   // 部署结束会接着拉起（见本方法的 after 回调）
         final Context app = requireContext().getApplicationContext();
-        runAsync(getString(R.string.status_busy_deploy), () -> {
+        final String busyText = getString(R.string.status_busy_deploy);
+        final CharSequence previousStatus = statusView != null ? statusView.getText() : null;
+        // 已有动作在跑时 runAsync 会直接返回（只写一条操作记录），此时不能写占位文案，否则会永久残留
+        final boolean busyShown = !actionRunning;
+        if (busyShown) {
+            swapStatusTextAnimated(busyText);   // 立刻上屏；成功时随后由结果覆盖
+        }
+        runAsync(busyText, () -> {
             Deployer.Result result = Deployer.get(app).deploy();
             deployPlaced = result.placementsOk;
             deployFailed = !result.ok;
             return result.status != null ? result.status.describe() : result.describe();
         }, false, true, () -> {
+            // 失败走对话框、不写状态区：占位文案此时仍在（或还在等选中结束），恢复部署前的文本，避免残留
+            if (busyShown && statusView != null
+                    && (busyText.contentEquals(statusView.getText())
+                        || busyText.equals(pendingStatusText))) {
+                swapStatusTextAnimated(previousStatus != null ? previousStatus.toString() : "");
+            }
             if (deployPlaced) {
                 startDaemon();
             }

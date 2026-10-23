@@ -55,6 +55,16 @@ public class MainHook implements IXposedHookLoadPackage {
     // 界面开关标志文件（守护进程写、本进程读）；界面 → 钩子的唯一通道。
     // 跨进程通道说明见 app/逻辑说明.md §1.4，写入端见 tempctrl.c 的 UIPREFS_PATH。
     private static final String UIPREFS_FILE = "/data/local/tmp/tempctrl_uiprefs";
+    // ===== 修复 #5：SDK 类型门禁放行（仅目标包、仅 connect() 执行期、仅目标地址）=====
+    // 动机：冷启动只能凭地址重建设备对象，getType() 恒为 UNKNOWN，SDK 的 connect() 因此在
+    //   发令前直接拒绝（日志 "current device is not a valid BLE device"），后台重连永不生效。
+    // 边界与开关语义见 参数定义/params.def.json 的 UI_GATE_LE；结论依据见 app/逻辑说明.md §1.7。
+    private static final String GATE_LE_PREFIX = "GATE_LE=";   // 界面开关（守护进程转写进 uiprefs）
+    private static final long GATE_LE_CACHE_MS = 30 * 1000L;   // 开关缓存（读不到按默认=开）
+    private static final ThreadLocal<Boolean> gateLeActive = new ThreadLocal<>();  // 仅 connect() 执行期置位
+    private static volatile boolean gateLeCfg = true;          // 开关当前值（默认开）
+    private static volatile long gateLeCfgAt = 0;              // 开关上次读取时刻（0=未读过）
+    private static long gateLeLogAt = 0;                       // "门禁放行"日志限频
     // 上次设备 MAC 落点（宿主 app 私有目录，各包各记，按包名拼死路径）。
     // 落点选择与冷启动自动连接的说明见 app/逻辑说明.md §1.6；在 handleLoadPackage 里赋值。
     private static String lastDevFile = null;
@@ -961,6 +971,8 @@ public class MainHook implements IXposedHookLoadPackage {
         if (appKind == 6) hookB6ViewModelFix(lpparam);   // 修复 #2：ViewModel LiveData（仅 B6X）
         if (appKind == 6) hookB6Diagnostics(lpparam);    // 修复 #3/#4 + 诊断钩子（仅 B6X）
         hookCommonDisconnect(lpparam);                // 公共 BLE 断联（双设备）
+        // 修复 #5：SDK 类型门禁放行（仅老 B6X app；新包/B7X 未验证同门禁，暂不装）
+        if (PACKAGE_B6X.equals(lpparam.packageName)) hookDeviceTypeGate(lpparam);
         hookRunFetchLoopCpuFix(lpparam);              // runFetchLoop CPU 满载修复（双设备）
         if (appKind == 6) hookB6Activity(lpparam);       // 自动进入设置界面（仅 B6X）
         hookWaspWingManagerCapture(lpparam);          // 捕获 WaspWingManager 实例（双设备）
@@ -1183,6 +1195,7 @@ public class MainHook implements IXposedHookLoadPackage {
                     new XC_MethodHook() {
                         @Override
                         protected void beforeHookedMethod(MethodHookParam param) {
+                            gateLeActive.set(Boolean.TRUE);   // 修复 #5：标记「SDK 连接期」，供 getType 钩子放行
                             if (!connEnterLogAllowed()) return;
                             Object ctrl = param.thisObject;
                             Object dev = XposedHelpers.callMethod(ctrl, "getMBluetoothDevice");
@@ -1193,6 +1206,7 @@ public class MainHook implements IXposedHookLoadPackage {
                         }
                         @Override
                         protected void afterHookedMethod(MethodHookParam param) {
+                            gateLeActive.remove();            // 修复 #5：连接期结束，立即失效（异常路径同样执行）
                             if (!connExitLogAllowed()) return;
                             Object ctrl = param.thisObject;
                             Object gatt = XposedHelpers.getObjectField(ctrl, "mBluetoothGatt");
@@ -1275,6 +1289,88 @@ public class MainHook implements IXposedHookLoadPackage {
         } catch (Throwable t) {
             XposedBridge.log(TAG + " 钩 BluetoothGatt.disconnect 失败: " + t.getMessage());
         }
+    }
+
+    /**
+     * 修复 #5：SDK 类型门禁放行。
+     *
+     * <p>宿主 SDK 的 {@code LeDataInteractionController.connect()} 在发令前判 {@code BluetoothDevice.getType()}，
+     * 只接受 LE(2)/DUAL(3)，否则打 {@code current device is not a valid BLE device} 并直接 return。冷启动时
+     * 模块只能凭地址重建设备对象（{@code getRemoteDevice}/{@code getRemoteLeDevice}），其类型恒为 UNKNOWN，
+     * 于是后台重连永远停在门禁前（依据见 app/逻辑说明.md §1.7）。
+     *
+     * <p>本钩子只在三个条件同时成立时把返回值改成 LE：① 当前线程处于 SDK {@code connect()} 执行期
+     * （{@link #gateLeActive}，由 connect 钩子置/清）；② 设备地址等于 {@link #lastDevice} 的地址；
+     * ③ 界面开关 {@code GATE_LE} 非 0（缺省开）。缺一即原样返回，故不影响模块自身的类型探针
+     * （它在 tick 线程调用，不在连接期），也不影响其它设备与经典通道的门禁。
+     */
+    private static void hookDeviceTypeGate(XC_LoadPackage.LoadPackageParam lpparam) {
+        try {
+            XposedHelpers.findAndHookMethod(BluetoothDevice.class, "getType", new XC_MethodHook() {
+                @Override
+                protected void afterHookedMethod(MethodHookParam param) {
+                    try {
+                        if (!Boolean.TRUE.equals(gateLeActive.get())) return;   // 非 SDK 连接期：不干预
+                        if (param.getThrowable() != null) return;               // 原方法已抛异常：不吞异常、不改结果
+                        Object r = param.getResult();
+                        if (r instanceof Integer && (Integer) r == BluetoothDevice.DEVICE_TYPE_LE) return;
+                        Object self = param.thisObject;
+                        if (!(self instanceof BluetoothDevice)) return;
+                        BluetoothDevice dev = (BluetoothDevice) self;
+                        BluetoothDevice target = lastDevice;
+                        if (target == null) return;
+                        String addr = dev.getAddress();
+                        if (addr == null || !addr.equals(target.getAddress())) return;   // 只放行目标设备
+                        if (!readGateLeEnabled()) return;                                // 开关关闭：保持原行为
+                        param.setResult(BluetoothDevice.DEVICE_TYPE_LE);
+                        if (gateLeLogAllowed())
+                            XposedBridge.log(TAG + " [修复] getType 门禁放行 -> " + addr);
+                    } catch (Throwable ignored) {
+                        // 任何异常都不改结果（退化为原行为），也不向宿主抛出
+                    }
+                }
+            });
+            XposedBridge.log(TAG + " 已钩住 BluetoothDevice.getType（类型门禁·仅连接期放行目标设备）");
+        } catch (Throwable t) {
+            XposedBridge.log(TAG + " 钩 BluetoothDevice.getType 失败: " + t.getMessage());
+        }
+    }
+
+    /**
+     * 读界面开关 {@code GATE_LE=0/1}（守护进程写 {@link #UIPREFS_FILE}，与 UI_BACK_HIDE 同通道）。
+     * 读不到 / 无该行 / 值异常一律按默认值「开」，只有明确的 0 才关闭。带 30s 缓存，改动最迟半分钟生效。
+     */
+    private static boolean readGateLeEnabled() {
+        long now = System.currentTimeMillis();
+        if (gateLeCfgAt != 0 && now - gateLeCfgAt < GATE_LE_CACHE_MS) return gateLeCfg;
+        gateLeCfgAt = now;
+        boolean v = true;
+        try {
+            BufferedReader br = new BufferedReader(new java.io.FileReader(UIPREFS_FILE));
+            try {
+                String line;
+                while ((line = br.readLine()) != null) {
+                    if (line.startsWith(GATE_LE_PREFIX)) {
+                        v = !"0".equals(line.substring(GATE_LE_PREFIX.length()).trim());
+                        break;
+                    }
+                }
+            } finally {
+                br.close();
+            }
+        } catch (Throwable ignored) {
+            // 文件不存在属正常（守护进程尚未写过），走默认值
+        }
+        gateLeCfg = v;
+        return v;
+    }
+
+    /** "门禁放行"日志限频（5 分钟一条，与重连类日志同口径）。 */
+    private static boolean gateLeLogAllowed() {
+        long now = System.currentTimeMillis();
+        if (now - gateLeLogAt < RECONNECT_LOG_INTERVAL_MS) return false;
+        gateLeLogAt = now;
+        return true;
     }
 
     /** 修复 DefaultDispatcher 线程 100% CPU */

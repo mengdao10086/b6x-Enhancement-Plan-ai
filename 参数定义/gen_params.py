@@ -145,7 +145,7 @@ def _ui_clean(lines):
     return out
 
 
-def _ui_note(entry):
+def _ui_note(entry, labels=None):
     """由定义里的注释原文构建界面浮窗用的 uiNote（有序小节）；无任何注释时返回 []（则该键不输出 uiNote）。
 
     小节：作用（docDesc，缺则 desc）· 填写指导（confNote 清洗后）· 取值（rangeNote）·
@@ -163,11 +163,17 @@ def _ui_note(entry):
     defaults = [_ui_plain(entry[k]) for k in ("defaultNote", "factoryNote") if entry.get(k)]
     if defaults:
         nodes.append({"title": "默认", "text": "\n".join(defaults)})
+    labels = labels or {}
+
+    def _label(k):
+        return "%s（%s）" % (labels[k], k) if labels.get(k) else k
+
     conds = []
     if entry.get("requires"):
-        conds.append("需先开启：" + " / ".join(entry["requires"]))
+        conds.append("需先开启：" + " / ".join(_label(k) for k in entry["requires"]))
     if entry.get("hiddenWhen"):
-        conds.append("以下键任一为 1 时本项隐藏：" + " / ".join(entry["hiddenWhen"]))
+        conds.append("以下键任一开启时本项隐藏："
+                     + " / ".join(_label(k) for k in entry["hiddenWhen"]))
     if conds:
         nodes.append({"title": "生效条件", "text": "\n".join(conds)})
     # 「有注释才输出」：定义里写了 docDesc 或 confNote 才输出；都没有的键不产出 uiNote（逐字节不变）。
@@ -179,6 +185,7 @@ def _ui_note(entry):
 def build_params_json(definition):
     """由定义构建界面消费的 params.json（键序完全由定义决定，保证幂等）。"""
     keys_out = {}
+    labels = {e["key"]: e["label"] for e in definition["keys"]}
     for entry in definition["keys"]:
         item = {
             "key": entry["key"],
@@ -205,7 +212,7 @@ def build_params_json(definition):
                 item[opt] = entry[opt]
         # 界面「说明浮窗」用的注释小节（顺序：作用 / 填写指导 / 取值 / 默认 / 生效条件）；
         # 只有定义里写了 docDesc/confNote 的键才输出，其余键产物逐字节不变。
-        ui = _ui_note(entry)
+        ui = _ui_note(entry, labels)
         if ui:
             item["uiNote"] = ui
         fields = entry.get("fields")
@@ -741,7 +748,7 @@ def parse_c_keys(c_text):
         for row in tables[pid]:
             found[row[0]] = table
     for func in ("parse_debug_cfg", "parse_sysfs_cfg", "parse_pid_cfg",
-                 "parse_common_cfg", "load_config"):
+                 "parse_common_cfg", "config_apply_prepass_key", "load_config"):
         body = _func_body(c_text, func)
         for m in re.finditer(r'strcmp\(\s*key\s*,\s*"([A-Z0-9_]+)"\s*\)', body):
             found.setdefault(m.group(1), func)

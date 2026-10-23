@@ -46,7 +46,7 @@ sys.dont_write_bytecode = True   # 不在 参数定义/ 里留 __pycache__（.gi
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import gen_params  # noqa: E402  同目录模块，标准库路径规则即可导入
 
-EXPECTED_KEY_COUNT = 55
+EXPECTED_KEY_COUNT = 56
 VALID_TYPES = ("switch", "int", "multi", "path", "enum", "table")
 
 

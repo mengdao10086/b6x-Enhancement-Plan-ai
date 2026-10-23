@@ -1151,7 +1151,8 @@ public final class ConfigStore {
                             fo.isNull("max") ? null : Integer.valueOf(fo.optInt("max")),
                             fo.optInt("default", 0),
                             fo.optBoolean("bool", false),
-                            fo.optBoolean("allowEmpty", false)));
+                            fo.optBoolean("allowEmpty", false),
+                            fo.optString("unitNote", "")));
                 }
             }
             this.fields = f.isEmpty() ? null : Collections.unmodifiableList(f);
@@ -1210,7 +1211,8 @@ public final class ConfigStore {
                         fo.isNull("min") ? null : Integer.valueOf(fo.optInt("min")),
                         fo.isNull("max") ? null : Integer.valueOf(fo.optInt("max")),
                         0, false,
-                        fo.optBoolean("allowEmpty", false)));
+                        fo.optBoolean("allowEmpty", false),
+                        fo.optString("unitNote", "")));
             }
             return f.isEmpty() ? null : Collections.unmodifiableList(f);
         }
@@ -1342,6 +1344,11 @@ public final class ConfigStore {
     public static final class FieldMeta {
         public final String label;
         public final String unit;
+        /**
+         * 字段级单位/换算说明（{@code params.json} 的 {@code fields[].unitNote}），如
+         * 「存储值 = 实际指数 ×100（150 = 1.50）」；定义里没写时为空串。
+         */
+        public final String unitNote;
         public final Integer min;
         public final Integer max;
         public final int defaultValue;
@@ -1358,9 +1365,10 @@ public final class ConfigStore {
         public final boolean allowEmpty;
 
         FieldMeta(String label, String unit, Integer min, Integer max, int defaultValue,
-                  boolean bool, boolean allowEmpty) {
+                  boolean bool, boolean allowEmpty, String unitNote) {
             this.label = label;
             this.unit = unit;
+            this.unitNote = unitNote;
             this.min = min;
             this.max = max;
             this.defaultValue = defaultValue;
