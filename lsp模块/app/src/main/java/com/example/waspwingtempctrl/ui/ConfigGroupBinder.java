@@ -25,8 +25,9 @@ import java.util.List;
  * {@link ConfigKeyRow#commitSwitch}；master 为 null 的组（"未分组"兜底组、设置页的 {@code webui} 组）
  * 卡头不放开关键。**总开关也有「?」**（紧贴卡头标题右侧，复用 {@link ConfigKeyRow#attachHintIcon}）。
  * 两个"整组一句话"的标注（未生效 / 界面自用）都只在卡头出现一次。
- * <b>键行全建、展开只切可见性</b>：行由 {@link #buildRows()} 一次建满，{@link #setExpanded} 只切可见性，
- * 展开从不现场建控件。设计理由见 app 逻辑说明.md §6.1。
+ * <b>键行全建、展开只切可见性</b>：正常时行由 {@link #buildRows()} 一次建满，{@link #setExpanded} 只切可见性；
+ * 若展开时全量建行还没跑到，则先补建一次再展开（{@link #ensureRowsBuilt()}），绝不展开空 body。
+ * 设计理由见 app 逻辑说明.md §6.1。
  *
  * <p><b>两列</b>（目前只有「日志 &amp; 调试」组）：本类把该组的键行改标 `halfLine`（见
  * {@link WrapRowLayout#setHalfLine}），由容器逐行实测决定两项并排还是独占整行；行同时以紧凑几何建
@@ -56,6 +57,8 @@ final class ConfigGroupBinder {
     private final boolean twoColumn;
 
     private boolean expanded;
+    /** 行是否已建：buildRows 幂等；展开入口据此补建，保证任何时刻都不会展开空 body。 */
+    private boolean rowsBuilt;
 
     /** true 时忽略组头开关回调：程序化回填值不该被当成用户改动作业。 */
     private boolean suppressMaster;
@@ -103,7 +106,7 @@ final class ConfigGroupBinder {
             // 其后一枚 0dp 权重的 Space 把徽标 / 开关 / 箭头推到行尾，故 index 1 正好落在标题与 Space 之间。
             View header = card.findViewById(R.id.config_group_header);
             if (header instanceof ViewGroup) {
-                ConfigKeyRow.attachHintIcon((ViewGroup) header, 1, masterMeta, false);
+                ConfigKeyRow.attachHintIcon((ViewGroup) header, 1, masterMeta, false, true);
             }
         }
 
@@ -175,15 +178,23 @@ final class ConfigGroupBinder {
      * <p><b>行没"建全"时不能走这条路</b>（判据是行数与键数不等，不是"行表为空"）：按不完整的行表算出的
      * "未生效 0 个"会把卡头徽标错误隐藏，而那枚徽标在收起态是<b>唯一</b>可见的依赖提示。故没建全就转走
      * 同源判据的另一条路（{@link #refreshHeaderBadge}）。见 app 逻辑说明.md §6.1。
+     *
+     * <p><b>组头总开关已关时</b>：组内所有行都按未生效处理（无差别压暗），徽标计数 = 本组行数
+     * （行还没建时 = 键数）。总开关一开即回到按 {@code requires} 逐行判断。
      */
     void refreshBadges() {
+        final boolean masterOff = groupOff();
         if (rows.size() != keyMetas.size()) {   // 行与键一一对应，不等即没建全
-            refreshHeaderBadge();
+            if (masterOff) {
+                setBadge(keyMetas.size());
+            } else {
+                refreshHeaderBadge();
+            }
             return;
         }
         int unsatisfied = 0;
         for (ConfigKeyRow row : rows) {
-            if (row.refreshDependencyState()) {
+            if (row.refreshDependencyState(masterOff)) {
                 unsatisfied++;
             }
         }
@@ -193,8 +204,14 @@ final class ConfigGroupBinder {
     /**
      * 只刷卡头徽标（<b>行还没建时的那条路</b>）：判据与行内压暗同源（{@link ConfigKeyRow#isUnsatisfied}），
      * 直接问 store 的当前值、不经过行。用于"先建卡头、行稍后再建"的时序（见 §5.2）。见 app 逻辑说明.md §6.1。
+     *
+     * <p>组头总开关已关时整组都算未生效：徽标计数直接取键数，不再逐条看 {@code requires}。
      */
     void refreshHeaderBadge() {
+        if (groupOff()) {
+            setBadge(keyMetas.size());
+            return;
+        }
         int unsatisfied = 0;
         for (KeyMeta meta : keyMetas) {
             if (ConfigKeyRow.isUnsatisfied(meta, host)) {
@@ -202,6 +219,15 @@ final class ConfigGroupBinder {
             }
         }
         setBadge(unsatisfied);
+    }
+
+    /** 本组总开关是否已关：有 master 且其当前有效值为 0（取不到值按未关处理）；master 为 null 的组恒为 false。 */
+    private boolean groupOff() {
+        if (masterMeta == null) {
+            return false;
+        }
+        Value value = host.effectiveValue(masterMeta.key);
+        return value != null && value.intAt(0) == 0;
     }
 
     /** 卡头那枚「未生效」徽标：可见性与无障碍描述两处一起改（两条刷新路共用这一处落点）。 */
@@ -214,12 +240,16 @@ final class ConfigGroupBinder {
     }
 
     /**
-     * 展开/折叠本组：<b>只切可见性</b>（行由 {@link #buildRows()} 建满，本方法与建控件无关）。
+     * 展开/折叠本组：正常情况下<b>只切可见性</b>（行由 {@link #buildRows()} 建满）；行还没建时先补建一次
+     * （见 {@link #ensureRowsBuilt()}），保证任何时刻都不会展开空 body。
      *
      * <p>构造时默认折叠（长列表先看分组名），设置页只此一组故由调用方改为默认展开。
      */
     void setExpanded(boolean value) {
         expanded = value;
+        if (value) {
+            ensureRowsBuilt();
+        }
         // 展开/收起按逻辑 2 做高度补间（系统关动画或宽度不可知时由 Motion 直接落位）；
         // 箭头用同一次返回的时长驱动——两者同生共灭，不另设箭头常量
         final long duration = Motion.animateHeight(body, value);
@@ -245,7 +275,8 @@ final class ConfigGroupBinder {
     }
 
     /**
-     * 建本组键行（收起态也留着；由 {@code ConfigFormController} 在建表时调一次）。
+     * 建本组键行（收起态也留着；由 {@code ConfigFormController} 在建表时调一次，展开入口也可能先补建一次）。
+     * <b>幂等</b>：{@link #rowsBuilt} 一旦立起就直接返回，重复调用不会重复建行。
      *
      * <p><b>这里不铺值、也不刷徽标</b>：行建起来之后一定紧跟一次
      * {@code ConfigFormController.applySnapshot}（建行与上屏是同一次调用里相邻的两行），值、组头开关、
@@ -253,6 +284,10 @@ final class ConfigGroupBinder {
      * 那一段尤其贵）。
      */
     void buildRows() {
+        if (rowsBuilt) {
+            return;   // 幂等：展开入口可能抢在全量建行之前补建过一次
+        }
+        rowsBuilt = true;   // 先立旗再建：中途异常也不会留下"半套行 + 再次建行"的叠加
         // 一键的组不排两列：半格左对齐只剩一个孤项，观感不如整行
         final boolean twoColumnRows = twoColumn && keyMetas.size() >= 2;
         for (KeyMeta meta : keyMetas) {
@@ -266,6 +301,13 @@ final class ConfigGroupBinder {
                 body.setHalfLine(row.view(), true);
             }
             rows.add(row);
+        }
+    }
+
+    /** 展开入口的兜底：行还没建就补建一次（{@link #buildRows()} 自身幂等，重复调用无副作用）。 */
+    private void ensureRowsBuilt() {
+        if (!rowsBuilt) {
+            buildRows();
         }
     }
 }

@@ -807,13 +807,18 @@ static int parse_common_cfg(const char *key, int val, const char *val_str) {
 /**
  * 把界面侧开关转写成 /data/local/tmp 标志文件（BACK_HIDE=0/1、GATE_LE=0/1、BT_ON_SEC=<秒>），供宿主进程里的钩子读取。
  *
+ * <p>GATE_LE / BT_ON_SEC 受 APP_LAUNCH_ENABLED 控制（用户 2026-10-24 定）：拉起应用总开关关闭时
+ * 对外只发布关闭值（0 / 0），配置值本身不改，重新开启后按原配置恢复。
  * <p>只在值变化时写；写失败不更新「已写出」记录，下一轮配置重载会重试，且只记一条日志。
  * 先写 .tmp 再 rename，避免钩子读到半行。
  */
 static void publish_uiprefs(void) {
+    // 受 APP_LAUNCH_ENABLED 控制（用户 2026-10-24 定）：总开关关闭时不发布放行/自开蓝牙请求。
+    int gate_le_eff = (APP_LAUNCH_ENABLED && gate_le_enabled) ? 1 : 0;
+    int bt_sec_eff  = APP_LAUNCH_ENABLED ? bt_auto_enable_sec : 0;
     if (back_hide_enabled == uiprefs_last_back_hide
-            && gate_le_enabled == uiprefs_last_gate_le
-            && bt_auto_enable_sec == uiprefs_last_bt_sec) {
+            && gate_le_eff == uiprefs_last_gate_le
+            && bt_sec_eff == uiprefs_last_bt_sec) {
         return;
     }
     char tmp[64];
@@ -827,8 +832,8 @@ static void publish_uiprefs(void) {
         return;
     }
     fprintf(f, "BACK_HIDE=%d\n", back_hide_enabled ? 1 : 0);
-    fprintf(f, "GATE_LE=%d\n", gate_le_enabled ? 1 : 0);
-    fprintf(f, "BT_ON_SEC=%d\n", bt_auto_enable_sec);
+    fprintf(f, "GATE_LE=%d\n", gate_le_eff);
+    fprintf(f, "BT_ON_SEC=%d\n", bt_sec_eff);
     fclose(f);
     if (rename(tmp, UIPREFS_PATH) != 0) {
         if (!uiprefs_fail_logged) {
@@ -839,8 +844,8 @@ static void publish_uiprefs(void) {
         return;
     }
     uiprefs_last_back_hide = back_hide_enabled;
-    uiprefs_last_gate_le = gate_le_enabled;
-    uiprefs_last_bt_sec = bt_auto_enable_sec;
+    uiprefs_last_gate_le = gate_le_eff;
+    uiprefs_last_bt_sec = bt_sec_eff;
     uiprefs_fail_logged = 0;
 }
 
@@ -4204,8 +4209,9 @@ static void poll_bt_request(void) {
     if (!tok_valid) return;                     // 畸形：忽略本条，不消费、不更新 handled
     if (tok <= bt_req_handled) return;          // 非新请求
 
-    // 0=关闭：消费掉这条新请求但不执行命令，避免开关再打开时被补执行
-    if (bt_auto_enable_sec <= 0) { bt_req_handled = tok; return; }
+    // 0=关闭或拉起应用总开关关闭：消费掉这条新请求但不执行命令，避免开关再打开时被补执行。
+    // 受 APP_LAUNCH_ENABLED 控制（用户 2026-10-24 定）。
+    if (!APP_LAUNCH_ENABLED || bt_auto_enable_sec <= 0) { bt_req_handled = tok; return; }
 
     static const char *const cmds[] = {
         "/system/bin/svc bluetooth enable > /dev/null 2>&1",
@@ -4374,7 +4380,8 @@ static int spawn_watchdog(const char *path) {
  * 顺序：开关 → 判活（存在即不重复拉起）→ 连续未见阈值 → 脚本存在性 → 拉起冷却/失败退避 → 拉起。
  */
 static void maybe_keepalive_watchdog(void) {
-    if (!wd_keepalive_enabled) return;
+    // 受 APP_LAUNCH_ENABLED 控制（用户 2026-10-24 定）：拉起应用总开关关闭时不执行反向保活。
+    if (!APP_LAUNCH_ENABLED || !wd_keepalive_enabled) return;
     time_t now = time(NULL);
     if (wd_check_at != 0 && now - wd_check_at < WD_KEEPALIVE_INTERVAL) return;
     wd_check_at = now;

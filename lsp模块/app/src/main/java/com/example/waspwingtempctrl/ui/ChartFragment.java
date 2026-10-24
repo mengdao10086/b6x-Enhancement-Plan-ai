@@ -173,6 +173,14 @@ public class ChartFragment extends Fragment {
             windowSec = sec;
             rebuildWindow();
         });
+
+        // 首帧就摆好档位行：不等配置到位，先用回落档位建按钮（真配置到达后由 applySnapshot 保留已选档）。
+        // 视图重建时 config 已在内存，直接用它，避免回落集合把用户已选档挤回默认。
+        int[] options = config != null ? config.windowOptions : ChartConfig.FALLBACK_WINDOW_OPTIONS;
+        if (windowSec <= 0) {
+            windowSec = ChartConfig.FALLBACK_WINDOW_DEFAULT;
+        }
+        buildWindowButtons(options, windowSec);
     }
 
     @Override
@@ -303,12 +311,12 @@ public class ChartFragment extends Fragment {
         // 当前档位不在新档位集合里才回落默认，避免每次切页都把用户选的档位冲掉
         boolean configChanged = config != cfg;
         config = cfg;
-        boolean windowInvalid = windowSec <= 0 || !containsOption(cfg, windowSec);
+        boolean windowInvalid = windowSec <= 0 || !contains(cfg.windowOptions, windowSec);
         if (windowInvalid) {
             windowSec = cfg.windowDefaultSec;
         }
         if (configChanged || windowInvalid) {
-            buildWindowButtons();
+            buildWindowButtons(cfg.windowOptions, windowSec);
         }
         if (snap.unchanged) {
             // 内容没变也要补发一次信息：宿主（配置页）可能是刚接上的，或者刚重建过
@@ -437,14 +445,17 @@ public class ChartFragment extends Fragment {
         }
     }
 
-    /** 档位按钮来自 params.json 的 chart.windowOptionsSec（读不到时用回落常量）。 */
-    private void buildWindowButtons() {
-        if (windowGroup == null || config == null) {
+    /**
+     * 档位按钮：首帧用回落档位、真配置到达后换成 {@code chart.windowOptionsSec}（读不到时同样回落常量）。
+     * 选中值优先保留 {@code selectedSec}（用户已选档），不在新集合里才回落默认档，再不行取第一档。
+     */
+    private void buildWindowButtons(@NonNull int[] options, int selectedSec) {
+        if (windowGroup == null || options.length == 0) {
             return;
         }
         LayoutInflater inflater = LayoutInflater.from(requireContext());
         windowGroup.removeAllViews();
-        for (int sec : config.windowOptions) {
+        for (int sec : options) {
             MaterialButton b = (MaterialButton) inflater.inflate(
                     R.layout.item_chart_window_button, windowGroup, false);
             b.setId(View.generateViewId());
@@ -452,18 +463,30 @@ public class ChartFragment extends Fragment {
             b.setTag(sec);
             windowGroup.addView(b);
         }
-        // 选中当前档位（监听已挂在组上，重复 check 同值会被自身的相等判断挡掉）
+        // 选中档位（监听已挂在组上，重复 check 同值会被自身的相等判断挡掉）
+        final int checkedSec = resolveWindowSec(options, selectedSec);
         for (int i = 0; i < windowGroup.getChildCount(); i++) {
             View child = windowGroup.getChildAt(i);
-            if (child.getTag() instanceof Integer && (Integer) child.getTag() == windowSec) {
+            if (child.getTag() instanceof Integer && (Integer) child.getTag() == checkedSec) {
                 windowGroup.check(child.getId());
                 break;
             }
         }
     }
 
-    private static boolean containsOption(ChartConfig cfg, int sec) {
-        for (int v : cfg.windowOptions) {
+    /** 选中档：新集合含已选值就保留；否则含默认档就用默认；再否则取第一档。 */
+    private static int resolveWindowSec(@NonNull int[] options, int selectedSec) {
+        if (contains(options, selectedSec)) {
+            return selectedSec;
+        }
+        if (contains(options, ChartConfig.FALLBACK_WINDOW_DEFAULT)) {
+            return ChartConfig.FALLBACK_WINDOW_DEFAULT;
+        }
+        return options.length > 0 ? options[0] : ChartConfig.FALLBACK_WINDOW_DEFAULT;
+    }
+
+    private static boolean contains(@NonNull int[] options, int sec) {
+        for (int v : options) {
             if (v == sec) {
                 return true;
             }

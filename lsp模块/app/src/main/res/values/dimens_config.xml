@@ -158,6 +158,14 @@
     <dimen name="config_hint_icon_size">24dp</dimen>
 
     <!--
+        分组卡头总开关的「?」专用档：28dp / 16sp，比键行再大一档、与卡头标题同高。
+        不复用 @dimen/log_filter_text_size / @dimen/title_action_size——那两个是语义不相干的档位
+        （日志过滤器字号、标题按钮尺寸），卡头「?」只此一处。
+    -->
+    <dimen name="config_hint_icon_size_header">28dp</dimen>
+    <dimen name="config_hint_icon_text_header">16sp</dimen>
+
+    <!--
         ===== 两列行（「日志 & 调试」组，见 ConfigGroupBinder / WrapRowLayout#setHalfLine） =====
         半行宽 = (行可用宽 − 容器列距) / 2；一行自然宽 ≈ 参数名 + 列距 + 「?」+ 列距 + 开关。
         常规行在 360dp 机型上自然宽约 172dp（5 字参数名）、半格只有约 146dp，故两列行单独收紧三处：

@@ -7,6 +7,7 @@ import android.content.res.Configuration;
 import android.content.res.Resources;
 import android.content.res.TypedArray;
 import android.graphics.Paint;
+import android.graphics.Typeface;
 import android.os.Handler;
 import android.os.Looper;
 import android.text.Editable;
@@ -270,7 +271,7 @@ final class ConfigKeyRow {
         renderer.build();
         // 「?」统一在行骨架建：必须在 build 之后——尾段用的 tailCount 下标以"参数名在 index 0"为前提，
         // 提前插进来会把尾段控件错位。插在 index 1 = 参数名之后、首个尾段控件之前。
-        hintIcon = attachHintIcon(root, 1, meta, compact);
+        hintIcon = attachHintIcon(root, 1, meta, compact, false);
         dimTargetsCache = renderer.dimTargets();
         alignLabelToField();
         applySwitchRowGap();
@@ -1476,7 +1477,21 @@ final class ConfigKeyRow {
      * @return true 表示本行当前未生效（供分组卡头汇总）
      */
     boolean refreshDependencyState() {
-        boolean unsatisfied = isUnsatisfied(meta, host);
+        return refreshDependencyState(false);
+    }
+
+    /**
+     * 行内压暗（可带「本组总开关已关」）。
+     *
+     * <p><b>组已关时整组无差别压暗</b>：不管本行 {@code requires} 是否满足，都按未生效处理——
+     * 总开关一关，组内每一项都不再生效。压暗范围与无参版本完全一致（参数名、键内控件、行级文本、
+     * 「?」、字段说明行），不额外隐藏任何行。
+     *
+     * @param groupOff 本组总开关已关（{@code master} 存在且当前有效值为 0）
+     * @return true 表示本行当前按未生效处理（供分组卡头汇总）
+     */
+    boolean refreshDependencyState(boolean groupOff) {
+        boolean unsatisfied = groupOff || isUnsatisfied(meta, host);
         float alpha = unsatisfied ? dimAlpha : 1f;
         labelView.setAlpha(alpha);
         descView.setAlpha(alpha);
@@ -1617,27 +1632,38 @@ final class ConfigKeyRow {
     /**
      * 在 {@code parent} 的第 {@code index} 个位置插一枚「?」（leading、不标 trailing，故与参数名同行）：
      * 点了走与输入框获焦<b>完全相同</b>的说明浮窗（见 {@link HintOverlay}）。无新 drawable：
-     * 「?」字符 + 边框水波纹。
+     * 「?」字符 + 边框水波纹。「?」<b>一律粗体</b>（{@link Typeface#DEFAULT_BOLD}）。
      *
      * <p>两个调用处共用这一个助手：键行（六型都有）与分组卡头的总开关。取不到 Activity 时
      * {@link #showHintFor} 安全跳过。
      *
-     * @param compact 两列行：图标盒 20dp、字号 12sp（常规行 24dp / 14sp）。两种行的左边距都补到
-     *                「与参数名相距 @dimen/space_xs」：键行容器自己会加一个列距，这里把它抵掉
+     * @param compact    两列行：图标盒 20dp、字号 12sp（常规行 24dp / 14sp）。两种行的左边距都补到
+     *                   「与参数名相距 @dimen/space_xs」：键行容器自己会加一个列距，这里把它抵掉
+     * @param cardHeader 分组卡头的总开关：图标盒 28dp、字号 16sp（比常规行再大一档，与卡头标题同高）；
+     *                   与 {@code compact} 互斥，为 true 时忽略它
      * @return 建出的图标（键行存着它，依赖未满足时跟随整行压暗）
      */
     @NonNull
     static TextView attachHintIcon(@NonNull ViewGroup parent, int index,
-                                   @NonNull KeyMeta meta, boolean compact) {
+                                   @NonNull KeyMeta meta, boolean compact, boolean cardHeader) {
         Resources res = parent.getResources();
         Context context = parent.getContext();
         TextView icon = new TextView(context);
-        int box = res.getDimensionPixelSize(compact
-                ? R.dimen.config_hint_icon_size_compact : R.dimen.config_hint_icon_size);
+        int sizeRes;
+        int textRes;
+        if (cardHeader) {
+            sizeRes = R.dimen.config_hint_icon_size_header;
+            textRes = R.dimen.config_hint_icon_text_header;
+        } else {
+            sizeRes = compact
+                    ? R.dimen.config_hint_icon_size_compact : R.dimen.config_hint_icon_size;
+            textRes = compact ? R.dimen.text_caption : R.dimen.text_body;
+        }
+        int box = res.getDimensionPixelSize(sizeRes);
         icon.setLayoutParams(new ViewGroup.LayoutParams(box, box));
         icon.setText(R.string.config_hint_icon);
-        icon.setTextSize(TypedValue.COMPLEX_UNIT_PX,
-                res.getDimension(compact ? R.dimen.text_caption : R.dimen.text_body));
+        icon.setTextSize(TypedValue.COMPLEX_UNIT_PX, res.getDimension(textRes));
+        icon.setTypeface(Typeface.DEFAULT_BOLD);
         icon.setGravity(Gravity.CENTER);
         icon.setContentDescription(context.getString(R.string.config_hint_action));
         icon.setTextColor(ContextCompat.getColor(context, R.color.app_on_surface_variant));

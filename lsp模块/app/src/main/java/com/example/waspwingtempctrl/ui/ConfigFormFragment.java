@@ -73,7 +73,7 @@ public class ConfigFormFragment extends Fragment
         // 传本页上下文当身份凭据：Activity 换了一个就不再取用（否则会挂上属于上一个 Activity 的件）
         form = new ConfigFormController(this, requireContext().getApplicationContext(),
                 ConfigPreInflater.get(requireContext()));
-        // 与首帧并行：定义与首份快照在后台读，读完主线程一次建满（建满之前参数区不露面）
+        // 与首帧并行：定义到位即建卡（不等首份快照），快照到达后补值（见 app 逻辑说明.md §5.2）
         form.start();
     }
 
@@ -102,9 +102,12 @@ public class ConfigFormFragment extends Fragment
     }
 
     /**
-     * 挂上曲线区（子 Fragment）。页面重建时 {@code getChildFragmentManager()} 里已有恢复出来的实例，
-     * 只重新接宿主、不重复添加。用异步 {@code commit()}：本方法在父页的 onCreateView 里跑，
-     * {@code commitNow()} 会抛"already executing transactions"。
+     * 挂上曲线区（子 Fragment），并让它与父页<b>同帧挂载</b>：首帧就不再是空白容器。页面重建时
+     * {@code getChildFragmentManager()} 里已有恢复出来的实例，只重新接宿主、不重复添加。
+     *
+     * <p>三级降级：优先 {@code commitNow}（同步跑完）；本方法在父页的 onCreateView 里跑，历史上
+     * {@code commitNow()} 撞过"already executing transactions"，故捕获后改为异步提交 + 立即执行挂起事务；
+     * 若连执行挂起事务也失败，事务已经入队（只等下一轮执行），不再重复提交同一个 Fragment。
      */
     private void ensureChartFragment() {
         FragmentManager cfm = getChildFragmentManager();
@@ -117,7 +120,23 @@ public class ConfigFormFragment extends Fragment
         }
         chart = new ChartFragment();
         chart.setHost(this);
-        cfm.beginTransaction().replace(R.id.config_chart_container, chart, TAG_CHART).commit();
+        try {
+            cfm.beginTransaction().replace(R.id.config_chart_container, chart, TAG_CHART)
+                    .commitNowAllowingStateLoss();
+        } catch (RuntimeException e) {
+            if (chart.isAdded()) {
+                // commitNow 已把实例挂上（异常发生在执行中而非"已在执行事务"的闸门）：不再提交第二个事务
+                return;
+            }
+            // 降级一：先入队，再立刻尝试执行（此刻若正处事务执行中，执行会再抛，事务留待下一轮）
+            cfm.beginTransaction().replace(R.id.config_chart_container, chart, TAG_CHART)
+                    .commitAllowingStateLoss();
+            try {
+                cfm.executePendingTransactions();
+            } catch (RuntimeException ignored) {
+                // 降级二：事务已入队，由 FragmentManager 自己的调度执行（不重复提交，避免同一实例被加两次）
+            }
+        }
     }
 
     // ========== 键行宿主（ConfigKeyRow.Host）：数据全在控制器手上，这里只转发 ==========
@@ -218,13 +237,26 @@ public class ConfigFormFragment extends Fragment
 
     /**
      * 参数区露面（本页内容的终态之一）：调用点在"可见结构已就位"那一刻（见 app 逻辑说明.md §5.2）。
-     * 本页没有别的建表后收尾动作（曲线子页与诊断折叠体在 {@code onCreateView} 里已挂好），故不做任何事。
+     * 本页没有别的建表后收尾动作（曲线子页与诊断折叠体在 {@code onCreateView} 里已挂好）。
+     *
+     * <p><b>首轮不淡入</b>：冷启动要第一帧就三区齐备，入场动画会把"表壳已在"这一帧推后；
+     * 视图重建后的那一轮才播（与旧行为一致）。
      */
     @Override
+    public void onFormBuilt(int groupCount, boolean rebuilding) {
+        if (rebuilding) {
+            // 重建那轮淡入（控制器在本回调之后才把它置为可见）：只动 alpha/translationY，不动布局
+            Motion.revealFadeIn(groupContainer);
+        } else {
+            groupContainer.setAlpha(1f);
+            groupContainer.setTranslationY(0f);
+        }
+    }
+
+    /** 一参版保持旧语义（重建淡入）；设置页用它，本页走两参版。 */
+    @Override
     public void onFormBuilt(int groupCount) {
-        // 参数区首次露面淡入（控制器在本回调之后才把它置为可见）：只动 alpha/translationY，不动布局，
-        // 故「建满一次露出」的口径不变——每一帧露出的都是建满的完整参数区，只是半透明
-        Motion.revealFadeIn(groupContainer);
+        onFormBuilt(groupCount, true);
     }
 
     /**

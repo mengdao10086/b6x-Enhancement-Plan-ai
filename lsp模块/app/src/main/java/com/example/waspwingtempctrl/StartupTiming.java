@@ -70,7 +70,7 @@ public final class StartupTiming {
     public static final int MARK_PAGE_VIEW_1 = 19;
     /** 时间点：第三页（最后一页）的视图建好。 */
     public static final int MARK_PAGE_VIEW_ALL = 20;
-    /** 时间点：建表数据到位（{@code onLoaded} 进主线程）。 */
+    /** 时间点：首份快照到位（{@code onSnapshotReady} 进主线程）。 */
     public static final int MARK_FORM_DATA = 21;
     /** 时间点：首轮 {@code onPageSelected}。 */
     public static final int MARK_PAGE_SELECTED = 22;
@@ -101,9 +101,9 @@ public final class StartupTiming {
     public static final int MARK_PRE_ALREADY_STARTED = 33;
     // ---- 建表首读那趟后台任务的两端（只服务"数据到位为什么晚"这一个问题，见 app/逻辑说明.md §5.3） ----
 
-    /** 时间点：首读后台任务开工（走的是降级路；就地取快照那条快路上本槽不记）。 */
+    /** 时间点：快照读取开工（快路与降级路同记，只包住读文件本身）。 */
     public static final int MARK_CFG_IO_BEGIN = 34;
-    /** 时间点：首读后台任务算完、即将回主线程那一刻。 */
+    /** 时间点：快照读取算完、即将回主线程那一刻。 */
     public static final int MARK_CFG_IO_DONE = 35;
     // ---- 未命中构成：按布局 id 各一个累计计数（把"缺的是哪几种件"一次定死，见 app/逻辑说明.md §5.3） ----
 

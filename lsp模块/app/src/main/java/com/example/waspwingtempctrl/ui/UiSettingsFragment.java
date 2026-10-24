@@ -88,7 +88,7 @@ public class UiSettingsFragment extends Fragment
         super.onCreate(savedInstanceState);
         // 建表一律现场 inflate：本页按需打开、不在启动链上，且是另一个 Activity 的上下文（预制造件不该跨页取用）
         form = new ConfigFormController(this, requireContext().getApplicationContext(), null);
-        // 与首帧并行：定义与首份快照在后台读，读完主线程一次建满（建满之前内容不露面）
+        // 与首帧并行：定义到位即建卡（不等首份快照），快照到达后补值（见 app 逻辑说明.md §5.2）
         form.start();
     }
 

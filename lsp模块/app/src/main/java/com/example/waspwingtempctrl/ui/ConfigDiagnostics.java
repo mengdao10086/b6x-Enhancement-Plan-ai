@@ -25,7 +25,8 @@ import java.util.concurrent.RejectedExecutionException;
  * 调用方已读过盘时把那份快照传进来（{@link #refresh(Snapshot)}），本区不再多读一次 {@code profile.conf}。
  *
  * <p>整块默认折叠（收起态下只登记欠账、不上屏）；块内参数定义行与启动耗时各是一行独立的可折叠行
- * （前者收起只报文件名、点开原地换成键渲染自检计数并露出配置 mtime；后者收起只报首帧、点开列各段明细）；
+ * （前者收起只报文件名、点开原地换成键渲染自检计数并把配置 mtime 并入同一段文本；后者收起只报首帧、
+ * 点开列各段明细）。两行都是<b>原地换文本 + 行高按内容补间</b>，箭头与行高同一时长。
  * 不提供任何写动作（I5）。
  * 只调 {@link ConfigStore} 的公开接口，读取在后台线程、主线程只做渲染。
  * 设计口径（收起欠账 / 在途排队 / 复用快照）见 app 逻辑说明.md §6.5。
@@ -38,16 +39,17 @@ final class ConfigDiagnostics {
 
     private final View body;
     private final ImageView arrowView;
-    private final TextView mtimeView;
-    /** 参数定义行（块内可展开项）：文字按展开态原地切换（收起只报文件名、展开报自检计数），展开内容是配置 mtime。 */
+    /** 参数定义行（块内可展开项）：文字按展开态原地切换（收起只报文件名、展开报自检计数 + 配置 mtime），换文本时行高补间。 */
     private final View defsRow;
     private final ImageView defsArrow;
     private final TextView defsView;
     /** 参数定义行的两态文案（由页面按自检结果写入，见 {@link #setDefsSummary}）。 */
     private CharSequence defsSummaryCollapsed;
     private CharSequence defsSummaryExpanded;
+    /** 配置 mtime 展示文本，并入参数定义行展开态；首次成功读盘前为 null。 */
+    private CharSequence mtimeText;
     private final TextView stateView;
-    /** 启动耗时折叠行：收起只显示一行概要（首帧），点开才列各段明细。 */
+    /** 启动耗时折叠行：收起只显示一行概要（首帧），点开才列各段明细（换文本时行高补间）。 */
     private final View timingRow;
     private final ImageView timingArrow;
     private final TextView timingView;
@@ -55,7 +57,7 @@ final class ConfigDiagnostics {
     private final TextView datafileView;
 
     private boolean expanded;
-    /** 参数定义行自己的展开态（内容 = 配置 mtime；行文字按它原地切换）。 */
+    /** 参数定义行自己的展开态（行文字按它原地切换；展开态文案里含配置 mtime）。 */
     private boolean defsExpanded;
     /** 启动耗时明细是否展开；概要为空（一个槽都没记）时恒为 false。 */
     private boolean timingExpanded;
@@ -86,8 +88,6 @@ final class ConfigDiagnostics {
 
         body = pageRoot.findViewById(R.id.config_diag_body);
         arrowView = pageRoot.findViewById(R.id.config_diag_arrow);
-        mtimeView = pageRoot.findViewById(R.id.config_diag_mtime);
-        TextCopy.copyOnLongPress(mtimeView);
         defsRow = pageRoot.findViewById(R.id.config_diag_defs_row);
         defsArrow = pageRoot.findViewById(R.id.config_diag_defs_arrow);
         defsView = pageRoot.findViewById(R.id.config_diag_defs);
@@ -99,6 +99,7 @@ final class ConfigDiagnostics {
         defsSummaryExpanded = defsName;   // 自检还没跑：展开态先与收起态同文
         applyDefsSummary();
         defsRow.setOnClickListener(v -> toggleDefs());
+        // 长按整行复制行内文字：展开态已含配置 mtime，整段一并复制（不留独立的 mtime 视图）
         TextCopy.copyOnLongPress(defsRow, defsView::getText);
         stateView = pageRoot.findViewById(R.id.config_diag_text);
         datafileView = pageRoot.findViewById(R.id.config_diag_datafile_text);
@@ -110,7 +111,7 @@ final class ConfigDiagnostics {
         timingRow.setOnClickListener(v -> toggleTiming());
         refreshTimingSummary();
 
-        // 「诊断信息」标题行控制整块；参数定义行只控制它自己的 mtime，同时原地切换自己那一行的文案
+        // 「诊断信息」标题行控制整块；参数定义行只原地切换自己那一行的文案（内容已并入行文本）
         pageRoot.findViewById(R.id.config_diag_header).setOnClickListener(v -> setExpanded(!expanded));
         pageRoot.findViewById(R.id.config_diag_refresh).setOnClickListener(v -> refresh());
         setExpanded(false);
@@ -183,14 +184,15 @@ final class ConfigDiagnostics {
     }
 
     /**
-     * 点参数定义行：<b>原地换文案</b>（收起只报文件名、展开报键渲染自检计数），并展开/收起它自己的内容
-     * （配置 mtime）；三角与高度同一次动画。交互与启动耗时行同一套。
+     * 点参数定义行：<b>原地换文案</b>（收起只报文件名、展开报键渲染自检计数 + 配置 mtime），
+     * 行高按内容变化补间，三角与行高同一时长（不可补间时退回 180ms）。交互与启动耗时行同一套。
      */
     private void toggleDefs() {
+        int from = defsRow.getHeight();
         defsExpanded = !defsExpanded;
         applyDefsSummary();
-        long duration = Motion.animateHeight(mtimeView, defsExpanded);
-        Motion.syncExpandArrow(defsArrow, defsExpanded, duration);
+        long duration = Motion.animateHeightChange(defsRow, from, measureRowHeight(defsRow));
+        Motion.syncExpandArrow(defsArrow, defsExpanded, duration >= 0 ? duration : 180L);
     }
 
     /**
@@ -203,19 +205,37 @@ final class ConfigDiagnostics {
         applyDefsSummary();
     }
 
-    /** 按当前展开态把「参数定义」行的文字写回（两态文案的唯一落点）。 */
+    /** 按当前展开态把「参数定义」行的文字写回（两态文案的唯一落点；展开态并入配置 mtime）。 */
     private void applyDefsSummary() {
-        defsView.setText(defsExpanded ? defsSummaryExpanded : defsSummaryCollapsed);
+        defsView.setText(defsExpanded
+                ? (mtimeText == null ? defsSummaryExpanded : defsSummaryExpanded + "\n" + mtimeText)
+                : defsSummaryCollapsed);
     }
 
-    /** 点启动耗时行：展开看各段明细，再点收起（三角随之转，与参数定义行同一档时长）。 */
+    /** 点启动耗时行：展开看各段明细，再点收起（行高补间，三角与行高同一时长；不可补间时退回 180ms）。 */
     private void toggleTiming() {
         if (StartupTiming.summary().isEmpty()) {
             return;
         }
+        int from = timingRow.getHeight();
         timingExpanded = !timingExpanded;
         timingView.setText(timingExpanded ? StartupTiming.report() : StartupTiming.summary());
-        Motion.syncExpandArrow(timingArrow, timingExpanded, 180L);
+        long duration = Motion.animateHeightChange(timingRow, from, measureRowHeight(timingRow));
+        Motion.syncExpandArrow(timingArrow, timingExpanded, duration >= 0 ? duration : 180L);
+    }
+
+    /**
+     * 量行容器在当前宽度下的自然高（须在换文本之后调用）。宽还没布局（为 0）时返回 0，
+     * 调用方据此直接落位、不补间——量不出最终宽时量出的高不可信。
+     */
+    private static int measureRowHeight(@NonNull View row) {
+        int width = row.getWidth();
+        if (width <= 0) {
+            return 0;
+        }
+        row.measure(View.MeasureSpec.makeMeasureSpec(width, View.MeasureSpec.EXACTLY),
+                View.MeasureSpec.makeMeasureSpec(0, View.MeasureSpec.UNSPECIFIED));
+        return row.getMeasuredHeight();
     }
 
     /** 后台重读诊断信息（落点一致性 / 参数定义 / 未定义键 / mtime）：没有现成快照，自己读一次。 */
@@ -324,12 +344,16 @@ final class ConfigDiagnostics {
         if (snapshot.exists) {
             String time = new SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.getDefault())
                     .format(new Date(snapshot.mtimeMs));
-            mtimeView.setText(mtimeView.getContext().getString(R.string.config_diag_mtime, time));
+            mtimeText = defsView.getContext().getString(R.string.config_diag_mtime, time);
         } else {
-            mtimeView.setText(mtimeView.getContext().getString(R.string.config_diag_mtime_missing));
+            mtimeText = defsView.getContext().getString(R.string.config_diag_mtime_missing);
+        }
+        // mtime 已并入参数定义行：此刻正展开着就立刻重写行文本（**先写文本、再量高**，否则展开时高度会跳）
+        if (defsExpanded) {
+            applyDefsSummary();
         }
         // 正文已就绪：此刻展开着就**从当前高度续动画到最终实高**——既补上"占位→正文"的第二段，
-        // 也让展开态下的内容变化走动画。量高发生在正文已定之后，故终点即最终实高（末尾不跳）
+        // 也让展开态下的内容变化走动画。量高发生在正文与行文本已定之后，故终点即最终实高（末尾不跳）
         if (expanded) {
             Motion.animateHeight(body, true);
         }

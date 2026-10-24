@@ -137,7 +137,7 @@
                     折叠体：默认整块隐藏（明细属排障内容，不该常驻参数区上方）。
                     自上而下：数据文件信息（原曲线页信息条，由 ChartFragment 经 ChartFragment.Host
                     回调提供，曲线卡内不再重复）→ 配置诊断正文（配置文件/C端路径/未定义键/提示）
-                    → 参数定义行（自身可展开，点一下原地换文案，内挂 mtime）
+                    → 参数定义行（自身可展开，点一下原地换文案；展开态文案含 mtime）
                     → 启动耗时行（自身可展开）→ 刷新按钮。
                 -->
                 <LinearLayout
@@ -175,8 +175,9 @@
 
                     <!--
                         参数定义行：块内的一行可展开项（不是整块概要），紧接诊断正文；
-                        触控高 ≥32dp，右侧小三角展开它自己的内容（配置 mtime）。
-                        点一下原地换文案：收起只报文件名，展开报键渲染自检计数（与启动耗时行同一套交互）。
+                        触控高 ≥32dp，右侧小三角与行高补间同时长；无需补间时走 180ms。
+                        点一下原地换文案：收起只报文件名，展开报键渲染自检计数 + 配置 mtime
+                        （两段并进同一段文本，与启动耗时行同构；没有独立的 mtime 视图）。
                         与上下普通行同字号、且不留外边距：与相邻行的距离只由行内 padding 给。
                         文字顶对齐：首行到触控区上界恒为 paddingTop(8dp)，折行多出的部分只向下长；
                         小三角自己 layout_gravity 居中，不跟着文字下移。
@@ -212,14 +213,6 @@
                             android:src="@drawable/ic_triangle"
                             app:tint="?attr/colorOnSurfaceVariant" />
                     </LinearLayout>
-
-                    <!-- 参数定义的展开内容：配置 mtime（默认收起；保留长按整段复制） -->
-                    <TextView
-                        android:id="@+id/config_diag_mtime"
-                        android:layout_width="match_parent"
-                        android:layout_height="wrap_content"
-                        android:textAppearance="@style/TextAppearance.B6XTempCtrl.Caption"
-                        android:visibility="gone" />
 
                     <!--
                         启动耗时：与键渲染自检同一套折叠交互——收起只报首帧，右侧小三角点开列各段明细。

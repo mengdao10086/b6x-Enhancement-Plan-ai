@@ -395,6 +395,67 @@ public final class Motion {
     }
 
     /**
+     * 已知起点/终点高度时的高度补间（用于"原地换文本后行高变化"这类内容驱动场景）。
+     *
+     * <p>与 {@link #animateHeight(View, boolean)} 并列、共用同一张 {@link #HEIGHT_ANIMS} 记账表：
+     * 同一个视图上两种补间可互相取消，连点不排队。过程：先把高度钉到 {@code fromPx} 并请求重排，
+     * 再逐帧改到 {@code toPx}，结束时还原 {@code WRAP_CONTENT}。时长与曲线沿用面板那套口径
+     * （{@link #durationForPixels(Context, float)} + {@link #panelCurve}），箭头据此与行高同生共灭。
+     *
+     * <p><b>不满足补间条件时直接返回 {@code -1}、不设置动画高度</b>：系统关动效、起点不可用
+     * （{@code fromPx <= 0}）、终点不可用（{@code toPx <= 0}）、或两者相等。若此前有本视图的补间在跑，
+     * 会先取消并把高度还原为 {@code WRAP_CONTENT}，避免留下动画中间值。
+     *
+     * @return 本次动画时长（毫秒）；直接落位时返回 {@code -1}
+     */
+    static long animateHeightChange(View content, int fromPx, int toPx) {
+        if (content == null) {
+            return -1L;
+        }
+        final ValueAnimator running = HEIGHT_ANIMS.remove(content);
+        if (running != null) {
+            // 先摘账再取消：旧动画的 onAnimationEnd 会因对不上号而空跑，不会误置最终态
+            running.cancel();
+        }
+        final ViewGroup.LayoutParams lp = content.getLayoutParams();
+        if (lp == null) {
+            return -1L;
+        }
+        if (fromPx <= 0 || toPx <= 0 || fromPx == toPx || !enabled(content.getContext())) {
+            if (running != null) {
+                // 上一次补间被中止：把固定的中间高度还原，避免本次落位后一直停在这个高
+                lp.height = ViewGroup.LayoutParams.WRAP_CONTENT;
+                content.requestLayout();
+            }
+            return -1L;
+        }
+        final ValueAnimator anim = ValueAnimator.ofInt(fromPx, toPx);
+        final long duration = durationForPixels(content.getContext(), Math.abs(toPx - fromPx));
+        anim.setDuration(duration);
+        anim.setInterpolator(panelCurve);
+        anim.addUpdateListener(a -> {
+            lp.height = (int) (Integer) a.getAnimatedValue();
+            content.requestLayout();
+        });
+        anim.addListener(new AnimatorListenerAdapter() {
+            @Override
+            public void onAnimationEnd(Animator animation) {
+                if (HEIGHT_ANIMS.get(content) != anim) {
+                    return;   // 已被新一次调用取代：不作收尾
+                }
+                HEIGHT_ANIMS.remove(content);
+                lp.height = ViewGroup.LayoutParams.WRAP_CONTENT;
+                content.requestLayout();
+            }
+        });
+        HEIGHT_ANIMS.put(content, anim);
+        lp.height = fromPx;
+        content.requestLayout();
+        anim.start();
+        return duration;
+    }
+
+    /**
      * 量出容器在 {@code wrap_content} 下的完整高——展开时它就是**最终实高**（在最终宽度上量）。
      *
      * <p><b>绕开"GONE 下测量为 0"的经典坑</b>：调用前须已置 {@code VISIBLE}；这里用
