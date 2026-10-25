@@ -1,25 +1,68 @@
 <!DOCTYPE html>
 <html lang="zh-CN">
 <head>
-    <meta charset="utf-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>飞智温控增强 Lite（占位）</title>
-    <link rel="stylesheet" href="style.css">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>飞智温控增强 Lite</title>
+<link rel="stylesheet" href="style.css">
 </head>
 <body>
-<h1>飞智温控增强 Lite</h1>
-<p class="hint">骨架占位页：只验证 WebView 与 <code>WaspBridge</code> 能通，真界面由下一包实现。</p>
+<header class="topbar">
+    <div class="title">飞智温控增强 Lite</div>
+    <nav id="tabs" class="tabs">
+        <button type="button" class="tab" data-tab="status">状态</button>
+        <button type="button" class="tab active" data-tab="config">配置</button>
+        <button type="button" class="tab" data-tab="chart">曲线</button>
+        <button type="button" class="tab" data-tab="log">日志</button>
+    </nav>
+</header>
 
-<section>
-    <h2>defs()</h2>
-    <p id="defs-meta">读取中…</p>
-    <pre id="defs-out"></pre>
-</section>
+<div id="banner" class="banner hidden"></div>
 
-<section>
-    <h2>snapshot()</h2>
-    <pre id="snap-out">读取中…</pre>
-</section>
+<main>
+    <section id="page-status" class="page">
+        <div class="toolbar">
+            <button id="status-refresh" type="button">刷新状态</button>
+            <span class="hint">动作结果直接采用返回里的状态，不再补探</span>
+        </div>
+        <pre id="status-summary" class="panel mono">尚未读取</pre>
+        <div id="status-actions" class="actions"></div>
+        <div id="status-message" class="message"></div>
+    </section>
+
+    <section id="page-config" class="page active">
+        <div id="config-message" class="message"></div>
+        <div id="config-groups"></div>
+    </section>
+
+    <section id="page-chart" class="page">
+        <div id="chart-windows" class="toolbar"></div>
+        <div id="chart-legend" class="toolbar legend"></div>
+        <canvas id="chart-canvas" class="chart" width="360" height="220"></canvas>
+        <div id="chart-meta" class="meta"></div>
+        <div id="chart-message" class="message"></div>
+    </section>
+
+    <section id="page-log" class="page">
+        <div class="toolbar">
+            <button id="log-scroll" type="button">自动滚底：开</button>
+            <button id="log-refresh" type="button">刷新</button>
+            <span class="hint">最多 500 行</span>
+        </div>
+        <div id="log-lines" class="log mono"></div>
+        <div id="log-message" class="message"></div>
+    </section>
+</main>
+
+<div id="note-backdrop" class="backdrop hidden">
+    <div id="note-dialog" class="dialog">
+        <div class="dialog-head">
+            <span id="note-title"></span>
+            <button id="note-close" type="button">关闭</button>
+        </div>
+        <div id="note-body" class="dialog-body"></div>
+    </div>
+</div>
 
 <script src="app.js"></script>
 </body>
