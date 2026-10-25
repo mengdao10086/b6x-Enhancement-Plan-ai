@@ -10,8 +10,8 @@ on:
   workflow_dispatch:
 
 # 旧版独立 workflow（build-apk/build-lsposed/build-magisk）已废弃，合并至此文件
-# 交付物为单一 APK：C 守护程序（源码在 lsp模块/daemon/）在本 job 内编译后注入
-# lsp模块/core/src/main/assets/，再出 APK
+# 交付物为两个 APK（GUI + lite）：C 守护程序（源码在 lsp模块/daemon/）在本 job 内编译后注入
+# lsp模块/core/src/main/assets/，再出 APK；lite 不折叠、不重签
 # 注意：C 源码与 APK 工程现在同在 lsp模块/ 下，两个构建信号已并入单一信号
 #
 # 目录名 ↔ CI 路径正则的耦合：下列正则里的 `lsp模块/` 前缀是硬编码的，
@@ -63,7 +63,7 @@ jobs:
             #   参数定义/          —— assets/params.json 与 daemon/profile.conf 的单一来源
             #   .github/           —— workflow 自身（否则改 workflow 会「绿色但什么都没跑」）
             # 注意：只改 参数定义/ 而没重新生成产物时必须让 CI 跑到校验步骤
-            echo "$CHANGES" | grep -qE '^(lsp模块/(app/|core/|daemon/|build\.gradle\.kts|settings\.gradle\.kts|gradle\.properties|gradlew|gradle/)|参数定义/|\.github/)' \
+            echo "$CHANGES" | grep -qE '^(lsp模块/(app/|app-lite/|core/|daemon/|build\.gradle\.kts|settings\.gradle\.kts|gradle\.properties|gradlew|gradle/)|参数定义/|\.github/)' \
               && echo "changed=true" >> "$GITHUB_OUTPUT" || echo "changed=false" >> "$GITHUB_OUTPUT"
           fi
 
@@ -278,23 +278,28 @@ jobs:
           ls -l "$DEST"
           md5sum "$DEST"
 
-      # ── 出 APK ──
+      # ── 出 APK（GUI + lite，一次 Gradle 调用）──
       - name: 编译 APK（b6x keystore 签名）
         working-directory: ./lsp模块
         run: |
           chmod +x gradlew
-          ./gradlew assembleRelease
+          ./gradlew :app:assembleRelease :app-lite:assembleRelease
 
       - name: 获取版本号
         id: apk-version
         working-directory: ./lsp模块
         run: echo "VERSION=$(grep "versionName" app/build.gradle.kts | sed 's/.*"\(.*\)".*/\1/')" >> $GITHUB_OUTPUT
 
-      # 该 APK 已是唯一交付物，产物名不再带 LSPosed 后缀
+      # 两个产物：GUI（b6x-EP-v<ver>.apk）与 lite（b6x-EP-v<ver>-lite.apk）
       - name: 重命名 APK
         run: |
           mkdir -p "$GITHUB_WORKSPACE/CI记录"
-          cp "lsp模块/app/build/outputs/apk/release/"*.apk "$GITHUB_WORKSPACE/CI记录/b6x-EP-v${{ steps.apk-version.outputs.VERSION }}.apk"
+          V="${{ steps.apk-version.outputs.VERSION }}"
+          cp "$(ls lsp模块/app/build/outputs/apk/release/*.apk | head -1)" \
+             "$GITHUB_WORKSPACE/CI记录/b6x-EP-v$V.apk"
+          cp "$(ls lsp模块/app-lite/build/outputs/apk/release/*.apk | head -1)" \
+             "$GITHUB_WORKSPACE/CI记录/b6x-EP-v$V-lite.apk"
+          ls -l "$GITHUB_WORKSPACE/CI记录/"
 
       # ── 资源名折叠（仅 GUI 产物）──
       # 依据与实测：.claude/subagent方案存放区/性能下沉评估-方案.md §A
@@ -312,7 +317,8 @@ jobs:
       - name: 资源名折叠并重新签名（aapt2 optimize → zipalign → apksigner）
         run: |
           set -euo pipefail
-          APK=$(ls CI记录/b6x-EP-v*.apk | head -1)
+          # 只折叠 GUI；lite 走 Gradle 原签名，不经过本步骤
+          APK="CI记录/b6x-EP-v${{ steps.apk-version.outputs.VERSION }}.apk"
           UNSIGNED="CI记录/optimize-unsigned.apk"
           ALIGNED="CI记录/optimize-aligned.apk"
           SIGNED="CI记录/optimize-signed.apk"
@@ -320,6 +326,8 @@ jobs:
 
           entries() { "$BT/aapt2" dump resources "$1" | grep -c '^[[:space:]]*resource 0x'; }
           types()   { "$BT/aapt2" dump resources "$1" | grep -E '^[[:space:]]*type ' | sed 's/^[[:space:]]*//'; }
+          # 资源 ID 集合指纹（按 dump 顺序，不排序）：折叠改名合法，ID 增删/重排绝对不允许。
+          ids()     { "$BT/aapt2" dump resources "$1" | grep -oE 'resource 0x[0-9a-f]{8}'; }
           assets_digest() {
             unzip -l "$1" | awk '$4 ~ /^assets\// {print $4}' | LC_ALL=C sort | while IFS= read -r a; do
               printf '%s ' "$a"; unzip -p "$1" "$a" | sha256sum | cut -d' ' -f1
@@ -330,6 +338,8 @@ jobs:
           BEFORE_ENTRIES=$(entries "$APK")
           BEFORE_TYPES=$(types "$APK" | sha256sum | cut -d' ' -f1)
           BEFORE_NTYPES=$(types "$APK" | wc -l | tr -d ' ')
+          BEFORE_IDS=$(ids "$APK" | sha256sum | cut -d' ' -f1)
+          BEFORE_NIDS=$(ids "$APK" | wc -l | tr -d ' ')
           BEFORE_DEX=$(unzip -p "$APK" classes.dex | sha256sum | cut -d' ' -f1)
           BEFORE_ASSETS=$(assets_digest "$APK")
 
@@ -360,39 +370,107 @@ jobs:
           AFTER_ENTRIES=$(entries "$APK")
           AFTER_TYPES=$(types "$APK" | sha256sum | cut -d' ' -f1)
           AFTER_NTYPES=$(types "$APK" | wc -l | tr -d ' ')
+          AFTER_IDS=$(ids "$APK" | sha256sum | cut -d' ' -f1)
+          AFTER_NIDS=$(ids "$APK" | wc -l | tr -d ' ')
           AFTER_DEX=$(unzip -p "$APK" classes.dex | sha256sum | cut -d' ' -f1)
           AFTER_ASSETS=$(assets_digest "$APK")
 
           echo "资源条目: $BEFORE_ENTRIES -> $AFTER_ENTRIES；类型数: $BEFORE_NTYPES -> $AFTER_NTYPES"
+          echo "资源 ID: $BEFORE_NIDS -> $AFTER_NIDS（指纹一致=$([ "$BEFORE_IDS" = "$AFTER_IDS" ] && echo true || echo false)）"
           echo "APK 字节: $BEFORE_SIZE -> $AFTER_SIZE（净减 $((BEFORE_SIZE - AFTER_SIZE))）"
           { echo "资源条目: $BEFORE_ENTRIES -> $AFTER_ENTRIES；类型数: $BEFORE_NTYPES -> $AFTER_NTYPES";
+            echo "资源 ID: $BEFORE_NIDS -> $AFTER_NIDS";
             echo "APK 字节: $BEFORE_SIZE -> $AFTER_SIZE（净减 $((BEFORE_SIZE - AFTER_SIZE))）"; } >> "$GITHUB_STEP_SUMMARY"
 
           [ "$BEFORE_ENTRIES" = "$AFTER_ENTRIES" ] || { echo "资源条目数变化：折叠改变了资源集合"; exit 1; }
           [ "$BEFORE_TYPES" = "$AFTER_TYPES" ]     || { echo "类型/entryCount 指纹变化"; exit 1; }
+          # 资源名允许被折叠，但 ID 集合必须与折叠前逐个同序一致（5,380 个 ID 一个都不能少/多/挪位）
+          [ "$BEFORE_IDS" = "$AFTER_IDS" ]         || { echo "资源 ID 集合指纹变化：折叠改动了 ID 集合或顺序"; exit 1; }
+          [ "$BEFORE_NIDS" -gt 0 ]                 || { echo "未解析到资源 ID，断言失效"; exit 1; }
+          echo "OK：资源 ID 集合与折叠前同序一致（$BEFORE_NIDS 个）"
           [ "$BEFORE_DEX" = "$AFTER_DEX" ]         || { echo "classes.dex 内容被折叠步骤改动"; exit 1; }
           [ "$BEFORE_ASSETS" = "$AFTER_ASSETS" ]   || { echo "assets 内容被折叠步骤改动"; exit 1; }
           echo "OK：资源条目/类型、classes.dex、assets 均与折叠前一致"
 
       # 注入是否真的进了产物，只有拆开 APK 才能确认（cp 失败不会让 Gradle 报错）
-      - name: 校验 APK 内含 C 二进制
+      - name: 校验两个 APK 都含 C 二进制
         run: |
-          APK=$(ls CI记录/b6x-EP-v*.apk | head -1)
-          echo "=== $APK 内的 assets ==="
-          unzip -l "$APK" | grep 'assets/' || true
-          unzip -l "$APK" | grep -q 'assets/tempctrl-arm64' \
-            || { echo "APK 内缺少 assets/tempctrl-arm64"; exit 1; }
+          V="${{ steps.apk-version.outputs.VERSION }}"
+          for APK in "CI记录/b6x-EP-v$V.apk" "CI记录/b6x-EP-v$V-lite.apk"; do
+            echo "=== $APK 内的 assets ==="
+            unzip -l "$APK" | grep 'assets/' || true
+            unzip -l "$APK" | grep -q 'assets/tempctrl-arm64' \
+              || { echo "$APK 内缺少 assets/tempctrl-arm64"; exit 1; }
+          done
+
+      # lite 的体积/资源/依赖/签名硬断言（GUI 的折叠断言在上一步）
+      - name: 校验 lite 产物
+        run: |
+          set -euo pipefail
+          V="${{ steps.apk-version.outputs.VERSION }}"
+          GUI="CI记录/b6x-EP-v$V.apk"
+          LITE="CI记录/b6x-EP-v$V-lite.apk"
+          SIZE=$(stat -c%s "$LITE")
+          echo "lite 字节数: $SIZE ($((SIZE / 1024)) KB)"
+          unzip -l "$LITE"
+
+          # 四条共享资产 + 占位前端都在
+          for a in xposed_init params.json deploy/b6x-tempctrl.sh tempctrl-arm64 \
+                   webui/index.html webui/style.css webui/app.js; do
+            unzip -l "$LITE" | grep -q "assets/$a" || { echo "lite 缺少 assets/$a"; exit 1; }
+          done
+
+          # 无 res/ 文件、resources.arsc < 2 KB
+          NRES=$(unzip -l "$LITE" | awk '$4 ~ /^res\// {c++} END{print c+0}')
+          ARSC=$(unzip -l "$LITE" | awk '$4 == "resources.arsc" {print $1}')
+          echo "res/ 条目=$NRES  resources.arsc=${ARSC:-缺失}B"
+          [ "$NRES" = "0" ] || { echo "lite 含 res/ 资源文件：$NRES"; exit 1; }
+          [ -n "$ARSC" ] && [ "$ARSC" -lt 2048 ] || { echo "resources.arsc 缺失或 ≥2 KB：$ARSC"; exit 1; }
+
+          # 无 material / appcompat 类
+          rm -rf /tmp/lite-dex && mkdir -p /tmp/lite-dex
+          unzip -q -o -d /tmp/lite-dex "$LITE" 'classes*.dex'
+          HITS=$(for d in /tmp/lite-dex/classes*.dex; do "$BT/dexdump" "$d"; done \
+                 | grep -cE 'Landroidx/appcompat|Lcom/google/android/material' || true)
+          echo "material/appcompat 类引用=$HITS"
+          [ "$HITS" = "0" ] || { echo "lite 含 material/appcompat 类"; exit 1; }
+
+          # 同 applicationId / versionCode
+          for APK in "$GUI" "$LITE"; do
+            "$BT/aapt2" dump badging "$APK" \
+              | grep -q "package: name='com.example.waspwingtempctrl' versionCode='5'" \
+              || { echo "$APK 包名/versionCode 不符"; exit 1; }
+          done
+
+          # lite 未在 CI 重签：AGP 直出 v1=false、v2/v3=true
+          VERIFY=$("$BT/apksigner" verify --verbose "$LITE")
+          echo "$VERIFY"
+          echo "$VERIFY" | grep -q 'Verified using v1 scheme (JAR signing): false' \
+            || { echo "lite 签名断言失败：v1 未关闭"; exit 1; }
+          echo "$VERIFY" | grep -q 'Verified using v2 scheme (APK Signature Scheme v2): true' \
+            || { echo "lite 签名断言失败：v2 未开启"; exit 1; }
+          echo "$VERIFY" | grep -q 'Verified using v3 scheme (APK Signature Scheme v3): true' \
+            || { echo "lite 签名断言失败：v3 未开启"; exit 1; }
+          echo "OK：lite 资源/依赖/签名均符合约束"
 
       # 体积只记录、不设阈值门禁（正常波动不应挂 CI）
       - name: 记录 APK 体积
         run: |
-          APK=$(ls CI记录/b6x-EP-v*.apk | head -1)
-          SIZE=$(stat -c%s "$APK")
-          echo "APK 字节数: $SIZE ($((SIZE / 1024)) KB) <- $APK"
-          echo "APK 字节数: $SIZE ($((SIZE / 1024)) KB)" >> "$GITHUB_STEP_SUMMARY"
+          V="${{ steps.apk-version.outputs.VERSION }}"
+          for APK in "CI记录/b6x-EP-v$V.apk" "CI记录/b6x-EP-v$V-lite.apk"; do
+            SIZE=$(stat -c%s "$APK")
+            echo "APK 字节数: $SIZE ($((SIZE / 1024)) KB) <- $APK"
+            echo "APK 字节数: $SIZE ($((SIZE / 1024)) KB) <- $(basename "$APK")" >> "$GITHUB_STEP_SUMMARY"
+          done
 
-      - name: 上传 APK 构建产物
+      - name: 上传 GUI APK
         uses: actions/upload-artifact@v7
         with:
           name: b6x-EP-v${{ steps.apk-version.outputs.VERSION }}
-          path: CI记录/b6x-EP-v*.apk
+          path: CI记录/b6x-EP-v${{ steps.apk-version.outputs.VERSION }}.apk
+
+      - name: 上传 lite APK
+        uses: actions/upload-artifact@v7
+        with:
+          name: b6x-EP-v${{ steps.apk-version.outputs.VERSION }}-lite
+          path: CI记录/b6x-EP-v${{ steps.apk-version.outputs.VERSION }}-lite.apk

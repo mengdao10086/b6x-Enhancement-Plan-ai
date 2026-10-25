@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <application
+        android:label="飞智温控增强 Lite"
+        android:icon="@android:drawable/ic_menu_compass"
+        android:allowBackup="false"
+        android:supportsRtl="true">
+
+        <!-- LSPosed 模块元数据与 scope 由 :core 的 manifest 合并进来 -->
+
+        <!-- 单 Activity + WebView；主题用 framework 主题，不引入 Material 库 -->
+        <activity
+            android:name=".WebActivity"
+            android:exported="true"
+            android:theme="@android:style/Theme.Material.Light.NoActionBar">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+
+    </application>
+
+    <!--
+        不新增任何权限：
+        - WebView 只加载 file:///android_asset 本地页面（无网络）
+        - Deployer 走 Runtime.exec("su")，不需要权限
+    -->
+
+</manifest>

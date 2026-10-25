@@ -2,6 +2,7 @@
 /build/
 /app/build/
 /core/build/
+/app-lite/build/
 .gradle/
 local.properties
 *.iml

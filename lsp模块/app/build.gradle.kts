@@ -150,7 +150,43 @@ val checkPreInflateThemeAttr by tasks.registering {
     }
 }
 
+// ──────────────────────────────────────
+// 构建期拦截：布局里禁止 constraint_referenced_ids
+// ──────────────────────────────────────
+// CI 的 aapt2 optimize --collapse-resource-names 会把资源名全部塌成 0_resource_name_obfuscated，
+// 而 constraint_referenced_ids 是按资源名在运行期查 id 的：名字塌掉后它静默失配、约束整段失效，
+// 且不会有任何构建/运行报错。要表达同样的约束请改用 @id 直接引用（ID 在折叠前后保持不变）。
+val checkNoConstraintReferencedIds by tasks.registering {
+    val layoutDir = file("src/main/res/layout")
+    val attrPattern = Regex("""constraint_referenced_ids\s*=""")
+
+    group = "verification"
+    description = "断言 res/layout 下无 constraint_referenced_ids（资源名折叠后按名查 id 会静默失败）"
+    inputs.dir(layoutDir)
+    doLast {
+        val xmls = layoutDir.listFiles { f -> f.isFile && f.name.endsWith(".xml") }
+            ?: throw GradleException("布局目录不存在：$layoutDir")
+        val hits = xmls.sortedBy { f -> f.name }.flatMap { f ->
+            f.readLines().withIndex()
+                .filter { (_, line) -> attrPattern.containsMatchIn(line) }
+                .map { (i, line) -> "  ${f.name}:${i + 1}  ${line.trim()}" }
+        }
+        if (hits.isNotEmpty()) {
+            throw GradleException(
+                buildString {
+                    appendLine("res/layout 下出现 constraint_referenced_ids。")
+                    appendLine("GUI 产物经 aapt2 optimize --collapse-resource-names 后资源名全部丢失，")
+                    appendLine("该属性按名字在运行期查 id，会静默失配、约束失效且无任何报错。命中：")
+                    hits.forEach { appendLine(it) }
+                    append("处理：改用 @id 直接引用（ID 在折叠前后不变），不要按资源名批量引用。")
+                }
+            )
+        }
+    }
+}
+
 // 挂到 preBuild：assembleDebug / assembleRelease 之前必跑（本地与 CI 的 ./gradlew assembleRelease 都覆盖；
-// 也可单独跑 ./gradlew checkPreInflateThemeAttr）
+// 也可单独跑 ./gradlew checkPreInflateThemeAttr / checkNoConstraintReferencedIds）
 tasks.named("preBuild") { dependsOn(checkPreInflateThemeAttr) }
+tasks.named("preBuild") { dependsOn(checkNoConstraintReferencedIds) }
 

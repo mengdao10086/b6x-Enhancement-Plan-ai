@@ -20,3 +20,4 @@ dependencyResolutionManagement {
 rootProject.name = "WaspWingTempCtrl"
 include(":core")
 include(":app")
+include(":app-lite")
