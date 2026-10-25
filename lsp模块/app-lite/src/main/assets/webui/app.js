@@ -131,6 +131,33 @@
         showBanner(cur ? cur + '\n' + msg : msg, info);
     }
 
+    /** 未捕获异常/初始化失败：不白屏，把原因写进 banner。自身绝不再抛。 */
+    function reportFatal(message, detail) {
+        try {
+            var text = '运行时错误：' + textOf(message) + (detail ? '\n' + detail : '');
+            var b = document.getElementById('banner');
+            if (!b) {
+                b = document.createElement('div');
+                b.setAttribute('id', 'banner');
+                if (document.body && document.body.appendChild) {
+                    document.body.appendChild(b);
+                }
+            }
+            b.className = 'banner';
+            b.textContent = text;
+            if (window.console && window.console.error) {
+                window.console.error(text);
+            }
+        } catch (ignore) {
+            // 兜底路径本身不能再抛
+        }
+    }
+
+    window.onerror = function (msg, src, line, col, err) {
+        reportFatal(msg, (src || '') + ':' + line + (err && err.stack ? '\n' + err.stack : ''));
+        return false;
+    };
+
     function showMessage(id, msg, ok) {
         var e = $(id);
         if (!e) {
@@ -1360,8 +1387,16 @@
 
     // ==================== 导出 ====================
 
+    function safeInit() {
+        try {
+            init();
+        } catch (e) {
+            reportFatal(e && e.message ? e.message : e, e && e.stack ? e.stack : '');
+        }
+    }
+
     window.LiteApp = {
-        init: init,
+        init: safeInit,
         _state: state,
         _test: {
             showTab: showTab,
@@ -1380,6 +1415,6 @@
     };
 
     if (!window.__LITE_TEST__) {
-        init();
+        safeInit();
     }
 })();
