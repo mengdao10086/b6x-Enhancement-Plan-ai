@@ -295,6 +295,75 @@ jobs:
           mkdir -p "$GITHUB_WORKSPACE/CI记录"
           cp "lsp模块/app/build/outputs/apk/release/"*.apk "$GITHUB_WORKSPACE/CI记录/b6x-EP-v${{ steps.apk-version.outputs.VERSION }}.apk"
 
+      # ── 资源名折叠（仅 GUI 产物）──
+      # 依据与实测：.claude/subagent方案存放区/性能下沉评估-方案.md §A
+      - name: 准备 build-tools 34.0.0
+        run: |
+          SDK_ROOT="${ANDROID_SDK_ROOT:-$ANDROID_HOME}"
+          BT="$SDK_ROOT/build-tools/34.0.0"
+          if [ ! -x "$BT/aapt2" ]; then
+            sdkmanager --install "build-tools;34.0.0"
+          fi
+          echo "BT=$BT" >> "$GITHUB_ENV"
+          test -x "$BT/aapt2" && test -x "$BT/zipalign" && test -x "$BT/apksigner"
+          echo "build-tools: $("$BT/aapt2" version)" | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: 资源名折叠并重新签名（aapt2 optimize → zipalign → apksigner）
+        run: |
+          set -euo pipefail
+          APK=$(ls CI记录/b6x-EP-v*.apk | head -1)
+          UNSIGNED="CI记录/optimize-unsigned.apk"
+          ALIGNED="CI记录/optimize-aligned.apk"
+          SIGNED="CI记录/optimize-signed.apk"
+          KS="lsp模块/app/b6x.keystore"
+
+          entries() { "$BT/aapt2" dump resources "$1" | grep -c '^[[:space:]]*resource 0x'; }
+          types()   { "$BT/aapt2" dump resources "$1" | grep -E '^[[:space:]]*type ' | sed 's/^[[:space:]]*//'; }
+          assets_digest() {
+            unzip -l "$1" | awk '$4 ~ /^assets\// {print $4}' | LC_ALL=C sort | while IFS= read -r a; do
+              printf '%s ' "$a"; unzip -p "$1" "$a" | sha256sum | cut -d' ' -f1
+            done | sha256sum | cut -d' ' -f1
+          }
+
+          BEFORE_SIZE=$(stat -c%s "$APK")
+          BEFORE_ENTRIES=$(entries "$APK")
+          BEFORE_TYPES=$(types "$APK" | sha256sum | cut -d' ' -f1)
+          BEFORE_NTYPES=$(types "$APK" | wc -l | tr -d ' ')
+          BEFORE_DEX=$(unzip -p "$APK" classes.dex | sha256sum | cut -d' ' -f1)
+          BEFORE_ASSETS=$(assets_digest "$APK")
+
+          "$BT/aapt2" optimize \
+            --collapse-resource-names \
+            --deduplicate-entry-values \
+            --shorten-resource-paths \
+            -o "$UNSIGNED" "$APK"
+          "$BT/zipalign" -p -f 4 "$UNSIGNED" "$ALIGNED"
+          "$BT/apksigner" sign --ks "$KS" --ks-key-alias b6x \
+            --ks-pass pass:android --key-pass pass:android \
+            --v1-signing-enabled true --v2-signing-enabled true \
+            --out "$SIGNED" "$ALIGNED"
+          "$BT/apksigner" verify --verbose --print-certs "$SIGNED"
+          mv -f "$SIGNED" "$APK"
+          rm -f "$UNSIGNED" "$ALIGNED"
+
+          AFTER_SIZE=$(stat -c%s "$APK")
+          AFTER_ENTRIES=$(entries "$APK")
+          AFTER_TYPES=$(types "$APK" | sha256sum | cut -d' ' -f1)
+          AFTER_NTYPES=$(types "$APK" | wc -l | tr -d ' ')
+          AFTER_DEX=$(unzip -p "$APK" classes.dex | sha256sum | cut -d' ' -f1)
+          AFTER_ASSETS=$(assets_digest "$APK")
+
+          echo "资源条目: $BEFORE_ENTRIES -> $AFTER_ENTRIES；类型数: $BEFORE_NTYPES -> $AFTER_NTYPES"
+          echo "APK 字节: $BEFORE_SIZE -> $AFTER_SIZE（净减 $((BEFORE_SIZE - AFTER_SIZE))）"
+          { echo "资源条目: $BEFORE_ENTRIES -> $AFTER_ENTRIES；类型数: $BEFORE_NTYPES -> $AFTER_NTYPES";
+            echo "APK 字节: $BEFORE_SIZE -> $AFTER_SIZE（净减 $((BEFORE_SIZE - AFTER_SIZE))）"; } >> "$GITHUB_STEP_SUMMARY"
+
+          [ "$BEFORE_ENTRIES" = "$AFTER_ENTRIES" ] || { echo "资源条目数变化：折叠改变了资源集合"; exit 1; }
+          [ "$BEFORE_TYPES" = "$AFTER_TYPES" ]     || { echo "类型/entryCount 指纹变化"; exit 1; }
+          [ "$BEFORE_DEX" = "$AFTER_DEX" ]         || { echo "classes.dex 内容被折叠步骤改动"; exit 1; }
+          [ "$BEFORE_ASSETS" = "$AFTER_ASSETS" ]   || { echo "assets 内容被折叠步骤改动"; exit 1; }
+          echo "OK：资源条目/类型、classes.dex、assets 均与折叠前一致"
+
       # 注入是否真的进了产物，只有拆开 APK 才能确认（cp 失败不会让 Gradle 报错）
       - name: 校验 APK 内含 C 二进制
         run: |

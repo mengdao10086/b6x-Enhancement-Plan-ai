@@ -104,6 +104,8 @@ public final class ConfigStore {
     private final Map<String, String> compatRenames = new LinkedHashMap<>();
 
     private final String configFileNameFromDef;
+    /** 构造时解析出的 params.json 根对象（只读复用，避免各处重复 open + 解析整份资产）；加载失败为 null。 */
+    private final JSONObject paramsRoot;
     private String loadError = "";
 
     private ConfigStore(Context context) {
@@ -125,6 +127,7 @@ public final class ConfigStore {
             loadError = "读取 assets/" + PARAMS_ASSET + " 失败：" + e.getMessage();
         }
         this.configFileNameFromDef = fileName;
+        this.paramsRoot = root;
         if (root != null) {
             parseDefinitions(root);
         }
@@ -196,6 +199,19 @@ public final class ConfigStore {
     /** 参数定义是否加载成功。 */
     public boolean definitionsLoaded() {
         return loadError.isEmpty() && !keys.isEmpty();
+    }
+
+    /**
+     * 构造时已解析的 params.json 根对象（只读，调用方不得修改）；加载失败时为 null。
+     * 供 {@code ui.ChartConfig} 取 {@code chart} 块，避免第二次 open + 解析整份资产。
+     */
+    public JSONObject paramsRoot() {
+        return paramsRoot;
+    }
+
+    /** params.json 加载失败原因；成功时为空串（供调用方如实上屏诊断）。 */
+    public String paramsLoadError() {
+        return loadError;
     }
 
     // ==================== 元数据（来自 params.json） ====================

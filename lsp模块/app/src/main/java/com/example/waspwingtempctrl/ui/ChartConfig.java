@@ -7,10 +7,7 @@ import com.example.waspwingtempctrl.ConfigStore;
 import org.json.JSONArray;
 import org.json.JSONObject;
 
-import java.io.ByteArrayOutputStream;
 import java.io.IOException;
-import java.io.InputStream;
-import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
@@ -25,9 +22,9 @@ import java.util.List;
  *       {@code PID_COLD_RANGE} / {@code PERF_ENABLED} —— 一律经 {@link ConfigStore} 读。
  *       字段缺项（如只写 {@code UI_CURVE_FILTER=15}）回落该字段在
  *       {@code assets/params.json} 里声明的默认值。</li>
- *   <li>{@code params.json} 的 {@code chart} 块（窗口档位/默认档位/滚动行数）——{@link ConfigStore}
- *       只暴露 {@code groups()/keys()/key()}，{@code chart} 不是键，故本类直接读该 asset
- *       （<b>本页唯一允许碰 assets 的地方，只读</b>）。读失败回落常量并把事实写进 {@link #notes}，不静默。</li>
+ *   <li>{@code params.json} 的 {@code chart} 块（窗口档位/默认档位/滚动行数）——直接复用
+ *       {@link ConfigStore} 构造时已解析的根对象（{@link ConfigStore#paramsRoot()}），
+ *       <b>不再第二次 open + 解析整份资产</b>。读失败回落常量并把事实写进 {@link #notes}，不静默。</li>
  * </ol>
  *
  * <p><b>进程级缓存</b>：{@link #load} 的结果按 {@link ConfigStore#configFingerprint()} 缓存，失效判据
@@ -92,7 +89,7 @@ final class ChartConfig {
         }
         ChartConfig c = new ChartConfig();
         c.readKeys(store);
-        c.readChartBlock(context);
+        c.readChartBlock(store);
         cached = new Cached(fingerprint, c);
         return c;
     }
@@ -155,9 +152,13 @@ final class ChartConfig {
 
     // ==================== params.json 的 chart 块 ====================
 
-    private void readChartBlock(Context context) {
-        try (InputStream in = context.getAssets().open(ConfigStore.PARAMS_ASSET)) {
-            JSONObject root = new JSONObject(readAll(in));
+    private void readChartBlock(ConfigStore store) {
+        try {
+            JSONObject root = store.paramsRoot();
+            if (root == null) {
+                String err = store.paramsLoadError();
+                throw new IOException(err.isEmpty() ? "params.json 缺少 chart 块" : err);
+            }
             JSONObject chart = root.optJSONObject("chart");
             if (chart == null) {
                 throw new IOException("params.json 缺少 chart 块");
@@ -200,15 +201,5 @@ final class ChartConfig {
             }
         }
         return false;
-    }
-
-    private static String readAll(InputStream in) throws IOException {
-        ByteArrayOutputStream out = new ByteArrayOutputStream();
-        byte[] buf = new byte[8192];
-        int n;
-        while ((n = in.read(buf)) > 0) {
-            out.write(buf, 0, n);
-        }
-        return new String(out.toByteArray(), StandardCharsets.UTF_8);
     }
 }
