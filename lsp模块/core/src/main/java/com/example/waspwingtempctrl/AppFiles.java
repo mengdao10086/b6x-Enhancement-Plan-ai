@@ -1,4 +1,4 @@
-package com.example.waspwingtempctrl.ui;
+package com.example.waspwingtempctrl;
 
 import android.content.Context;
 import android.system.ErrnoException;

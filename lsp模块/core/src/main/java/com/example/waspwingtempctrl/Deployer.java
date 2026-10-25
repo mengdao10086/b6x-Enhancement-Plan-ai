@@ -3,6 +3,8 @@ package com.example.waspwingtempctrl;
 import android.content.Context;
 import android.content.SharedPreferences;
 
+import com.example.waspwingtempctrl.core.R;
+
 import java.io.File;
 import java.io.FileInputStream;
 import java.io.FileOutputStream;

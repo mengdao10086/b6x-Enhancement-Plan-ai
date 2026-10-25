@@ -7,21 +7,7 @@
         android:allowBackup="false"
         android:supportsRtl="true">
 
-        <!-- ========== Xposed / LSPosed 模块元数据 ========== -->
-        <meta-data
-            android:name="xposedmodule"
-            android:value="true" />
-        <meta-data
-            android:name="xposedminversion"
-            android:value="53" />
-        <meta-data
-            android:name="xposeddescription"
-            android:value="修复B6X/B7X超频软件在安卓16的蓝牙问题，并内置智能温控：原生界面调参、一键部署守护进程" />
-
-        <!-- LSPosed 推荐作用域：管理器 > 模块 > 推荐勾选的应用 -->
-        <meta-data
-            android:name="xposedscope"
-            android:resource="@array/xposed_scope" />
+        <!-- Xposed / LSPosed 模块元数据由 :core 的 manifest 合并进来 -->
 
         <!-- 最小启动壳：显示构建信息与 root 状态；界面本体属线 D -->
         <activity

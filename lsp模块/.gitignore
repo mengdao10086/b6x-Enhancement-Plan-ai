@@ -1,6 +1,7 @@
 *.docx
 /build/
 /app/build/
+/core/build/
 .gradle/
 local.properties
 *.iml

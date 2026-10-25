@@ -18,6 +18,7 @@ import androidx.fragment.app.Fragment;
 import androidx.recyclerview.widget.LinearLayoutManager;
 import androidx.recyclerview.widget.RecyclerView;
 
+import com.example.waspwingtempctrl.AppFiles;
 import com.example.waspwingtempctrl.PageAware;
 import com.example.waspwingtempctrl.R;
 

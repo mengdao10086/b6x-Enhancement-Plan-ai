@@ -58,7 +58,7 @@ def source_path(source):
 Product = namedtuple("Product", "id path kind desc")
 
 PRODUCTS = (
-    Product("params.json", "lsp模块/app/src/main/assets/params.json", "full",
+    Product("params.json", "lsp模块/core/src/main/assets/params.json", "full",
             "界面消费的键/范围/默认值（APK assets）"),
     Product("profile.conf", "lsp模块/daemon/profile.conf", "full",
             "配置文件出厂模板（含注释）"),

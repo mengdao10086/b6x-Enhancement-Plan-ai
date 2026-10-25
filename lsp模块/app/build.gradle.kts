@@ -88,6 +88,9 @@ android {
 }
 
 dependencies {
+    // 共享协议/配置/部署实现（MainHook、ConfigStore、Deployer、RootShell、AppFiles、StartupTiming、PageAware）
+    implementation(project(":core"))
+
     // Xposed API (LSPosed 兼容)
     compileOnly("de.robv.android.xposed:api:82")
     compileOnly("de.robv.android.xposed:api:82:sources")

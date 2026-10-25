@@ -11,7 +11,7 @@ on:
 
 # 旧版独立 workflow（build-apk/build-lsposed/build-magisk）已废弃，合并至此文件
 # 交付物为单一 APK：C 守护程序（源码在 lsp模块/daemon/）在本 job 内编译后注入
-# lsp模块/app/src/main/assets/，再出 APK
+# lsp模块/core/src/main/assets/，再出 APK
 # 注意：C 源码与 APK 工程现在同在 lsp模块/ 下，两个构建信号已并入单一信号
 #
 # 目录名 ↔ CI 路径正则的耦合：下列正则里的 `lsp模块/` 前缀是硬编码的，
@@ -56,13 +56,14 @@ jobs:
             CHANGES=$(echo "$CHANGES" | grep -v '\.md$' || true)
             CHANGES=$(printf '%s\n%s' "$CHANGES" "$DOC_PRODUCT")
             # 单一信号，三类输入任一变更即重建（APK 内含 C 二进制，产物不可分割）：
-            #   lsp模块/app/      —— APK 代码
+            #   lsp模块/app/      —— APK 代码（界面壳）
+            #   lsp模块/core/     —— 共享代码/资产（库模块，合并进 APK）
             #   lsp模块/daemon/   —— C 守护程序源码与构建脚本
             #   lsp模块/*.kts 等  —— Gradle 配置
             #   参数定义/          —— assets/params.json 与 daemon/profile.conf 的单一来源
             #   .github/           —— workflow 自身（否则改 workflow 会「绿色但什么都没跑」）
             # 注意：只改 参数定义/ 而没重新生成产物时必须让 CI 跑到校验步骤
-            echo "$CHANGES" | grep -qE '^(lsp模块/(app/|daemon/|build\.gradle\.kts|settings\.gradle\.kts|gradle\.properties|gradlew|gradle/)|参数定义/|\.github/)' \
+            echo "$CHANGES" | grep -qE '^(lsp模块/(app/|core/|daemon/|build\.gradle\.kts|settings\.gradle\.kts|gradle\.properties|gradlew|gradle/)|参数定义/|\.github/)' \
               && echo "changed=true" >> "$GITHUB_OUTPUT" || echo "changed=false" >> "$GITHUB_OUTPUT"
           fi
 
@@ -93,7 +94,7 @@ jobs:
           C_EXTRAS=$(sed -n '/BROADCAST_EXTRAS\[\] *= *{/,/};/p' lsp模块/daemon/tempctrl.c \
                      | grep -o '"[^"]*"' | tr -d '"' | paste -sd' ' -)
           J_EXTRAS=$(grep -o 'getIntExtra("[^"]*"' \
-                     lsp模块/app/src/main/java/com/example/waspwingtempctrl/MainHook.java \
+                     lsp模块/core/src/main/java/com/example/waspwingtempctrl/MainHook.java \
                      | sed 's/.*getIntExtra("//; s/"$//' | paste -sd' ' -)
           echo "C  端 BROADCAST_EXTRAS[]: [$C_EXTRAS]"
           echo "Java 端 getIntExtra()    : [$J_EXTRAS]"
@@ -266,7 +267,7 @@ jobs:
       # 落点固定为 assets/tempctrl-arm64（Deployer.BIN_ASSET 依赖该名字）
       - name: 注入 C 二进制到 APK assets
         run: |
-          DEST="lsp模块/app/src/main/assets/tempctrl-arm64"
+          DEST="lsp模块/core/src/main/assets/tempctrl-arm64"
           mkdir -p "$(dirname "$DEST")"
           cp tempctrl "$DEST"
           if [ ! -s "$DEST" ]; then
@@ -338,11 +339,20 @@ jobs:
             --shorten-resource-paths \
             -o "$UNSIGNED" "$APK"
           "$BT/zipalign" -p -f 4 "$UNSIGNED" "$ALIGNED"
+          # minSdk 25 不必要 v1：关掉省约 59 KB；v2+v3 覆盖 Android 7.0+ 全部目标
           "$BT/apksigner" sign --ks "$KS" --ks-key-alias b6x \
             --ks-pass pass:android --key-pass pass:android \
-            --v1-signing-enabled true --v2-signing-enabled true \
+            --v1-signing-enabled false --v2-signing-enabled true --v3-signing-enabled true \
             --out "$SIGNED" "$ALIGNED"
-          "$BT/apksigner" verify --verbose --print-certs "$SIGNED"
+          VERIFY=$("$BT/apksigner" verify --verbose --print-certs "$SIGNED")
+          echo "$VERIFY"
+          echo "$VERIFY" | grep -q 'Verified using v1 scheme (JAR signing): false' \
+            || { echo "签名断言失败：v1 未关闭"; exit 1; }
+          echo "$VERIFY" | grep -q 'Verified using v2 scheme (APK Signature Scheme v2): true' \
+            || { echo "签名断言失败：v2 未开启"; exit 1; }
+          echo "$VERIFY" | grep -q 'Verified using v3 scheme (APK Signature Scheme v3): true' \
+            || { echo "签名断言失败：v3 未开启"; exit 1; }
+          echo "OK：v1=false，v2/v3=true"
           mv -f "$SIGNED" "$APK"
           rm -f "$UNSIGNED" "$ALIGNED"
 

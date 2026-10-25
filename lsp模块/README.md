@@ -70,7 +70,7 @@ am broadcast -a com.flydigi.SET_TEMPERATURE_B7 \
 
 ## 源码结构
 
-本模块分两部分：`app/`（Android 工程：Xposed 钩子 + 原生配置界面）与 `daemon/`（C 守护程序源码与构建脚本，CI 编译后注入 `app/src/main/assets/tempctrl-arm64`）。
+本模块分三部分：`core/`（共享实现与资产：Xposed 钩子、配置读写、部署/root 通道、`params.json`/`tempctrl-arm64`/`xposed_init`）、`app/`（原生配置界面外壳，依赖 `:core`）与 `daemon/`（C 守护程序源码与构建脚本，CI 编译后注入 `core/src/main/assets/tempctrl-arm64`）。
 
 > 目录与文件的权威清单见仓库根 [CLAUDE.md](../CLAUDE.md) 的「关键文件索引」表（全仓库以该表为准）；
 > 架构、进程协作与各文件落点见 [daemon/逻辑说明.md](daemon/逻辑说明.md)。

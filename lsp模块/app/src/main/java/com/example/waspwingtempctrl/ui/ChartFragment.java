@@ -18,6 +18,7 @@ import androidx.annotation.NonNull;
 import androidx.annotation.Nullable;
 import androidx.fragment.app.Fragment;
 
+import com.example.waspwingtempctrl.AppFiles;
 import com.example.waspwingtempctrl.R;
 import com.example.waspwingtempctrl.StartupTiming;
 import com.google.android.material.button.MaterialButton;
