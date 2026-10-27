@@ -14,6 +14,7 @@ import android.content.BroadcastReceiver;
 import android.content.Context;
 import android.content.Intent;
 import android.content.IntentFilter;
+import android.content.pm.PackageManager;
 import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
@@ -65,6 +66,9 @@ public class MainHook implements IXposedHookLoadPackage {
     private static volatile boolean gateLeCfg = true;          // 开关当前值（默认开）
     private static volatile long gateLeCfgAt = 0;              // 开关上次读取时刻（0=未读过）
     private static long gateLeLogAt = 0;                       // "门禁放行"日志限频
+    // 修复 #4 的适用边界：-1=未知（按放行处理，保留 Android 16 修复）、1=已授予、0=未授予。
+    // 全新安装时宿主尚未申请 BLUETOOTH_CONNECT，无条件放行会让 SDK 走到 connectGatt() 抛 SecurityException。
+    private static volatile int btConnectPerm = -1;
     // 上次设备 MAC 落点（宿主 app 私有目录，各包各记，按包名拼死路径）。
     // 落点选择与冷启动自动连接的说明见 app/逻辑说明.md §1.6；在 handleLoadPackage 里赋值。
     private static String lastDevFile = null;
@@ -138,6 +142,24 @@ public class MainHook implements IXposedHookLoadPackage {
     private static volatile boolean appBackgrounded = false;
     // setupResumeHookReady：设置页 onResume 钩子注册成功才启用复位机制；失败则退回进程级行为（降级不更坏）。
     private static volatile boolean setupResumeHookReady = false;
+
+    // ========== B7X 自动进入控制页（farsef，见 app/逻辑说明.md §1.6）==========
+    // 与 B6X 的 enteredSetup/appBackgrounded/resumedActivityCount 完全独立：进程内只会注册其中一条分支。
+    private static volatile boolean b7EnteredControl = false;    // 本前台会话是否已进入过控制页
+    private static volatile boolean b7AppBackgrounded = false;   // 整应用退到后台待定（只由 B7X 分支维护）
+    private static volatile boolean b7AutoLaunchSession = false;  // 本次前台会话由守护进程拉起
+    private static volatile Activity b7AutoEnterFrom = null;     // 本次自动跳转的发起 Activity（识别跳转引起的 onStop）
+    private static final AtomicInteger b7ResumedCount = new AtomicInteger();  // 已 resumed 的 Activity 数（B7X 独立计数）
+    private static volatile String lastWaspwingCodeCache = null;  // 上次散热器型号码（内存缓存，避免每包回传都落盘）
+    private static String lastDevCodeFile = null;                 // 型号码落点（B7X 包私有目录，handleLoadPackage 赋值）
+    private static volatile long b7AutoEnterLogAt = 0;            // 自动进入失败日志限频
+    private static final long B7_AUTO_ENTER_LOG_MIN_INTERVAL_MS = 60000;
+    private static final String B7_MAIN_ACTIVITY = "com.game.motionelf.activity.ActivityStart";
+    private static final String B7_HOME_FRAGMENT = "com.flydigi.device_manager.ui.home.DeviceHomeFragment";
+    private static final String B7_DETAIL_ACTIVITY = "com.flydigi.device_manager.ui.detail.DetailActivity";
+    private static final String EXTRA_KEY_DEVICE_TYPE = "key_device_type";
+    private static final String EXTRA_KEY_DEVICE_CODE = "key_device_code";
+    private static final String EXTRA_IP_TYPE = "ip_type";
 
     // ========== 后台自动重连 ==========
     private static volatile BluetoothDevice lastDevice = null;      // 上次连接的 BLE 设备
@@ -956,6 +978,7 @@ public class MainHook implements IXposedHookLoadPackage {
             currentStatusFile = STATUS_FILE_B7;
             lastDevFile = lastDevFileFor(PACKAGE_B7X);
             btOnAtFile = btOnAtFileFor(PACKAGE_B7X);
+            lastDevCodeFile = lastDevCodeFileFor(PACKAGE_B7X);
         } else {
             XposedBridge.log(TAG + " 跳过非目标包: " + lpparam.packageName);
             return;
@@ -975,6 +998,7 @@ public class MainHook implements IXposedHookLoadPackage {
         if (PACKAGE_B6X.equals(lpparam.packageName)) hookDeviceTypeGate(lpparam);
         hookRunFetchLoopCpuFix(lpparam);              // runFetchLoop CPU 满载修复（双设备）
         if (appKind == 6) hookB6Activity(lpparam);       // 自动进入设置界面（仅 B6X）
+        if (appKind == 7) hookB7Activity(lpparam);       // 自动进入控制页（仅 B7X）
         hookWaspWingManagerCapture(lpparam);          // 捕获 WaspWingManager 实例（双设备）
         hookSyncConnectedController(lpparam);         // static controller 同步到已连接实例（仅 B6X）
         hookGattConnectTimeoutClose(lpparam);         // 加固一：连接超时补 gatt.close（双设备）
@@ -1154,15 +1178,18 @@ public class MainHook implements IXposedHookLoadPackage {
             Class<?> appVm = lpparam.classLoader.loadClass(
                     "com.example.extool.WaspWingViewModel");
 
-            // === 修复 #4：强制 checkBluetoothPermission 返回 true ===
+            // === 修复 #4：仅在「实测已授予」时替 SDK 放行权限检查 ===
+            // 宿主 connect() / onGattConnected() 的第一道门就是它；未授予时保持 SDK 原判断，
+            // 让其安全早退，避免强制放行后 getType()/connectGatt() 抛 SecurityException（宿主链路无 try/catch）。
             XposedHelpers.findAndHookMethod(leCtrl, "checkBluetoothPermission",
                     new XC_MethodHook() {
                         @Override
                         protected void afterHookedMethod(MethodHookParam param) {
+                            if (btConnectPerm == 0) return;   // 实测未授予：交回 SDK 自行早退
                             param.setResult(true);
                         }
                     });
-            XposedBridge.log(TAG + " 已钩住 checkBluetoothPermission（强制返回 true）");
+            XposedBridge.log(TAG + " 已钩住 checkBluetoothPermission（实测已授予才放行）");
 
             // ===== 诊断钩子（调试用，保留） =====
             // 公共断连钩子（BluetoothGatt.disconnect 双设备通用）已覆盖。
@@ -1196,6 +1223,7 @@ public class MainHook implements IXposedHookLoadPackage {
                         @Override
                         protected void beforeHookedMethod(MethodHookParam param) {
                             gateLeActive.set(Boolean.TRUE);   // 修复 #5：标记「SDK 连接期」，供 getType 钩子放行
+                            probeBtConnectPermission();       // 修复 #4 边界：与崩溃同线程实测权限，供权限钩子判定
                             if (!connEnterLogAllowed()) return;
                             Object ctrl = param.thisObject;
                             Object dev = XposedHelpers.callMethod(ctrl, "getMBluetoothDevice");
@@ -1365,6 +1393,40 @@ public class MainHook implements IXposedHookLoadPackage {
         return v;
     }
 
+    /**
+     * 实测 {@code BLUETOOTH_CONNECT} 是否已授予，结果缓存到 {@link #btConnectPerm}。
+     * 由 {@code connect()} 的 before 钩子调用（与崩溃同线程），供 {@code checkBluetoothPermission} 钩子判定：
+     * 未授予（0）时不替 SDK 放行，让它自己早退；未知（-1）仍放行，保留 Android 16 修复。
+     * 取不到 Context / 低版本 / 任何异常一律保持未知，绝不阻断。
+     */
+    private static void probeBtConnectPermission() {
+        try {
+            Context ctx = appContext;
+            if (ctx == null || Build.VERSION.SDK_INT <= Build.VERSION_CODES.R) return;
+            btConnectPerm = (ctx.checkSelfPermission("android.permission.BLUETOOTH_CONNECT")
+                    == PackageManager.PERMISSION_GRANTED) ? 1 : 0;
+        } catch (Throwable ignored) {
+            // 探测失败保持未知（-1）：按放行处理，不改变原有 Android 16 修复
+        }
+    }
+
+    /**
+     * 全新安装守卫：两项「附近的设备」运行时权限是否都已授予。
+     * 仅用于「是否自动跳设置页」——未授予时留在引导页，由宿主的按钮流程一次性申请
+     * BLUETOOTH_CONNECT + BLUETOOTH_SCAN；SDK≤30、取不到 Context 或任何异常一律返回 true（不阻断）。
+     */
+    private static boolean hasNearbyPermissions(Context ctx) {
+        if (ctx == null || Build.VERSION.SDK_INT <= Build.VERSION_CODES.R) return true;
+        try {
+            return ctx.checkSelfPermission("android.permission.BLUETOOTH_SCAN")
+                    == PackageManager.PERMISSION_GRANTED
+                    && ctx.checkSelfPermission("android.permission.BLUETOOTH_CONNECT")
+                    == PackageManager.PERMISSION_GRANTED;
+        } catch (Throwable t) {
+            return true;
+        }
+    }
+
     /** "门禁放行"日志限频（5 分钟一条，与重连类日志同口径）。 */
     private static boolean gateLeLogAllowed() {
         long now = System.currentTimeMillis();
@@ -1522,6 +1584,261 @@ public class MainHook implements IXposedHookLoadPackage {
             setupResumeHookReady = false;   // 闸门关闭：退后台标记永不消费，enteredSetup 保持进程级语义
             XposedBridge.log(TAG + " 钩设置页 onResume 失败（自动进入设置界面退回进程级行为）: " + t.getMessage());
         }
+    }
+
+    /**
+     * B7X 专属：自动进入设备控制页（farsef）。
+     * 行为与 B6X 一致：每次回到前台且设备首页可见时进一次；同一前台会话内从控制页返回不再弹回；
+     * 守护进程拉起的会话不进入。控制页是独立 Activity（DetailActivity），会话判定用 Activity 级信号。
+     * 任一宿主类/extra 不可用只记日志并放弃本次进入，绝不上抛（见 app/逻辑说明.md §1.6）。
+     */
+    private static void hookB7Activity(XC_LoadPackage.LoadPackageParam lpparam) {
+        // ========== 前台会话计数 + 控制页识别 ==========
+        try {
+            XposedHelpers.findAndHookMethod(Activity.class, "onResume", new XC_MethodHook() {
+                @Override
+                protected void afterHookedMethod(MethodHookParam param) {
+                    try {
+                        b7ResumedCount.incrementAndGet();
+                        Activity act = (Activity) param.thisObject;
+                        if (isB7DetailActivity(act)) {
+                            b7EnteredControl = true;    // 已进过控制页（含用户手动进入）
+                            b7AppBackgrounded = false;  // 回到控制页：消费退后台标记
+                        }
+                    } catch (Throwable t) { /* 会话判定失败不阻断宿主 */ }
+                }
+            });
+            XposedHelpers.findAndHookMethod(Activity.class, "onPause", new XC_MethodHook() {
+                @Override
+                protected void beforeHookedMethod(MethodHookParam param) {
+                    if (b7ResumedCount.decrementAndGet() < 0) {
+                        b7ResumedCount.set(0);   // 钩子晚装等异常时序的防御性钳位
+                    }
+                }
+            });
+            XposedHelpers.findAndHookMethod(Activity.class, "onStop", new XC_MethodHook() {
+                @Override
+                protected void afterHookedMethod(MethodHookParam param) {
+                    try {
+                        if (b7ResumedCount.get() != 0) return;   // 仍有前台 Activity：页面切换，不是退后台
+                        Activity act = (Activity) param.thisObject;
+                        // 返回键 finish、旋转重建都不算退后台；对话框只有 onPause、分屏/可见 PiP 不会 onStop
+                        if (act.isFinishing() || act.isChangingConfigurations()) return;
+                        if (act == b7AutoEnterFrom) {
+                            // 本模块自动跳转引起的停止（新 Activity 已在上面）：不是退后台，
+                            // 否则从控制页返回时会误判成新会话而再次弹入。
+                            b7AutoEnterFrom = null;
+                            return;
+                        }
+                        b7AppBackgrounded = true;   // 只武装；是否复位 b7EnteredControl 由下次设备首页 onResume 决定
+                        // 本次前台会话到此结束：daemon 会话豁免必须同步失效。否则从最近任务恢复
+                        // （Activity 不重建、也不走 onNewIntent）会永久命中 onB7HomeResumed 开头的 return。
+                        b7AutoLaunchSession = false;
+                    } catch (Throwable t) { /* 判定失败按「未退后台」处理 */ }
+                }
+            });
+            // 守护进程在已有任务上二次拉起（onNewIntent）时同步会话标记
+            XposedHelpers.findAndHookMethod(Activity.class, "onNewIntent", Intent.class, new XC_MethodHook() {
+                @Override
+                protected void afterHookedMethod(MethodHookParam param) {
+                    try {
+                        Intent intent = (Intent) param.args[0];
+                        b7AutoLaunchSession = intent != null
+                                && "1".equals(intent.getStringExtra(AUTO_LAUNCH_EXTRA));
+                    } catch (Throwable t) { /* 读不到按非 daemon 会话处理 */ }
+                }
+            });
+            XposedBridge.log(TAG + " 已钩住 Activity 生命周期（B7X 自动进入控制页·会话判定）");
+        } catch (Throwable t) {
+            XposedBridge.log(TAG + " 钩 B7X 会话判定失败（不自动进入控制页）: " + t.getMessage());
+        }
+
+        // ========== 触发点：设备首页 onResume（协议/权限门之后才存在） ==========
+        hookClassMethod(lpparam.classLoader, B7_HOME_FRAGMENT, "f4",
+                "DeviceHomeFragment.f4（B7X 自动进入控制页）",
+                "钩 DeviceHomeFragment.f4 失败（B7X 不自动进入控制页）",
+                new XC_MethodHook() {
+                    @Override
+                    protected void afterHookedMethod(MethodHookParam param) {
+                        try {
+                            onB7HomeResumed(param.thisObject);
+                        } catch (Throwable t) {
+                            b7AutoEnterLog("B7X 自动进入控制页异常: " + t.getMessage());
+                        }
+                    }
+                });
+    }
+
+    /** 设备首页可见时的自动进入决策（只在主线程 onResume 回调里调用）。 */
+    private static void onB7HomeResumed(Object fragment) {
+        // 守护进程拉起的会话：保持现有「拉起即后台」，不进入
+        if (autoLaunchPending || b7AutoLaunchSession) return;
+        if (b7AppBackgrounded) {
+            b7AppBackgrounded = false;
+            if (b7EnteredControl) {   // 退后台再回来 = 新前台会话
+                b7EnteredControl = false;
+                XposedBridge.log(TAG + " B7X 前台会话重新开始");
+            }
+        }
+        if (b7EnteredControl) return;   // 本次会话已进过（含用户从控制页手动返回）
+        Activity act = b7FragmentActivity(fragment);
+        if (act == null || act.isFinishing()) return;
+        if (!hasNearbyPermissions(act)) return;   // 权限未授予：不绕过宿主的授权流程
+        String code = loadLastWaspwingCode();
+        if (code == null) {
+            b7AutoEnterLog("B7X 自动进入控制页跳过：未取得设备码");
+            return;
+        }
+        if (!isB7AutoEnterCode(code)) {
+            b7AutoEnterLog("B7X 自动进入控制页跳过：型号 " + code + " 不在自动进入范围");
+            return;
+        }
+        b7EnteredControl = true;   // 先占位去重；启动失败再回退
+        if (!startB7ControlPage(act, code)) b7EnteredControl = false;
+    }
+
+    /** 取 Fragment 所属 Activity；取不到返回 null。 */
+    private static Activity b7FragmentActivity(Object fragment) {
+        try {
+            Object ctx = XposedHelpers.callMethod(fragment, "getActivity");
+            return (ctx instanceof Activity) ? (Activity) ctx : null;
+        } catch (Throwable t) {
+            return null;
+        }
+    }
+
+    /** 是否为 B7X 的散热器控制页（type=3 且设备码属于 waspwing；老机型只用于去重）。 */
+    private static boolean isB7DetailActivity(Activity act) {
+        try {
+            if (!B7_DETAIL_ACTIVITY.equals(act.getClass().getName())) return false;
+            Intent intent = act.getIntent();
+            if (intent == null || intent.getIntExtra(EXTRA_KEY_DEVICE_TYPE, 1) != 3) return false;
+            return isB7WaspwingCode(intent.getStringExtra(EXTRA_KEY_DEVICE_CODE));
+        } catch (Throwable t) {
+            return false;
+        }
+    }
+
+    /** waspwing 全量设备码（含老机型）：用于「已进过控制页」的判定。 */
+    private static boolean isB7WaspwingCode(String code) {
+        if (code == null) return false;
+        switch (code) {
+            case "b3":
+            case "b5":
+            case "b5p":
+            case "b6":
+            case "b6x":
+            case "b7":
+            case "b7x":
+                return true;
+            default:
+                return false;
+        }
+    }
+
+    /** 主动进入的目标：仅 6/7 两代（老机型不主动进入）。 */
+    private static boolean isB7AutoEnterCode(String code) {
+        return "b6".equals(code) || "b6x".equals(code)
+                || "b7".equals(code) || "b7x".equals(code);
+    }
+
+    /**
+     * 启动宿主控制页 DetailActivity（显式 Intent，宿主 onCreate 会跑 ARouter 注入读 extras）。
+     * 失败只记日志并返回 false，不崩宿主。
+     */
+    private static boolean startB7ControlPage(Activity from, String code) {
+        try {
+            Intent intent = new Intent();
+            intent.setClassName(from.getPackageName(), B7_DETAIL_ACTIVITY);
+            intent.putExtra(EXTRA_KEY_DEVICE_TYPE, 3);
+            intent.putExtra(EXTRA_KEY_DEVICE_CODE, code);
+            intent.putExtra(EXTRA_IP_TYPE, -1);          // 宿主默认值即 -1，显式传以对齐路由参数
+            intent.putExtra("b7x_auto_enter", true);     // 仅供本模块识别，宿主忽略未知 extra
+            b7AutoEnterFrom = from;                       // 本次跳转引起的 onStop 不算退后台
+            from.startActivity(intent);
+            XposedBridge.log(TAG + " B7X 自动进入控制页 code=" + code);
+            return true;
+        } catch (Throwable t) {
+            b7AutoEnterFrom = null;
+            b7AutoEnterLog("B7X 自动进入控制页失败: " + t.getMessage());
+            return false;
+        }
+    }
+
+    /** 型号码落点：宿主 app 私有目录（与上次设备 MAC 同套路，按包名拼死路径）。 */
+    private static String lastDevCodeFileFor(String pkg) {
+        return "/data/data/" + pkg + "/files/tempctrl_last_dev_code";
+    }
+
+    /** 持久化上次散热器型号码（每包回传都会走这里，值未变不写盘）。 */
+    private static void saveLastWaspwingCode(String code) {
+        if (lastDevCodeFile == null || code == null) return;
+        String c = code.trim();
+        if (c.isEmpty() || c.equals(lastWaspwingCodeCache)) return;
+        try {
+            File parent = new File(lastDevCodeFile).getParentFile();
+            if (parent != null) parent.mkdirs();
+            FileOutputStream fos = new FileOutputStream(lastDevCodeFile);
+            fos.write((c + "\n").getBytes());
+            fos.close();
+            lastWaspwingCodeCache = c;
+        } catch (Throwable t) {
+            b7AutoEnterLog("B7X 保存设备码失败: " + t.getMessage());
+        }
+    }
+
+    /** 读取上次散热器型号码：内存缓存 → 落盘文件 → 反射宿主 v5.a.j().k() 兜底；都拿不到返回 null。 */
+    private static String loadLastWaspwingCode() {
+        String code = lastWaspwingCodeCache;
+        if (code != null) return code;
+        code = readLastWaspwingCodeFile();
+        if (code == null) code = readWaspwingCodeFromHost();
+        if (code != null) {
+            lastWaspwingCodeCache = code;
+            saveLastWaspwingCode(code);   // 反射兜底取到的也落盘，下次冷启动不再依赖宿主内部实现
+        }
+        return code;
+    }
+
+    /** 读模块自己落的型号码文件；无文件/读失败返回 null（从未连接过属正常路径）。 */
+    private static String readLastWaspwingCodeFile() {
+        if (lastDevCodeFile == null) return null;
+        try {
+            BufferedReader br = new BufferedReader(new java.io.FileReader(lastDevCodeFile));
+            String line = br.readLine();
+            br.close();
+            return (line != null && !line.trim().isEmpty()) ? line.trim() : null;
+        } catch (Throwable t) {
+            return null;
+        }
+    }
+
+    /** 反射宿主持久化的散热器信息兜底：v5.a.j().k().getDeviceCode()；失败返回 null。 */
+    private static String readWaspwingCodeFromHost() {
+        try {
+            ClassLoader cl = appClassLoader;
+            if (cl == null) return null;
+            Class<?> holder = cl.loadClass("v5.a");   // 宿主设备信息单例
+            Object inst = XposedHelpers.callStaticMethod(holder, "j");
+            if (inst == null) return null;
+            Object info = XposedHelpers.callMethod(inst, "k");
+            if (info == null) return null;
+            Object codeObj = XposedHelpers.callMethod(info, "getDeviceCode");
+            if (codeObj == null) return null;
+            String code = String.valueOf(codeObj).trim();
+            return (code.isEmpty() || "null".equals(code)) ? null : code;
+        } catch (Throwable t) {
+            b7AutoEnterLog("B7X 反射读取宿主设备码失败: " + t.getMessage());
+            return null;
+        }
+    }
+
+    /** 自动进入相关失败日志限频（60s 一条）。 */
+    private static void b7AutoEnterLog(String msg) {
+        long now = System.currentTimeMillis();
+        if (now - b7AutoEnterLogAt < B7_AUTO_ENTER_LOG_MIN_INTERVAL_MS) return;
+        b7AutoEnterLogAt = now;
+        XposedBridge.log(TAG + " " + msg);
     }
 
     /** 捕获 WaspWingManager 实例（双设备）；B6X 附屏蔽 App 自修复 */
@@ -1854,7 +2171,11 @@ public class MainHook implements IXposedHookLoadPackage {
                                 if (intent != null && "1".equals(intent.getStringExtra(AUTO_LAUNCH_EXTRA))) {
                                     intent.removeExtra(AUTO_LAUNCH_EXTRA);  // 只后台化一次
                                     autoLaunchPending = true;
+                                    if (appKind == 7) b7AutoLaunchSession = true;  // 守护进程拉起：不自动进控制页
                                     scheduleAutoLaunchTimeout(act);  // 兜底：自动进入设置失败时仍退后台
+                                } else if (appKind == 7
+                                        && B7_MAIN_ACTIVITY.equals(act.getClass().getName())) {
+                                    b7AutoLaunchSession = false;  // 用户主动打开 app：开新会话
                                 }
                             } catch (Throwable t) {
                                 XposedBridge.log(TAG + " auto_launch 标志读取失败: " + t.getMessage());
@@ -2528,6 +2849,12 @@ public class MainHook implements IXposedHookLoadPackage {
     private static void autoStartSetup() {
         if (enteredSetup || bleConnected || currentGuideActivity == null) return;
         final Activity act = currentGuideActivity;
+        // 全新安装：宿主尚未授予「附近的设备」权限。此时不自动跳设置页——设置页内的扫描只申请
+        // BLUETOOTH_SCAN，连接时会因缺 BLUETOOTH_CONNECT 失败/崩溃；留在引导页让用户点按钮一次性申请两项。
+        if (!hasNearbyPermissions(act)) {
+            XposedBridge.log(TAG + " 冷启动未自动进入设置界面：蓝牙权限未授予，请先在引导页授权");
+            return;
+        }
         currentGuideActivity = null;  // 先清空去重
         enterSetupActivity(act, false, "冷启动进入设置界面", "冷启动自动进入设置界面（自动连接）");
     }
@@ -2690,8 +3017,10 @@ public class MainHook implements IXposedHookLoadPackage {
     /** 从 getDeviceCode() 识别型号并同步 BLE_OWNER_LAST */
     private static void updateModelFromInfo(Object info) {
         try {
-            connectedModel = modelFromDeviceCode(
-                    XposedHelpers.callMethod(info, "getDeviceCode"));
+            Object codeObj = XposedHelpers.callMethod(info, "getDeviceCode");
+            connectedModel = modelFromDeviceCode(codeObj);
+            // B7X：顺手把原始型号码落盘，供下次冷启动自动进入控制页（值未变不写盘）
+            if (appKind == 7 && codeObj != null) saveLastWaspwingCode(String.valueOf(codeObj));
             refreshLastOwnerIfNeeded();  // 型号修正后同步 BLE_OWNER_LAST
         } catch (Throwable t) { /* 型号未知保持包名兜底 */ }
     }
