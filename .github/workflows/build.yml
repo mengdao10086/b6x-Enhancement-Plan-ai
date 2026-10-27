@@ -343,11 +343,16 @@ jobs:
           BEFORE_DEX=$(unzip -p "$APK" classes.dex | sha256sum | cut -d' ' -f1)
           BEFORE_ASSETS=$(assets_digest "$APK")
 
+          # 不用 --shorten-resource-paths：它会去掉资源文件的扩展名，
+          # 而 Resources.loadDrawable 按后缀区分 XML 与位图，丢掉 .xml 后矢量图被当位图解码，
+          # AppCompat 启动即抛 incorrect configuration 闪退。省下的体积可忽略。
           "$BT/aapt2" optimize \
             --collapse-resource-names \
             --deduplicate-entry-values \
-            --shorten-resource-paths \
             -o "$UNSIGNED" "$APK"
+          NOEXT=$("$BT/aapt2" dump resources "$UNSIGNED" | grep -oE '\(file\) res/[^ ]+' \
+            | awk '{print $2}' | grep -v '\.' || true)
+          [ -z "$NOEXT" ] || { echo "资源路径缺少扩展名（XML 会被当位图解析）: $NOEXT"; exit 1; }
           "$BT/zipalign" -p -f 4 "$UNSIGNED" "$ALIGNED"
           # minSdk 25 不必要 v1：关掉省约 59 KB；v2+v3 覆盖 Android 7.0+ 全部目标
           "$BT/apksigner" sign --ks "$KS" --ks-key-alias b6x \
