@@ -19,7 +19,7 @@ import androidx.recyclerview.widget.LinearLayoutManager;
 import androidx.recyclerview.widget.RecyclerView;
 
 import com.example.waspwingtempctrl.AppFiles;
-import com.example.waspwingtempctrl.PageAware;
+import com.example.waspwingtempctrl.SetupActivity;
 import com.example.waspwingtempctrl.R;
 
 import java.io.File;
@@ -35,7 +35,7 @@ import java.util.Locale;
  * <p>线程纪律、刷新节奏、无变化跳过、自动跟随：见 {@code app/逻辑说明.md} §8.3。
  * 键盘"只覆盖、不顶起"与聚焦兜底由 {@link EdgeToEdge} 全 app 统一负责，本页不再自行接管窗口设置。
  */
-public class LogFragment extends Fragment implements PageAware {
+public class LogFragment extends Fragment implements SetupActivity.PageAware {
 
     /** 自动刷新间隔。 */
     private static final long REFRESH_INTERVAL_MS = 2000L;

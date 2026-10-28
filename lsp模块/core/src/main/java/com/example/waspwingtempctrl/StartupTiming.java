@@ -264,156 +264,21 @@ public final class StartupTiming {
         }
     }
 
-    // ==================== 展示 ====================
+    // ==================== 展示（只读访问器） ====================
 
-    /**
-     * 折叠态的一行概要：优先给「首帧」这个端到端读数（各段并行、耗时不可相加，故没有真正的"总耗时"）；
-     * 未记到首帧时退回落页判定的耗时；一个槽都没记过返回空串（调用方据此不显示这一行）。
-     *
-     * <p>取「首帧」的理由见 {@code app/逻辑说明.md} §5.3：它是唯一能代表"从 onCreate 首行到页面可见"
-     * 的单个时间点，其余槽位是并行分段，相加没有意义。
-     */
-    public static String summary() {
-        if (!anyRecorded()) {
-            return "";
-        }
-        long firstFrame = VALUES.get(MARK_FIRST_DRAW * 2);
-        if (firstFrame >= 0) {
-            return "启动耗时：首帧 " + firstFrame + " ms";
-        }
-        long landing = VALUES.get(LANDING * 2 + 1);
-        if (landing >= 0) {
-            return "启动耗时：落页判定 " + landing + " ms";
-        }
-        return "启动耗时：已记录（点开看各段）";
+    /** 展示层只读访问：槽位原始值（{@code -1} = 未记录）。 */
+    public static long slot(int index) {
+        return VALUES.get(index);
     }
 
-    /**
-     * 拼展示文本（多行，不带前后空行；调用方自己接在既有文本之后）。
-     *
-     * <p>一个槽都没记过就返回空串（调用方据此不追加）。整体套 try/catch：本方法只用于展示，
-     * 任何意外都不该冒泡出去。
-     */
-    public static String report() {
-        try {
-            if (!anyRecorded()) {
-                return "";
-            }
-            StringBuilder sb = new StringBuilder(720);
-            sb.append("启动耗时（相对 onCreate 首行，ms）");
-            sb.append("\n起 = 该段开始时距首行的毫秒数；后台各段并行，耗时不可相加");
-            appendSpan(sb, "落页判定", LANDING);
-            appendSpan(sb, "配置定义", DEF_LOAD);
-            appendSpan(sb, "配置首份快照", SNAP_LOAD);
-            appendSpan(sb, "曲线口径", CHART_CFG);
-            appendSpan(sb, "曲线数据首读", CHART_DATA);
-            appendSpan(sb, "建表·首屏", FORM_BUILD_HEAD);
-            appendSpan(sb, "建表·可见后", FORM_BUILD_ROWS);
-            appendSubs(sb);
-            // 预制造（B）：命中/未命中看"池子里有没有件"，六个成因看"谁是死因"（判读口径见 app/逻辑说明.md §5.3）
-            sb.append("\n预制造 · 命中 ").append(counter(PRE_HIT))
-                    .append(" · 未命中 ").append(counter(PRE_MISS))
-                    .append(" · 段二起已备 ").append(moment(POOL_AT_ROWS_BEGIN))
-                    .append(" · 段二末已备 ").append(moment(POOL_AT_ROWS_END));
-            sb.append("\n预制造 · 失败 ").append(moment(MARK_PRE_FAIL))
-                    .append(" · 未就绪 ").append(moment(MARK_PRE_NOT_READY))
-                    .append(" · 无实例 ").append(moment(MARK_PRE_NO_INSTANCE))
-                    .append(" · 已关门 ").append(moment(MARK_PRE_CLOSED))
-                    .append(" · 身份不符 ").append(moment(MARK_PRE_OWNER_MISMATCH))
-                    .append(" · 已启动 ").append(moment(MARK_PRE_ALREADY_STARTED));
-            // 未命中构成：把"缺的是哪几种件"按布局 id 摊开（判读见 app/逻辑说明.md §5.3）
-            sb.append("\n未命中构成 · 卡 ").append(counter(MISS_GROUP))
-                    .append(" · 行 ").append(counter(MISS_ROW))
-                    .append(" · 开关 ").append(counter(MISS_KEY_SWITCH))
-                    .append(" · 枚举组 ").append(counter(MISS_ENUM_GROUP))
-                    .append(" · 枚举钮 ").append(counter(MISS_ENUM_BUTTON))
-                    .append(" · 字段开关 ").append(counter(MISS_FIELD_SWITCH))
-                    .append(" · 字段 ").append(counter(MISS_FIELD));
-            sb.append("\n时间点 · 首读IO 起 ").append(moment(MARK_CFG_IO_BEGIN))
-                    .append(" · 完成 ").append(moment(MARK_CFG_IO_DONE));
-            sb.append("\n时间点 · onCreate 结束 ").append(moment(MARK_ONCREATE_END))
-                    .append(" · 判定放行 ").append(moment(MARK_LANDING_WAKE))
-                    .append(" · 首帧 ").append(moment(MARK_FIRST_DRAW));
-            sb.append("\n时间点 · 落页等待 ").append(moment(MARK_LANDING_AWAIT))
-                    .append(" · 首页视图 ").append(moment(MARK_PAGE_VIEW_1))
-                    .append(" · 三页视图 ").append(moment(MARK_PAGE_VIEW_ALL))
-                    .append(" · 页面选中 ").append(moment(MARK_PAGE_SELECTED));
-            sb.append("\n时间点 · 数据到位 ").append(moment(MARK_FORM_DATA))
-                    .append(" · 建表后首帧 ").append(moment(MARK_AFTER_BUILD_FRAME))
-                    .append(" · 曲线数据 ").append(moment(MARK_CHART_DATA))
-                    .append(" · 诊断上屏 ").append(moment(MARK_DIAG_APPLY));
-            return sb.toString();
-        } catch (Throwable t) {
-            return "";
-        }
+    /** 槽位总数（时间点/计数/区间共用一维数组）。 */
+    public static int slotCount() {
+        return SLOTS;
     }
 
-    private static void appendSpan(StringBuilder sb, String label, int slot) {
-        sb.append('\n').append(label)
-                .append(" · 起 ").append(value(VALUES.get(slot * 2)))
-                .append(" · 耗时 ").append(value(VALUES.get(slot * 2 + 1)));
-    }
-
-    /**
-     * 建表细分的八项（每行三项，紧跟两个建表段之后）+ 八项合计。读法与拆并史见 {@code app/逻辑说明.md} §5.3。
-     * 一项都没计入过就整段不显示。
-     */
-    private static void appendSubs(StringBuilder sb) {
-        if (!anySubRecorded()) {
-            return;
-        }
-        sb.append("\n细分 · 控件制造 ").append(ms(FORM_SUB_INFLATE))
-                .append(" · 说明画笔 ").append(ms(FORM_SUB_PAINT))
-                .append(" · 文本实测宽 ").append(ms(FORM_SUB_MEASURE));
-        sb.append("\n细分 · 值回填 ").append(ms(FORM_SUB_FILL))
-                .append(" · 挂载 ").append(ms(FORM_SUB_ATTACH))
-                .append(" · 自检 ").append(ms(FORM_SUB_SELFCHECK));
-        sb.append("\n细分 · 徽标 ").append(ms(FORM_SUB_BADGE))
-                .append(" · 诊断提交 ").append(ms(FORM_SUB_DIAG_SUBMIT));
-        long sum = 0L;
-        for (int i = 0; i < SUB_COUNT; i++) {
-            // 合计必须与上面六项<b>同源</b>：两边都取已 flush 的展示槽位。取 ACC_MS 的话，
-            // 第二轮建表（视图重建）会把它清零重算，而展示槽位是首次写入胜出 → 六项是上一轮、
-            // 合计是这一轮，两个数永远对不上（诊断数字是本包的核心交付物，不能自相矛盾）
-            sum += Math.max(0L, VALUES.get((FORM_SUB_INFLATE + i) * 2 + 1));
-        }
-        sb.append(" · 合计 ").append(sum);
-    }
-
-    /** 累计槽的耗时（累计槽只用"耗时"那一格，起点那一格不对它对外开放）。 */
-    private static String ms(int slot) {
-        return value(VALUES.get(slot * 2 + 1));
-    }
-
-    private static boolean anySubRecorded() {
-        for (int i = 0; i < SUB_COUNT; i++) {
-            if (VALUES.get((FORM_SUB_INFLATE + i) * 2) >= 0) {
-                return true;
-            }
-        }
-        return false;
-    }
-
-    private static String moment(int slot) {
-        return value(VALUES.get(slot * 2));
-    }
-
-    /** 计数槽的读数：没记过按 {@code 0} 显示（"一次都没发生"）。 */
-    private static String counter(int slot) {
-        return Long.toString(Math.max(0L, VALUES.get(slot * 2 + 1)));
-    }
-
-    private static String value(long v) {
-        return v < 0 ? "—" : Long.toString(v);
-    }
-
-    private static boolean anyRecorded() {
-        for (int i = 0; i < SLOTS * 2; i++) {
-            if (VALUES.get(i) >= 0) {
-                return true;
-            }
-        }
-        return false;
+    /** 建表细分累计槽个数。 */
+    public static int subCount() {
+        return SUB_COUNT;
     }
 
     /** 取原点（没有就地定一个）：{@code compareAndSet} 只可能成功一次，故"最先到的那次"即原点。 */

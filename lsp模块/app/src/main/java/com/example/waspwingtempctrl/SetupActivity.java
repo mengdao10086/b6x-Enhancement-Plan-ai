@@ -49,6 +49,11 @@ import java.util.concurrent.atomic.AtomicInteger;
  */
 public class SetupActivity extends AppCompatActivity {
 
+    /** 页面可见性回调（外壳切页时广播）：只有当前页收 {@code true}、其余页收 {@code false}。 */
+    public interface PageAware {
+        void onPageVisible(boolean visible);
+    }
+
     private static final String KEY_TAB = "ww_selected_tab";
 
     /** 起始页设定（界面参数键，type=enum）：文本值 {@code status|config|log}，出厂 {@code config}。 */

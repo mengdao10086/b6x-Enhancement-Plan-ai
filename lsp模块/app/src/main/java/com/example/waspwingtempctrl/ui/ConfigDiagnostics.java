@@ -20,7 +20,7 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.RejectedExecutionException;
 
 /**
- * 配置页的诊断区（<b>只读展示</b>）：{@link ConfigStore#describeState(ConfigStore.Snapshot)}
+ * 配置页的诊断区（<b>只读展示</b>）：{@link ConfigDiagnosticsText#describeState(ConfigStore, Snapshot)}
  * （含配置文件路径与大小、落点是否与守护进程一致、参数定义加载情况、未定义键与读取提示）与配置 mtime。
  * 调用方已读过盘时把那份快照传进来（{@link #refresh(Snapshot)}），本区不再多读一次 {@code profile.conf}。
  *
@@ -170,7 +170,7 @@ final class ConfigDiagnostics {
      * 展开态保持用户正在看的那份明细、不被后台刷新打断。
      */
     private void refreshTimingSummary() {
-        String summary = StartupTiming.summary();
+        String summary = StartupTimingReport.summary();
         boolean expandable = !summary.isEmpty();
         timingRow.setVisibility(expandable ? View.VISIBLE : View.GONE);
         timingRow.setClickable(expandable);
@@ -214,12 +214,12 @@ final class ConfigDiagnostics {
 
     /** 点启动耗时行：展开看各段明细，再点收起（行高补间，三角与行高同一时长；不可补间时退回 180ms）。 */
     private void toggleTiming() {
-        if (StartupTiming.summary().isEmpty()) {
+        if (StartupTimingReport.summary().isEmpty()) {
             return;
         }
         int from = timingRow.getHeight();
         timingExpanded = !timingExpanded;
-        timingView.setText(timingExpanded ? StartupTiming.report() : StartupTiming.summary());
+        timingView.setText(timingExpanded ? StartupTimingReport.report() : StartupTimingReport.summary());
         long duration = Motion.animateHeightChange(timingRow, from, measureRowHeight(timingRow));
         Motion.syncExpandArrow(timingArrow, timingExpanded, duration >= 0 ? duration : 180L);
     }
@@ -244,7 +244,7 @@ final class ConfigDiagnostics {
     }
 
     /**
-     * 后台刷新诊断信息，复用调用方刚读到的快照（与本类、{@link ConfigStore#describeState(Snapshot)}
+     * 后台刷新诊断信息，复用调用方刚读到的快照（与本类、{@link ConfigDiagnosticsText#describeState(ConfigStore, Snapshot)}
      * 都不再各读一次 {@code profile.conf}；mtime 也取快照自己的字段）。在途期间到达的请求排队重跑、不丢；
      * 收起态下只登记、不上屏。见 app 逻辑说明.md §6.5。
      *
@@ -285,7 +285,7 @@ final class ConfigDiagnostics {
                     try {
                         final Snapshot snapshot = known != null ? known : store.read();
                         // 参数定义行由本类单独上屏（与清理按钮同排），正文只放落点/数量/提示
-                        final String state = store.describePathsAndNotes(snapshot);
+                        final String state = ConfigDiagnosticsText.describePathsAndNotes(store, snapshot);
                         main.post(new Runnable() {
                             @Override
                             public void run() {

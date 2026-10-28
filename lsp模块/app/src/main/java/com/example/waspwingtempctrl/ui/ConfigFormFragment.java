@@ -16,7 +16,7 @@ import com.example.waspwingtempctrl.ConfigStore;
 import com.example.waspwingtempctrl.ConfigStore.GroupMeta;
 import com.example.waspwingtempctrl.ConfigStore.Snapshot;
 import com.example.waspwingtempctrl.ConfigStore.Value;
-import com.example.waspwingtempctrl.PageAware;
+import com.example.waspwingtempctrl.SetupActivity;
 import com.example.waspwingtempctrl.R;
 import com.google.android.material.button.MaterialButton;
 import com.google.android.material.snackbar.Snackbar;
@@ -41,7 +41,8 @@ import java.util.List;
  * 生命周期（ViewPager2 切页不派发 {@code onPause}，靠 {@link #onPageVisible}）见 §9.1。
  */
 public class ConfigFormFragment extends Fragment
-        implements ConfigKeyRow.Host, ConfigFormController.Page, ChartFragment.Host, PageAware {
+        implements ConfigKeyRow.Host, ConfigFormController.Page, ChartFragment.Host,
+        SetupActivity.PageAware {
 
     /** 曲线区（子 Fragment）的 tag。 */
     private static final String TAG_CHART = "config_chart";
@@ -333,13 +334,13 @@ public class ConfigFormFragment extends Fragment
 
     /**
      * 按快照里「可清理的旧版遗留键」置显清理按钮：有候选才露出，文案带候选数。候选来自
-     * {@link Snapshot#removableKeys}（界面与 c-daemon 都不认的死键 + 可安全删除的遗留族键）。
+     * {@link ConfigStore#removableKeys(Snapshot)}（界面与 c-daemon 都不认的死键 + 可安全删除的遗留族键）。
      */
     private void refreshCleanupButton(@NonNull Snapshot snapshot) {
         if (cleanupRow == null || cleanupButton == null) {
             return;
         }
-        int n = snapshot.removableKeys.size();
+        int n = form.store().removableKeys(snapshot).size();
         if (n == 0) {
             cleanupRow.setVisibility(View.GONE);
             return;
@@ -356,11 +357,15 @@ public class ConfigFormFragment extends Fragment
      */
     private void onCleanupClicked() {
         Snapshot snapshot = lastSnapshot;
-        if (snapshot == null || snapshot.removableKeys.isEmpty() || pageRoot == null) {
+        if (snapshot == null || pageRoot == null) {
             return;
         }
-        final List<String> keys = new ArrayList<>(snapshot.removableKeys);
         ConfigStore store = form.store();
+        List<String> removable = store.removableKeys(snapshot);
+        if (removable.isEmpty()) {
+            return;
+        }
+        final List<String> keys = new ArrayList<>(removable);
         StringBuilder sb = new StringBuilder();
         for (String key : keys) {
             String note = store.legacyNote(key);

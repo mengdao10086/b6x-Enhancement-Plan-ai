@@ -19,7 +19,7 @@ import androidx.appcompat.app.AlertDialog;
 import androidx.fragment.app.Fragment;
 
 import com.example.waspwingtempctrl.Deployer;
-import com.example.waspwingtempctrl.PageAware;
+import com.example.waspwingtempctrl.SetupActivity;
 import com.example.waspwingtempctrl.R;
 
 import java.text.SimpleDateFormat;
@@ -30,14 +30,14 @@ import java.util.Locale;
  * 状态页：部署状态 / 一键部署 / 卸载部署 / 拉起daemon / 停止daemon / su 诊断。
  *
  * <p><b>调用边界（I5 的另一半）</b>：本类只调 {@link Deployer} 的
- * {@code probe() / deploy() / uninstall() / startDaemon() / stopDaemon() / buildDiagnostics() /
+ * {@code probe() / deploy() / uninstall() / startDaemon() / stopDaemon() / DeployDiagnostics.build() /
  * ensureRoot() / updateScript()}，不拼 shell、不碰文件、不绕过 {@code Deployer}。
  * {@link Deployer} 的方法都阻塞，故一律放后台线程；结果回主线程渲染。
  *
  * <p>刷新两条路径（消闪烁）、首次探测的时机、忙态与代号纪律、部署请求的武装与去重、
  * 部署后自动接拉起：均见 {@code app/逻辑说明.md} §8.1。
  */
-public class StatusFragment extends Fragment implements PageAware {
+public class StatusFragment extends Fragment implements SetupActivity.PageAware {
 
     /**
      * 一次性落盘标记的 prefs 文件名与键都定义在 {@link Deployer}（跨包收口，键名只有一处）——
@@ -437,7 +437,7 @@ public class StatusFragment extends Fragment implements PageAware {
     private void showDiagnostics() {
         final Context app = requireContext().getApplicationContext();
         runAsync(getString(R.string.status_busy_diag),
-                () -> Deployer.get(app).buildDiagnostics(), true, true);
+                () -> DeployDiagnostics.build(app), true, true);
     }
 
     // ==================== 破坏性动作的二次确认 ====================

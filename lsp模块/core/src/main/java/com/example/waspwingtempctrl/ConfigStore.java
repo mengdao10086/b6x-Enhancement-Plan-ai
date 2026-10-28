@@ -246,20 +246,17 @@ public final class ConfigStore {
     public static final class Snapshot {
         public final Map<String, Value> values;
         public final List<String> unknownKeys;
-        /**
-         * 可清理的旧版遗留键：{@code unknownKeys}（界面与 cdaemon 都不认的死键）加上「可安全删除的
-         * 遗留族键」（如其现表同号行已存在的旧倍率表行）。清理按钮的候选，按定义顺序去重。
-         */
-        public final List<String> removableKeys;
+        /** 文件里实际出现的键（GUI 的遗留键清理按需计算候选，lite 不触发）。 */
+        private final Set<String> presentKeys;
         public final boolean exists;
         public final long mtimeMs;
         public final List<String> notes;
 
-        Snapshot(Map<String, Value> values, List<String> unknownKeys, List<String> removableKeys,
+        Snapshot(Map<String, Value> values, List<String> unknownKeys, Set<String> presentKeys,
                  boolean exists, long mtimeMs, List<String> notes) {
             this.values = Collections.unmodifiableMap(values);
             this.unknownKeys = Collections.unmodifiableList(unknownKeys);
-            this.removableKeys = Collections.unmodifiableList(removableKeys);
+            this.presentKeys = Collections.unmodifiableSet(presentKeys);
             this.exists = exists;
             this.mtimeMs = mtimeMs;
             this.notes = Collections.unmodifiableList(notes);
@@ -342,7 +339,7 @@ public final class ConfigStore {
         for (KeyMeta meta : keys.values()) {
             values.put(meta.key, meta.defaultValue);
         }
-        return new Snapshot(values, new ArrayList<>(), new ArrayList<>(), exists, mtimeMs,
+        return new Snapshot(values, new ArrayList<>(), Collections.emptySet(), exists, mtimeMs,
                 new ArrayList<>(Collections.singletonList(note)));
     }
 
@@ -402,7 +399,17 @@ public final class ConfigStore {
             Value v = fromFile.get(meta.key);
             values.put(meta.key, v != null ? v : meta.defaultValue);
         }
-        return new Snapshot(values, unknown, removableOf(present, unknown), true, mtimeMs, notes);
+        return new Snapshot(values, unknown, present, true, mtimeMs, notes);
+    }
+
+    /**
+     * 可清理的旧版遗留键（<b>GUI 专用</b>）：由快照里的 present 键集合按需计算；lite 不调用，
+     * 故 {@link #removableOf} 与 {@link #cleanupPrefixOf} 可被 R8 从 lite 产物裁掉。
+     *
+     * @param snap 已读到的快照
+     */
+    public List<String> removableKeys(Snapshot snap) {
+        return removableOf(snap.presentKeys, snap.unknownKeys);
     }
 
     /**
@@ -818,67 +825,6 @@ public final class ConfigStore {
         return new Assessment(ui, clamped, notes);
     }
 
-    // ==================== 诊断 ====================
-
-    /** 诊断串（路径 / 定义 / 一致性 / 出厂值冲突）。 */
-    public String describeState() {
-        return describeState(read());
-    }
-
-    /**
-     * 诊断串（路径 / 定义 / 一致性），复用调用方刚读到的快照（避免为拿提示白读一遍整文件）。
-     * 详见 app/逻辑说明.md §3.4。
-     *
-     * @param snap 已读到的快照（调用方负责它确实是最近一次读取的结果）
-     */
-    public String describeState(Snapshot snap) {
-        StringBuilder sb = new StringBuilder(describePaths()).append('\n')
-                .append(describeDefinitions()).append('\n');
-        appendUnknownAndNotes(sb, snap);
-        return sb.toString();
-    }
-
-    /** 配置落点两行（配置文件 / C 端路径）：诊断正文的前两行，不含定义与提示。 */
-    public String describePaths() {
-        return "配置文件: " + configFile.getAbsolutePath()
-                + (exists() ? "（存在，" + configFile.length() + " B）" : "（不存在）")
-                + '\n'
-                + "C 端路径: " + daemonConfigPath()
-                + (isPathAlignedWithDaemon() ? "（一致）" : "（不一致！守护进程读不到 app 写的配置）");
-    }
-
-    /**
-     * 参数定义一行（文件名 + 键数 / 加载失败原因）：配置页把它单独摆一行，右侧同行放「清理旧版遗留键」。
-     */
-    public String describeDefinitions() {
-        return "参数定义: " + PARAMS_ASSET + " · "
-                + (loadError.isEmpty() ? keyCount() + " 键" : loadError);
-    }
-
-    /**
-     * 配置落点 + 未定义键数量 + 读取提示（不含参数定义行）：界面把定义行单独摆一行后，
-     * 正文用这一份，避免同一行内容出现两次。
-     */
-    public String describePathsAndNotes(Snapshot snap) {
-        StringBuilder sb = new StringBuilder(describePaths()).append('\n');
-        appendUnknownAndNotes(sb, snap);
-        return sb.toString();
-    }
-
-    /**
-     * 未定义键（<b>只报数量</b>，名单只在「清理旧版遗留键」的确认弹窗里逐条出现）与读取提示，各占一行。
-     * 名单不在这里罗列，也不在界面其它位置重复。
-     */
-    private static void appendUnknownAndNotes(StringBuilder sb, Snapshot snap) {
-        if (!snap.unknownKeys.isEmpty()) {
-            sb.append("未定义键: ").append(snap.unknownKeys.size())
-                    .append(" 项（不影响使用）").append('\n');
-        }
-        for (String note : snap.notes) {
-            sb.append("提示: ").append(note).append('\n');
-        }
-    }
-
     // ==================== 遗留键清理 ====================
 
     /**
@@ -920,7 +866,7 @@ public final class ConfigStore {
     }
 
     /**
-     * 删除给定的遗留键行（候选见 {@link Snapshot#removableKeys}），一次原子写。
+     * 删除给定的遗留键行（候选见 {@link #removableKeys(Snapshot)}），一次原子写。
      *
      * <p><b>为什么安全</b>：候选只含「界面与 cdaemon 都不认」的死键，以及「可安全删除的遗留族键」
      * （其现表同号行已存在）——没有任何一方会读它们。删前先把要删的行写成一份备份文件（可恢复），

@@ -202,7 +202,7 @@ final class ConfigFormController implements ConfigKeyRow.Host, ConfigWriteQueue.
                 final ConfigStore loaded = ConfigStore.get(appContext);
                 if (!loaded.definitionsLoaded()) {
                     // 定义没到位：诊断串（内部还要读一次盘）也在后台算好，再回主线程如实说明
-                    final String failure = loaded.describeState();
+                    final String failure = ConfigDiagnosticsText.describeState(loaded);
                     main.post(() -> onStoreReady(loaded));
                     main.post(() -> onSnapshotReady(null, failure));
                     return;
@@ -704,7 +704,7 @@ final class ConfigFormController implements ConfigKeyRow.Host, ConfigWriteQueue.
     }
 
     /**
-     * 清理旧版遗留键（{@link Snapshot#removableKeys} 的候选）：在共享 I/O 线程上原子删除 + 备份，
+     * 清理旧版遗留键（{@link ConfigStore#removableKeys(Snapshot)} 的候选）：在共享 I/O 线程上原子删除 + 备份，
      * 回主线程重读并整体刷一遍（值不变，只刷自检与诊断）。候选由页面给出，{@link ConfigStore#removeKeys}
      * 只删配置里确实存在的行、并二次判空。守 I3：只经 {@link ConfigStore} 写，不碰文件、不拼 shell。
      */
@@ -876,7 +876,7 @@ final class ConfigFormController implements ConfigKeyRow.Host, ConfigWriteQueue.
     }
 
     /**
-     * 外壳的页面可见性广播（{@link com.example.waspwingtempctrl.PageAware} 的落点）：回到本页重读盘，
+     * 外壳的页面可见性广播（{@link com.example.waspwingtempctrl.SetupActivity.PageAware} 的落点）：回到本页重读盘，
      * 离开本页冲刷待写（切页不派发 {@code onPause}，不主动冲刷就会把改动留在内存里）。见 §9.1。
      */
     void setPageVisible(boolean visible) {

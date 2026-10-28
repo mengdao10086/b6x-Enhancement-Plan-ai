@@ -22,7 +22,7 @@ import java.util.concurrent.ConcurrentHashMap;
 
 /**
  * 部署链路核心。界面只允许调 {@link #probe()}、{@link #deploy()}、{@link #uninstall()}、
- * {@link #startDaemon()}、{@link #stopDaemon()}、{@link #buildDiagnostics()}，不得自己拼 shell、不得直接碰文件；
+ * {@link #startDaemon()}、{@link #stopDaemon()}，不得自己拼 shell、不得直接碰文件；
  * root 调用一律走 {@link RootShell}（I2）。本类方法全部阻塞，<b>禁止在主线程调用</b>。
  *
  * <p>I4 部署完成判据、二进制/脚本为何经私有目录中转 —— 详见 app/逻辑说明.md §2.1、§2.5。
@@ -812,15 +812,6 @@ public final class Deployer {
         Status st = buildStatus(kv, true, md5OfAssetOrEmpty(appContext, BIN_ASSET),
                 md5OfAssetOrEmpty(appContext, SCRIPT_ASSET), new ArrayList<>());
         return new Result(ok, "停止daemon", steps, ok ? "" : "有进程未确认退出，见步骤", st);
-    }
-
-    /** 诊断串：部署状态 + 配置状态 + root 诊断。阻塞。部署段与状态区同一份文本（describe）。 */
-    public String buildDiagnostics() {
-        StringBuilder sb = new StringBuilder();
-        sb.append("=== 部署 ===\n").append(probe().describe()).append('\n');
-        sb.append("=== 配置 ===\n").append(configStore.describeState()).append('\n');
-        sb.append("=== root ===\n").append(shell.buildDiagnostics());
-        return sb.toString();
     }
 
     // ==================== 内部：资源落盘 ====================
