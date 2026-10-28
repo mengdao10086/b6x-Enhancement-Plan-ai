@@ -104,6 +104,13 @@ dependencies {
     implementation("androidx.viewpager2:viewpager2:1.1.0")
 }
 
+// profileinstaller 只用于安装 baseline profile，且本项目已 ignoreFromAllExternalDependencies、
+// 无自建 profile。它经 appcompat/material/viewpager2 → core/lifecycle-runtime 多条传递链进入，
+// 逐条 exclude 容易漏；这里统一从所有配置剔除，覆盖全部传递路径。
+configurations.configureEach {
+    exclude(group = "androidx.profileinstaller", module = "profileinstaller")
+}
+
 // ──────────────────────────────────────
 // 预制造并发前提的构建期检查（Z-3）
 // ──────────────────────────────────────

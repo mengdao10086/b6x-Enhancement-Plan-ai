@@ -326,6 +326,9 @@ jobs:
 
           entries() { "$BT/aapt2" dump resources "$1" | grep -c '^[[:space:]]*resource 0x'; }
           types()   { "$BT/aapt2" dump resources "$1" | grep -E '^[[:space:]]*type ' | sed 's/^[[:space:]]*//'; }
+          # 类型指纹：layout 的 entryCount 会按删除数下降，先归一化；其余类型的 entryCount 必须逐项不变
+          types_shape()  { types "$1" | sed -E 's/^(type layout id=0c entryCount=)[0-9]+$/\1X/'; }
+          layout_count() { types "$1" | sed -nE 's/^type layout id=0c entryCount=([0-9]+)$/\1/p'; }
           # 资源 ID 集合指纹（按 dump 顺序，不排序）：折叠改名合法，ID 增删/重排绝对不允许。
           ids()     { "$BT/aapt2" dump resources "$1" | grep -oE 'resource 0x[0-9a-f]{8}'; }
           assets_digest() {
@@ -336,10 +339,46 @@ jobs:
 
           BEFORE_SIZE=$(stat -c%s "$APK")
           BEFORE_ENTRIES=$(entries "$APK")
-          BEFORE_TYPES=$(types "$APK" | sha256sum | cut -d' ' -f1)
+          BEFORE_TYPES=$(types_shape "$APK" | sha256sum | cut -d' ' -f1)
           BEFORE_NTYPES=$(types "$APK" | wc -l | tr -d ' ')
-          BEFORE_IDS=$(ids "$APK" | sha256sum | cut -d' ' -f1)
+          BEFORE_LAYOUTS=$(layout_count "$APK")
           BEFORE_NIDS=$(ids "$APK" | wc -l | tr -d ' ')
+
+          # 本次有意移除的 layout：复查报告第 1 项的 18 个 + material_clock_display。
+          # 后者是唯一「保留文件中引用删除集」的一环：只被 material_timepicker（已在本名单）
+          # 引用，自身又 include material_time_chip；不一并删除会留下悬空引用。
+          # 两者均无代码路径可达（dex 里的 R.layout 常量都在 Material 自身不可达的 picker 类中）。
+          LAYOUTS_FILE="$RUNNER_TEMP/remove-layouts.txt"
+          cat > "$LAYOUTS_FILE" <<'EOF'
+          material_chip_input_combo
+          material_clockface_textview
+          material_clockface_view
+          material_textinput_timepicker
+          material_time_chip
+          material_timepicker
+          material_timepicker_dialog
+          material_timepicker_textinput_display
+          mtrl_calendar_day
+          mtrl_calendar_day_of_week
+          mtrl_calendar_days_of_week
+          mtrl_calendar_horizontal
+          mtrl_calendar_month
+          mtrl_calendar_month_labeled
+          mtrl_calendar_month_navigation
+          mtrl_calendar_months
+          mtrl_calendar_vertical
+          mtrl_calendar_year
+          material_clock_display
+          EOF
+          CFG="$RUNNER_TEMP/remove-unused-layouts.cfg"
+          sed 's|^|layout/|; s|$|#remove|' "$LAYOUTS_FILE" > "$CFG"
+          REMOVE_N=$(wc -l < "$LAYOUTS_FILE")
+          REMOVE_RE=$(paste -sd'|' "$LAYOUTS_FILE")
+          REMOVE_IDS=$("$BT/aapt2" dump resources "$APK" \
+            | grep -E "^[[:space:]]*resource 0x[0-9a-f]{8} layout/(${REMOVE_RE})$" \
+            | grep -oE 'resource 0x[0-9a-f]{8}' || true)
+          printf '%s\n' "$REMOVE_IDS" > "$RUNNER_TEMP/removed-ids.txt"
+          EXPECTED_IDS=$(ids "$APK" | grep -vxF -f "$RUNNER_TEMP/removed-ids.txt" | sha256sum | cut -d' ' -f1)
           BEFORE_DEX=$(unzip -p "$APK" classes.dex | sha256sum | cut -d' ' -f1)
           BEFORE_ASSETS=$(assets_digest "$APK")
 
@@ -347,6 +386,7 @@ jobs:
           # 而 Resources.loadDrawable 按后缀区分 XML 与位图，丢掉 .xml 后矢量图被当位图解码，
           # AppCompat 启动即抛 incorrect configuration 闪退。省下的体积可忽略。
           "$BT/aapt2" optimize \
+            --resources-config-path "$CFG" \
             --collapse-resource-names \
             --deduplicate-entry-values \
             -o "$UNSIGNED" "$APK"
@@ -373,29 +413,42 @@ jobs:
 
           AFTER_SIZE=$(stat -c%s "$APK")
           AFTER_ENTRIES=$(entries "$APK")
-          AFTER_TYPES=$(types "$APK" | sha256sum | cut -d' ' -f1)
+          AFTER_TYPES=$(types_shape "$APK" | sha256sum | cut -d' ' -f1)
           AFTER_NTYPES=$(types "$APK" | wc -l | tr -d ' ')
+          AFTER_LAYOUTS=$(layout_count "$APK")
           AFTER_IDS=$(ids "$APK" | sha256sum | cut -d' ' -f1)
           AFTER_NIDS=$(ids "$APK" | wc -l | tr -d ' ')
           AFTER_DEX=$(unzip -p "$APK" classes.dex | sha256sum | cut -d' ' -f1)
           AFTER_ASSETS=$(assets_digest "$APK")
 
-          echo "资源条目: $BEFORE_ENTRIES -> $AFTER_ENTRIES；类型数: $BEFORE_NTYPES -> $AFTER_NTYPES"
-          echo "资源 ID: $BEFORE_NIDS -> $AFTER_NIDS（指纹一致=$([ "$BEFORE_IDS" = "$AFTER_IDS" ] && echo true || echo false)）"
+          echo "资源条目: $BEFORE_ENTRIES -> $AFTER_ENTRIES（预期减 $REMOVE_N）；类型数: $BEFORE_NTYPES -> $AFTER_NTYPES"
+          echo "layout entryCount: $BEFORE_LAYOUTS -> $AFTER_LAYOUTS"
+          echo "资源 ID: $BEFORE_NIDS -> $AFTER_NIDS"
           echo "APK 字节: $BEFORE_SIZE -> $AFTER_SIZE（净减 $((BEFORE_SIZE - AFTER_SIZE))）"
-          { echo "资源条目: $BEFORE_ENTRIES -> $AFTER_ENTRIES；类型数: $BEFORE_NTYPES -> $AFTER_NTYPES";
+          { echo "资源条目: $BEFORE_ENTRIES -> $AFTER_ENTRIES（预期减 $REMOVE_N）；类型数: $BEFORE_NTYPES -> $AFTER_NTYPES";
+            echo "layout entryCount: $BEFORE_LAYOUTS -> $AFTER_LAYOUTS";
             echo "资源 ID: $BEFORE_NIDS -> $AFTER_NIDS";
             echo "APK 字节: $BEFORE_SIZE -> $AFTER_SIZE（净减 $((BEFORE_SIZE - AFTER_SIZE))）"; } >> "$GITHUB_STEP_SUMMARY"
 
-          [ "$BEFORE_ENTRIES" = "$AFTER_ENTRIES" ] || { echo "资源条目数变化：折叠改变了资源集合"; exit 1; }
-          [ "$BEFORE_TYPES" = "$AFTER_TYPES" ]     || { echo "类型/entryCount 指纹变化"; exit 1; }
-          # 资源名允许被折叠，但 ID 集合必须与折叠前逐个同序一致（5,380 个 ID 一个都不能少/多/挪位）
-          [ "$BEFORE_IDS" = "$AFTER_IDS" ]         || { echo "资源 ID 集合指纹变化：折叠改动了 ID 集合或顺序"; exit 1; }
+          # 基线断言：GUI 资源集合为 5,380 条 / 16 个类型（改动基线时需同步本检查）
+          [ "$BEFORE_ENTRIES" -eq 5380 ]           || { echo "基线资源条目数不是 5,380（$BEFORE_ENTRIES）"; exit 1; }
+          [ "$BEFORE_NTYPES" -eq 16 ]              || { echo "基线资源类型数不是 16（$BEFORE_NTYPES）"; exit 1; }
+          [ "$REMOVE_N" -eq 19 ]                   || { echo "待移除 layout 数量不是 19（$REMOVE_N）"; exit 1; }
+          [ "$AFTER_ENTRIES" -eq $((BEFORE_ENTRIES - REMOVE_N)) ] \
+            || { echo "资源条目数变化异常：$BEFORE_ENTRIES -> $AFTER_ENTRIES（应减 $REMOVE_N）"; exit 1; }
+          [ "$AFTER_NTYPES" -eq 16 ]               || { echo "折叠后资源类型数不是 16（$AFTER_NTYPES）"; exit 1; }
+          [ "$BEFORE_TYPES" = "$AFTER_TYPES" ]     || { echo "类型/除 layout 外 entryCount 指纹变化"; exit 1; }
+          [ "$AFTER_LAYOUTS" -eq $((BEFORE_LAYOUTS - REMOVE_N)) ] \
+            || { echo "layout entryCount 变化异常：$BEFORE_LAYOUTS -> $AFTER_LAYOUTS"; exit 1; }
+          # 资源名允许被折叠，但删除集之外的 ID 必须与折叠前逐个同序一致（一个都不能增/删/挪位）
+          [ "$AFTER_IDS" = "$EXPECTED_IDS" ]       || { echo "资源 ID 集合指纹变化：删除集之外的 ID 有增/删/挪位"; exit 1; }
+          [ "$AFTER_NIDS" -eq $((BEFORE_NIDS - REMOVE_N)) ] \
+            || { echo "资源 ID 数量异常：$BEFORE_NIDS -> $AFTER_NIDS"; exit 1; }
           [ "$BEFORE_NIDS" -gt 0 ]                 || { echo "未解析到资源 ID，断言失效"; exit 1; }
-          echo "OK：资源 ID 集合与折叠前同序一致（$BEFORE_NIDS 个）"
+          echo "OK：删除 $REMOVE_N 个 layout 后，其余资源 ID 与折叠前同序一致（$AFTER_NIDS 个）"
           [ "$BEFORE_DEX" = "$AFTER_DEX" ]         || { echo "classes.dex 内容被折叠步骤改动"; exit 1; }
           [ "$BEFORE_ASSETS" = "$AFTER_ASSETS" ]   || { echo "assets 内容被折叠步骤改动"; exit 1; }
-          echo "OK：资源条目/类型、classes.dex、assets 均与折叠前一致"
+          echo "OK：资源条目/类型、classes.dex、assets 均符合预期"
 
       # 注入是否真的进了产物，只有拆开 APK 才能确认（cp 失败不会让 Gradle 报错）
       - name: 校验两个 APK 都含 C 二进制

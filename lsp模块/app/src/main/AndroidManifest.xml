@@ -1,5 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
-<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
 
     <application
         android:label="飞智温控增强"
@@ -24,6 +25,23 @@
         <activity
             android:name=".SettingsActivity"
             android:exported="false" />
+
+        <!-- profileinstaller 已从依赖树排除（仅用于 baseline profile，本项目不用）。
+             下面两条是显式移除，防止库被其他依赖重新带入时又注册初始化器与接收器；
+             InitializationProvider 本身必须保留：emoji2 / lifecycle 仍通过它初始化。 -->
+        <provider
+            android:name="androidx.startup.InitializationProvider"
+            android:authorities="${applicationId}.androidx-startup"
+            android:exported="false"
+            tools:node="merge">
+            <meta-data
+                android:name="androidx.profileinstaller.ProfileInstallerInitializer"
+                tools:node="remove" />
+        </provider>
+
+        <receiver
+            android:name="androidx.profileinstaller.ProfileInstallReceiver"
+            tools:node="remove" />
 
     </application>
 
