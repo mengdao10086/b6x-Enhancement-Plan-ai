@@ -5,13 +5,15 @@
     'use strict';
 
     var SERIES = [
-        {id: 'batt', label: '电池温度', color: '#F44336', axis: 'left', fmt: 'temp', on: true},
-        {id: 'cool', label: '制冷', color: '#4CAF50', axis: 'right', fmt: 'int', on: true},
-        {id: 'rpm', label: '风扇(百rpm)', color: '#9C27B0', axis: 'left', fmt: 'rpm', on: true},
-        {id: 'hot', label: '热端温度', color: '#E91E63', axis: 'left', fmt: 'temp', on: true},
-        {id: 'cold', label: '冷端温度', color: '#2196F3', axis: 'left', fmt: 'temp', on: false},
-        {id: 'cpu', label: 'CPU温度', color: '#FF9800', axis: 'left', fmt: 'temp', on: false}
+        {id: 'batt', label: '电池温度', color: '#F44336', axis: 'left'},
+        {id: 'cool', label: '制冷', color: '#4CAF50', axis: 'right'},
+        {id: 'rpm', label: '风扇(百rpm)', color: '#9C27B0', axis: 'left'},
+        {id: 'hot', label: '热端温度', color: '#E91E63', axis: 'left'},
+        {id: 'cold', label: '冷端温度', color: '#2196F3', axis: 'left'},
+        {id: 'cpu', label: 'CPU温度', color: '#FF9800', axis: 'left'}
     ];
+
+    var SERIES_SCALE = {rpm: 100, cool: 1};
 
     var MAIN_GROUPS = ['debug', 'perf', 'sysfs', 'launch'];
     var WEBUI_KEYS = ['UI_GAP_SEC', 'UI_RPM_AXIS_MIN', 'UI_BACK_HIDE', 'UI_AUTO_UPDATE'];
@@ -22,13 +24,14 @@
     var THEME_LOG_PREFIX = 'lite-theme:';
     var booted = false;
     var LOG_MAX = 500;
+    var CHART_WINDOWS = [120, 180, 240, 360, 480, 720];
+    var CHART_DEFAULT_WIN = 360;
+    var CHART_MAX_WIN = 720;
 
     var state = {
         defs: null,
-        snapshot: null,
         values: {},
         rows: {},
-        groups: {},
         badges: {},
         expanded: {},
         tab: 'config',
@@ -37,8 +40,6 @@
         statusEnteredAt: 0,
         writeTimer: null,
         pending: {},
-        pendingMeta: {},
-        pendingTarget: {},
         theme: 'follow',
         chart: {
             points: [],
@@ -56,8 +57,7 @@
             loaded: false,
             series: {batt: true, cool: true, rpm: true, hot: true, cold: false, cpu: false}
         },
-        log: {loaded: false, lastLine: null, count: 0, follow: true},
-        statusLoaded: false,
+        log: {loaded: false, lastLine: null, follow: true},
         busy: false,
         settingsTimer: null,
         confirmTimer: null,
@@ -99,35 +99,23 @@
     }
 
     function hasClass(e, c) {
-        return (' ' + e.className + ' ').indexOf(' ' + c + ' ') !== -1;
+        return e.classList.contains(c);
     }
 
     function addClass(e, c) {
-        if (!hasClass(e, c)) {
-            e.className = e.className ? e.className + ' ' + c : c;
-        }
+        e.classList.add(c);
     }
 
     function removeClass(e, c) {
-        if (!hasClass(e, c)) {
-            return;
-        }
-        e.className = (' ' + e.className + ' ').replace(' ' + c + ' ', ' ')
-            .replace(/^\s+|\s+$/g, '').replace(/\s+/g, ' ');
+        e.classList.remove(c);
     }
 
     function toggleClass(e, c, on) {
-        if (on) {
-            addClass(e, c);
-        } else {
-            removeClass(e, c);
-        }
+        e.classList.toggle(c, !!on);
     }
 
     function clear(e) {
-        if (e) {
-            e.textContent = '';
-        }
+        e.textContent = '';
     }
 
     function asInt(v) {
@@ -156,11 +144,12 @@
         }
     }
 
+    function errOf(res) {
+        return (res && res.error) || '未知错误';
+    }
+
     function showBanner(msg, info) {
         var b = $('banner');
-        if (!b) {
-            return;
-        }
         b.textContent = textOf(msg);
         toggleClass(b, 'hidden', !msg);
         toggleClass(b, 'info', !!info);
@@ -206,9 +195,6 @@
 
     function showMessage(id, msg, ok) {
         var e = $(id);
-        if (!e) {
-            return;
-        }
         e.textContent = textOf(msg);
         toggleClass(e, 'error', !ok);
     }
@@ -220,34 +206,11 @@
         if (meta.type === 'table') {
             return d && d.length ? d.join('\n') : '';
         }
-        if (meta.type === 'multi') {
-            var arr = d || [];
-            var out = [];
-            for (var i = 0; i < arr.length; i++) {
-                out.push(textOf(arr[i]));
-            }
-            return out.join(' ');
-        }
-        return d === null || d === undefined ? '' : String(d);
+        return serializeValue(d);
     }
 
     function factoryText(meta) {
-        var f = meta.factory;
-        if (meta.type === 'table') {
-            return f && f.length ? f.join('\n') : '';
-        }
-        if (meta.type === 'multi') {
-            var arr = f || [];
-            var out = [];
-            for (var i = 0; i < arr.length; i++) {
-                out.push(textOf(arr[i]));
-            }
-            return out.join(' ');
-        }
-        if (f === null || f === undefined) {
-            return defaultValue(meta);
-        }
-        return String(f);
+        return serializeValue(factoryPayload(meta));
     }
 
     function factoryPayload(meta) {
@@ -273,6 +236,10 @@
         }
         var meta = state.defs && state.defs.keys ? state.defs.keys[key] : null;
         return meta ? defaultValue(meta) : '';
+    }
+
+    function isOn(key) {
+        return asInt(valueOf(key)) === 1;
     }
 
     function serializeValue(v) {
@@ -343,10 +310,7 @@
         var effective = effectiveTheme(theme);
         root.setAttribute('data-theme', effective);
         logTheme(effective);
-        var sel = $('theme-select');
-        if (sel) {
-            sel.value = theme;
-        }
+        $('theme-select').value = theme;
     }
 
     function applySystemTheme() {
@@ -392,31 +356,23 @@
     // ==================== 快照 ====================
 
     function applySnapshot(snap) {
-        state.snapshot = snap;
         state.values = {};
         var defs = state.defs;
         var values = snap && snap.ok && snap.values ? snap.values : {};
-        var key;
         if (defs && defs.keys) {
-            for (key in defs.keys) {
-                if (Object.prototype.hasOwnProperty.call(defs.keys, key)) {
-                    state.values[key] = values[key] !== undefined
-                        ? String(values[key]) : defaultValue(defs.keys[key]);
-                }
+            var keys = Object.keys(defs.keys);
+            for (var i = 0; i < keys.length; i++) {
+                var key = keys[i];
+                state.values[key] = values[key] !== undefined
+                    ? String(values[key]) : defaultValue(defs.keys[key]);
             }
         }
-        var unknown = [];
-        for (key in values) {
-            if (Object.prototype.hasOwnProperty.call(values, key)
-                && (!defs || !defs.keys || !defs.keys[key])) {
-                unknown.push(key);
-            }
-        }
+        var unknown = (snap && snap.unknown) || [];
         if (unknown.length) {
             appendBanner('配置里有 ' + unknown.length + ' 个未知键（已忽略）：' + unknown.join(', '));
         }
         if (!snap || !snap.ok) {
-            appendBanner('读取当前配置失败：' + ((snap && snap.error) || '未知错误'));
+            appendBanner('读取当前配置失败：' + errOf(snap));
         } else if (snap.notes && snap.notes.length) {
             appendBanner(snap.notes.join(' / '), true);
         }
@@ -425,27 +381,6 @@
     // ==================== 配置表单 ====================
 
     function init() {
-        state.rows = {};
-        state.values = {};
-        state.defs = null;
-        state.groups = {};
-        state.badges = {};
-        state.expanded = {};
-        state.pending = {};
-        state.pendingMeta = {};
-        state.pendingTarget = {};
-        clear($('banner'));
-        clear($('config-groups'));
-        clear($('settings-rows'));
-        clear($('chart-windows'));
-        clear($('chart-legend'));
-        clear($('chart-meta'));
-        clear($('chart-message'));
-        clear($('log-lines'));
-        clear($('log-message'));
-        clear($('settings-message'));
-        clear($('status-actions'));
-        clear($('status-message'));
         applyTheme(themeLoad());
 
         var defs = call('defs');
@@ -454,38 +389,27 @@
         } else {
             state.defs = defs;
         }
-        buildGroupIndex();
         applySnapshot(call('snapshot'));
         renderConfig();
         renderSettings();
         initChartControls();
         bindUi();
-        state.statusLoaded = false;
-        state.chart.loaded = false;
-        state.log.loaded = false;
-        state.log.lastLine = null;
-        state.log.count = 0;
-        state.log.follow = true;
         showTab('config');
         revealPage();
     }
 
-    function buildGroupIndex() {
+    function groupById(id) {
         var groups = state.defs && state.defs.groups ? state.defs.groups : [];
         for (var i = 0; i < groups.length; i++) {
-            state.groups[groups[i].id] = groups[i];
+            if (groups[i].id === id) {
+                return groups[i];
+            }
         }
-    }
-
-    function groupById(id) {
-        return state.groups[id] || null;
+        return null;
     }
 
     function renderConfig() {
         var container = $('config-groups');
-        if (!container) {
-            return;
-        }
         clear(container);
         if (!state.defs || !state.defs.keys) {
             return;
@@ -493,7 +417,7 @@
         for (var i = 0; i < MAIN_GROUPS.length; i++) {
             var group = groupById(MAIN_GROUPS[i]);
             if (group) {
-                container.appendChild(renderGroup(group, {}));
+                container.appendChild(renderGroup(group));
             }
         }
         fitAllRows();
@@ -523,13 +447,10 @@
         }
     }
 
-    function renderGroup(group, opts) {
-        opts = opts || {};
-        var keyList = opts.keys || group.keys || [];
+    function renderGroup(group) {
+        var keyList = group.keys || [];
         var card = make('section', 'group');
-        card.setAttribute('data-group', group.id);
-        var open = opts.expanded !== undefined ? opts.expanded : !!state.expanded[group.id];
-        if (!open) {
+        if (!state.expanded[group.id]) {
             addClass(card, 'collapsed');
         }
 
@@ -539,30 +460,27 @@
         head.appendChild(title);
         var body = make('div', 'group-body');
 
-        if (!opts.noBadge) {
-            var badge = make('span', 'badge hidden');
-            head.appendChild(badge);
-            state.badges[group.id] = badge;
-        }
+        var badge = make('span', 'badge hidden');
+        head.appendChild(badge);
+        state.badges[group.id] = badge;
 
-        var sw = null;
-        if (!opts.noMaster && group.master && state.defs.keys[group.master]) {
+        if (group.master && state.defs.keys[group.master]) {
             var mmeta = state.defs.keys[group.master];
-            sw = make('input', 'switch');
+            var sw = make('input', 'switch');
             sw.type = 'checkbox';
-            sw.checked = asInt(valueOf(group.master)) === 1;
+            sw.checked = isOn(group.master);
             sw.title = mmeta.label || group.master;
             sw.onchange = (function (meta) {
                 return function () {
-                    writeKey(meta, this.checked ? 1 : 0, 'config');
+                    writeKey(meta, this.checked ? 1 : 0);
                 };
             })(mmeta);
             head.appendChild(sw);
-            state.rows[group.master] = {row: card, controls: [sw], meta: mmeta, master: true};
+            state.rows[group.master] = {row: card, controls: [sw]};
         }
 
         head.onclick = function (e) {
-            if (e && e.target && (e.target === sw || e.target.tagName === 'INPUT')) {
+            if (e && e.target && e.target.tagName === 'INPUT') {
                 return;
             }
             setGroupOpen(group, card, body, hasClass(card, 'collapsed'));
@@ -571,31 +489,28 @@
         for (var i = 0; i < keyList.length; i++) {
             var meta = state.defs.keys[keyList[i]];
             if (meta) {
-                body.appendChild(renderRow(meta, 'config'));
+                body.appendChild(renderRow(meta));
             }
         }
 
-        if (!opts.noReset) {
-            var reset = make('button', 'group-reset');
-            reset.type = 'button';
-            reset.textContent = '恢复本组出厂值';
-            reset.onclick = (function (g) {
-                return function () {
-                    resetGroup(g);
-                };
-            })(group);
-            body.appendChild(reset);
-        }
+        var reset = make('button', 'group-reset');
+        reset.textContent = '恢复本组出厂值';
+        reset.onclick = (function (g) {
+            return function () {
+                resetGroup(g);
+            };
+        })(group);
+        body.appendChild(reset);
 
         card.appendChild(head);
         card.appendChild(body);
         return card;
     }
 
-    function renderRow(meta, target) {
+    function renderRow(meta) {
         var row = make('div', 'row');
         row.setAttribute('data-key', meta.key);
-        var entry = {row: row, controls: [], meta: meta, target: target || 'config'};
+        var entry = {row: row, controls: []};
         state.rows[meta.key] = entry;
         if (meta.type === 'table') {
             addClass(row, 'row-table');
@@ -607,13 +522,12 @@
         var head = make('div', 'row-head');
         head.appendChild(label);
 
-        var hints = [];
+        var rowHint = null;
         var note = noteText(meta);
         var descBtn = null;
         var descBox = null;
         if (note) {
             descBtn = make('button', 'desc-btn');
-            descBtn.type = 'button';
             descBtn.textContent = '?';
             descBtn.title = '说明';
             descBox = make('div', 'row-desc hidden');
@@ -638,11 +552,11 @@
             var sw = make('input', 'switch');
             sw.type = 'checkbox';
             sw.checked = asInt(value) === 1;
-            sw.onchange = (function (m, t) {
+            sw.onchange = (function (m) {
                 return function () {
-                    writeKey(m, this.checked ? 1 : 0, t);
+                    writeKey(m, this.checked ? 1 : 0);
                 };
-            })(meta, entry.target);
+            })(meta);
             ctrl.appendChild(sw);
             entry.controls.push(sw);
         } else if (type === 'multi') {
@@ -664,13 +578,13 @@
                     }
                     out.push(r);
                 }
-                writeKey(meta, out, entry.target);
+                writeKey(meta, out);
             };
             for (i = 0; i < multiInputs.length; i++) {
                 multiInputs[i].onchange = commitMulti;
             }
-            hints.push(multiHint);
-            entry.controls = multiInputs.slice(0);
+            rowHint = multiHint;
+            entry.controls = multiInputs;
         } else if (type === 'enum') {
             var sel = make('select');
             var options = meta.options || [];
@@ -681,22 +595,22 @@
                 sel.appendChild(opt);
             }
             sel.value = value;
-            sel.onchange = (function (m, t) {
+            sel.onchange = (function (m) {
                 return function () {
-                    writeKey(m, this.value, t);
+                    writeKey(m, this.value);
                 };
-            })(meta, entry.target);
+            })(meta);
             ctrl.appendChild(sel);
             entry.controls.push(sel);
         } else if (type === 'path') {
             var txt = make('input');
             txt.type = 'text';
             txt.value = value;
-            txt.onchange = (function (m, t) {
+            txt.onchange = (function (m) {
                 return function () {
-                    writeKey(m, this.value, t);
+                    writeKey(m, this.value);
                 };
-            })(meta, entry.target);
+            })(meta);
             ctrl.appendChild(txt);
             entry.controls.push(txt);
         } else if (type === 'table') {
@@ -705,21 +619,16 @@
             var num = make('input');
             num.type = 'number';
             num.value = value;
-            if (meta.min !== null && meta.min !== undefined) {
-                num.min = String(meta.min);
-            }
-            if (meta.max !== null && meta.max !== undefined) {
-                num.max = String(meta.max);
-            }
+            applyRange(num, meta);
             var hint = make('div', 'row-hint');
-            num.onchange = (function (m, input, hintEl, t) {
+            num.onchange = (function (m, input, hintEl) {
                 return function () {
                     var r = clampInput(input, m, hintEl);
                     if (r !== null) {
-                        writeKey(m, r, t);
+                        writeKey(m, r);
                     }
                 };
-            })(meta, num, hint, entry.target);
+            })(meta, num, hint);
             num.oninput = (function (input, m, hintEl) {
                 return function () {
                     removeClass(input, 'invalid');
@@ -727,13 +636,13 @@
                 };
             })(num, meta, hint);
             ctrl.appendChild(num);
-            hints.push(hint);
+            rowHint = hint;
             entry.controls.push(num);
         }
 
         row.appendChild(ctrl);
-        for (i = 0; i < hints.length; i++) {
-            row.appendChild(hints[i]);
+        if (rowHint) {
+            row.appendChild(rowHint);
         }
         if (descBox) {
             row.appendChild(descBox);
@@ -753,17 +662,43 @@
         return textOf(meta.desc);
     }
 
+    function hasMin(meta) {
+        return meta.min !== null && meta.min !== undefined;
+    }
+
+    function hasMax(meta) {
+        return meta.max !== null && meta.max !== undefined;
+    }
+
+    function boundText(v) {
+        return v === null || v === undefined ? '∞' : v;
+    }
+
+    function applyRange(input, meta) {
+        if (hasMin(meta)) {
+            input.min = String(meta.min);
+        }
+        if (hasMax(meta)) {
+            input.max = String(meta.max);
+        }
+    }
+
+    function clampToRange(n, meta) {
+        if (hasMin(meta) && n < meta.min) {
+            n = meta.min;
+        }
+        if (hasMax(meta) && n > meta.max) {
+            n = meta.max;
+        }
+        return n;
+    }
+
     function makeMultiInput(field, value) {
         var wrap = make('span', 'field');
         var input = make('input');
         input.type = 'number';
         input.value = textOf(value);
-        if (field.min !== null && field.min !== undefined) {
-            input.min = String(field.min);
-        }
-        if (field.max !== null && field.max !== undefined) {
-            input.max = String(field.max);
-        }
+        applyRange(input, field);
         input.title = field.label || '';
         if (field.unit) {
             input.title = (input.title ? input.title + ' ' : '') + '（' + field.unit + '）';
@@ -780,11 +715,8 @@
         if (n === null) {
             return '请输入整数';
         }
-        if (meta.min !== null && meta.min !== undefined && n < meta.min) {
-            return '范围 ' + meta.min + '~' + (meta.max === null || meta.max === undefined ? '∞' : meta.max);
-        }
-        if (meta.max !== null && meta.max !== undefined && n > meta.max) {
-            return '范围 ' + (meta.min === null || meta.min === undefined ? '∞' : meta.min) + '~' + meta.max;
+        if ((hasMin(meta) && n < meta.min) || (hasMax(meta) && n > meta.max)) {
+            return '范围 ' + boundText(meta.min) + '~' + boundText(meta.max);
         }
         return '';
     }
@@ -806,13 +738,7 @@
             addClass(input, 'invalid');
             return null;
         }
-        var c = n;
-        if (meta.min !== null && meta.min !== undefined && c < meta.min) {
-            c = meta.min;
-        }
-        if (meta.max !== null && meta.max !== undefined && c > meta.max) {
-            c = meta.max;
-        }
+        var c = clampToRange(n, meta);
         if (c !== n) {
             input.value = String(c);
             if (hintEl) {
@@ -859,11 +785,7 @@
     }
 
     function cutFields(meta) {
-        var f = meta.rowFields && meta.rowFields.length ? meta.rowFields : [];
-        if (f.length < 4) {
-            f = [{label: '冷值'}, {label: 'KDP 增益'}, {label: '升温率'}, {label: '降温率'}];
-        }
-        return f;
+        return meta.rowFields || [];
     }
 
     function renderCut(meta, value, entry) {
@@ -872,7 +794,7 @@
         var clusters = parseCut(value);
         var bad = 0;
 
-        function commit(target) {
+        function commit() {
             if (bad || hasClass(entry.row, 'disabled') || hasClass(entry.row, 'hidden')) {
                 return;
             }
@@ -882,7 +804,7 @@
                     lines.push(clusters[c].join(','));
                 }
             }
-            writeKey(meta, lines.join('\n'), target || entry.target);
+            writeKey(meta, lines.join('\n'));
         }
 
         function draw() {
@@ -909,7 +831,6 @@
                 wrap.appendChild(stop);
             }
             var addCluster = make('button', 'ki-add ki-actions');
-            addCluster.type = 'button';
             addCluster.textContent = '添加簇';
             addCluster.onclick = function () {
                 clusters.push(['', '', '', '']);
@@ -929,7 +850,6 @@
             title.textContent = '簇 ' + (ci + 1) + ' · ' + points + ' 点';
             head.appendChild(title);
             var delCluster = make('button', 'ki-del');
-            delCluster.type = 'button';
             delCluster.textContent = '删簇';
             delCluster.onclick = function () {
                 clusters.splice(ci, 1);
@@ -965,12 +885,7 @@
                     var inp = make('input');
                     inp.type = 'number';
                     var field = fields[c];
-                    if (field.min !== null && field.min !== undefined) {
-                        inp.min = String(field.min);
-                    }
-                    if (field.max !== null && field.max !== undefined) {
-                        inp.max = String(field.max);
-                    }
+                    applyRange(inp, field);
                     inp.value = textOf(segs[pi * 4 + c]).replace(/\s+/g, '');
                     inp.onchange = (function (segIndex, fieldMeta) {
                         return function () {
@@ -987,12 +902,7 @@
                                 showMessage('config-message', '分段倍率只能是整数，已暂不写入', false);
                                 return;
                             }
-                            if (fieldMeta.min !== null && fieldMeta.min !== undefined && n < fieldMeta.min) {
-                                n = fieldMeta.min;
-                            }
-                            if (fieldMeta.max !== null && fieldMeta.max !== undefined && n > fieldMeta.max) {
-                                n = fieldMeta.max;
-                            }
+                            n = clampToRange(n, fieldMeta);
                             this.value = String(n);
                             segs[segIndex] = String(n);
                             removeClass(this, 'invalid');
@@ -1005,7 +915,6 @@
                 }
                 var tdAct = make('td');
                 var delPoint = make('button', 'ki-del');
-                delPoint.type = 'button';
                 delPoint.textContent = '删点';
                 delPoint.onclick = (function (pointIndex) {
                     return function () {
@@ -1023,7 +932,6 @@
             card.appendChild(table);
 
             var addPoint = make('button', 'ki-del ki-actions');
-            addPoint.type = 'button';
             addPoint.textContent = '添加点';
             addPoint.onclick = function () {
                 segs.push('', '', '', '');
@@ -1041,11 +949,9 @@
 
     // ---------- 写入 ----------
 
-    function writeKey(meta, value, target) {
+    function writeKey(meta, value) {
         state.values[meta.key] = serializeValue(value);
         state.pending[meta.key] = value;
-        state.pendingMeta[meta.key] = meta;
-        state.pendingTarget[meta.key] = target || 'config';
         // 值变了才重算宽度（提交时算一次，不跟着按键重排）
         fitEntry(state.rows[meta.key]);
         if (state.writeTimer) {
@@ -1061,45 +967,45 @@
         refreshGates();
     }
 
+    function targetOf(keys) {
+        var meta = state.defs && state.defs.keys ? state.defs.keys[keys[0]] : null;
+        return meta && meta.group === 'webui' ? 'settings' : 'config';
+    }
+
     function flushWrites() {
         if (state.writeTimer) {
             clearTimeout(state.writeTimer);
             state.writeTimer = null;
         }
         var payload = state.pending;
-        var metas = state.pendingMeta;
-        var targets = state.pendingTarget;
-        var keys = [];
-        var key;
-        for (key in payload) {
-            if (Object.prototype.hasOwnProperty.call(payload, key)) {
-                keys.push(key);
-            }
-        }
+        var keys = Object.keys(payload);
         state.pending = {};
-        state.pendingMeta = {};
-        state.pendingTarget = {};
         if (!keys.length) {
             return;
         }
-        var target = targets[keys[0]] === 'settings' ? 'settings' : 'config';
+        var target = targetOf(keys);
         var res = call('setValues', JSON.stringify(payload));
-        var meta;
         if (res && res.ok) {
             showMessage(target + '-message',
                 (res.message || '已写入') + '（changed=' + res.changed + ', skipped=' + res.skipped + '）',
                 true);
         } else {
-            showMessage(target + '-message',
-                '写入失败：' + ((res && res.error) || '未知错误'), false);
-        }
-        for (var i = 0; i < keys.length; i++) {
-            meta = metas[keys[i]];
-            if (meta && (meta.key === 'UI_GAP_SEC' || meta.key === 'UI_RPM_AXIS_MIN')) {
-                refreshChartConfig();
-            }
+            showMessage(target + '-message', '写入失败：' + errOf(res), false);
         }
         refreshGates();
+    }
+
+    function fadeOut(backdropId, timerKey) {
+        var backdrop = $(backdropId);
+        addClass(backdrop, 'fade-out');
+        if (state[timerKey]) {
+            clearTimeout(state[timerKey]);
+        }
+        state[timerKey] = setTimeout(function () {
+            addClass(backdrop, 'hidden');
+            removeClass(backdrop, 'fade-out');
+            state[timerKey] = null;
+        }, 160);
     }
 
     function openConfirm(title, text, onOk) {
@@ -1120,16 +1026,7 @@
             flushWrites();
         }
         state.confirmAction = null;
-        var backdrop = $('confirm-backdrop');
-        addClass(backdrop, 'fade-out');
-        if (state.confirmTimer) {
-            clearTimeout(state.confirmTimer);
-        }
-        state.confirmTimer = setTimeout(function () {
-            addClass(backdrop, 'hidden');
-            removeClass(backdrop, 'fade-out');
-            state.confirmTimer = null;
-        }, 160);
+        fadeOut('confirm-backdrop', 'confirmTimer');
     }
 
     function runConfirm() {
@@ -1175,17 +1072,16 @@
         var res = call('setValues', JSON.stringify(payload));
         var msgId = messageId || 'config-message';
         if (res && res.ok) {
-            for (var k in values) {
-                if (Object.prototype.hasOwnProperty.call(values, k)) {
-                    state.values[k] = values[k];
-                }
+            var vkeys = Object.keys(values);
+            for (i = 0; i < vkeys.length; i++) {
+                state.values[vkeys[i]] = values[vkeys[i]];
             }
             renderConfig();
             renderSettings();
             showMessage(msgId,
                 '已恢复「' + title + '」出厂值' + (res.changed ? '' : '（无变化）'), true);
         } else {
-            showMessage(msgId, '恢复失败：' + ((res && res.error) || '未知错误'), false);
+            showMessage(msgId, '恢复失败：' + errOf(res), false);
         }
     }
 
@@ -1198,7 +1094,7 @@
         var groups = state.defs.groups;
         for (var gi = 0; gi < groups.length; gi++) {
             var group = groups[gi];
-            var masterOn = group.master ? asInt(valueOf(group.master)) === 1 : true;
+            var masterOn = group.master ? isOn(group.master) : true;
             var inactive = 0;
             var keys = group.keys || [];
             for (var ki = 0; ki < keys.length; ki++) {
@@ -1210,14 +1106,14 @@
                 var active = masterOn;
                 var req = meta.requires || [];
                 for (var ri = 0; ri < req.length; ri++) {
-                    if (asInt(valueOf(req[ri])) !== 1) {
+                    if (!isOn(req[ri])) {
                         active = false;
                     }
                 }
                 var hidden = false;
                 var hw = meta.hiddenWhen || [];
                 for (var hi = 0; hi < hw.length; hi++) {
-                    if (asInt(valueOf(hw[hi])) === 1) {
+                    if (isOn(hw[hi])) {
                         hidden = true;
                     }
                 }
@@ -1241,7 +1137,7 @@
             }
             var masterRow = group.master ? state.rows[group.master] : null;
             if (masterRow && masterRow.controls.length) {
-                masterRow.controls[0].checked = asInt(valueOf(group.master)) === 1;
+                masterRow.controls[0].checked = isOn(group.master);
             }
         }
     }
@@ -1250,9 +1146,6 @@
 
     function renderSettings() {
         var box = $('settings-rows');
-        if (!box) {
-            return;
-        }
         clear(box);
         var group = groupById('webui');
         if (!group || !state.defs || !state.defs.keys) {
@@ -1281,16 +1174,7 @@
 
     function closeSettings() {
         flushWrites();
-        var backdrop = $('settings-backdrop');
-        addClass(backdrop, 'fade-out');
-        if (state.settingsTimer) {
-            clearTimeout(state.settingsTimer);
-        }
-        state.settingsTimer = setTimeout(function () {
-            addClass(backdrop, 'hidden');
-            removeClass(backdrop, 'fade-out');
-            state.settingsTimer = null;
-        }, 160);
+        fadeOut('settings-backdrop', 'settingsTimer');
     }
 
     // ==================== 纵轴定标（精简版：整档步长 + 不裁点） ====================
@@ -1353,7 +1237,7 @@
     }
 
     function coldRange() {
-        var on = asInt(valueOf('PERF_ENABLED')) === 1;
+        var on = isOn('PERF_ENABLED');
         var start = on ? numsOf(valueOf('COLD_RPM_MAP'), 1)[0] : 40;
         var high = on ? numsOf(valueOf('PID_COLD_RANGE'), 3)[1] : 190;
         if (start < 0) {
@@ -1383,7 +1267,7 @@
                     maxWin = chartDef.windowOptionsSec[i];
                 }
             }
-            state.chart.maxWindow = maxWin || 720;
+            state.chart.maxWindow = maxWin || CHART_MAX_WIN;
         }
     }
 
@@ -1394,16 +1278,14 @@
         refreshChartConfig();
         var chartDef = state.defs ? state.defs.chart : null;
         var options = chartDef && chartDef.windowOptionsSec
-            ? chartDef.windowOptionsSec : [120, 180, 240, 360, 480, 720];
-        var defWin = chartDef && chartDef.windowDefaultSec ? chartDef.windowDefaultSec : 360;
+            ? chartDef.windowOptionsSec : CHART_WINDOWS;
+        var defWin = chartDef && chartDef.windowDefaultSec ? chartDef.windowDefaultSec : CHART_DEFAULT_WIN;
         state.chart.windowSec = defWin;
         var winBox = $('chart-windows');
         clear(winBox);
         for (var i = 0; i < options.length; i++) {
             var btn = make('button', 'win-btn');
-            btn.type = 'button';
             btn.textContent = options[i] + 's';
-            btn.setAttribute('data-window', String(options[i]));
             if (options[i] === defWin) {
                 addClass(btn, 'active');
             }
@@ -1487,7 +1369,7 @@
             state.chart.lastT = 0;
             state.chart.lastPoint = null;
         }
-        var added = 0;
+        var added = false;
         for (var j = 0; j < parsed.length; j++) {
             var point = parsed[j];
             if (state.chart.lastT && point.t <= state.chart.lastT) {
@@ -1504,13 +1386,12 @@
             state.chart.points.push(point);
             state.chart.lastPoint = point;
             state.chart.lastT = point.t;
-            added++;
+            added = true;
         }
         if (added) {
             pruneChart();
             drawChart();
         }
-        return added;
     }
 
     function pruneChart() {
@@ -1548,13 +1429,7 @@
         if (v === null || v === undefined || v < 0) {
             return null;
         }
-        if (id === 'rpm') {
-            return v / 100;
-        }
-        if (id === 'cool') {
-            return v;
-        }
-        return v / 10;
+        return v / (SERIES_SCALE[id] || 10);
     }
 
     function drawChart() {
@@ -1605,13 +1480,13 @@
         var s;
         var rpmMin = chart.rpmAxisMin > 0 ? chart.rpmAxisMin : 0;
 
-        function collectLeft(ignoreMin) {
+        function collectAxis(axis, ignoreMin) {
             var out = [];
             for (var pi = 0; pi < pts.length; pi++) {
                 var pp = pts[pi];
                 for (var si = 0; si < SERIES.length; si++) {
                     var dd = SERIES[si];
-                    if (!chart.series[dd.id] || dd.axis !== 'left') {
+                    if (!chart.series[dd.id] || dd.axis !== axis) {
                         continue;
                     }
                     var vv = seriesValue(dd.id, pp);
@@ -1628,17 +1503,11 @@
             return out;
         }
 
-        var leftValues = collectLeft(false);
+        var leftValues = collectAxis('left', false);
         if (!leftValues.length && rpmMin > 0) {
-            leftValues = collectLeft(true);
+            leftValues = collectAxis('left', true);
         }
-        var coolValues = [];
-        for (i = 0; i < pts.length; i++) {
-            var cool = seriesValue('cool', pts[i]);
-            if (cool !== null && chart.series.cool) {
-                coolValues.push(cool);
-            }
-        }
+        var coolValues = collectAxis('right', false);
         // 左轴：整档吸附（ChartAxis.fit），无 8% 人工留白
         var lAxis = null;
         if (leftValues.length) {
@@ -1761,14 +1630,21 @@
         return dark ? 'rgba(255,255,255,0.10)' : 'rgba(0,0,0,0.08)';
     }
 
-    function chartPoll() {
-        var res = call('chartData');
+    function pollText(method, msgId, ingest, label) {
+        var res = call(method);
         if (!res || !res.ok) {
-            showMessage('chart-message', '读取曲线失败：' + ((res && res.error) || '未知错误'), false);
+            showMessage(msgId, label + '失败：' + errOf(res), false);
+            return false;
+        }
+        showMessage(msgId, '', true);
+        ingest(res.text || '');
+        return true;
+    }
+
+    function chartPoll() {
+        if (!pollText('chartData', 'chart-message', chartIngest, '读取曲线')) {
             return;
         }
-        showMessage('chart-message', '', true);
-        chartIngest(res.text || '');
         var pts = visiblePoints();
         var newest = pts.length ? pts[pts.length - 1].t : state.chart.lastT;
         $('chart-meta').textContent = '样本 ' + pts.length + ' / 窗口 ' + state.chart.windowSec
@@ -1810,29 +1686,18 @@
     }
 
     function updateJumpButton() {
-        var btn = $('log-jump');
-        if (btn) {
-            toggleClass(btn, 'jump-off', !!state.log.follow);
-        }
+        toggleClass($('log-jump'), 'jump-off', !!state.log.follow);
     }
 
     function scrollLogBottom() {
         var box = $('log-lines');
-        if (box) {
-            box.scrollTop = box.scrollHeight;
-            state.log.follow = true;
-            updateJumpButton();
-        }
+        box.scrollTop = box.scrollHeight;
+        state.log.follow = true;
+        updateJumpButton();
     }
 
     function logPoll() {
-        var res = call('logs');
-        if (!res || !res.ok) {
-            showMessage('log-message', '读取日志失败：' + ((res && res.error) || '未知错误'), false);
-            return;
-        }
-        showMessage('log-message', '', true);
-        logIngest(res.text || '');
+        pollText('logs', 'log-message', logIngest, '读取日志');
     }
 
     function logIngest(text) {
@@ -1841,9 +1706,6 @@
             lines.pop();
         }
         var box = $('log-lines');
-        if (!box) {
-            return;
-        }
         var first = state.log.lastLine === null;
         var atBottom = first || nearBottom(box);
         var fresh = [];
@@ -1868,7 +1730,6 @@
                 addClass(div, 'warn');
             }
             box.appendChild(div);
-            state.log.count++;
         }
         var heightBeforeTrim = box.scrollHeight;
         while (box.children.length > LOG_MAX) {
@@ -1912,10 +1773,14 @@
 
     // ==================== 状态与动作 ====================
 
+    function hashState(present, ok) {
+        return present ? (ok ? '存在且哈希一致' : '存在但哈希不一致') : '不存在';
+    }
+
     function renderStatus(res) {
         var summary = $('status-summary');
         if (!res || !res.ok) {
-            summary.textContent = '读取失败：' + ((res && res.error) || '未知错误');
+            summary.textContent = '读取失败：' + errOf(res);
             addClass(summary, 'error');
             return;
         }
@@ -1926,10 +1791,8 @@
         lines.push('守护进程：' + (s.daemonRunning ? '运行中（PID ' + (s.daemonPids || '?') + '）' : '未运行'));
         lines.push('看门狗：' + (s.watchdogCount || 0) + ' 个（' + (s.watchdogPids || '无') + '）');
         lines.push('部署：' + (s.deployed ? '已就位' : '未就位'));
-        lines.push('二进制：' + (s.binExists
-            ? (s.binHashOk ? '存在且哈希一致' : '存在但哈希不一致') : '不存在'));
-        lines.push('脚本：' + (s.scriptPresent
-            ? (s.scriptHashOk ? '存在且哈希一致' : '存在但哈希不一致') : '不存在'));
+        lines.push('二进制：' + hashState(s.binExists, s.binHashOk));
+        lines.push('脚本：' + hashState(s.scriptPresent, s.scriptHashOk));
         lines.push('配置：' + (s.configPresent ? '存在' : '不存在')
             + (s.configPathAligned ? '（路径一致）' : '（路径不一致）'));
         if (s.configPath) {
@@ -2026,9 +1889,7 @@
         ];
         for (var i = 0; i < actions.length; i++) {
             var btn = make('button', 'action-btn');
-            btn.type = 'button';
             btn.textContent = actions[i].label;
-            btn.setAttribute('data-action', actions[i].id);
             btn.onclick = (function (id) {
                 return function () {
                     doAction(id);
@@ -2226,10 +2087,9 @@
 
     /** 建行/回填后统一算一次，不在每次按键时重排 */
     function fitAllRows() {
-        for (var key in state.rows) {
-            if (Object.prototype.hasOwnProperty.call(state.rows, key)) {
-                fitEntry(state.rows[key]);
-            }
+        var keys = Object.keys(state.rows);
+        for (var i = 0; i < keys.length; i++) {
+            fitEntry(state.rows[keys[i]]);
         }
     }
 
@@ -2262,12 +2122,7 @@
     }
 
     function shiftTab(delta) {
-        var idx = -1;
-        for (var i = 0; i < TABS.length; i++) {
-            if (TABS[i] === state.tab) {
-                idx = i;
-            }
-        }
+        var idx = TABS.indexOf(state.tab);
         if (idx < 0) {
             return;
         }
@@ -2334,15 +2189,17 @@
             }
         }
 
-        try {
-            document.addEventListener('touchstart', onStart, {passive: true});
-            document.addEventListener('touchmove', onMove, {passive: true});
-            document.addEventListener('touchend', onEnd, {passive: true});
-        } catch (e) {
-            document.addEventListener('touchstart', onStart, false);
-            document.addEventListener('touchmove', onMove, false);
-            document.addEventListener('touchend', onEnd, false);
-        }
+        document.addEventListener('touchstart', onStart, {passive: true});
+        document.addEventListener('touchmove', onMove, {passive: true});
+        document.addEventListener('touchend', onEnd, {passive: true});
+    }
+
+    function bindBackdrop(id, close) {
+        $(id).onclick = function (e) {
+            if (e && e.target === this) {
+                close();
+            }
+        };
     }
 
     function bindUi() {
@@ -2355,31 +2212,15 @@
                 };
             })(name);
         }
-        $('log-jump').onclick = function () {
-            scrollLogBottom();
-        };
-        $('open-settings').onclick = function () {
-            openSettings();
-        };
-        $('settings-close').onclick = function () {
-            closeSettings();
-        };
-        $('settings-backdrop').onclick = function (e) {
-            if (e && e.target === this) {
-                closeSettings();
-            }
-        };
+        $('log-jump').onclick = scrollLogBottom;
+        $('open-settings').onclick = openSettings;
+        $('settings-close').onclick = closeSettings;
+        bindBackdrop('settings-backdrop', closeSettings);
         $('confirm-cancel').onclick = function () {
             closeConfirm();
         };
-        $('confirm-ok').onclick = function () {
-            runConfirm();
-        };
-        $('confirm-backdrop').onclick = function (e) {
-            if (e && e.target === this) {
-                closeConfirm();
-            }
-        };
+        $('confirm-ok').onclick = runConfirm;
+        bindBackdrop('confirm-backdrop', closeConfirm);
         $('settings-reset').onclick = function () {
             resetGroup(groupById('webui'), WEBUI_KEYS, 'settings-message', '界面参数（可见项）');
         };
@@ -2459,6 +2300,9 @@
         _state: state,
         _test: {
             showTab: showTab,
+            defaultValue: defaultValue,
+            factoryPayload: factoryPayload,
+            factoryText: factoryText,
             chartIngest: chartIngest,
             chartPoll: chartPoll,
             drawChart: drawChart,
