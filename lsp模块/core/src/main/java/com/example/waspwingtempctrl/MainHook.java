@@ -2491,6 +2491,11 @@ public class MainHook implements IXposedHookLoadPackage {
     /**
      * 调用 WaspWingManager.setRunMode。
      * WaspWingManager：B6X 的 setRunMode，B7X 混淆为 W
+     *
+     * 型号差异：宿主「固定功率」在 B6X 是 SDK mode=2（命令字 0x23），在 B7X 是 mode=1。
+     * 模块/daemon 协议中 mode=1 恒表示固定功率，故下发前按 connectedModel 换算：
+     * B6X(6) 把 1→2 并改走 mode=2 的参数槽；B7X(7) 与未知型号(0) 原样透传。
+     * 仅换算真正下发的参数，设备回传的 RUN_MODE（status 文件/日志）不受影响。
      */
     private static void invokeSetRunMode(Object inst, int mode, int temperature, int windOC,
                                         int coldOC, int windLevel, int modeCustom, int extra) {
@@ -2522,12 +2527,24 @@ public class MainHook implements IXposedHookLoadPackage {
             // 字段缺失/不可访问时忽略（不影响 setRunMode 主流程）
         }
         String[] names = (appKind == 7) ? SET_RUN_MODE_NAMES_B7 : SET_RUN_MODE_NAMES_B6;
+        // B6X 固定功率换算：宿主用 mode=2（0x23），风走第 5 参、冷走第 6 参；
+        // 型号未知(0) 或 B7X(7) 保持原样（回落现状 mode=1）。
+        int sdkMode = mode;
+        int sdkWindOC = windOC, sdkColdOC = coldOC, sdkWindLevel = windLevel, sdkModeCustom = modeCustom;
+        if (mode == 1 && connectedModel == 6) {
+            sdkMode = 2;
+            sdkWindLevel = windOC;      // RPM → mode=2 的风速槽
+            sdkModeCustom = coldOC;     // 制冷强度 → mode=2 的冷值槽
+            sdkWindOC = 0;
+            sdkColdOC = 0;
+        }
         Throwable last = null;
         for (String n : names) {
             try {
-                XposedHelpers.callMethod(inst, n, mode, temperature, windOC, coldOC,
-                        windLevel, modeCustom, extra);
-                // 记录最近下发目标（锁死检测基准：目标≠回传且停滞时判定锁死）；仅 callMethod 成功后更新
+                XposedHelpers.callMethod(inst, n, sdkMode, temperature, sdkWindOC, sdkColdOC,
+                        sdkWindLevel, sdkModeCustom, extra);
+                // 记录最近下发目标（锁死检测基准：目标≠回传且停滞时判定锁死）；仅 callMethod 成功后更新。
+                // 基准取模块侧原始 coldOC/windOC，不取换算后的参数槽，否则目标会错位。
                 lastBcastColdLv = coldOC;
                 lastBcastRpmLv = (mode == 0) ? windLevel : windOC;
                 dispatchStallCount++;   // 锁死检测：累计下发次数（回传到位/变化时由 checkCommandStall 清零）
@@ -2535,7 +2552,7 @@ public class MainHook implements IXposedHookLoadPackage {
                 if (setRunModeLogCount < DIAG_LOG_MAX_PER_CONN) {
                     setRunModeLogCount++;
                     XposedBridge.log(TAG + " setRunMode 已下发 method=" + n
-                            + " mode=" + mode + " temp=" + temperature
+                            + " 请求mode=" + mode + " SDKmode=" + sdkMode + " temp=" + temperature
                             + " windOC=" + windOC + " coldOC=" + coldOC
                             + " windLv=" + windLevel + " modeCustom=" + modeCustom
                             + " extra=" + extra);
@@ -2634,14 +2651,15 @@ public class MainHook implements IXposedHookLoadPackage {
         }
     }
 
-    /** 异步下发 mode0（关制冷）尝试唤醒固件；tempctrl 会恢复 mode1 */
+    /** 异步下发 mode0（智能命令，目标温度 0，靠固件语义关制冷）尝试唤醒固件；tempctrl 会恢复固定功率 */
     private static void invokeDeviceWakeup() {
         Thread t = new Thread(() -> {
             try {
                 Thread.sleep(300);   // 等当前命令处理完
                 Object inst = capturedWaspWingMgr;
                 if (inst != null) {
-                    invokeSetRunMode(inst, 0, 0, 0, 0, 0, 0, 0);   // mode=0 固定功率/关制冷
+                    // mode=0 智能温控语义，与固定功率无关，不参与 B6X 的 mode1→2 映射
+                    invokeSetRunMode(inst, 0, 0, 0, 0, 0, 0, 0);
                 } else {
                     XposedBridge.log(TAG + " 唤醒序列失败: WaspWingManager 实例未就绪");
                 }
