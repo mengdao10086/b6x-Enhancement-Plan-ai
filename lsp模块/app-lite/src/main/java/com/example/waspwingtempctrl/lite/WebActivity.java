@@ -42,8 +42,9 @@ public final class WebActivity extends Activity {
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
-        // 首帧固定黑底，避免 WebView 默认白底闪一下
+        // 首帧固定黑底 + 底部导航栏先黑，避免 WebView 默认白底 / 系统默认栏色闪一下
         getWindow().getDecorView().setBackgroundColor(Color.BLACK);
+        applyNavBarColor(Color.BLACK, true);
         try {
             webView = new WebView(this);
         } catch (Throwable t) {
@@ -152,11 +153,16 @@ public final class WebActivity extends Activity {
 
     /** 底部导航栏取主题背景色，浅色主题同时把图标切深色，避免手势条区域割裂。 */
     private void applyNavBar(boolean dark) {
+        applyNavBarColor(dark ? BG_DARK : BG_LIGHT, dark);
+    }
+
+    /** 显式设置导航栏颜色；{@code dark=true} 表示深底浅图标。 */
+    private void applyNavBarColor(int color, boolean dark) {
         Window window = getWindow();
         if (window == null) {
             return;
         }
-        window.setNavigationBarColor(dark ? BG_DARK : BG_LIGHT);
+        window.setNavigationBarColor(color);
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             View decor = window.getDecorView();
             int flags = decor.getSystemUiVisibility();
