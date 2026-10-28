@@ -3,12 +3,16 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="color-scheme" content="light dark">
 <title>飞智温控增强 Lite</title>
 <link rel="stylesheet" href="style.css">
 </head>
 <body>
 <header class="topbar">
-    <div class="title">飞智温控增强 Lite</div>
+    <div class="bar">
+        <div class="title">飞智温控增强 Lite</div>
+        <button id="open-settings" class="bar-btn" type="button">设置</button>
+    </div>
     <nav id="tabs" class="tabs">
         <button type="button" class="tab" data-tab="status">状态</button>
         <button type="button" class="tab active" data-tab="config">配置</button>
@@ -19,10 +23,9 @@
 
 <div id="banner" class="banner hidden"></div>
 
-<main>
+<main id="main">
     <section id="page-status" class="page">
         <div class="toolbar">
-            <button id="status-refresh" type="button">刷新状态</button>
             <span class="hint">动作结果直接采用返回里的状态，不再补探</span>
         </div>
         <pre id="status-summary" class="panel mono">尚未读取</pre>
@@ -38,29 +41,57 @@
     <section id="page-chart" class="page">
         <div id="chart-windows" class="toolbar"></div>
         <div id="chart-legend" class="toolbar legend"></div>
-        <canvas id="chart-canvas" class="chart" width="360" height="220"></canvas>
+        <canvas id="chart-canvas" class="chart"></canvas>
         <div id="chart-meta" class="meta"></div>
         <div id="chart-message" class="message"></div>
     </section>
 
     <section id="page-log" class="page">
         <div class="toolbar">
-            <button id="log-scroll" type="button">自动滚底：开</button>
-            <button id="log-refresh" type="button">刷新</button>
-            <span class="hint">最多 500 行</span>
+            <span class="hint">停留在底部时自动跟随 · 最多 500 行</span>
         </div>
-        <div id="log-lines" class="log mono"></div>
+        <div class="log-wrap">
+            <div id="log-lines" class="log mono"></div>
+            <button id="log-jump" class="jump jump-off" type="button">跳到最新</button>
+        </div>
         <div id="log-message" class="message"></div>
     </section>
 </main>
 
-<div id="note-backdrop" class="backdrop hidden">
-    <div id="note-dialog" class="dialog">
+<div id="settings-backdrop" class="backdrop hidden">
+    <div id="settings-dialog" class="dialog">
         <div class="dialog-head">
-            <span id="note-title"></span>
-            <button id="note-close" type="button">关闭</button>
+            <span>设置</span>
+            <button id="settings-close" type="button">关闭</button>
         </div>
-        <div id="note-body" class="dialog-body"></div>
+        <div class="dialog-body">
+            <div class="theme-row">
+                <label for="theme-select">外观</label>
+                <select id="theme-select">
+                    <option value="follow">跟随系统</option>
+                    <option value="light">浅色</option>
+                    <option value="dark">深色</option>
+                </select>
+            </div>
+            <div id="settings-message" class="message"></div>
+            <div id="settings-rows"></div>
+            <button id="settings-reset" class="group-reset" type="button">恢复界面参数出厂值</button>
+        </div>
+    </div>
+</div>
+
+<div id="confirm-backdrop" class="backdrop hidden">
+    <div id="confirm-dialog" class="dialog">
+        <div class="dialog-head">
+            <span id="confirm-title">确认</span>
+        </div>
+        <div class="dialog-body">
+            <p id="confirm-text"></p>
+            <div class="confirm-actions">
+                <button id="confirm-cancel" type="button">取消</button>
+                <button id="confirm-ok" class="danger" type="button">恢复</button>
+            </div>
+        </div>
     </div>
 </div>
 

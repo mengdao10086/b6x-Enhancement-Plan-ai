@@ -43,6 +43,15 @@ public final class WebBridge {
     /** defs 原始串：首次调用读一次，之后直接复用（不随每次调用 open）。 */
     private String defsCache;
 
+    /** status() 缓存：probe 会起一趟 root shell（实测可达秒级），同步返回会卡住 WebView 的 JS 线程。 */
+    private static final long STATUS_TTL_MS = 1500L;
+    private final Object statusLock = new Object();
+    private String statusCache;
+    private long statusCachedAt;
+    private boolean statusProbing;
+    /** 动作结果直接写缓存时的代号：在途 probe 若代号已变则丢弃，避免旧数据盖掉动作后的新状态。 */
+    private int statusGen;
+
     WebBridge(Context context) {
         this.appContext = context.getApplicationContext();
     }
@@ -70,7 +79,7 @@ public final class WebBridge {
 
     /**
      * 当前配置：{@code {"ok":true,"exists":…,"mtime":…,"values":{KEY:"字面量"},
-     * "unknown":[…],"removable":[…],"notes":[…]}}。多值键按配置文件原文（空格分隔）。
+     * "unknown":[…],"notes":[…]}}。多值键按配置文件原文（空格分隔）。
      */
     @JavascriptInterface
     public String snapshot() {
@@ -87,7 +96,6 @@ public final class WebBridge {
             }
             out.put("values", values);
             out.put("unknown", new JSONArray(snapshot.unknownKeys));
-            out.put("removable", new JSONArray(snapshot.removableKeys));
             out.put("notes", new JSONArray(snapshot.notes));
             return out.toString();
         } catch (Exception e) {
@@ -107,18 +115,65 @@ public final class WebBridge {
         return tail(AppFiles.logFile(appContext));
     }
 
-    /** 部署状态：直接这一次 probe 的结果（含 describe 文本）。 */
+    /**
+     * 部署状态：返回缓存并在后台刷新，不再同步跑 probe。
+     *
+     * <p>probe 要走 root 通道（秒级），同步返回会阻塞 WebView 的 JS 线程，页面切换因此卡住。
+     * 首次调用无缓存时返回 {@code pending}，前端轮询到缓存就绪后再渲染。
+     */
     @JavascriptInterface
     public String status() {
-        try {
-            Deployer.Status status = Deployer.get(appContext).probe();
-            JSONObject out = new JSONObject();
-            out.put("ok", true);
-            out.put("status", statusJson(status));
-            out.put("describe", status.describe());
-            return out.toString();
-        } catch (Exception e) {
-            return error("读取部署状态失败：" + e.getMessage());
+        String cached;
+        synchronized (statusLock) {
+            cached = statusCache;
+            boolean stale = cached == null
+                    || System.currentTimeMillis() - statusCachedAt >= STATUS_TTL_MS;
+            if (stale && !statusProbing) {
+                statusProbing = true;
+                probeStatusAsync(statusGen);
+            }
+        }
+        if (cached != null) {
+            return cached;
+        }
+        return "{\"ok\":false,\"pending\":true,\"error\":\"正在读取状态…\"}";
+    }
+
+    /** 后台跑一趟 probe 填缓存；结果由后续 {@link #status()} 返回。 */
+    private void probeStatusAsync(final int gen) {
+        Thread t = new Thread(new Runnable() {
+            @Override
+            public void run() {
+                String json;
+                try {
+                    Deployer.Status status = Deployer.get(appContext).probe();
+                    JSONObject out = new JSONObject();
+                    out.put("ok", true);
+                    out.put("status", statusJson(status));
+                    out.put("describe", status.describe());
+                    json = out.toString();
+                } catch (Exception e) {
+                    json = error("读取部署状态失败：" + e.getMessage());
+                }
+                synchronized (statusLock) {
+                    statusProbing = false;
+                    if (gen == statusGen) {
+                        statusCache = json;
+                        statusCachedAt = System.currentTimeMillis();
+                    }
+                }
+            }
+        }, "lite-status-probe");
+        t.setDaemon(true);
+        t.start();
+    }
+
+    /** 动作结果里已带最新状态：直接写缓存，免得下一轮轮询把旧状态盖回来。 */
+    private void seedStatus(String json) {
+        synchronized (statusLock) {
+            statusGen++;
+            statusCache = json;
+            statusCachedAt = System.currentTimeMillis();
         }
     }
 
@@ -206,6 +261,14 @@ public final class WebBridge {
             out.put("describe", result.describe());
             if (result.status != null) {
                 out.put("status", statusJson(result.status));
+            }
+            if (result.status != null) {
+                // 按 status() 的形状写缓存（动作本身失败也要能读到真实状态）
+                JSONObject snap = new JSONObject();
+                snap.put("ok", true);
+                snap.put("status", statusJson(result.status));
+                snap.put("describe", result.describe());
+                seedStatus(snap.toString());
             }
             return out.toString();
         } catch (Exception e) {
