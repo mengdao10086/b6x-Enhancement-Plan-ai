@@ -178,13 +178,13 @@ public class MainHook implements IXposedHookLoadPackage {
     private static final int STUCK_STATE_CLEAR_AFTER_TICKS = 30;     // state∈{1,2} 连续达此秒数才清（>SDK 5s 建连超时，不误拆）
     private static final long STUCK_STATE_CLEAR_COOLDOWN_MS = 60 * 1000;  // 清状态动作限频
 
-    // ========== R1·任务2：不受限频的 state 观测（30s 一条，仅 tick 线程读写）==========
+    // ========== R1·任务2：不受限频的 state 观测（10min 一条，仅 tick 线程读写）==========
     // 动机：`后台重连尝试`/`重连循环心跳` 是 5min 限频，上线后分不清「修好了」与「本来就会好」、
-    // 也分不清 state「卡 2」与「争用」。此观测不受 5min 限频，但按 30s 节流（每秒读 state、30s 才输出）。
+    // 也分不清 state「卡 2」与「争用」。此观测不受 5min 限频，但按 10min 节流（每秒读 state、10min 才输出）。
     private static int lastObservedState = Integer.MIN_VALUE;  // 上次观测到的 state（哨兵=未观测过）
     private static long observedStateSince = 0;                // 进入当前 state 的时刻（ms，算持续时长）
-    private static long lastStateObsLogAt = 0;                 // 上次输出时刻（30s 节流）
-    private static final long STATE_OBS_LOG_INTERVAL_MS = 30 * 1000;  // 观测输出间隔（不刷屏：≤2 条/分）
+    private static long lastStateObsLogAt = 0;                 // 上次输出时刻（10min 节流）
+    private static final long STATE_OBS_LOG_INTERVAL_MS = 10 * 60 * 1000;  // 观测输出间隔（不刷屏：≤1 条/10 分）
 
     // ========== M2：SDK 扫描自锁（inScanning）解除 + 扫描侧观测 ==========
     // 动机：SDK 的「正在扫描」标志在 startLeScan() 内先置 true、唯一清除点是 stopScan()（只在连接成功后触发）；
@@ -699,7 +699,7 @@ public class MainHook implements IXposedHookLoadPackage {
             return;
         }
         int st = readConnectState(dic);
-        observeConnectState(st, readInScanning(dic));   // 任务2：不受限频的观测（30s 一条；含扫描侧 inScanning）
+        observeConnectState(st, readInScanning(dic));   // 任务2：不受限频的观测（10min 一条；含扫描侧 inScanning）
         if (st != 1 && st != 2) {   // 0=空闲、-1=读失败、其它：一律清零
             stuckStateTicks = 0;
             return;
@@ -715,7 +715,7 @@ public class MainHook implements IXposedHookLoadPackage {
 
     /**
      * 任务2：不受 5min 限频的观测。每次调用（断连期每秒）读一次，但**每
-     * {@link #STATE_OBS_LOG_INTERVAL_MS}(30s) 才输出一条**，输出当前 state 与该值「已持续」秒数，
+     * {@link #STATE_OBS_LOG_INTERVAL_MS}(10min) 才输出一条**，输出当前 state 与该值「已持续」秒数，
      * 并附带扫描侧信号（{@code inScanning} 标志 + 被拒累计次数，M2 观测扩展）：
      * 持续秒数很小 ⇒ 门禁在快速翻转（争用）；持续秒数逐条增大且 state=2 ⇒ 卡死；inScanning=true 而
      * 长时间无进展 ⇒ 扫描侧卡死（M2）。据此可分辨「卡 2 vs 争用」并验收两项修复是否生效。
