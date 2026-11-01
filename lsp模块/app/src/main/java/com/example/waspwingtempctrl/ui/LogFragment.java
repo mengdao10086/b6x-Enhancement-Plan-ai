@@ -7,6 +7,7 @@ import android.os.Looper;
 import android.text.Editable;
 import android.text.TextWatcher;
 import android.view.LayoutInflater;
+import android.view.MotionEvent;
 import android.view.View;
 import android.view.ViewGroup;
 import android.widget.EditText;
@@ -36,8 +37,9 @@ import java.util.Locale;
  * <p>线程纪律、刷新节奏、无变化跳过、自动跟随：见 {@code app/逻辑说明.md} §8.3。
  * 键盘"只覆盖、不顶起"与聚焦兜底由 {@link EdgeToEdge} 全 app 统一负责，本页不再自行接管窗口设置。
  *
- * <p>整行跨选：长按行进入选择模式（锚点高亮、暂停列表重绑），点另一行扩展范围，
- * 底部操作条「复制 / 取消」，返回键等同取消。见 {@code app/逻辑说明.md} §9.4。
+ * <p>整行跨选：长按行进入选择模式（锚点高亮、暂停列表重绑），**保持按下直接上下滑动即扩选**
+ * （手指到上下边缘会自动滚动并继续扩选），松手后也可点另一行扩展范围；底部操作条
+ * 「复制 / 取消」，返回键等同取消。见 {@code app/逻辑说明.md} §9.4。
  */
 public class LogFragment extends Fragment
         implements SetupActivity.PageAware, LogListAdapter.LineGestureListener {
@@ -46,6 +48,11 @@ public class LogFragment extends Fragment
     private static final long REFRESH_INTERVAL_MS = 2000L;
     /** 输入关键词后的去抖间隔（过滤本身在后台线程做）。 */
     private static final long FILTER_DEBOUNCE_MS = 250L;
+    /** 拖动扩选：手指进入上/下边缘多少 dp 内开始自动滚动。 */
+    private static final int DRAG_EDGE_DP = 24;
+    /** 拖动扩选：边缘自动滚动每拍移动的 dp 与拍间隔（3dp/20ms ≈ 150dp/s）。 */
+    private static final int DRAG_SCROLL_STEP_DP = 3;
+    private static final long DRAG_SCROLL_INTERVAL_MS = 20L;
 
     /**
      * 本页是否为当前页（外壳 ViewPager2 广播，见 {@code PageAware}）：切页不再 hide/show、
@@ -69,6 +76,17 @@ public class LogFragment extends Fragment
 
     /** 选择模式下接管返回键（只在「本页可见且在选择」时启用）。 */
     private OnBackPressedCallback selectionBackCallback;
+
+    /**
+     * 拖动扩选是否进行中：长按时置位、抬手/取消时清除。
+     * 只有它成立时才接管列表触摸，其余时间一律放行，普通滚动与滚动条拖拽不受影响。
+     */
+    private boolean dragSelecting;
+    /** 最近一次手指坐标（边缘自动滚动的每一拍用它继续扩选）。 */
+    private float dragX;
+    private float dragY;
+    /** 边缘自动滚动的每拍位移：正=向下、负=向上、0=停。 */
+    private int autoScrollDy;
 
     private final Handler mainHandler = new Handler(Looper.getMainLooper());
 
@@ -136,6 +154,8 @@ public class LogFragment extends Fragment
         listView.setAdapter(adapter);
         // 滚动条常显 + 加粗（见 fragment_log.xml），这里才接得上"按住滚动条拖动"
         ScrollbarDrag.attach(listView);
+        // 长按后不抬手、直接滑动即扩选：接管发生在长按之后，见 dragSelectTouchListener
+        listView.addOnItemTouchListener(dragSelectTouchListener);
         listView.addOnScrollListener(new RecyclerView.OnScrollListener() {
             @Override
             public void onScrolled(@NonNull RecyclerView rv, int dx, int dy) {
@@ -223,6 +243,10 @@ public class LogFragment extends Fragment
         if (selectionBackCallback != null) {
             selectionBackCallback.remove();
             selectionBackCallback = null;
+        }
+        endDragSelect();
+        if (listView != null) {
+            listView.removeOnItemTouchListener(dragSelectTouchListener);
         }
         if (adapter != null) {
             adapter.clearSelection();
@@ -384,6 +408,9 @@ public class LogFragment extends Fragment
         syncSelectionBackCallback();
         // 选择期间「回到底部」让位，避免与操作条挤在同一角落
         updateFollowButton();
+        // 长按生效时手指仍按着屏幕：从这里起，本次手势的后续移动用于扩选而不是滚动列表
+        dragSelecting = true;
+        autoScrollDy = 0;
     }
 
     @Override
@@ -391,6 +418,117 @@ public class LogFragment extends Fragment
         if (adapter != null && adapter.isSelecting()) {
             adapter.extendSelectionTo(position);
         }
+    }
+
+    /**
+     * 拖动扩选的手势入口：只在「长按后手指未抬起」期间接管。
+     *
+     * <p>返回 true 会让 RecyclerView 取消本次滚动并把手势交给本监听，因此
+     * 只有 {@link #dragSelecting} 成立时才接管；其余触摸一律返回 false 放行，
+     * 普通滚动、列表项点击、滚动条拖拽都不受影响。
+     */
+    private final RecyclerView.OnItemTouchListener dragSelectTouchListener =
+            new RecyclerView.OnItemTouchListener() {
+                @Override
+                public boolean onInterceptTouchEvent(@NonNull RecyclerView rv, @NonNull MotionEvent e) {
+                    return handleDragSelectTouch(rv, e);
+                }
+
+                @Override
+                public void onTouchEvent(@NonNull RecyclerView rv, @NonNull MotionEvent e) {
+                    handleDragSelectTouch(rv, e);
+                }
+
+                @Override
+                public void onRequestDisallowInterceptTouchEvent(boolean disallowIntercept) {
+                    // 不参与父容器的手势裁决；本监听本来就只在拖动扩选期间接管
+                }
+            };
+
+    /** @return true = 已消费该事件（拖动扩选中） */
+    private boolean handleDragSelectTouch(@NonNull RecyclerView rv, @NonNull MotionEvent e) {
+        if (!dragSelecting) {
+            return false;
+        }
+        switch (e.getActionMasked()) {
+            case MotionEvent.ACTION_MOVE:
+                dragX = e.getX();
+                dragY = e.getY();
+                extendSelectionAt(dragX, dragY);
+                updateAutoScroll(rv);
+                return true;
+            case MotionEvent.ACTION_UP:
+            case MotionEvent.ACTION_CANCEL:
+                // 抬手只结束拖动：选择保留，复制仍由操作条的「复制」按钮触发
+                endDragSelect();
+                return true;
+            default:
+                return true;
+        }
+    }
+
+    /** 把选择焦点移到手指所在的日志行；手指落在列表空白处时取最近的可见行。 */
+    private void extendSelectionAt(float x, float y) {
+        if (listView == null || adapter == null) {
+            return;
+        }
+        View child = listView.findChildViewUnder(x, y);
+        if (child != null) {
+            int position = listView.getChildAdapterPosition(child);
+            if (position != RecyclerView.NO_POSITION) {
+                adapter.extendSelectionTo(position);
+            }
+            return;
+        }
+        // 列表不满一屏或手指超出内容区：仍以最近的一行为目标，保证拖动始终有扩选目标
+        if (!(listView.getLayoutManager() instanceof LinearLayoutManager) || listView.getChildCount() == 0) {
+            return;
+        }
+        LinearLayoutManager manager = (LinearLayoutManager) listView.getLayoutManager();
+        int nearest = (y < listView.getPaddingTop())
+                ? manager.findFirstVisibleItemPosition()
+                : manager.findLastVisibleItemPosition();
+        if (nearest != RecyclerView.NO_POSITION) {
+            adapter.extendSelectionTo(nearest);
+        }
+    }
+
+    /** 手指进入上/下边缘带时启动持续滚动；离开边缘即停。滚动过程中继续扩选。 */
+    private void updateAutoScroll(@NonNull RecyclerView rv) {
+        float density = getResources().getDisplayMetrics().density;
+        int edge = Math.round(DRAG_EDGE_DP * density);
+        int step = Math.round(DRAG_SCROLL_STEP_DP * density);
+        int dy = 0;
+        if (dragY < edge) {
+            dy = -step;
+        } else if (dragY > rv.getHeight() - edge) {
+            dy = step;
+        }
+        mainHandler.removeCallbacks(autoScrollTick);
+        autoScrollDy = dy;
+        if (dy != 0) {
+            mainHandler.postDelayed(autoScrollTick, DRAG_SCROLL_INTERVAL_MS);
+        }
+    }
+
+    /** 边缘自动滚动的一拍：滚一小步后按同一坐标重新扩选，滚出新行即自动纳入选择。 */
+    private final Runnable autoScrollTick = new Runnable() {
+        @Override
+        public void run() {
+            if (!dragSelecting || listView == null || autoScrollDy == 0) {
+                return;
+            }
+            listView.scrollBy(0, autoScrollDy);
+            extendSelectionAt(dragX, dragY);
+            mainHandler.postDelayed(this, DRAG_SCROLL_INTERVAL_MS);
+        }
+    };
+
+    /** 结束拖动扩选（抬手、取消、销毁视图都走这里）。选择本身不清除。 */
+    private void endDragSelect() {
+        dragSelecting = false;
+        autoScrollDy = 0;
+        mainHandler.removeCallbacks(autoScrollTick);
     }
 
     /** 复制选中区间的整行文本（行间以换行连接），成功后退出选择模式。 */
@@ -404,6 +542,7 @@ public class LogFragment extends Fragment
 
     /** 退出选择模式：清高亮、收起操作条、交还返回键、恢复跟随按钮的显隐逻辑。 */
     private void exitSelection() {
+        endDragSelect();
         if (adapter != null) {
             adapter.clearSelection();
         }
