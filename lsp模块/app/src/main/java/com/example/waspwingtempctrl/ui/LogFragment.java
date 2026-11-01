@@ -49,10 +49,10 @@ public class LogFragment extends Fragment
     /** 输入关键词后的去抖间隔（过滤本身在后台线程做）。 */
     private static final long FILTER_DEBOUNCE_MS = 250L;
     /** 拖动扩选：离列表上下边界几行以内开始自动滚动（按可见行实测行高换算）。 */
-    private static final int DRAG_EDGE_ROWS = 2;
+    private static final int DRAG_EDGE_ROWS = 3;
     /** 拖动扩选：自动滚动速度区间（dp/秒）——刚进入触发带取最小，贴到边界取最大，中间线性。 */
     private static final int DRAG_SCROLL_MIN_DP_PER_SEC = 80;
-    private static final int DRAG_SCROLL_MAX_DP_PER_SEC = 700;
+    private static final int DRAG_SCROLL_MAX_DP_PER_SEC = 1600;
     /** 拖动扩选：自动滚动的拍间隔。 */
     private static final long DRAG_SCROLL_INTERVAL_MS = 16L;
 
@@ -89,6 +89,8 @@ public class LogFragment extends Fragment
     private float dragY;
     /** 边缘自动滚动的每拍位移：正=向下、负=向上、0=停。 */
     private int autoScrollDy;
+    /** 自动滚动的定时链是否在跑：只由定时器驱动，MOVE 不得重投（否则拍频等于触摸频率）。 */
+    private boolean autoScrollRunning;
 
     private final Handler mainHandler = new Handler(Looper.getMainLooper());
 
@@ -500,9 +502,11 @@ public class LogFragment extends Fragment
     /**
      * 手指进入上/下触发带时启动持续滚动；离开触发带即停。
      *
-     * <p>触发带高度 = 两行日志（按可见行实测行高），越靠近边界速度越快（见 {@link #autoScrollStepPx}）。
-     * 这里用 {@code post} 而不是 {@code postDelayed}：拖动期间 MOVE 的到达频率高于拍间隔，
-     * 带延迟的重投会被下一次 MOVE 反复取消，表现为「手指不动了才开始滚」。
+     * <p>触发带高度 = 三行日志（按可见行实测行高），越靠近边界速度越快（见 {@link #autoScrollStepPx}）。
+     *
+     * <p>拍频只由定时器决定：MOVE 仅更新 {@link #autoScrollDy} 与续跑状态，**不重投定时器**。
+     * 若每次 MOVE 都 remove + post，等于每个触摸事件额外多滚一拍，120Hz 屏幕上拍频翻倍，
+     * 表现为「一直滑动比按住不动滚得快」。
      */
     private void updateAutoScroll(@NonNull RecyclerView rv) {
         int band = DRAG_EDGE_ROWS * rowHeightPx(rv);
@@ -514,9 +518,12 @@ public class LogFragment extends Fragment
             dy = autoScrollStepPx((dragY - (height - band)) / (float) band);
         }
         autoScrollDy = dy;
-        mainHandler.removeCallbacks(autoScrollTick);
-        if (dy != 0) {
-            mainHandler.post(autoScrollTick);
+        if (dy != 0 && !autoScrollRunning) {
+            autoScrollRunning = true;
+            mainHandler.postDelayed(autoScrollTick, DRAG_SCROLL_INTERVAL_MS);
+        } else if (dy == 0 && autoScrollRunning) {
+            autoScrollRunning = false;
+            mainHandler.removeCallbacks(autoScrollTick);
         }
     }
 
@@ -554,6 +561,7 @@ public class LogFragment extends Fragment
         @Override
         public void run() {
             if (!dragSelecting || listView == null || autoScrollDy == 0) {
+                autoScrollRunning = false;
                 return;
             }
             listView.scrollBy(0, autoScrollDy);
@@ -566,6 +574,7 @@ public class LogFragment extends Fragment
     private void endDragSelect() {
         dragSelecting = false;
         autoScrollDy = 0;
+        autoScrollRunning = false;
         mainHandler.removeCallbacks(autoScrollTick);
         requestParentDisallowIntercept(false);
     }
