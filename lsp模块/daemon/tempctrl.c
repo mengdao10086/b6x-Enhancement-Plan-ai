@@ -174,7 +174,8 @@ static int first_run = 1;           // 首次运行，滤波直接赋初值
 // ======================== 日志与调试 ========================
 // --- 日志路径（默认根据二进制名自动生成，可由 profile.conf 覆盖）---
 static char log_file_path[256] = "";
-static int LOG_MAX = 16256;          // 日志文件大小上限（字节），0=关闭日志
+static int LOG_MAX = 16256;          // 日志文件大小上限（字节），0=关闭日志（普通模式）
+#define LOG_MAX_DEBUG 204800         // 调试日志的体积上限（字节）；普通模式不受影响
 static FILE *log_fp = NULL;          // 持久的日志文件指针
 static char log_path_opened[256] = ""; // 已打开的文件路径（检测路径变化）
 static int debug_mode = 0;           // 调试日志总开关，=1 时启用各分区调试输出
@@ -1728,16 +1729,19 @@ static int config_retry_if_needed(void) {
  * 写入日志（自动滚动：超上限后保留最新日志，截断对齐到完整行首）。
  * 日期格式：日+时间，无年月（例 "14 22:30:16"）。
  * LOG_MAX=0 时关闭日志。持持久 FILE*
+ * 普通模式按 LOG_MAX 滚动；调试模式取 LOG_MAX 与 LOG_MAX_DEBUG 中的较大值，
+ * 两种模式都参与滚动（不再因 debug_mode 跳过截断）。LOG_MAX=0 始终优先表示关闭日志。
  */
 static void write_log(const char *fmt, ...) {
-    if (LOG_MAX == 0) return;     // 日志关闭
+    if (LOG_MAX == 0) return;     // 日志关闭（含调试模式，不被调试上限顶回）
 
-    int max_bytes = LOG_MAX;
+    // 调试模式取普通上限与调试专用上限的较大值；普通模式仍用 LOG_MAX。
+    int max_bytes = (debug_mode && LOG_MAX < LOG_MAX_DEBUG) ? LOG_MAX_DEBUG : LOG_MAX;
 
-    // 超标 → 截断保留尾部（调试模式下跳过限制，保留完整日志）。
+    // 超标 → 截断保留尾部（调试模式按较大上限滚动，保留最新日志）。
     // ftruncate 只能从尾部截断，删头部必须先把尾部内容前移到文件头再截断。
     struct stat st;
-    if (!debug_mode && stat(log_file_path, &st) == 0 && st.st_size > max_bytes) {
+    if (stat(log_file_path, &st) == 0 && st.st_size > max_bytes) {
         int fd = open(log_file_path, O_RDWR);
         if (fd >= 0) {
             off_t keep = (off_t)max_bytes;            // 保留的尾部字节数（最新日志）
@@ -3665,13 +3669,14 @@ static int compute_fan_target(void) {
     int rpm_cold = rpm_from_cold_exp(actual_cold);
     int rpm = rpm_cold;
     if (cooler_hot_temp >= 0) {   // 热端 ≤0（0=异常 0°）也进入，由 rpm_from_hot_end 保持上次值
-        // 自加权合并：各以自身 RPM 为权重，权重钳制到设备范围
+        // 自加权合并：各以自身 RPM 为权重，权重钳制到设备范围。
+        // 热端低于映射起始温度时按负向外推继续参与，不在此丢弃；结果可低于最低转速，
+        // 由下游 rate_limit_fan 统一钳制落到最低转速（此处提前钳制会改变限速行为）。
         int rpm_hot = rpm_from_hot_end(cooler_hot_temp);
-        if (rpm_hot > 0) {
-            int w_hot  = clamp(rpm_hot,  fan_rpm_min, active_fan_max);
-            int w_cold = clamp(rpm_cold, fan_rpm_min, active_fan_max);
-            rpm = (w_hot * rpm_hot + w_cold * rpm_cold) / (w_hot + w_cold);
-        }
+        int w_hot  = clamp(rpm_hot,  fan_rpm_min, active_fan_max);
+        int w_cold = clamp(rpm_cold, fan_rpm_min, active_fan_max);
+        // 两权重经 clamp 后恒 ≥1000（FAN_RPM_RANGE 各值的解析下限），故分母恒 >0，除法安全。
+        rpm = (w_hot * rpm_hot + w_cold * rpm_cold) / (w_hot + w_cold);
     }
     debug_log(debug_exec, "rpm 目标 冷端=%d 热端=%d → %d", rpm_cold, cooler_hot_temp, rpm);
     return rpm;
