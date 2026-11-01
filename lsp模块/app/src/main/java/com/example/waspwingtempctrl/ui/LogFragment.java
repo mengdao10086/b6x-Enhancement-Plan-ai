@@ -48,11 +48,13 @@ public class LogFragment extends Fragment
     private static final long REFRESH_INTERVAL_MS = 2000L;
     /** 输入关键词后的去抖间隔（过滤本身在后台线程做）。 */
     private static final long FILTER_DEBOUNCE_MS = 250L;
-    /** 拖动扩选：手指进入上/下边缘多少 dp 内开始自动滚动。 */
-    private static final int DRAG_EDGE_DP = 24;
-    /** 拖动扩选：边缘自动滚动每拍移动的 dp 与拍间隔（3dp/20ms ≈ 150dp/s）。 */
-    private static final int DRAG_SCROLL_STEP_DP = 3;
-    private static final long DRAG_SCROLL_INTERVAL_MS = 20L;
+    /** 拖动扩选：离列表上下边界几行以内开始自动滚动（按可见行实测行高换算）。 */
+    private static final int DRAG_EDGE_ROWS = 2;
+    /** 拖动扩选：自动滚动速度区间（dp/秒）——刚进入触发带取最小，贴到边界取最大，中间线性。 */
+    private static final int DRAG_SCROLL_MIN_DP_PER_SEC = 80;
+    private static final int DRAG_SCROLL_MAX_DP_PER_SEC = 700;
+    /** 拖动扩选：自动滚动的拍间隔。 */
+    private static final long DRAG_SCROLL_INTERVAL_MS = 16L;
 
     /**
      * 本页是否为当前页（外壳 ViewPager2 广播，见 {@code PageAware}）：切页不再 hide/show、
@@ -411,6 +413,8 @@ public class LogFragment extends Fragment
         // 长按生效时手指仍按着屏幕：从这里起，本次手势的后续移动用于扩选而不是滚动列表
         dragSelecting = true;
         autoScrollDy = 0;
+        // 纵向拖动扩选期间禁止外层 ViewPager2 抢手势翻页：否则稍微斜一点就整页滑走，选择也被取消
+        requestParentDisallowIntercept(true);
     }
 
     @Override
@@ -493,22 +497,56 @@ public class LogFragment extends Fragment
         }
     }
 
-    /** 手指进入上/下边缘带时启动持续滚动；离开边缘即停。滚动过程中继续扩选。 */
+    /**
+     * 手指进入上/下触发带时启动持续滚动；离开触发带即停。
+     *
+     * <p>触发带高度 = 两行日志（按可见行实测行高），越靠近边界速度越快（见 {@link #autoScrollStepPx}）。
+     * 这里用 {@code post} 而不是 {@code postDelayed}：拖动期间 MOVE 的到达频率高于拍间隔，
+     * 带延迟的重投会被下一次 MOVE 反复取消，表现为「手指不动了才开始滚」。
+     */
     private void updateAutoScroll(@NonNull RecyclerView rv) {
-        float density = getResources().getDisplayMetrics().density;
-        int edge = Math.round(DRAG_EDGE_DP * density);
-        int step = Math.round(DRAG_SCROLL_STEP_DP * density);
+        int band = DRAG_EDGE_ROWS * rowHeightPx(rv);
+        int height = rv.getHeight();
         int dy = 0;
-        if (dragY < edge) {
-            dy = -step;
-        } else if (dragY > rv.getHeight() - edge) {
-            dy = step;
+        if (dragY < band) {
+            dy = -autoScrollStepPx((band - dragY) / (float) band);
+        } else if (dragY > height - band) {
+            dy = autoScrollStepPx((dragY - (height - band)) / (float) band);
         }
-        mainHandler.removeCallbacks(autoScrollTick);
         autoScrollDy = dy;
+        mainHandler.removeCallbacks(autoScrollTick);
         if (dy != 0) {
-            mainHandler.postDelayed(autoScrollTick, DRAG_SCROLL_INTERVAL_MS);
+            mainHandler.post(autoScrollTick);
         }
+    }
+
+    /** 单行高度（px）：取首个可见行；列表尚未布局时按 24dp 估算。 */
+    private int rowHeightPx(@NonNull RecyclerView rv) {
+        if (rv.getChildCount() > 0) {
+            int height = rv.getChildAt(0).getHeight();
+            if (height > 0) {
+                return height;
+            }
+        }
+        return Math.round(24 * getResources().getDisplayMetrics().density);
+    }
+
+    /**
+     * 每拍滚动像素：{@code intensity} 0=刚进入触发带、1=贴到边界（超出按 1 算）。
+     * 速度在 最小~最大 dp/秒 之间线性插值，再按拍间隔折成本拍像素，至少 1px。
+     */
+    private int autoScrollStepPx(float intensity) {
+        if (intensity < 0f) {
+            intensity = 0f;
+        }
+        if (intensity > 1f) {
+            intensity = 1f;
+        }
+        float dps = DRAG_SCROLL_MIN_DP_PER_SEC
+                + (DRAG_SCROLL_MAX_DP_PER_SEC - DRAG_SCROLL_MIN_DP_PER_SEC) * intensity;
+        float density = getResources().getDisplayMetrics().density;
+        int px = Math.round(dps * density * DRAG_SCROLL_INTERVAL_MS / 1000f);
+        return px < 1 ? 1 : px;
     }
 
     /** 边缘自动滚动的一拍：滚一小步后按同一坐标重新扩选，滚出新行即自动纳入选择。 */
@@ -529,6 +567,15 @@ public class LogFragment extends Fragment
         dragSelecting = false;
         autoScrollDy = 0;
         mainHandler.removeCallbacks(autoScrollTick);
+        requestParentDisallowIntercept(false);
+    }
+
+    /** 请求（或撤销）父容器不要截获本次手势；列表尚未附着时会静默跳过。 */
+    private void requestParentDisallowIntercept(boolean disallow) {
+        if (listView == null || listView.getParent() == null) {
+            return;
+        }
+        listView.getParent().requestDisallowInterceptTouchEvent(disallow);
     }
 
     /** 复制选中区间的整行文本（行间以换行连接），成功后退出选择模式。 */
