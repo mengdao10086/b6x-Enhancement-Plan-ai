@@ -52,7 +52,7 @@ public class LogFragment extends Fragment
     private static final int DRAG_EDGE_ROWS = 3;
     /** 拖动扩选：自动滚动速度区间（dp/秒）——刚进入触发带取最小，贴到边界取最大，中间线性。 */
     private static final int DRAG_SCROLL_MIN_DP_PER_SEC = 80;
-    private static final int DRAG_SCROLL_MAX_DP_PER_SEC = 1600;
+    private static final int DRAG_SCROLL_MAX_DP_PER_SEC = 3200;
     /** 拖动扩选：自动滚动的拍间隔。 */
     private static final long DRAG_SCROLL_INTERVAL_MS = 16L;
 
