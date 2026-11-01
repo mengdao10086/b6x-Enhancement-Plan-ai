@@ -23,7 +23,7 @@
     // 放行黑底前不上报，免得黑屏期间底部先亮出一条浅色导航栏
     var THEME_LOG_PREFIX = 'lite-theme:';
     var booted = false;
-    var LOG_MAX = 500;
+    var LOG_MAX = 3000;
     var CHART_WINDOWS = [120, 180, 240, 360, 480, 720];
     var CHART_DEFAULT_WIN = 360;
     var CHART_MAX_WIN = 720;
@@ -57,7 +57,7 @@
             loaded: false,
             series: {batt: true, cool: true, rpm: true, hot: true, cold: false, cpu: false}
         },
-        log: {loaded: false, lastLine: null, follow: true},
+        log: {loaded: false, lastLine: null, follow: true, lines: []},
         busy: false,
         settingsTimer: null,
         confirmTimer: null,
@@ -65,17 +65,6 @@
     };
 
     var cache = {};
-    var ERR_WORDS = ['失败', '错误', '无法', '异常', 'error', 'fail'];
-    var WARN_WORDS = ['警告', '未生效', '超时', '未就绪', '断联', '断开', '丢失', '停滞', '强制'];
-
-    function hasAny(line, words) {
-        for (var i = 0; i < words.length; i++) {
-            if (line.indexOf(words[i]) !== -1) {
-                return true;
-            }
-        }
-        return false;
-    }
 
     // ==================== 基础工具 ====================
 
@@ -1700,7 +1689,19 @@
         pollText('logs', 'log-message', logIngest, '读取日志');
     }
 
+    // 用户正在选中文本时不重写 textContent，避免打断选择
+    function hasSelection() {
+        if (!window.getSelection) {
+            return false;
+        }
+        var sel = window.getSelection();
+        return !!(sel && sel.toString());
+    }
+
     function logIngest(text) {
+        if (hasSelection()) {
+            return;
+        }
         var lines = String(text || '').split('\n');
         while (lines.length && lines[lines.length - 1] === '') {
             lines.pop();
@@ -1721,32 +1722,29 @@
             }
             fresh = idx >= 0 ? lines.slice(idx + 1) : lines;
         }
-        for (var j = 0; j < fresh.length; j++) {
-            var div = make('div', 'log-line');
-            div.textContent = fresh[j];
-            if (hasAny(fresh[j], ERR_WORDS)) {
-                addClass(div, 'err');
-            } else if (hasAny(fresh[j], WARN_WORDS)) {
-                addClass(div, 'warn');
+        if (fresh.length) {
+            // 整段重写前记下距底部的距离，重写后按同一距离还原
+            var dist = box.scrollHeight - box.scrollTop - box.clientHeight;
+            if (dist < 0) {
+                dist = 0;
             }
-            box.appendChild(div);
-        }
-        var heightBeforeTrim = box.scrollHeight;
-        while (box.children.length > LOG_MAX) {
-            box.removeChild(box.children[0]);
-        }
-        var removedHeight = heightBeforeTrim - box.scrollHeight;
-        if (removedHeight > 0 && !atBottom) {
-            var top = box.scrollTop - removedHeight;
-            box.scrollTop = top > 0 ? top : 0;
+            for (var j = 0; j < fresh.length; j++) {
+                state.log.lines.push(fresh[j]);
+            }
+            if (state.log.lines.length > LOG_MAX) {
+                state.log.lines.splice(0, state.log.lines.length - LOG_MAX);
+            }
+            box.textContent = state.log.lines.join('\n');
+            if (atBottom) {
+                box.scrollTop = box.scrollHeight;
+            } else {
+                box.scrollTop = box.scrollHeight - box.clientHeight - dist;
+            }
         }
         if (lines.length) {
             state.log.lastLine = lines[lines.length - 1];
         }
         state.log.follow = atBottom;
-        if (atBottom) {
-            box.scrollTop = box.scrollHeight;
-        }
         updateJumpButton();
     }
 

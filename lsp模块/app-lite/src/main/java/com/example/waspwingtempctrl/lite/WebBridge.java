@@ -35,8 +35,8 @@ public final class WebBridge {
     /** 前端通过 {@code window.WaspBridge} 访问。 */
     public static final String JS_NAME = "WaspBridge";
 
-    /** 日志/曲线 tail 上限：占位页够用，避免一次把大文件搬进 JS。 */
-    private static final int TAIL_BYTES = 65536;
+    /** 日志/曲线 tail 上限：日志 200KB 与守护进程、GUI 同口径；曲线文件仅 720 行，不受影响。 */
+    private static final int TAIL_BYTES = 204800;
     private static final String PARAMS_ASSET = "params.json";
 
     private final Context appContext;

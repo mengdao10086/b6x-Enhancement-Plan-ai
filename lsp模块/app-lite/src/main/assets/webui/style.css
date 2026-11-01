@@ -447,17 +447,10 @@ input.invalid { border-color: var(--danger); background: var(--danger-soft); }
     height: 62vh;
     overflow: auto;
     padding: 8px;
-}
-
-.log-line {
-    padding: 1px 0;
+    line-height: 18px;
     white-space: pre-wrap;
     word-break: break-all;
-    border-bottom: 1px solid var(--line);
 }
-
-.log-line.warn { color: var(--warn); }
-.log-line.err { color: var(--danger); }
 
 .jump {
     position: absolute;
