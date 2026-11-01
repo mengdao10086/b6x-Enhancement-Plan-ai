@@ -24,11 +24,11 @@ import java.util.Locale;
  */
 final class LogTailReader {
 
-    /** 尾读上限：等价 {@code tail -c 400KB}（口径见 {@code app/逻辑说明.md} §8.3）。 */
-    static final int TAIL_BYTES = 400 * 1024;
+    /** 尾读上限：等价 {@code tail -c 200KB}（口径见 {@code app/逻辑说明.md} §8.3）。 */
+    static final int TAIL_BYTES = 200 * 1024;
 
-    /** 单次渲染的行数上限（性能硬约束）。 */
-    static final int MAX_LINES = 2000;
+    /** 单次渲染的行数上限（性能硬约束，列表走 RecyclerView 虚拟化，不一次性全排版）。 */
+    static final int MAX_LINES = 3000;
 
     private LogTailReader() {
     }
@@ -120,7 +120,7 @@ final class LogTailReader {
         }
 
         // 先不分配地定出「内容末尾」与「最近 MAX_LINES 行的起点」，只对这一小段 split：
-        // 把 400KB 窗口整个切成数组会白造几千个永远不上屏的 String。
+        // 把 200KB 窗口整个切成数组会白造几千个永远不上屏的 String。
         int contentEnd = text.length();
         while (contentEnd > 0 && text.charAt(contentEnd - 1) == '\n') {
             contentEnd--;   // 与 split("\n", -1) 后剥掉尾部空串同义

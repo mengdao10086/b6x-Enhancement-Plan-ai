@@ -112,7 +112,8 @@ final class TextCopy {
         }, SELECTION_POLL_MS);
     }
 
-    private static void copy(@NonNull Context context, @NonNull CharSequence text) {
+    /** 直接写剪贴板；包内可见，供日志页的整行跨选复制复用。 */
+    static void copy(@NonNull Context context, @NonNull CharSequence text) {
         ClipboardManager manager =
                 (ClipboardManager) context.getSystemService(Context.CLIPBOARD_SERVICE);
         if (manager != null) {

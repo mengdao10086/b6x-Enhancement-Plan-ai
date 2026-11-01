@@ -1,15 +1,16 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!-- 日志单行。颜色由 LogListAdapter 按级别逐行设置，此处只给字面样式。
-     可选中：长按进系统选择、可拖手柄、可复制。选择期间列表暂停重绑（LogFragment.render 判断），
-     否则每 2 秒一次的 notifyDataSetChanged + setText 会把选择与手柄一起清掉。 -->
+     不开 android:textIsSelectable：系统选择被限制在这个 TextView 内，也就是只能选单行；
+     跨行整行选择由列表自己记区间（LogListAdapter + LogFragment 的复制条），开它会与自实现的
+     长按/点击抢同一套触摸手势。底色 = bg_log_line_selected，随 selected 状态切换。 -->
 <TextView xmlns:android="http://schemas.android.com/apk/res/android"
     android:id="@+id/log_line_text"
     android:layout_width="match_parent"
     android:layout_height="wrap_content"
+    android:background="@drawable/bg_log_line_selected"
     android:paddingStart="@dimen/space_s"
     android:paddingEnd="@dimen/space_s"
     android:paddingTop="@dimen/space_xs"
     android:paddingBottom="@dimen/space_xs"
     android:lineSpacingExtra="@dimen/log_line_spacing"
-    android:textAppearance="@style/TextAppearance.B6XTempCtrl.Mono"
-    android:textIsSelectable="true" />
+    android:textAppearance="@style/TextAppearance.B6XTempCtrl.Mono" />

@@ -12,6 +12,7 @@ import android.view.ViewGroup;
 import android.widget.EditText;
 import android.widget.TextView;
 
+import androidx.activity.OnBackPressedCallback;
 import androidx.annotation.NonNull;
 import androidx.annotation.Nullable;
 import androidx.fragment.app.Fragment;
@@ -34,8 +35,12 @@ import java.util.Locale;
  *
  * <p>线程纪律、刷新节奏、无变化跳过、自动跟随：见 {@code app/逻辑说明.md} §8.3。
  * 键盘"只覆盖、不顶起"与聚焦兜底由 {@link EdgeToEdge} 全 app 统一负责，本页不再自行接管窗口设置。
+ *
+ * <p>整行跨选：长按行进入选择模式（锚点高亮、暂停列表重绑），点另一行扩展范围，
+ * 底部操作条「复制 / 取消」，返回键等同取消。见 {@code app/逻辑说明.md} §9.4。
  */
-public class LogFragment extends Fragment implements SetupActivity.PageAware {
+public class LogFragment extends Fragment
+        implements SetupActivity.PageAware, LogListAdapter.LineGestureListener {
 
     /** 自动刷新间隔。 */
     private static final long REFRESH_INTERVAL_MS = 2000L;
@@ -57,7 +62,13 @@ public class LogFragment extends Fragment implements SetupActivity.PageAware {
     private TextView failureView;
     private View failureScroll;
     private View followButton;
+    private View selectionBar;
+    private View selectionCopyButton;
+    private View selectionCancelButton;
     private EditText filterInput;
+
+    /** 选择模式下接管返回键（只在「本页可见且在选择」时启用）。 */
+    private OnBackPressedCallback selectionBackCallback;
 
     private final Handler mainHandler = new Handler(Looper.getMainLooper());
 
@@ -113,9 +124,12 @@ public class LogFragment extends Fragment implements SetupActivity.PageAware {
         failureView = view.findViewById(R.id.log_failure_text);
         failureScroll = view.findViewById(R.id.log_failure_scroll);
         followButton = view.findViewById(R.id.log_follow_btn);
+        selectionBar = view.findViewById(R.id.log_selection_bar);
+        selectionCopyButton = view.findViewById(R.id.log_selection_copy_btn);
+        selectionCancelButton = view.findViewById(R.id.log_selection_cancel_btn);
         filterInput = view.findViewById(R.id.log_filter_input);
 
-        adapter = new LogListAdapter(context);
+        adapter = new LogListAdapter(context, this);
         listView.setLayoutManager(new LinearLayoutManager(context));
         // 日志行不做增删动画：整批替换时动画只会变成闪烁
         listView.setItemAnimator(null);
@@ -139,6 +153,18 @@ public class LogFragment extends Fragment implements SetupActivity.PageAware {
             }
             updateFollowButton();
         });
+
+        selectionCopyButton.setOnClickListener(v -> copySelectedLines());
+        selectionCancelButton.setOnClickListener(v -> exitSelection());
+
+        selectionBackCallback = new OnBackPressedCallback(false) {
+            @Override
+            public void handleOnBackPressed() {
+                exitSelection();
+            }
+        };
+        requireActivity().getOnBackPressedDispatcher()
+                .addCallback(getViewLifecycleOwner(), selectionBackCallback);
 
         filterInput.addTextChangedListener(new TextWatcher() {
             @Override
@@ -185,12 +211,23 @@ public class LogFragment extends Fragment implements SetupActivity.PageAware {
         } else {
             stopRefresh();
         }
+        // 别的页在台前时不要抢返回键；选择状态保留，回到本页再恢复接管
+        syncSelectionBackCallback();
     }
 
     @Override
     public void onDestroyView() {
         stopRefresh();
         mainHandler.removeCallbacksAndMessages(null);
+        // 选择状态、返回键回调、行手势回调都必须断开，否则适配器/调度器会反向持有本 Fragment
+        if (selectionBackCallback != null) {
+            selectionBackCallback.remove();
+            selectionBackCallback = null;
+        }
+        if (adapter != null) {
+            adapter.clearSelection();
+            adapter.clearGestureListener();
+        }
         listView = null;
         adapter = null;
         infoView = null;
@@ -200,6 +237,9 @@ public class LogFragment extends Fragment implements SetupActivity.PageAware {
         failureView = null;
         failureScroll = null;
         followButton = null;
+        selectionBar = null;
+        selectionCopyButton = null;
+        selectionCancelButton = null;
         filterInput = null;
         super.onDestroyView();
     }
@@ -285,8 +325,8 @@ public class LogFragment extends Fragment implements SetupActivity.PageAware {
         updateCountView(snap, keyword);
 
         if (!snap.ok) {
-            // 选中期间不切视图：visible/gone 的切换同样会结束选择
-            if (hasSelectionInList()) {
+            // 选择期间不切视图：列表一旦让位给诊断，高亮与操作条就失去了作用对象
+            if (isSelectingLines()) {
                 return;
             }
             // 失败：原样展示诊断，列表与跟随入口全部让位
@@ -299,9 +339,9 @@ public class LogFragment extends Fragment implements SetupActivity.PageAware {
             return;
         }
 
-        // 选中期间不重绑列表：notifyDataSetChanged 会 rebind 可见行并 setText，选择与手柄一起消失。
+        // 选择期间不重绑列表：新一批行会顶掉选中区间（下标对不上），高亮也跟着失效。
         // 这里只暂停列表本身，信息行/统计行已在上方按各自的选择状态单独处理
-        if (hasSelectionInList()) {
+        if (isSelectingLines()) {
             return;
         }
         failureScroll.setVisibility(View.GONE);
@@ -327,21 +367,58 @@ public class LogFragment extends Fragment implements SetupActivity.PageAware {
         updateFollowButton();
     }
 
-    /**
-     * 列表里是否有行正被选中。选中期间不重绑列表（rebind 会 setText 并清掉选择与手柄）；
-     * 只认已附着在屏幕上的行——滚出屏幕的行会被回收，其选择也随滚动结束，不需要拦。
-     */
-    private boolean hasSelectionInList() {
-        if (listView == null) {
-            return false;
+    // ==================== 整行选择 ====================
+
+    /** 是否处于整行选择模式。选择期间不重绑列表（rebind 会顶掉选中区间与高亮）。 */
+    private boolean isSelectingLines() {
+        return adapter != null && adapter.isSelecting();
+    }
+
+    @Override
+    public void onLineLongPress(int position) {
+        if (adapter == null || selectionBar == null) {
+            return;
         }
-        for (int i = 0; i < listView.getChildCount(); i++) {
-            View child = listView.getChildAt(i);
-            if (child instanceof TextView && ((TextView) child).hasSelection()) {
-                return true;
-            }
+        adapter.beginSelection(position);
+        selectionBar.setVisibility(View.VISIBLE);
+        syncSelectionBackCallback();
+        // 选择期间「回到底部」让位，避免与操作条挤在同一角落
+        updateFollowButton();
+    }
+
+    @Override
+    public void onLineClick(int position) {
+        if (adapter != null && adapter.isSelecting()) {
+            adapter.extendSelectionTo(position);
         }
-        return false;
+    }
+
+    /** 复制选中区间的整行文本（行间以换行连接），成功后退出选择模式。 */
+    private void copySelectedLines() {
+        if (adapter == null || !adapter.isSelecting()) {
+            return;
+        }
+        TextCopy.copy(requireContext(), adapter.selectedText());
+        exitSelection();
+    }
+
+    /** 退出选择模式：清高亮、收起操作条、交还返回键、恢复跟随按钮的显隐逻辑。 */
+    private void exitSelection() {
+        if (adapter != null) {
+            adapter.clearSelection();
+        }
+        if (selectionBar != null) {
+            selectionBar.setVisibility(View.GONE);
+        }
+        syncSelectionBackCallback();
+        updateFollowButton();
+    }
+
+    /** 返回键只在「本页可见 + 处于选择模式」时接管，切到别的页不再吞掉返回。 */
+    private void syncSelectionBackCallback() {
+        if (selectionBackCallback != null) {
+            selectionBackCallback.setEnabled(isSelectingLines() && pageVisible);
+        }
     }
 
     private void updateFollowButton() {
@@ -350,6 +427,7 @@ public class LogFragment extends Fragment implements SetupActivity.PageAware {
         }
         boolean show = listView.getVisibility() == View.VISIBLE
                 && !following
+                && !isSelectingLines()
                 && adapter.getItemCount() > 0;
         followButton.setVisibility(show ? View.VISIBLE : View.GONE);
     }
@@ -394,7 +472,7 @@ public class LogFragment extends Fragment implements SetupActivity.PageAware {
         countView.setText(filtered ? getString(R.string.log_count_hit_fmt, snap.lines.size()) : "");
     }
 
-    /** 字节 → k（1024 进制）文本，最多 1 位小数且整数不补 {@code .0}：1843 → "1.8"、409600 → "400"。 */
+    /** 字节 → k（1024 进制）文本，最多 1 位小数且整数不补 {@code .0}：1843 → "1.8"、204800 → "200"。 */
     private static String formatK(long bytes) {
         String text = String.format(Locale.US, "%.1f", bytes / 1024.0);
         return text.endsWith(".0") ? text.substring(0, text.length() - 2) : text;
