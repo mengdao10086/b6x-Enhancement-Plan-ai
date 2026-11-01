@@ -19,7 +19,9 @@ import android.os.PowerManager;
 import java.io.BufferedReader;
 import java.io.File;
 import java.io.FileOutputStream;
+import java.util.ArrayList;
 import java.util.Iterator;
+import java.util.List;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -126,6 +128,38 @@ public class MainHook implements IXposedHookLoadPackage {
         if (sMainHandler == null) sMainHandler = new Handler(Looper.getMainLooper());
         return sMainHandler;
     }
+
+    /**
+     * 安装期的「已钩住 xxx」先攒着，300ms 后合并成一行输出。
+     * 逐条打印一次启动会刷二十多行，占掉 LSPosed 日志的大半体积。
+     */
+    private static final List<String> sPendingHooked = new ArrayList<>();
+    private static boolean sHookedFlushScheduled = false;
+
+    private static void hooked(String item) {
+        synchronized (sPendingHooked) {
+            sPendingHooked.add(item);
+            if (sHookedFlushScheduled) return;
+            sHookedFlushScheduled = true;
+        }
+        mainHandler().postDelayed(MainHook::flushHooked, 300);
+    }
+
+    private static void flushHooked() {
+        List<String> items;
+        synchronized (sPendingHooked) {
+            if (sPendingHooked.isEmpty()) {
+                sHookedFlushScheduled = false;
+                return;
+            }
+            items = new ArrayList<>(sPendingHooked);
+            sPendingHooked.clear();
+            sHookedFlushScheduled = false;
+        }
+        XposedBridge.log(TAG + " 已钩住 " + items.size() + " 项: "
+                + String.join("、", items));
+    }
+
     private static final int AUTO_LAUNCH_TIMEOUT_MS = 2000;        // 兜底：自动进入设置失败时仍退后台
     private static volatile boolean enteredSetup = false;         // 本前台会话是否已进入过设置界面
     // ========== 前台会话判定：每次进入前台跳一次设置页（见 app/逻辑说明.md §1.6）==========
@@ -872,7 +906,7 @@ public class MainHook implements IXposedHookLoadPackage {
             Class<?> clazz = cl.loadClass(className);
             XposedHelpers.findAndHookMethod(clazz, methodName, parameterTypesAndCallback);
             if (successLog != null) {
-                XposedBridge.log(TAG + " 已钩住 " + successLog);
+                hooked(successLog);
             }
         } catch (Throwable t) {
             XposedBridge.log(TAG + " " + failLog + ": " + t.getMessage());
@@ -1039,7 +1073,7 @@ public class MainHook implements IXposedHookLoadPackage {
                             param.setResult(true);
                         }
                     });
-            XposedBridge.log(TAG + " 已钩住 checkBluetoothPermission（实测已授予才放行）");
+            hooked("checkBluetoothPermission（实测已授予才放行）");
 
             // ===== 诊断钩子（调试用，保留） =====
             // 公共断连钩子（BluetoothGatt.disconnect 双设备通用）已覆盖。
@@ -1065,7 +1099,7 @@ public class MainHook implements IXposedHookLoadPackage {
                                     + (result != null ? result : "null"));  // 防御 getResult() 为 null
                         }
                     });
-            XposedBridge.log(TAG + " 已钩住 BluetoothGatt.discoverServices");
+            hooked("BluetoothGatt.discoverServices");
 
             // LeDataInteractionController.connect() 诊断
             XposedHelpers.findAndHookMethod(leCtrl, "connect",
@@ -1095,7 +1129,7 @@ public class MainHook implements IXposedHookLoadPackage {
                                     + " throwable=" + (th != null ? th.getClass().getSimpleName() : "null"));
                         }
                     });
-            XposedBridge.log(TAG + " 已钩住 LeDataInteractionController.connect");
+            hooked("LeDataInteractionController.connect");
 
             // GattCallback（远程断联检测 onConnectionStateChange 用）
             Class<?> gattCb = lpparam.classLoader.loadClass(
@@ -1116,7 +1150,7 @@ public class MainHook implements IXposedHookLoadPackage {
                             }
                         }
                     });
-            XposedBridge.log(TAG + " 已钩住 GattCallback.onConnectionStateChange（远程断联检测）");
+            hooked("GattCallback.onConnectionStateChange（远程断联检测）");
 
             // controller 的 onGattConnected（BLE 状态恢复）
             XposedHelpers.findAndHookMethod(wingCtrl, "onGattConnected",
@@ -1130,16 +1164,16 @@ public class MainHook implements IXposedHookLoadPackage {
                             writeStatusFile();  // 连接事件立刻写 status 文件
                         }
                     });
-            XposedBridge.log(TAG + " 已钩住 WaspWingDataInteractionController.onGattConnected（BLE 状态恢复）");
+            hooked("WaspWingDataInteractionController.onGattConnected（BLE 状态恢复）");
 
             XposedHelpers.findAndHookMethod(sdkVm, "onDeviceInfoUpdate",
                     waspInfoCls, infoUpdateHook);
-            XposedBridge.log(TAG + " 已钩住 SDK WaspwingViewModel.onDeviceInfoUpdate（beforeHook）");
+            hooked("SDK WaspwingViewModel.onDeviceInfoUpdate（beforeHook）");
 
             // App 层 WaspWingViewModel.onDeviceInfoUpdate — 自修复
             XposedHelpers.findAndHookMethod(appVm, "onDeviceInfoUpdate",
                     waspInfoCls, infoUpdateHook);
-            XposedBridge.log(TAG + " 已钩住 App WaspWingViewModel.onDeviceInfoUpdate（beforeHook）");
+            hooked("App WaspWingViewModel.onDeviceInfoUpdate（beforeHook）");
 
         } catch (Throwable t) {
             XposedBridge.log(TAG + " 钩诊断失败: " + t.getMessage());
@@ -1163,7 +1197,7 @@ public class MainHook implements IXposedHookLoadPackage {
                             writeStatusFile();  // 断连事件立刻写 status 文件
                         }
                     });
-            XposedBridge.log(TAG + " 已钩住 BluetoothGatt.disconnect（双设备通用）");
+            hooked("BluetoothGatt.disconnect（双设备通用）");
         } catch (Throwable t) {
             XposedBridge.log(TAG + " 钩 BluetoothGatt.disconnect 失败: " + t.getMessage());
         }
@@ -1208,7 +1242,7 @@ public class MainHook implements IXposedHookLoadPackage {
                     }
                 }
             });
-            XposedBridge.log(TAG + " 已钩住 BluetoothDevice.getType（类型门禁·仅连接期放行目标设备）");
+            hooked("BluetoothDevice.getType（类型门禁·仅连接期放行目标设备）");
         } catch (Throwable t) {
             XposedBridge.log(TAG + " 钩 BluetoothDevice.getType 失败: " + t.getMessage());
         }
@@ -1338,8 +1372,7 @@ public class MainHook implements IXposedHookLoadPackage {
                     }
                 }
             });
-            XposedBridge.log(TAG + " 已钩住 AbstractDataInteractionController 构造"
-                    + "（修复 runFetchLoop CPU 满载）");
+            hooked("AbstractDataInteractionController 构造（修复 runFetchLoop CPU 满载）");
         } catch (Throwable t) {
             XposedBridge.log(TAG + " 钩 AbstractDataInteractionController 失败: " + t.getMessage());
         }
@@ -1392,7 +1425,7 @@ public class MainHook implements IXposedHookLoadPackage {
                     enteredSetup = true;  // 已进入过设置界面，此后不再自动跳
                 }
             });
-            XposedBridge.log(TAG + " 已钩住 Activity 基类生命周期（MainActivity 自动进入设置界面）");
+            hooked("Activity 基类生命周期（MainActivity 自动进入设置界面）");
         } catch (Throwable t) {
             XposedBridge.log(TAG + " 钩自动进入设置界面失败: " + t.getMessage());
         }
@@ -1413,7 +1446,7 @@ public class MainHook implements IXposedHookLoadPackage {
                     }
                 }
             });
-            XposedBridge.log(TAG + " 已钩住 Activity.onStop（前台会话结束判定）");
+            hooked("Activity.onStop（前台会话结束判定）");
         } catch (Throwable t) {
             XposedBridge.log(TAG + " 钩 Activity.onStop 失败（自动进入设置界面退回进程级行为）: " + t.getMessage());
         }
@@ -1429,7 +1462,7 @@ public class MainHook implements IXposedHookLoadPackage {
                 }
             });
             setupResumeHookReady = true;
-            XposedBridge.log(TAG + " 已钩住 B6ExperimentalActivity.onResume（设置页 = 已进入判定）");
+            hooked("B6ExperimentalActivity.onResume（设置页 = 已进入判定）");
         } catch (Throwable t) {
             setupResumeHookReady = false;   // 闸门关闭：退后台标记永不消费，enteredSetup 保持进程级语义
             XposedBridge.log(TAG + " 钩设置页 onResume 失败（自动进入设置界面退回进程级行为）: " + t.getMessage());
@@ -1498,7 +1531,7 @@ public class MainHook implements IXposedHookLoadPackage {
                     } catch (Throwable t) { /* 读不到按非 daemon 会话处理 */ }
                 }
             });
-            XposedBridge.log(TAG + " 已钩住 Activity 生命周期（B7X 自动进入控制页·会话判定）");
+            hooked("Activity 生命周期（B7X 自动进入控制页·会话判定）");
         } catch (Throwable t) {
             XposedBridge.log(TAG + " 钩 B7X 会话判定失败（不自动进入控制页）: " + t.getMessage());
         }
@@ -1705,7 +1738,7 @@ public class MainHook implements IXposedHookLoadPackage {
                     XposedBridge.log(TAG + " 已捕获 WaspWingManager 实例");
                 }
             });
-            XposedBridge.log(TAG + " 已钩住 WaspWingManager 构造函数");
+            hooked("WaspWingManager 构造函数");
 
             // 屏蔽 App 自修复（仅 B6X）
             if (appKind == 6) {
@@ -1721,7 +1754,7 @@ public class MainHook implements IXposedHookLoadPackage {
                                     param.setResult(null);
                                 }
                             });
-                    XposedBridge.log(TAG + " 已钩住 setExperimentalRunMode（已屏蔽）");
+                    hooked("setExperimentalRunMode（已屏蔽）");
                 } catch (Throwable t) { /* B6X only */ }
             }
         } catch (Throwable t) {
@@ -1736,7 +1769,7 @@ public class MainHook implements IXposedHookLoadPackage {
                             XposedBridge.log(TAG + " 已捕获 WaspWingManager(t9.j) 实例");
                         }
                     });
-                    XposedBridge.log(TAG + " 已钩住 WaspWingManager(t9.j) 构造函数");
+                    hooked("WaspWingManager(t9.j) 构造函数");
                 } catch (Throwable t2) {
                     XposedBridge.log(TAG + " WaspWingManager 原名+混淆均不可用");
                 }
@@ -1776,7 +1809,7 @@ public class MainHook implements IXposedHookLoadPackage {
                             }
                         }
                     });
-            XposedBridge.log(TAG + " 已钩住 LeDataInteractionController.onGattConnected（static 同步修复）");
+            hooked("LeDataInteractionController.onGattConnected（static 同步修复）");
 
             // 收包者定基准：B6X 数据到达时把 currentValidGatt 重绑到真在收包的 gatt，
             // 消除「命令写进失效 gatt 被静默丢弃」窗口（见 app/逻辑说明.md §1.3）。
@@ -1796,7 +1829,7 @@ public class MainHook implements IXposedHookLoadPackage {
                                 }
                             }
                         });
-                XposedBridge.log(TAG + " 已钩住 LeDataInteractionController.onCharacteristicChanged（收包锚点）");
+                hooked("LeDataInteractionController.onCharacteristicChanged（收包锚点）");
             } catch (Throwable t) {
                 XposedBridge.log(TAG + " 钩 onCharacteristicChanged 失败: " + t.getMessage());
             }
@@ -1840,7 +1873,7 @@ public class MainHook implements IXposedHookLoadPackage {
                     }
                 }
             });
-            XposedBridge.log(TAG + " 已钩住 " + clsName + "." + method + "（超时补 close，堵句柄泄漏）");
+            hooked(clsName + "." + method + "（超时补 close，堵句柄泄漏）");
         } catch (Throwable t) {
             XposedBridge.log(TAG + " 钩连接超时补 close 失败: " + t.getMessage());
         }
@@ -2044,7 +2077,7 @@ public class MainHook implements IXposedHookLoadPackage {
                     backgroundForAutoLaunch(act);
                 }
             });
-            XposedBridge.log(TAG + " 已钩住 Activity.onCreate/onResume（b6x_auto_launch 后台化）");
+            hooked("Activity.onCreate/onResume（b6x_auto_launch 后台化）");
         } catch (Throwable t) {
             XposedBridge.log(TAG + " 钩 auto_launch 失败: " + t.getMessage());
         }
@@ -2253,7 +2286,7 @@ public class MainHook implements IXposedHookLoadPackage {
             Class<?> componentActivity =
                     lpparam.classLoader.loadClass("androidx.activity.ComponentActivity");
             XposedHelpers.findAndHookMethod(componentActivity, "onBackPressed", backHook);
-            XposedBridge.log(TAG + " 已钩住 ComponentActivity.onBackPressed（返回退出改为隐藏后台）");
+            hooked("ComponentActivity.onBackPressed（返回退出改为隐藏后台）");
         } catch (ClassNotFoundException e) {
             XposedBridge.log(TAG + " 无 androidx.activity.ComponentActivity，仅用 Activity 兜底钩子");
         } catch (Throwable t) {
@@ -2263,7 +2296,7 @@ public class MainHook implements IXposedHookLoadPackage {
         // 兜底钩子：非 androidx 页面（与主钩子互斥，同一次返回只走一个）
         try {
             XposedHelpers.findAndHookMethod(Activity.class, "onBackPressed", backHook);
-            XposedBridge.log(TAG + " 已钩住 Activity.onBackPressed（兜底）");
+            hooked("Activity.onBackPressed（兜底）");
         } catch (Throwable t) {
             XposedBridge.log(TAG + " 钩 onBackPressed 失败: " + t.getMessage());
         }
