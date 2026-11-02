@@ -109,6 +109,11 @@ public class MainHook implements IXposedHookLoadPackage {
     private static final int STALL_RECONNECT_MAX = 3;              // 连续 3 次重连仍无回传 → 设备固件锁死，停止循环
     private static volatile boolean deviceLockedAlerted = false;   // 设备锁死提示已发出（markConnected 重置）
 
+    // ========== 连接诊断（每次连接各记一条，定位"连上但回传全 0"）==========
+    private static volatile long lastInfoUpdateAt = 0;             // 最近一次参数回传时刻（ms）
+    private static volatile boolean firstPacketLogged = false;     // 本次连接的首包延迟是否已记录
+    private static volatile boolean zeroInfoLogged = false;        // 本次连接是否已记录"全 0 回传"
+
     // ========== runFetchLoop 崩溃兜底 ==========
     private static final int QUEUE_STALL_THRESHOLD = 6;           // queue 堆积 > 6 条（≈30s 下发量）= runFetchLoop 疑似崩溃
     private static final long QUEUE_TAKEOVER_MS = 5000;           // 守护线程接管判定：同一队首停留超 5s 才消费
@@ -1042,10 +1047,71 @@ public class MainHook implements IXposedHookLoadPackage {
     /** 捕获全参数回传 + 重置重连新鲜度标记 + 型号识别 + 屏蔽 App 自修复。 */
     private static void handleInfoUpdate(Object info) {
         lastWaspWingInfo = info;    // 捕获散热器全参数回传
+        lastInfoUpdateAt = System.currentTimeMillis();
+        logInfoDiagnostics(info);   // 首包延迟 / 全 0 回传（每连接各一条）
         reconnectPending = false;   // 收到新回传，重连新鲜度验证通过
         stallReconnectCount = 0;    // 设备恢复响应，清零连续无回传重连计数
         updateModelFromInfo(info);  // 型号识别 + 同步 BLE_OWNER_LAST
         blockSelfRepair(info);      // 改 experimentalRunModeValue 使 self-repair 跳过（须在原方法前）
+    }
+
+    /** 首包延迟 + 全 0 回传诊断（每类每连接各一条，见 app/逻辑说明.md §1.2）。 */
+    private static void logInfoDiagnostics(Object info) {
+        try {
+            if (!firstPacketLogged) {
+                firstPacketLogged = true;
+                long since = connectStartedAt > 0 ? lastInfoUpdateAt - connectStartedAt : -1;
+                XposedBridge.log(TAG + " [诊断] 连接后首个参数回传："
+                        + (since >= 0 ? since + "ms" : "连接时刻未知")
+                        + " 冷=" + XposedHelpers.callMethod(info, "getRealColdLevel")
+                        + " 热=" + XposedHelpers.callMethod(info, "getHotSurfaceTemperature")
+                        + " RPM=" + XposedHelpers.callMethod(info, "getRealWindLevel"));
+            }
+            if (!zeroInfoLogged && isAllZeroInfo(info)) {
+                zeroInfoLogged = true;
+                XposedBridge.log(TAG + " [诊断] 收到全 0 参数回传（冷/热/RPM 均 0，设备数据未就绪）");
+            }
+        } catch (Throwable t) {
+            XposedBridge.log(TAG + " [诊断] 回传诊断异常: " + t);
+        }
+    }
+
+    /** 冷/热/RPM 三值均为 0 → 宿主 connect 时的默认对象，不是有效回传。 */
+    private static boolean isAllZeroInfo(Object info) {
+        return toInt(XposedHelpers.callMethod(info, "getRealColdLevel")) == 0
+                && toInt(XposedHelpers.callMethod(info, "getHotSurfaceTemperature")) == 0
+                && toInt(XposedHelpers.callMethod(info, "getRealWindLevel")) == 0;
+    }
+
+    private static int toInt(Object v) {
+        return v instanceof Number ? ((Number) v).intValue() : -1;
+    }
+
+    /**
+     * 连接后 3s 诊断：服务/特征是否就绪 + 首包是否到达。用来区分「通知没订阅上」（service
+     * 或 readChar 为 null、首包无）与「设备不回报」（两者都在、首包无）。
+     * 只对本次连接生效：期间又发生新连接则直接放弃。
+     */
+    private static void scheduleConnectDiagnostics(final Object ctrl) {
+        final long startedAt = connectStartedAt;
+        mainHandler().postDelayed(new Runnable() {
+            @Override
+            public void run() {
+                if (connectStartedAt != startedAt) return;   // 已被更新的连接取代
+                try {
+                    Object service = XposedHelpers.callMethod(ctrl, "getGattService");
+                    Object chr = XposedHelpers.callMethod(ctrl, "getReadCharacteristic");
+                    int state = XposedHelpers.getIntField(ctrl, "mDataConnectState");
+                    long since = lastInfoUpdateAt >= startedAt ? lastInfoUpdateAt - startedAt : -1;
+                    XposedBridge.log(TAG + " [诊断] 连接后 3s：state=" + state
+                            + " service=" + (service != null)
+                            + " readChar=" + (chr != null)
+                            + " 首包=" + (since >= 0 ? since + "ms" : "无"));
+                } catch (Throwable t) {
+                    XposedBridge.log(TAG + " [诊断] 连接后 3s 检查异常: " + t);
+                }
+            }
+        }, 3000);
     }
 
     /** 修复 #3/#4 + 诊断钩子（仅 B6X） */
@@ -1152,6 +1218,25 @@ public class MainHook implements IXposedHookLoadPackage {
                     });
             hooked("GattCallback.onConnectionStateChange（远程断联检测）");
 
+            // 服务发现结果诊断：status≠0 或 service/readChar 为空 → 通知不会被订阅，链路"连上但静默"
+            XposedHelpers.findAndHookMethod(gattCb, "onServicesDiscovered",
+                    BluetoothGatt.class, int.class, new XC_MethodHook() {
+                        @Override
+                        protected void afterHookedMethod(MethodHookParam param) {
+                            try {
+                                Object ctrl = XposedHelpers.getObjectField(param.thisObject, "this$0");
+                                Object service = XposedHelpers.callMethod(ctrl, "getGattService");
+                                Object chr = XposedHelpers.callMethod(ctrl, "getReadCharacteristic");
+                                XposedBridge.log(TAG + " [诊断] onServicesDiscovered status=" + param.args[1]
+                                        + " service=" + (service != null)
+                                        + " readChar=" + (chr != null));
+                            } catch (Throwable t) {
+                                XposedBridge.log(TAG + " [诊断] onServicesDiscovered 检查异常: " + t);
+                            }
+                        }
+                    });
+            hooked("GattCallback.onServicesDiscovered（诊断）");
+
             // controller 的 onGattConnected（BLE 状态恢复）
             XposedHelpers.findAndHookMethod(wingCtrl, "onGattConnected",
                     BluetoothGatt.class, new XC_MethodHook() {
@@ -1160,6 +1245,7 @@ public class MainHook implements IXposedHookLoadPackage {
                             BluetoothGatt gatt = (BluetoothGatt) param.args[0];
                             // 重连路径也刷新 CONNECTED_AT；并保存设备引用
                             markConnected(gatt);
+                            scheduleConnectDiagnostics(param.thisObject);   // 3s 后看服务/首包
                             autoEnterSetup();  // 引导页可见时自动进入设置界面
                             writeStatusFile();  // 连接事件立刻写 status 文件
                         }
@@ -1905,6 +1991,7 @@ public class MainHook implements IXposedHookLoadPackage {
                         try {
                             // 型号未知按包名兜底，随后 X.getDeviceCode() 修正
                             markConnected((BluetoothGatt) param.args[0]);
+                            scheduleConnectDiagnostics(param.thisObject);   // 3s 后看服务/首包
                             captureInfoFromController(param.thisObject);
                             stopControllerScan(param.thisObject);   // B7X 连接成功后停扫描（对齐 B6X 的 hookControllerStopScan）
                             // static controller(f50991b) 只在 init 赋值
@@ -2862,6 +2949,8 @@ public class MainHook implements IXposedHookLoadPackage {
         boolean wasConnected = bleConnected;
         bleConnected = true;
         diagLogCount = 0;            // 新连接：重置广播接收诊断计数（每连最多记录 DIAG_LOG_MAX_PER_CONN 对）
+        firstPacketLogged = false;   // 新连接：重新记录首包延迟
+        zeroInfoLogged = false;      // 新连接：重新记录"全 0 回传"
         setRunModeLogCount = 0;      // 新连接：重置"setRunMode 已下发"计数（每连最多 3 条）
         diagConnLogCount = 0;        // 新连接：重置连接诊断日志计数（每连最多 DIAG_CONN_LOG_MAX 条）
         lastReconnectAttemptLogAt = 0;   // 新连接：重置"后台重连尝试"限频计时（下条断连后首试立即可见）

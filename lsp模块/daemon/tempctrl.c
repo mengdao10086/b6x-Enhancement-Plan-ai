@@ -360,6 +360,10 @@ static int APP_LAUNCH_ENABLED = 0;      // 总开关：1=允许自动拉起，0=
 // 锁死自动重启（watchdog）：每次实际下发制冷变化时判定——实际停滞（=上周期实际）且≠上周期下发持续 N 次 → kill app 并重新拉起
 static int app_watchdog_cycles = 6;     // APP_WATCHDOG：连续停滞次数（0=关闭，默认 6）
 static int watchdog_stall_count = 0;    // 当前连续停滞次数（按实际下发周期计数）
+// 死链自动重启：BLE 已连但冷/热/转速回传同时是全 0（宿主 connect 时的默认对象）连续 N 个周期
+// → kill app 重新拉起。与通用停滞判定互补：只看回传是否有效，不看下发目标。
+#define DEADLINK_CYCLES 3               // 每周期 5s，3 次 ≈ 15s
+static int deadlink_cycles = 0;         // 当前连续死链周期数
 static int watchdog_last_cold = -1;     // 上周期实际制冷值（停滞判定基准）
 static int watchdog_last_cmd  = -1;     // 上周期下发制冷值（未达目标判定基准）
 static long watchdog_last_kill_at = 0;  // 上次 kill 时间戳（冷却防风暴）
@@ -2996,6 +3000,31 @@ static void watchdog_check(void) {
     }
 }
 
+/**
+ * 死链检测：BLE 已连接、但冷/热/转速回传同时为全 0 / 无效——宿主连接对象仍是 connect 时的
+ * 默认值（convertFromDevice），说明通知没订阅上或设备不回报。模块侧重连无法恢复，重启宿主
+ * 进程可重建（实测 5s 内恢复）。判定细节见 逻辑说明.md「主循环逻辑→死链自动重启」。
+ */
+static void deadlink_check(void) {
+    if (pending_align)                       { deadlink_cycles = 0; return; }  // 待对齐窗口内不判
+    if (!app_ble_connected || active_device == DEVICE_NONE) { deadlink_cycles = 0; return; }
+    if (last_cold < 0)                       { deadlink_cycles = 0; return; }  // 从未下发不判
+    int dead = (cooler_cold_real == 0 && cooler_rpm_real == 0
+                && cooler_hot_temp <= 0 && cooler_cold_temp <= 0);
+    if (!dead)                               { deadlink_cycles = 0; return; }
+    time_t now = time(NULL);
+    if (watchdog_last_kill_at > 0 && now - watchdog_last_kill_at < 300) {
+        deadlink_cycles = 0;   // 与锁死重启共用 5 分钟冷却，防风暴
+        return;
+    }
+    if (++deadlink_cycles < DEADLINK_CYCLES) return;
+    write_log("死链自动重启 BLE 已连但冷/热/转速回传全 0 连续 %d 次，kill app 并重新拉起",
+              DEADLINK_CYCLES);
+    deadlink_cycles = 0;
+    watchdog_last_kill_at = now;
+    force_kill_and_relaunch();
+}
+
 /** 淘汰存活参与者：非保留者且非前台时 force-stop（在前台则等下周期再试） */
 static void evict_app_if_eligible(int alive, const char *keep, const char *pkg) {
     if (alive && keep != pkg && !is_foreground_pkg(pkg)) {
@@ -4752,6 +4781,8 @@ int main(int argc, char *argv[]) {
             // ★ 锁死自动重启检测（watchdog）：仅在本次实际下发制冷变化后判定——
             // 实际停滞（=上周期实际）且未达目标（≠上周期下发）连续 N 次 → kill app 重新拉起
             if (dispatched) watchdog_check();
+            // ★ 死链检测：BLE 已连但回传全 0（与本次是否下发无关）
+            deadlink_check();
         }
 
         sleep(1);
