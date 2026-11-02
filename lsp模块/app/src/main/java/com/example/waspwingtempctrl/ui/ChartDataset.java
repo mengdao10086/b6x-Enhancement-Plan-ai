@@ -6,6 +6,8 @@ package com.example.waspwingtempctrl.ui;
  * <p>解析口径见 app/逻辑说明.md §7.1（行格式权威在 {@code daemon/逻辑说明.md}〈状态页数据源〉）：
  * 按 {@code \n} 切行、<b>列数不足 {@link #COL_COUNT} 的整行跳过</b>（不中断、不产生断点）；
  * 温度列 {@code v>=0 ? v/10 : 无效}，转速/制冷列 {@code v>=0 ? v : 无效}，故哨兵 -1 变无效。
+ * 另按「0 = 未就绪」再滤一次：热端/风扇/制冷 {@code v>0} 才有效；冷端 0℃ 合法，
+ * 连续 {@link #COLD_ZERO_RUN} 个 0 才整段判无效。
  *
  * <p>行数上限 {@code rollingMaxLines}（= C 端 {@code WEBUI_DATA_MAX_LINES}）用环形覆盖保留
  * 最近 N 行，与 C 端压缩口径一致。
@@ -35,6 +37,9 @@ final class ChartDataset {
      * 故 8 列里只读前 7 列；<b>但列数校验仍按 8 列</b>——校验的是"写端格式"，读端不擅自放宽或收紧。
      */
     static final int COL_COUNT = 8;
+
+    /** 冷端连续 0 的判定门槛：连续达到该点数才整段判无效（0℃ 对制冷片是合法读数）。 */
+    static final int COLD_ZERO_RUN = 6;
 
     private static final int COL_TS = 0;
     private static final int COL_BATT = 1;
@@ -78,10 +83,10 @@ final class ChartDataset {
                     ts != null ? ts : 0L,
                     temp(parseInt(p[COL_BATT])),
                     temp(parseInt(p[COL_CPU])),
-                    temp(parseInt(p[COL_HOT])),
+                    tempNonZero(parseInt(p[COL_HOT])),
                     temp(parseInt(p[COL_COLD])),
-                    raw(parseInt(p[COL_RPM])),
-                    raw(parseInt(p[COL_COOL])));
+                    rawNonZero(parseInt(p[COL_RPM])),
+                    rawNonZero(parseInt(p[COL_COOL])));
             total++;
         }
         int keep = Math.min(total, cap);
@@ -90,6 +95,7 @@ final class ChartDataset {
         for (int i = 0; i < keep; i++) {
             out[i] = ring[(start + i) % cap];
         }
+        applyColdZeroRuns(out, cfg == null ? 0 : cfg.gapDetectSec);
         if (cfg != null) {
             applyOne(out, true, cfg.alpha, cfg.quantStep);
             applyOne(out, false, cfg.alpha, cfg.quantStep);
@@ -121,6 +127,49 @@ final class ChartDataset {
 
     private static float raw(Integer v) {
         return v != null && v >= 0 ? v : ChartSample.INVALID;
+    }
+
+    /** 热端温度：0 是宿主对象在首帧有效回传前的默认值，不是 0.0℃，按无效处理。 */
+    private static float tempNonZero(Integer v) {
+        return v != null && v > 0 ? v / 10f : ChartSample.INVALID;
+    }
+
+    /** 风扇转速/制冷档位：设备未启动时回传 0，按无效处理（不画到 0）。 */
+    private static float rawNonZero(Integer v) {
+        return v != null && v > 0 ? v : ChartSample.INVALID;
+    }
+
+    /**
+     * 冷端 0 的整段判定：0℃ 对制冷片是合法读数，单点 0 照常画；连续达到 {@link #COLD_ZERO_RUN} 个 0
+     * 才说明是宿主默认值，<b>整段（含最早那几个）</b>判无效。时间戳差 &gt; {@code gapDetectSec} 的
+     * 断联处不算连续（C 端断联期间不写行）。
+     */
+    private static void applyColdZeroRuns(ChartSample[] s, int gapDetectSec) {
+        int runStart = -1;
+        long prevT = 0L;
+        for (int i = 0; i < s.length; i++) {
+            ChartSample d = s[i];
+            if (gapDetectSec > 0 && d.t > 0 && prevT > 0 && d.t - prevT > gapDetectSec) {
+                runStart = -1;
+            }
+            prevT = d.t;
+            if (d.cold != 0f) {   // NaN 同样不等于 0，结束本段
+                runStart = -1;
+                continue;
+            }
+            if (runStart < 0) {
+                runStart = i;
+            }
+            int run = i - runStart + 1;
+            if (run == COLD_ZERO_RUN) {
+                for (int j = runStart; j < i; j++) {
+                    s[j].invalidateCold();
+                }
+            }
+            if (run >= COLD_ZERO_RUN) {
+                d.invalidateCold();
+            }
+        }
     }
 
     // ==================== 滤波 ====================

@@ -142,6 +142,7 @@ static int hot_map_max = 450;       // HOT_RPM_MAP 第二值（0.1°C）
 static int fan_rpm_min = 2000;      // FAN_RPM_RANGE 第一值
 static int fan_rpm_max = 6000;      // FAN_RPM_RANGE 第二值
 static int fan_rpm_round_unit = 10; // RATE_LIMIT_FAN 第三值：下发转速前按该单位就近取整（RPM，1~500）
+#define FAN_WEIGHT_MAX 4000         // 自加权合并的权重上限（RPM）：映射值超过它时按同一权重参与
 
 // ======================== 速率限制 ========================
 // --- 固定值 ---
@@ -3669,12 +3670,13 @@ static int compute_fan_target(void) {
     int rpm_cold = rpm_from_cold_exp(actual_cold);
     int rpm = rpm_cold;
     if (cooler_hot_temp >= 0) {   // 热端 ≤0（0=异常 0°）也进入，由 rpm_from_hot_end 保持上次值
-        // 自加权合并：各以自身 RPM 为权重，权重钳制到设备范围。
+        // 自加权合并：各以自身 RPM 为权重，权重钳制到 [最低转速, FAN_WEIGHT_MAX]。
         // 热端低于映射起始温度时按负向外推继续参与，不在此丢弃；结果可低于最低转速，
         // 由下游 rate_limit_fan 统一钳制落到最低转速（此处提前钳制会改变限速行为）。
         int rpm_hot = rpm_from_hot_end(cooler_hot_temp);
-        int w_hot  = clamp(rpm_hot,  fan_rpm_min, active_fan_max);
-        int w_cold = clamp(rpm_cold, fan_rpm_min, active_fan_max);
+        int w_max = (fan_rpm_min > FAN_WEIGHT_MAX) ? fan_rpm_min : FAN_WEIGHT_MAX;
+        int w_hot  = clamp(rpm_hot,  fan_rpm_min, w_max);
+        int w_cold = clamp(rpm_cold, fan_rpm_min, w_max);
         // 两权重经 clamp 后恒 ≥1000（FAN_RPM_RANGE 各值的解析下限），故分母恒 >0，除法安全。
         rpm = (w_hot * rpm_hot + w_cold * rpm_cold) / (w_hot + w_cold);
     }

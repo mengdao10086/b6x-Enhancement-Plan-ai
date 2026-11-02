@@ -23,8 +23,8 @@ final class ChartSample {
     final float cpu;
     /** 热端温度（℃）。 */
     final float hot;
-    /** 冷端温度（℃）。 */
-    final float cold;
+    /** 冷端温度（℃）。解析层判定「连续 0 段」后可用 {@link #invalidateCold()} 改为无效。 */
+    float cold;
     /** 实际风扇转速（原始 RPM，未折算）。 */
     final float rpm;
     /** 实际制冷强度（制冷档位）。 */
@@ -47,5 +47,10 @@ final class ChartSample {
 
     static boolean valid(float v) {
         return !Float.isNaN(v);
+    }
+
+    /** 把一个「属于连续 0 段」的冷端样本判为无效（整段丢弃，见 {@code ChartDataset}）。 */
+    void invalidateCold() {
+        cold = INVALID;
     }
 }
