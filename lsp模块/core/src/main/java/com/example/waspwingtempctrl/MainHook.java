@@ -166,6 +166,7 @@ public class MainHook implements IXposedHookLoadPackage {
     }
 
     private static final int AUTO_LAUNCH_TIMEOUT_MS = 2000;        // 兜底：自动进入设置失败时仍退后台
+    private static final int AUTO_LAUNCH_BACKGROUND_DELAY_MS = 500; // 自动拉起后等界面稳定再退后台
     private static volatile boolean enteredSetup = false;         // 本前台会话是否已进入过设置界面
     // ========== 前台会话判定：每次进入前台跳一次设置页（见 app/逻辑说明.md §1.6）==========
     // resumedActivityCount：当前处于 resumed 的 Activity 数（0=无前台 Activity）。onResume +1 / onPause -1。
@@ -2171,12 +2172,18 @@ public class MainHook implements IXposedHookLoadPackage {
     }
 
     /**
-     * 自动拉起（守护进程拉起）：把当前任务切到后台（界面已就绪；连接由后台重连线程完成；事件触发时同步切，无固定延迟）。
+     * 自动拉起（守护进程拉起）：把当前任务切到后台（界面已就绪；连接由后台重连线程完成）。
+     * 延迟 {@link #AUTO_LAUNCH_BACKGROUND_DELAY_MS} 再切，给界面稳定留时间。
      * 与返回键路径同源：开关开启时一并从最近任务隐藏（见 {@link #excludeFromRecents}）。
      */
     private static void backgroundForAutoLaunch(final Activity act) {
-        backgroundActivity(act, "自动拉起");
-        if (readBackHideEnabled()) excludeFromRecents(act);   // 与返回键路径一致：开关开则隐藏，失败不影响上面的收后台
+        mainHandler().postDelayed(new Runnable() {
+            @Override
+            public void run() {
+                backgroundActivity(act, "自动拉起");
+                if (readBackHideEnabled()) excludeFromRecents(act);   // 与返回键路径一致：开关开则隐藏，失败不影响上面的收后台
+            }
+        }, AUTO_LAUNCH_BACKGROUND_DELAY_MS);
     }
 
     /** 把当前任务切到后台，不动最近任务（是否隐藏由调用方自行决定）；{@code reason} 只进日志。 */
