@@ -3663,6 +3663,18 @@ static int rpm_from_cold_exp(int cold) {
 }
 
 /**
+ * 转速 → 合并权重：把转速域 [fan_rpm_min, active_fan_max] 线性映射到权重域
+ * [fan_rpm_min, FAN_WEIGHT_MAX]，而不是把转速值直接钳到权重上下限。
+ * 输入先按转速域钳制（低于最低转速按最低、高于设备上限按设备上限）。
+ */
+static int weight_from_rpm(int rpm) {
+    if (active_fan_max <= fan_rpm_min) return fan_rpm_min;   // 配置异常：权重退化为等权
+    int w_max = (fan_rpm_min > FAN_WEIGHT_MAX) ? fan_rpm_min : FAN_WEIGHT_MAX;
+    int v = clamp(rpm, fan_rpm_min, active_fan_max);
+    return fan_rpm_min + (v - fan_rpm_min) * (w_max - fan_rpm_min) / (active_fan_max - fan_rpm_min);
+}
+
+/**
  * 独立风扇目标计算：冷端指数映射（基于限速后实际制冷）+ 热端线性映射加权合并。
  * 与 PID 输出解耦：每周期下发前由 rate_limited_execute 单独调用。
  */
@@ -3670,14 +3682,13 @@ static int compute_fan_target(void) {
     int rpm_cold = rpm_from_cold_exp(actual_cold);
     int rpm = rpm_cold;
     if (cooler_hot_temp >= 0) {   // 热端 ≤0（0=异常 0°）也进入，由 rpm_from_hot_end 保持上次值
-        // 自加权合并：各以自身 RPM 为权重，权重钳制到 [最低转速, FAN_WEIGHT_MAX]。
+        // 自加权合并：各以自身 RPM 映射出的权重参与（转速域线性映射到权重域，见 weight_from_rpm）。
         // 热端低于映射起始温度时按负向外推继续参与，不在此丢弃；结果可低于最低转速，
         // 由下游 rate_limit_fan 统一钳制落到最低转速（此处提前钳制会改变限速行为）。
         int rpm_hot = rpm_from_hot_end(cooler_hot_temp);
-        int w_max = (fan_rpm_min > FAN_WEIGHT_MAX) ? fan_rpm_min : FAN_WEIGHT_MAX;
-        int w_hot  = clamp(rpm_hot,  fan_rpm_min, w_max);
-        int w_cold = clamp(rpm_cold, fan_rpm_min, w_max);
-        // 两权重经 clamp 后恒 ≥1000（FAN_RPM_RANGE 各值的解析下限），故分母恒 >0，除法安全。
+        int w_hot  = weight_from_rpm(rpm_hot);
+        int w_cold = weight_from_rpm(rpm_cold);
+        // 两权重经映射后恒 ≥fan_rpm_min（FAN_RPM_RANGE 解析下限 1000），故分母恒 >0，除法安全。
         rpm = (w_hot * rpm_hot + w_cold * rpm_cold) / (w_hot + w_cold);
     }
     debug_log(debug_exec, "rpm 目标 冷端=%d 热端=%d → %d", rpm_cold, cooler_hot_temp, rpm);
