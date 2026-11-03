@@ -98,6 +98,8 @@ public class StatusFragment extends Fragment implements SetupActivity.PageAware 
     private TextView statusView;
     /** 换字交叉淡入的"旧文本"层（{@code status_text_stack} 内的装饰层，默认 GONE）。 */
     private TextView statusOutgoingView;
+    /** 新旧文本的叠放层：换字时只补间它的高度（ChangeBounds，不淡入淡出）。 */
+    private ViewGroup statusStack;
     private TextView infoView;
     private TextView logView;
     /** 操作记录的正文容器（自适应高、无内部滚动，同诊断卡）；展开/收起切的是它的可见性。 */
@@ -207,6 +209,7 @@ public class StatusFragment extends Fragment implements SetupActivity.PageAware 
         super.onViewCreated(view, savedInstanceState);
         statusView = view.findViewById(R.id.status_text);
         statusOutgoingView = view.findViewById(R.id.status_text_outgoing);
+        statusStack = view.findViewById(R.id.status_text_stack);
         infoView = view.findViewById(R.id.info_text);
         logView = view.findViewById(R.id.action_log_text);
         logBody = view.findViewById(R.id.action_log_body);
@@ -514,7 +517,7 @@ public class StatusFragment extends Fragment implements SetupActivity.PageAware 
             return;   // 部署/拉起结果的保留期内：周期扫描不覆盖状态文本
         }
         if (!result.contentEquals(statusView.getText())) {
-            statusView.setText(result);   // 静默：内容没变就一个字都不动
+            swapStatusTextAnimated(result);   // 静默更新也走同一套淡变（内容没变就一个字都不动）
         }
     }
 
@@ -1034,7 +1037,8 @@ public class StatusFragment extends Fragment implements SetupActivity.PageAware 
     /**
      * 手动刷新的结果上屏：<b>业务上屏零延迟</b>——新文本立刻写上去（不再等淡出结束），视觉上做
      * 「旧文本淡出、新文本淡入」的交叉淡入（旧的在下、新的在上叠放）。
-     * <p>纯交叉淡入淡出、不做高度补间（避免卡片「收起再展开」）。防中间发灰：新层 270ms 淡入、
+     * <p>文本做纯交叉淡入淡出；行数变化时的高度另用 {@link Motion#beginHeightChange}（只补边界、
+     * 不淡入淡出），避免 AutoTransition 的 Fade 造成「收起再展开」。防中间发灰：新层 270ms 淡入、
      * 旧层延后 105ms 起播且只用 180ms 淡出——新层接近不透明时旧层才退，任一帧至少一层接近不透明。代号保证串行、
      * <b>打断不丢结果</b>（打断后当前文本即最新结果）；系统关掉动画时直接上屏。见 {@code app/逻辑说明.md} §8.1。
      */
@@ -1061,9 +1065,10 @@ public class StatusFragment extends Fragment implements SetupActivity.PageAware 
         final int generation = ++fadeGeneration;
         view.animate().cancel();
         outgoing.animate().cancel();
-        // 旧的 = 上一次换字的落点（打断时即当前可见的那段）。纯交叉淡入淡出：
-        // 不做高度补间，避免卡片出现「收起再展开」的过程
+        // 旧的 = 上一次换字的落点（打断时即当前可见的那段）。文本做交叉淡入淡出；
+        // 高度只用「只补边界、不淡入淡出」的过渡，避免 AutoTransition 的 Fade 看起来像「收起再展开」
         final CharSequence old = view.getText();
+        Motion.beginHeightChange(statusStack, FADE_IN_MS);
         outgoing.setText(old);
         outgoing.setAlpha(1f);
         outgoing.setVisibility(View.VISIBLE);
@@ -1081,6 +1086,8 @@ public class StatusFragment extends Fragment implements SetupActivity.PageAware 
             if (statusOutgoingView == null || !isAdded()) {
                 return;   // 视图已销毁，无处收尾（onDestroyView 已复位）
             }
+            // 旧层收起会让叠放层变矮：同样只补边界、不淡变
+            Motion.beginHeightChange(statusStack, FADE_IN_MS);
             outgoing.setVisibility(View.GONE);
             outgoing.setAlpha(1f);
         }).start();

@@ -7,6 +7,7 @@ import android.content.Context;
 import android.os.Build;
 import android.provider.Settings;
 import android.transition.AutoTransition;
+import android.transition.ChangeBounds;
 import android.transition.TransitionManager;
 import android.util.TypedValue;
 import android.view.Display;
@@ -579,6 +580,21 @@ public final class Motion {
         AutoTransition transition = new AutoTransition();
         transition.setDuration(durationForPixels(root.getContext(), Math.abs(deltaPx)));
         transition.setInterpolator(panelCurve);
+        TransitionManager.beginDelayedTransition(root, transition);
+    }
+
+    /**
+     * 只补间边界、不做淡入淡出的高度过渡：用于状态文本换字时的高度变化——
+     * {@link AutoTransition} 自带 Fade，会把整块内容淡掉，看起来像「收起再展开」。
+     * 时长由调用方给（与换字淡变同长）；系统关掉动效时不动，调用方直接改状态即可。
+     */
+    static void beginHeightChange(ViewGroup root, long durationMs) {
+        if (root == null || !enabled(root.getContext())) {
+            return;
+        }
+        ChangeBounds transition = new ChangeBounds();
+        transition.setDuration(durationMs);
+        transition.setInterpolator(EASE_OUT);
         TransitionManager.beginDelayedTransition(root, transition);
     }
 
