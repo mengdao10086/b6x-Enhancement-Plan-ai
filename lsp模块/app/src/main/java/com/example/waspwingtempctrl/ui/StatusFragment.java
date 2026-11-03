@@ -27,11 +27,11 @@ import java.util.Date;
 import java.util.Locale;
 
 /**
- * 状态页：部署状态 / 一键部署 / 卸载部署 / 拉起daemon / 停止daemon / su 诊断。
+ * 状态页：部署状态 / 一键部署 / 卸载部署 / 拉起daemon / 停止daemon / 停止控制app / su 诊断。
  *
  * <p><b>调用边界（I5 的另一半）</b>：本类只调 {@link Deployer} 的
- * {@code probe() / deploy() / uninstall() / startDaemon() / stopDaemon() / DeployDiagnostics.build() /
- * ensureRoot() / updateScript()}，不拼 shell、不碰文件、不绕过 {@code Deployer}。
+ * {@code probe() / deploy() / uninstall() / startDaemon() / stopDaemon() / stopControlApp() /
+ * DeployDiagnostics.build() / ensureRoot() / updateScript()}，不拼 shell、不碰文件、不绕过 {@code Deployer}。
  * {@link Deployer} 的方法都阻塞，故一律放后台线程；结果回主线程渲染。
  *
  * <p>刷新两条路径（消闪烁）、首次探测的时机、忙态与代号纪律、部署请求的武装与去重、
@@ -186,6 +186,7 @@ public class StatusFragment extends Fragment implements SetupActivity.PageAware 
         view.findViewById(R.id.btn_deploy).setOnClickListener(v -> deploy());
         view.findViewById(R.id.btn_uninstall).setOnClickListener(v -> confirmUninstall());
         view.findViewById(R.id.btn_stop).setOnClickListener(v -> confirmStopDaemon());
+        view.findViewById(R.id.btn_stop_app).setOnClickListener(v -> confirmStopControlApp());
         view.findViewById(R.id.btn_start).setOnClickListener(v -> startDaemon());
         view.findViewById(R.id.btn_diag).setOnClickListener(v -> showDiagnostics());
 
@@ -434,6 +435,17 @@ public class StatusFragment extends Fragment implements SetupActivity.PageAware 
                 () -> Deployer.get(app).stopDaemon().describe(), false, true);
     }
 
+    /**
+     * 停止散热器控制 app（动作本身见 {@link Deployer#stopControlApp()}）。
+     * 与「停止daemon」无关：只杀控制 app，不停守护进程、不改配置；
+     * 故不动 {@link #daemonStoppedByUser}。
+     */
+    private void stopControlApp() {
+        final Context app = requireContext().getApplicationContext();
+        runAsync(getString(R.string.status_busy_stop_app),
+                () -> Deployer.get(app).stopControlApp().describe(), false, true);
+    }
+
     private void showDiagnostics() {
         final Context app = requireContext().getApplicationContext();
         runAsync(getString(R.string.status_busy_diag),
@@ -443,8 +455,8 @@ public class StatusFragment extends Fragment implements SetupActivity.PageAware 
     // ==================== 破坏性动作的二次确认 ====================
 
     /**
-     * 点「确认」才执行、点「取消」什么都不做。两个入口（卸载部署 / 停止daemon）都会让温控增强失效，
-     * 且都是一次点击就落盘或杀进程，故都要先问一次。
+     * 点「确认」才执行、点「取消」什么都不做。三个入口（卸载部署 / 停止daemon / 停止控制app）
+     * 都会中断或移除温控增强，且都是一次点击就落盘或杀进程，故都要先问一次。
      */
     private void confirmThen(int titleRes, int messageRes, int confirmRes, Runnable action) {
         if (!isAdded()) {
@@ -481,6 +493,13 @@ public class StatusFragment extends Fragment implements SetupActivity.PageAware 
         confirmThen(R.string.status_dialog_stop_title,
                 R.string.status_dialog_stop_message,
                 R.string.status_dialog_stop_confirm, this::stopDaemon);
+    }
+
+    /** 「停止控制app」的确认入口（动作本身见 {@link #stopControlApp()}）。 */
+    private void confirmStopControlApp() {
+        confirmThen(R.string.status_dialog_stop_app_title,
+                R.string.status_dialog_stop_app_message,
+                R.string.status_dialog_stop_app_confirm, this::stopControlApp);
     }
 
     /**
