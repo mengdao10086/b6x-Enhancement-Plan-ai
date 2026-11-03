@@ -7,7 +7,6 @@ import android.content.Context;
 import android.os.Build;
 import android.provider.Settings;
 import android.transition.AutoTransition;
-import android.transition.ChangeBounds;
 import android.transition.TransitionManager;
 import android.util.TypedValue;
 import android.view.Display;
@@ -584,18 +583,23 @@ public final class Motion {
     }
 
     /**
-     * 只补间边界、不做淡入淡出的高度过渡：用于状态文本换字时的高度变化——
-     * {@link AutoTransition} 自带 Fade，会把整块内容淡掉，看起来像「收起再展开」。
-     * 时长由调用方给（与换字淡变同长）；系统关掉动效时不动，调用方直接改状态即可。
+     * 中止某视图在跑的高度补间并还原 {@code WRAP_CONTENT}（不留下钉死的中间高度）。
+     * 用于换字动画离屏/销毁时的收尾：{@link #animateHeightChange} 的 onAnimationEnd 只认
+     * {@link #HEIGHT_ANIMS} 里的当前 animator，先摘账再取消即可让它空跑、由本方法统一落位。
      */
-    static void beginHeightChange(ViewGroup root, long durationMs) {
-        if (root == null || !enabled(root.getContext())) {
+    static void cancelHeightChange(View content) {
+        if (content == null) {
             return;
         }
-        ChangeBounds transition = new ChangeBounds();
-        transition.setDuration(durationMs);
-        transition.setInterpolator(EASE_OUT);
-        TransitionManager.beginDelayedTransition(root, transition);
+        final ValueAnimator running = HEIGHT_ANIMS.remove(content);
+        if (running != null) {
+            running.cancel();
+        }
+        final ViewGroup.LayoutParams lp = content.getLayoutParams();
+        if (lp != null) {
+            lp.height = ViewGroup.LayoutParams.WRAP_CONTENT;
+            content.requestLayout();
+        }
     }
 
     private static float scale(Context context, String key) {

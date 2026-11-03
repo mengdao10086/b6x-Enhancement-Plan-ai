@@ -98,7 +98,7 @@ public class StatusFragment extends Fragment implements SetupActivity.PageAware 
     private TextView statusView;
     /** 换字交叉淡入的"旧文本"层（{@code status_text_stack} 内的装饰层，默认 GONE）。 */
     private TextView statusOutgoingView;
-    /** 新旧文本的叠放层：换字时只补间它的高度（ChangeBounds，不淡入淡出）。 */
+    /** 新旧文本的叠放层：换字时用 {@link Motion#animateHeightChange} 补间它的高度（窗口展开/收起）。 */
     private ViewGroup statusStack;
     private TextView infoView;
     private TextView logView;
@@ -1037,9 +1037,11 @@ public class StatusFragment extends Fragment implements SetupActivity.PageAware 
     /**
      * 手动刷新的结果上屏：<b>业务上屏零延迟</b>——新文本立刻写上去（不再等淡出结束），视觉上做
      * 「旧文本淡出、新文本淡入」的交叉淡入（旧的在下、新的在上叠放）。
-     * <p>文本做纯交叉淡入淡出；行数变化时的高度另用 {@link Motion#beginHeightChange}（只补边界、
-     * 不淡入淡出），避免 AutoTransition 的 Fade 造成「收起再展开」。防中间发灰：新层 270ms 淡入、
-     * 旧层延后 105ms 起播且只用 180ms 淡出——新层接近不透明时旧层才退，任一帧至少一层接近不透明。代号保证串行、
+     * <p>文本只做交叉淡入淡出，不裁剪、不做上下收展。行数变化时的高度复用配置页那套
+     * {@link Motion#animateHeightChange}（{@code ValueAnimator} + panelCurve、按位移定时长）：
+     * 新文本更高时与淡变同拍长高；更矮时淡变期间保持旧高（不裁旧文本），等旧层淡出结束、
+     * 置 {@code GONE} 之前再平滑收缩。防中间发灰：新层 270ms 淡入、旧层延后 105ms 起播且只用
+     * 180ms 淡出——新层接近不透明时旧层才退，任一帧至少一层接近不透明。代号保证串行、
      * <b>打断不丢结果</b>（打断后当前文本即最新结果）；系统关掉动画时直接上屏。见 {@code app/逻辑说明.md} §8.1。
      */
     private void swapStatusTextAnimated(final String text) {
@@ -1066,9 +1068,19 @@ public class StatusFragment extends Fragment implements SetupActivity.PageAware 
         view.animate().cancel();
         outgoing.animate().cancel();
         // 旧的 = 上一次换字的落点（打断时即当前可见的那段）。文本做交叉淡入淡出；
-        // 高度只用「只补边界、不淡入淡出」的过渡，避免 AutoTransition 的 Fade 看起来像「收起再展开」
+        // 高度按新旧文本的自然高比较：更高则同拍长高，更矮则等旧层退场前再收
         final CharSequence old = view.getText();
-        Motion.beginHeightChange(statusStack, FADE_IN_MS);
+        final int oldStackHeight = measureStatusStackHeight(old);
+        final int newStackHeight = measureStatusStackHeight(text);
+        final boolean grow = oldStackHeight > 0 && newStackHeight > oldStackHeight;
+        final boolean shrink = oldStackHeight > 0 && newStackHeight > 0
+                && newStackHeight < oldStackHeight;
+        if (grow) {
+            final int from = currentStatusStackHeight();
+            if (from > 0) {
+                Motion.animateHeightChange(statusStack, from, newStackHeight);
+            }
+        }
         outgoing.setText(old);
         outgoing.setAlpha(1f);
         outgoing.setVisibility(View.VISIBLE);
@@ -1086,11 +1098,50 @@ public class StatusFragment extends Fragment implements SetupActivity.PageAware 
             if (statusOutgoingView == null || !isAdded()) {
                 return;   // 视图已销毁，无处收尾（onDestroyView 已复位）
             }
-            // 旧层收起会让叠放层变矮：同样只补边界、不淡变
-            Motion.beginHeightChange(statusStack, FADE_IN_MS);
+            // 收缩在旧层 GONE 之前起跑：此刻叠放层仍是旧高的自然高度，
+            // 起点取当前实高（可能是上一次动画的中间值），钉住后再置 GONE，不会先跳一帧
+            if (shrink) {
+                final int from = currentStatusStackHeight();
+                if (from > 0) {
+                    Motion.animateHeightChange(statusStack, from, newStackHeight);
+                }
+            }
             outgoing.setVisibility(View.GONE);
             outgoing.setAlpha(1f);
         }).start();
+    }
+
+    /**
+     * 叠放层在给定文本下的自然高度（像素）：文本自然高 + 子 TextView 的 {@code marginTop}。
+     * FrameLayout 的 {@code wrap_content} 高度把子 View 的外边距算在内，故必须补上这一段。
+     * 宽度尚未排版时返回 -1（量不出真实换行，调用方据此放弃高度补间）。
+     */
+    private int measureStatusStackHeight(CharSequence text) {
+        if (statusView == null || statusView.getWidth() <= 0) {
+            return -1;
+        }
+        int textHeight = Motion.measureTextHeight(statusView, text);
+        int topMargin = 0;
+        ViewGroup.LayoutParams lp = statusView.getLayoutParams();
+        if (lp instanceof ViewGroup.MarginLayoutParams) {
+            topMargin = ((ViewGroup.MarginLayoutParams) lp).topMargin;
+        }
+        return textHeight + topMargin;
+    }
+
+    /**
+     * 叠放层当前高度：优先取 {@code lp.height}（高度补间进行中的中间值），否则取已布局实高。
+     * 连续换字打断时以它为下一次补间的起点，避免从自然高重新起跳。
+     */
+    private int currentStatusStackHeight() {
+        if (statusStack == null) {
+            return 0;
+        }
+        ViewGroup.LayoutParams lp = statusStack.getLayoutParams();
+        if (lp != null && lp.height > 0) {
+            return lp.height;
+        }
+        return statusStack.getHeight();
     }
 
     /** 把选中期间推迟的状态文本补上（选择已结束或页面重新可见时调用）。 */
@@ -1103,7 +1154,10 @@ public class StatusFragment extends Fragment implements SetupActivity.PageAware 
         swapStatusTextAnimated(pending);
     }
 
-    /** 作废在跑的淡入淡出、复位两层文本的透明度并收起叠放层（离开本页 / 视图销毁时收尾）。 */
+    /**
+     * 作废在跑的淡入淡出、复位两层文本的透明度并收起叠放层（离开本页 / 视图销毁时收尾）。
+     * 高度补间一并中止并把叠放层还原为 {@code WRAP_CONTENT}，不留钉死的中间高度。
+     */
     private void cancelFade() {
         fadeGeneration++;
         if (statusView != null) {
@@ -1115,6 +1169,7 @@ public class StatusFragment extends Fragment implements SetupActivity.PageAware 
             statusOutgoingView.setAlpha(1f);
             statusOutgoingView.setVisibility(View.GONE);
         }
+        Motion.cancelHeightChange(statusStack);
     }
 
     /**
