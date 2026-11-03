@@ -430,9 +430,10 @@ jobs:
             echo "资源 ID: $BEFORE_NIDS -> $AFTER_NIDS";
             echo "APK 字节: $BEFORE_SIZE -> $AFTER_SIZE（净减 $((BEFORE_SIZE - AFTER_SIZE))）"; } >> "$GITHUB_STEP_SUMMARY"
 
-          # 基线断言：GUI 资源集合为 5,386 条 / 16 个类型（改动基线时需同步本检查）
+          # 基线断言：GUI 资源集合为 5,393 条 / 16 个类型（改动基线时需同步本检查）
           # 5,380 → 5,386：日志整行跨选新增 1 个 drawable、3 个 id、2 个 string
-          [ "$BEFORE_ENTRIES" -eq 5386 ]           || { echo "基线资源条目数不是 5,386（$BEFORE_ENTRIES）"; exit 1; }
+          # 5,386 → 5,393：停止控制app 新增 6 个 string、1 个 id
+          [ "$BEFORE_ENTRIES" -eq 5393 ]           || { echo "基线资源条目数不是 5,393（$BEFORE_ENTRIES）"; exit 1; }
           [ "$BEFORE_NTYPES" -eq 16 ]              || { echo "基线资源类型数不是 16（$BEFORE_NTYPES）"; exit 1; }
           [ "$REMOVE_N" -eq 19 ]                   || { echo "待移除 layout 数量不是 19（$REMOVE_N）"; exit 1; }
           [ "$AFTER_ENTRIES" -eq $((BEFORE_ENTRIES - REMOVE_N)) ] \
