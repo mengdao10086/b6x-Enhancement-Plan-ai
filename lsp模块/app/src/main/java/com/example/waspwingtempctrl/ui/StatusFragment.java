@@ -71,11 +71,13 @@ public class StatusFragment extends Fragment implements SetupActivity.PageAware 
     /** 页面可见期间的周期静默复探间隔：及时反映控制 app 被杀等外部状态变化。 */
     private static final long PERIODIC_REFRESH_MS = 5_000L;
     /** 手动刷新时文本淡出时长（旧层缩短，见 {@link #swapStatusTextAnimated}）。 */
-    private static final long FADE_OUT_MS = 120L;
+    private static final long FADE_OUT_MS = 180L;
     /** 手动刷新时文本淡入时长。 */
-    private static final long FADE_IN_MS = 180L;
+    private static final long FADE_IN_MS = 270L;
     /** 旧层延后起播：等新层接近不透明再退，避免两层同时过淡的空档。 */
-    private static final long FADE_OUT_DELAY_MS = 70L;
+    private static final long FADE_OUT_DELAY_MS = 105L;
+    /** 部署/拉起结果在状态区的最短保留时长：在此期间周期扫描不覆盖状态文本。 */
+    private static final long RESULT_HOLD_MS = 10_000L;
     /** 动作期间按钮压暗后的透明度与渐变时长（压暗快、恢复稍慢）。 */
     private static final float BUTTON_DIM_ALPHA = 0.35f;
     private static final long BUTTON_DIM_MS = 160L;
@@ -136,6 +138,8 @@ public class StatusFragment extends Fragment implements SetupActivity.PageAware 
     private volatile boolean deployFailed;
     /** 上次探测的开始时刻（手动与静默共用）；静默刷新据此节流。内存态，进程重启即失效。 */
     private long lastProbeAtMs;
+    /** 部署/拉起结果上屏后的保留截止时刻（ms）：在此之前周期扫描不覆盖状态文本。 */
+    private long statusHoldUntilMs;
     /** 上次写入 prefs 的 root 可用性；配合 {@link #rootOkSeen} 做到"值没变就不重复落盘"。 */
     private boolean lastRootOk;
     /** {@link #lastRootOk} 是否已取过值（false = 尚未取过，取过一次后置真）。 */
@@ -506,6 +510,9 @@ public class StatusFragment extends Fragment implements SetupActivity.PageAware 
                     .create());
             return;
         }
+        if (System.currentTimeMillis() < statusHoldUntilMs) {
+            return;   // 部署/拉起结果的保留期内：周期扫描不覆盖状态文本
+        }
         if (!result.contentEquals(statusView.getText())) {
             statusView.setText(result);   // 静默：内容没变就一个字都不动
         }
@@ -640,7 +647,7 @@ public class StatusFragment extends Fragment implements SetupActivity.PageAware 
             if (deployFailed) {
                 clearPromptMark();
             }
-        });
+        }, RESULT_HOLD_MS);
     }
 
     /**
@@ -667,7 +674,7 @@ public class StatusFragment extends Fragment implements SetupActivity.PageAware 
         daemonStoppedByUser = false;   // 用户明确要拉起：把「刚停过」的抑制位清掉
         final Context app = requireContext().getApplicationContext();
         runAsyncBlocking(getString(R.string.status_busy_start),
-                () -> Deployer.get(app).startDaemon().describe(), false, true);
+                () -> Deployer.get(app).startDaemon().describe(), false, true, null, RESULT_HOLD_MS);
     }
 
     private void stopDaemon() {
@@ -756,7 +763,7 @@ public class StatusFragment extends Fragment implements SetupActivity.PageAware 
      */
     private void runAsync(final String busyText, final Task task, final boolean asDialog,
                           final boolean manual) {
-        runAsync(busyText, task, asDialog, manual, null, false);
+        runAsync(busyText, task, asDialog, manual, null, false, 0L);
     }
 
     /**
@@ -771,19 +778,29 @@ public class StatusFragment extends Fragment implements SetupActivity.PageAware 
      */
     private void runAsync(final String busyText, final Task task, final boolean asDialog,
                           final boolean manual, @Nullable final Runnable after) {
-        runAsync(busyText, task, asDialog, manual, after, false);
+        runAsync(busyText, task, asDialog, manual, after, false, 0L);
     }
 
     /** 需要压暗全部按钮的动作（部署/卸载/拉起/停止daemon/停止控制app）。 */
     private void runAsyncBlocking(final String busyText, final Task task, final boolean asDialog,
                                   final boolean manual) {
-        runAsync(busyText, task, asDialog, manual, null, true);
+        runAsync(busyText, task, asDialog, manual, null, true, 0L);
     }
 
     /** 同上，带 after（部署→自动拉起）。 */
     private void runAsyncBlocking(final String busyText, final Task task, final boolean asDialog,
                                   final boolean manual, @Nullable final Runnable after) {
-        runAsync(busyText, task, asDialog, manual, after, true);
+        runAsync(busyText, task, asDialog, manual, after, true, 0L);
+    }
+
+    /**
+     * 同上，并指定结果保留时长：部署/拉起的结果上屏后至少保留 {@code holdStatusMs}，
+     * 期间的周期静默扫描不覆盖状态文本（手动刷新不受限）。
+     */
+    private void runAsyncBlocking(final String busyText, final Task task, final boolean asDialog,
+                                  final boolean manual, @Nullable final Runnable after,
+                                  final long holdStatusMs) {
+        runAsync(busyText, task, asDialog, manual, after, true, holdStatusMs);
     }
 
     /**
@@ -792,7 +809,7 @@ public class StatusFragment extends Fragment implements SetupActivity.PageAware 
      */
     private void runAsync(final String busyText, final Task task, final boolean asDialog,
                           final boolean manual, @Nullable final Runnable after,
-                          final boolean dimButtons) {
+                          final boolean dimButtons, final long holdStatusMs) {
         if (actionRunning) {
             if (manual) {
                 appendLog(getString(R.string.status_busy_other));
@@ -853,6 +870,10 @@ public class StatusFragment extends Fragment implements SetupActivity.PageAware 
                             .create());
                 } else if (manual) {
                     swapStatusTextAnimated(result);
+                    if (holdStatusMs > 0) {
+                        // 部署/拉起结果：到期前周期扫描不许覆盖
+                        statusHoldUntilMs = System.currentTimeMillis() + holdStatusMs;
+                    }
                 } else if (!result.contentEquals(statusView.getText())) {
                     // 先比后写：内容没变就一个字都不动，连重绘都省掉
                     statusView.setText(result);
@@ -1013,8 +1034,8 @@ public class StatusFragment extends Fragment implements SetupActivity.PageAware 
     /**
      * 手动刷新的结果上屏：<b>业务上屏零延迟</b>——新文本立刻写上去（不再等淡出结束），视觉上做
      * 「旧文本淡出、新文本淡入」的交叉淡入（旧的在下、新的在上叠放）。
-     * <p>防中间发灰：新层 180ms 淡入、旧层延后 70ms 起播且只用 120ms 淡出——新层接近不透明时旧层才退，
-     * 任一帧至少一层接近不透明；高度补间与淡变在同一拍并行，不再分两段。代号保证串行、
+     * <p>纯交叉淡入淡出、不做高度补间（避免卡片「收起再展开」）。防中间发灰：新层 270ms 淡入、
+     * 旧层延后 105ms 起播且只用 180ms 淡出——新层接近不透明时旧层才退，任一帧至少一层接近不透明。代号保证串行、
      * <b>打断不丢结果</b>（打断后当前文本即最新结果）；系统关掉动画时直接上屏。见 {@code app/逻辑说明.md} §8.1。
      */
     private void swapStatusTextAnimated(final String text) {
@@ -1038,20 +1059,14 @@ public class StatusFragment extends Fragment implements SetupActivity.PageAware 
             return;
         }
         final int generation = ++fadeGeneration;
-        final ViewGroup root = contentRoot;
         view.animate().cancel();
         outgoing.animate().cancel();
-        // 旧的 = 上一次换字的落点（打断时即当前可见的那段）；预测换字后的高度差用于补间时长
+        // 旧的 = 上一次换字的落点（打断时即当前可见的那段）。纯交叉淡入淡出：
+        // 不做高度补间，避免卡片出现「收起再展开」的过程
         final CharSequence old = view.getText();
-        final int oldHeight = view.getHeight();
-        final int newHeight = Motion.measureTextHeight(view, text);
         outgoing.setText(old);
         outgoing.setAlpha(1f);
         outgoing.setVisibility(View.VISIBLE);
-        // 高度补间与淡变并行：增长/收缩都在换字同一拍开始，不再等旧层退完才收缩
-        if (newHeight != oldHeight) {
-            Motion.beginLayoutChange(root, newHeight - oldHeight);
-        }
         // 业务上屏：立即，不等动画；先置透明再写文本，避免新文本以不透明状态先露一帧
         view.setAlpha(0f);
         view.setText(text);
