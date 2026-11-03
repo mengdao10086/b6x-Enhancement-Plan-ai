@@ -2471,7 +2471,10 @@ static int rate_limit_fan(int desired_rpm) {
 static int should_skip_dispatch(int mode, int target, int windOC, int cold, int windLevel, int force_dispatch) {
     int send_rpm = (mode == 0) ? windLevel : windOC;
 
-    if (cooler_cold_real >= 0 && cooler_rpm_real >= 0) {
+    // 全 0 回传 = 未就绪（刚连上/通知未生效）：与 -1 同等对待，走下方 last_* 退化分支。
+    // 否则「目标冷=1、回传冷=0」会被制冷死区判成已到位，首条命令永远发不出去。
+    int feedback_invalid = (cooler_cold_real <= 0 && cooler_rpm_real <= 0);
+    if (!feedback_invalid && cooler_cold_real >= 0 && cooler_rpm_real >= 0) {
         if (mode == 0) {
             // mode=0 智能温控：散热器自管理制冷，故只需比较风扇上限（windLevel/RPM），制冷不参与去重。
             if (send_rpm == cooler_rpm_real) {
@@ -2523,7 +2526,7 @@ static int should_skip_dispatch(int mode, int target, int windOC, int cold, int 
                windOC == last_rpm && cold == last_cold &&
                windLevel == last_wind_level;
     if (skip)
-        write_log("下发去重 回传异常（冷%d RPM%d 不可用），按上次参数缓存判定跳过 mode=%d 冷%d RPM%d",
+        write_log("下发去重 回传异常（冷%d RPM%d 不可用/全 0），按上次参数缓存判定跳过 mode=%d 冷%d RPM%d",
                   cooler_cold_real, cooler_rpm_real, last_mode, last_cold, last_rpm);
     return skip;
 }
@@ -3004,11 +3007,12 @@ static void watchdog_check(void) {
  * 死链检测：BLE 已连接、但冷/热/转速回传同时为全 0 / 无效——宿主连接对象仍是 connect 时的
  * 默认值（convertFromDevice），说明通知没订阅上或设备不回报。模块侧重连无法恢复，重启宿主
  * 进程可重建（实测 5s 内恢复）。判定细节见 逻辑说明.md「主循环逻辑→死链自动重启」。
+ * 判定不要求「已下发过命令」：本轮故障中守护进程因制冷死区从未下发，若保留该门槛则永远不会计数；
+ * 启动窗口由 pending_align（15s 对齐）+ 3 个周期（15s）共同兜住，正常首包 1.2~2.8s，不会误杀。
  */
 static void deadlink_check(void) {
     if (pending_align)                       { deadlink_cycles = 0; return; }  // 待对齐窗口内不判
     if (!app_ble_connected || active_device == DEVICE_NONE) { deadlink_cycles = 0; return; }
-    if (last_cold < 0)                       { deadlink_cycles = 0; return; }  // 从未下发不判
     int dead = (cooler_cold_real == 0 && cooler_rpm_real == 0
                 && cooler_hot_temp <= 0 && cooler_cold_temp <= 0);
     if (!dead)                               { deadlink_cycles = 0; return; }

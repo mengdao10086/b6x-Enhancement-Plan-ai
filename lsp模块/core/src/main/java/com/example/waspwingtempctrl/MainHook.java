@@ -101,6 +101,8 @@ public class MainHook implements IXposedHookLoadPackage {
     private static volatile boolean reconnectPending = false;      // markConnected 置 true：重连后等待新回传
     private static volatile long connectStartedAt = 0;             // 最近一次连接成功时间戳（ms，等待新回传计时）
     private static final long INFO_STALE_AFTER_MS = 6000;          // 重连成功后无新回传超时（6s）→ 判定设备无响应
+    private static final long ZERO_INFO_ALERT_MS = 15000;          // 已连接但冷/热/RPM 全 0 持续该时长 → 无响应处置（不依赖下发）
+    private static volatile long zeroInfoSinceAt = 0;              // 全 0 起点（ms）；0=当前不在全 0 态
     private static volatile int wakeupAttempts = 0;                // 本次连接已尝试的设备唤醒次数
     private static final int WAKEUP_MAX = 1;                       // 每连接最多唤醒尝试 1 次
     private static volatile long lastWakeupAttemptAt = 0;          // 唤醒尝试防抖（ms）
@@ -113,6 +115,10 @@ public class MainHook implements IXposedHookLoadPackage {
     private static volatile long lastInfoUpdateAt = 0;             // 最近一次参数回传时刻（ms）
     private static volatile boolean firstPacketLogged = false;     // 本次连接的首包延迟是否已记录
     private static volatile boolean zeroInfoLogged = false;        // 本次连接是否已记录"全 0 回传"
+    private static volatile int packetCount = 0;            // 本连接收到的 BLE 数据包数
+    private static volatile int zeroPacketCount = 0;        // 其中内容全 0 的包数
+    private static volatile boolean packetInfoLogged = false;   // 首包 len/全0 是否已记录
+    private static volatile boolean zeroPacketLogged = false;   // 首个全 0 包是否已记录
 
     // ========== runFetchLoop 崩溃兜底 ==========
     private static final int QUEUE_STALL_THRESHOLD = 6;           // queue 堆积 > 6 条（≈30s 下发量）= runFetchLoop 疑似崩溃
@@ -1914,6 +1920,7 @@ public class MainHook implements IXposedHookLoadPackage {
                                 if (gatt != null) {
                                     currentValidGatt = gatt;   // 收包实例 = 真在通信的 gatt，作下发基准
                                 }
+                                logPacketArrival(param.args[1]);
                             }
                         });
                 hooked("LeDataInteractionController.onCharacteristicChanged（收包锚点）");
@@ -2591,6 +2598,62 @@ public class MainHook implements IXposedHookLoadPackage {
     }
 
     /**
+     * 全 0 回传守时判据（与「是否下发过」解耦）：BLE 已连、回传对象就绪，但冷/热/RPM 持续
+     * ZERO_INFO_ALERT_MS 全 0 → 交给 handleDeviceNoResponse 的「唤醒 → 重连 ×N → 锁死」既有分层处置。
+     * 动机：既有两条锁死判据都以「已下发」为前提，而本轮故障中守护进程一条命令都没发过。
+     */
+    private static void checkZeroInfoTimeout() {
+        long now = System.currentTimeMillis();
+        boolean allZero;
+        try {
+            allZero = isAllZeroInfo(lastWaspWingInfo);
+        } catch (Throwable t) {
+            allZero = false;
+        }
+        if (!allZero) { zeroInfoSinceAt = 0; return; }
+        if (zeroInfoSinceAt == 0) { zeroInfoSinceAt = now; return; }
+        if (now - zeroInfoSinceAt < ZERO_INFO_ALERT_MS) return;
+        zeroInfoSinceAt = 0;
+        XposedBridge.log(TAG + " 全 0 回传持续 " + ZERO_INFO_ALERT_MS / 1000
+                + "s（BLE 已连但无有效数据，本连接收包 " + packetCount + "，全 0 " + zeroPacketCount + "），触发无响应处置");
+        reconnectPending = true;
+        connectStartedAt = now - INFO_STALE_AFTER_MS;   // 立即判为无响应，复用既有分层处置
+        handleDeviceNoResponse();
+    }
+
+    /**
+     * 收包留痕：记录首包长度与是否全 0、首个全 0 包。
+     * 用途：区分「一个包都没收到」（通知没订阅上/设备不回报）与「收到的包内容全 0」（设备回了空数据）。
+     */
+    private static void logPacketArrival(Object characteristic) {
+        try {
+            byte[] v = null;
+            if (characteristic instanceof android.bluetooth.BluetoothGattCharacteristic) {
+                v = ((android.bluetooth.BluetoothGattCharacteristic) characteristic).getValue();
+            }
+            boolean allZero = true;
+            if (v != null) {
+                for (byte b : v) {
+                    if (b != 0) { allZero = false; break; }
+                }
+            }
+            packetCount++;
+            if (allZero) zeroPacketCount++;
+            if (!packetInfoLogged) {
+                packetInfoLogged = true;
+                XposedBridge.log(TAG + " [诊断] 收包首包 len=" + (v == null ? -1 : v.length)
+                        + " 全0=" + (allZero ? "是" : "否"));
+            }
+            if (allZero && !zeroPacketLogged) {
+                zeroPacketLogged = true;
+                XposedBridge.log(TAG + " [诊断] 收到内容全 0 的 BLE 包 len=" + (v == null ? -1 : v.length));
+            }
+        } catch (Throwable ignored) {
+            // 诊断失败不影响主流程
+        }
+    }
+
+    /**
      * 重连成功后无新回传 → 分层处置：唤醒 → 重连上限 → 强制重启 App 提示。
      * 由 checkCommandStall 的"回传新鲜度验证"分支调用（每秒最多一次）。
      */
@@ -2655,6 +2718,7 @@ public class MainHook implements IXposedHookLoadPackage {
         // 设备固件锁死已判定 → 完全退出锁死检测，旧值停滞判定不再触发 forceReconnect
         if (deviceLockedAlerted) { dispatchStallCount = 0; return; }
         if (!bleConnected || lastWaspWingInfo == null) { dispatchStallCount = 0; return; }
+        checkZeroInfoTimeout();
         try {
             // ═══ 回传新鲜度验证（先于值停滞判定）═══
             // 重连后长时间无新 onDeviceInfoUpdate → 无回传，仍是旧缓存；
@@ -2958,6 +3022,11 @@ public class MainHook implements IXposedHookLoadPackage {
         diagLogCount = 0;            // 新连接：重置广播接收诊断计数（每连最多记录 DIAG_LOG_MAX_PER_CONN 对）
         firstPacketLogged = false;   // 新连接：重新记录首包延迟
         zeroInfoLogged = false;      // 新连接：重新记录"全 0 回传"
+        zeroInfoSinceAt = 0;         // 新连接：全 0 守时重新计时
+        packetCount = 0;             // 新连接：收包计数清零
+        zeroPacketCount = 0;
+        packetInfoLogged = false;
+        zeroPacketLogged = false;
         setRunModeLogCount = 0;      // 新连接：重置"setRunMode 已下发"计数（每连最多 3 条）
         diagConnLogCount = 0;        // 新连接：重置连接诊断日志计数（每连最多 DIAG_CONN_LOG_MAX 条）
         lastReconnectAttemptLogAt = 0;   // 新连接：重置"后台重连尝试"限频计时（下条断连后首试立即可见）
