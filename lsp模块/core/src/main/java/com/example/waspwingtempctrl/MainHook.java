@@ -225,8 +225,8 @@ public class MainHook implements IXposedHookLoadPackage {
     private static final long STUCK_STATE_CLEAR_COOLDOWN_MS = 60 * 1000;  // 清状态动作限频
 
     // ========== R1·任务2：不受限频的 state 观测（10min 一条，仅 tick 线程读写）==========
-    // 动机：`后台重连尝试`/`重连循环心跳` 是 5min 限频，上线后分不清「修好了」与「本来就会好」、
-    // 也分不清 state「卡 2」与「争用」。此观测不受 5min 限频，但按 10min 节流（每秒读 state、10min 才输出）。
+    // 动机：`本段重连 N 次` 每 30 分钟才一条，上线后分不清「修好了」与「本来就会好」、
+    // 也分不清 state「卡 2」与「争用」。此观测不受聚合日志限频，但按 10min 节流（每秒读 state、10min 才输出）。
     private static int lastObservedState = Integer.MIN_VALUE;  // 上次观测到的 state（哨兵=未观测过）
     private static long observedStateSince = 0;                // 进入当前 state 的时刻（ms，算持续时长）
     private static long lastStateObsLogAt = 0;                 // 上次输出时刻（10min 节流）
@@ -251,20 +251,19 @@ public class MainHook implements IXposedHookLoadPackage {
     private static final long BT_SEC_CACHE_MS = 30000;  // 配置缓存时长（避免每 tick 读文件）
     private static final int BT_SEC_DEFAULT = 300;      // 读不到配置时按默认 300（功能开启）
 
-    // ========== 广播接收诊断（每次连接最多 3 对日志） ==========
-    private static final int DIAG_LOG_MAX_PER_CONN = 3;   // 每次连接最多记录的对数
+    // ========== 广播接收诊断（每次连接最多 1 对日志） ==========
+    private static final int DIAG_LOG_MAX_PER_CONN = 1;   // 每次连接最多记录的对数
     private static volatile int diagLogCount = 0;          // 当前连接已记录的对数（markConnected 清零）
     private static volatile int setRunModeLogCount = 0;    // "setRunMode 已下发"当前连接已记录条数（markConnected 清零）
-    private static final int DIAG_CONN_LOG_MAX = 1;        // 连接诊断日志每连最多条数（connect 进/出、断联等风暴源）
+    private static final int DIAG_CONN_LOG_MAX = 1;        // 连接诊断日志每连最多条数（discoverServices 等风暴源）
     private static volatile int diagConnLogCount = 0;      // 连接诊断日志计数（markConnected 清零）
-    // ========== 后台重连日志限频（方案 3；节奏为用户拍板值 5 分钟） ==========
-    // 使「零输出 ≠ 无尝试」：断连期间即使重连块跑了成百上千次，日志里也能看到周期性的尝试/心跳。
-    private static final long RECONNECT_LOG_INTERVAL_MS = 5 * 60 * 1000; // 重连类日志限频间隔（5 分钟）
-    private static volatile long lastReconnectAttemptLogAt = 0;  // 上次"后台重连尝试"日志时间（markConnected 清零）
-    private static volatile long lastReconnectHeartbeatAt = 0;   // 上次重连循环心跳日志时间（markConnected 清零）
-    // ---- 诊断门控拆分（进入/退出/断连各自独立，避免「进入」把窗口吃掉）----
-    private static volatile long lastConnEnterLogAt = 0;         // "connect() 进入"限频（markConnected 清零）
-    private static volatile long lastConnExitLogAt = 0;          // "connect() 退出"限频（独立窗口，markConnected 清零）
+    // ========== 后台重连日志：30 分钟聚合（无重连不输出） ==========
+    // 使「零输出 ≠ 无尝试」：断连期间重连块可能跑了成百上千次，日志按窗口聚合成一条。
+    private static final long RECONNECT_LOG_INTERVAL_MS = 5 * 60 * 1000; // 异常类日志限频间隔（5 分钟）
+    private static final long RECONNECT_SUMMARY_INTERVAL_MS = 30 * 60 * 1000; // 重连次数聚合输出间隔
+    private static volatile int reconnectAttemptCount = 0;     // 本聚合窗口内实际发令次数（tick 线程累计）
+    private static volatile long lastReconnectSummaryAt = 0;   // 上次聚合输出/窗口起点（markConnected 清零）
+    // ---- 断连日志门控 ----
     private static volatile boolean disconnectLogged = false;    // 本断连周期是否已记（边沿触发，markConnected 清）
     private static final long DISCONNECT_LOG_COOLDOWN_MS = 10 * 1000;   // 断连去重硬冷却（同一物理断连的重复回调）
     private static volatile long lastDisconnectLogAt = 0;        // 上次断连日志时间（冷却计时）
@@ -274,6 +273,7 @@ public class MainHook implements IXposedHookLoadPackage {
     private static volatile boolean paramMissingLogged = false;     // 参数回传缺失：状态翻转才打（进入一条/恢复一条）
     private static volatile boolean statusWriteFailLogged = false;  // 状态文件写入失败：状态翻转才打（进入一条/恢复一条）
     private static volatile boolean loggedResolveFallback = false;  // resolveWaspWingManager 兜底失败仅记一次（进程内）
+    private static volatile boolean nonTargetLogged = false;        // 非目标包跳过日志：每进程最多一条
 
     // ========== 智能温控广播接收器 ==========
     // 接收 tempctrl 发送的 am broadcast，调用 setRunMode 控制散热器
@@ -294,7 +294,7 @@ public class MainHook implements IXposedHookLoadPackage {
                         int modeCustom  = intent.getIntExtra("modeCustom", 0);
                         int extra       = intent.getIntExtra("extra", 0);
 
-                        // 诊断：每次连接最多 3 对——"收到广播参数" + "1s 后散热器实际回传"
+                        // 诊断：每次连接最多 1 对——"收到广播参数" + "1s 后散热器实际回传"
                         logDiagOnBroadcast(mode, temperature, windOC, coldOC, windLevel);
 
                         // 调用 setRunMode——优先用构造函数捕获的实例，其次试单例
@@ -328,29 +328,9 @@ public class MainHook implements IXposedHookLoadPackage {
         return true;
     }
 
-    // ========== 诊断日志门控（拆分后）==========
-    // 拆分动机：此前「进入 / 退出 / 断连」共用一个 5 分钟窗口，进入（微秒级）把窗口吃掉后
-    // 退出永不可达；故三类事件各自独立门控，互不吃窗口（见 app/逻辑说明.md §1.2）。
-    // 三类事件与限频策略：
-    //   ① 进入类（connect() 进入）：5min 窗口（连接失败风暴源）
-    //   ② 结果类（connect() 退出）：独立的 5min 窗口——退出必须可见，且带 gatt + throwable
-    //   ③ 断连类（onConnectionStateChange / disconnect / b7x a.T1）：边沿触发（每断连 1 条）+ 10s 冷却
-
-    /** 进入类事件限频（connect() 进入）。 */
-    private static boolean connEnterLogAllowed() {
-        long now = System.currentTimeMillis();
-        if (now - lastConnEnterLogAt < RECONNECT_LOG_INTERVAL_MS) return false;
-        lastConnEnterLogAt = now;
-        return true;
-    }
-
-    /** 结果类事件限频（connect() 退出）；与进入自列独立窗口，进入不再吃掉它。 */
-    private static boolean connExitLogAllowed() {
-        long now = System.currentTimeMillis();
-        if (now - lastConnExitLogAt < RECONNECT_LOG_INTERVAL_MS) return false;
-        lastConnExitLogAt = now;
-        return true;
-    }
+    // ========== 诊断日志门控 ==========
+    // connect() 进入不再记录；connect() 退出仅在 gatt 为空或抛异常时留一条（正常成功路径静默）。
+    // 断连类（onConnectionStateChange / disconnect / b7x a.T1）：边沿触发（每断连 1 条）+ 10s 冷却。
 
     /** 断连类事件门控：边沿触发（每断连周期 1 条）+ 10s 硬冷却。 */
     private static boolean disconnectLogAllowed() {
@@ -526,8 +506,8 @@ public class MainHook implements IXposedHookLoadPackage {
                         tryReconnectOnce();   // 只发令（见 app/逻辑说明.md §1.2）
                     }
 
-                    // ═══ 重连循环心跳（方案 3）：仅断连时每 5 分钟一条，使「循环在跑」在日志上可见 ═══
-                    if (!bleConnected) logReconnectHeartbeat();
+                    // ═══ 重连聚合日志：断连期间每 30 分钟一条（本段无重连则不输出）═══
+                    if (!bleConnected) logReconnectSummary();
 
                     Thread.sleep(1000);
                 } catch (InterruptedException e) {
@@ -588,13 +568,6 @@ public class MainHook implements IXposedHookLoadPackage {
             }
 
             Class<?> mgrCls = XposedHelpers.findClass(reconnectMgrClassName(), appClassLoader);
-            // 取 static 控制器实例（字段缺失时 dic 为 null）；只为把状态读进日志，不用于改状态
-            Object dic = null;
-            try {
-                dic = XposedHelpers.getStaticObjectField(mgrCls, dicFieldName());
-            } catch (Throwable ignored) { /* dic 保持 null */ }
-            int stateBefore = readConnectState(dic);      // 发令前读状态（-1=不可读）
-
             // 发令前预探测设备类型——把「陈旧对象卡 getType() 门禁（R2）」与「设备不在场（R1）」分开。
             // 抛 SecurityException 视为"疑似 R2 命中"，跳过本次发令（发令也必被 SDK 的 GATE-A 拒）。
             int typeProbe = -1;
@@ -627,11 +600,9 @@ public class MainHook implements IXposedHookLoadPackage {
                 logReconnectExOnce("发令异常 " + t.getClass().getSimpleName() + ": " + t.getMessage());
             }
 
-            // "真发起连接"按时间限频记录一条（方案 3；每断连不再只记一次）
-            if (reconnectAttemptLogAllowed()) {
-                XposedBridge.log(TAG + " 后台重连尝试 -> " + lastDevice.getAddress()
-                        + " state=" + stateDesc(stateBefore) + " type=" + typeDesc(typeProbe));
-            }
+            // 重连尝试计数：由 tick 线程每 30 分钟聚合成一条（无尝试不输出）
+            if (reconnectAttemptCount == 0) lastReconnectSummaryAt = System.currentTimeMillis();
+            reconnectAttemptCount++;
         } catch (Throwable t) {
             // 反射/未知异常不再完全静默：限频留痕 + 计数，仍不上抛（保持 tick 存活）
             logReconnectExOnce("重连块异常 " + t.getClass().getSimpleName() + ": " + t.getMessage());
@@ -760,7 +731,7 @@ public class MainHook implements IXposedHookLoadPackage {
     }
 
     /**
-     * 任务2：不受 5min 限频的观测。每次调用（断连期每秒）读一次，但**每
+     * 任务2：不受重连聚合日志限频的观测。每次调用（断连期每秒）读一次，但**每
      * {@link #STATE_OBS_LOG_INTERVAL_MS}(10min) 才输出一条**，输出当前 state 与该值「已持续」秒数，
      * 并附带扫描侧信号（{@code inScanning} 标志 + 被拒累计次数，M2 观测扩展）：
      * 持续秒数很小 ⇒ 门禁在快速翻转（争用）；持续秒数逐条增大且 state=2 ⇒ 卡死；inScanning=true 而
@@ -813,24 +784,31 @@ public class MainHook implements IXposedHookLoadPackage {
         }
     }
 
-    /** "后台重连尝试"日志限频（RECONNECT_LOG_INTERVAL_MS 一条）；返回本次是否输出。 */
-    private static boolean reconnectAttemptLogAllowed() {
+    /**
+     * 重连聚合日志：断连期间每 {@link #RECONNECT_SUMMARY_INTERVAL_MS} 输出一条
+     * 「本段重连 N 次 state=.. 屏幕=..」，输出后清零；本段无重连则不输出。
+     * 让「循环在跑但没发起」与「循环停了」在日志上可区分。只在 tick 线程调用。
+     */
+    private static void logReconnectSummary() {
         long now = System.currentTimeMillis();
-        if (now - lastReconnectAttemptLogAt < RECONNECT_LOG_INTERVAL_MS) return false;
-        lastReconnectAttemptLogAt = now;
-        return true;
+        if (reconnectAttemptCount == 0) return;
+        if (now - lastReconnectSummaryAt < RECONNECT_SUMMARY_INTERVAL_MS) return;
+        int count = reconnectAttemptCount;
+        reconnectAttemptCount = 0;
+        lastReconnectSummaryAt = now;
+        XposedBridge.log(TAG + " 本段重连 " + count + " 次 state=" + currentReconnectStateDesc()
+                + " 屏幕=" + (screenInteractive ? "亮" : "灭"));
     }
 
-    /**
-     * 重连循环心跳（方案 3）：仅在断连时、每 RECONNECT_LOG_INTERVAL_MS 输出一条，
-     * 让「循环在跑但没发起」与「循环停了」在日志上可区分。只在 tick 线程调用，读 screenInteractive 无并发问题。
-     */
-    private static void logReconnectHeartbeat() {
-        long now = System.currentTimeMillis();
-        if (now - lastReconnectHeartbeatAt < RECONNECT_LOG_INTERVAL_MS) return;
-        lastReconnectHeartbeatAt = now;
-        XposedBridge.log(TAG + " 重连循环心跳: 仍断连（屏幕 " + (screenInteractive ? "亮" : "灭")
-                + "），tick 线程持续推进");
+    /** 读当前连接状态供聚合日志使用；读取失败返回 ?（只读，不改状态）。仅在 tick 线程调用。 */
+    private static String currentReconnectStateDesc() {
+        try {
+            Class<?> mgrCls = XposedHelpers.findClass(reconnectMgrClassName(), appClassLoader);
+            Object dic = XposedHelpers.getStaticObjectField(mgrCls, dicFieldName());
+            return stateDesc(readConnectState(dic));
+        } catch (Throwable t) {
+            return "?";
+        }
     }
 
     /**
@@ -859,8 +837,6 @@ public class MainHook implements IXposedHookLoadPackage {
 
     @Override
     public void handleLoadPackage(XC_LoadPackage.LoadPackageParam lpparam) {
-        XposedBridge.log(TAG + " LoadPackage: " + lpparam.packageName);
-
         // 判断设备类型
         if (lpparam.packageName.equals(PACKAGE_B6X)
                 || lpparam.packageName.equals(PACKAGE_B6X_NEW)) {
@@ -876,10 +852,15 @@ public class MainHook implements IXposedHookLoadPackage {
             btOnAtFile = btOnAtFileFor(PACKAGE_B7X);
             lastDevCodeFile = lastDevCodeFileFor(PACKAGE_B7X);
         } else {
-            XposedBridge.log(TAG + " 跳过非目标包: " + lpparam.packageName);
+            // 非目标包：每进程最多留一条，避免作用域内其它进程反复注入刷屏
+            if (!nonTargetLogged) {
+                nonTargetLogged = true;
+                XposedBridge.log(TAG + " 跳过非目标包: " + lpparam.packageName);
+            }
             return;
         }
 
+        XposedBridge.log(TAG + " LoadPackage: " + lpparam.packageName);
         XposedBridge.log(TAG + " 模块已加载到 " + lpparam.packageName
                 + " (appKind=" + appKind + ")");
         appClassLoader = lpparam.classLoader;  // 保存类加载器供后台重连线程使用
@@ -1181,25 +1162,19 @@ public class MainHook implements IXposedHookLoadPackage {
                         protected void beforeHookedMethod(MethodHookParam param) {
                             gateLeActive.set(Boolean.TRUE);   // 修复 #5：标记「SDK 连接期」，供 getType 钩子放行
                             probeBtConnectPermission();       // 修复 #4 边界：与崩溃同线程实测权限，供权限钩子判定
-                            if (!connEnterLogAllowed()) return;
-                            Object ctrl = param.thisObject;
-                            Object dev = XposedHelpers.callMethod(ctrl, "getMBluetoothDevice");
-                            int state = XposedHelpers.getIntField(ctrl, "mDataConnectState");
-                            XposedBridge.log(TAG + " [诊断] connect() 进入"
-                                    + " device=" + (dev != null ? dev.toString() : "null")
-                                    + " state=" + state);
                         }
                         @Override
                         protected void afterHookedMethod(MethodHookParam param) {
                             gateLeActive.remove();            // 修复 #5：连接期结束，立即失效（异常路径同样执行）
-                            if (!connExitLogAllowed()) return;
                             Object ctrl = param.thisObject;
                             Object gatt = XposedHelpers.getObjectField(ctrl, "mBluetoothGatt");
                             Throwable th = param.getThrowable();
-                            // 退出独立门控（不再被进入吃掉）；带 throwable 类名可判定 R2「异常在 connectGatt 之前」
-                            XposedBridge.log(TAG + " [诊断] connect() 退出"
-                                    + " gatt=" + (gatt != null ? "有值" : "null")
-                                    + " throwable=" + (th != null ? th.getClass().getSimpleName() : "null"));
+                            // 正常成功路径静默；仅在无 gatt 或抛异常时留一条，供 R2 等故障定位
+                            if (gatt == null || th != null) {
+                                XposedBridge.log(TAG + " [诊断] connect() 结果异常"
+                                        + " gatt=" + (gatt != null ? "有值" : "null")
+                                        + " throwable=" + (th != null ? th.getClass().getSimpleName() : "null"));
+                            }
                         }
                     });
             hooked("LeDataInteractionController.connect");
@@ -1404,7 +1379,7 @@ public class MainHook implements IXposedHookLoadPackage {
         }
     }
 
-    /** "门禁放行"日志限频（5 分钟一条，与重连类日志同口径）。 */
+    /** "门禁放行"日志限频（5 分钟一条，与异常类日志同口径）。 */
     private static boolean gateLeLogAllowed() {
         long now = System.currentTimeMillis();
         if (now - gateLeLogAt < RECONNECT_LOG_INTERVAL_MS) return false;
@@ -3029,10 +3004,8 @@ public class MainHook implements IXposedHookLoadPackage {
         zeroPacketLogged = false;
         setRunModeLogCount = 0;      // 新连接：重置"setRunMode 已下发"计数（每连最多 3 条）
         diagConnLogCount = 0;        // 新连接：重置连接诊断日志计数（每连最多 DIAG_CONN_LOG_MAX 条）
-        lastReconnectAttemptLogAt = 0;   // 新连接：重置"后台重连尝试"限频计时（下条断连后首试立即可见）
-        lastReconnectHeartbeatAt = 0;    // 新连接：重置重连心跳计时
-        lastConnEnterLogAt = 0;          // 新连接：重置"进入"限频（进入/退出各自独立窗口）
-        lastConnExitLogAt = 0;           // 新连接：重置"退出"限频
+        reconnectAttemptCount = 0;       // 新连接：清空聚合窗口计数
+        lastReconnectSummaryAt = 0;      // 新连接：聚合窗口重新起算
         disconnectLogged = false;        // 新连接：断连边沿标志复位（下个断连周期可再记一条）
         // 注意：不清 lastDisconnectLogAt —— 10s 冷却跨连接周期仍有效，防"连上-又断开"快速抖动刷屏
         lastReconnectExLogAt = 0;        // 新连接：重置连接期异常限频（异常计数 reconnectExCount 累计不清）
