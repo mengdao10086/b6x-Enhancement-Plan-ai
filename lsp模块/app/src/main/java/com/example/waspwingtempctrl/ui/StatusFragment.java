@@ -71,15 +71,15 @@ public class StatusFragment extends Fragment implements SetupActivity.PageAware 
     /** 页面可见期间的周期静默复探间隔：及时反映控制 app 被杀等外部状态变化。 */
     private static final long PERIODIC_REFRESH_MS = 5_000L;
     /** 手动刷新时文本淡出时长（旧层缩短，见 {@link #swapStatusTextAnimated}）。 */
-    private static final long FADE_OUT_MS = 80L;
+    private static final long FADE_OUT_MS = 120L;
     /** 手动刷新时文本淡入时长。 */
-    private static final long FADE_IN_MS = 120L;
+    private static final long FADE_IN_MS = 180L;
     /** 旧层延后起播：等新层接近不透明再退，避免两层同时过淡的空档。 */
-    private static final long FADE_OUT_DELAY_MS = 50L;
+    private static final long FADE_OUT_DELAY_MS = 70L;
     /** 动作期间按钮压暗后的透明度与渐变时长（压暗快、恢复稍慢）。 */
     private static final float BUTTON_DIM_ALPHA = 0.35f;
-    private static final long BUTTON_DIM_MS = 120L;
-    private static final long BUTTON_RESTORE_MS = 180L;
+    private static final long BUTTON_DIM_MS = 160L;
+    private static final long BUTTON_RESTORE_MS = 260L;
 
     /**
      * 版本行的成品文案（`status_info_version` 已格式化）；null = 尚未从 PMS 读到。
@@ -1013,7 +1013,7 @@ public class StatusFragment extends Fragment implements SetupActivity.PageAware 
     /**
      * 手动刷新的结果上屏：<b>业务上屏零延迟</b>——新文本立刻写上去（不再等淡出结束），视觉上做
      * 「旧文本淡出、新文本淡入」的交叉淡入（旧的在下、新的在上叠放）。
-     * <p>防中间发灰：新层 120ms 淡入、旧层延后 50ms 起播且只用 80ms 淡出——新层接近不透明时旧层才退，
+     * <p>防中间发灰：新层 180ms 淡入、旧层延后 70ms 起播且只用 120ms 淡出——新层接近不透明时旧层才退，
      * 任一帧至少一层接近不透明；高度补间与淡变在同一拍并行，不再分两段。代号保证串行、
      * <b>打断不丢结果</b>（打断后当前文本即最新结果）；系统关掉动画时直接上屏。见 {@code app/逻辑说明.md} §8.1。
      */
