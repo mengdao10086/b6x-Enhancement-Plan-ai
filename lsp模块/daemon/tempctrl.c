@@ -2464,6 +2464,19 @@ static int rate_limit_fan(int desired_rpm) {
     return send_rpm;
 }
 
+/** 死区带宽：ceil(死区×1.5)，冷值与风扇共用（先乘后除且向上取整，写成 /2*3 或截断式会差 1）。 */
+static inline int deadzone_band(int deadzone) {
+    return (deadzone * 3 + 1) / 2;
+}
+
+/**
+ * 死区判定（冷值 / 风扇共用）：|diff| < deadzone 且该方向余量 ≥ ceil(deadzone×1.5) → 1=在死区内（保持）。
+ * 余量不足视为超出（贴近端点无需再抑制）；deadzone=0 时恒不保持（等价于关闭死区）。
+ */
+static inline int within_deadzone(int diff, int deadzone, int room) {
+    return abs(diff) < deadzone && room >= deadzone_band(deadzone);
+}
+
 /**
  * 下发去重 + 双死区判定（冷值 / 风扇，均以散热器实际回传为准）：两者都未超出各自死区才跳过；
  * 任一超出 → 冷值与风扇一起下发。规则见 逻辑说明.md「注意事项→去重逻辑」。返回 1=跳过下发。
@@ -2486,43 +2499,37 @@ static int should_skip_dispatch(int mode, int target, int windOC, int cold, int 
             return 0;
         }
 
-        // 冷值与风扇各按自己的死区判定：两者都在死区内才跳过；任一超出死区 → 冷值和风扇一起下发。
-        // 冷值：|目标 − 回传| < COLD_DEADZONE 且该方向未贴近端点（沿用既有口径与豁免）。
-        // 风扇：|目标 − 回传| ≤ RATE_LIMIT_FAN_DEBOUNCE 且距方向端点 ≥ ceil(死区×1.5)（与限速防抖同口径）。
+        // 冷值与风扇各按自己的死区判定（同一套 within_deadzone）：两者都在死区内才跳过；
+        // 任一超出死区 → 冷值和风扇一起下发。两边的边界口径统一为「|差| < 死区」。
         int cold_diff = cold - cooler_cold_real;
         int rpm_diff  = send_rpm - cooler_rpm_real;
         int cold_hold = 1, rpm_hold = 1;
 
         if (cold_diff != 0) {
-            int cmin = active_cold_eff_min;   // 当前模式有效范围（main_loop 统一计算）
-            int cmax = active_cold_eff_max;
-            int adiff = abs(cold_diff);
-            int band = (COLD_DEADZONE * 3 + 1) / 2;   // ceil(死区×1.5)
-            int room = (cold_diff > 0) ? (cmax - cooler_cold_real)    // 要升：只看距上限
-                                       : (cooler_cold_real - cmin);   // 要降：只看距下限
-            cold_hold = (adiff < COLD_DEADZONE) && !force_dispatch && (room >= band);
-            if (adiff < COLD_DEADZONE) {
+            int room = (cold_diff > 0) ? (active_cold_eff_max - cooler_cold_real)    // 要升：只看距上限
+                                       : (cooler_cold_real - active_cold_eff_min);   // 要降：只看距下限
+            cold_hold = !force_dispatch && within_deadzone(cold_diff, COLD_DEADZONE, room);
+            if (abs(cold_diff) < COLD_DEADZONE) {
                 if (force_dispatch) {
                     // 热端过温削减下压：最高优先级，死区一律放行（判据可解释：本轮 cold 确被硬钳制下压）
                     debug_log(debug_exec, "豁免 死区（过温削减下压）：目标冷%d 回传冷%d |diff|=%d <%d，强制下发",
-                              cold, cooler_cold_real, adiff, COLD_DEADZONE);
-                } else if (room < band) {
+                              cold, cooler_cold_real, abs(cold_diff), COLD_DEADZONE);
+                } else if (room < deadzone_band(COLD_DEADZONE)) {
                     debug_log(debug_exec, "豁免 死区（%s 余量%d<%d）：目标冷%d 回传冷%d 放行",
-                              cold_diff > 0 ? "升" : "降", room, band, cold, cooler_cold_real);
+                              cold_diff > 0 ? "升" : "降", room, deadzone_band(COLD_DEADZONE),
+                              cold, cooler_cold_real);
                 }
             }
         }
 
         if (rpm_diff != 0) {
-            int adiff = abs(rpm_diff);
-            int band = (RATE_LIMIT_FAN_DEBOUNCE * 3 + 1) / 2;   // ceil(死区×1.5)
             int room = (rpm_diff > 0) ? (active_fan_max - cooler_rpm_real)   // 要升：只看距最高
                                       : (cooler_rpm_real - fan_rpm_min);     // 要降：只看距最低
-            rpm_hold = (adiff <= RATE_LIMIT_FAN_DEBOUNCE) && (room >= band);
+            rpm_hold = within_deadzone(rpm_diff, RATE_LIMIT_FAN_DEBOUNCE, room);
         }
 
         if (cold_hold && rpm_hold) {
-            debug_log(debug_exec, "skip 双双在死区内：目标冷%d 回传冷%d（差%d<%d），目标RPM%d 回传RPM%d（差%d≤%d）",
+            debug_log(debug_exec, "skip 双双在死区内：目标冷%d 回传冷%d（差%d<%d），目标RPM%d 回传RPM%d（差%d<%d）",
                       cold, cooler_cold_real, abs(cold_diff), COLD_DEADZONE,
                       send_rpm, cooler_rpm_real, abs(rpm_diff), RATE_LIMIT_FAN_DEBOUNCE);
             return 1;   // 冷值与风扇都未超出各自死区 → 不下发
