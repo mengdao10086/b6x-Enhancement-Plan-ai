@@ -76,6 +76,8 @@ public class StatusFragment extends Fragment implements SetupActivity.PageAware 
     private static final long FADE_IN_MS = 270L;
     /** 旧层延后起播：等新层接近不透明再退，避免两层同时过淡的空档。 */
     private static final long FADE_OUT_DELAY_MS = 105L;
+    /** 换字高度动画时长：与旧层淡出终点对齐（105 + 180 = 285ms），高度与淡变同起同止。 */
+    private static final long HEIGHT_SYNC_MS = FADE_OUT_DELAY_MS + FADE_OUT_MS;
     /** 部署/拉起结果在状态区的最短保留时长：在此期间周期扫描不覆盖状态文本。 */
     private static final long RESULT_HOLD_MS = 10_000L;
     /** 动作期间按钮压暗后的透明度与渐变时长（压暗快、恢复稍慢）。 */
@@ -1039,8 +1041,8 @@ public class StatusFragment extends Fragment implements SetupActivity.PageAware 
      * 「旧文本淡出、新文本淡入」的交叉淡入（旧的在下、新的在上叠放）。
      * <p>文本只做交叉淡入淡出，不裁剪、不做上下收展。行数变化时的高度复用配置页那套
      * {@link Motion#animateHeightChange}（{@code ValueAnimator} + panelCurve、按位移定时长）：
-     * 新文本更高时与淡变同拍长高；更矮时淡变期间保持旧高（不裁旧文本），等旧层淡出结束、
-     * 置 {@code GONE} 之前再平滑收缩。防中间发灰：新层 270ms 淡入、旧层延后 105ms 起播且只用
+     * 高低都不分时机、与淡变同拍启动，并在 285ms 后与旧层消失同时到位（变矮时旧层会被
+     * 容器底部裁掉一部分，是同步的必然结果）。防中间发灰：新层 270ms 淡入、旧层延后 105ms 起播且只用
      * 180ms 淡出——新层接近不透明时旧层才退，任一帧至少一层接近不透明。代号保证串行、
      * <b>打断不丢结果</b>（打断后当前文本即最新结果）；系统关掉动画时直接上屏。见 {@code app/逻辑说明.md} §8.1。
      */
@@ -1068,17 +1070,13 @@ public class StatusFragment extends Fragment implements SetupActivity.PageAware 
         view.animate().cancel();
         outgoing.animate().cancel();
         // 旧的 = 上一次换字的落点（打断时即当前可见的那段）。文本做交叉淡入淡出；
-        // 高度按新旧文本的自然高比较：更高则同拍长高，更矮则等旧层退场前再收
+        // 高度与淡变同起同止：不分增减，换字同一拍启动，285ms 后与旧层消失同时到位
         final CharSequence old = view.getText();
-        final int oldStackHeight = measureStatusStackHeight(old);
         final int newStackHeight = measureStatusStackHeight(text);
-        final boolean grow = oldStackHeight > 0 && newStackHeight > oldStackHeight;
-        final boolean shrink = oldStackHeight > 0 && newStackHeight > 0
-                && newStackHeight < oldStackHeight;
-        if (grow) {
+        if (newStackHeight > 0) {
             final int from = currentStatusStackHeight();
             if (from > 0) {
-                Motion.animateHeightChange(statusStack, from, newStackHeight);
+                Motion.animateHeightChange(statusStack, from, newStackHeight, HEIGHT_SYNC_MS);
             }
         }
         outgoing.setText(old);
@@ -1098,14 +1096,7 @@ public class StatusFragment extends Fragment implements SetupActivity.PageAware 
             if (statusOutgoingView == null || !isAdded()) {
                 return;   // 视图已销毁，无处收尾（onDestroyView 已复位）
             }
-            // 收缩在旧层 GONE 之前起跑：此刻叠放层仍是旧高的自然高度，
-            // 起点取当前实高（可能是上一次动画的中间值），钉住后再置 GONE，不会先跳一帧
-            if (shrink) {
-                final int from = currentStatusStackHeight();
-                if (from > 0) {
-                    Motion.animateHeightChange(statusStack, from, newStackHeight);
-                }
-            }
+            // 高度已与淡变同起同止，这里只收旧层
             outgoing.setVisibility(View.GONE);
             outgoing.setAlpha(1f);
         }).start();

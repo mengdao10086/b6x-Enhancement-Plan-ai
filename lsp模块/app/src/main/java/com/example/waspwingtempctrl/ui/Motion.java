@@ -409,6 +409,16 @@ public final class Motion {
      * @return 本次动画时长（毫秒）；直接落位时返回 {@code -1}
      */
     static long animateHeightChange(View content, int fromPx, int toPx) {
+        return animateHeightChange(content, fromPx, toPx, -1L);
+    }
+
+    /**
+     * 同上，另可指定显式时长：用于需要与另一条动画（如状态卡换字的交叉淡变）同起同止的场景。
+     *
+     * @param durationMs 动画时长（毫秒）；{@code <= 0} 时退回按位移定时长
+     *                   （{@link #durationForPixels(Context, float)}）
+     */
+    static long animateHeightChange(View content, int fromPx, int toPx, long durationMs) {
         if (content == null) {
             return -1L;
         }
@@ -430,7 +440,8 @@ public final class Motion {
             return -1L;
         }
         final ValueAnimator anim = ValueAnimator.ofInt(fromPx, toPx);
-        final long duration = durationForPixels(content.getContext(), Math.abs(toPx - fromPx));
+        final long duration = durationMs > 0L
+                ? durationMs : durationForPixels(content.getContext(), Math.abs(toPx - fromPx));
         anim.setDuration(duration);
         anim.setInterpolator(panelCurve);
         anim.addUpdateListener(a -> {
