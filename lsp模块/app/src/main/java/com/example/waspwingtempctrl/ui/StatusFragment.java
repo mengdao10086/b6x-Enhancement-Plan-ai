@@ -23,7 +23,9 @@ import com.example.waspwingtempctrl.SetupActivity;
 import com.example.waspwingtempctrl.R;
 
 import java.text.SimpleDateFormat;
+import java.util.ArrayList;
 import java.util.Date;
+import java.util.List;
 import java.util.Locale;
 
 /**
@@ -68,10 +70,16 @@ public class StatusFragment extends Fragment implements SetupActivity.PageAware 
     private static final long PROBE_MIN_INTERVAL_MS = 30_000L;
     /** 页面可见期间的周期静默复探间隔：及时反映控制 app 被杀等外部状态变化。 */
     private static final long PERIODIC_REFRESH_MS = 5_000L;
-    /** 手动刷新时文本淡出时长（退出比进入快，见 {@link #swapStatusTextAnimated}）。 */
-    private static final long FADE_OUT_MS = 100L;
+    /** 手动刷新时文本淡出时长（旧层缩短，见 {@link #swapStatusTextAnimated}）。 */
+    private static final long FADE_OUT_MS = 80L;
     /** 手动刷新时文本淡入时长。 */
-    private static final long FADE_IN_MS = 150L;
+    private static final long FADE_IN_MS = 120L;
+    /** 旧层延后起播：等新层接近不透明再退，避免两层同时过淡的空档。 */
+    private static final long FADE_OUT_DELAY_MS = 50L;
+    /** 动作期间按钮压暗后的透明度与渐变时长（压暗快、恢复稍慢）。 */
+    private static final float BUTTON_DIM_ALPHA = 0.35f;
+    private static final long BUTTON_DIM_MS = 120L;
+    private static final long BUTTON_RESTORE_MS = 180L;
 
     /**
      * 版本行的成品文案（`status_info_version` 已格式化）；null = 尚未从 PMS 读到。
@@ -142,11 +150,29 @@ public class StatusFragment extends Fragment implements SetupActivity.PageAware 
 
     /** 是否有动作在跑（结果还没回到主线程）；为 true 时拒绝并发触发。见 {@code app/逻辑说明.md} §8.1。 */
     private boolean actionRunning;
+    /** 动作期间是否已压暗按钮；收尾据此恢复，刷新/诊断等不压暗的动作为 false。 */
+    private boolean actionDimmed;
+    /** 进度条的两个独立占用方：动作与扫描，任一方在跑都显示（互不抢先关掉）。 */
+    private boolean actionBusy;
+    private boolean scanBusy;
+
+    /** 状态页 7 个按钮：动作进行时统一禁用并压暗（扫描不压暗）。 */
+    private final List<View> actionButtons = new ArrayList<>();
+
+    // ========== 扫描协调器 ==========
+    /** 同一时刻只跑一趟探测；扫描中再请求只挂监听，不新起。 */
+    private boolean scanRunning;
+    /** 本轮扫描是否有手动监听者（播动画 + 写结果记录）与静默监听者（只比后写）。 */
+    private boolean scanManualPending;
+    private boolean scanSilentPending;
+    /** 扫描代号：视图销毁/重新起跑时递增，旧回调据此作废。 */
+    private int scanGeneration;
+    /** 页面可见期间的周期复探是否在运行（生命周期开关）。 */
+    private boolean periodicActive;
 
     /**
-     * 页面可见期间的周期静默复探：由 {@link #startPeriodicRefresh()} 起拍，
-     * 每拍先排下一拍再跑，故单拍失败/跳过不会断链。视图不在时不再自排，
-     * 由 {@code onPause} / {@code onPageVisible(false)} / {@code onDestroyView} 收尾。
+     * 页面可见期间的周期静默复探：一拍只触发一次扫描，下一拍由扫描结束
+     * （{@link #finishScan}）重置，故不会固定自调度、也不会在扫描进行中再起一趟。
      */
     private final Runnable periodicRefresh = new Runnable() {
         @Override
@@ -154,11 +180,11 @@ public class StatusFragment extends Fragment implements SetupActivity.PageAware 
             if (!isAdded() || statusView == null) {
                 return;
             }
-            MAIN.postDelayed(this, PERIODIC_REFRESH_MS);   // 先排下一拍，保证节拍连续
             if (actionRunning) {
-                return;   // 用户动作在跑：本拍跳过，不抢并发守卫
+                startPeriodicRefresh();   // 动作中让路，5 秒后再试
+                return;
             }
-            refreshStatusQuiet();
+            requestSilentRefresh();
         }
     };
 
@@ -202,6 +228,16 @@ public class StatusFragment extends Fragment implements SetupActivity.PageAware 
         infoView.setText(buildInfo());
         loadVersionLineAsync();
 
+        // 动作期间统一压暗的 7 个按钮（扫描/刷新不压暗，见 runAsyncBlocking）
+        actionButtons.clear();
+        actionButtons.add(view.findViewById(R.id.btn_deploy));
+        actionButtons.add(view.findViewById(R.id.btn_start));
+        actionButtons.add(view.findViewById(R.id.btn_diag));
+        actionButtons.add(view.findViewById(R.id.btn_refresh));
+        actionButtons.add(view.findViewById(R.id.btn_uninstall));
+        actionButtons.add(view.findViewById(R.id.btn_stop));
+        actionButtons.add(view.findViewById(R.id.btn_stop_app));
+
         // 手动路径：写操作记录 + 结果文本淡入淡出（静默路径不走这两处；进度条两条路径都走）
         view.findViewById(R.id.btn_refresh).setOnClickListener(v -> refreshStatus(true));
         view.findViewById(R.id.btn_deploy).setOnClickListener(v -> deploy());
@@ -213,6 +249,9 @@ public class StatusFragment extends Fragment implements SetupActivity.PageAware 
 
         // 滚动条常显 + 加粗（见 fragment_status.xml），这里才接得上"按住滚动条拖动"
         ScrollbarDrag.attach(view.findViewById(R.id.status_scroll));
+
+        // 路径长按整条选中（方案 B）：状态/设备信息/归档提示/操作记录等可选中文本统一安装（见 app/逻辑说明.md §9.4）
+        TextCopy.installPathSelection(view);
         // 操作记录已是自适应高、无内部滚动（同诊断卡），故不再需要
         // PageScrollView.yieldVerticalDragTo：没有内层可滚动区，就不存在手势相争。
         // 页面根保持 PageScrollView（配置页的曲线拖柄仍在用它）。
@@ -223,9 +262,10 @@ public class StatusFragment extends Fragment implements SetupActivity.PageAware 
     @Override
     public void onPageVisible(boolean visible) {
         if (!visible) {
-            // 离屏：收掉动画与周期复探（定时器只在页面可见期间运行）。
+            // 离屏：收掉动画、周期复探与在跑的扫描（扫描结果不再上屏/弹窗）。
             cancelFade();
             stopPeriodicRefresh();
+            invalidateScan();
             return;
         }
         firstProbeIfNeeded();
@@ -247,15 +287,27 @@ public class StatusFragment extends Fragment implements SetupActivity.PageAware 
 
     @Override
     public void onPause() {
-        // 宿主暂停：停掉周期复探，回前台时由 onResume 重新起拍。
+        // 宿主暂停：停掉周期复探并作废在跑的扫描，回前台时由 onResume 重新起拍。
         stopPeriodicRefresh();
+        invalidateScan();
         super.onPause();
     }
 
     @Override
     public void onDestroyView() {
         stopPeriodicRefresh();
+        // 作废在跑的扫描；旧回调按代号直接丢弃
+        invalidateScan();
+        actionBusy = false;
         actionRunning = false;
+        actionDimmed = false;
+        // 按钮可能正压暗/禁用：视图要销毁了，直接复位并清引用（不播动画）
+        for (View b : actionButtons) {
+            b.animate().cancel();
+            b.setAlpha(1f);
+            b.setEnabled(true);
+        }
+        actionButtons.clear();
         // 先收掉动画并复位透明度：回调里判空就返回，不给已销毁的视图留半透明残影
         cancelFade();
         statusView = null;
@@ -314,41 +366,172 @@ public class StatusFragment extends Fragment implements SetupActivity.PageAware 
     }
 
     /**
-     * 刷新部署状态。
+     * 刷新入口。
      *
-     * @param manual true = 用户点了「刷新状态」：写操作记录 + 结果淡入淡出；
-     *               false = 非手动（{@code onResume}，外壳每次切回本页都会派发）：
-     *               静默刷新（不写记录、不碰文本、不做动画），
-     *               且 {@link #PROBE_MIN_INTERVAL_MS} 内的重复触发直接跳过
+     * @param manual true = 用户点了「刷新状态」：立即播「正在探测…」动画并写一条记录，
+     *               再启动或复用扫描；false = onResume 的静默刷新（仍受 30 秒节流）。
      */
     private void refreshStatus(boolean manual) {
-        if (!manual && System.currentTimeMillis() - lastProbeAtMs < PROBE_MIN_INTERVAL_MS) {
+        if (manual) {
+            requestManualRefresh();
+            return;
+        }
+        if (System.currentTimeMillis() - lastProbeAtMs < PROBE_MIN_INTERVAL_MS) {
             return;   // 刚探过：su 往返（含可能自动重推 service.d 脚本）不必再来一次
         }
-        final Context app = requireContext().getApplicationContext();
-        runAsync(getString(R.string.status_busy_probe),
-                () -> probeAndAutoFixScript(app), false, manual);
+        if (actionRunning) {
+            return;   // 动作中不插探测；5 秒周期会补
+        }
+        requestSilentRefresh();
     }
 
-    /** 启动（或重置）周期静默复探：先摘掉旧的一拍，避免 onResume 与 onPageVisible 重复排队。 */
+    /**
+     * 手动刷新：动画与扫描并行——先把「正在探测…」立即上屏，再挂监听并启动/复用扫描，
+     * 结果到达才淡入结果。动作进行中仍按既有规则拒绝（不播动画、不压暗按钮）。
+     */
+    private void requestManualRefresh() {
+        if (!isAdded() || statusView == null) {
+            return;
+        }
+        if (actionRunning) {
+            appendLog(getString(R.string.status_busy_other));
+            return;
+        }
+        appendLog(getString(R.string.status_busy_probe));
+        final String busy = getString(R.string.status_busy_probe);
+        if (!busy.contentEquals(statusView.getText())) {
+            swapStatusTextAnimated(busy);   // 已在「正在探测」时不重播，避免闪一下
+        }
+        scanManualPending = true;
+        if (scanRunning) {
+            // 复用的是进行中的静默扫描：这次是手动触发，进度条要亮
+            scanBusy = true;
+            updateBusy();
+        }
+        startScanIfNeeded();
+    }
+
+    /** 静默刷新：不写记录、不做动画；扫描中复用同一趟。 */
+    private void requestSilentRefresh() {
+        if (!isAdded() || statusView == null || actionRunning) {
+            return;
+        }
+        scanSilentPending = true;
+        startScanIfNeeded();
+    }
+
+    /** 启动一趟扫描；已在跑则只挂监听（结果由 {@link #finishScan} 统一分发）。 */
+    private void startScanIfNeeded() {
+        if (scanRunning) {
+            return;
+        }
+        scanRunning = true;
+        final int generation = ++scanGeneration;
+        final Context app = requireContext().getApplicationContext();
+        // 手动发起才允许自动重推脚本；周期/静默探测不做这个有副作用的动作。
+        final boolean allowAutoFix = scanManualPending;
+        lastProbeAtMs = System.currentTimeMillis();
+        scanBusy = scanManualPending;   // 静默/周期扫描不闪进度条；手动扫描才显示
+        updateBusy();
+        Thread thread = new Thread(() -> {
+            String text;
+            boolean failed = false;
+            try {
+                text = probeAndAutoFixScript(app, allowAutoFix);
+            } catch (Throwable t) {
+                text = "出错：" + t;
+                failed = true;
+            }
+            final String result = text == null ? "" : text;
+            final boolean isFailure = failed;
+            MAIN.post(() -> finishScan(generation, result, isFailure));
+        }, "ww-probe");
+        thread.setDaemon(true);
+        thread.start();
+    }
+
+    /** 扫描收尾（主线程）：分发结果、应用探测副作用，并重置 5 秒周期计时。 */
+    private void finishScan(int generation, String result, boolean failed) {
+        if (generation != scanGeneration) {
+            return;   // 视图已销毁或有更新的一趟：旧结果作废
+        }
+        scanRunning = false;
+        scanBusy = false;
+        updateBusy();
+        final boolean manual = scanManualPending;
+        final boolean silent = scanSilentPending;
+        scanManualPending = false;
+        scanSilentPending = false;
+        if (periodicActive) {
+            startPeriodicRefresh();   // 扫描结束重新计 5 秒，而不是固定自调度
+        }
+        if (!isAdded() || statusView == null) {
+            return;
+        }
+        if (actionRunning) {
+            // 动作正在上屏（如部署占位）：本次结果不覆盖它，只留手动记录；
+            // 动作收尾后 5 秒周期会再探一次。
+            if (manual) {
+                appendLog(result);
+            }
+        } else {
+            renderScanResult(result, manual, silent, failed);
+        }
+        applyProbeSideEffects();
+    }
+
+    /** 把扫描结果分发给监听者：手动播动画并写记录，静默只做「比后写」。 */
+    private void renderScanResult(String result, boolean manual, boolean silent, boolean failed) {
+        if (manual) {
+            appendLog(result);
+            if (failed) {
+                showDismissOnOutside(new AlertDialog.Builder(requireContext())
+                        .setTitle(R.string.status_dialog_failed)
+                        .setMessage(result)
+                        .setPositiveButton(R.string.status_dialog_close, null)
+                        .create());
+                return;
+            }
+            swapStatusTextAnimated(result);
+            return;
+        }
+        if (!silent || statusView == null) {
+            return;
+        }
+        if (failed) {
+            showDismissOnOutside(new AlertDialog.Builder(requireContext())
+                    .setTitle(R.string.status_dialog_failed)
+                    .setMessage(result)
+                    .setPositiveButton(R.string.status_dialog_close, null)
+                    .create());
+            return;
+        }
+        if (!result.contentEquals(statusView.getText())) {
+            statusView.setText(result);   // 静默：内容没变就一个字都不动
+        }
+    }
+
+    /** 启动（或重置）周期静默复探：先摘掉旧的一拍，避免重复排队。 */
     private void startPeriodicRefresh() {
+        periodicActive = true;
         MAIN.removeCallbacks(periodicRefresh);
         MAIN.postDelayed(periodicRefresh, PERIODIC_REFRESH_MS);
     }
 
     /** 停止周期静默复探（幂等）：离屏、暂停、视图销毁时调用。 */
     private void stopPeriodicRefresh() {
+        periodicActive = false;
         MAIN.removeCallbacks(periodicRefresh);
     }
 
-    /**
-     * 周期静默复探入口：与静默刷新同口径（不写记录、不做动画、内容不变不重绘），
-     * 但<b>不走 30 秒节流</b>——周期任务本身就是节拍源。
-     */
-    private void refreshStatusQuiet() {
-        final Context app = requireContext().getApplicationContext();
-        runAsync(getString(R.string.status_busy_probe),
-                () -> probeAndAutoFixScript(app, false), false, false);
+    /** 作废在跑的扫描（离屏/暂停/销毁）：旧回调按代号丢弃，监听与进度条一并清掉。 */
+    private void invalidateScan() {
+        scanGeneration++;
+        scanRunning = false;
+        scanManualPending = false;
+        scanSilentPending = false;
+        scanBusy = false;
+        updateBusy();
     }
 
     /**
@@ -439,7 +622,7 @@ public class StatusFragment extends Fragment implements SetupActivity.PageAware 
         if (busyShown) {
             swapStatusTextAnimated(busyText);   // 立刻上屏；成功时随后由结果覆盖
         }
-        runAsync(busyText, () -> {
+        runAsyncBlocking(busyText, () -> {
             Deployer.Result result = Deployer.get(app).deploy();
             deployPlaced = result.placementsOk;
             deployFailed = !result.ok;
@@ -476,14 +659,14 @@ public class StatusFragment extends Fragment implements SetupActivity.PageAware 
 
     private void uninstall() {
         final Context app = requireContext().getApplicationContext();
-        runAsync(getString(R.string.status_busy_uninstall),
+        runAsyncBlocking(getString(R.string.status_busy_uninstall),
                 () -> Deployer.get(app).uninstall().describe(), false, true);
     }
 
     private void startDaemon() {
         daemonStoppedByUser = false;   // 用户明确要拉起：把「刚停过」的抑制位清掉
         final Context app = requireContext().getApplicationContext();
-        runAsync(getString(R.string.status_busy_start),
+        runAsyncBlocking(getString(R.string.status_busy_start),
                 () -> Deployer.get(app).startDaemon().describe(), false, true);
     }
 
@@ -491,7 +674,7 @@ public class StatusFragment extends Fragment implements SetupActivity.PageAware 
         // 「没在跑」那条提示的抑制位：刚点过停止就别马上再问"要不要拉起来"（见 armDeployPrompt）
         daemonStoppedByUser = true;
         final Context app = requireContext().getApplicationContext();
-        runAsync(getString(R.string.status_busy_stop),
+        runAsyncBlocking(getString(R.string.status_busy_stop),
                 () -> Deployer.get(app).stopDaemon().describe(), false, true);
     }
 
@@ -502,7 +685,7 @@ public class StatusFragment extends Fragment implements SetupActivity.PageAware 
      */
     private void stopControlApp() {
         final Context app = requireContext().getApplicationContext();
-        runAsync(getString(R.string.status_busy_stop_app),
+        runAsyncBlocking(getString(R.string.status_busy_stop_app),
                 () -> Deployer.get(app).stopControlApp().describe(), false, true);
     }
 
@@ -573,7 +756,7 @@ public class StatusFragment extends Fragment implements SetupActivity.PageAware 
      */
     private void runAsync(final String busyText, final Task task, final boolean asDialog,
                           final boolean manual) {
-        runAsync(busyText, task, asDialog, manual, null);
+        runAsync(busyText, task, asDialog, manual, null, false);
     }
 
     /**
@@ -588,6 +771,28 @@ public class StatusFragment extends Fragment implements SetupActivity.PageAware 
      */
     private void runAsync(final String busyText, final Task task, final boolean asDialog,
                           final boolean manual, @Nullable final Runnable after) {
+        runAsync(busyText, task, asDialog, manual, after, false);
+    }
+
+    /** 需要压暗全部按钮的动作（部署/卸载/拉起/停止daemon/停止控制app）。 */
+    private void runAsyncBlocking(final String busyText, final Task task, final boolean asDialog,
+                                  final boolean manual) {
+        runAsync(busyText, task, asDialog, manual, null, true);
+    }
+
+    /** 同上，带 after（部署→自动拉起）。 */
+    private void runAsyncBlocking(final String busyText, final Task task, final boolean asDialog,
+                                  final boolean manual, @Nullable final Runnable after) {
+        runAsync(busyText, task, asDialog, manual, after, true);
+    }
+
+    /**
+     * 动作核心。{@code dimButtons} 为 true 时在起跑点禁用并压暗全部按钮、收尾恢复；
+     * 扫描/刷新走 {@link #startScanIfNeeded()}，不经过这里、也不压暗按钮。
+     */
+    private void runAsync(final String busyText, final Task task, final boolean asDialog,
+                          final boolean manual, @Nullable final Runnable after,
+                          final boolean dimButtons) {
         if (actionRunning) {
             if (manual) {
                 appendLog(getString(R.string.status_busy_other));
@@ -595,10 +800,15 @@ public class StatusFragment extends Fragment implements SetupActivity.PageAware 
             return;
         }
         actionRunning = true;
+        actionDimmed = dimButtons;
+        if (dimButtons) {
+            setButtonsBlocked(true);
+        }
         final Context appContext = requireContext().getApplicationContext();
         final int generation = ++actionGeneration;
         lastProbeAtMs = System.currentTimeMillis();
-        setBusy(true);
+        actionBusy = true;
+        updateBusy();
         if (manual) {
             appendLog(busyText);
         }
@@ -647,33 +857,10 @@ public class StatusFragment extends Fragment implements SetupActivity.PageAware 
                     // 先比后写：内容没变就一个字都不动，连重绘都省掉
                     statusView.setText(result);
                 }
-                if (rootJustGranted) {
-                    rootJustGranted = false;
-                    // 刚拿到授权：这一支优先于「自动更新」的静默部署，同批武装的另一条请求就地作废
-                    // （见 app/逻辑说明.md §8.1）
-                    pendingPrompt = PROMPT_NONE;
-                    showDeployPrompt();
-                } else if (autoDeployPending) {
-                    autoDeployPending = false;
-                    // 「自动更新」开着且设备上的内容旧了：不弹窗，直接重装（写进操作记录，
-                    // 让用户能看出"刚才自动做了什么"）。deploy() 结束会自己接着拉起守护进程。
-                    appendLog(getString(R.string.status_auto_deploy_log));
-                    deploy();
-                } else if (pendingPrompt != PROMPT_NONE) {
-                    final int kind = pendingPrompt;
-                    pendingPrompt = PROMPT_NONE;
-                    if (kind == PROMPT_HASH_MISMATCH) {
-                        showDeployRequest(R.string.status_hash_title, R.string.status_hash_message);
-                    } else if (kind == PROMPT_NOT_DEPLOYED) {
-                        showDeployRequest(R.string.status_notdeployed_title,
-                                R.string.status_notdeployed_message);
-                    } else {
-                        showNotRunningPrompt();
-                    }
-                }
                 if (after != null) {
                     after.run();
                 }
+                applyProbeSideEffects();
             });
         }, "ww-deploy");
         thread.setDaemon(true);
@@ -690,7 +877,46 @@ public class StatusFragment extends Fragment implements SetupActivity.PageAware 
             return;
         }
         actionRunning = false;
-        setBusy(false);
+        actionBusy = false;
+        updateBusy();
+        if (actionDimmed) {
+            actionDimmed = false;
+            setButtonsBlocked(false);
+        }
+    }
+
+    /**
+     * 应用探测副作用（部署提示 / 自动更新 / 刚拿授权）。动作进行中时直接返回、把状态留在字段里，
+     * 由动作收尾后的 {@code runAsync} 回调再调一次；避免提示与动作结果抢同一时机上屏。
+     */
+    private void applyProbeSideEffects() {
+        if (actionRunning || !isAdded() || statusView == null) {
+            return;
+        }
+        if (rootJustGranted) {
+            rootJustGranted = false;
+            // 刚拿到授权：这一支优先于「自动更新」的静默部署，同批武装的另一条请求就地作废
+            // （见 app/逻辑说明.md §8.1）
+            pendingPrompt = PROMPT_NONE;
+            showDeployPrompt();
+        } else if (autoDeployPending) {
+            autoDeployPending = false;
+            // 「自动更新」开着且设备上的内容旧了：不弹窗，直接重装（写进操作记录，
+            // 让用户能看出"刚才自动做了什么"）。deploy() 结束会自己接着拉起守护进程。
+            appendLog(getString(R.string.status_auto_deploy_log));
+            deploy();
+        } else if (pendingPrompt != PROMPT_NONE) {
+            final int kind = pendingPrompt;
+            pendingPrompt = PROMPT_NONE;
+            if (kind == PROMPT_HASH_MISMATCH) {
+                showDeployRequest(R.string.status_hash_title, R.string.status_hash_message);
+            } else if (kind == PROMPT_NOT_DEPLOYED) {
+                showDeployRequest(R.string.status_notdeployed_title,
+                        R.string.status_notdeployed_message);
+            } else {
+                showNotRunningPrompt();
+            }
+        }
     }
 
     private interface Task {
@@ -761,21 +987,35 @@ public class StatusFragment extends Fragment implements SetupActivity.PageAware 
     // ==================== 渲染小工具 ====================
 
     /**
-     * 忙态指示：所有刷新路径（手动与静默）都开它——它是刷新唯一的反馈。只切
-     * {@code VISIBLE}/{@code INVISIBLE}、绝不用 {@code GONE}（进度条常占位，理由见
+     * 忙态指示：动作与扫描各自占一个位，任一方在跑就显示——互不抢先关掉对方的进度条。
+     * 只切 {@code VISIBLE}/{@code INVISIBLE}、绝不用 {@code GONE}（进度条常占位，理由见
      * {@code app/逻辑说明.md} §8.1）。
      */
-    private void setBusy(boolean busy) {
+    private void updateBusy() {
         if (progress != null) {
-            progress.setVisibility(busy ? View.VISIBLE : View.INVISIBLE);
+            progress.setVisibility(actionBusy || scanBusy ? View.VISIBLE : View.INVISIBLE);
+        }
+    }
+
+    /** 动作期间统一禁用并压暗全部按钮；收尾恢复可点并淡回不透明。扫描不调用这里。 */
+    private void setButtonsBlocked(boolean blocked) {
+        for (View b : actionButtons) {
+            b.animate().cancel();
+            b.setEnabled(!blocked);
+            b.animate()
+                    .alpha(blocked ? BUTTON_DIM_ALPHA : 1f)
+                    .setDuration(blocked ? BUTTON_DIM_MS : BUTTON_RESTORE_MS)
+                    .setInterpolator(Motion.easeOut())
+                    .start();
         }
     }
 
     /**
      * 手动刷新的结果上屏：<b>业务上屏零延迟</b>——新文本立刻写上去（不再等淡出结束），视觉上做
-     * 「旧文本淡出、新文本淡入」的交叉淡入（旧的在下、新的在上叠放，时长沿用 100/150ms，均强 ease-out）。
-     * 高度变化按逻辑 2 的时长补间（位移量由换字前预测）。代号保证串行、<b>打断不丢结果</b>（打断后
-     * 当前文本即最新结果）；系统关掉动画时直接上屏。见 {@code app/逻辑说明.md} §8.1。
+     * 「旧文本淡出、新文本淡入」的交叉淡入（旧的在下、新的在上叠放）。
+     * <p>防中间发灰：新层 120ms 淡入、旧层延后 50ms 起播且只用 80ms 淡出——新层接近不透明时旧层才退，
+     * 任一帧至少一层接近不透明；高度补间与淡变在同一拍并行，不再分两段。代号保证串行、
+     * <b>打断不丢结果</b>（打断后当前文本即最新结果）；系统关掉动画时直接上屏。见 {@code app/逻辑说明.md} §8.1。
      */
     private void swapStatusTextAnimated(final String text) {
         final TextView view = statusView;
@@ -808,25 +1048,23 @@ public class StatusFragment extends Fragment implements SetupActivity.PageAware 
         outgoing.setText(old);
         outgoing.setAlpha(1f);
         outgoing.setVisibility(View.VISIBLE);
-        if (newHeight > oldHeight) {
-            // 新文本更高：先开一段过渡，再把新文本写上去（卡片平滑长高）
+        // 高度补间与淡变并行：增长/收缩都在换字同一拍开始，不再等旧层退完才收缩
+        if (newHeight != oldHeight) {
             Motion.beginLayoutChange(root, newHeight - oldHeight);
         }
-        // 业务上屏：立即，不等动画
-        view.setText(text);
+        // 业务上屏：立即，不等动画；先置透明再写文本，避免新文本以不透明状态先露一帧
         view.setAlpha(0f);
+        view.setText(text);
         view.animate().alpha(1f).setDuration(FADE_IN_MS).setInterpolator(Motion.easeOut()).start();
-        outgoing.animate().alpha(0f).setDuration(FADE_OUT_MS).setInterpolator(Motion.easeOut())
+        // 旧层延后起播并缩短：新层接近不透明时旧层才退，任一帧至少一层接近不透明，消除中间空档
+        outgoing.animate().alpha(0f).setDuration(FADE_OUT_MS)
+                .setStartDelay(FADE_OUT_DELAY_MS).setInterpolator(Motion.easeOut())
                 .withEndAction(() -> {
             if (generation != fadeGeneration) {
                 return;   // 已被新一次换字 / cancelFade 接管：叠放层归它们管，这里什么都不动
             }
             if (statusOutgoingView == null || !isAdded()) {
                 return;   // 视图已销毁，无处收尾（onDestroyView 已复位）
-            }
-            if (newHeight < oldHeight) {
-                // 新文本更矮：旧文本退了再收（此刻新文本已不透明，收缩平滑）
-                Motion.beginLayoutChange(root, oldHeight - newHeight);
             }
             outgoing.setVisibility(View.GONE);
             outgoing.setAlpha(1f);

@@ -102,6 +102,12 @@ public class ConfigFormFragment extends Fragment
         return root;
     }
 
+    @Override
+    public void onViewCreated(@NonNull View view, @Nullable Bundle savedInstanceState) {
+        super.onViewCreated(view, savedInstanceState);
+        TextCopy.installPathSelection(view);
+    }
+
     /**
      * 挂上曲线区（子 Fragment），并让它与父页<b>同帧挂载</b>：首帧就不再是空白容器。页面重建时
      * {@code getChildFragmentManager()} 里已有恢复出来的实例，只重新接宿主、不重复添加。

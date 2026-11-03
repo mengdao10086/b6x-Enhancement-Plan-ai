@@ -182,6 +182,7 @@ public class ChartFragment extends Fragment {
             windowSec = ChartConfig.FALLBACK_WINDOW_DEFAULT;
         }
         buildWindowButtons(options, windowSec);
+        TextCopy.installPathSelection(view);
     }
 
     @Override

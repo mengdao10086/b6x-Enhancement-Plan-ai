@@ -4,12 +4,21 @@ import android.app.Dialog;
 import android.content.ClipData;
 import android.content.ClipboardManager;
 import android.content.Context;
+import android.text.Selection;
+import android.text.Spannable;
+import android.view.ActionMode;
 import android.view.HapticFeedbackConstants;
+import android.view.Menu;
+import android.view.MenuItem;
 import android.view.View;
+import android.view.ViewGroup;
+import android.widget.EditText;
 import android.widget.TextView;
 
 import androidx.annotation.NonNull;
 import androidx.annotation.Nullable;
+
+import com.example.waspwingtempctrl.ConfigStore;
 
 import java.util.Map;
 import java.util.WeakHashMap;
@@ -57,8 +66,138 @@ final class TextCopy {
             TextView message = dialog.findViewById(android.R.id.message);
             if (message != null) {
                 message.setTextIsSelectable(true);
+                installPathSelection(message);
             }
         });
+    }
+
+    /** 「路径整条复制」开关键（定义在 {@code params.def.json} 的 webui 组，仅界面读取）。 */
+    private static final String KEY_UI_PATH_COPY = "UI_PATH_COPY";
+
+    /**
+     * 方案 B：保留系统选择态，只在选区 ActionMode 创建时把选区扩到「当前词所在的整条路径」。
+     * 递归处理 root 下所有 {@code textIsSelectable} 的 {@link TextView}（跳过 {@link EditText}）。
+     *
+     * <p>开关关闭时回调不扩选、不改系统菜单，行为等同未安装（系统按词选择）。
+     * <b>已知风险</b>：MIUI/HyperOS 可能不走这套系统回调，届时本功能不生效（用户已知情并接受）。
+     */
+    static void installPathSelection(@NonNull View root) {
+        if (root instanceof TextView && !(root instanceof EditText)) {
+            TextView text = (TextView) root;
+            if (text.isTextSelectable()) {
+                text.setCustomSelectionActionModeCallback(new PathSelectionCallback(text));
+            }
+        }
+        if (root instanceof ViewGroup) {
+            ViewGroup group = (ViewGroup) root;
+            for (int i = 0; i < group.getChildCount(); i++) {
+                installPathSelection(group.getChildAt(i));
+            }
+        }
+    }
+
+    /** 单个控件的选区回调：每次 ActionMode 只扩一次，用户拖动手柄后不再强制扩选。 */
+    private static final class PathSelectionCallback implements ActionMode.Callback {
+
+        private final TextView view;
+        /** 本次 ActionMode 是否已扩过（防止重复 post 再次强设选区）。 */
+        private boolean expanded;
+
+        PathSelectionCallback(TextView view) {
+            this.view = view;
+        }
+
+        @Override
+        public boolean onCreateActionMode(ActionMode mode, Menu menu) {
+            expanded = false;
+            // 开关实时读取（与其它 webui 组界面键同一套），创建当帧即生效
+            if (isPathCopyEnabled(view.getContext())) {
+                // 系统在创建回调之后才落定选区，延一帧再扩
+                view.post(this::expandOnce);
+            }
+            return true;   // 不 menu.clear()：保留系统复制/全选/分享
+        }
+
+        @Override
+        public boolean onPrepareActionMode(ActionMode mode, Menu menu) {
+            return false;  // 系统菜单无需重建（手柄拖动只走这里，不重新扩选）
+        }
+
+        @Override
+        public boolean onActionItemClicked(ActionMode mode, MenuItem item) {
+            return false;  // 交给系统默认项处理
+        }
+
+        @Override
+        public void onDestroyActionMode(ActionMode mode) {
+        }
+
+        private void expandOnce() {
+            if (expanded) {
+                return;
+            }
+            expanded = true;
+            if (!view.isAttachedToWindow() || !view.hasSelection()) {
+                return;
+            }
+            CharSequence text = view.getText();
+            int[] bounds = wholePathBounds(
+                    text, view.getSelectionStart(), view.getSelectionEnd());
+            // textIsSelectable 的控件文本是 SPANNABLE（见 setTextIsSelectable），可直接设选区
+            if (bounds != null && text instanceof Spannable) {
+                Selection.setSelection((Spannable) text, bounds[0], bounds[1]);
+            }
+        }
+    }
+
+    /** 开关默认开启；读取失败也按开启处理（不因配置通道异常丢掉路径复制）。 */
+    private static boolean isPathCopyEnabled(Context context) {
+        try {
+            ConfigStore.Value value = ConfigStore.get(context).get(KEY_UI_PATH_COPY);
+            return value == null || value.intAt(0) != 0;
+        } catch (RuntimeException e) {
+            return true;
+        }
+    }
+
+    /**
+     * 选区所在的「整条路径」边界；不是路径（起点/终点不在同一路径内，或不以 {@code /} 开头）时返回 null。
+     * 路径字符 = ASCII 字母数字与 {@code ._-+%~@/:}，遇空白/换行/全角标点等其它字符即止。
+     */
+    @Nullable
+    private static int[] wholePathBounds(CharSequence text, int selStart, int selEnd) {
+        if (text == null) {
+            return null;
+        }
+        int length = text.length();
+        int start = Math.min(selStart, selEnd);
+        int end = Math.max(selStart, selEnd);
+        if (start < 0 || start >= length || !isPathChar(text.charAt(start))) {
+            return null;   // 选区起点不在路径字符上
+        }
+        int left = start;
+        while (left > 0 && isPathChar(text.charAt(left - 1))) {
+            left--;
+        }
+        int right = start;
+        while (right < length && isPathChar(text.charAt(right))) {
+            right++;
+        }
+        if (text.charAt(left) != '/') {
+            return null;   // 只认以 / 开头的路径
+        }
+        if (end > right) {
+            return null;   // 终点越出该路径：起终点不在同一条路径内
+        }
+        if (left == start && right == end) {
+            return null;   // 已经是整条路径
+        }
+        return new int[]{left, right};
+    }
+
+    private static boolean isPathChar(char c) {
+        return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')
+                || (c >= '0' && c <= '9') || "._-+%~@/:".indexOf(c) >= 0;
     }
 
     /** 控件是否正处在选择态（含未拖动的选中）。刷新路径用它决定本次是否跳过 UI 更新。 */

@@ -210,6 +210,7 @@ public class LogFragment extends Fragment
         statView.setText(R.string.log_loading);
         countView.setText("");
         lastFollowCount = -1;
+        TextCopy.installPathSelection(view);
     }
 
     @Override

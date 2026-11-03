@@ -2134,6 +2134,28 @@
       "hiddenWhen": ["UI_AUTO_UPDATE"],
       "daemonConsumes": false,
       "fields": null
+    },
+    {
+      "key": "UI_PATH_COPY",
+      "group": "webui",
+      "role": "setting",
+      "type": "switch",
+      "label": "路径整条复制",
+      "desc": "长按选中日志、状态或弹窗里的文件路径时，自动把选区扩展为包含选中处的整条路径；关闭后恢复系统按词选择。仅界面读取。",
+      "docOrder": 63,
+      "docDesc": "路径整条复制（0/1，默认 1）：长按选中一段路径时，系统选区自动扩展为包含选中处的完整路径，复制到的就是整条路径；关闭后恢复系统的按词选择。仅界面读取，守护进程忽略",
+      "confNote": [
+        "路径整条复制（0/1，默认 1）：长按选中路径时自动扩展到整条路径；关闭后恢复系统按词选择"
+      ],
+      "unit": "",
+      "unitNote": "布尔开关，取值 0/1，无单位",
+      "default": 1,
+      "factory": 1,
+      "min": 0,
+      "max": 1,
+      "requires": [],
+      "daemonConsumes": false,
+      "fields": null
     }
   ],
   "conf": {

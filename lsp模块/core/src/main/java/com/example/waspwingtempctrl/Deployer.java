@@ -135,6 +135,21 @@ public final class Deployer {
      */
     private volatile long lastStartAtMs;
 
+    /**
+     * 探测快路径的进程内缓存（纯优化：丢了只多扫一趟 / 多重算一次哈希，不影响判据）。
+     * stat 缓存携带 inode，mv 同尺寸同秒替换也能识别为变化；PID 缓存只用于跳过全量 /proc 扫描，
+     * 任一不命中即回退。详见 app/逻辑说明.md §2.1、§2.3。
+     */
+    private volatile String binStatCache = "";
+    private volatile String binMd5Cache = "";
+    private volatile String scriptPathCache = "";
+    private volatile String scriptStatCache = "";
+    private volatile String scriptMd5Cache = "";
+    private volatile String daemonPidsCache = "";
+    private volatile String watchdogPidsCache = "";
+    /** md5sum 能力："" 未探测 / "1" 有 / "0" 无（进程内只探测一次）。 */
+    private volatile String md5ToolCap = "";
+
     private Deployer(Context context) {
         this.appContext = context.getApplicationContext();
         this.shell = RootShell.get(this.appContext);
@@ -401,6 +416,7 @@ public final class Deployer {
      */
     private Status buildStatus(Map<String, String> kv, boolean suOk, String expectedBin,
                                String expectedScript, List<String> notes) {
+        rememberProbeCaches(kv);
         if (kv.containsKey("MD5TOOL") && "0".equals(kv.get("MD5TOOL"))) {
             notes.add("设备缺少 md5sum，无法比对内容哈希，部署判据无从通过，一律判为未部署");
         }
@@ -439,6 +455,94 @@ public final class Deployer {
                 configStore.exists(), aligned, "1".equals(kv.get("RUNNING")),
                 nvl(kv.get("DAEMON_PIDS")), wdCount, nvl(kv.get("WD_PIDS")),
                 deployed, configStore.getConfigFile().getAbsolutePath(), notes);
+    }
+
+    /**
+     * 收下本趟回吐的快路径数据：stat→md5、md5sum 能力与 PID。只接受格式合法的值（设备侧输出一律
+     * 先校验再嵌回脚本，避免异常输出被当成命令）；缺键（su 未通 / 文件不存在）时清空对应缓存。
+     */
+    private void rememberProbeCaches(Map<String, String> kv) {
+        if (kv == null) {
+            return;
+        }
+        // 与 probeTail 的快照读取互斥：stat 与 md5 必须成对更新，避免并发探测读到半新半旧的一对
+        synchronized (this) {
+            String cap = nvl(kv.get("MD5TOOL")).trim();
+            if ("0".equals(cap) || "1".equals(cap)) {
+                md5ToolCap = cap;
+            }
+            if (kv.containsKey("BIN_STAT")) {
+                String stat = nvl(kv.get("BIN_STAT")).trim();
+                String md5 = nvl(kv.get("BIN_MD5")).trim();
+                if (isStat(stat) && isMd5(md5)) {
+                    binStatCache = stat;
+                    binMd5Cache = md5;
+                } else {
+                    binStatCache = "";
+                    binMd5Cache = "";
+                }
+            }
+            if (kv.containsKey("SCRIPT")) {
+                String path = nvl(kv.get("SCRIPT")).trim();
+                String stat = nvl(kv.get("SCRIPT_STAT")).trim();
+                String md5 = nvl(kv.get("SCRIPT_MD5")).trim();
+                if (isScriptPath(path) && isStat(stat) && isMd5(md5)) {
+                    scriptPathCache = path;
+                    scriptStatCache = stat;
+                    scriptMd5Cache = md5;
+                } else {
+                    scriptPathCache = "";
+                    scriptStatCache = "";
+                    scriptMd5Cache = "";
+                }
+            } else if (kv.containsKey("BIN_EXISTS")) {
+                // 本趟确实跑了探测尾段却没有 SCRIPT 行 = 脚本不存在
+                scriptPathCache = "";
+                scriptStatCache = "";
+                scriptMd5Cache = "";
+            }
+            if (kv.containsKey("DAEMON_PIDS")) {
+                daemonPidsCache = sanitizePids(kv.get("DAEMON_PIDS"));
+            } else if ("0".equals(nvl(kv.get("RUNNING")).trim())) {
+                daemonPidsCache = "";
+            }
+            if (kv.containsKey("WD_PIDS")) {
+                watchdogPidsCache = sanitizePids(kv.get("WD_PIDS"));
+            } else if ("0".equals(nvl(kv.get("WD_COUNT")).trim())) {
+                watchdogPidsCache = "";
+            }
+        }
+    }
+
+    /** stat 串形态（{@code size:mtime:inode}）；只放行数字与冒号。 */
+    private static boolean isStat(String stat) {
+        return !stat.isEmpty() && stat.matches("[0-9:]+");
+    }
+
+    private static boolean isMd5(String md5) {
+        return md5.matches("[0-9a-f]{32}");
+    }
+
+    private static boolean isScriptPath(String path) {
+        return path.equals(SERVICE_D_MODERN + "/" + SCRIPT_NAME)
+                || path.equals(SERVICE_D_KSU_LEGACY + "/" + SCRIPT_NAME);
+    }
+
+    /** PID 串只保留纯数字 token，空格分隔（脚本里直接作 for 词表）。 */
+    private static String sanitizePids(String raw) {
+        if (raw == null) {
+            return "";
+        }
+        StringBuilder sb = new StringBuilder();
+        for (String token : raw.trim().split("\\s+")) {
+            if (token.matches("[0-9]+")) {
+                if (sb.length() > 0) {
+                    sb.append(' ');
+                }
+                sb.append(token);
+            }
+        }
+        return sb.toString();
     }
 
     /**
@@ -1137,6 +1241,12 @@ public final class Deployer {
                 + " | grep -E -- \"-> $BIN( [(]deleted[)])?$\""
                 + " | sed -n \"s#.* /proc/\\([0-9]*\\)/exe ->.*#\\1#p\"\n"
                 + "}\n"
+                // PID 快路径：只验证上拍记住的 PID（exe 末端锚定 $BIN，含删除态），命中就免掉全量扫描
+                + "bin_pid_ok() {\n"
+                + "    e=$(ls -l \"/proc/$1/exe\" 2>/dev/null)\n"
+                + "    case \"$e\" in *\"-> $BIN\"|*\"-> $BIN (deleted)\") return 0 ;; esac\n"
+                + "    return 1\n"
+                + "}\n"
                 // 看门狗 shell 的 exe 都是 /system/bin/sh，身份只由「某参数恰好等于候选脚本路径」定
                 // （整行相等、非子串；binary 语义不依赖 grep）。见 §2.3
                 + "wd_match() {\n"
@@ -1172,27 +1282,106 @@ public final class Deployer {
      * c-daemon 与看门狗 PID。与 {@link #probe()} 共用；部署 / 拉起 / 停止 / 卸载趟也把它接在末尾——
      * "顺手报状态"，省掉一场独立的 su 往返（见 app/逻辑说明.md §2.1、§8.1）。
      */
-    private static String probeTail() {
-        return "[ -e \"$BIN\" ] && echo BIN_EXISTS=1 || echo BIN_EXISTS=0\n"
-                + "[ -x \"$BIN\" ] && echo BIN_EXEC=1 || echo BIN_EXEC=0\n"
-                + "if command -v md5sum > /dev/null 2>&1; then echo MD5TOOL=1; else echo MD5TOOL=0; fi\n"
-                + "echo \"BIN_MD5=$(md5sum \"$BIN\" 2>/dev/null | cut -d' ' -f1)\"\n"
-                + "for d in " + SERVICE_D_KSU_LEGACY + " " + SERVICE_D_MODERN + "; do\n"
-                + "  f=\"$d/" + SCRIPT_NAME + "\"\n"
-                + "  if [ -f \"$f\" ]; then echo \"SCRIPT=$f\"; echo \"SCRIPT_MD5=$(md5sum \"$f\" 2>/dev/null | cut -d' ' -f1)\"; fi\n"
-                + "done\n"
-                // c-daemon 的 pid 列表只取一次：既出 RUNNING 也出 PID（不为第二件事再扫一趟 /proc）
-                + "BIN_LIST=$(bin_pids)\n"
-                + "[ -n \"$BIN_LIST\" ] && echo RUNNING=1 || echo RUNNING=0\n"
-                + "set -- $BIN_LIST\n"
-                + "echo \"DAEMON_PIDS=$*\"\n"
-                // 看门狗同样上屏（不输出它，「停机时它仍在跑」「两个并存」在界面上完全不可观测）。
-                // 先落到变量再一次取用：wd_pids 要扫全部 pid，不能为了计数再跑一次。
-                // set -- 借位置参数数个数、$* 折成一行，省掉 wc/tr 各一次 fork。
-                + "WD_LIST=$(wd_pids)\n"
-                + "set -- $WD_LIST\n"
-                + "echo \"WD_COUNT=$#\"\n"
-                + "echo \"WD_PIDS=$*\"\n";
+    private String probeTail() {
+        // 快路径数据取一次一致快照：脚本是纯函数，且 stat 与 md5 必须来自同一趟探测
+        String binStat;
+        String binMd5;
+        String scriptPath;
+        String scriptStat;
+        String scriptMd5;
+        String daemonPids;
+        String watchdogPids;
+        String md5Cap;
+        synchronized (this) {
+            binStat = binStatCache;
+            binMd5 = binMd5Cache;
+            scriptPath = scriptPathCache;
+            scriptStat = scriptStatCache;
+            scriptMd5 = scriptMd5Cache;
+            daemonPids = daemonPidsCache;
+            watchdogPids = watchdogPidsCache;
+            md5Cap = md5ToolCap;
+        }
+
+        StringBuilder sb = new StringBuilder();
+        sb.append("[ -e \"$BIN\" ] && echo BIN_EXISTS=1 || echo BIN_EXISTS=0\n")
+                .append("[ -x \"$BIN\" ] && echo BIN_EXEC=1 || echo BIN_EXEC=0\n");
+        // 设备能力缓存：md5sum 是否可用在进程内只探测一次（未知时才 fork command -v）
+        if ("1".equals(md5Cap)) {
+            sb.append("MD5TOOL=1\n");
+        } else if ("0".equals(md5Cap)) {
+            sb.append("MD5TOOL=0\n");
+        } else {
+            sb.append("if command -v md5sum > /dev/null 2>&1; then MD5TOOL=1; else MD5TOOL=0; fi\n");
+        }
+        sb.append("echo \"MD5TOOL=$MD5TOOL\"\n");
+        // 哈希按 stat 缓存：size:mtime:inode 未变就复用上拍 md5，不再执行 md5sum。
+        // inode 必须参与，防止 mv 换出同尺寸、同秒的文件被误判为未变。
+        sb.append("BIN_STAT=$(stat -c '%s:%Y:%i' \"$BIN\" 2>/dev/null)\n")
+                .append("echo \"BIN_STAT=$BIN_STAT\"\n")
+                .append("if [ \"$MD5TOOL\" = 1 ]; then\n");
+        if (!binStat.isEmpty() && !binMd5.isEmpty()) {
+            sb.append("  if [ \"$BIN_STAT\" = ").append(quote(binStat)).append(" ]; then\n")
+                    .append("    echo \"BIN_MD5=").append(binMd5).append("\"\n")
+                    .append("  else\n")
+                    .append("    echo \"BIN_MD5=$(md5sum \"$BIN\" 2>/dev/null | cut -d' ' -f1)\"\n")
+                    .append("  fi\n");
+        } else {
+            sb.append("  echo \"BIN_MD5=$(md5sum \"$BIN\" 2>/dev/null | cut -d' ' -f1)\"\n");
+        }
+        sb.append("else\n")
+                .append("  echo \"BIN_MD5=\"\n")
+                .append("fi\n");
+        sb.append("for d in ").append(SERVICE_D_KSU_LEGACY).append(' ').append(SERVICE_D_MODERN)
+                .append("; do\n")
+                .append("  f=\"$d/").append(SCRIPT_NAME).append("\"\n")
+                .append("  if [ -f \"$f\" ]; then echo \"SCRIPT=$f\";\n")
+                .append("    SCRIPT_STAT=$(stat -c '%s:%Y:%i' \"$f\" 2>/dev/null)\n")
+                .append("    echo \"SCRIPT_STAT=$SCRIPT_STAT\"\n")
+                .append("    if [ \"$MD5TOOL\" = 1 ]; then\n");
+        if (!scriptPath.isEmpty() && !scriptStat.isEmpty() && !scriptMd5.isEmpty()) {
+            sb.append("      if [ \"$f\" = ").append(quote(scriptPath))
+                    .append(" ] && [ \"$SCRIPT_STAT\" = ").append(quote(scriptStat))
+                    .append(" ]; then\n")
+                    .append("        echo \"SCRIPT_MD5=").append(scriptMd5).append("\"\n")
+                    .append("      else\n")
+                    .append("        echo \"SCRIPT_MD5=$(md5sum \"$f\" 2>/dev/null | cut -d' ' -f1)\"\n")
+                    .append("      fi\n");
+        } else {
+            sb.append("      echo \"SCRIPT_MD5=$(md5sum \"$f\" 2>/dev/null | cut -d' ' -f1)\"\n");
+        }
+        sb.append("    else\n")
+                .append("      echo \"SCRIPT_MD5=\"\n")
+                .append("    fi\n")
+                .append("  fi\n")
+                .append("done\n");
+        // PID 快路径：上拍的 PID 全部仍指向目标就跳过全量 /proc 扫描；任一不命中才回退。
+        // 快路径只认「上拍非空」，故首次探测 / 进程全死（空表）仍走全量，不会漏掉新出现的实例。
+        sb.append("BIN_LIST=\"\"\n")
+                .append("_FAST=0\n")
+                .append("if [ -n ").append(quote(daemonPids)).append(" ]; then\n")
+                .append("  _FAST=1\n")
+                .append("  for p in ").append(daemonPids).append("; do\n")
+                .append("    if bin_pid_ok \"$p\"; then BIN_LIST=\"$BIN_LIST $p\"; else _FAST=0; fi\n")
+                .append("  done\n")
+                .append("fi\n")
+                .append("[ \"$_FAST\" = 1 ] || BIN_LIST=$(bin_pids)\n")
+                .append("[ -n \"$BIN_LIST\" ] && echo RUNNING=1 || echo RUNNING=0\n")
+                .append("set -- $BIN_LIST\n")
+                .append("echo \"DAEMON_PIDS=$*\"\n");
+        sb.append("WD_LIST=\"\"\n")
+                .append("_FAST=0\n")
+                .append("if [ -n ").append(quote(watchdogPids)).append(" ]; then\n")
+                .append("  _FAST=1\n")
+                .append("  for p in ").append(watchdogPids).append("; do\n")
+                .append("    if wd_match \"$p\"; then WD_LIST=\"$WD_LIST $p\"; else _FAST=0; fi\n")
+                .append("  done\n")
+                .append("fi\n")
+                .append("[ \"$_FAST\" = 1 ] || WD_LIST=$(wd_pids)\n")
+                .append("set -- $WD_LIST\n")
+                .append("echo \"WD_COUNT=$#\"\n")
+                .append("echo \"WD_PIDS=$*\"\n");
+        return sb.toString();
     }
 
     /**

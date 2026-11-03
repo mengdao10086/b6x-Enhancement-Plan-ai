@@ -118,6 +118,12 @@ public class UiSettingsFragment extends Fragment
         return scroll;
     }
 
+    @Override
+    public void onViewCreated(@NonNull View view, @Nullable Bundle savedInstanceState) {
+        super.onViewCreated(view, savedInstanceState);
+        TextCopy.installPathSelection(view);
+    }
+
     // ========== 键行与重置栏共用的服务面（ConfigResetBar.Host 继承 ConfigKeyRow.Host） ==========
     // 数据全在控制器手上，这里只把契约转发过去；notifyUser 同时满足 ConfigKeyRow.Host 与
     // ConfigFormController.Page 两处要求（同一个语义：本页的人话反馈），故只有这一份实现。
