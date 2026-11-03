@@ -403,8 +403,8 @@ public final class Motion {
      * （{@link #durationForPixels(Context, float)} + {@link #panelCurve}），箭头据此与行高同生共灭。
      *
      * <p><b>不满足补间条件时直接返回 {@code -1}、不设置动画高度</b>：系统关动效、起点不可用
-     * （{@code fromPx <= 0}）、终点不可用（{@code toPx <= 0}）、或两者相等。若此前有本视图的补间在跑，
-     * 会先取消并把高度还原为 {@code WRAP_CONTENT}，避免留下动画中间值。
+     * （{@code fromPx <= 0}）、终点不可用（{@code toPx <= 0}）、或两者相等。本次没有动画，
+     * 故把高度还原为 {@code WRAP_CONTENT}（若此前被钉在中间高，不能留在那里）。
      *
      * @return 本次动画时长（毫秒）；直接落位时返回 {@code -1}
      */
@@ -432,8 +432,8 @@ public final class Motion {
             return -1L;
         }
         if (fromPx <= 0 || toPx <= 0 || fromPx == toPx || !enabled(content.getContext())) {
-            if (running != null) {
-                // 上一次补间被中止：把固定的中间高度还原，避免本次落位后一直停在这个高
+            // 本次不补间：还原自然高（可能被 keepHeight 等路径钉住，不能留下中间/固定高）
+            if (lp.height != ViewGroup.LayoutParams.WRAP_CONTENT) {
                 lp.height = ViewGroup.LayoutParams.WRAP_CONTENT;
                 content.requestLayout();
             }

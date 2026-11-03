@@ -29,6 +29,8 @@
     <string name="status_dialog_failed">执行失败</string>
     <string name="status_dialog_close">关闭</string>
     <string name="status_busy_probe">读取部署状态…</string>
+    <!-- 手动刷新时只替换部署状态结论行；行数不变，故直接上屏、不做动画 -->
+    <string name="status_deploy_checking">部署状态：正在检测</string>
     <!-- 部署只到"盘上就位"为止；拉起daemon 是紧随其后独立的一段（见 StatusFragment.deploy），不写进本行 -->
     <string name="status_busy_deploy">部署中…（落盘 + root 就位 + 省电白名单）</string>
     <string name="status_busy_uninstall">卸载部署中…</string>

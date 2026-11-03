@@ -80,6 +80,8 @@ public class StatusFragment extends Fragment implements SetupActivity.PageAware 
     private static final long HEIGHT_SYNC_MS = FADE_OUT_DELAY_MS + FADE_OUT_MS;
     /** 部署/拉起结果在状态区的最短保留时长：在此期间周期扫描不覆盖状态文本。 */
     private static final long RESULT_HOLD_MS = 10_000L;
+    /** 部署状态文本的结论行前缀（须与 {@code Deployer.Status.summaryLine()} 保持一致）。 */
+    private static final String DEPLOY_STATUS_PREFIX = "部署状态：";
     /** 动作期间按钮压暗后的透明度与渐变时长（压暗快、恢复稍慢）。 */
     private static final float BUTTON_DIM_ALPHA = 0.35f;
     private static final long BUTTON_DIM_MS = 160L;
@@ -123,6 +125,11 @@ public class StatusFragment extends Fragment implements SetupActivity.PageAware 
     /** 选中期间被推迟上屏的状态文本；选择结束后由 {@link #flushPendingStatus()} 补。 */
     @Nullable
     private String pendingStatusText;
+    /** {@link #pendingStatusText} 是否属于「只换字、不改高度」的占位换字（见 keepHeight）。 */
+    private boolean pendingStatusKeepHeight;
+    /** 「部署状态」首行临时替换前的原文首行；null = 当前没有待恢复的替换。 */
+    @Nullable
+    private String deployFirstLineBackup;
 
     /** 操作记录是否展开（默认收起）。 */
     private boolean logExpanded;
@@ -395,8 +402,11 @@ public class StatusFragment extends Fragment implements SetupActivity.PageAware 
     }
 
     /**
-     * 手动刷新：动画与扫描并行——先把「正在探测…」立即上屏，再挂监听并启动/复用扫描，
+     * 手动刷新：动画与扫描并行——先把占位文案立即上屏，再挂监听并启动/复用扫描，
      * 结果到达才淡入结果。动作进行中仍按既有规则拒绝（不播动画、不压暗按钮）。
+     *
+     * <p>占位分两种：当前以 {@code 部署状态：} 开头时只替换结论行（行数不变，直接 setText）；
+     * 否则回退整段「读取部署状态…」占位（只换字、钉住高度）。
      */
     private void requestManualRefresh() {
         if (!isAdded() || statusView == null) {
@@ -407,9 +417,12 @@ public class StatusFragment extends Fragment implements SetupActivity.PageAware 
             return;
         }
         appendLog(getString(R.string.status_busy_probe));
-        final String busy = getString(R.string.status_busy_probe);
-        if (!busy.contentEquals(statusView.getText())) {
-            swapStatusTextAnimated(busy);   // 已在「正在探测」时不重播，避免闪一下
+        if (!replaceDeployFirstLineWithChecking()) {
+            final String busy = getString(R.string.status_busy_probe);
+            if (!busy.contentEquals(statusView.getText())) {
+                // 占位只换字、不改高度：避免单行占位把窗口压矮、结果到达再撑开
+                swapStatusTextAnimated(busy, true);
+            }
         }
         scanManualPending = true;
         if (scanRunning) {
@@ -418,6 +431,83 @@ public class StatusFragment extends Fragment implements SetupActivity.PageAware 
             updateBusy();
         }
         startScanIfNeeded();
+    }
+
+    /**
+     * 当前状态文本以「部署状态：」开头时，只把结论行换成「部署状态：正在检测」，其余行原样保留。
+     * 行数不变，故直接 setText（不淡变、不做高度动画）；正在选中时走既有 pending 机制推迟。
+     *
+     * @return true = 已走首行替换；false = 当前不是部署状态文本，调用方回退整段占位
+     */
+    private boolean replaceDeployFirstLineWithChecking() {
+        final TextView view = statusView;
+        if (view == null) {
+            return false;
+        }
+        final String text = view.getText().toString();
+        final int end = firstLineEnd(text);
+        final String firstLine = text.substring(0, end);
+        if (!firstLine.startsWith(DEPLOY_STATUS_PREFIX)) {
+            return false;
+        }
+        final String checking = getString(R.string.status_deploy_checking);
+        if (checking.equals(firstLine)) {
+            return true;   // 已在该临时态：保留首次记下的原首行，不重复覆盖
+        }
+        deployFirstLineBackup = firstLine;
+        final String replaced = checking + text.substring(end);
+        if (TextCopy.isSelecting(view)) {
+            pendingStatusText = replaced;
+            pendingStatusKeepHeight = true;   // 只换字、不改高度
+            TextCopy.runWhenSelectionEnds(view, this::flushPendingStatus);
+        } else {
+            cancelFade();   // 中断可能还在跑的上一次淡变，避免新文本半透明叠在旧层上
+            view.setText(replaced);
+        }
+        return true;
+    }
+
+    /**
+     * 扫描失败时恢复被临时替换的结论行（失败分支只弹对话框、不换文本，不能把首行留在「正在检测」）。
+     * 仅在当前首行仍是该临时态时恢复，避免把过期备份写进已被其它结果覆盖的文本；
+     * 正在选中时同样走 pending 推迟。
+     */
+    private void restoreDeployFirstLineIfNeeded() {
+        final String backup = deployFirstLineBackup;
+        deployFirstLineBackup = null;
+        final TextView view = statusView;
+        if (backup == null || view == null) {
+            return;
+        }
+        // 替换可能还挂在 pending 里（选中期间）：把待上屏文本的首行也改回去
+        final String pending = pendingStatusText;
+        if (pending != null) {
+            final int pendingEnd = firstLineEnd(pending);
+            if (getString(R.string.status_deploy_checking).equals(pending.substring(0, pendingEnd))) {
+                pendingStatusText = backup + pending.substring(pendingEnd);
+                pendingStatusKeepHeight = true;
+            }
+        }
+        final String text = view.getText().toString();
+        final int end = firstLineEnd(text);
+        if (!getString(R.string.status_deploy_checking).equals(text.substring(0, end))) {
+            return;   // 临时态已被完整结果/动作文案覆盖，无需恢复
+        }
+        final String restored = backup + text.substring(end);
+        if (TextCopy.isSelecting(view)) {
+            pendingStatusText = restored;
+            pendingStatusKeepHeight = true;
+            TextCopy.runWhenSelectionEnds(view, this::flushPendingStatus);
+        } else {
+            cancelFade();
+            view.setText(restored);
+        }
+    }
+
+    /** 第一行结束位置（不含换行符）；无换行时返回整串长度。 */
+    private static int firstLineEnd(String text) {
+        final int newline = text.indexOf('\n');
+        return newline < 0 ? text.length() : newline;
     }
 
     /** 静默刷新：不写记录、不做动画；扫描中复用同一趟。 */
@@ -482,6 +572,10 @@ public class StatusFragment extends Fragment implements SetupActivity.PageAware 
             // 动作收尾后 5 秒周期会再探一次。
             if (manual) {
                 appendLog(result);
+                if (failed) {
+                    // 失败弹窗走不到 renderScanResult，这里也要把临时结论行恢复
+                    restoreDeployFirstLineIfNeeded();
+                }
             }
         } else {
             renderScanResult(result, manual, silent, failed);
@@ -494,6 +588,7 @@ public class StatusFragment extends Fragment implements SetupActivity.PageAware 
         if (manual) {
             appendLog(result);
             if (failed) {
+                restoreDeployFirstLineIfNeeded();
                 showDismissOnOutside(new AlertDialog.Builder(requireContext())
                         .setTitle(R.string.status_dialog_failed)
                         .setMessage(result)
@@ -508,6 +603,7 @@ public class StatusFragment extends Fragment implements SetupActivity.PageAware 
             return;
         }
         if (failed) {
+            restoreDeployFirstLineIfNeeded();
             showDismissOnOutside(new AlertDialog.Builder(requireContext())
                     .setTitle(R.string.status_dialog_failed)
                     .setMessage(result)
@@ -1036,6 +1132,11 @@ public class StatusFragment extends Fragment implements SetupActivity.PageAware 
         }
     }
 
+    /** 默认换字：高度与淡变同起同止（见带 {@code keepHeight} 的重载）。 */
+    private void swapStatusTextAnimated(final String text) {
+        swapStatusTextAnimated(text, false);
+    }
+
     /**
      * 手动刷新的结果上屏：<b>业务上屏零延迟</b>——新文本立刻写上去（不再等淡出结束），视觉上做
      * 「旧文本淡出、新文本淡入」的交叉淡入（旧的在下、新的在上叠放）。
@@ -1045,8 +1146,12 @@ public class StatusFragment extends Fragment implements SetupActivity.PageAware 
      * 容器底部裁掉一部分，是同步的必然结果）。防中间发灰：新层 270ms 淡入、旧层延后 105ms 起播且只用
      * 180ms 淡出——新层接近不透明时旧层才退，任一帧至少一层接近不透明。代号保证串行、
      * <b>打断不丢结果</b>（打断后当前文本即最新结果）；系统关掉动画时直接上屏。见 {@code app/逻辑说明.md} §8.1。
+     *
+     * @param keepHeight true = 本次只换字、不驱动高度：把当前高度钉住，再走交叉淡入淡出。
+     *                   手动刷新的单行「正在探测…」占位用它，避免窗口先被占位压矮、结果到达再撑开；
+     *                   结果到达的换字仍走 false，届时以钉住的高度为起点补间到结果高度。
      */
-    private void swapStatusTextAnimated(final String text) {
+    private void swapStatusTextAnimated(final String text, boolean keepHeight) {
         final TextView view = statusView;
         final TextView outgoing = statusOutgoingView;
         if (view == null || !isAdded()) {
@@ -1055,10 +1160,12 @@ public class StatusFragment extends Fragment implements SetupActivity.PageAware 
         // 正选中时推迟上屏：setText 会清掉选择与手柄。结果不丢——存起来，选择一结束就补
         if (TextCopy.isSelecting(view)) {
             pendingStatusText = text;
+            pendingStatusKeepHeight = keepHeight;
             TextCopy.runWhenSelectionEnds(view, this::flushPendingStatus);
             return;
         }
         pendingStatusText = null;
+        pendingStatusKeepHeight = false;
         if (outgoing == null || !Motion.enabled(view.getContext())) {
             // 系统关掉动画（或叠放层缺失）：直接换文本，信息先可读
             cancelFade();
@@ -1072,11 +1179,23 @@ public class StatusFragment extends Fragment implements SetupActivity.PageAware 
         // 旧的 = 上一次换字的落点（打断时即当前可见的那段）。文本做交叉淡入淡出；
         // 高度与淡变同起同止：不分增减，换字同一拍启动，285ms 后与旧层消失同时到位
         final CharSequence old = view.getText();
-        final int newStackHeight = measureStatusStackHeight(text);
-        if (newStackHeight > 0) {
-            final int from = currentStatusStackHeight();
-            if (from > 0) {
-                Motion.animateHeightChange(statusStack, from, newStackHeight, HEIGHT_SYNC_MS);
+        if (keepHeight) {
+            // 只换字：钉住当前高度（可能正在补间，先记中间值再中止），不启动高度动画
+            final int held = currentStatusStackHeight();
+            Motion.cancelHeightChange(statusStack);
+            if (held > 0 && statusStack != null) {
+                ViewGroup.LayoutParams lp = statusStack.getLayoutParams();
+                if (lp != null) {
+                    lp.height = held;
+                }
+            }
+        } else {
+            final int newStackHeight = measureStatusStackHeight(text);
+            if (newStackHeight > 0) {
+                final int from = currentStatusStackHeight();
+                if (from > 0) {
+                    Motion.animateHeightChange(statusStack, from, newStackHeight, HEIGHT_SYNC_MS);
+                }
             }
         }
         outgoing.setText(old);
@@ -1141,8 +1260,10 @@ public class StatusFragment extends Fragment implements SetupActivity.PageAware 
         if (pending == null || statusView == null || TextCopy.isSelecting(statusView)) {
             return;
         }
+        boolean keepHeight = pendingStatusKeepHeight;
         pendingStatusText = null;
-        swapStatusTextAnimated(pending);
+        pendingStatusKeepHeight = false;
+        swapStatusTextAnimated(pending, keepHeight);
     }
 
     /**
