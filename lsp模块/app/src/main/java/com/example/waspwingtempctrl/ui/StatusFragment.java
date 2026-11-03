@@ -66,6 +66,8 @@ public class StatusFragment extends Fragment implements SetupActivity.PageAware 
 
     /** 静默刷新的最小间隔：30 秒内的重复触发不再跑 su 探测（该路径会顺带自动重推脚本）。 */
     private static final long PROBE_MIN_INTERVAL_MS = 30_000L;
+    /** 页面可见期间的周期静默复探间隔：及时反映控制 app 被杀等外部状态变化。 */
+    private static final long PERIODIC_REFRESH_MS = 5_000L;
     /** 手动刷新时文本淡出时长（退出比进入快，见 {@link #swapStatusTextAnimated}）。 */
     private static final long FADE_OUT_MS = 100L;
     /** 手动刷新时文本淡入时长。 */
@@ -141,6 +143,25 @@ public class StatusFragment extends Fragment implements SetupActivity.PageAware 
     /** 是否有动作在跑（结果还没回到主线程）；为 true 时拒绝并发触发。见 {@code app/逻辑说明.md} §8.1。 */
     private boolean actionRunning;
 
+    /**
+     * 页面可见期间的周期静默复探：由 {@link #startPeriodicRefresh()} 起拍，
+     * 每拍先排下一拍再跑，故单拍失败/跳过不会断链。视图不在时不再自排，
+     * 由 {@code onPause} / {@code onPageVisible(false)} / {@code onDestroyView} 收尾。
+     */
+    private final Runnable periodicRefresh = new Runnable() {
+        @Override
+        public void run() {
+            if (!isAdded() || statusView == null) {
+                return;
+            }
+            MAIN.postDelayed(this, PERIODIC_REFRESH_MS);   // 先排下一拍，保证节拍连续
+            if (actionRunning) {
+                return;   // 用户动作在跑：本拍跳过，不抢并发守卫
+            }
+            refreshStatusQuiet();
+        }
+    };
+
     private static final SimpleDateFormat TIME_FMT =
             new SimpleDateFormat("HH:mm:ss", Locale.US);
 
@@ -202,13 +223,15 @@ public class StatusFragment extends Fragment implements SetupActivity.PageAware 
     @Override
     public void onPageVisible(boolean visible) {
         if (!visible) {
-            // 离屏只需收掉动画：本页没有任何定时器要停。
+            // 离屏：收掉动画与周期复探（定时器只在页面可见期间运行）。
             cancelFade();
+            stopPeriodicRefresh();
             return;
         }
         firstProbeIfNeeded();
         // 选中期间攒下的结果，回到本页时若无选择就补上
         flushPendingStatus();
+        startPeriodicRefresh();
     }
 
     @Override
@@ -216,14 +239,22 @@ public class StatusFragment extends Fragment implements SetupActivity.PageAware 
         super.onResume();
         // 首次可见时先起首探（见 firstProbeIfNeeded），否则走静默刷新（不写记录、不碰文本、不做动画）；
         // 手动路径的动画/记录不该被切页触发；静默刷新被 30 秒节流挡下，不会多跑一趟 su。
-        if (firstProbeIfNeeded()) {
-            return;
+        if (!firstProbeIfNeeded()) {
+            refreshStatus(false);
         }
-        refreshStatus(false);
+        startPeriodicRefresh();
+    }
+
+    @Override
+    public void onPause() {
+        // 宿主暂停：停掉周期复探，回前台时由 onResume 重新起拍。
+        stopPeriodicRefresh();
+        super.onPause();
     }
 
     @Override
     public void onDestroyView() {
+        stopPeriodicRefresh();
         actionRunning = false;
         // 先收掉动画并复位透明度：回调里判空就返回，不给已销毁的视图留半透明残影
         cancelFade();
@@ -299,6 +330,27 @@ public class StatusFragment extends Fragment implements SetupActivity.PageAware 
                 () -> probeAndAutoFixScript(app), false, manual);
     }
 
+    /** 启动（或重置）周期静默复探：先摘掉旧的一拍，避免 onResume 与 onPageVisible 重复排队。 */
+    private void startPeriodicRefresh() {
+        MAIN.removeCallbacks(periodicRefresh);
+        MAIN.postDelayed(periodicRefresh, PERIODIC_REFRESH_MS);
+    }
+
+    /** 停止周期静默复探（幂等）：离屏、暂停、视图销毁时调用。 */
+    private void stopPeriodicRefresh() {
+        MAIN.removeCallbacks(periodicRefresh);
+    }
+
+    /**
+     * 周期静默复探入口：与静默刷新同口径（不写记录、不做动画、内容不变不重绘），
+     * 但<b>不走 30 秒节流</b>——周期任务本身就是节拍源。
+     */
+    private void refreshStatusQuiet() {
+        final Context app = requireContext().getApplicationContext();
+        runAsync(getString(R.string.status_busy_probe),
+                () -> probeAndAutoFixScript(app, false), false, false);
+    }
+
     /**
      * 探测部署状态；脚本哈希不一致且 su 可用时自动重推脚本（重推会连带重启守护进程），再复探一次。
      *
@@ -308,11 +360,19 @@ public class StatusFragment extends Fragment implements SetupActivity.PageAware 
      * @return 可直接上屏的文本
      */
     private String probeAndAutoFixScript(Context app) {
+        return probeAndAutoFixScript(app, true);
+    }
+
+    /**
+     * 同上，{@code allowAutoFix} 控制脚本哈希不一致时要不要自动重推。
+     * 5 秒周期复探传 false：探测与上屏照常，但不在每次复探里重启守护进程（自愈留给手动刷新/回页）。
+     */
+    private String probeAndAutoFixScript(Context app, boolean allowAutoFix) {
         final Deployer deployer = Deployer.get(app);
         Deployer.Status status = deployer.probe();
         final String head;
         // su 不可用时不尝试（否则每次进页面都白撞一次授权框）
-        if (status.suOk && status.scriptPresent && !status.scriptHashOk) {
+        if (allowAutoFix && status.suOk && status.scriptPresent && !status.scriptHashOk) {
             // 三选一，判据取自紧随其后的那次 probe（更晚、更权威，且不额外增加 su 往返）——见 app/逻辑说明.md §8.1
             Deployer.Result r = deployer.updateScript();
             status = deployer.probe();

@@ -92,8 +92,9 @@
                     按钮排布：行1 [一键部署][拉起daemon]、行2 [su诊断][刷新状态]、行3 [卸载部署][停止daemon][停止控制app]。
                     「刷新状态」与「su 诊断」同为点一次即出一段文本的动作，故同用 TextButton 样式。
                     行3 三个同为破坏性动作（都要二次确认、都会中断或移除温控增强），故同用 TextButton + state_error。
-                    行3 在 360dp 最小屏宽下按原 8dp 间隔会超宽，故两处间隔压到 0dp（按钮自带左右内边距，
-                    视觉空隙仍在；不换行、不省略文字、不改按钮尺寸与样式）。
+                    行2、行3 的按钮间隔统一为 0dp：行3 在 360dp 最小屏宽下按 8dp 会超宽，故压到 0dp；
+                    行2 跟随同一间隔以保持两行一致（按钮自带左右内边距，视觉空隙仍在；
+                    不换行、不省略文字、不改按钮尺寸与样式）。
                     这 7 个按钮都是 M3 按钮样式，insetTop/insetBottom 各 4dp 会把可见圆角块上下各收 4dp，
                     故行间的可见空白 = margin + 8dp（调 margin 的观感与数值不成比例，细则见 dimens_status.xml）。
                     四处可见空白：
@@ -144,7 +145,7 @@
                         style="@style/Widget.Material3.Button.TextButton"
                         android:layout_width="wrap_content"
                         android:layout_height="wrap_content"
-                        android:layout_marginStart="@dimen/space_s"
+                        android:layout_marginStart="0dp"
                         android:text="@string/status_action_refresh" />
                 </LinearLayout>
 
