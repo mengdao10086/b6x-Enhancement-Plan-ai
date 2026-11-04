@@ -4,6 +4,7 @@ import android.app.Dialog;
 import android.content.ClipData;
 import android.content.ClipboardManager;
 import android.content.Context;
+import android.text.Layout;
 import android.text.Selection;
 import android.text.Spannable;
 import android.view.ActionMode;
@@ -127,6 +128,11 @@ final class TextCopy {
         private ActionMode mode;
         /** 手指是否仍按在控件上：抬手或拖动都会清掉这次"继续按住"的计时。 */
         private boolean holding;
+        /** 本次按压是否已经按满 {@link #HOLD_TO_EXPAND_MS}（不依赖 ActionMode 何时创建）。 */
+        private boolean holdElapsed;
+        /** 按下点在控件内的坐标：系统尚未建立选区时，用它自己算出整条路径。 */
+        private float pressX;
+        private float pressY;
         private final Runnable expandAfterHold = this::expandIfStillHolding;
 
         PathSelectionCallback(TextView view) {
@@ -139,18 +145,11 @@ final class TextCopy {
             this.mode = mode;
             // 开关实时读取（与其它 webui 组界面键同一套），创建当帧即生效
             if (isPathCopyEnabled(view.getContext())) {
-                // 系统在创建回调之后才落定选区，延一帧再起计时：先让用户看到选中的那一段
-                view.post(() -> {
-                    if (expanded) {
-                        return;
-                    }
-                    if (holding) {
-                        view.postDelayed(expandAfterHold, HOLD_TO_EXPAND_MS);
-                    } else {
-                        // 非按住触发（键盘/无障碍等）：退回一步到位，保证整条复制在这些入口仍可用
-                        expandOnce();
-                    }
-                });
+                // 部分系统把 ActionMode 推迟到抬手之后才建：按压期已过但确实按够了，
+                // 此时系统刚落定那一段选区，再扩一次（按住期间已主动扩过则重复一次无副作用）
+                if (holdElapsed || expanded) {
+                    view.post(this::applyWholePath);
+                }
             }
             return true;   // 不 menu.clear()：保留系统复制/全选/分享
         }
@@ -170,6 +169,20 @@ final class TextCopy {
             this.mode = null;
             holding = false;
             view.removeCallbacks(expandAfterHold);
+        }
+
+        /**
+         * 按下起点：从这一刻起算「系统长按时长 + {@link #HOLD_TO_EXPAND_MS}」。
+         * 不从 ActionMode 创建回调起算——部分系统把它推迟到抬手之后，那样就永远等不到"按住期间"。
+         */
+        void onPressStart(float x, float y) {
+            pressX = x;
+            pressY = y;
+            holdElapsed = false;
+            holding = true;
+            view.removeCallbacks(expandAfterHold);
+            long delay = ViewConfiguration.getLongPressTimeout() + HOLD_TO_EXPAND_MS;
+            view.postDelayed(expandAfterHold, delay);
         }
 
         /** 按住状态由 {@link HoldWatcher} 维护：抬手/拖动即取消这一次扩选。 */
@@ -205,27 +218,63 @@ final class TextCopy {
         }
 
         private void expandIfStillHolding() {
+            holdElapsed = true;
             if (!holding || expanded) {
                 return;   // 已抬手/已拖动：保留系统选中的那一段
             }
-            expandOnce();
+            if (view.hasSelection()) {
+                applyWholePath();   // 系统已按词选好：扩到整条
+            } else {
+                applyWholePathFromPress();   // 系统还没落选区：用按下点自己算，别等抬手
+            }
         }
 
+        /** 非按住入口（键盘/无障碍）的兜底：系统已有选区时一步扩到整条。 */
         private void expandOnce() {
-            if (expanded) {
+            if (expanded || !view.isAttachedToWindow() || !view.hasSelection()) {
                 return;
             }
-            expanded = true;
+            applyWholePath();
+        }
+
+        /** 把当前选区两端扩到整条路径；选区不在同一条路径上时保持不动。 */
+        private void applyWholePath() {
             if (!view.isAttachedToWindow() || !view.hasSelection()) {
                 return;
             }
             CharSequence text = view.getText();
+            if (!(text instanceof Spannable)) {
+                return;
+            }
             int[] bounds = wholePathBounds(
                     text, view.getSelectionStart(), view.getSelectionEnd());
-            // textIsSelectable 的控件文本是 SPANNABLE（见 setTextIsSelectable），可直接设选区
-            if (bounds != null && text instanceof Spannable) {
-                Selection.setSelection((Spannable) text, bounds[0], bounds[1]);
+            if (bounds == null) {
+                return;
             }
+            expanded = true;
+            // textIsSelectable 的控件文本是 SPANNABLE（见 setTextIsSelectable），可直接设选区
+            Selection.setSelection((Spannable) text, bounds[0], bounds[1]);
+        }
+
+        /** 按住期满而系统尚未建立选区：按按下点的字符偏移自己算出整条路径并选中。 */
+        private void applyWholePathFromPress() {
+            CharSequence text = view.getText();
+            Layout layout = view.getLayout();
+            if (!(text instanceof Spannable) || layout == null || text.length() == 0) {
+                return;
+            }
+            int line = layout.getLineForVertical((int) pressY);
+            int offset = layout.getOffsetForHorizontal(line, pressX);
+            if (offset < 0 || offset >= text.length()) {
+                return;
+            }
+            int[] bounds = wholePathBounds(text, offset, offset);
+            if (bounds == null) {
+                return;
+            }
+            expanded = true;
+            view.requestFocus();   // 选区要有焦点才画得出来（此时手指仍按着）
+            Selection.setSelection((Spannable) text, bounds[0], bounds[1]);
         }
     }
 
@@ -251,7 +300,7 @@ final class TextCopy {
                     downX = event.getX();
                     downY = event.getY();
                     moved = false;
-                    callback.setHolding(true);
+                    callback.onPressStart(downX, downY);
                     break;
                 case MotionEvent.ACTION_MOVE:
                     if (!moved) {
