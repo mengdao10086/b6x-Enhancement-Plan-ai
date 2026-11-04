@@ -2674,6 +2674,7 @@ public class MainHook implements IXposedHookLoadPackage {
                 Object inst = capturedWaspWingMgr;
                 if (inst != null) {
                     // mode=0 智能温控语义，与固定功率无关，不参与 B6X 的 mode1→2 映射
+                    ensureWakeupDeviceCode(inst);
                     invokeSetRunMode(inst, 0, 0, 0, 0, 0, 0, 0);
                 } else {
                     XposedBridge.log(TAG + " 唤醒序列失败: WaspWingManager 实例未就绪");
@@ -2682,6 +2683,37 @@ public class MainHook implements IXposedHookLoadPackage {
         });
         t.setDaemon(true);
         t.start();
+    }
+
+    /**
+     * 唤醒前置：SDK 的 setRunMode 按 controller.deviceInfo.deviceCode 决定命令数组长度——
+     * b6/b6x 且 mode=0 用 9 字节，未知设备只用 6 字节，末尾却无条件写 index 8，必然越界。
+     * 回传未就绪时 deviceCode 恰为空（connect 默认对象），唤醒命令因此从未发出过；按宿主类型
+     * 补一个已知值让命令能正常构造，真实回传到达后 SDK 会自行覆盖。
+     */
+    private static void ensureWakeupDeviceCode(Object inst) {
+        if (appKind != 6) {
+            return;   // B7X 为混淆类，字段结构不同，保持现状
+        }
+        try {
+            Object ctrl = XposedHelpers.getStaticObjectField(inst.getClass(), dicFieldName());
+            if (ctrl == null) {
+                return;
+            }
+            Object info = XposedHelpers.getObjectField(ctrl, "deviceInfo");
+            if (info == null) {
+                return;
+            }
+            Object code = XposedHelpers.callMethod(info, "getDeviceCode");
+            String s = (code == null) ? "" : String.valueOf(code);
+            if (s.startsWith("b6") || s.startsWith("b7")) {
+                return;   // 已识别型号，不干预
+            }
+            XposedHelpers.setObjectField(info, "deviceCode", "b6x");
+            XposedBridge.log(TAG + " 唤醒前补设备码 b6x（回传未就绪，避免 SDK 命令数组越界）");
+        } catch (Throwable t) {
+            XposedBridge.log(TAG + " 唤醒前补设备码失败: " + t.getMessage());
+        }
     }
 
     /**
