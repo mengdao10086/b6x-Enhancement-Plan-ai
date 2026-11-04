@@ -59,8 +59,7 @@ public class ConfigFormFragment extends Fragment
     private TextView defsView;
     /** 诊断信息头部：数据文件信息（由曲线区回调填充）。 */
     private TextView dataFileView;
-    /** 「清理旧版遗留键」所在行与按钮：仅当最近快照里存在可清理候选时整行可见。 */
-    private View cleanupRow;
+    /** 「清理旧版遗留键」按钮（在诊断信息行的三角左侧）：仅当最近快照里存在可清理候选时可见。 */
     private MaterialButton cleanupButton;
     /** 最近一次上屏的快照（清理按钮据它取候选）。 */
     private Snapshot lastSnapshot;
@@ -89,10 +88,9 @@ public class ConfigFormFragment extends Fragment
         errorText = root.findViewById(R.id.config_error_text);
         defsView = root.findViewById(R.id.config_diag_defs);
         dataFileView = root.findViewById(R.id.config_diag_datafile_text);
-        cleanupRow = root.findViewById(R.id.config_diag_cleanup_row);
         cleanupButton = root.findViewById(R.id.config_diag_cleanup);
         cleanupButton.setOnClickListener(v -> onCleanupClicked());
-        // 清理按钮独立成行、靠右；高度按概要行文字高的 150% 收（用户指定），颜色沿用 TextButton
+        // 清理按钮与「诊断信息」同行：高度按概要行文字高的 150% 收，颜色沿用 TextButton
         fitButtonToLineHeight(cleanupButton, defsView);
         // 滚动条常显（fadeScrollbars=false）+ 加粗到 scrollbar_size，按住即可拖动
         ScrollbarDrag.attach(root);
@@ -343,17 +341,16 @@ public class ConfigFormFragment extends Fragment
      * {@link ConfigStore#removableKeys(Snapshot)}（界面与 c-daemon 都不认的死键 + 可安全删除的遗留族键）。
      */
     private void refreshCleanupButton(@NonNull Snapshot snapshot) {
-        if (cleanupRow == null || cleanupButton == null) {
+        if (cleanupButton == null) {
             return;
         }
         int n = form.store().removableKeys(snapshot).size();
         if (n == 0) {
-            cleanupRow.setVisibility(View.GONE);
+            cleanupButton.setVisibility(View.GONE);
             return;
         }
         cleanupButton.setText(getString(R.string.config_cleanup_button, n));
         cleanupButton.setVisibility(View.VISIBLE);
-        cleanupRow.setVisibility(View.VISIBLE);
     }
 
     /**
@@ -443,7 +440,6 @@ public class ConfigFormFragment extends Fragment
         errorText = null;
         defsView = null;
         dataFileView = null;
-        cleanupRow = null;
         cleanupButton = null;
         lastSnapshot = null;
         chart = null;   // 子 Fragment 实例仍在（视图随本页一起销毁），只是不再从这里驱动它

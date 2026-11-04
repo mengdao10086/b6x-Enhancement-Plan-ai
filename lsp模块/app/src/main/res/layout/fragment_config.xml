@@ -121,6 +121,24 @@
                         android:text="@string/config_diag_title"
                         android:textAppearance="@style/TextAppearance.B6XTempCtrl.SectionTitle" />
 
+                    <!--
+                        清理旧版遗留键：与「诊断信息」同行，落点在小三角左侧；仅当最近快照里存在可清理
+                        候选时才可见（见 ConfigFormFragment#refreshCleanupButton）。按钮自己消费点击，
+                        不会连带触发整行展开/收起。
+                    -->
+                    <com.google.android.material.button.MaterialButton
+                        android:id="@+id/config_diag_cleanup"
+                        style="@style/Widget.Material3.Button.TextButton"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:layout_marginStart="@dimen/space_s"
+                        android:minWidth="0dp"
+                        android:minHeight="0dp"
+                        android:paddingTop="0dp"
+                        android:paddingBottom="0dp"
+                        android:text="@string/config_cleanup_button_plain"
+                        android:visibility="gone" />
+
                     <!-- 展开三角：收起指右、展开由 ConfigDiagnostics 转 90° 指下 -->
                     <ImageView
                         android:id="@+id/config_diag_arrow"
@@ -260,35 +278,6 @@
                         android:layout_marginTop="@dimen/space_s"
                         android:text="@string/config_diag_action_refresh" />
 
-                </LinearLayout>
-
-                <!--
-                    清理旧版遗留键：诊断折叠块下方的独立一行（不随明细收起），靠右。
-                    高度在代码里按概要行文字行高的 150% 设置，颜色沿用原 TextButton 样式。
-                -->
-                <LinearLayout
-                    android:id="@+id/config_diag_cleanup_row"
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:layout_marginTop="@dimen/space_xs"
-                    android:gravity="end|center_vertical"
-                    android:orientation="horizontal"
-                    android:paddingStart="@dimen/card_padding"
-                    android:paddingEnd="@dimen/card_padding"
-                    android:paddingBottom="@dimen/card_padding"
-                    android:visibility="gone">
-
-                    <com.google.android.material.button.MaterialButton
-                        android:id="@+id/config_diag_cleanup"
-                        style="@style/Widget.Material3.Button.TextButton"
-                        android:layout_width="wrap_content"
-                        android:layout_height="wrap_content"
-                        android:minWidth="0dp"
-                        android:minHeight="0dp"
-                        android:paddingTop="0dp"
-                        android:paddingBottom="0dp"
-                        android:text="@string/config_cleanup_button_plain"
-                        android:visibility="gone" />
                 </LinearLayout>
             </LinearLayout>
         </com.google.android.material.card.MaterialCardView>
