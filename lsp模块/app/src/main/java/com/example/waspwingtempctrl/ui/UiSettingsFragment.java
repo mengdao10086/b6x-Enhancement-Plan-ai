@@ -233,7 +233,7 @@ public class UiSettingsFragment extends Fragment
      * 空态提示须留在它上面）。它不放键行（只有按钮），故配置页的键渲染自检不受影响。
      */
     @Override
-    public void onFormBuilt(int groupCount) {
+    public void onFormBuilt(int groupCount, boolean rebuilding) {
         LayoutInflater inflater = getLayoutInflater();
         if (groupCount == 0) {
             TextView empty = new TextView(inflater.getContext());
@@ -244,9 +244,17 @@ public class UiSettingsFragment extends Fragment
             contentBox.addView(empty);
         }
         contentBox.addView(ConfigResetBar.create(inflater, contentBox, this).view());
-        // 内容首次露面淡入（控制器在本回调之后才把内容容器置为可见）：只动 alpha/translationY，不动布局，
-        // 故「建满一次露出」的口径不变——每一帧露出的都是建满的完整内容，只是半透明
-        Motion.revealFadeIn(contentBox);
+        // 首轮不播淡入：这一轮控制器会等首份快照铺满才露（见 revealBuiltForm），一次就是终态；
+        // 视图重建后的那一轮才淡入（控制器在本回调之后才把内容容器置为可见）
+        if (rebuilding) {
+            Motion.revealFadeIn(contentBox);
+        }
+    }
+
+    /** 一参版是接口要求：控制器已统一走两参版，这里按"重建"语义转发。 */
+    @Override
+    public void onFormBuilt(int groupCount) {
+        onFormBuilt(groupCount, true);
     }
 
     /**

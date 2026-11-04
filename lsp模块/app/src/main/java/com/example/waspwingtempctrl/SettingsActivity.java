@@ -1,6 +1,7 @@
 package com.example.waspwingtempctrl;
 
 import android.os.Bundle;
+import android.view.MotionEvent;
 import android.view.View;
 
 import androidx.annotation.Nullable;
@@ -8,6 +9,7 @@ import androidx.appcompat.app.AppCompatActivity;
 import androidx.fragment.app.FragmentManager;
 
 import com.example.waspwingtempctrl.ui.EdgeToEdge;
+import com.example.waspwingtempctrl.ui.SelectionDismiss;
 import com.example.waspwingtempctrl.ui.UiSettingsFragment;
 
 /**
@@ -23,6 +25,15 @@ public class SettingsActivity extends AppCompatActivity {
 
     /** 内容 Fragment 的 tag（重建时按 tag 找回，不重复添加）。 */
     private static final String TAG_UI_SETTINGS = "ui_settings";
+
+    /** 点背景取消选区（与主界面同一套，见 {@link SelectionDismiss}）：不消费事件。 */
+    @Override
+    public boolean dispatchTouchEvent(MotionEvent event) {
+        if (event.getActionMasked() == MotionEvent.ACTION_DOWN) {
+            SelectionDismiss.onDown(event.getRawX(), event.getRawY());
+        }
+        return super.dispatchTouchEvent(event);
+    }
 
     @Override
     protected void onCreate(@Nullable Bundle savedInstanceState) {

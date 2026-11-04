@@ -166,6 +166,16 @@ final class ConfigFormController implements ConfigKeyRow.Host, ConfigWriteQueue.
     /** 曾经定过一次（跨视图重建保持）：视图重建时那份预热快照可能已旧，要补读一次盘。 */
     private boolean everSettled;
 
+    /**
+     * 首轮建表后正在等首份快照再露面（见 {@link #revealBuiltForm}）：只用于默认展开页的首轮。
+     * 期间容器保持 GONE，快照铺满（值 + 输入框宽都已定）后才露，用户不会看到"先空框、后回填"的重排。
+     */
+    private boolean revealPending;
+    /** 等快照露面的兜底上限：读盘失败或 io 线程被占住时按现状露出，不无限空白。 */
+    private static final long REVEAL_SNAPSHOT_TIMEOUT_MS = 300L;
+    /** 兜底那一次延时（一次性、不轮询）：到点仍未露面就露出。 */
+    private final Runnable revealFallback = () -> revealNow(false);
+
     ConfigFormController(@NonNull Page page, @NonNull Context appContext,
                          @Nullable ConfigPreInflater preInflater) {
         this.page = page;
@@ -265,6 +275,14 @@ final class ConfigFormController implements ConfigKeyRow.Host, ConfigWriteQueue.
         // 记账（旁路）：快照到位这一刻（与后面的"建表起点"相减，即"视图与数据谁在等谁"）
         StartupTiming.mark(StartupTiming.MARK_FORM_DATA);
         failureText = failure;
+        if (failure != null) {
+            // 读盘失败：等过快照的那一轮按现状露出（错误态另由 showDefinitionError 承担），不留空白
+            if (revealPending && built && rowsBuiltForCurrentRound()) {
+                revealNow(false);
+            }
+            revealPending = false;
+            main.removeCallbacks(revealFallback);
+        }
         if (snapshot != null) {
             rememberSnapshot(snapshot);
         }
@@ -272,6 +290,9 @@ final class ConfigFormController implements ConfigKeyRow.Host, ConfigWriteQueue.
             applyHeaderValues(snapshot);
             if (rowsBuiltForCurrentRound()) {
                 applySnapshot(snapshot);
+                if (revealPending) {
+                    revealNow(false);   // 等快照的那一轮：铺满即露，宽度已按真值定好
+                }
             }
         }
         buildIfNeeded();
@@ -406,8 +427,29 @@ final class ConfigFormController implements ConfigKeyRow.Host, ConfigWriteQueue.
     /**
      * 参数区露面并置「就绪」：容器可见 + 页面收尾（设置页在这里追加它的重置栏）+ 记账。
      * {@code rebuilding} 透传给页面：首轮不播入场动画，视图重建后的那一轮才播。
+     *
+     * <p><b>首轮 + 默认展开页 + 首份快照未到时不立刻露</b>：行是按"无值"建的，快照一到还要回填并
+     * 重算输入框宽度（尾段贴行右界，宽一变左沿就动）——先露再改就是用户看到的那次横向重排。
+     * 等到铺满再露，整页只出现一次终态。300ms 兜底：读盘失败或 io 线程被占住时按现状露出。
      */
     private void revealBuiltForm(boolean rebuilding) {
+        if (!rebuilding && page.expandsByDefault() && loadedSnapshot == null
+                && failureText == null) {
+            revealPending = true;
+            main.removeCallbacks(revealFallback);
+            main.postDelayed(revealFallback, REVEAL_SNAPSHOT_TIMEOUT_MS);
+            return;
+        }
+        revealNow(rebuilding);
+    }
+
+    /** 真正露出：只在 {@link #revealBuiltForm}、等快照到期与等快照铺满这三条路上调（幂等由调用方保证）。 */
+    private void revealNow(boolean rebuilding) {
+        if (!viewAlive) {
+            return;   // 兜底延时要到视图已销毁：无处可露
+        }
+        revealPending = false;
+        main.removeCallbacks(revealFallback);
         page.onFormBuilt(groups.size(), rebuilding);
         page.cardContainer().setVisibility(View.VISIBLE);   // 都摆好了才露：不出现半成品
         markAfterBuildFrame();
@@ -845,6 +887,8 @@ final class ConfigFormController implements ConfigKeyRow.Host, ConfigWriteQueue.
     /** 页面视图销毁（{@code onDestroyView} 调）：冲刷待写、释放诊断区；下次视图重建再建满。 */
     void detachView() {
         viewAlive = false;
+        revealPending = false;
+        main.removeCallbacks(revealFallback);   // 兜底延时不该落到已销毁的视图上
         if (queue != null) {
             queue.flushNow();
             queue.detach();

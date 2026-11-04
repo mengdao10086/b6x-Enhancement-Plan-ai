@@ -4,6 +4,7 @@ import android.content.Context;
 import android.content.Intent;
 import android.os.Bundle;
 import android.os.Process;
+import android.view.MotionEvent;
 import android.view.View;
 import android.view.ViewTreeObserver;
 
@@ -21,6 +22,7 @@ import com.example.waspwingtempctrl.ui.ConfigPreInflater;
 import com.example.waspwingtempctrl.ui.EdgeToEdge;
 import com.example.waspwingtempctrl.ui.LogFragment;
 import com.example.waspwingtempctrl.ui.Motion;
+import com.example.waspwingtempctrl.ui.SelectionDismiss;
 import com.example.waspwingtempctrl.ui.StatusFragment;
 import com.google.android.material.bottomnavigation.BottomNavigationView;
 
@@ -97,6 +99,18 @@ public class SetupActivity extends AppCompatActivity {
 
     /** 底栏与 pager 互相驱动时的防重入标记（两者任一变化都会回调对方）。 */
     private boolean syncing;
+
+    /**
+     * 在分发前清掉"点背景"留下的选区：文本选中后点空白处取消，不止能靠点别的窗口结束。
+     * 只看 ACTION_DOWN，不消费事件（返回值仍是 {@code super} 的结果）。
+     */
+    @Override
+    public boolean dispatchTouchEvent(MotionEvent event) {
+        if (event.getActionMasked() == MotionEvent.ACTION_DOWN) {
+            SelectionDismiss.onDown(event.getRawX(), event.getRawY());
+        }
+        return super.dispatchTouchEvent(event);
+    }
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {

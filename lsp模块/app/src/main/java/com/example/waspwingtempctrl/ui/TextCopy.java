@@ -10,7 +10,9 @@ import android.view.ActionMode;
 import android.view.HapticFeedbackConstants;
 import android.view.Menu;
 import android.view.MenuItem;
+import android.view.MotionEvent;
 import android.view.View;
+import android.view.ViewConfiguration;
 import android.view.ViewGroup;
 import android.widget.EditText;
 import android.widget.TextView;
@@ -20,6 +22,8 @@ import androidx.annotation.Nullable;
 
 import com.example.waspwingtempctrl.ConfigStore;
 
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Map;
 import java.util.WeakHashMap;
 import java.util.function.Supplier;
@@ -75,6 +79,15 @@ final class TextCopy {
     private static final String KEY_UI_PATH_COPY = "UI_PATH_COPY";
 
     /**
+     * 两段式扩选的第二段时长：系统长按先按词选中一段，<b>继续按住</b>满这么久才扩成整条。
+     * 抬手、超出手指移动阈值（改成拖选）或 ActionMode 结束都会取消这一次计时。
+     */
+    private static final long HOLD_TO_EXPAND_MS = 850L;
+
+    /** 本进程里装过选区回调的控件：点背景时按它找"当前有选区的控件"。只增不减（弱引用随控件回收）。 */
+    private static final Map<TextView, PathSelectionCallback> CALLBACKS = new WeakHashMap<>();
+
+    /**
      * 方案 B：保留系统选择态，只在选区 ActionMode 创建时把选区扩到「当前词所在的整条路径」。
      * 递归处理 root 下所有 {@code textIsSelectable} 的 {@link TextView}（跳过 {@link EditText}）。
      *
@@ -85,7 +98,11 @@ final class TextCopy {
         if (root instanceof TextView && !(root instanceof EditText)) {
             TextView text = (TextView) root;
             if (text.isTextSelectable()) {
-                text.setCustomSelectionActionModeCallback(new PathSelectionCallback(text));
+                PathSelectionCallback callback = new PathSelectionCallback(text);
+                CALLBACKS.put(text, callback);
+                text.setCustomSelectionActionModeCallback(callback);
+                // 只观察按住/抬手与拖动：返回 false，系统选择与手柄拖动原样走（两段式的计时用它）
+                text.setOnTouchListener(new HoldWatcher(callback));
             }
         }
         if (root instanceof ViewGroup) {
@@ -96,12 +113,21 @@ final class TextCopy {
         }
     }
 
-    /** 单个控件的选区回调：每次 ActionMode 只扩一次，用户拖动手柄后不再强制扩选。 */
+    /**
+     * 单个控件的选区回调：<b>两段式</b>——系统长按先按词选中一段，继续按住满 {@link #HOLD_TO_EXPAND_MS}
+     * 才扩成整条路径；抬手或改成拖选即保持系统那一段。每次 ActionMode 至多扩一次。
+     */
     private static final class PathSelectionCallback implements ActionMode.Callback {
 
         private final TextView view;
-        /** 本次 ActionMode 是否已扩过（防止重复 post 再次强设选区）。 */
+        /** 本次 ActionMode 是否已扩过（防止重复计时再次强设选区）。 */
         private boolean expanded;
+        /** 当前 ActionMode（点背景清除时用它结束浮条）；未创建时为 null。 */
+        @Nullable
+        private ActionMode mode;
+        /** 手指是否仍按在控件上：抬手或拖动都会清掉这次"继续按住"的计时。 */
+        private boolean holding;
+        private final Runnable expandAfterHold = this::expandIfStillHolding;
 
         PathSelectionCallback(TextView view) {
             this.view = view;
@@ -110,10 +136,21 @@ final class TextCopy {
         @Override
         public boolean onCreateActionMode(ActionMode mode, Menu menu) {
             expanded = false;
+            this.mode = mode;
             // 开关实时读取（与其它 webui 组界面键同一套），创建当帧即生效
             if (isPathCopyEnabled(view.getContext())) {
-                // 系统在创建回调之后才落定选区，延一帧再扩
-                view.post(this::expandOnce);
+                // 系统在创建回调之后才落定选区，延一帧再起计时：先让用户看到选中的那一段
+                view.post(() -> {
+                    if (expanded) {
+                        return;
+                    }
+                    if (holding) {
+                        view.postDelayed(expandAfterHold, HOLD_TO_EXPAND_MS);
+                    } else {
+                        // 非按住触发（键盘/无障碍等）：退回一步到位，保证整条复制在这些入口仍可用
+                        expandOnce();
+                    }
+                });
             }
             return true;   // 不 menu.clear()：保留系统复制/全选/分享
         }
@@ -130,6 +167,48 @@ final class TextCopy {
 
         @Override
         public void onDestroyActionMode(ActionMode mode) {
+            this.mode = null;
+            holding = false;
+            view.removeCallbacks(expandAfterHold);
+        }
+
+        /** 按住状态由 {@link HoldWatcher} 维护：抬手/拖动即取消这一次扩选。 */
+        void setHolding(boolean value) {
+            holding = value;
+            if (!value) {
+                view.removeCallbacks(expandAfterHold);
+            }
+        }
+
+        /** 当前是否正有选中（点背景清除的判据）。 */
+        boolean isSelecting() {
+            return view.hasSelection();
+        }
+
+        /** 结束选区与浮条：点背景时调用。先清选区再结束 ActionMode，系统回调里不会再触发扩选。 */
+        void clearSelection() {
+            if (!view.hasSelection()) {
+                return;
+            }
+            holding = false;
+            expanded = false;
+            view.removeCallbacks(expandAfterHold);
+            CharSequence text = view.getText();
+            if (text instanceof Spannable) {
+                Selection.removeSelection((Spannable) text);
+            }
+            ActionMode current = mode;
+            mode = null;
+            if (current != null) {
+                current.finish();
+            }
+        }
+
+        private void expandIfStillHolding() {
+            if (!holding || expanded) {
+                return;   // 已抬手/已拖动：保留系统选中的那一段
+            }
+            expandOnce();
         }
 
         private void expandOnce() {
@@ -148,6 +227,85 @@ final class TextCopy {
                 Selection.setSelection((Spannable) text, bounds[0], bounds[1]);
             }
         }
+    }
+
+    /**
+     * 按住观察者：只记录按下/移动/抬起，<b>不消费事件</b>（返回 false，系统选择与手柄拖动原样走）。
+     * 移动超出触摸阈值即视为用户改成拖选，取消这次自动扩选。
+     */
+    private static final class HoldWatcher implements View.OnTouchListener {
+
+        private final PathSelectionCallback callback;
+        private float downX;
+        private float downY;
+        private boolean moved;
+
+        HoldWatcher(PathSelectionCallback callback) {
+            this.callback = callback;
+        }
+
+        @Override
+        public boolean onTouch(View v, MotionEvent event) {
+            switch (event.getActionMasked()) {
+                case MotionEvent.ACTION_DOWN:
+                    downX = event.getX();
+                    downY = event.getY();
+                    moved = false;
+                    callback.setHolding(true);
+                    break;
+                case MotionEvent.ACTION_MOVE:
+                    if (!moved) {
+                        float dx = event.getX() - downX;
+                        float dy = event.getY() - downY;
+                        int slop = ViewConfiguration.get(v.getContext()).getScaledTouchSlop();
+                        if (dx * dx + dy * dy > (float) slop * slop) {
+                            moved = true;
+                            callback.setHolding(false);
+                        }
+                    }
+                    break;
+                case MotionEvent.ACTION_UP:
+                case MotionEvent.ACTION_CANCEL:
+                    callback.setHolding(false);
+                    break;
+                default:
+                    break;
+            }
+            return false;
+        }
+    }
+
+    /**
+     * 点背景清除选区：Activity 在 {@code dispatchTouchEvent} 的 ACTION_DOWN 上调用。
+     * 触点落在任一"有选区且可见"的控件内就什么都不做（用户还在操作那一段）；否则清掉所有选区并结束浮条。
+     */
+    static void dismissSelectionsOutside(float rawX, float rawY) {
+        // 先复制一份：WeakHashMap 在迭代期间可能因 GC 清理条目而变结构
+        List<Map.Entry<TextView, PathSelectionCallback>> entries =
+                new ArrayList<>(CALLBACKS.entrySet());
+        List<PathSelectionCallback> selecting = new ArrayList<>();
+        for (Map.Entry<TextView, PathSelectionCallback> entry : entries) {
+            TextView text = entry.getKey();
+            PathSelectionCallback callback = entry.getValue();
+            if (text == null || callback == null || !callback.isSelecting() || !text.isShown()) {
+                continue;
+            }
+            if (hits(text, rawX, rawY)) {
+                return;   // 点在选区内：这一段还在操作，不动
+            }
+            selecting.add(callback);
+        }
+        for (PathSelectionCallback callback : selecting) {
+            callback.clearSelection();
+        }
+    }
+
+    /** 触点（屏幕坐标）是否落在控件矩形内。 */
+    private static boolean hits(@NonNull TextView view, float rawX, float rawY) {
+        int[] location = new int[2];
+        view.getLocationOnScreen(location);
+        return rawX >= location[0] && rawX < location[0] + view.getWidth()
+                && rawY >= location[1] && rawY < location[1] + view.getHeight();
     }
 
     /** 开关默认开启；读取失败也按开启处理（不因配置通道异常丢掉路径复制）。 */
