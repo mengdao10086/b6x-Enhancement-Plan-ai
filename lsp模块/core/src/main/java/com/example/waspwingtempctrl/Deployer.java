@@ -1250,7 +1250,10 @@ public final class Deployer {
                 // 看门狗 shell 的 exe 都是 /system/bin/sh，身份只由「某参数恰好等于候选脚本路径」定
                 // （整行相等、非子串；binary 语义不依赖 grep）。见 §2.3
                 + "wd_match() {\n"
-                + "    a=$(tr '\\000' '\\n' < \"/proc/$1/cmdline\" 2>/dev/null)\n"
+                // cmdline 读取必须有上限：直接把 /proc/<pid>/cmdline 接到 tr 时，异常对象上曾出现
+                // tr 持续空转（单核满载、脚本被拖到超时且 tr 残留）；先用 head 限量再转义。
+                + "    [ -r \"/proc/$1/cmdline\" ] || return 1\n"
+                + "    a=$(head -c 8192 \"/proc/$1/cmdline\" 2>/dev/null | tr '\\000' '\\n')\n"
                 + "    case \"$a\" in *" + SCRIPT_NAME + "*) ;; *) return 1 ;; esac\n"
                 + "    printf '%s\\n' \"$a\" | grep -qx -- \"" + SERVICE_D_MODERN + "/" + SCRIPT_NAME + "\""
                 + " || printf '%s\\n' \"$a\" | grep -qx -- \""
