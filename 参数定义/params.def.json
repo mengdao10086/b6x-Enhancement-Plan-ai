@@ -2156,6 +2156,28 @@
       "requires": [],
       "daemonConsumes": false,
       "fields": null
+    },
+    {
+      "key": "UI_PATH_HOLD_MS",
+      "group": "webui",
+      "role": "setting",
+      "type": "int",
+      "label": "路径扩选按住",
+      "desc": "长按路径后，继续按住多久（毫秒）才把整条路径一起选中；越短越快扩展，越长越不容易误触发。仅界面读取。",
+      "docOrder": 64,
+      "docDesc": "路径整条扩选的第二段时长（毫秒，100~2000，默认 400）：系统长按先选中一段，继续按住超过该时长才扩到整条；抬手或拖动即保持系统选中的那一段。仅界面读取，守护进程忽略",
+      "confNote": [
+        "路径扩选按住（毫秒，100~2000）：默认 400；长按选中路径后继续按住多久才扩成整条"
+      ],
+      "unit": "毫秒",
+      "unitNote": "",
+      "default": 400,
+      "factory": 400,
+      "min": 100,
+      "max": 2000,
+      "requires": ["UI_PATH_COPY"],
+      "daemonConsumes": false,
+      "fields": null
     }
   ],
   "conf": {

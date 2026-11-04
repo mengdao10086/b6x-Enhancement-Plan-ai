@@ -83,7 +83,11 @@ final class TextCopy {
      * 两段式扩选的第二段时长：系统长按先按词选中一段，<b>继续按住</b>满这么久才扩成整条。
      * 抬手、超出手指移动阈值（改成拖选）或 ActionMode 结束都会取消这一次计时。
      */
-    private static final long HOLD_TO_EXPAND_MS = 850L;
+    private static final long DEFAULT_HOLD_TO_EXPAND_MS = 400L;
+    /** 「路径扩选按住」开关键与取值范围（定义在 {@code params.def.json} 的 webui 组，仅界面读取）。 */
+    private static final String KEY_UI_PATH_HOLD_MS = "UI_PATH_HOLD_MS";
+    private static final int HOLD_TO_EXPAND_MIN_MS = 100;
+    private static final int HOLD_TO_EXPAND_MAX_MS = 2000;
 
     /** 本进程里装过选区回调的控件：点背景时按它找"当前有选区的控件"。只增不减（弱引用随控件回收）。 */
     private static final Map<TextView, PathSelectionCallback> CALLBACKS = new WeakHashMap<>();
@@ -181,7 +185,7 @@ final class TextCopy {
             holdElapsed = false;
             holding = true;
             view.removeCallbacks(expandAfterHold);
-            long delay = ViewConfiguration.getLongPressTimeout() + HOLD_TO_EXPAND_MS;
+            long delay = ViewConfiguration.getLongPressTimeout() + holdToExpandMs(view.getContext());
             view.postDelayed(expandAfterHold, delay);
         }
 
@@ -355,6 +359,17 @@ final class TextCopy {
         view.getLocationOnScreen(location);
         return rawX >= location[0] && rawX < location[0] + view.getWidth()
                 && rawY >= location[1] && rawY < location[1] + view.getHeight();
+    }
+
+    /** 第二段时长实时读取；越界按定义范围钳制，读取失败或没配走默认 400ms。 */
+    private static long holdToExpandMs(@NonNull Context context) {
+        try {
+            ConfigStore.Value value = ConfigStore.get(context).get(KEY_UI_PATH_HOLD_MS);
+            int ms = value == null ? (int) DEFAULT_HOLD_TO_EXPAND_MS : value.intAt(0);
+            return Math.max(HOLD_TO_EXPAND_MIN_MS, Math.min(HOLD_TO_EXPAND_MAX_MS, ms));
+        } catch (RuntimeException e) {
+            return DEFAULT_HOLD_TO_EXPAND_MS;
+        }
     }
 
     /** 开关默认开启；读取失败也按开启处理（不因配置通道异常丢掉路径复制）。 */
