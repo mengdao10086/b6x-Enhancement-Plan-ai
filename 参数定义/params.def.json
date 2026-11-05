@@ -443,6 +443,35 @@
       ]
     },
     {
+      "key": "RAMP_DISPATCH",
+      "group": "perf",
+      "role": "setting",
+      "type": "switch",
+      "label": "平滑下发",
+      "desc": "=1 时把每个控制周期要下发的风扇与制冷变化拆成 5 次、每秒一次送出，过渡更平滑；=0 时每周期一次下发。",
+      "docOrder": 33,
+      "docDesc": "平滑下发开关（0/1）。=1：每个 5 秒控制周期的限速结果拆成 5 次，每秒下发一次，每次变化量 = 本周期限速上限 ÷ 5（风扇与制冷各自独立计算）；中途到达目标即提前结束本轮，剩余次数作废。=0：每个控制周期一次下发，与旧行为一致。判定层（防抖、限速、去重、回传比对）不受影响，仍每 5 秒一次。",
+      "confSection": "通用参数",
+      "confNote": [
+        "--- 下发节拍 ---",
+        "=1 每个 5 秒控制周期拆成 5 次下发（每秒一次），风扇与制冷过渡更平滑",
+        "=0 每个控制周期一次下发，与旧行为一致"
+      ],
+      "unit": "",
+      "unitNote": "开关，取值 0/1，无单位",
+      "default": 1,
+      "defaultNote": "代码默认值。配置文件缺失或未写入时守护进程按 1（开启）",
+      "factory": 1,
+      "factoryNote": "出厂值",
+      "min": 0,
+      "max": 1,
+      "requires": [
+        "PERF_ENABLED"
+      ],
+      "daemonConsumes": true,
+      "fields": null
+    },
+    {
       "key": "RECONNECT_KEEP_CYCLES",
       "group": "perf",
       "role": "setting",
@@ -2271,6 +2300,7 @@
       "PERF_ENABLED": ["perf_enabled"],
       "RATE_LIMIT_FAN": ["RATE_LIMIT_FAN", "RATE_LIMIT_FAN_DEBOUNCE", "fan_rpm_round_unit"],
       "RATE_LIMIT_COLD": ["RATE_LIMIT_COLD", "RATE_LIMIT_COLD_MULT", "COLD_DEADZONE"],
+      "RAMP_DISPATCH": ["ramp_dispatch"],
       "RECONNECT_KEEP_CYCLES": ["reconnect_keep_cycles"],
       "BATT_BASELINE": ["BATT_BASELINE"],
       "CPU_FILTER_ALPHA": ["CPU_FILTER_ALPHA"],

@@ -91,8 +91,8 @@ public class MainHook implements IXposedHookLoadPackage {
     private static final ConcurrentHashMap<Object, BluetoothGatt> connectedControllers = new ConcurrentHashMap<>();
     private static volatile int lastBcastColdLv = -1, lastBcastRpmLv = -1; // 最近广播下发的目标制冷/风扇（锁死检测基准）
     private static volatile int stallLastCold = -1, stallLastRpm = -1; // 回传停滞快照（锁死检测）
-    private static volatile int dispatchStallCount = 0;                // 回传停滞期间累计的下发次数（达 3 次 → 锁死）
-    private static final int DISPATCH_STALL_LIMIT = 3;                 // 连续 3 次参数下发后回传仍停滞 → 锁死
+    private static volatile long dispatchStallSinceMs = 0;             // 回传停滞起点（ms）；0=当前不在停滞态
+    private static final long DISPATCH_STALL_TIMEOUT_MS = 15000;       // 回传停滞持续该时长 → 锁死
     private static volatile long lastForceReconnectAt = 0;              // forceReconnect 防抖（10s 内最多一次）
     private static final long FORCE_RECONNECT_MIN_INTERVAL_MS = 10000;
 
@@ -121,7 +121,8 @@ public class MainHook implements IXposedHookLoadPackage {
     private static volatile boolean zeroPacketLogged = false;   // 首个全 0 包是否已记录
 
     // ========== runFetchLoop 崩溃兜底 ==========
-    private static final int QUEUE_STALL_THRESHOLD = 6;           // queue 堆积 > 6 条（≈30s 下发量）= runFetchLoop 疑似崩溃
+    private static volatile long queueNonEmptySinceMs = 0;        // 队列持续非空起点（ms）；0=队列为空
+    private static final long QUEUE_STALL_TIMEOUT_MS = 30000;     // 队列持续非空该时长 = runFetchLoop 疑似崩溃
     private static final long QUEUE_TAKEOVER_MS = 5000;           // 守护线程接管判定：同一队首停留超 5s 才消费
     private static volatile boolean consumerThreadStarted = false; // 守护消费线程已启动（幂等，进程内一次）
     private static volatile long consumerThreadStartedAt = 0;      // 守护线程启动防抖（10s 内不重复触发）
@@ -2506,7 +2507,6 @@ public class MainHook implements IXposedHookLoadPackage {
                 // 基准取模块侧原始 coldOC/windOC，不取换算后的参数槽，否则目标会错位。
                 lastBcastColdLv = coldOC;
                 lastBcastRpmLv = (mode == 0) ? windLevel : windOC;
-                dispatchStallCount++;   // 锁死检测：累计下发次数（回传到位/变化时由 checkCommandStall 清零）
                 // 下发成功日志每连最多 DIAG_LOG_MAX_PER_CONN 条
                 if (setRunModeLogCount < DIAG_LOG_MAX_PER_CONN) {
                     setRunModeLogCount++;
@@ -2640,7 +2640,7 @@ public class MainHook implements IXposedHookLoadPackage {
             lastWakeupAttemptAt = now;
             reconnectPending = true;      // 重置等待，唤醒后重新计时
             connectStartedAt = now;
-            dispatchStallCount = 0;
+            dispatchStallSinceMs = 0;
             XposedBridge.log(TAG + " 设备无回传（重连后 " + INFO_STALE_AFTER_MS / 1000
                     + "s 无新数据），尝试唤醒序列 mode0→1");
             invokeDeviceWakeup();
@@ -2651,7 +2651,7 @@ public class MainHook implements IXposedHookLoadPackage {
             stallReconnectCount++;
             reconnectPending = true;
             connectStartedAt = now;
-            dispatchStallCount = 0;
+            dispatchStallSinceMs = 0;
             XposedBridge.log(TAG + " 设备无回传重连 #" + stallReconnectCount + "/" + STALL_RECONNECT_MAX
                     + "（唤醒无效），触发重连");
             forceReconnect();
@@ -2718,13 +2718,14 @@ public class MainHook implements IXposedHookLoadPackage {
 
     /**
      * 锁死检测——双信号并行判断、独立处置：
-     * ① 队列堆积 > 阈值 → runFetchLoop 疑似崩溃，启动守护线程接管；
-     * ② 回传停滞且累计 3 次下发未生效 → 强制重连；两信号可同时触发。
+     * ① 队列持续非空超时 → runFetchLoop 疑似崩溃，启动守护线程接管；
+     * ② 回传停滞持续超时 → 强制重连；两信号可同时触发。
+     * 两者都按时间窗口判定，与下发频率无关。
      */
     private static void checkCommandStall() {
         // 设备固件锁死已判定 → 完全退出锁死检测，旧值停滞判定不再触发 forceReconnect
-        if (deviceLockedAlerted) { dispatchStallCount = 0; return; }
-        if (!bleConnected || lastWaspWingInfo == null) { dispatchStallCount = 0; return; }
+        if (deviceLockedAlerted) { dispatchStallSinceMs = 0; return; }
+        if (!bleConnected || lastWaspWingInfo == null) { dispatchStallSinceMs = 0; return; }
         checkZeroInfoTimeout();
         try {
             // ═══ 回传新鲜度验证（先于值停滞判定）═══
@@ -2738,33 +2739,41 @@ public class MainHook implements IXposedHookLoadPackage {
             int rpm = ((Number) XposedHelpers.callMethod(lastWaspWingInfo, "getRealWindLevel")).intValue();
             // 回传已到位（与最近下发目标一致）→ 完全正常，清零
             if (cold == lastBcastColdLv && rpm == lastBcastRpmLv) {
-                dispatchStallCount = 0;
+                dispatchStallSinceMs = 0;
                 stallLastCold = cold;
                 stallLastRpm = rpm;
                 return;
             }
-            // ═══ 双信号并行判断、独立处置 ═══
-            boolean queueStalled = getCommandQueueSize() > QUEUE_STALL_THRESHOLD;
-            boolean deviceStalled = (cold == stallLastCold && rpm == stallLastRpm
-                    && dispatchStallCount >= DISPATCH_STALL_LIMIT);
+            long now = System.currentTimeMillis();
 
-            // ① 队列堆积 → 消费协程疑似崩溃，守护线程接管消费（不再依赖重连）
-            if (queueStalled) startConsumerThreadIfNeeded();
-            // ② 回传停滞 ≥ 3 次下发 → 连接/设备问题，强制重连（与 ① 可同时触发）
-            if (deviceStalled) {
-                XposedBridge.log(TAG + " 锁死检测: " + DISPATCH_STALL_LIMIT + " 次下发后回传停滞 冷" + cold
-                        + " RPM" + rpm + " ≠ 目标 冷" + lastBcastColdLv + " RPM" + lastBcastRpmLv
-                        + "，触发重连自愈");
-                dispatchStallCount = 0;
-                forceReconnect();
+            // ① 队列持续非空超时 → 消费协程疑似崩溃
+            if (getCommandQueueSize() > 0) {
+                if (queueNonEmptySinceMs == 0) queueNonEmptySinceMs = now;
+            } else {
+                queueNonEmptySinceMs = 0;
             }
-            // 两个信号均未触发：回传在变 → 追赶中，清零；停滞但未满 3 次 → 继续累计
-            if (!queueStalled && !deviceStalled) {
-                if (cold != stallLastCold || rpm != stallLastRpm) {
-                    stallLastCold = cold;
-                    stallLastRpm = rpm;
-                    dispatchStallCount = 0;
-                }
+            boolean queueStalled = queueNonEmptySinceMs != 0
+                    && now - queueNonEmptySinceMs >= QUEUE_STALL_TIMEOUT_MS;
+
+            // ② 回传停滞持续超时 → 连接/设备问题
+            if (cold == stallLastCold && rpm == stallLastRpm) {
+                if (dispatchStallSinceMs == 0) dispatchStallSinceMs = now;
+            } else {
+                stallLastCold = cold;
+                stallLastRpm = rpm;
+                dispatchStallSinceMs = 0;
+            }
+            boolean deviceStalled = dispatchStallSinceMs != 0
+                    && now - dispatchStallSinceMs >= DISPATCH_STALL_TIMEOUT_MS;
+
+            if (queueStalled) startConsumerThreadIfNeeded();
+            if (deviceStalled) {
+                XposedBridge.log(TAG + " 锁死检测: 回传停滞 " + DISPATCH_STALL_TIMEOUT_MS / 1000
+                        + "s 冷" + cold + " RPM" + rpm
+                        + " ≠ 目标 冷" + lastBcastColdLv + " RPM" + lastBcastRpmLv
+                        + "，触发重连自愈");
+                dispatchStallSinceMs = 0;
+                forceReconnect();
             }
         } catch (Throwable t) { /* 回传读取失败忽略 */ }
     }
@@ -2857,8 +2866,8 @@ public class MainHook implements IXposedHookLoadPackage {
             t.setDaemon(true);
             t.start();
             consumerThreadStarted = true;
-            XposedBridge.log(TAG + " 守护消费线程已启动（runFetchLoop 崩溃接管，queue>"
-                    + QUEUE_STALL_THRESHOLD + "）");
+            XposedBridge.log(TAG + " 守护消费线程已启动（runFetchLoop 崩溃接管，队列持续非空>"
+                    + QUEUE_STALL_TIMEOUT_MS / 1000 + "s）");
         } catch (Throwable t) {
             XposedBridge.log(TAG + " 守护消费线程启动失败: " + t.getMessage());
         }

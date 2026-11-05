@@ -6,7 +6,7 @@
 #define PARAMS_GENERATED_H
 
 /* 键数：守护进程消费 / 仅界面读取 */
-#define CFG_DAEMON_KEY_COUNT 49
+#define CFG_DAEMON_KEY_COUNT 50
 #define CFG_WEBUI_KEY_COUNT 8
 
 /* 性能层单值键表（PERF_ENABLED=1）→ INT_CFG_KEYS[]：X(键名, C 变量, min, max) */
@@ -169,6 +169,7 @@
     X(RATE_LIMIT_COLD, 25) \
     X(RATE_LIMIT_COLD_MULT, 10) \
     X(COLD_DEADZONE, 3) \
+    X(ramp_dispatch, 1) \
     X(reconnect_keep_cycles, 3) \
     X(BATT_BASELINE, 350) \
     X(CPU_FILTER_ALPHA, 25) \

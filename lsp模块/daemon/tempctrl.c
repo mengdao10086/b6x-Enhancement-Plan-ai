@@ -153,6 +153,7 @@ static int RATE_LIMIT_COLD = 25;   // 制冷强度升降速基础值：升速=ba
 static int RATE_LIMIT_COLD_MULT = 10;  // 制冷强度倍率：升速/降速 = base ± dev(0.1°C) × mult / 10
 static int COLD_DEADZONE = 3;          // 制冷最小变化幅度（RATE_LIMIT_COLD 第三值）：与散热器实际 |差值| < 该值时不升不降；豁免有方向（升只看距上限、降只看距下限，余量 < ceil(死区×1.5) 才豁免）
 static int RATE_LIMIT_FAN_DEBOUNCE = 50;   // RATE_LIMIT_FAN 第二值：防抖阈值（RPM/周期，0=关闭防抖）；变化量 ≤ 阈值且距方向端点（升=最高/降=最低）≥ 阈值×1.5（向上取整）时保持不动
+static int cold_rate_bound = 0;        // 本周期制冷方向对应的限速上限（升=up 降=down，供拆分步长使用）
 static int cycle_batt_temp = -1;       // 本周期电池温度（-1=未就绪）
 // --- 1s 采集缓存：5s 控制块直接读缓存，不再重复读 sysfs/状态文件 ---
 static int cached_batt_raw = -1;   // 电池温度（0.1°C），保留上次成功值抗抖
@@ -162,6 +163,21 @@ static int cached_cpu_now  = -1;   // CPU 最高温度（0.1°C），保留上�
 // 始终向目标值（PID 目标制冷 / 风扇目标）靠拢，每周期最多变动速率限制的量
 static int actual_rpm = -1;            // 当前实际风扇转速（RPM）
 static int actual_cold = -1;           // 当前实际制冷片强度
+
+// ======================== 平滑下发（RAMP_DISPATCH） ========================
+// 判定层（防抖/限速/去重/回传比对）仍是每 5s 一次；通过后只登记本轮目标，
+// 由 1s 主循环每拍送出一份。关闭时等价于每个控制周期一次下发。
+#define RAMP_SLOTS 5                   // 每控制周期固定拆 5 份，与 1s 主循环节拍对齐
+static int ramp_dispatch = 1;          // RAMP_DISPATCH：1=拆 5 次下发，0=每周期一次
+static int ramp_slots_left = 0;        // 本轮剩余份数（0=无待发）
+static int ramp_remain_rpm  = 0;       // 剩余风扇变化量（带符号）
+static int ramp_remain_cold = 0;       // 剩余制冷变化量（带符号）
+static int ramp_step_rpm    = 0;       // 每份风扇步长（正数）
+static int ramp_step_cold   = 0;       // 每份制冷步长（正数）
+static int ramp_target_rpm  = 0;       // 本轮风扇目标（已取整的出值）
+static int ramp_mode = 1, ramp_target_temp = 5, ramp_wl = 0;   // 本轮下发参数
+static int sent_rpm  = -1;             // 最近一次实际广播的风扇值（拆分起点；-1=未知）
+static int sent_cold = -1;             // 最近一次实际广播的制冷值（拆分起点；-1=未知）
 
 // ======================== 控制周期计数器 ========================
 static int pid_ctrl_cycles = 0;               // PID 控制周期单调计数器（pid_cycle 每次 +1）
@@ -868,6 +884,7 @@ static int last_sysfs_enabled = -1;   // -1=未加载过；否则=上一轮 SYSF
 /** PERF 层 int 取值位 → 代码默认值（表见 params_generated.h 的 CFG_PERF_DEFAULTS） */
 static void reset_perf_layer_defaults(void) {
     CFG_PERF_DEFAULTS(CFG_RESET_ROW)
+    ramp_slots_left = 0;   // 默认值表只复位取值位，未走完的本轮一并丢弃
     // 削减量是"相对生效上限"的累减量：上限复位后基线失效，连同两个冷却计数一并清零。
     // PID 运行态（积分/动态目标等）不动——那是运行状态，不是配置。
     hot_derate = 0;
@@ -1063,6 +1080,9 @@ static int load_config(const char *path) {
 
         // 旧键兼容（永久）：KI_CUT_<簇号>（三元组）与已废弃的 KI_CUT_SMOOTH，见 parse_legacy_pidcut_cfg
         if (parse_legacy_pidcut_cfg(key, val_str)) continue;
+
+        // 平滑下发开关（switch 型，不进 int 表）
+        if (strcmp(key, "RAMP_DISPATCH") == 0) { ramp_dispatch = clamp(atoi(val_str), 0, 1); continue; }
 
         // 表驱动单值 → 分段函数（PID/通用），键互不重叠、唯一命中
         if (parse_int_cfg(key, val)) continue;
@@ -2335,8 +2355,37 @@ static int wait_child_timeout(pid_t pid, int *out_status) {
     return 1;
 }
 
+// ---- 非阻塞广播：fork 后不等待，由主循环每拍回收 ----
+// 每秒一条时同步 wait 会把 1s 节拍拖到 1.5~2s，故改异步；错误日志在回收时补记。
+#define AM_PENDING_MAX 8
+static pid_t  am_pending_pid[AM_PENDING_MAX];
+static time_t am_pending_at[AM_PENDING_MAX];
+static int    am_pending_n = 0;
+
+/** 回收已结束的 am 子进程；未退出的超过 3 秒强杀，日志口径与原同步等待一致。 */
+static void reap_am_children(void) {
+    time_t now = time(NULL);
+    for (int i = 0; i < am_pending_n; ) {
+        int status = 0;
+        pid_t r = waitpid(am_pending_pid[i], &status, WNOHANG);
+        if (r == 0) {
+            if (now - am_pending_at[i] < 3) { i++; continue; }
+            kill(am_pending_pid[i], SIGKILL);
+            waitpid(am_pending_pid[i], NULL, 0);
+            write_log("am broadcast 超时");
+        } else if (r > 0) {
+            if (WIFEXITED(status) && WEXITSTATUS(status) != 0)
+                write_log("am broadcast 失败：退出码 %d（广播未送达）", WEXITSTATUS(status));
+            else if (WIFSIGNALED(status))
+                write_log("am broadcast 异常终止：信号 %d", WTERMSIG(status));
+        }
+        am_pending_pid[i] = am_pending_pid[--am_pending_n];
+        am_pending_at[i]  = am_pending_at[am_pending_n];
+    }
+}
+
 /**
- * 通过 am broadcast 下发控制参数到 LSPosed 模块（fork+exec，3s 超时）
+ * 通过 am broadcast 下发控制参数到 LSPosed 模块（fork+exec，非阻塞）
  */
 static void send_am_broadcast(int mode, int target, int windOC, int coldOC, int windLevel) {
     // 取值顺序必须与 BROADCAST_EXTRAS 一致（前 5 项来自形参，后 2 项固定 0）
@@ -2379,19 +2428,19 @@ static void send_am_broadcast(int mode, int target, int windOC, int coldOC, int 
         execv(AM_BIN, argv);
         _exit(127);
     }
-    // 父进程：限时（3 秒）等待子进程；超时/异常只记日志、不影响主循环。
-    int status;
-    if (!wait_child_timeout(pid, &status)) {
-        write_log("am broadcast 超时");
-    } else if (WIFEXITED(status) && WEXITSTATUS(status) != 0) {
-        // am 退出码非零 → 广播未送达，需让故障可见
-        write_log("am broadcast 失败：退出码 %d（广播未送达）", WEXITSTATUS(status));
-    } else if (WIFSIGNALED(status)) {
-        write_log("am broadcast 异常终止：信号 %d", WTERMSIG(status));
-    } else {
-        debug_log(debug_exec, "am broadcast 已发送 mode=%d target=%d windOC=%d coldOC=%d windLevel=%d",
-                  mode, target, windOC, coldOC, windLevel);
+    // 父进程：不等待，登记后立即返回；退出状态由 reap_am_children 在主循环每拍回收。
+    reap_am_children();
+    if (am_pending_n >= AM_PENDING_MAX) {   // 池满：强杀最旧一条，避免无限堆积
+        kill(am_pending_pid[0], SIGKILL);
+        waitpid(am_pending_pid[0], NULL, 0);
+        am_pending_pid[0] = am_pending_pid[--am_pending_n];
+        am_pending_at[0]  = am_pending_at[am_pending_n];
     }
+    am_pending_pid[am_pending_n] = pid;
+    am_pending_at[am_pending_n]  = time(NULL);
+    am_pending_n++;
+    debug_log(debug_exec, "am broadcast 已派发 mode=%d target=%d windOC=%d coldOC=%d windLevel=%d",
+              mode, target, windOC, coldOC, windLevel);
 }
 
 /**
@@ -2419,6 +2468,7 @@ static void rate_limit_cold(int desired_cold) {
     int fan_step, cold_up, cold_down;
     calc_dynamic_rates(&fan_step, &cold_up, &cold_down);
     int old_cold = actual_cold;
+    cold_rate_bound = (desired_cold >= old_cold) ? cold_up : cold_down;   // 方向对应的上限，供平滑下发拆步长
     rate_limit(&actual_cold, desired_cold, cold_up, cold_down);
     debug_log(debug_exec, "cold 限速 %d→%d desired=%d（升%d 降%d）",
               old_cold, actual_cold, desired_cold, cold_up, cold_down);
@@ -3782,7 +3832,31 @@ static int apply_gear_direct(int mode, int target,
               BATT_BASELINE / 10, dev_10 / 10.0f,
               device_tag_of(active_device),
               cold, hot_deg, send_rpm);
-    send_am_broadcast(mode, target, send_rpm, cold, wl);
+
+    // 平滑下发：判定通过后只登记本轮目标，由 1s 主循环按 RAMP_SLOTS 份送出。
+    // 不拆分的三种情况：开关关闭、起点未知（首次 / 长断连后）、本轮无变化；
+    // 热端过温下压是最高优先级保护，也不拆分，保持原来一步到位。
+    int ramp_able = ramp_dispatch && !hot_forced_down && sent_rpm >= 0 && sent_cold >= 0
+                    && (send_rpm != sent_rpm || cold != sent_cold);
+    if (ramp_able) {
+        ramp_mode        = mode;
+        ramp_target_temp = target;
+        ramp_wl          = wl;
+        ramp_target_rpm  = send_rpm;
+        ramp_remain_rpm  = send_rpm - sent_rpm;
+        ramp_remain_cold = cold - sent_cold;
+        // 每份步长取「本周期限速上限 / 份数」，不是「目标差 / 份数」
+        ramp_step_rpm    = RATE_LIMIT_FAN / RAMP_SLOTS;
+        ramp_step_cold   = cold_rate_bound / RAMP_SLOTS;
+        if (ramp_step_rpm  < 1) ramp_step_rpm  = 1;
+        if (ramp_step_cold < 1) ramp_step_cold = 1;
+        ramp_slots_left  = RAMP_SLOTS;
+    } else {
+        send_am_broadcast(mode, target, send_rpm, cold, wl);
+        sent_rpm        = send_rpm;
+        sent_cold       = cold;
+        ramp_slots_left = 0;
+    }
 
     last_bcast_valid   = 1;
     last_mode          = mode;
@@ -3791,6 +3865,44 @@ static int apply_gear_direct(int mode, int target,
     last_cold          = cold;
     last_wind_level    = wl;
     return 1;
+}
+
+/**
+ * 平滑下发：送出一份。由 1s 主循环每拍调用，判定层不参与。
+ * 每次走 min(每份步长, 剩余量)；到达目标即结束本轮，剩余份数作废。
+ */
+static void ramp_tick(void) {
+    if (ramp_slots_left <= 0) return;
+
+    int step_r = ramp_step_rpm;
+    if (abs(ramp_remain_rpm) < step_r) step_r = abs(ramp_remain_rpm);
+    if (ramp_remain_rpm < 0) step_r = -step_r;
+
+    int step_c = ramp_step_cold;
+    if (abs(ramp_remain_cold) < step_c) step_c = abs(ramp_remain_cold);
+    if (ramp_remain_cold < 0) step_c = -step_c;
+
+    sent_rpm         += step_r;
+    sent_cold        += step_c;
+    ramp_remain_rpm  -= step_r;
+    ramp_remain_cold -= step_c;
+    ramp_slots_left--;
+
+    int done = (ramp_remain_rpm == 0 && ramp_remain_cold == 0);
+    int out_rpm = sent_rpm;
+    if (done) {
+        out_rpm  = ramp_target_rpm;   // 最后一份直接落目标，消除取整累积误差
+        sent_rpm = ramp_target_rpm;
+    } else {
+        int u = (fan_rpm_round_unit > 0) ? fan_rpm_round_unit : 1;
+        out_rpm = ((sent_rpm + u / 2) / u) * u;
+    }
+
+    send_am_broadcast(ramp_mode, ramp_target_temp, out_rpm, sent_cold, ramp_wl);
+    debug_log(debug_exec, "平滑下发 第%d/%d份 冷%d RPM%d（剩余 冷%d RPM%d）",
+              RAMP_SLOTS - ramp_slots_left, RAMP_SLOTS,
+              sent_cold, out_rpm, ramp_remain_cold, ramp_remain_rpm);
+    if (done) ramp_slots_left = 0;
 }
 
 /**
@@ -3946,6 +4058,8 @@ static int try_align_actual(void) {
     if (report_ok) {
         actual_cold = (cooler_cold_real >= COLD_MIN) ? cooler_cold_real : pid_cold_min;
         actual_rpm = (cooler_rpm_real >= fan_rpm_min) ? cooler_rpm_real : fan_rpm_min;
+        sent_cold = actual_cold;   // 平滑下发起点：以回传值为准，首发从此渐变
+        sent_rpm  = actual_rpm;
         write_log("回传就绪对齐 冷=%d rpm=%d", actual_cold, actual_rpm);
         pending_align = 0;
         return 1;
@@ -3953,6 +4067,8 @@ static int try_align_actual(void) {
     if (pending_align_since > 0 && time(NULL) - pending_align_since >= ALIGN_WAIT_TIMEOUT) {
         actual_cold = pid_cold_min;
         actual_rpm = fan_rpm_min;
+        sent_cold = actual_cold;
+        sent_rpm  = actual_rpm;
         write_log("回传超时（>%ds）未就绪，用保守值起步 冷=%d rpm=%d",
                   ALIGN_WAIT_TIMEOUT, actual_cold, actual_rpm);
         pending_align = 0;
@@ -3988,6 +4104,9 @@ static void reconnect_align(void) {
             pid_reset_core();
             actual_cold = -1;      // 未就绪：不设兜底基线，避免被 COLD_MIN=1 吞掉真实起步值
             actual_rpm = -1;
+            sent_cold = -1;        // 长断连后设备可能被别处改过：起点未知，首发不拆分
+            sent_rpm  = -1;
+            ramp_slots_left = 0;   // 丢弃断连前未走完的本轮
             pending_align = 1;
             pending_align_since = time(NULL);
             write_log("重连 PID 状态已重置，进入待对齐（等待真实回传）");
@@ -4676,7 +4795,9 @@ int main(int argc, char *argv[]) {
         else actual_rpm = fan_rpm_min;
         write_log("LSP 回传承载就绪 制冷=%d ratio=%.2f rpm=%d", actual_cold, pid_ratio, pid_align_rpm);
 
-        // 强制首次下发
+        // 强制首次下发（起点=当前回传值，同样走平滑下发）
+        sent_cold = actual_cold;
+        sent_rpm  = actual_rpm;
         last_bcast_valid = 0;
         rate_limit_cold(pid_align_cold);
         int send_rpm = rate_limit_fan(compute_fan_target());
@@ -4684,6 +4805,8 @@ int main(int argc, char *argv[]) {
     } else {
         actual_cold = -1;      // 未就绪：不设兜底基线，待 try_align_actual 对齐后起步
         actual_rpm = -1;
+        sent_cold = -1;
+        sent_rpm  = -1;
         pid_align_cold = 1;    // 待对齐期间保持最小，等 PID 重算/对齐后推进
         pending_align = 1;
         pending_align_since = time(NULL);
@@ -4695,6 +4818,7 @@ int main(int argc, char *argv[]) {
     // 每 5s（时间判定）：执行控制（仲裁/存活/主循环/限速下发）
     time_t last_ctrl = 0;
     while (running) {
+        reap_am_children();   // 每拍回收，断联 continue 的拍也不漏
         write_webui_data();   // 每 1s 采集写数据文件（刚需热数据，WebUI 直接读）
         write_coldmax_hint(); // 每 1s 核对生效制冷上限，变了才写给 app（定 KI 曲线横轴）
         poll_bt_request();    // 每 1s 查开蓝牙请求，有新请求才执行一次命令链
@@ -4805,6 +4929,9 @@ int main(int argc, char *argv[]) {
             // ★ 死链检测：BLE 已连但回传全 0（与本次是否下发无关）
             deadlink_check();
         }
+
+        // 平滑下发：每 1s 送出一份。放在 5s 块之后，本拍判定通过的目标同一拍就送出第一份。
+        ramp_tick();
 
         sleep(1);
     }
