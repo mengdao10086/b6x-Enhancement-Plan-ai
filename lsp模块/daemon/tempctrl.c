@@ -252,10 +252,6 @@ static int pid_target_away_alpha = 20;            // 第二值：远离基线 al
 static int pid_target_toward_alpha = 10;          // 第三值：回归基线 alpha（%，10=0.1）
 // PID_CH_THRESHOLD：跳过重算的 ch 阈值（0.1°C，|last_ch|≤此值 → 整轮冻结）
 static int pid_ch_threshold = 2;
-// KDP 死区（内部常量，非配置键）：本次算出的 kdp 与当前值相差不到它就沿用当前值。
-// 温度每变 0.1°C 会让 kdp 变 0.03，而积分一周期只补约 0.018；不设死区时预算跟着抖，
-// 输出会短暂跌离饱和线，目标冷值掉几档后被限速/去重放行成一次真实下发。
-#define KDP_DEADZONE 0.03f
 
 // PID_CPU_COMP：CPU 补偿（始终生效，无开关）
 static int pid_cpu_comp_filter_alpha = 25;      // PID_CPU_COMP 第一值：补偿 EMA 平滑系数（%）
@@ -301,9 +297,8 @@ static int pid_last_comp_10 = 0;            // 上次 PID 重算时的补偿值�
 static int pid_cpu_comp_active = 0;         // 补偿门控：1=激活（进入后即使条件消失也保持到滤波归零才退出）
 
 // --- 电池温度输入滤波（改动2：加回；仅温度更新时滤波，动态 α，停机后恢复原始值）---
-static int pid_batt_filtered = -1;        // 滤波后电池温度（0.1°C），-1=未初始化
+static int pid_batt_filtered = -1;        // 滤波后电池温度（0.01°C 单位，3680=36.80°C；传感器分辨率 0.1，小数由滤波插值给出），-1=未初始化
 static int pid_batt_last_update_cycle = -1; // 上次温度更新的控制周期（动态α间隔计算用）
-static int pid_batt_snap_done = 0;        // 停机后是否已做一次"恢复原始值"snap（1=已做）
 
 // --- 输出映射与对齐 ---
 static int pid_align_rpm = 2000;          // PID 目标 RPM（仅初始化对齐与日志使用；风扇下发已由 compute_fan_target 独立计算）
@@ -3618,15 +3613,15 @@ static float pid_spd_nl_map(float v) {
 /**
  * PID 计算（单累积器 OUTPUT = clamp(acc + kdp, 0, 1)）。公式与各步（error/速度/KDP/动态目标/KI 削减/
  * 跳过①）见 逻辑说明.md「单累积器公式」。
- * @param batt_10  原始电池温度（0.1°C，纯电池，不含补偿）
+ * @param batt_cdeg 电池温度（0.01°C，纯电池，不含补偿；取滤波值，3680 = 36.80°C）
  * @param dt       距上次重算以来的 5 秒周期数（钳位 0.6~6，1 = 5s）
  * @param cpu_comp CPU 补偿（°C，已 EMA 平滑）
  * @param batt_window_changed 本周期温度窗口是否变化（0=温度未变，kdp 沿用）
  * @return 归一化输出 0.0~1.0
  */
-static float pid_compute(int batt_10, float dt, float cpu_comp, int batt_window_changed, int recall_on, float recall_v) {
-    // 输入误差（纯电池）
-    float error = (batt_10 - BATT_BASELINE) / 10.0f;
+static float pid_compute(int batt_cdeg, float dt, float cpu_comp, int batt_window_changed, int recall_on, float recall_v) {
+    // 输入误差（纯电池）；基线仍是 0.1°C 口径，此处按 0.01°C 换算
+    float error = (batt_cdeg - BATT_BASELINE * 10) / 100.0f;
 
     // 速度项（°C/周期）：首次重算（无常值历史）时 v=0；温度未变时用回溯速度（recall_on）
     float v = 0.0f;
@@ -3674,11 +3669,10 @@ static float pid_compute(int batt_10, float dt, float cpu_comp, int batt_window_
     }
 
     // KDP（融合 P+D）：温度变了才更新；温度未变沿用上次值（跳过①）；乘 PID 分段倍率表的 KDP 倍率（100 = 不削）。
-    // 死区：新值离当前值不到 KDP_DEADZONE 就沿用当前值，挡住 0.1°C 级温度抖动带来的预算跳动。
-    if (batt_window_changed) {
-        float kdp_new = (pid_kdp_coef / 1000.0f) * chkdp * (ki_cut_mult_kdp / 100.0f);
-        if (fabsf(kdp_new - pid_kdp) >= KDP_DEADZONE) pid_kdp = kdp_new;
-    }
+    // 不设死区：输入滤波已把 0.1°C 台阶拆成多拍，kdp 逐拍跟随即可；加死区会把几拍累计的
+    // 变化攒成一次释放，反而把台阶合回去（见 逻辑说明.md「PID 输入滤波」）。
+    if (batt_window_changed)
+        pid_kdp = (pid_kdp_coef / 1000.0f) * chkdp * (ki_cut_mult_kdp / 100.0f);
 
     // 预算钳制：acc ≥0 且 ≤ max(0, 1−kdp)（防 acc+kdp 超 1 被末端硬截断，即抗 windup）
     float budget = 1.0f - pid_kdp;
@@ -3946,7 +3940,6 @@ static void pid_reset_core(void) {
     pid_cpu_comp_active = 0;
     pid_batt_filtered = -1;          // 电池输入滤波重置（改动2；重连/启动后直取初值）
     pid_batt_last_update_cycle = -1;
-    pid_batt_snap_done = 0;
     recall_anchor = 0;
     recall_prev_batt = 0;
     recall_cycles = 0;
@@ -4183,26 +4176,37 @@ static void pid_cycle(void) {
     int total_comp_10 = cpu_comp_now(batt_raw);
     float cpu_comp = total_comp_10 / 10.0f;   // 日志用（0.1°C → °C）
 
-    // --- 电池温度输入滤波（改动2：加回；仅温度更新时滤波并输出，动态 α） ---
+    // --- 电池温度输入滤波（改动2：加回；仅温度更新时滤波并输出，动态 α + 变化量限幅） ---
     // 首启直取；此后仅温度窗口变化（值/mtime 变）时滤波；动态 α=0.2+0.05×间隔周期数（5s控制周期）。
+    // 滤波值按 0.01°C 保存：0.1°C 的量化台阶只有落在更细的刻度上才拆得开。
+    // 变化量限幅：新值权重不超过 |原值−滤波值|/0.3（0.1°C→33%、0.2°C→67%、≥0.3°C→100%），
+    // 小变化不一步吃满，大变化照常直通。
+    int batt_cdeg = batt_raw * 10;          // 原始值 0.1°C → 0.01°C
     if (pid_batt_filtered < 0) {
-        pid_batt_filtered = batt_raw;
+        pid_batt_filtered = batt_cdeg;
         pid_batt_last_update_cycle = pid_ctrl_cycles;
     } else if (batt_window_changed) {
         int interval = clamp(pid_ctrl_cycles - pid_batt_last_update_cycle, 0, 16);   // 钳 0~16 → α 0.2~1.0（1.0=不滤波）
         float alpha = 0.2f + 0.05f * interval;
-        pid_batt_filtered = (int)(alpha * batt_raw + (1.0f - alpha) * pid_batt_filtered + 0.5f);
+        float cap = abs(batt_cdeg - pid_batt_filtered) / 30.0f;   // 每 0.1°C（30 个 0.01°C）最多 1/3
+        if (alpha > cap) alpha = cap;
+        pid_batt_filtered = (int)(alpha * batt_cdeg + (1.0f - alpha) * pid_batt_filtered + 0.5f);
         pid_batt_last_update_cycle = pid_ctrl_cycles;
-        pid_batt_snap_done = 0;             // 新样本，恢复 snap 资格
     }
 
-    // 滤波态判据：原始电池温度 != 滤波值 → 正在滤波（可触发恢复原始值逻辑）
-    int filter_lag = (pid_batt_filtered != batt_raw);
-    // 停机首周期（温度未变）且滤波未收敛且未 snap 过：优先恢复原始值强制重算（改动2优先，绕过冻结）
+    // 滤波态判据：滤波值与原始值相差 ≥0.05°C → 仍在滤波（可触发追赶逻辑）
+    int filter_lag = abs(pid_batt_filtered - batt_cdeg) >= 5;
+    // 停机（温度未变）且滤波未收敛：继续按同一限幅向原值推进一拍，不硬跳——硬跳会把整段残差
+    // 一次交给 PID，等于把刚拆开的台阶又合回去。推进到不足 0.05°C 时直接对齐收尾；
+    // 每次推进都强制重算（改动2优先，绕过冻结）。
     int filter_forced = 0;
-    if (!batt_window_changed && filter_lag && !pid_batt_snap_done) {
-        pid_batt_filtered = batt_raw;   // 恢复原始值 = 未更新的电池温度
-        pid_batt_snap_done = 1;         // 只 snap 一次，次周期回正常冻结
+    if (!batt_window_changed && filter_lag) {
+        int diff = batt_cdeg - pid_batt_filtered;
+        float cap = abs(diff) / 30.0f;
+        if (cap > 1.0f) cap = 1.0f;
+        int step = (int)(cap * (diff > 0 ? diff : -diff) + 0.5f);
+        pid_batt_filtered += (diff > 0) ? step : -step;
+        if (abs(batt_cdeg - pid_batt_filtered) < 5) pid_batt_filtered = batt_cdeg;
         filter_forced = 1;
     }
 
@@ -4217,7 +4221,7 @@ static void pid_cycle(void) {
     }
 
     // --- 跳过②：温度未变（仅补偿变化触发）且上次 |ch| ≤ ch阈值 → 整轮冻结 ---
-    // （改动2优先：本周期已 snap 强制重算则跳过冻结，"改动2跑完再冻结"；snap 后 pid_batt_filtered==batt_raw 回正常冻结）
+    // （改动2优先：本周期已 snap 强制重算则跳过冻结，"改动2跑完再冻结"；snap 后 pid_batt_filtered==batt_cdeg 回正常冻结）
     if (!batt_window_changed && !filter_forced) {
         float last_ch_abs = (pid_last_ch >= 0.0f) ? pid_last_ch : -pid_last_ch;
         if (last_ch_abs <= (pid_ch_threshold / 10.0f)) {
@@ -4243,7 +4247,7 @@ static void pid_cycle(void) {
                    * (pid_spd_recall_weight / 1000.0f);
     }
 
-    // --- PID 计算（电池 error 用滤波值 pid_batt_filtered + cpu_comp；snap 后==batt_raw 故恢复原始值；温度未变时 kdp 沿用）---
+    // --- PID 计算（电池 error 用滤波值 pid_batt_filtered(0.01°C) + cpu_comp；snap 后==batt_cdeg 故恢复原始值；温度未变时 kdp 沿用）---
     float pid_out = pid_compute(pid_batt_filtered, dt, cpu_comp, batt_window_changed, recall_on, recall_v);
 
     // 直接映射到物理值（无输出平滑）：PID 输出 → 制冷强度（风扇目标由 compute_fan_target 独立计算）
