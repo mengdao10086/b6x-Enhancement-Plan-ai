@@ -146,8 +146,8 @@ static int fan_rpm_round_unit = 10; // RATE_LIMIT_FAN 第三值：下发转速�
 
 // ======================== 速率限制 ========================
 // --- 固定值 ---
-static int RATE_LIMIT_FAN = 150;   // RATE_LIMIT_FAN 第一值：风扇每周期最大变化量（RPM，升/降共用，三值键）
-static int RATE_LIMIT_COLD = 25;   // 制冷强度升降速基础值：升速=base+dev×mult/10，降速=base-dev×mult/10，负值→0=禁止该方向
+static int RATE_LIMIT_FAN = 200;   // RATE_LIMIT_FAN 第一值：风扇每周期最大变化量（RPM，升/降共用，三值键）
+static int RATE_LIMIT_COLD = 15;   // 制冷强度升降速基础值：升速=base+dev×mult/10，降速=base-dev×mult/10，负值→0=禁止该方向
 
 // --- 动态值（根据电池温差自动调整）---
 static int RATE_LIMIT_COLD_MULT = 10;  // 制冷强度倍率：升速/降速 = base ± dev(0.1°C) × mult / 10

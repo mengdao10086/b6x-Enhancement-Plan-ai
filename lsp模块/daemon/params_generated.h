@@ -163,10 +163,10 @@
  * （该函数按二进制名派生路径，私有目录不可用时兜底 /cache，照抄宏会绕过兜底）。
  * 各层总开关自身同样不入表（PERF_ENABLED 默认 1，复位它会立刻自我重开）。 */
 #define CFG_PERF_DEFAULTS(X) \
-    X(RATE_LIMIT_FAN, 150) \
+    X(RATE_LIMIT_FAN, 200) \
     X(RATE_LIMIT_FAN_DEBOUNCE, 50) \
     X(fan_rpm_round_unit, 10) \
-    X(RATE_LIMIT_COLD, 25) \
+    X(RATE_LIMIT_COLD, 15) \
     X(RATE_LIMIT_COLD_MULT, 10) \
     X(COLD_DEADZONE, 3) \
     X(ramp_dispatch, 1) \
