@@ -252,6 +252,10 @@ static int pid_target_away_alpha = 20;            // 第二值：远离基线 al
 static int pid_target_toward_alpha = 10;          // 第三值：回归基线 alpha（%，10=0.1）
 // PID_CH_THRESHOLD：跳过重算的 ch 阈值（0.1°C，|last_ch|≤此值 → 整轮冻结）
 static int pid_ch_threshold = 2;
+// KDP 死区（内部常量，非配置键）：本次算出的 kdp 与当前值相差不到它就沿用当前值。
+// 温度每变 0.1°C 会让 kdp 变 0.03，而积分一周期只补约 0.018；不设死区时预算跟着抖，
+// 输出会短暂跌离饱和线，目标冷值掉几档后被限速/去重放行成一次真实下发。
+#define KDP_DEADZONE 0.03f
 
 // PID_CPU_COMP：CPU 补偿（始终生效，无开关）
 static int pid_cpu_comp_filter_alpha = 25;      // PID_CPU_COMP 第一值：补偿 EMA 平滑系数（%）
@@ -3669,9 +3673,12 @@ static float pid_compute(int batt_10, float dt, float cpu_comp, int batt_window_
         pid_ki += (ki_rate / 1000.0f) * integrand;
     }
 
-    // KDP（融合 P+D）：温度变了才更新；温度未变沿用上次值（跳过①）；乘 PID 分段倍率表的 KDP 倍率（100 = 不削）
-    if (batt_window_changed)
-        pid_kdp = (pid_kdp_coef / 1000.0f) * chkdp * (ki_cut_mult_kdp / 100.0f);
+    // KDP（融合 P+D）：温度变了才更新；温度未变沿用上次值（跳过①）；乘 PID 分段倍率表的 KDP 倍率（100 = 不削）。
+    // 死区：新值离当前值不到 KDP_DEADZONE 就沿用当前值，挡住 0.1°C 级温度抖动带来的预算跳动。
+    if (batt_window_changed) {
+        float kdp_new = (pid_kdp_coef / 1000.0f) * chkdp * (ki_cut_mult_kdp / 100.0f);
+        if (fabsf(kdp_new - pid_kdp) >= KDP_DEADZONE) pid_kdp = kdp_new;
+    }
 
     // 预算钳制：acc ≥0 且 ≤ max(0, 1−kdp)（防 acc+kdp 超 1 被末端硬截断，即抗 windup）
     float budget = 1.0f - pid_kdp;
