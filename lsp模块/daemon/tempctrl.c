@@ -179,6 +179,13 @@ static int ramp_mode = 1, ramp_target_temp = 5, ramp_wl = 0;   // 本轮下发�
 static int sent_rpm  = -1;             // 最近一次实际广播的风扇值（拆分起点；-1=未知）
 static int sent_cold = -1;             // 最近一次实际广播的制冷值（拆分起点；-1=未知）
 
+// ======================== 下发日志去重 ========================
+// 决策目标（限速前）变化时打一条普通日志；限速逐步靠拢产生的下发只写 debug。
+static int dispatch_target_cold = -1;  // 本周期期望制冷（PID 决策，限速前）
+static int dispatch_target_rpm  = -1;  // 本周期期望风扇（限速前）
+static int logged_target_cold   = -1;  // 上次普通日志对应的期望制冷
+static int logged_target_rpm    = -1;  // 上次普通日志对应的期望风扇
+
 // ======================== 控制周期计数器 ========================
 static int pid_ctrl_cycles = 0;               // PID 控制周期单调计数器（pid_cycle 每次 +1）
 static int reconnect_keep_cycles = 3;         // RECONNECT_KEEP_CYCLES：断联< N 控制周期(×5s) 不重置 PID 状态
@@ -2465,6 +2472,7 @@ static void calc_dynamic_rates(int *out_fan_step, int *out_cold_up, int *out_col
  * 更新 actual_cold；调用方随后用限速后的实际制冷重算风扇目标。
  */
 static void rate_limit_cold(int desired_cold) {
+    dispatch_target_cold = desired_cold;   // 供下发日志判定「决策目标是否变化」
     int fan_step, cold_up, cold_down;
     calc_dynamic_rates(&fan_step, &cold_up, &cold_down);
     int old_cold = actual_cold;
@@ -2482,6 +2490,7 @@ static void rate_limit_cold(int desired_cold) {
  * 距最低转速（降）/最高转速（升）< 阈值×1.5 时防抖失效（贴近端点无需再抑制）。
  */
 static int rate_limit_fan(int desired_rpm) {
+    dispatch_target_rpm = desired_rpm;     // 供下发日志判定「决策目标是否变化」（取防抖改写前的值）
     int fan_step, cold_up, cold_down;
     calc_dynamic_rates(&fan_step, &cold_up, &cold_down);
 
@@ -3828,10 +3837,18 @@ static int apply_gear_direct(int mode, int target,
     int batt_10 = (cached_batt_raw >= 0) ? cached_batt_raw : BATT_BASELINE;
     int dev_10 = batt_10 + pid_last_comp_10 - BATT_BASELINE;
     int hot_deg = (cooler_hot_temp > 0) ? cooler_hot_temp / 10 : 0;
-    write_log("%d%+.1f° %s 冷%d 热%d° RPM%d",
-              BATT_BASELINE / 10, dev_10 / 10.0f,
-              device_tag_of(active_device),
-              cold, hot_deg, send_rpm);
+    if (dispatch_target_cold != logged_target_cold ||
+        dispatch_target_rpm  != logged_target_rpm) {
+        write_log("%d%+.1f° %s 冷%d 热%d° RPM%d",
+                  BATT_BASELINE / 10, dev_10 / 10.0f,
+                  device_tag_of(active_device),
+                  cold, hot_deg, send_rpm);
+        logged_target_cold = dispatch_target_cold;
+        logged_target_rpm  = dispatch_target_rpm;
+    } else {
+        debug_log(debug_exec, "下发（目标未变）冷%d 热%d° RPM%d（目标 冷%d RPM%d）",
+                  cold, hot_deg, send_rpm, dispatch_target_cold, dispatch_target_rpm);
+    }
 
     // 平滑下发：判定通过后只登记本轮目标，由 1s 主循环按 RAMP_SLOTS 份送出。
     // 不拆分的三种情况：开关关闭、起点未知（首次 / 长断连后）、本轮无变化；
@@ -4107,6 +4124,8 @@ static void reconnect_align(void) {
             sent_cold = -1;        // 长断连后设备可能被别处改过：起点未知，首发不拆分
             sent_rpm  = -1;
             ramp_slots_left = 0;   // 丢弃断连前未走完的本轮
+            logged_target_cold = -1;   // 日志去重基线失效，恢复后首条走普通日志
+            logged_target_rpm  = -1;
             pending_align = 1;
             pending_align_since = time(NULL);
             write_log("重连 PID 状态已重置，进入待对齐（等待真实回传）");
@@ -4807,6 +4826,8 @@ int main(int argc, char *argv[]) {
         actual_rpm = -1;
         sent_cold = -1;
         sent_rpm  = -1;
+        logged_target_cold = -1;   // 尚未下发过，首条必走普通日志
+        logged_target_rpm  = -1;
         pid_align_cold = 1;    // 待对齐期间保持最小，等 PID 重算/对齐后推进
         pending_align = 1;
         pending_align_since = time(NULL);
