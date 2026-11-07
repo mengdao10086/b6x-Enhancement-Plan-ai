@@ -37,11 +37,12 @@
             android:id="@+id/config_field_switch"
             android:layout_width="wrap_content"
             android:layout_height="@dimen/field_height"
-            android:layout_marginStart="@dimen/space_xs"
-            android:layout_marginEnd="@dimen/switch_trim_end"
+            android:layout_marginStart="@dimen/switch_label_gap"
+            android:layout_marginEnd="@dimen/switch_trim_end_lead"
             android:gravity="center_vertical"
             android:scaleX="0.75"
             android:scaleY="0.75"
+            android:transformPivotX="0dp"
             app:wrapTrailing="true" />
     </com.example.waspwingtempctrl.ui.WrapRowLayout>
 </LinearLayout>
