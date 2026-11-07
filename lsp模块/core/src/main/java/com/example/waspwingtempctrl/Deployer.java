@@ -237,6 +237,23 @@ public final class Deployer {
                 .getBoolean(KEY_ROOT_OK, false);
     }
 
+    /**
+     * 去掉结尾的 {@code '\n'} / {@code '\r'}，其余字符原样保留：状态/结果描述文本的共同不变量是
+     * 「不以换行结尾」（见 app/逻辑说明.md §8.1）。
+     */
+    private static String stripTrailingNewlines(StringBuilder sb) {
+        int end = sb.length();
+        while (end > 0) {
+            char c = sb.charAt(end - 1);
+            if (c != '\n' && c != '\r') {
+                break;
+            }
+            end--;
+        }
+        sb.setLength(end);
+        return sb.toString();
+    }
+
     // ==================== 状态 / 判定 ====================
 
     /**
@@ -308,6 +325,8 @@ public final class Deployer {
          *
          * <p>逐项不因 su 不通而省略：结论行已带「（无 su）」，且提示行里会写明 root 通道不可用，
          * 「读到不存在」的原因因此有落点。
+         *
+         * <p>不以换行结尾（源侧不变量）：界面按此与无末尾换行的预填充骨架等高比对。
          */
         public String describe() {
             StringBuilder sb = new StringBuilder(summaryLine()).append('\n');
@@ -330,7 +349,7 @@ public final class Deployer {
                     : "未运行").append('\n');
             sb.append("  sh-watchdog：").append(watchdogLine()).append('\n');
             appendNotes(sb);
-            return sb.toString();
+            return stripTrailingNewlines(sb);
         }
 
         /**
@@ -599,7 +618,7 @@ public final class Deployer {
 
         /**
          * 动作 + 步骤 + 状态。状态部分走 {@link Status#describe()} 的简短版（状态区直接上屏），
-         * 逐项细节看诊断信息。
+         * 逐项细节看诊断信息。不以换行结尾（源侧不变量，两条收尾路径同一口径）。
          */
         public String describe() {
             StringBuilder sb = new StringBuilder();
@@ -614,7 +633,7 @@ public final class Deployer {
             if (status != null) {
                 sb.append(status.describe());
             }
-            return sb.toString();
+            return stripTrailingNewlines(sb);
         }
     }
 
