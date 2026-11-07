@@ -192,6 +192,8 @@ public class StatusFragment extends Fragment implements SetupActivity.PageAware 
     private MaterialButton autoUpdateButton;
     private boolean autoUpdateOn = true;   // 缺键 / 读取失败时按出厂默认（开）
     private boolean autoUpdateBusy;
+    /** 用户已点过开关：首次读盘回调晚到时不再用旧值覆盖。 */
+    private boolean autoUpdateTouched;
 
     // ========== 扫描协调器 ==========
     /** 同一时刻只跑一趟探测；扫描中再请求只挂监听，不新起。 */
@@ -1466,8 +1468,8 @@ public class StatusFragment extends Fragment implements SetupActivity.PageAware 
             }
             final boolean value = on;
             MAIN.post(() -> {
-                if (!isAdded() || autoUpdateButton == null) {
-                    return;
+                if (!isAdded() || autoUpdateButton == null || autoUpdateTouched) {
+                    return;   // 视图已走 / 用户已点过：不让晚到的旧值覆盖当前外观
                 }
                 autoUpdateOn = value;
                 applyAutoUpdateStyle(value);
@@ -1487,6 +1489,7 @@ public class StatusFragment extends Fragment implements SetupActivity.PageAware 
         }
         final boolean target = !autoUpdateOn;
         autoUpdateBusy = true;
+        autoUpdateTouched = true;
         autoUpdateButton.setEnabled(false);
         final Context app = requireContext().getApplicationContext();
         Thread thread = new Thread(() -> {

@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 宽屏（smallestWidth ≥400dp）覆盖：按钮水平内边距恢复 16dp。 -->
+<resources>
+
+    <!--
+        400dp 起可用宽（400 − 页边距 32 − 卡内边距 24 = 344dp）足以容纳行3 三个按钮；
+        360dp 下 16dp 会超宽，故默认取 13dp，见 values/dimens_status.xml。
+    -->
+    <dimen name="status_button_padding_horizontal">16dp</dimen>
+</resources>

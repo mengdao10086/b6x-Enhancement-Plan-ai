@@ -16,53 +16,40 @@
     <dimen name="status_buttons_gap">5dp</dimen>
 
     <!--
-        按钮行1 → 行2 的间隔，目标可见空白 3dp。行2 → 行3 的目标不同，见 status_button_last_gap。
-        本项是 margin，不是可见空白——两者相差 8dp，换算见下。
-        这几个按钮用的都是 material 的 M3 按钮样式（Widget.Material3.Button / .TextButton /
-        .OutlinedButton，OutlinedButton 自身不设、经 parent=TextButton 继承），AAR 里三者都设了
-        android:insetTop = android:insetBottom = @dimen/m3_btn_inset = 4dp；
+        按钮行1 → 行2 的间隔：保持真机当前观感，目标可见空白 3dp。
+        本项是 margin，不是可见空白——两者相差两侧 inset，换算见下。
+        这几个按钮都用 M3 按钮样式，本页统一 android:insetTop/Bottom = 3dp；
         MaterialButtonHelper.wrapDrawableWithInset() 把背景 drawable 包成 InsetDrawable，
-        于是按钮可见的圆角块比它的布局盒上下各小 4dp。所以：
-            可见空白 = 4dp(上按钮 insetBottom) + margin(本值) + 4dp(下按钮 insetTop) = 本值 + 8dp
-        取 -5dp：可见空白 = 4 - 5 + 4 = 3dp（上一版 -3dp → 5dp，更早 margin 7dp → 15dp）。
-        为什么必须是负数：本值只是 margin，正数最小取 0 时可见空白仍有 8dp，压不下去；
-        而按钮外观（圆角块尺寸、文字、内边距）要求完全不变，不能动按钮自身的 inset，
-        唯一的自由度就是让两行的布局盒互相吃掉一点，即负 margin。
-        负 margin 的副作用核对（结论：无害）：
-          ① 两行按钮的布局盒会重叠 5dp，重叠区全落在两侧按钮的内缩空白里——上按钮圆角块的下沿
-             比它的布局盒下沿高 4dp，下按钮圆角块的上沿比它的布局盒上沿低 4dp，
-             故只有重叠量达到 4 + 4 = 8dp 时两块才刚好相接。5dp < 8dp，两行圆角块之间仍留 3dp，不会相碰。
-          ② 上按钮圆角块的可点区域一点没少：重叠区在它的布局盒内、却不在它的圆角块内，
-             本来就不是它的可点区（inset 区域不接收这颗按钮的触摸）。
-          ③ 重叠区归后绘制的下按钮接收触摸，而那里正是下按钮自己的内缩空白 → 也不会误触。
-        安全边界：可见空白压到 0 需 margin = -8dp，那才是重叠量等于两侧内缩之和、两行圆角块刚好相接的点；
-        再深则圆角块真的互相叠上，且上按钮布局盒的剩余高度逼近圆角块本身，字体放大或
-        minHeight 变化时立刻出问题。本项 -5dp 距该边界还有 3dp 余量。
+        于是按钮可见的圆角块比它的布局盒上下各小 3dp。所以：
+            可见空白 = 3dp(上按钮 insetBottom) + margin(本值) + 3dp(下按钮 insetTop) = 本值 + 6dp
+        取 -3dp：可见空白 = 3 - 3 + 3 = 3dp（上一版 inset 4dp、margin -5dp → 同为 3dp）。
+        为什么取负：正数最小取 0 时可见空白仍有 6dp，压不到当前观感；按钮外观不变，
+        只能让两行布局盒互相吃掉一点。重叠区落在两侧按钮的内缩空白/文字按钮的空白内边距里，
+        不压文字、不改按钮尺寸；下按钮是 TextButton（无可见底色），不会被上按钮圆角块盖住文字。
     -->
-    <dimen name="status_button_row_gap">-5dp</dimen>
+    <dimen name="status_button_row_gap">-3dp</dimen>
 
     <!--
-        按钮行2 → 行3（「卸载部署」）的间隔：把两行的行距压到原来的 75%。
-        行2 与行3 的按钮全是 TextButton（无底色、无可见圆角块），可见的只有居中的文字，
-        因此不再受 status_button_row_gap 那条「重叠 8dp 就相碰」的约束——布局盒可以更深地互相吃掉，
-        重叠区是两行各自的内缩空白，不压文字、也不改按钮尺寸与样式。
-        取 -18dp：行距 40dp（48dp 按钮盒 − 8dp）压到 30dp，即 75%；
-        两行文字的净空仍有约 10dp，触摸区重叠处落在这两行的空白内边距里。
-        沿革：-8dp（可见空白 0dp）→ -18dp。
+        按钮行2 → 行3（「卸载部署」）的间隔：两行触控区高度之和的 3/4，作为两行布局盒之间的空白。
+        marginTop = 0.75 × (行2 触控高 + 行3 触控高) = 0.75 × (46 + 46) = 69dp。
+        两行都是 TextButton（无可见底色），本值即盒与盒之间的留白，不再按「盒顶到盒顶」折算。
+        触控高若改值，按同一式子重算本项。
     -->
-    <dimen name="status_button_last_gap">-18dp</dimen>
+    <dimen name="status_button_last_gap">69dp</dimen>
 
     <!--
-        三行 8 个按钮统一收窄（行1 新增「自动更新」后，360dp 最小屏宽必须放得下且文字不换行）。
+        三行 8 个按钮统一尺寸（行1 新增「自动更新」后，360dp 最小屏宽仍须放得下且文字不换行）。
         M3 默认：insetTop/Bottom = 4dp、minHeight = 48dp、实心/描边按钮左右内边距 = 24dp。
-        本组：垂直 inset 收到 2dp、minHeight 收到 40dp（可见/触控高 36dp，不低于 36dp），
-        左右内边距收到 12dp；水平 inset 显式归 0（M3 本就是 0，统一写全便于后续调整）。
-        行 1→行 2、行 2→行 3 的负 margin 保持原值，不由本组改动。
+        本组：insetTop/Bottom = 3dp、minHeight = 46dp → 可见圆角块高 40dp、触控高 46dp；
+        水平 inset 2dp（只收背景圆角块，不改布局宽）。
+        水平内边距：窄屏（默认，覆盖 360dp）取 13dp——16dp 时行3 三个按钮约 314dp，
+        超出 304dp 可用宽；宽屏（≥400dp）取 16dp，见 values-sw400dp。
+        行 1→行 2、行 2→行 3 的间隔分别见下面的 status_button_row_gap / status_button_last_gap。
     -->
-    <dimen name="status_button_inset_horizontal">0dp</dimen>
-    <dimen name="status_button_inset_vertical">2dp</dimen>
-    <dimen name="status_button_padding_horizontal">12dp</dimen>
-    <dimen name="status_button_min_height">40dp</dimen>
+    <dimen name="status_button_inset_horizontal">2dp</dimen>
+    <dimen name="status_button_inset_vertical">3dp</dimen>
+    <dimen name="status_button_padding_horizontal">13dp</dimen>
+    <dimen name="status_button_min_height">46dp</dimen>
 
     <!--
         进度条与上方「部署状态」文本之间的间隔，目标可见空白 0dp。

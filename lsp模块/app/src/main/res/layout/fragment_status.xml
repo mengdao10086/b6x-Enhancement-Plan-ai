@@ -95,17 +95,16 @@
                     行2、行3 的按钮间隔统一为 0dp：行3 在 360dp 最小屏宽下按 8dp 会超宽，故压到 0dp；
                     行2 跟随同一间隔以保持两行一致（按钮自带左右内边距，视觉空隙仍在；
                     不换行、不省略文字、不改按钮尺寸与样式）。
-                    这 8 个按钮都是 M3 按钮样式（统一走 status_button_* 尺寸项收窄），
-                    insetTop/insetBottom 会把可见圆角块上下收窄，
-                    故行间的可见空白 = margin + 8dp（调 margin 的观感与数值不成比例，细则见 dimens_status.xml）。
-                    四处可见空白：
+                    这 8 个按钮都是 M3 按钮样式，统一走 status_button_* 尺寸（水平 inset 2dp、垂直 inset 3dp、
+                    minHeight 46dp → 可见圆角块高 40dp、触控高 46dp；水平内边距窄屏 13dp、≥400dp 16dp）。
+                    行1→行2 的可见空白 = margin + 两侧 inset（3 + (-3) + 3 = 3dp）；
+                    行2→行3 按两行触控高之和的 3/4 留白（0.75 × (46 + 46) = 69dp），细则见 dimens_status.xml。
+                    四处空白：
                       · 部署状态文本 → 进度条：0dp，走 status_progress_gap（进度条无 inset，margin 即所见）
                       · 进度条 → 行1：5dp，走 status_buttons_gap（上方不挨按钮，同理 margin 即所见）
-                      · 行1 → 行2：3dp，走 status_button_row_gap（margin 取 -5dp）
-                      · 行2 → 行3：行距压到原来的 75%，走 status_button_last_gap（margin 取 -18dp）
-                    后两处目标不同，故各开一项；行1→行2 的布局盒重叠 5dp（小于两侧内缩之和 8dp，
-                    圆角块仍留 3dp）；行2→行3 全是 TextButton（无底色、无可见圆角块），
-                    布局盒可以更深地互相吃掉，只剩居中的文字，故行距从 40dp 压到 30dp。
+                      · 行1 → 行2：3dp，走 status_button_row_gap（margin 取 -3dp）
+                      · 行2 → 行3：69dp，走 status_button_last_gap（margin 取 69dp）
+                    行2→行3 全是 TextButton（无底色），两行之间只有居中文字，留白即盒间距。
                 -->
                 <LinearLayout
                     android:layout_width="match_parent"
