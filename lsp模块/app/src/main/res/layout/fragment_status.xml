@@ -98,13 +98,15 @@
                     这 8 个按钮都是 M3 按钮样式，统一走 status_button_* 尺寸（水平 inset 2dp、垂直 inset 3dp、
                     minHeight 46dp → 可见圆角块高 40dp、触控高 46dp；水平内边距窄屏 13dp、≥400dp 16dp）。
                     行1→行2 的可见空白 = margin + 两侧 inset（3 + (-3) + 3 = 3dp）；
-                    行2→行3 按两行触控高之和的 3/4 留白（0.75 × (46 + 46) = 69dp），细则见 dimens_status.xml。
+                    行2→行3 按「两行文字之间的空白 = 9dp」留白（触控外扩量口径的 3/4）：
+                    文字约 20dp 高、居中在 46dp 盒内（上下各约 13dp），故 margin 取 -17dp
+                    （13 − 17 + 13 = 9dp），细则见 dimens_status.xml。
                     四处空白：
                       · 部署状态文本 → 进度条：0dp，走 status_progress_gap（进度条无 inset，margin 即所见）
                       · 进度条 → 行1：5dp，走 status_buttons_gap（上方不挨按钮，同理 margin 即所见）
                       · 行1 → 行2：3dp，走 status_button_row_gap（margin 取 -3dp）
-                      · 行2 → 行3：69dp，走 status_button_last_gap（margin 取 69dp）
-                    行2→行3 全是 TextButton（无底色），两行之间只有居中文字，留白即盒间距。
+                      · 行2 → 行3：文字间 9dp，走 status_button_last_gap（margin 取 -17dp）
+                    行2→行3 全是 TextButton（无底色），两行之间只有居中文字；不要按盒间距直接取 9dp。
                 -->
                 <LinearLayout
                     android:layout_width="match_parent"
