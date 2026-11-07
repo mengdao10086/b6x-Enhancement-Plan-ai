@@ -53,10 +53,8 @@ final class ChartConfig {
     int coldMapStart = 40;
     /** 右轴上限浮动区间上沿 = {@code PID_COLD_RANGE} 第 2 值（B6X 制冷上限）。 */
     int coldMax = 190;
-    /** 曲线上的 PID 重算标记（{@code UI_PID_MARK} 双开关）：点、虚线；默认只开点。 */
-    boolean markDot = true;
-    /** 重算位置画竖虚线；与点互相独立。 */
-    boolean markDash;
+    /** 曲线上的 PID 重算标记（{@code UI_PID_MARK}）：在重算位置画竖虚线，默认开。 */
+    boolean markDash = true;
 
     int[] windowOptions = FALLBACK_WINDOW_OPTIONS.clone();
     int windowDefaultSec = FALLBACK_WINDOW_DEFAULT;
@@ -116,9 +114,8 @@ final class ChartConfig {
         gapMaxSec = maxSec > 0 ? maxSec : 15;
         // 转速下限：负值一律归 0 = 关闭（口径见 app/逻辑说明.md §7.3〈双纵轴〉）
         rpmAxisMin = Math.max(0, field(store, snap, "UI_RPM_AXIS_MIN", 0, 3000));
-        // 重算标记双开关：缺键/缺字段一律按 schema 默认（点开、虚线关）
-        markDot = field(store, snap, "UI_PID_MARK", 0, 1) != 0;
-        markDash = field(store, snap, "UI_PID_MARK", 1, 0) != 0;
+        // 重算标记：缺键按 schema 默认（开）
+        markDash = field(store, snap, "UI_PID_MARK", 0, 1) != 0;
         // 滤波：两个子值 0 都合法（= 关闭该级），负值回落默认（口径见 app/逻辑说明.md §7.2〈滤波关闭语义〉）
         int a = field(store, snap, "UI_CURVE_FILTER", 0, 15);
         int s = field(store, snap, "UI_CURVE_FILTER", 1, 5);

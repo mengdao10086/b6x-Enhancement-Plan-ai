@@ -2019,43 +2019,21 @@
       "key": "UI_PID_MARK",
       "group": "webui",
       "role": "setting",
-      "type": "multi",
+      "type": "switch",
       "label": "重算标记",
-      "desc": "在制冷、电池℃、pid℃ 三条曲线上标出守护进程触发 PID 重算的位置：点、粗线、虚线三种样式可组合",
+      "desc": "在制冷、电池℃、pid℃ 三条曲线上，用竖虚线标出守护进程触发 PID 重算的位置",
       "docOrder": 54.5,
-      "docDesc": "曲线上的 PID 重算标记（双开关，默认 点=1 / 虚线=0）：点在每个重算样本处画带底色的描边小圆点；虚线在重算位置画竖虚线（与坐标轴同宽同色同透明度），与点互不依赖。**仅界面读取，守护进程忽略**",
-      "confNote": ["曲线 PID 重算标记（双开关，默认 1 0）：点 / 虚线，互相独立"],
+      "docDesc": "曲线上的 PID 重算标记（0/1，默认 1）：开启后在制冷、电池℃、pid℃ 三条曲线的重算位置画竖虚线（与坐标轴同宽同色同透明度）；0=不画。**仅界面读取，守护进程忽略**",
+      "confNote": ["曲线 PID 重算标记（0/1，默认 1）：在重算位置画竖虚线；0=不画"],
       "unit": "",
-      "unitNote": "双开关，取值各为 0/1，无单位",
-      "default": [1, 0],
-      "factory": [1, 0],
-      "min": null,
-      "max": null,
-      "rangeNote": "两个字段均为 0/1，可同时开启",
+      "unitNote": "开关，取值 0/1，无单位",
+      "default": 1,
+      "factory": 1,
+      "min": 0,
+      "max": 1,
       "requires": [],
       "daemonConsumes": false,
-      "fields": [
-        {
-          "bool": true,
-          "label": "点",
-          "unit": "",
-          "unitNote": "0/1，默认 1",
-          "min": 0,
-          "max": 1,
-          "default": 1,
-          "cVar": null
-        },
-        {
-          "bool": true,
-          "label": "虚线",
-          "unit": "",
-          "unitNote": "0/1，默认 0",
-          "min": 0,
-          "max": 1,
-          "default": 0,
-          "cVar": null
-        }
-      ]
+      "fields": null
     },
     {
       "key": "UI_CURVE_FILTER",

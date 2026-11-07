@@ -45,14 +45,12 @@ public class ChartView extends View {
     private static final float HALO_WIDTH_DP = 3f;   // 文字 halo
     private static final float DOT_RADIUS_DP = 3.2f; // 头部圆点
     private static final float DOT_HALO_DP = 1f;     // 圆点外圈
-    // PID 重算标记点：直径 = 线宽 × 1.2（线宽 1.6dp → 半径 0.96dp），刻意比头部圆点小得多
-    private static final float MARK_RADIUS_DP = LINE_WIDTH_DP * 0.6f;
-    // 标记点外的底色描边宽度（与头部数值圆点同一手法：底色圈把点从曲线上衬出来）
-    private static final float MARK_HALO_DP = 0.75f;
     // 竖虚线：与网格线同宽同色（透明度含在网格色里），3dp 实 / 3dp 空
     private static final float DASH_ON_DP = 3f;
     private static final float DASH_OFF_DP = 3f;
-    // pid 曲线的孤立样本（前后都没有相邻有效点）：只画一个点，不连线；半径取线宽
+    // pid 曲线相邻两次重算样本的最大间隔（控制 5s + 写行落后 1s）；超过即视为不连续、不连线
+    private static final float PID_CHAIN_MAX_SEC = 6f;
+    // pid 曲线的孤立样本（前后都没有相邻重算点）：只画一个点，不连线；半径取线宽
     private static final float PID_DOT_RADIUS_DP = LINE_WIDTH_DP;
     private static final float TICK_TEXT_DP = 10f;   // 刻度 / 标注 / 轴标题字号
     private static final float EMPTY_TEXT_DP = 12f;  // 「采样中…」字号
@@ -106,9 +104,7 @@ public class ChartView extends View {
     private Path[] paths;
     private ChartLabelOp[] labels;
     private ChartDotOp[] dots;
-    /** PID 重算标记：「点」样式（x/y/颜色）。 */
-    private MarkDot[] markDots;
-    /** PID 重算标记：「虚线」样式（竖向 x 坐标）。 */
+    /** PID 重算标记：竖向虚线（x 坐标）。 */
     private float[] dashXs;
     /** pid 曲线的孤立样本点（x/y 同长，颜色恒为 pid 系列色）。 */
     private float[] pidDotX;
@@ -245,7 +241,6 @@ public class ChartView extends View {
         paths = null;
         labels = null;
         dots = null;
-        markDots = null;
         dashXs = null;
         pidDotX = null;
         pidDotY = null;
@@ -326,127 +321,138 @@ public class ChartView extends View {
             return;
         }
         buildPaths(win, lAxis, rAxis);
+        buildPidPath(win, lAxis);
         buildPidSingles(win, lAxis);
-        buildRecomputeMarks(win, lAxis, rAxis);
+        buildRecomputeMarks(win);
         buildMarkers(win, lAxis, rAxis);
     }
 
     /**
-     * pid 曲线的孤立样本：前后都没有相邻有效点（断联也断开）时只画点、不连线。
-     * 连续两周期以上有数据的情况由 {@link #buildPaths} 正常连成折线。
+     * pid 曲线：只有重算样本才有值。相邻两次重算的间隔 ≤{@link #PID_CHAIN_MAX_SEC}（连续两个控制周期
+     * 都重算）才连线；相隔更远的两次重算不连成假线。单点由 {@link #buildPidSingles} 画成圆点。
+     */
+    private void buildPidPath(ChartWindow win, ChartAxis lAxis) {
+        if (lAxis == null) {
+            return;
+        }
+        int si = pidSeriesIndex();
+        if (si < 0 || !series[si].on) {
+            return;
+        }
+        Path p = new Path();
+        boolean any = false;
+        int prev = -1;
+        float prevX = 0f;
+        float prevY = 0f;
+        for (int i = 0; i < win.samples.length; i++) {
+            ChartSample d = win.samples[i];
+            float v = ChartSeries.value(series[si], d);
+            if (!ChartSample.valid(v)) {
+                continue;
+            }
+            float x = fPadL + fW * win.u[i];
+            float y = lAxis.y(v, fPadT, fH);
+            if (prev >= 0 && !win.broken[i] && isPidNeighbor(win.samples[prev], d)) {
+                p.moveTo(prevX, prevY);
+                p.lineTo(x, y);
+                any = true;
+            }
+            prev = i;
+            prevX = x;
+            prevY = y;
+        }
+        if (any) {
+            paths[si] = p;
+        }
+    }
+
+    /**
+     * pid 曲线的孤立样本：前后都没有「相邻重算点」（时间差 ≤{@link #PID_CHAIN_MAX_SEC}、无断联）
+     * 时只画点、不连线。
      */
     private void buildPidSingles(ChartWindow win, ChartAxis lAxis) {
         if (lAxis == null) {
             return;
         }
-        int si = -1;
-        for (int k = 0; k < series.length; k++) {
-            if ("pid".equals(series[k].id)) {
-                si = k;
-                break;
-            }
-        }
+        int si = pidSeriesIndex();
         if (si < 0 || !series[si].on) {
             return;
         }
         int n = win.samples.length;
-        float[] xs = new float[n];
-        float[] ys = new float[n];
+        int[] idx = new int[n];
         int m = 0;
         for (int i = 0; i < n; i++) {
-            float v = ChartSeries.value(series[si], win.samples[i]);
-            if (!ChartSample.valid(v)) {
-                continue;
+            if (ChartSample.valid(ChartSeries.value(series[si], win.samples[i]))) {
+                idx[m++] = i;
             }
-            boolean hasPrev = i > 0 && !win.broken[i]
-                    && ChartSample.valid(ChartSeries.value(series[si], win.samples[i - 1]));
-            boolean hasNext = i + 1 < n && !win.broken[i + 1]
-                    && ChartSample.valid(ChartSeries.value(series[si], win.samples[i + 1]));
+        }
+        float[] xs = new float[m];
+        float[] ys = new float[m];
+        int count = 0;
+        for (int j = 0; j < m; j++) {
+            int i = idx[j];
+            boolean hasPrev = j > 0 && !win.broken[i]
+                    && isPidNeighbor(win.samples[idx[j - 1]], win.samples[i]);
+            boolean hasNext = j + 1 < m && !win.broken[idx[j + 1]]
+                    && isPidNeighbor(win.samples[i], win.samples[idx[j + 1]]);
             if (hasPrev || hasNext) {
                 continue;
             }
-            xs[m] = fPadL + fW * win.u[i];
-            ys[m] = lAxis.y(v, fPadT, fH);
-            m++;
+            xs[count] = fPadL + fW * win.u[i];
+            ys[count] = lAxis.y(ChartSeries.value(series[si], win.samples[i]), fPadT, fH);
+            count++;
         }
-        if (m == 0) {
+        if (count == 0) {
             return;
         }
-        pidDotX = new float[m];
-        pidDotY = new float[m];
-        System.arraycopy(xs, 0, pidDotX, 0, m);
-        System.arraycopy(ys, 0, pidDotY, 0, m);
+        pidDotX = new float[count];
+        pidDotY = new float[count];
+        System.arraycopy(xs, 0, pidDotX, 0, count);
+        System.arraycopy(ys, 0, pidDotY, 0, count);
         pidDotColor = seriesColors[si];
-        pidDotCount = m;
+        pidDotCount = count;
+    }
+
+    /** 相邻两次重算样本是否算「连续」：时间差在控制周期内。 */
+    private static boolean isPidNeighbor(ChartSample a, ChartSample b) {
+        long dt = b.t - a.t;
+        return dt >= 0 && dt <= (long) PID_CHAIN_MAX_SEC;
+    }
+
+    private int pidSeriesIndex() {
+        for (int k = 0; k < series.length; k++) {
+            if ("pid".equals(series[k].id)) {
+                return k;
+            }
+        }
+        return -1;
     }
 
     /**
-     * 制冷 / 电池℃ / pid℃ 三条线的 PID 重算标记，两个开关可组合（{@code UI_PID_MARK}）：
-     * <ul>
-     *   <li>点：每个重算样本画一个小圆点（直径 = 线宽 ×1.2，外圈一圈底色描边）；</li>
-     *   <li>虚线：每个重算位置画一条竖虚线（与网格同宽同色，含透明度），与点互相独立。</li>
-     * </ul>
+     * PID 重算标记（{@code UI_PID_MARK}）：每个重算位置画一条竖虚线，与网格同宽同色（含透明度）。
+     * 重算位置与系列开关无关——它是「控制层在这一秒算过一次」的事实。
      */
-    private void buildRecomputeMarks(ChartWindow win, ChartAxis lAxis, ChartAxis rAxis) {
-        if (config == null) {
+    private void buildRecomputeMarks(ChartWindow win) {
+        if (config == null || !config.markDash) {
             return;
         }
-        boolean dot = config.markDot;
-        boolean dash = config.markDash;
-        if (!dot && !dash) {
-            return;
-        }
-        List<MarkDot> dots = new ArrayList<>();
         int n = win.samples.length;
-
-        for (int si = 0; si < series.length; si++) {
-            ChartSeries s = series[si];
-            if (!s.on || !isRecomputeSeries(s.id) || !dot) {
-                continue;
-            }
-            ChartAxis ax = s.axis == ChartSeries.AXIS_LEFT ? lAxis : rAxis;
-            if (ax == null) {
-                continue;
-            }
-            for (int i = 0; i < n; i++) {
-                ChartSample d = win.samples[i];
-                if (!d.recomp) {
-                    continue;
-                }
-                float v = ChartSeries.value(s, d);
-                if (!ChartSample.valid(v)) {
-                    continue;
-                }
-                dots.add(new MarkDot(
-                        fPadL + fW * win.u[i], ax.y(v, fPadT, fH), seriesColors[si]));
+        int count = 0;
+        for (int i = 0; i < n; i++) {
+            if (win.samples[i].recomp) {
+                count++;
             }
         }
-
-        if (dash) {
-            List<Float> xs = new ArrayList<>();
-            for (int i = 0; i < n; i++) {
-                if (win.samples[i].recomp && hasAnyMarkValue(win.samples[i])) {
-                    xs.add(fPadL + fW * win.u[i]);
-                }
-            }
-            dashXs = new float[xs.size()];
-            for (int i = 0; i < xs.size(); i++) {
-                dashXs[i] = xs.get(i);
+        if (count == 0) {
+            return;
+        }
+        dashXs = new float[count];
+        int k = 0;
+        for (int i = 0; i < n; i++) {
+            if (win.samples[i].recomp) {
+                dashXs[k++] = fPadL + fW * win.u[i];
             }
         }
-        if (!dots.isEmpty()) {
-            markDots = dots.toArray(new MarkDot[0]);
-        }
-    }
-
-    /** 该样本上三条标记系列至少一条有值（竖虚线只需画一次）。 */
-    private static boolean hasAnyMarkValue(ChartSample d) {
-        return ChartSample.valid(d.cool) || ChartSample.valid(d.battF) || ChartSample.valid(d.pid);
-    }
-
-    /** 带重算标记的三条系列（与 C 端 PID 的重算节拍对齐）。 */
-    private static boolean isRecomputeSeries(String id) {
-        return "cool".equals(id) || "batt".equals(id) || "pid".equals(id);
     }
 
     /**
@@ -542,12 +548,13 @@ public class ChartView extends View {
             if (!s.on) {
                 continue;
             }
+            if ("pid".equals(s.id)) {
+                continue;   // 稀疏样本单独连线，见 buildPidPath
+            }
             ChartAxis ax = s.axis == ChartSeries.AXIS_LEFT ? lAxis : rAxis;
             if (ax == null) {
                 continue;
             }
-            // pid 输入只在 C 端算过 PID 的周期才有值，孤立样本不连线（见 buildPidSingles）
-            boolean breakOnGap = "pid".equals(s.id);
             Path p = new Path();
             boolean started = false;
             for (int i = 0; i < win.samples.length; i++) {
@@ -556,9 +563,6 @@ public class ChartView extends View {
                 }
                 float v = ChartSeries.value(s, win.samples[i]);
                 if (!ChartSample.valid(v)) {
-                    if (breakOnGap) {
-                        started = false;
-                    }
                     continue;
                 }
                 float x = fPadL + fW * win.u[i];
@@ -847,18 +851,6 @@ public class ChartView extends View {
             }
         }
 
-        // PID 重算标记「点」：先铺一圈底色再画点，与头部数值圆点同一手法，避免被曲线吞掉
-        if (markDots != null && markDots.length > 0) {
-            float mr = MARK_RADIUS_DP * density;
-            float halo = mr + MARK_HALO_DP * density;
-            for (MarkDot dot : markDots) {
-                dotPaint.setColor(colorBg);
-                canvas.drawCircle(dot.x, dot.y, halo, dotPaint);
-                dotPaint.setColor(dot.color);
-                canvas.drawCircle(dot.x, dot.y, mr, dotPaint);
-            }
-        }
-
         // 标注先描边（halo）再填色，避免曲线穿过字形时同色糊在一起
         if (labels != null) {
             haloPaint.setColor(colorBg);
@@ -880,19 +872,6 @@ public class ChartView extends View {
                 canvas.drawCircle(e.x, e.y, r, dotPaint);
                 canvas.drawCircle(e.x, e.y, r, dotHaloPaint);
             }
-        }
-    }
-
-    /** PID 重算「点」标记（位置与颜色在 rebuild 定死，onDraw 只画）。 */
-    private static final class MarkDot {
-        final float x;
-        final float y;
-        final int color;
-
-        MarkDot(float x, float y, int color) {
-            this.x = x;
-            this.y = y;
-            this.color = color;
         }
     }
 

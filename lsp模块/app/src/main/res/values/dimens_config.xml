@@ -117,17 +117,6 @@
     <dimen name="switch_trim_end">-6dp</dimen>
 
     <!--
-        字段内开关（item_config_field_switch.xml）：缩放 0.75 的枢轴改到左沿，
-        于是墨迹左侧的 6.5dp 空白消失、右侧变成 13dp。两项配套：
-          · switch_label_gap = 3dp：字段名 → 开关墨迹的净距。原先是「4dp 边距 + 6.5dp 缩放空白」
-            ≈ 10.5dp，改后正好是它与「前一个开关」之间净距（4.5dp）的 2/3；
-          · switch_trim_end_lead = -12.5dp：把右侧多出来的 13dp 还给布局（原 switch_trim_end 的 -6dp
-            只够抵缩放前的一半），组与组之间的净距保持原样。
-    -->
-    <dimen name="switch_label_gap">3dp</dimen>
-    <dimen name="switch_trim_end_lead">-12.5dp</dimen>
-
-    <!--
         参数名的下移量：<b>enum 行与 path 行</b>有效——它们的参数名仍按行高居中并整体下移这么多
         （enum 是分段开关、没有"框体"；path 的框吃满整行、名字在框上一行、与框不同行，故都不钉框体几何中点）。
         有输入框的 int / multi 数值行改由 ConfigKeyRow#alignLabelToField 把名字钉在框体几何中点

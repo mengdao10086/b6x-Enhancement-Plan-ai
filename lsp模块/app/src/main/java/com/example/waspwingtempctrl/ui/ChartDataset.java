@@ -151,7 +151,7 @@ final class ChartDataset {
         return v != null && v > 0 ? v : ChartSample.INVALID;
     }
 
-    /** PID 输入：C 端按 0.01°C 写，哨兵 -1 无效。 */
+    /** PID 输入：C 端按 0.01°C 写，只有重算行有值，其余行（含旧数据）为 -1 → 无效。 */
     private static float pidInput(Integer v) {
         return v != null && v >= 0 ? v / 100f : ChartSample.INVALID;
     }

@@ -31,7 +31,7 @@ final class ChartSample {
     final float rpm;
     /** 实际制冷强度（制冷档位）。 */
     final float cool;
-    /** PID 实际输入（守护进程滤波后的电池温度，℃）；C 端尚未算出时 {@link #INVALID}。 */
+    /** PID 实际输入（守护进程滤波后的电池温度，℃）；只有重算样本有值，其余行为 {@link #INVALID}。 */
     final float pid;
     /** 本行是否由 PID 重算触发（曲线上的重算标记点）。 */
     final boolean recomp;

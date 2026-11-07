@@ -368,7 +368,7 @@ static const char *status_field_value(const char *line, const char *field) {
 
 // 曲线行格式：列数唯一声明（CI 断言可 grep 本行数 % 个数，须等于 WEBUI_DATA_COLS）
 // 列序：epoch, 电池, CPU, 热端, 冷端, 实际转速, 实际制冷, 目标制冷（0.1°C，未就绪为 -1）,
-//       PID 输入（0.01°C，未算过为 -1）, 本行是否触发 PID 重算（0/1）
+//       PID 输入（0.01°C，仅重算行有值、其余行为 -1）, 本行是否触发 PID 重算（0/1）
 #define WEBUI_DATA_COLS       10
 #define WEBUI_ROW_FMT         "%ld,%d,%d,%d,%d,%d,%d,%d,%d,%d\n"
 
@@ -4374,7 +4374,7 @@ static void append_webui_row(void) {
                     webui_epoch_now, webui_batt_now, webui_cpu_now,
                     cooler_hot_temp, cooler_cold_temp,
                     cooler_rpm_real, cooler_cold_real, actual_cold,
-                    pid_input_cdeg, recomp) >= 0) {
+                    recomp ? pid_input_cdeg : -1, recomp) >= 0) {
             fflush(webui_fp);   // 立即落盘：界面按秒读取
         } else {
             fclose(webui_fp);
