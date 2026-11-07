@@ -299,6 +299,10 @@ static int pid_cpu_comp_active = 0;         // 补偿门控：1=激活（进入�
 // --- 电池温度输入滤波（改动2：加回；仅温度更新时滤波，动态 α，停机后恢复原始值）---
 static int pid_batt_filtered = -1;        // 滤波后电池温度（0.01°C 单位，3680=36.80°C；传感器分辨率 0.1，小数由滤波插值给出），-1=未初始化
 static int pid_batt_last_update_cycle = -1; // 上次温度更新的控制周期（动态α间隔计算用）
+// 曲线数据用：本周期实际送入 PID 的滤波值（0.01°C，-1=尚未算过），以及本周期是否真跑了 PID 重算。
+// 写完一行曲线即清零后者的标记位（见 write_webui_data）。
+static int pid_input_cdeg = -1;
+static int pid_recompute_pending = 0;
 
 // --- 输出映射与对齐 ---
 static int pid_align_rpm = 2000;          // PID 目标 RPM（仅初始化对齐与日志使用；风扇下发已由 compute_fan_target 独立计算）
@@ -363,9 +367,10 @@ static const char *status_field_value(const char *line, const char *field) {
 #define WEBUI_DATA_MAX_LINES  720   // = 曲线最大时间挡位（秒）
 
 // 曲线行格式：列数唯一声明（CI 断言可 grep 本行数 % 个数，须等于 WEBUI_DATA_COLS）
-// 列序：epoch, 电池, CPU, 热端, 冷端, 实际转速, 实际制冷, 目标制冷（0.1°C，未就绪为 -1）
-#define WEBUI_DATA_COLS       8
-#define WEBUI_ROW_FMT         "%ld,%d,%d,%d,%d,%d,%d,%d\n"
+// 列序：epoch, 电池, CPU, 热端, 冷端, 实际转速, 实际制冷, 目标制冷（0.1°C，未就绪为 -1）,
+//       PID 输入（0.01°C，未算过为 -1）, 本行是否触发 PID 重算（0/1）
+#define WEBUI_DATA_COLS       10
+#define WEBUI_ROW_FMT         "%ld,%d,%d,%d,%d,%d,%d,%d,%d,%d\n"
 
 // 生效制冷上限提示文件（写给 app 定 KI 分段倍率曲线横轴）；行格式与降级见 app/逻辑说明.md §6.6
 #define COLDMAX_HINT_PATH     PRIVATE_DIR "/tempctrl_coldmax"
@@ -3940,6 +3945,8 @@ static void pid_reset_core(void) {
     pid_cpu_comp_active = 0;
     pid_batt_filtered = -1;          // 电池输入滤波重置（改动2；重连/启动后直取初值）
     pid_batt_last_update_cycle = -1;
+    pid_input_cdeg = -1;             // 曲线上的 PID 输入同步失效，重连后等下一次控制周期
+    pid_recompute_pending = 0;
     recall_anchor = 0;
     recall_prev_batt = 0;
     recall_cycles = 0;
@@ -4194,6 +4201,9 @@ static void pid_cycle(void) {
         pid_batt_last_update_cycle = pid_ctrl_cycles;
     }
 
+    // 曲线用：本周期实际送入 PID 的输入（滤波后，0.01°C），每周期刷新
+    pid_input_cdeg = pid_batt_filtered;
+
     // 滤波态判据：滤波值与原始值相差 ≥0.05°C → 仍在滤波（可触发追赶逻辑）
     int filter_lag = abs(pid_batt_filtered - batt_cdeg) >= 5;
     // 停机（温度未变）且滤波未收敛：继续按同一限幅向原值推进一拍，不硬跳——硬跳会把整段残差
@@ -4231,6 +4241,9 @@ static void pid_cycle(void) {
             return;
         }
     }
+
+    // 走到这里 = 本轮真跑 PID（没被跳过①/②挡下）：给曲线行打重算标记。
+    pid_recompute_pending = 1;
 
     // dt：距上次重算以来的 5 秒周期数（1 = 5s），钳位 0.6~6（3s~30s）。标定单位为每 5s 周期
     float dt = (float)(now - pid_last_change_time) / 5.0f;
@@ -4324,6 +4337,9 @@ static FILE *webui_fp = NULL;              // WebUI 曲线文件的常驻追加�
  * （第一值判断联、第二值封顶空白）断开曲线并等比留白，见 app/逻辑说明.md §7.2。
  */
 static void write_webui_data(void) {
+    // 重算标记只属于「写过的那一行」：断联不写时也要清掉，避免重连后把旧标记补记到新行上。
+    int recomp = pid_recompute_pending;
+    pid_recompute_pending = 0;
     int batt = read_battery_temp();
     int cpu  = read_cpu_temp_max();
     read_cooler_params();   // 更新 cooler_* 全局（热/冷端、实际转速、实际制冷）+ app_ble_connected
@@ -4342,7 +4358,8 @@ static void write_webui_data(void) {
         if (fprintf(webui_fp, WEBUI_ROW_FMT,
                     (long)time(NULL), batt, cpu,
                     cooler_hot_temp, cooler_cold_temp,
-                    cooler_rpm_real, cooler_cold_real, actual_cold) >= 0) {
+                    cooler_rpm_real, cooler_cold_real, actual_cold,
+                    pid_input_cdeg, recomp) >= 0) {
             fflush(webui_fp);   // 立即落盘：界面按秒读取
         } else {
             fclose(webui_fp);

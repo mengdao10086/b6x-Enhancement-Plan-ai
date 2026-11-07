@@ -7,8 +7,8 @@ import java.util.Locale;
 /**
  * 一条曲线的静态定义与会话内开关状态。
  *
- * <p>图例顺序与默认开关（口径见 {@code app/逻辑说明.md} §7.6〈系列开关〉）：6 条曲线，
- * 默认除「冷端℃」「CPU℃」外全开；左轴 5 条（温度 ℃ 与风扇百 rpm 共轴），右轴恒 1 条（制冷）。
+ * <p>图例顺序与默认开关（口径见 {@code app/逻辑说明.md} §7.6〈系列开关〉）：7 条曲线，
+ * 默认除「冷端℃」「CPU℃」外全开；左轴 6 条（温度 ℃ 与风扇百 rpm 共轴），右轴恒 1 条（制冷）。
  *
  * <p>取值分两种口径，<b>不可混用</b>：
  * <ul>
@@ -57,6 +57,8 @@ final class ChartSeries {
                         AXIS_LEFT, FMT_RPM, true),
                 new ChartSeries("hot", R.string.chart_series_hot, R.color.chart_series_hot,
                         AXIS_LEFT, FMT_TEMP, true),
+                new ChartSeries("pid", R.string.chart_series_pid, R.color.chart_series_pid,
+                        AXIS_LEFT, FMT_TEMP, true),
                 new ChartSeries("cold", R.string.chart_series_cold, R.color.chart_series_cold,
                         AXIS_LEFT, FMT_TEMP, false),
                 new ChartSeries("cpu", R.string.chart_series_cpu, R.color.chart_series_cpu,
@@ -71,11 +73,12 @@ final class ChartSeries {
     /**
      * 图例是否在该条之前另起一行（经 {@link WrapRowLayout#setBreakBefore} 施加）。
      *
-     * <p>{@code true} 的是「冷端℃ / CPU℃」这一行——两条可选温度传感器，与第一行不是一类；默认关闭、
-     * 排到第二行后图例不再随机掉行（见 app/逻辑说明.md §7.6）。图例顺序即 {@link #createAll} 的数组顺序。
+     * <p>{@code true} 的是「pid℃ / 冷端℃ / CPU℃」这一行——pid 输入与两条可选温度传感器同排，
+     * 第一行留给主曲线；默认关闭、排到第二行后图例不再随机掉行（见 app/逻辑说明.md §7.6）。
+     * 图例顺序即 {@link #createAll} 的数组顺序。
      */
     static boolean startsLegendRow(ChartSeries s) {
-        return "cold".equals(s.id);
+        return "pid".equals(s.id);
     }
 
     /** 绘图与标注取值：热端/电池走滤波值，风扇 ÷100 与 ℃ 共轴。 */
@@ -85,6 +88,8 @@ final class ChartSeries {
                 return d.battF;
             case "hot":
                 return d.hotF;
+            case "pid":
+                return d.pid;
             case "cold":
                 return d.cold;
             case "cpu":

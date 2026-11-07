@@ -32,6 +32,7 @@
     <string name="chart_series_cpu">CPU℃</string>
     <string name="chart_series_rpm">风扇rpm</string>
     <string name="chart_series_cool">制冷</string>
+    <string name="chart_series_pid">pid℃</string>
 
     <!-- ===== 画布内文字 ===== -->
     <string name="chart_axis_left">℃/百rpm</string>

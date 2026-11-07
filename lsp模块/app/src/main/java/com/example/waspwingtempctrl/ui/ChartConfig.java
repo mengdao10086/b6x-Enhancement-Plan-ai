@@ -17,7 +17,8 @@ import java.util.List;
  *
  * <p>两类来源（口径见 app/逻辑说明.md §7.1）：
  * <ol>
- *   <li>{@code UI_GAP_SEC} / {@code UI_RPM_AXIS_MIN} / {@code UI_CURVE_FILTER}，
+ *   <li>{@code UI_GAP_SEC} / {@code UI_RPM_AXIS_MIN} / {@code UI_CURVE_FILTER} /
+ *       {@code UI_PID_MARK}，
  *       以及右轴上限口径所需的 {@code COLD_RPM_MAP} /
  *       {@code PID_COLD_RANGE} / {@code PERF_ENABLED} —— 一律经 {@link ConfigStore} 读。
  *       字段缺项（如只写 {@code UI_CURVE_FILTER=15}）回落该字段在
@@ -52,6 +53,8 @@ final class ChartConfig {
     int coldMapStart = 40;
     /** 右轴上限浮动区间上沿 = {@code PID_COLD_RANGE} 第 2 值（B6X 制冷上限）。 */
     int coldMax = 190;
+    /** 曲线上的 PID 重算标记点开关（{@code UI_PID_MARK}），默认开。 */
+    boolean pidMarkOn = true;
 
     int[] windowOptions = FALLBACK_WINDOW_OPTIONS.clone();
     int windowDefaultSec = FALLBACK_WINDOW_DEFAULT;
@@ -111,6 +114,8 @@ final class ChartConfig {
         gapMaxSec = maxSec > 0 ? maxSec : 15;
         // 转速下限：负值一律归 0 = 关闭（口径见 app/逻辑说明.md §7.3〈双纵轴〉）
         rpmAxisMin = Math.max(0, field(store, snap, "UI_RPM_AXIS_MIN", 0, 3000));
+        // 重算标记点：缺键按 schema 默认（开），0 = 关闭
+        pidMarkOn = field(store, snap, "UI_PID_MARK", 0, 1) != 0;
         // 滤波：两个子值 0 都合法（= 关闭该级），负值回落默认（口径见 app/逻辑说明.md §7.2〈滤波关闭语义〉）
         int a = field(store, snap, "UI_CURVE_FILTER", 0, 15);
         int s = field(store, snap, "UI_CURVE_FILTER", 1, 5);

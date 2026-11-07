@@ -4,11 +4,13 @@ package com.example.waspwingtempctrl.ui;
  * 曲线数据文件的一行样本。
  *
  * <p>列序与 C 端 {@code write_webui_data()} 里 {@code fprintf(wf, WEBUI_ROW_FMT, ...)} 的格式串完全一致：
- * {@code epoch,电池,CPU,热端,冷端,实际转速,实际制冷,目标制冷}。温度列已在解析层
+ * {@code epoch,电池,CPU,热端,冷端,实际转速,实际制冷,目标制冷,PID输入,PID重算标记}。温度列已在解析层
  * ×0.1 折算为 ℃；哨兵值 -1（未就绪）一律转为 {@link #INVALID}，即
  * {@code v>=0 ? v/10 : 无效}（口径见 {@code lsp模块/daemon/逻辑说明.md} 的「状态页数据源（C 每 1s 写数据文件）」一节）。
+ * PID 输入列单位是 0.01°C，解析层按 ×0.01 折算。
  *
- * <p>第 8 列（目标制冷）落盘但旧 WebUI 从未消费，本类同样不保留。
+ * <p>第 8 列（目标制冷）落盘但本界面不消费；第 9/10 列为后加的可选列——旧行只有 8 列时
+ * 这两项取 {@link #INVALID}/false，不整行丢弃。
  */
 final class ChartSample {
 
@@ -29,13 +31,18 @@ final class ChartSample {
     final float rpm;
     /** 实际制冷强度（制冷档位）。 */
     final float cool;
+    /** PID 实际输入（守护进程滤波后的电池温度，℃）；C 端尚未算出时 {@link #INVALID}。 */
+    final float pid;
+    /** 本行是否由 PID 重算触发（曲线上的重算标记点）。 */
+    final boolean recomp;
 
     /** 电池滤波后的曲线值（仅该条参与滤波，{@code app/逻辑说明.md} §7.2〈热端与电池曲线滤波〉）。 */
     float battF = INVALID;
     /** 热端滤波后的曲线值（{@code app/逻辑说明.md} §7.2〈热端与电池曲线滤波〉）。 */
     float hotF = INVALID;
 
-    ChartSample(long t, float batt, float cpu, float hot, float cold, float rpm, float cool) {
+    ChartSample(long t, float batt, float cpu, float hot, float cold, float rpm, float cool,
+                float pid, boolean recomp) {
         this.t = t;
         this.batt = batt;
         this.cpu = cpu;
@@ -43,6 +50,8 @@ final class ChartSample {
         this.cold = cold;
         this.rpm = rpm;
         this.cool = cool;
+        this.pid = pid;
+        this.recomp = recomp;
     }
 
     static boolean valid(float v) {

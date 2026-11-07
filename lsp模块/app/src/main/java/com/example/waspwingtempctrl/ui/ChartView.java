@@ -44,10 +44,12 @@ public class ChartView extends View {
     private static final float HALO_WIDTH_DP = 3f;   // 文字 halo
     private static final float DOT_RADIUS_DP = 3.2f; // 头部圆点
     private static final float DOT_HALO_DP = 1f;     // 圆点外圈
+    // PID 重算标记点：直径 = 线宽 × 1.2（线宽 1.6dp → 半径 0.96dp），刻意比头部圆点小得多
+    private static final float MARK_RADIUS_DP = LINE_WIDTH_DP * 0.6f;
+    // pid 曲线的孤立样本（前后都没有相邻有效点）：只画一个点，不连线；半径取线宽
+    private static final float PID_DOT_RADIUS_DP = LINE_WIDTH_DP;
     private static final float TICK_TEXT_DP = 10f;   // 刻度 / 标注 / 轴标题字号
     private static final float EMPTY_TEXT_DP = 12f;  // 「采样中…」字号
-    private static final float SEAM_EXTRA_DP = 4f;   // 转速圆点允许下越界的量
-    private static final float SEAM_BOTTOM_DP = 5f;  // 接缝离画布下沿的下限：圆点（半径 3.2 + 外圈 0.5）不许被裁
     private static final float LABEL_GAP_DP = 6f;    // 标签与端点的水平间距
     // 标签落在簇上方时相对簇顶端的抬升量（原 WebUI 同名口径：top − 4）；落下方的间距见 LABEL_H_DP + 1dp
     private static final float LABEL_LIFT_DP = 4f;
@@ -88,7 +90,6 @@ public class ChartView extends View {
     private float fPadT;
     private float fW;
     private float fH;
-    private float fSeamY;
     /** 两个轴标题的绘制 x：左标题左沿 = 最左那条刻度数字的左沿，右标题右沿 = 最右那条的右沿。 */
     private float titleLeftX;
     private float titleRightX;
@@ -98,6 +99,16 @@ public class ChartView extends View {
     private Path[] paths;
     private ChartLabelOp[] labels;
     private ChartDotOp[] dots;
+    /** PID 重算标记点（x/y/颜色三数组同长，有效长度 {@link #markCount}）。 */
+    private float[] markX;
+    private float[] markY;
+    private int[] markColor;
+    private int markCount;
+    /** pid 曲线的孤立样本点（x/y 同长，颜色恒为 pid 系列色）。 */
+    private float[] pidDotX;
+    private float[] pidDotY;
+    private int pidDotColor;
+    private int pidDotCount;
 
     public ChartView(Context context) {
         super(context);
@@ -223,6 +234,13 @@ public class ChartView extends View {
         paths = null;
         labels = null;
         dots = null;
+        markX = null;
+        markY = null;
+        markColor = null;
+        markCount = 0;
+        pidDotX = null;
+        pidDotY = null;
+        pidDotCount = 0;
 
         if (!colorsReady) {
             loadColors();
@@ -239,11 +257,6 @@ public class ChartView extends View {
         if (fH <= 8f * density) {
             return;
         }
-        // 接缝（转速圆点允许下越界的下限）：以绘图区下沿外扩、再被画布下沿收住，圆点才不被裁（见 §7.3）
-        // 注：PAD_B_DP(4) < SEAM_EXTRA_DP + SEAM_BOTTOM_DP(4+5) 时首项恒大于次项，故此处实际恒取
-        // h − SEAM_BOTTOM_DP·density，SEAM_EXTRA_DP 当前对结果无影响（保留为口径锚点）。
-        fSeamY = Math.min(fPadT + fH + SEAM_EXTRA_DP * density, h - SEAM_BOTTOM_DP * density);
-
         titleLeft = getContext().getString(R.string.chart_axis_left);
         titleRight = getContext().getString(R.string.chart_axis_right);
 
@@ -304,7 +317,114 @@ public class ChartView extends View {
             return;
         }
         buildPaths(win, lAxis, rAxis);
+        buildPidSingles(win, lAxis);
+        buildRecomputeMarks(win, lAxis, rAxis);
         buildMarkers(win, lAxis, rAxis);
+    }
+
+    /**
+     * pid 曲线的孤立样本：前后都没有相邻有效点（断联也断开）时只画点、不连线。
+     * 连续两周期以上有数据的情况由 {@link #buildPaths} 正常连成折线。
+     */
+    private void buildPidSingles(ChartWindow win, ChartAxis lAxis) {
+        if (lAxis == null) {
+            return;
+        }
+        int si = -1;
+        for (int k = 0; k < series.length; k++) {
+            if ("pid".equals(series[k].id)) {
+                si = k;
+                break;
+            }
+        }
+        if (si < 0 || !series[si].on) {
+            return;
+        }
+        int n = win.samples.length;
+        float[] xs = new float[n];
+        float[] ys = new float[n];
+        int m = 0;
+        for (int i = 0; i < n; i++) {
+            float v = ChartSeries.value(series[si], win.samples[i]);
+            if (!ChartSample.valid(v)) {
+                continue;
+            }
+            boolean hasPrev = i > 0 && !win.broken[i]
+                    && ChartSample.valid(ChartSeries.value(series[si], win.samples[i - 1]));
+            boolean hasNext = i + 1 < n && !win.broken[i + 1]
+                    && ChartSample.valid(ChartSeries.value(series[si], win.samples[i + 1]));
+            if (hasPrev || hasNext) {
+                continue;
+            }
+            xs[m] = fPadL + fW * win.u[i];
+            ys[m] = lAxis.y(v, fPadT, fH);
+            m++;
+        }
+        if (m == 0) {
+            return;
+        }
+        pidDotX = new float[m];
+        pidDotY = new float[m];
+        System.arraycopy(xs, 0, pidDotX, 0, m);
+        System.arraycopy(ys, 0, pidDotY, 0, m);
+        pidDotColor = seriesColors[si];
+        pidDotCount = m;
+    }
+
+    /**
+     * 制冷 / 电池℃ / pid℃ 三条线：在 C 端触发 PID 重算的样本处画一个标记小点。
+     *
+     * <p>点径取线宽的 1.2 倍（{@link #MARK_RADIUS_DP}），只做"这里算过一次"的提示，不与头部
+     * 数值圆点抢视觉。开关是界面参数 {@code UI_PID_MARK}（默认开）。
+     */
+    private void buildRecomputeMarks(ChartWindow win, ChartAxis lAxis, ChartAxis rAxis) {
+        if (config == null || !config.pidMarkOn) {
+            return;
+        }
+        int cap = win.samples.length * 3;
+        float[] xs = new float[cap];
+        float[] ys = new float[cap];
+        int[] cs = new int[cap];
+        int n = 0;
+        for (int si = 0; si < series.length; si++) {
+            ChartSeries s = series[si];
+            if (!s.on || !isRecomputeSeries(s.id)) {
+                continue;
+            }
+            ChartAxis ax = s.axis == ChartSeries.AXIS_LEFT ? lAxis : rAxis;
+            if (ax == null) {
+                continue;
+            }
+            for (int i = 0; i < win.samples.length; i++) {
+                ChartSample d = win.samples[i];
+                if (!d.recomp) {
+                    continue;
+                }
+                float v = ChartSeries.value(s, d);
+                if (!ChartSample.valid(v)) {
+                    continue;
+                }
+                xs[n] = fPadL + fW * win.u[i];
+                ys[n] = ax.y(v, fPadT, fH);
+                cs[n] = seriesColors[si];
+                n++;
+            }
+        }
+        if (n == 0) {
+            return;
+        }
+        markX = new float[n];
+        markY = new float[n];
+        markColor = new int[n];
+        System.arraycopy(xs, 0, markX, 0, n);
+        System.arraycopy(ys, 0, markY, 0, n);
+        System.arraycopy(cs, 0, markColor, 0, n);
+        markCount = n;
+    }
+
+    /** 带重算标记的三条系列（与 C 端 PID 的重算节拍对齐）。 */
+    private static boolean isRecomputeSeries(String id) {
+        return "cool".equals(id) || "batt".equals(id) || "pid".equals(id);
     }
 
     /**
@@ -404,6 +524,8 @@ public class ChartView extends View {
             if (ax == null) {
                 continue;
             }
+            // pid 输入只在 C 端算过 PID 的周期才有值，孤立样本不连线（见 buildPidSingles）
+            boolean breakOnGap = "pid".equals(s.id);
             Path p = new Path();
             boolean started = false;
             for (int i = 0; i < win.samples.length; i++) {
@@ -412,6 +534,9 @@ public class ChartView extends View {
                 }
                 float v = ChartSeries.value(s, win.samples[i]);
                 if (!ChartSample.valid(v)) {
+                    if (breakOnGap) {
+                        started = false;
+                    }
                     continue;
                 }
                 float x = fPadL + fW * win.u[i];
@@ -469,13 +594,13 @@ public class ChartView extends View {
             }
             float ex = fPadL + fW * win.u[last];
             float ey = ax.y(lv, fPadT, fH);
-            // 只有风扇转速系列允许下越界到接缝；其余（含右轴制冷）钳在作图区下沿
-            float yMax = ChartSeries.isRpm(s) ? fSeamY : fPadT + fH;
+            // 风扇转速低于纵轴下限时，圆点落到画布下沿：下半被画布裁掉、只露上半边，
+            // 直观表示"已在轴下限之外"。其余系列（含右轴制冷）钳在作图区下沿。
+            if (ey > fPadT + fH) {
+                ey = ChartSeries.isRpm(s) ? getHeight() : fPadT + fH;
+            }
             if (ey < fPadT) {
                 ey = fPadT;
-            }
-            if (ey > yMax) {
-                ey = yMax;
             }
             entries.add(new ChartLabelOp(ChartSeries.format(s, lv), ex, ey, seriesColors[si]));
         }
@@ -680,6 +805,24 @@ public class ChartView extends View {
                     seriesPaint.setColor(seriesColors[si]);
                     canvas.drawPath(paths[si], seriesPaint);
                 }
+            }
+        }
+
+        // pid 曲线的孤立样本点：半径取线宽，先画（比重算标记点大一点）
+        if (pidDotCount > 0) {
+            dotPaint.setColor(pidDotColor);
+            float pr = PID_DOT_RADIUS_DP * density;
+            for (int i = 0; i < pidDotCount; i++) {
+                canvas.drawCircle(pidDotX[i], pidDotY[i], pr, dotPaint);
+            }
+        }
+
+        // PID 重算标记点：比头部圆点小，直接压在曲线上（不加 halo）
+        if (markCount > 0) {
+            float mr = MARK_RADIUS_DP * density;
+            for (int i = 0; i < markCount; i++) {
+                dotPaint.setColor(markColor[i]);
+                canvas.drawCircle(markX[i], markY[i], mr, dotPaint);
             }
         }
 

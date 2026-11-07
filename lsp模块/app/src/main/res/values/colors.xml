@@ -56,6 +56,8 @@
     <color name="chart_series_cpu">#FF9800</color>
     <color name="chart_series_rpm">#9C27B0</color>
     <color name="chart_series_cool">#4CAF50</color>
+    <!-- pid 输入：与电池同色、50% 透明，叠在电池线上时能同时看出两条 -->
+    <color name="chart_series_pid">#80F44336</color>
     <color name="chart_axis">#888888</color>
 
     <!-- ===== KI 分段倍率表曲线 =====

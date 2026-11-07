@@ -30,11 +30,17 @@ final class ChartDataset {
      *   [4] 冷端            0.1°C              → temp()
      *   [5] 实际转速        原始 RPM            → raw()
      *   [6] 实际制冷        制冷档位            → raw()
+     *   [7] 目标制冷        制冷档位            → 不消费
+     *   [8] PID 输入        0.01°C              → pidInput()
+     *   [9] 重算标记        0/1                 → asOne()
      * </pre>
      *
-     * <p><b>[7] 目标制冷：写端有，读端有意不消费。</b>本界面（图例 6 条系列 + 实时数值列）
+     * <p><b>[7] 目标制冷：写端有，读端有意不消费。</b>本界面（图例 7 条系列 + 实时数值列）
      * 都不展示目标制冷（{@code app/逻辑说明.md} §7.6〈实时数值列〉明确"不含目标制冷"），
      * 故 8 列里只读前 7 列；<b>但列数校验仍按 8 列</b>——校验的是"写端格式"，读端不擅自放宽或收紧。
+     *
+     * <p><b>[8] PID 输入 / [9] 重算标记：后加的可选列。</b>写端已升到 10 列；读端仍按「至少
+     * {@link #COL_COUNT} 列」校验，旧数据（8 列）照常解析，这两项取无效/false，不会整行丢弃。
      */
     static final int COL_COUNT = 8;
 
@@ -48,6 +54,10 @@ final class ChartDataset {
     private static final int COL_COLD = 4;
     private static final int COL_RPM = 5;
     private static final int COL_COOL = 6;
+    /** PID 输入（0.01°C）：后加列，旧行没有 → 无效。 */
+    private static final int COL_PID = 8;
+    /** PID 重算标记（0/1）：后加列，旧行没有 → false。 */
+    private static final int COL_RECOMP = 9;
 
     /** 全量样本（已滤波）。 */
     final ChartSample[] all;
@@ -86,7 +96,9 @@ final class ChartDataset {
                     tempNonZero(parseInt(p[COL_HOT])),
                     temp(parseInt(p[COL_COLD])),
                     rawNonZero(parseInt(p[COL_RPM])),
-                    rawNonZero(parseInt(p[COL_COOL])));
+                    rawNonZero(parseInt(p[COL_COOL])),
+                    pidInput(p.length > COL_PID ? parseInt(p[COL_PID]) : null),
+                    p.length > COL_RECOMP && asOne(p[COL_RECOMP]));
             total++;
         }
         int keep = Math.min(total, cap);
@@ -137,6 +149,17 @@ final class ChartDataset {
     /** 风扇转速/制冷档位：设备未启动时回传 0，按无效处理（不画到 0）。 */
     private static float rawNonZero(Integer v) {
         return v != null && v > 0 ? v : ChartSample.INVALID;
+    }
+
+    /** PID 输入：C 端按 0.01°C 写，哨兵 -1 无效。 */
+    private static float pidInput(Integer v) {
+        return v != null && v >= 0 ? v / 100f : ChartSample.INVALID;
+    }
+
+    /** 重算标记：非 0 即真。 */
+    private static boolean asOne(String s) {
+        Integer v = parseInt(s);
+        return v != null && v != 0;
     }
 
     /**
