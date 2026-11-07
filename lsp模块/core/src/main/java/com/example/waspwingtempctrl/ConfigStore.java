@@ -1114,7 +1114,8 @@ public final class ConfigStore {
                             fo.optInt("default", 0),
                             fo.optBoolean("bool", false),
                             fo.optBoolean("allowEmpty", false),
-                            fo.optString("unitNote", "")));
+                            fo.optString("unitNote", ""),
+                            fo.optInt("enabledWhenField", -1)));
                 }
             }
             this.fields = f.isEmpty() ? null : Collections.unmodifiableList(f);
@@ -1174,7 +1175,8 @@ public final class ConfigStore {
                         fo.isNull("max") ? null : Integer.valueOf(fo.optInt("max")),
                         0, false,
                         fo.optBoolean("allowEmpty", false),
-                        fo.optString("unitNote", "")));
+                        fo.optString("unitNote", ""),
+                        -1));
             }
             return f.isEmpty() ? null : Collections.unmodifiableList(f);
         }
@@ -1325,9 +1327,15 @@ public final class ConfigStore {
          * 详见 参数定义/params.def.json 的 PID_CUT 与 daemon/ki_cut.h。
          */
         public final boolean allowEmpty;
+        /**
+         * 字段级依赖（仅界面）：本字段只在同键第 N 个字段为 1 时生效，界面据此压暗；-1 = 无依赖。
+         * 由 {@code params.json} 的 {@code fields[].enabledWhenField} 给出（现有唯一使用者是
+         * {@code UI_PID_MARK} 的「粗线」依赖「点」）。
+         */
+        public final int enabledWhenField;
 
         FieldMeta(String label, String unit, Integer min, Integer max, int defaultValue,
-                  boolean bool, boolean allowEmpty, String unitNote) {
+                  boolean bool, boolean allowEmpty, String unitNote, int enabledWhenField) {
             this.label = label;
             this.unit = unit;
             this.unitNote = unitNote;
@@ -1336,6 +1344,7 @@ public final class ConfigStore {
             this.defaultValue = defaultValue;
             this.bool = bool;
             this.allowEmpty = allowEmpty;
+            this.enabledWhenField = enabledWhenField;
         }
     }
 

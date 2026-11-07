@@ -389,6 +389,13 @@ final class ConfigKeyRow {
         /** 跟随依赖压暗的键内控件。 */
         @NonNull
         List<View> dimTargets();
+
+        /**
+         * 字段级依赖（同键内某开关控制另一个开关是否生效）：在行级压暗之后调用，
+         * 未生效的字段保持压暗、其余按 {@code rowAlpha} 还原。默认无此需求。
+         */
+        default void applyFieldDependencies(float rowAlpha) {
+        }
     }
 
     /** switch 型键：0/1 只有两个完整状态，切换即排入防抖队列（见 {@link #commitSwitch}）。 */
@@ -562,6 +569,8 @@ final class ConfigKeyRow {
     private final class MultiRenderer implements Renderer {
 
         private final List<Field> fields = new ArrayList<>();
+        /** 字段级依赖：{目标下标, 控制它的字段下标}，来自定义里的 fields[].enabledWhenField。 */
+        private final List<int[]> fieldDeps = new ArrayList<>();
 
         @Override
         public void build() {
@@ -574,6 +583,21 @@ final class ConfigKeyRow {
                 fields.add(addNumberField(fieldMeta.label,
                         joinParts(joinParts(fieldMeta.unit, rangeText(i)), fieldMeta.unitNote),
                         false));
+            }
+            for (int i = 0; i < meta.fieldCount(); i++) {
+                int src = meta.fields.get(i).enabledWhenField;
+                if (src >= 0 && src < i
+                        && fields.get(src).toggle != null && fields.get(i).toggle != null) {
+                    fieldDeps.add(new int[]{i, src});
+                }
+            }
+        }
+
+        @Override
+        public void applyFieldDependencies(float rowAlpha) {
+            for (int[] dep : fieldDeps) {
+                boolean on = fields.get(dep[1]).toggle.isChecked();
+                fields.get(dep[0]).root.setAlpha(on ? rowAlpha : Math.min(rowAlpha, dimAlpha));
             }
         }
 
@@ -983,6 +1007,7 @@ final class ConfigKeyRow {
                 return;
             }
             commitBoolField();
+            refreshDependencyState();   // 开关可能控制同键内另一字段是否生效（见 enabledWhenField）
         });
         // 字段根里只有字段名与开关：没有输入框，宽度回写与单位-范围说明都不适用（input / layout 传 null）
         return new Field(fieldView, null, null, boolSwitch);
@@ -1502,6 +1527,7 @@ final class ConfigKeyRow {
         for (View target : dimTargetsCache) {
             target.setAlpha(alpha);
         }
+        renderer.applyFieldDependencies(alpha);
         // 挂到行级的字段说明行不在尾段里，压暗要单独来一遍（否则它比周围亮）
         for (TextView caption : rowCaptions) {
             caption.setAlpha(alpha);

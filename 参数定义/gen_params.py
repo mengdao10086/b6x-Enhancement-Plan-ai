@@ -115,6 +115,9 @@ def _field_product(field):
     # 只在真为 true 时输出，避免每个字段都多一个恒 false 的键。
     if field.get("bool"):
         out["bool"] = True
+    # 字段级依赖（仅界面）：本字段仅在「某一下标字段」为 1 时生效，界面据此压暗。
+    if "enabledWhenField" in field:
+        out["enabledWhenField"] = field["enabledWhenField"]
     out["min"] = field["min"]
     out["max"] = field["max"]
     out["default"] = field["default"]

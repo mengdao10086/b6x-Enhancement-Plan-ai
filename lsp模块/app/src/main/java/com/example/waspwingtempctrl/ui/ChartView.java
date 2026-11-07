@@ -4,6 +4,7 @@ import android.content.Context;
 import android.content.res.Resources;
 import android.content.res.Resources.Theme;
 import android.graphics.Canvas;
+import android.graphics.DashPathEffect;
 import android.graphics.Paint;
 import android.graphics.Path;
 import android.util.AttributeSet;
@@ -46,6 +47,13 @@ public class ChartView extends View {
     private static final float DOT_HALO_DP = 1f;     // 圆点外圈
     // PID 重算标记点：直径 = 线宽 × 1.2（线宽 1.6dp → 半径 0.96dp），刻意比头部圆点小得多
     private static final float MARK_RADIUS_DP = LINE_WIDTH_DP * 0.6f;
+    // 粗线样式：连续两周期以上都有重算的区段，整段改用 1.2 倍线宽
+    private static final float MARK_THICK_WIDTH_DP = LINE_WIDTH_DP * 1.2f;
+    // 「连续两周期」判据：相邻两次重算样本的时间差 ≤ 本值（控制 5s + 写曲线落后 1s）
+    private static final float MARK_CHAIN_MAX_SEC = 6f;
+    // 竖虚线：与网格线同宽同色（透明度含在网格色里），3dp 实 / 3dp 空
+    private static final float DASH_ON_DP = 3f;
+    private static final float DASH_OFF_DP = 3f;
     // pid 曲线的孤立样本（前后都没有相邻有效点）：只画一个点，不连线；半径取线宽
     private static final float PID_DOT_RADIUS_DP = LINE_WIDTH_DP;
     private static final float TICK_TEXT_DP = 10f;   // 刻度 / 标注 / 轴标题字号
@@ -67,6 +75,7 @@ public class ChartView extends View {
     private final Paint labelPaint = new Paint();
     private final Paint dotPaint = new Paint();
     private final Paint dotHaloPaint = new Paint();
+    private final Paint dashPaint = new Paint();     // 重算位置竖虚线（与网格同宽同色）
 
     private final ChartSeries[] series = ChartSeries.createAll();
 
@@ -99,11 +108,12 @@ public class ChartView extends View {
     private Path[] paths;
     private ChartLabelOp[] labels;
     private ChartDotOp[] dots;
-    /** PID 重算标记点（x/y/颜色三数组同长，有效长度 {@link #markCount}）。 */
-    private float[] markX;
-    private float[] markY;
-    private int[] markColor;
-    private int markCount;
+    /** PID 重算标记：「点」样式（x/y/颜色）。 */
+    private MarkDot[] markDots;
+    /** PID 重算标记：「粗线」样式（连续区段首尾坐标 + 系列色）。 */
+    private MarkSeg[] markSegs;
+    /** PID 重算标记：「虚线」样式（竖向 x 坐标）。 */
+    private float[] dashXs;
     /** pid 曲线的孤立样本点（x/y 同长，颜色恒为 pid 系列色）。 */
     private float[] pidDotX;
     private float[] pidDotY;
@@ -154,6 +164,11 @@ public class ChartView extends View {
         dotHaloPaint.setAntiAlias(true);
         dotHaloPaint.setStyle(Paint.Style.STROKE);
         dotHaloPaint.setStrokeWidth(DOT_HALO_DP * density);
+        dashPaint.setAntiAlias(true);
+        dashPaint.setStyle(Paint.Style.STROKE);
+        dashPaint.setStrokeWidth(GRID_WIDTH_DP * density);
+        dashPaint.setPathEffect(new DashPathEffect(
+                new float[]{DASH_ON_DP * density, DASH_OFF_DP * density}, 0f));
     }
 
     // ==================== 外部接口 ====================
@@ -234,10 +249,9 @@ public class ChartView extends View {
         paths = null;
         labels = null;
         dots = null;
-        markX = null;
-        markY = null;
-        markColor = null;
-        markCount = 0;
+        markDots = null;
+        markSegs = null;
+        dashXs = null;
         pidDotX = null;
         pidDotY = null;
         pidDotCount = 0;
@@ -372,20 +386,28 @@ public class ChartView extends View {
     }
 
     /**
-     * 制冷 / 电池℃ / pid℃ 三条线：在 C 端触发 PID 重算的样本处画一个标记小点。
-     *
-     * <p>点径取线宽的 1.2 倍（{@link #MARK_RADIUS_DP}），只做"这里算过一次"的提示，不与头部
-     * 数值圆点抢视觉。开关是界面参数 {@code UI_PID_MARK}（默认开）。
+     * 制冷 / 电池℃ / pid℃ 三条线的 PID 重算标记，三种样式可组合（{@code UI_PID_MARK} 三开关）：
+     * <ul>
+     *   <li>点：每个重算样本画一个小圆点（直径 = 线宽 ×1.2）；</li>
+     *   <li>粗线：连续两周期以上都有重算的区段整段改画 1.2 倍粗线，这些点不再画点；</li>
+     *   <li>虚线：每个重算位置画一条竖虚线（与网格同宽同色，含透明度），与点互相独立。</li>
+     * </ul>
+     * 粗线依赖「点」：点关闭时粗线一并失效（界面里已压暗）。
      */
     private void buildRecomputeMarks(ChartWindow win, ChartAxis lAxis, ChartAxis rAxis) {
-        if (config == null || !config.pidMarkOn) {
+        if (config == null) {
             return;
         }
-        int cap = win.samples.length * 3;
-        float[] xs = new float[cap];
-        float[] ys = new float[cap];
-        int[] cs = new int[cap];
-        int n = 0;
+        boolean dot = config.markDot;
+        boolean thick = dot && config.markThick;
+        boolean dash = config.markDash;
+        if (!dot && !dash) {
+            return;
+        }
+        List<MarkDot> dots = new ArrayList<>();
+        List<MarkSeg> segs = new ArrayList<>();
+        int n = win.samples.length;
+
         for (int si = 0; si < series.length; si++) {
             ChartSeries s = series[si];
             if (!s.on || !isRecomputeSeries(s.id)) {
@@ -395,31 +417,68 @@ public class ChartView extends View {
             if (ax == null) {
                 continue;
             }
-            for (int i = 0; i < win.samples.length; i++) {
+            int[] idx = new int[n];
+            int m = 0;
+            for (int i = 0; i < n; i++) {
                 ChartSample d = win.samples[i];
-                if (!d.recomp) {
-                    continue;
+                if (d.recomp && ChartSample.valid(ChartSeries.value(s, d))) {
+                    idx[m++] = i;
                 }
-                float v = ChartSeries.value(s, d);
-                if (!ChartSample.valid(v)) {
-                    continue;
+            }
+            for (int j = 0; j < m; j++) {
+                boolean prev = j > 0 && isChainNeighbor(win, idx[j - 1], idx[j]);
+                boolean next = j + 1 < m && isChainNeighbor(win, idx[j], idx[j + 1]);
+                if (thick && (prev || next)) {
+                    if (!prev) {
+                        continue;   // 由下一对的线段负责
+                    }
+                    segs.add(new MarkSeg(
+                            fPadL + fW * win.u[idx[j - 1]],
+                            ax.y(ChartSeries.value(s, win.samples[idx[j - 1]]), fPadT, fH),
+                            fPadL + fW * win.u[idx[j]],
+                            ax.y(ChartSeries.value(s, win.samples[idx[j]]), fPadT, fH),
+                            seriesColors[si]));
+                } else if (dot) {
+                    dots.add(new MarkDot(
+                            fPadL + fW * win.u[idx[j]],
+                            ax.y(ChartSeries.value(s, win.samples[idx[j]]), fPadT, fH),
+                            seriesColors[si]));
                 }
-                xs[n] = fPadL + fW * win.u[i];
-                ys[n] = ax.y(v, fPadT, fH);
-                cs[n] = seriesColors[si];
-                n++;
             }
         }
-        if (n == 0) {
-            return;
+
+        if (dash) {
+            List<Float> xs = new ArrayList<>();
+            for (int i = 0; i < n; i++) {
+                if (win.samples[i].recomp && hasAnyMarkValue(win.samples[i])) {
+                    xs.add(fPadL + fW * win.u[i]);
+                }
+            }
+            dashXs = new float[xs.size()];
+            for (int i = 0; i < xs.size(); i++) {
+                dashXs[i] = xs.get(i);
+            }
         }
-        markX = new float[n];
-        markY = new float[n];
-        markColor = new int[n];
-        System.arraycopy(xs, 0, markX, 0, n);
-        System.arraycopy(ys, 0, markY, 0, n);
-        System.arraycopy(cs, 0, markColor, 0, n);
-        markCount = n;
+        if (!dots.isEmpty()) {
+            markDots = dots.toArray(new MarkDot[0]);
+        }
+        if (!segs.isEmpty()) {
+            markSegs = segs.toArray(new MarkSeg[0]);
+        }
+    }
+
+    /** 相邻两次重算样本是否算「连续」：时间差在控制周期内且中间没有断联。 */
+    private static boolean isChainNeighbor(ChartWindow win, int prevIdx, int curIdx) {
+        if (win.broken[curIdx]) {
+            return false;
+        }
+        long dt = win.samples[curIdx].t - win.samples[prevIdx].t;
+        return dt >= 0 && dt <= (long) MARK_CHAIN_MAX_SEC;
+    }
+
+    /** 该样本上三条标记系列至少一条有值（竖虚线只需画一次）。 */
+    private static boolean hasAnyMarkValue(ChartSample d) {
+        return ChartSample.valid(d.cool) || ChartSample.valid(d.battF) || ChartSample.valid(d.pid);
     }
 
     /** 带重算标记的三条系列（与 C 端 PID 的重算节拍对齐）。 */
@@ -794,6 +853,14 @@ public class ChartView extends View {
         // 左轴标题左沿与左侧刻度数字的左沿平齐（数字是右对齐的，左沿按最宽那条算）
         canvas.drawText(titleLeft, titleLeftX, fPadT - 7f * density, axisTextPaint);
 
+        // 重算位置竖虚线：压在网格之上、曲线之下（与网格同宽同色，含透明度）
+        if (dashXs != null && dashXs.length > 0) {
+            dashPaint.setColor(colorGrid);
+            for (float x : dashXs) {
+                canvas.drawLine(x, fPadT, x, fPadT + fH, dashPaint);
+            }
+        }
+
         // 折线先左轴、后右轴（后画者压先画者）
         if (paths != null) {
             for (int pass = 0; pass < 2; pass++) {
@@ -817,12 +884,22 @@ public class ChartView extends View {
             }
         }
 
-        // PID 重算标记点：比头部圆点小，直接压在曲线上（不加 halo）
-        if (markCount > 0) {
+        // PID 重算标记「粗线」：连续重算区段整段加粗（压在普通折线之上）
+        if (markSegs != null && markSegs.length > 0) {
+            seriesPaint.setStrokeWidth(MARK_THICK_WIDTH_DP * density);
+            for (MarkSeg seg : markSegs) {
+                seriesPaint.setColor(seg.color);
+                canvas.drawLine(seg.x1, seg.y1, seg.x2, seg.y2, seriesPaint);
+            }
+            seriesPaint.setStrokeWidth(LINE_WIDTH_DP * density);   // 还原，后面无其它折线绘制
+        }
+
+        // PID 重算标记「点」：比头部圆点小，直接压在曲线上（不加 halo）
+        if (markDots != null && markDots.length > 0) {
             float mr = MARK_RADIUS_DP * density;
-            for (int i = 0; i < markCount; i++) {
-                dotPaint.setColor(markColor[i]);
-                canvas.drawCircle(markX[i], markY[i], mr, dotPaint);
+            for (MarkDot dot : markDots) {
+                dotPaint.setColor(dot.color);
+                canvas.drawCircle(dot.x, dot.y, mr, dotPaint);
             }
         }
 
@@ -847,6 +924,36 @@ public class ChartView extends View {
                 canvas.drawCircle(e.x, e.y, r, dotPaint);
                 canvas.drawCircle(e.x, e.y, r, dotHaloPaint);
             }
+        }
+    }
+
+    /** PID 重算「点」标记（位置与颜色在 rebuild 定死，onDraw 只画）。 */
+    private static final class MarkDot {
+        final float x;
+        final float y;
+        final int color;
+
+        MarkDot(float x, float y, int color) {
+            this.x = x;
+            this.y = y;
+            this.color = color;
+        }
+    }
+
+    /** PID 重算「粗线」区段（连续两周期以上都有重算的相邻两点）。 */
+    private static final class MarkSeg {
+        final float x1;
+        final float y1;
+        final float x2;
+        final float y2;
+        final int color;
+
+        MarkSeg(float x1, float y1, float x2, float y2, int color) {
+            this.x1 = x1;
+            this.y1 = y1;
+            this.x2 = x2;
+            this.y2 = y2;
+            this.color = color;
         }
     }
 
