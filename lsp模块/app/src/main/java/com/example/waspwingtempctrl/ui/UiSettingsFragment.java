@@ -73,12 +73,8 @@ public class UiSettingsFragment extends Fragment
             }
             List<KeyMeta> keys = new ArrayList<>();
             for (String key : group.keys) {
-                // 「自动更新」由状态页首行承载，本页不渲染；键本身仍留在 params.json
-                if (StatusFragment.KEY_AUTO_UPDATE.equals(key)) {
-                    continue;
-                }
                 KeyMeta meta = store.key(key);
-                if (meta != null) {
+                if (meta != null && isRenderedKey(key)) {
                     keys.add(meta);
                 }
             }
@@ -197,6 +193,17 @@ public class UiSettingsFragment extends Fragment
     @Override
     public boolean rendersGroup(@NonNull GroupMeta group) {
         return isSettingsGroup(group);
+    }
+
+    /** 设置页是否渲染该键：渲染与 {@link #webuiKeys} 的键渲染自检同一判据。 */
+    @Override
+    public boolean rendersKey(@NonNull KeyMeta key) {
+        return isRenderedKey(key.key);
+    }
+
+    /** 「自动更新」由状态页首行承载，本页不渲染；键本身仍留在 params.json。 */
+    private static boolean isRenderedKey(@NonNull String key) {
+        return !StatusFragment.KEY_AUTO_UPDATE.equals(key);
     }
 
     @NonNull

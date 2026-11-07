@@ -66,6 +66,11 @@ final class ConfigFormController implements ConfigKeyRow.Host, ConfigWriteQueue.
         /** 本页是否渲染该分组（配置页：除 {@code webui} 外全部；设置页：只有 {@code webui}）。 */
         boolean rendersGroup(@NonNull GroupMeta group);
 
+        /** 本页是否渲染该键（缺省全渲染）；设置页据此跳过由状态页承载的键。 */
+        default boolean rendersKey(@NonNull KeyMeta key) {
+            return true;
+        }
+
         /** 卡头标题（设置页去掉段标编号）。 */
         @NonNull
         String groupTitle(@NonNull GroupMeta group);
@@ -588,8 +593,10 @@ final class ConfigFormController implements ConfigKeyRow.Host, ConfigWriteQueue.
             for (String key : group.keys) {
                 KeyMeta meta = store.key(key);
                 if (meta != null) {
-                    keyMetas.add(meta);
-                    covered.add(key);
+                    covered.add(key);   // 本页有意不渲染的键也算已覆盖，避免兜底卡再列一遍
+                    if (page.rendersKey(meta)) {
+                        keyMetas.add(meta);
+                    }
                 }
             }
             KeyMeta master = group.master == null ? null : store.key(group.master);
