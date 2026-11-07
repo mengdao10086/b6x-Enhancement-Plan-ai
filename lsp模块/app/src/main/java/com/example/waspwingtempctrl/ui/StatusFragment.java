@@ -3,6 +3,8 @@ package com.example.waspwingtempctrl.ui;
 import android.content.Context;
 import android.content.SharedPreferences;
 import android.content.pm.PackageInfo;
+import android.content.res.ColorStateList;
+import android.graphics.Color;
 import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
@@ -18,18 +20,22 @@ import androidx.annotation.Nullable;
 import androidx.appcompat.app.AlertDialog;
 import androidx.fragment.app.Fragment;
 
+import com.example.waspwingtempctrl.ConfigStore;
 import com.example.waspwingtempctrl.Deployer;
 import com.example.waspwingtempctrl.SetupActivity;
 import com.example.waspwingtempctrl.R;
+import com.google.android.material.button.MaterialButton;
 
 import java.text.SimpleDateFormat;
 import java.util.ArrayList;
 import java.util.Date;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
 
 /**
- * 状态页：部署状态 / 一键部署 / 卸载部署 / 拉起daemon / 停止daemon / 停止控制app / su 诊断。
+ * 状态页：部署状态 / 一键部署 / 自动更新 / 卸载部署 / 拉起daemon / 停止daemon / 停止控制app / su 诊断。
  *
  * <p><b>调用边界（I5 的另一半）</b>：本类只调 {@link Deployer} 的
  * {@code probe() / deploy() / uninstall() / startDaemon() / stopDaemon() / stopControlApp() /
@@ -82,6 +88,11 @@ public class StatusFragment extends Fragment implements SetupActivity.PageAware 
     private static final long RESULT_HOLD_MS = 10_000L;
     /** 部署状态文本的结论行前缀（须与 {@code Deployer.Status.summaryLine()} 保持一致）。 */
     private static final String DEPLOY_STATUS_PREFIX = "部署状态：";
+    /**
+     * 「自动更新」键：由本页首行承载，设置页不渲染；键本身仍定义在 {@code params.json}。
+     * 键渲染自检经 {@link #statusPageKeyCount} 把它计入「状态页」分项。
+     */
+    static final String KEY_AUTO_UPDATE = "UI_AUTO_UPDATE";
     /** 动作期间按钮压暗后的透明度与渐变时长（压暗快、恢复稍慢）。 */
     private static final float BUTTON_DIM_ALPHA = 0.35f;
     private static final long BUTTON_DIM_MS = 160L;
@@ -174,8 +185,13 @@ public class StatusFragment extends Fragment implements SetupActivity.PageAware 
     private boolean actionBusy;
     private boolean scanBusy;
 
-    /** 状态页 7 个按钮：动作进行时统一禁用并压暗（扫描不压暗）。 */
+    /** 状态页 7 个动作/刷新按钮：动作进行时统一禁用并压暗（扫描不压暗；首行自动更新开关不在此列）。 */
     private final List<View> actionButtons = new ArrayList<>();
+
+    /** 首行「自动更新」开关：外观随值切换，点击即落盘。 */
+    private MaterialButton autoUpdateButton;
+    private boolean autoUpdateOn = true;   // 缺键 / 读取失败时按出厂默认（开）
+    private boolean autoUpdateBusy;
 
     // ========== 扫描协调器 ==========
     /** 同一时刻只跑一趟探测；扫描中再请求只挂监听，不新起。 */
@@ -265,6 +281,11 @@ public class StatusFragment extends Fragment implements SetupActivity.PageAware 
         view.findViewById(R.id.btn_stop_app).setOnClickListener(v -> confirmStopControlApp());
         view.findViewById(R.id.btn_start).setOnClickListener(v -> startDaemon());
         view.findViewById(R.id.btn_diag).setOnClickListener(v -> showDiagnostics());
+
+        // 首行「自动更新」：后台读当前值并按值套外观；点击即写回（不占动作单槽）
+        autoUpdateButton = view.findViewById(R.id.btn_auto_update);
+        autoUpdateButton.setOnClickListener(v -> toggleAutoUpdate());
+        loadAutoUpdateAsync();
 
         // 滚动条常显 + 加粗（见 fragment_status.xml），这里才接得上"按住滚动条拖动"
         ScrollbarDrag.attach(view.findViewById(R.id.status_scroll));
@@ -1422,6 +1443,106 @@ public class StatusFragment extends Fragment implements SetupActivity.PageAware 
                 + "\n" + getString(R.string.status_info_device, Build.MANUFACTURER, Build.MODEL)
                 + "\n" + getString(R.string.status_info_android, Build.VERSION.RELEASE,
                 Build.VERSION.SDK_INT);
+    }
+
+    /**
+     * 状态页首行承载、不在设置页表单里渲染的键数：供配置页的键渲染自检把「定义里有、由本页承载」
+     * 算进可编辑入口（见 app/逻辑说明.md §9.3）。
+     */
+    static int statusPageKeyCount(@NonNull ConfigStore store) {
+        return store.key(KEY_AUTO_UPDATE) == null ? 0 : 1;
+    }
+
+    /** 后台读「自动更新」当前值并同步首行外观；读盘阻塞，故不在主线程做。 */
+    private void loadAutoUpdateAsync() {
+        final Context app = requireContext().getApplicationContext();
+        Thread thread = new Thread(() -> {
+            boolean on;
+            try {
+                ConfigStore.Value v = ConfigStore.get(app).read().get(KEY_AUTO_UPDATE);
+                on = v == null || v.intAt(0) != 0;   // 缺键按出厂默认（开）
+            } catch (Throwable t) {
+                on = true;
+            }
+            final boolean value = on;
+            MAIN.post(() -> {
+                if (!isAdded() || autoUpdateButton == null) {
+                    return;
+                }
+                autoUpdateOn = value;
+                applyAutoUpdateStyle(value);
+            });
+        }, "ww-auto-update");
+        thread.setDaemon(true);
+        thread.start();
+    }
+
+    /**
+     * 点首行「自动更新」：后台写 {@link #KEY_AUTO_UPDATE}，成功后回主线程切外观；
+     * 失败写一条操作记录，不静默。
+     */
+    private void toggleAutoUpdate() {
+        if (autoUpdateButton == null || autoUpdateBusy) {
+            return;
+        }
+        final boolean target = !autoUpdateOn;
+        autoUpdateBusy = true;
+        autoUpdateButton.setEnabled(false);
+        final Context app = requireContext().getApplicationContext();
+        Thread thread = new Thread(() -> {
+            ConfigStore.WriteResult written = null;
+            String failure = null;
+            try {
+                Map<String, ConfigStore.Value> changes = new HashMap<>();
+                changes.put(KEY_AUTO_UPDATE, ConfigStore.Value.ofInt(target ? 1 : 0));
+                written = ConfigStore.get(app).setAll(changes);
+            } catch (Throwable t) {
+                failure = String.valueOf(t);
+            }
+            final ConfigStore.WriteResult result = written;
+            final String error = failure;
+            MAIN.post(() -> {
+                autoUpdateBusy = false;
+                if (!isAdded() || autoUpdateButton == null) {
+                    return;
+                }
+                autoUpdateButton.setEnabled(true);
+                if (result != null && result.ok) {
+                    autoUpdateOn = target;
+                    applyAutoUpdateStyle(target);
+                } else {
+                    appendLog(getString(R.string.status_auto_update_write_failed,
+                            result != null ? result.error : error));
+                }
+            });
+        }, "ww-auto-update-write");
+        thread.setDaemon(true);
+        thread.start();
+    }
+
+    /**
+     * 首行开关的外观随值切换：开 = 「一键部署」的实心样式，关 = 「拉起daemon」的描边样式。
+     * 同一个 MaterialButton 只换背景着色 / 描边 / 文字色，不重建按钮。
+     */
+    private void applyAutoUpdateStyle(boolean on) {
+        if (autoUpdateButton == null || !isAdded()) {
+            return;
+        }
+        View root = requireView();
+        MaterialButton filled = root.findViewById(R.id.btn_deploy);
+        MaterialButton outlined = root.findViewById(R.id.btn_start);
+        MaterialButton src = on ? filled : outlined;
+        ColorStateList tint = src.getBackgroundTintList();
+        autoUpdateButton.setBackgroundTintList(
+                tint != null ? tint : ColorStateList.valueOf(Color.TRANSPARENT));
+        ColorStateList stroke = src.getStrokeColor();
+        autoUpdateButton.setStrokeColor(
+                stroke != null ? stroke : ColorStateList.valueOf(Color.TRANSPARENT));
+        autoUpdateButton.setStrokeWidth(src.getStrokeWidth());
+        autoUpdateButton.setTextColor(src.getTextColors());
+        autoUpdateButton.setContentDescription(getString(on
+                ? R.string.status_auto_update_desc_on
+                : R.string.status_auto_update_desc_off));
     }
 
     /**

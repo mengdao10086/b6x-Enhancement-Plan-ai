@@ -73,6 +73,10 @@ public class UiSettingsFragment extends Fragment
             }
             List<KeyMeta> keys = new ArrayList<>();
             for (String key : group.keys) {
+                // 「自动更新」由状态页首行承载，本页不渲染；键本身仍留在 params.json
+                if (StatusFragment.KEY_AUTO_UPDATE.equals(key)) {
+                    continue;
+                }
                 KeyMeta meta = store.key(key);
                 if (meta != null) {
                     keys.add(meta);

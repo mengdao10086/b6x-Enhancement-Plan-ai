@@ -991,11 +991,20 @@ public class ChartView extends View {
             if (!s.on) {
                 continue;
             }
-            float v = ChartSeries.value(s, d);
-            if (!ChartSample.valid(v)) {
-                continue;
+            String text;
+            if ("pid".equals(s.id)) {
+                // pid 稀疏（只有重算行有值）：取按住点左侧最近的有效值；左侧没有则显示「-」，
+                // 但行始终保留，避免按住滑动时该行忽隐忽现
+                float v = pidTouchValue(idx);
+                text = getContext().getString(s.labelRes) + " "
+                        + (ChartSample.valid(v) ? ChartSeries.format(s, v) : "-");
+            } else {
+                float v = ChartSeries.value(s, d);
+                if (!ChartSample.valid(v)) {
+                    continue;
+                }
+                text = getContext().getString(s.labelRes) + " " + ChartSeries.format(s, v);
             }
-            String text = getContext().getString(s.labelRes) + " " + ChartSeries.format(s, v);
             texts[n] = text;
             colors[n] = seriesColors[si];
             maxW = Math.max(maxW, tickPaint.measureText(text));
@@ -1019,6 +1028,26 @@ public class ChartView extends View {
         for (int i = 0; i < n; i++) {
             touchTextY[i] = touchPanelT + padY + i * rowH - fm.ascent;
         }
+    }
+
+    /**
+     * 按住查看的 pid 取值：从 {@code idx} 起向左找第一个有效 pid 样本（含当前样本）。
+     * 左侧一个都没有时返回 {@link ChartSample#INVALID}，由调用方显示「-」。
+     */
+    private float pidTouchValue(int idx) {
+        ChartSample[] samples = window.samples;
+        int si = pidSeriesIndex();
+        if (si < 0) {
+            return ChartSample.INVALID;
+        }
+        ChartSeries pid = series[si];
+        for (int i = idx; i >= 0; i--) {
+            float v = ChartSeries.value(pid, samples[i]);
+            if (ChartSample.valid(v)) {
+                return v;
+            }
+        }
+        return ChartSample.INVALID;
     }
 
     /**
@@ -1206,7 +1235,7 @@ public class ChartView extends View {
             }
         }
 
-        // pid 曲线的孤立样本点：半径 = 线宽 ×1.5 的普通实心圆
+        // pid 曲线的孤立样本点：半径 = 线宽 ×1.3 的普通实心圆
         if (pidDotCount > 0) {
             dotPaint.setColor(pidDotColor);
             float pr = PID_DOT_RADIUS_DP * density;

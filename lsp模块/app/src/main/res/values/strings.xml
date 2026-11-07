@@ -27,6 +27,10 @@
     <string name="status_action_stop">停止daemon</string>
     <string name="status_action_stop_app">停止控制app</string>
     <string name="status_action_diag">su 诊断</string>
+    <string name="status_action_auto_update">自动更新</string>
+    <string name="status_auto_update_desc_on">自动更新，当前已开启</string>
+    <string name="status_auto_update_desc_off">自动更新，当前已关闭</string>
+    <string name="status_auto_update_write_failed">自动更新开关写入失败：%1$s</string>
     <string name="status_busy_other">上一个动作还没结束，请稍候</string>
     <string name="status_dialog_diag">诊断</string>
     <string name="status_dialog_failed">执行失败</string>

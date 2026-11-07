@@ -285,9 +285,10 @@ public class ConfigFormFragment extends Fragment
 
     /**
      * 键渲染自检：<b>每个定义键都要有可编辑入口</b>——本页键行（role=setting）、设置页的键
-     * （{@code webui} 组）或组头开关（role=master）。三个分项在建表时一次算定（见
-     * {@link ConfigFormController#rowKeyCount()}），不会因展开先后而变。结论写进诊断块的「参数定义」行的
-     * 展开态文案：该行收起只报文件名，点开原地换成本页/设置页/组头开关三项计数，不再单独占一行。
+     * （{@code webui} 组）、状态页承载的键（如首行「自动更新」）或组头开关（role=master）。
+     * 前三个分项在建表时一次算定（见 {@link ConfigFormController#rowKeyCount()}），不会因展开先后而变。
+     * 结论写进诊断块的「参数定义」行的展开态文案：该行收起只报文件名，点开原地换成本页/设置页/状态页/
+     * 组头开关四项计数，不再单独占一行。
      * 见 app 逻辑说明.md §6.1。
      */
     private void renderSelfCheck(Snapshot snapshot) {
@@ -297,16 +298,21 @@ public class ConfigFormFragment extends Fragment
         int renderedMasterCount = form.masterKeyCount();
         // 设置页键数取自 UiSettingsFragment.webuiKeys()——那是设置页真正渲染的那一份，不另写数字
         int renderedSettingsCount = UiSettingsFragment.webuiKeys(store).size();
+        // 状态页首行承载的键（如「自动更新」）：不在两页表单里，但仍是可编辑入口
+        int renderedStatusPageCount = StatusFragment.statusPageKeyCount(store);
         int defined = store.keyCount();
-        int rendered = renderedRowCount + renderedSettingsCount + renderedMasterCount;
-        // 两态文案交给诊断区：收起只报文件名，点开原地换成三项计数与结论（见 ConfigDiagnostics#toggleDefs）
+        int rendered = renderedRowCount + renderedSettingsCount + renderedStatusPageCount
+                + renderedMasterCount;
+        // 两态文案交给诊断区：收起只报文件名，点开原地换成四项计数与结论（见 ConfigDiagnostics#toggleDefs）
         form.setDefsSummary(
                 getString(R.string.config_diag_defs_name, ConfigStore.PARAMS_ASSET),
                 rendered == defined
                         ? getString(R.string.config_diag_defs_ok, ConfigStore.PARAMS_ASSET,
-                                renderedRowCount, renderedSettingsCount, renderedMasterCount, defined)
+                                renderedRowCount, renderedSettingsCount, renderedStatusPageCount,
+                                renderedMasterCount, defined)
                         : getString(R.string.config_diag_defs_mismatch, ConfigStore.PARAMS_ASSET,
-                                renderedRowCount, renderedSettingsCount, renderedMasterCount, defined));
+                                renderedRowCount, renderedSettingsCount, renderedStatusPageCount,
+                                renderedMasterCount, defined));
         refreshCleanupButton(snapshot);
     }
 

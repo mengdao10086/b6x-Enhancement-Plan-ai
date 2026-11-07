@@ -53,6 +53,18 @@
     <dimen name="status_button_last_gap">-18dp</dimen>
 
     <!--
+        三行 8 个按钮统一收窄（行1 新增「自动更新」后，360dp 最小屏宽必须放得下且文字不换行）。
+        M3 默认：insetTop/Bottom = 4dp、minHeight = 48dp、实心/描边按钮左右内边距 = 24dp。
+        本组：垂直 inset 收到 2dp、minHeight 收到 40dp（可见/触控高 36dp，不低于 36dp），
+        左右内边距收到 12dp；水平 inset 显式归 0（M3 本就是 0，统一写全便于后续调整）。
+        行 1→行 2、行 2→行 3 的负 margin 保持原值，不由本组改动。
+    -->
+    <dimen name="status_button_inset_horizontal">0dp</dimen>
+    <dimen name="status_button_inset_vertical">2dp</dimen>
+    <dimen name="status_button_padding_horizontal">12dp</dimen>
+    <dimen name="status_button_min_height">40dp</dimen>
+
+    <!--
         进度条与上方「部署状态」文本之间的间隔，目标可见空白 0dp。
         进度条是 LinearProgressIndicator，不带 MaterialButton 那套 inset，
         故 margin 本身就是可见空白，可见空白 = 本值 = 0dp（此处不加减 8dp，别与 status_button_row_gap 串口径）。
