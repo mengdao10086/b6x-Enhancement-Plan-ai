@@ -66,7 +66,7 @@ public class ChartView extends View {
     // pid 曲线相邻两次重算样本的最大间隔（控制 5s + 写行落后 1s）；超过即视为不连续、不连线
     private static final float PID_CHAIN_MAX_SEC = 6f;
     // pid 曲线的孤立样本（前后都没有相邻重算点）：只画一个实心圆点，不连线、不描边
-    private static final float PID_DOT_RADIUS_DP = LINE_WIDTH_DP * 1.5f;
+    private static final float PID_DOT_RADIUS_DP = LINE_WIDTH_DP * 1.3f;
     private static final float TICK_TEXT_DP = 10f;   // 刻度 / 标注 / 轴标题字号
     private static final float EMPTY_TEXT_DP = 12f;  // 「采样中…」字号
     private static final float LABEL_GAP_DP = 6f;    // 标签与端点的水平间距

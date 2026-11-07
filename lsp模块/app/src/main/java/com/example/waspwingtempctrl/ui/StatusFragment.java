@@ -718,7 +718,9 @@ public class StatusFragment extends Fragment implements SetupActivity.PageAware 
             Deployer.rememberRootState(app, status.suOk);
             lastRootOk = status.suOk;
         }
-        return head + (manifestNote == null ? "" : manifestNote + "\n") + status.describe();
+        // 上屏前归一：describe() 以换行结尾，TextView 会把它多渲染成一行，而预填充骨架没有末尾换行。
+        // 「先比后写」的 contentEquals 与写入都用这一份，否则每 5 秒静默复探都会被判成变化。见 app/逻辑说明.md §8.1
+        return (head + (manifestNote == null ? "" : manifestNote + "\n") + status.describe()).trim();
     }
 
     /**
@@ -957,8 +959,9 @@ public class StatusFragment extends Fragment implements SetupActivity.PageAware 
                 text = "出错：" + t;
                 failed = true;
             }
-            // contentEquals 不接受 null（任务实现一律不返回 null，这里只是兜底）
-            final String result = text == null ? "" : text;
+            // contentEquals 不接受 null（任务实现一律不返回 null，这里只是兜底）；
+            // 首尾空白一并归一，保证比对与写入是同一份文本（见 app/逻辑说明.md §8.1）
+            final String result = text == null ? "" : text.trim();
             final boolean isFailure = failed;
             android.app.Activity activity = getActivity();
             if (activity == null) {
