@@ -61,10 +61,8 @@ public class ChartView extends View {
     private static final float TOUCH_PANEL_PAD_Y_DP = 2f;
     // pid 曲线相邻两次重算样本的最大间隔（控制 5s + 写行落后 1s）；超过即视为不连续、不连线
     private static final float PID_CHAIN_MAX_SEC = 6f;
-    // pid 曲线的孤立样本（前后都没有相邻重算点）：只画一个点，不连线。
-    // 点径 = 线宽 ×1.2（半径 = 线宽 ×0.6），外圈一圈底色描边把它从曲线上衬出来
-    private static final float MARK_RADIUS_DP = LINE_WIDTH_DP * 0.6f;
-    private static final float MARK_HALO_DP = 0.75f;
+    // pid 曲线的孤立样本（前后都没有相邻重算点）：只画一个实心圆点，不连线、不描边
+    private static final float PID_DOT_RADIUS_DP = LINE_WIDTH_DP * 1.5f;
     private static final float TICK_TEXT_DP = 10f;   // 刻度 / 标注 / 轴标题字号
     private static final float EMPTY_TEXT_DP = 12f;  // 「采样中…」字号
     private static final float LABEL_GAP_DP = 6f;    // 标签与端点的水平间距
@@ -1111,15 +1109,12 @@ public class ChartView extends View {
             }
         }
 
-        // pid 曲线的孤立样本点：点模式画法——先铺一圈底色，再画系列色实心圆
+        // pid 曲线的孤立样本点：半径 = 线宽 ×1.5 的普通实心圆
         if (pidDotCount > 0) {
-            float mr = MARK_RADIUS_DP * density;
-            float halo = mr + MARK_HALO_DP * density;
+            dotPaint.setColor(pidDotColor);
+            float pr = PID_DOT_RADIUS_DP * density;
             for (int i = 0; i < pidDotCount; i++) {
-                dotPaint.setColor(colorBg);
-                canvas.drawCircle(pidDotX[i], pidDotY[i], halo, dotPaint);
-                dotPaint.setColor(pidDotColor);
-                canvas.drawCircle(pidDotX[i], pidDotY[i], mr, dotPaint);
+                canvas.drawCircle(pidDotX[i], pidDotY[i], pr, dotPaint);
             }
         }
 
