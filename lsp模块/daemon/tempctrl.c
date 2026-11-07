@@ -300,7 +300,7 @@ static int pid_cpu_comp_active = 0;         // 补偿门控：1=激活（进入�
 static int pid_batt_filtered = -1;        // 滤波后电池温度（0.01°C 单位，3680=36.80°C；传感器分辨率 0.1，小数由滤波插值给出），-1=未初始化
 static int pid_batt_last_update_cycle = -1; // 上次温度更新的控制周期（动态α间隔计算用）
 // 曲线数据用：本周期实际送入 PID 的滤波值（0.01°C，-1=尚未算过），以及本周期是否真跑了 PID 重算。
-// 写完一行曲线即清零后者的标记位（见 write_webui_data）。
+// 写完一行曲线即清零后者的标记位（见 append_webui_row）。
 static int pid_input_cdeg = -1;
 static int pid_recompute_pending = 0;
 
@@ -4331,32 +4331,47 @@ static void main_loop(void) {
 static int webui_lines_since_compact = 0;   // 自上次压缩以来追加的行数
 static FILE *webui_fp = NULL;              // WebUI 曲线文件的常驻追加句柄（"a"=O_APPEND）
 
+// 一块采样在本拍的快照：采集在循环开头（控制块要用新鲜缓存），写行在控制块之后
+// （这样「本拍是否重算 PID」已经确定，标记与重算落在同一行）。
+static long webui_epoch_now = 0;
+static int webui_batt_now = -1;
+static int webui_cpu_now = -1;
+static int webui_conn_ok = 0;
+
 /**
- * 每 1 秒采集一次并写入 WebUI 曲线数据文件（滚动保留 720 行）。
- * 断联（BLE 未连 或 app 进程失活）时停止写入、留真实时间空洞；界面按 `UI_GAP_SEC`
- * （第一值判断联、第二值封顶空白）断开曲线并等比留白，见 app/逻辑说明.md §7.2。
+ * 每 1 秒采集一次（电池/CPU/散热器回传），更新缓存并留一份本拍快照。
+ * 采集必须排在 5s 控制块之前：控制块直接用这里的缓存，且断联时也要照常更新缓存。
+ * 断联判定（BLE 未连 或 app 进程失活）一并记进 {@link #webui_conn_ok}，写行时再据此留时间空洞。
  */
-static void write_webui_data(void) {
-    // 重算标记只属于「写过的那一行」：断联不写时也要清掉，避免重连后把旧标记补记到新行上。
-    int recomp = pid_recompute_pending;
-    pid_recompute_pending = 0;
-    int batt = read_battery_temp();
-    int cpu  = read_cpu_temp_max();
+static void sample_webui_inputs(void) {
+    webui_epoch_now = (long)time(NULL);
+    webui_batt_now = read_battery_temp();
+    webui_cpu_now  = read_cpu_temp_max();
     read_cooler_params();   // 更新 cooler_* 全局（热/冷端、实际转速、实际制冷）+ app_ble_connected
     // 更新 1s 采集缓存（保留上次成功值抗抖）
-    if (batt >= 0) cached_batt_raw = batt;
+    if (webui_batt_now >= 0) cached_batt_raw = webui_batt_now;
     if (batt_temp_updated) batt_changed_since_ctrl = 1;  // 1s 层累积：自上次控制以来值变过
-    if (cpu  >= 0) cached_cpu_now  = cpu;
-    // 断联即停止写曲线（判定与主循环一致：BLE 未连 或 app 失活），留下真实时间空洞供 WebUI 断开。
-    // 温度采集/缓存不受影响，5s 控制块仍用新鲜缓存。
-    if (!app_ble_connected || !is_app_alive()) return;
+    if (webui_cpu_now  >= 0) cached_cpu_now  = webui_cpu_now;
+    webui_conn_ok = app_ble_connected && is_app_alive();
+}
+
+/**
+ * 把本拍快照写入 WebUI 曲线数据文件（滚动保留 720 行），排在 5s 控制块之后调用。
+ * 断联（采样时 BLE 未连 或 app 进程失活）时不写、留真实时间空洞；界面按 `UI_GAP_SEC`
+ * （第一值判断联、第二值封顶空白）断开曲线并等比留白，见 app/逻辑说明.md §7.2。
+ * 重算标记只属于「写过的那一行」：断联不写时也在入口清掉，避免重连后把旧标记补记到新行上。
+ */
+static void append_webui_row(void) {
+    int recomp = pid_recompute_pending;
+    pid_recompute_pending = 0;
+    if (!webui_conn_ok) return;
 
     // 追加 1 行到常驻句柄；O_APPEND 使压缩段用 "w" 截断后写入仍落在新 EOF。写失败（文件被外部
     // 删除/替换等）时关句柄，下一拍重开。
     if (!webui_fp) webui_fp = fopen(WEBUI_DATA_PATH, "a");
     if (webui_fp) {
         if (fprintf(webui_fp, WEBUI_ROW_FMT,
-                    (long)time(NULL), batt, cpu,
+                    webui_epoch_now, webui_batt_now, webui_cpu_now,
                     cooler_hot_temp, cooler_cold_temp,
                     cooler_rpm_real, cooler_cold_real, actual_cold,
                     pid_input_cdeg, recomp) >= 0) {
@@ -4863,12 +4878,12 @@ int main(int argc, char *argv[]) {
     }
 
     // ---- 主循环：1 秒节拍（采集 + 控制分离） ----
-    // 每 1s：采集电池/CPU/散热器回传 → 写 WebUI 曲线数据文件（滚动 720 行，断联不写）
+    // 每 1s：采集电池/CPU/散热器回传（开头）→ 5s 控制块（到期时）→ 写 WebUI 曲线行（滚动 720 行，断联不写）
     // 每 5s（时间判定）：执行控制（仲裁/存活/主循环/限速下发）
     time_t last_ctrl = 0;
     while (running) {
         reap_am_children();   // 每拍回收，断联 continue 的拍也不漏
-        write_webui_data();   // 每 1s 采集写数据文件（刚需热数据，WebUI 直接读）
+        sample_webui_inputs();   // 每 1s 采集（控制块用新鲜缓存；写行在 5s 控制块之后）
         write_coldmax_hint(); // 每 1s 核对生效制冷上限，变了才写给 app（定 KI 曲线横轴）
         poll_bt_request();    // 每 1s 查开蓝牙请求，有新请求才执行一次命令链
 
@@ -4894,7 +4909,7 @@ int main(int argc, char *argv[]) {
             cpu_affinity_reassert();
 
             // 0. CPU thermal_zone 周期重扫（移入 5s 控制块：全量扫描 ~100 个 zone 阻塞近 1s，
-            //    不在 1s 采集热路径 write_webui_data 内触发）
+            //    不在 1s 采集热路径 sample_webui_inputs 内触发）
             maybe_rescan_cpu_zones();
 
             // 1. 读取双状态文件 + 仲裁
@@ -4978,6 +4993,10 @@ int main(int argc, char *argv[]) {
             // ★ 死链检测：BLE 已连但回传全 0（与本次是否下发无关）
             deadlink_check();
         }
+
+        // 曲线数据：放在 5s 控制块之后——本拍是否重算 PID 已确定，标记与重算落在同一行；
+        // 时间戳沿用采集那一刻的 epoch，不因控制耗时（如 thermal_zone 全量扫描）而偏移。
+        append_webui_row();
 
         // 平滑下发：每 1s 送出一份。放在 5s 块之后，本拍判定通过的目标同一拍就送出第一份。
         ramp_tick();

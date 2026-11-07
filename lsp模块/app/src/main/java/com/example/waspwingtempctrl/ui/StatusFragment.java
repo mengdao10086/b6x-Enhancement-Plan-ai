@@ -256,7 +256,7 @@ public class StatusFragment extends Fragment implements SetupActivity.PageAware 
 
         // 手动路径：写操作记录 + 结果文本淡入淡出（静默路径不走这两处；进度条两条路径都走）
         view.findViewById(R.id.btn_refresh).setOnClickListener(v -> refreshStatus(true));
-        view.findViewById(R.id.btn_deploy).setOnClickListener(v -> deploy());
+        view.findViewById(R.id.btn_deploy).setOnClickListener(v -> deploy(false));
         view.findViewById(R.id.btn_uninstall).setOnClickListener(v -> confirmUninstall());
         view.findViewById(R.id.btn_stop).setOnClickListener(v -> confirmStopDaemon());
         view.findViewById(R.id.btn_stop_app).setOnClickListener(v -> confirmStopControlApp());
@@ -720,14 +720,20 @@ public class StatusFragment extends Fragment implements SetupActivity.PageAware 
      * 开始即把忙态文案写进状态区（避免只有进度条、看起来像卡住），结束未出结果时恢复原文本。
      * 判据与理由见 {@code app/逻辑说明.md} §8.1 与 §2.2。
      */
-    private void deploy() {
+    /**
+     * 部署。
+     *
+     * @param quiet true = 自动更新触发的静默部署：不动状态文本（只亮进度条），
+     *              避免把 8 行状态换成一行占位导致状态卡收起再展开；结果仍照常整段替换
+     */
+    private void deploy(boolean quiet) {
         daemonStoppedByUser = false;   // 部署结束会接着拉起（见本方法的 after 回调）
         final Context app = requireContext().getApplicationContext();
         final String busyText = getString(R.string.status_busy_deploy);
         final CharSequence previousStatus = statusView != null ? statusView.getText() : null;
         // 已有动作在跑时 runAsync 会直接返回（只写一条操作记录），此时不能写占位文案，否则会永久残留
         final boolean busyShown = !actionRunning;
-        if (busyShown) {
+        if (busyShown && !quiet) {
             swapStatusTextAnimated(busyText);   // 立刻上屏；成功时随后由结果覆盖
         }
         runAsyncBlocking(busyText, () -> {
@@ -737,7 +743,7 @@ public class StatusFragment extends Fragment implements SetupActivity.PageAware 
             return result.status != null ? result.status.describe() : result.describe();
         }, false, true, () -> {
             // 失败走对话框、不写状态区：占位文案此时仍在（或还在等选中结束），恢复部署前的文本，避免残留
-            if (busyShown && statusView != null
+            if (!quiet && busyShown && statusView != null
                     && (busyText.contentEquals(statusView.getText())
                         || busyText.equals(pendingStatusText))) {
                 swapStatusTextAnimated(previousStatus != null ? previousStatus.toString() : "");
@@ -1026,7 +1032,7 @@ public class StatusFragment extends Fragment implements SetupActivity.PageAware 
             // 「自动更新」开着且设备上的内容旧了：不弹窗，直接重装（写进操作记录，
             // 让用户能看出"刚才自动做了什么"）。deploy() 结束会自己接着拉起守护进程。
             appendLog(getString(R.string.status_auto_deploy_log));
-            deploy();
+            deploy(true);   // 静默：不动状态文本，避免状态卡收起再展开
         } else if (pendingPrompt != PROMPT_NONE) {
             final int kind = pendingPrompt;
             pendingPrompt = PROMPT_NONE;
@@ -1290,7 +1296,8 @@ public class StatusFragment extends Fragment implements SetupActivity.PageAware 
      * 同意过部署，只弹窗请求。第三种情形（进程没在跑）动作不同，见 {@link #showNotRunningPrompt()}。
      */
     private void showDeployRequest(int titleRes, int messageRes) {
-        showDeployRequestPrompt(titleRes, messageRes, R.string.status_action_deploy, this::deploy);
+        showDeployRequestPrompt(titleRes, messageRes, R.string.status_action_deploy,
+                () -> deploy(false));
     }
 
     /** 二进制就位但进程没在跑：请求拉起（动作是"拉起 daemon"，不是重装一遍）。 */
@@ -1387,7 +1394,7 @@ public class StatusFragment extends Fragment implements SetupActivity.PageAware 
         showDismissOnOutside(new AlertDialog.Builder(requireContext())
                 .setTitle(R.string.status_root_ok_title)
                 .setMessage(R.string.status_root_ok_message)
-                .setPositiveButton(R.string.status_action_deploy, (d, w) -> deploy())
+                .setPositiveButton(R.string.status_action_deploy, (d, w) -> deploy(false))
                 .setNegativeButton(R.string.status_root_later, null)
                 .create());
     }
