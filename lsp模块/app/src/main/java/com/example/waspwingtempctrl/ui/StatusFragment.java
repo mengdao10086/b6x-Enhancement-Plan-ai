@@ -74,7 +74,7 @@ public class StatusFragment extends Fragment implements SetupActivity.PageAware 
 
     /** 静默刷新的最小间隔：30 秒内的重复触发不再跑 su 探测（该路径会顺带自动重推脚本）。 */
     private static final long PROBE_MIN_INTERVAL_MS = 30_000L;
-    /** 周期静默复探间隔（本页可见，或离屏但宿主仍在前台）：及时反映控制 app 被杀等外部状态变化。 */
+    /** 页面可见期间的周期静默复探间隔：及时反映控制 app 被杀等外部状态变化。 */
     private static final long PERIODIC_REFRESH_MS = 5_000L;
     /** 手动刷新时文本淡出时长（旧层缩短，见 {@link #swapStatusTextAnimated}）。 */
     private static final long FADE_OUT_MS = 180L;
@@ -149,10 +149,6 @@ public class StatusFragment extends Fragment implements SetupActivity.PageAware 
     private boolean logExpanded;
     /** 本实例是否已起过「首次探测（含 root 尝试）」；由 {@link #firstProbeIfNeeded()} 置真。 */
     private boolean firstProbeDone;
-    /** 本页是否为外壳当前页：离屏时结果直接 setText、副作用延后到回页。 */
-    private boolean pageVisible;
-    /** 离屏期间攒下的探测副作用（弹窗 / 自动部署），回页时补一次。 */
-    private boolean sideEffectsPending;
     /** 后台任务里置位、主线程回调读取：本次刚拿到 root 授权，需弹部署确认。 */
     private volatile boolean rootJustGranted;
     /** 后台任务里置位、主线程回调读取：这次要弹哪种部署请求（{@link #PROMPT_NONE} = 不弹）。 */
@@ -207,11 +203,11 @@ public class StatusFragment extends Fragment implements SetupActivity.PageAware 
     private boolean scanSilentPending;
     /** 扫描代号：视图销毁/重新起跑时递增，旧回调据此作废。 */
     private int scanGeneration;
-    /** 周期复探是否在运行（生命周期开关：可见与离屏继续，宿主暂停/销毁时停）。 */
+    /** 页面可见期间的周期复探是否在运行（生命周期开关）。 */
     private boolean periodicActive;
 
     /**
-     * 周期静默复探（本页可见或离屏但宿主在前台）：一拍只触发一次扫描，下一拍由扫描结束
+     * 页面可见期间的周期静默复探：一拍只触发一次扫描，下一拍由扫描结束
      * （{@link #finishScan}）重置，故不会固定自调度、也不会在扫描进行中再起一趟。
      */
     private final Runnable periodicRefresh = new Runnable() {
@@ -307,19 +303,17 @@ public class StatusFragment extends Fragment implements SetupActivity.PageAware 
 
     @Override
     public void onPageVisible(boolean visible) {
-        pageVisible = visible;
         if (!visible) {
-            // 离屏：只收动画；周期复探与在跑的扫描继续（宿主暂停/销毁时才停，见 onPause/onDestroyView）。
-            // 结果在离屏时直接上屏，弹窗 / 自动部署等副作用由 applyProbeSideEffects 延后到回页。
+            // 离屏：收掉动画、周期复探与在跑的扫描（扫描结果不再上屏/弹窗）。
             cancelFade();
+            stopPeriodicRefresh();
+            invalidateScan();
             return;
         }
         firstProbeIfNeeded();
         // 选中期间攒下的结果，回到本页时若无选择就补上
         flushPendingStatus();
         startPeriodicRefresh();
-        // 离屏期间攒下的副作用回页补一次（文本已在离屏时直接上屏，顺序仍是先文本、后副作用）
-        applyProbeSideEffects();
     }
 
     @Override
@@ -635,16 +629,14 @@ public class StatusFragment extends Fragment implements SetupActivity.PageAware 
             appendLog(result);
             if (failed) {
                 restoreDeployFirstLineIfNeeded();
-                if (pageVisible) {
-                    showDismissOnOutside(new AlertDialog.Builder(requireContext())
-                            .setTitle(R.string.status_dialog_failed)
-                            .setMessage(result)
-                            .setPositiveButton(R.string.status_dialog_close, null)
-                            .create());
-                }
-                return;   // 离屏不弹窗：结果已记入操作记录（上面 appendLog），回页不补弹
+                showDismissOnOutside(new AlertDialog.Builder(requireContext())
+                        .setTitle(R.string.status_dialog_failed)
+                        .setMessage(result)
+                        .setPositiveButton(R.string.status_dialog_close, null)
+                        .create());
+                return;
             }
-            showStatusText(result);
+            swapStatusTextAnimated(result);
             return;
         }
         if (!silent || statusView == null) {
@@ -652,20 +644,18 @@ public class StatusFragment extends Fragment implements SetupActivity.PageAware 
         }
         if (failed) {
             restoreDeployFirstLineIfNeeded();
-            if (pageVisible) {
-                showDismissOnOutside(new AlertDialog.Builder(requireContext())
-                        .setTitle(R.string.status_dialog_failed)
-                        .setMessage(result)
-                        .setPositiveButton(R.string.status_dialog_close, null)
-                        .create());
-            }
+            showDismissOnOutside(new AlertDialog.Builder(requireContext())
+                    .setTitle(R.string.status_dialog_failed)
+                    .setMessage(result)
+                    .setPositiveButton(R.string.status_dialog_close, null)
+                    .create());
             return;
         }
         if (System.currentTimeMillis() < statusHoldUntilMs) {
             return;   // 部署/拉起结果的保留期内：周期扫描不覆盖状态文本
         }
         if (!result.contentEquals(statusView.getText())) {
-            showStatusText(result);   // 静默更新：可见时淡变，离屏直接 setText（内容没变就一个字都不动）
+            swapStatusTextAnimated(result);   // 静默更新也走同一套淡变（内容没变就一个字都不动）
         }
     }
 
@@ -676,13 +666,13 @@ public class StatusFragment extends Fragment implements SetupActivity.PageAware 
         MAIN.postDelayed(periodicRefresh, PERIODIC_REFRESH_MS);
     }
 
-    /** 停止周期静默复探（幂等）：宿主暂停、视图销毁时调用（离屏不停）。 */
+    /** 停止周期静默复探（幂等）：离屏、暂停、视图销毁时调用。 */
     private void stopPeriodicRefresh() {
         periodicActive = false;
         MAIN.removeCallbacks(periodicRefresh);
     }
 
-    /** 作废在跑的扫描（宿主暂停/销毁）：旧回调按代号丢弃，监听与进度条一并清掉。 */
+    /** 作废在跑的扫描（离屏/暂停/销毁）：旧回调按代号丢弃，监听与进度条一并清掉。 */
     private void invalidateScan() {
         scanGeneration++;
         scanRunning = false;
@@ -1017,26 +1007,22 @@ public class StatusFragment extends Fragment implements SetupActivity.PageAware 
                     appendLog(result);
                 }
                 if (asDialog || isFailure) {
-                    if (pageVisible) {
-                        showDismissOnOutside(new AlertDialog.Builder(appContext)
-                                .setTitle(isFailure ? R.string.status_dialog_failed
-                                        : R.string.status_dialog_diag)
-                                .setMessage(result)
-                                .setPositiveButton(R.string.status_dialog_close, null)
-                                .create());
-                    } else if (!manual) {
-                        appendLog(result);   // 离屏不弹窗：至少把结果记进操作记录
-                    }
+                    showDismissOnOutside(new AlertDialog.Builder(appContext)
+                            .setTitle(isFailure ? R.string.status_dialog_failed
+                                    : R.string.status_dialog_diag)
+                            .setMessage(result)
+                            .setPositiveButton(R.string.status_dialog_close, null)
+                            .create());
                 } else if (manual) {
-                    showStatusText(result);
+                    swapStatusTextAnimated(result);
                     if (holdStatusMs > 0) {
                         // 部署/拉起结果：到期前周期扫描不许覆盖
                         statusHoldUntilMs = System.currentTimeMillis() + holdStatusMs;
                     }
                 } else if (!result.contentEquals(statusView.getText())) {
-                    // 先比后写：内容没变就一个字都不动；可见时走交叉淡入 + 高度补间，
-                    // 离屏直接 setText（看不见，不跑动画）
-                    showStatusText(result);
+                    // 先比后写：内容没变就一个字都不动；变了也走交叉淡入 + 高度补间（与静默扫描同口径），
+                    // 首次探测从预填充骨架淡入结果，卡片高度由补间兜住残余差异
+                    swapStatusTextAnimated(result);
                 }
                 if (after != null) {
                     after.run();
@@ -1074,12 +1060,6 @@ public class StatusFragment extends Fragment implements SetupActivity.PageAware 
         if (actionRunning || !isAdded() || statusView == null) {
             return;
         }
-        if (!pageVisible) {
-            // 离屏不弹窗、不在后台触发自动部署：记下待办，回页时补
-            sideEffectsPending = true;
-            return;
-        }
-        sideEffectsPending = false;
         if (rootJustGranted) {
             rootJustGranted = false;
             // 刚拿到授权：这一支优先于「自动更新」的静默部署，同批武装的另一条请求就地作废
@@ -1195,29 +1175,6 @@ public class StatusFragment extends Fragment implements SetupActivity.PageAware 
                     .setInterpolator(Motion.easeOut())
                     .start();
         }
-    }
-
-    /**
-     * 结果文本上屏：本页可见时走交叉淡入 + 高度补间；离屏时直接 {@code setText}
-     * （看不见，不跑动画），选中期间仍走既有 pending 推迟。见 app/逻辑说明.md §8.1。
-     */
-    private void showStatusText(final String text) {
-        final TextView view = statusView;
-        if (view == null || !isAdded()) {
-            return;
-        }
-        if (pageVisible) {
-            swapStatusTextAnimated(text);
-            return;
-        }
-        cancelFade();
-        if (TextCopy.isSelecting(view)) {
-            pendingStatusText = text;
-            pendingStatusKeepHeight = false;
-            TextCopy.runWhenSelectionEnds(view, this::flushPendingStatus);
-            return;
-        }
-        view.setText(text);
     }
 
     /** 默认换字：高度与淡变同起同止（见带 {@code keepHeight} 的重载）。 */
