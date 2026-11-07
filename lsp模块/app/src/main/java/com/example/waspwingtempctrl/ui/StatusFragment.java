@@ -130,6 +130,9 @@ public class StatusFragment extends Fragment implements SetupActivity.PageAware 
     /** 「部署状态」首行临时替换前的原文首行；null = 当前没有待恢复的替换。 */
     @Nullable
     private String deployFirstLineBackup;
+    /** 当前临时替换用的首行文案（正在检测 / 部署中…），与 backup 成对出现。 */
+    @Nullable
+    private String deployFirstLinePlaceholder;
 
     /** 操作记录是否展开（默认收起）。 */
     private boolean logExpanded;
@@ -256,7 +259,7 @@ public class StatusFragment extends Fragment implements SetupActivity.PageAware 
 
         // 手动路径：写操作记录 + 结果文本淡入淡出（静默路径不走这两处；进度条两条路径都走）
         view.findViewById(R.id.btn_refresh).setOnClickListener(v -> refreshStatus(true));
-        view.findViewById(R.id.btn_deploy).setOnClickListener(v -> deploy(false));
+        view.findViewById(R.id.btn_deploy).setOnClickListener(v -> deploy());
         view.findViewById(R.id.btn_uninstall).setOnClickListener(v -> confirmUninstall());
         view.findViewById(R.id.btn_stop).setOnClickListener(v -> confirmStopDaemon());
         view.findViewById(R.id.btn_stop_app).setOnClickListener(v -> confirmStopControlApp());
@@ -417,7 +420,7 @@ public class StatusFragment extends Fragment implements SetupActivity.PageAware 
             return;
         }
         appendLog(getString(R.string.status_busy_probe));
-        if (!replaceDeployFirstLineWithChecking()) {
+        if (!replaceDeployFirstLine(R.string.status_deploy_checking)) {
             final String busy = getString(R.string.status_busy_probe);
             if (!busy.contentEquals(statusView.getText())) {
                 // 占位只换字、不改高度：避免单行占位把窗口压矮、结果到达再撑开
@@ -434,12 +437,14 @@ public class StatusFragment extends Fragment implements SetupActivity.PageAware 
     }
 
     /**
-     * 当前状态文本以「部署状态：」开头时，只把结论行换成「部署状态：正在检测」，其余行原样保留。
-     * 行数不变，故直接 setText（不淡变、不做高度动画）；正在选中时走既有 pending 机制推迟。
+     * 当前状态文本以「部署状态：」开头时，只把结论行换成给定文案（正在检测 / 部署中…），
+     * 其余行原样保留。行数不变，故直接 setText（不淡变、不做高度动画）；正在选中时走既有
+     * pending 机制推迟。
      *
-     * @return true = 已走首行替换；false = 当前不是部署状态文本，调用方回退整段占位
+     * @param placeholderRes 临时首行文案（须以「部署状态：」开头）
+     * @return true = 已走首行替换；false = 当前不是部署状态文本（调用方自行决定是否回退）
      */
-    private boolean replaceDeployFirstLineWithChecking() {
+    private boolean replaceDeployFirstLine(int placeholderRes) {
         final TextView view = statusView;
         if (view == null) {
             return false;
@@ -450,12 +455,13 @@ public class StatusFragment extends Fragment implements SetupActivity.PageAware 
         if (!firstLine.startsWith(DEPLOY_STATUS_PREFIX)) {
             return false;
         }
-        final String checking = getString(R.string.status_deploy_checking);
-        if (checking.equals(firstLine)) {
+        final String placeholder = getString(placeholderRes);
+        if (placeholder.equals(firstLine)) {
             return true;   // 已在该临时态：保留首次记下的原首行，不重复覆盖
         }
         deployFirstLineBackup = firstLine;
-        final String replaced = checking + text.substring(end);
+        deployFirstLinePlaceholder = placeholder;
+        final String replaced = placeholder + text.substring(end);
         if (TextCopy.isSelecting(view)) {
             pendingStatusText = replaced;
             pendingStatusKeepHeight = true;   // 只换字、不改高度
@@ -474,23 +480,25 @@ public class StatusFragment extends Fragment implements SetupActivity.PageAware 
      */
     private void restoreDeployFirstLineIfNeeded() {
         final String backup = deployFirstLineBackup;
+        final String placeholder = deployFirstLinePlaceholder;
         deployFirstLineBackup = null;
+        deployFirstLinePlaceholder = null;
         final TextView view = statusView;
-        if (backup == null || view == null) {
+        if (backup == null || placeholder == null || view == null) {
             return;
         }
         // 替换可能还挂在 pending 里（选中期间）：把待上屏文本的首行也改回去
         final String pending = pendingStatusText;
         if (pending != null) {
             final int pendingEnd = firstLineEnd(pending);
-            if (getString(R.string.status_deploy_checking).equals(pending.substring(0, pendingEnd))) {
+            if (placeholder.equals(pending.substring(0, pendingEnd))) {
                 pendingStatusText = backup + pending.substring(pendingEnd);
                 pendingStatusKeepHeight = true;
             }
         }
         final String text = view.getText().toString();
         final int end = firstLineEnd(text);
-        if (!getString(R.string.status_deploy_checking).equals(text.substring(0, end))) {
+        if (!placeholder.equals(text.substring(0, end))) {
             return;   // 临时态已被完整结果/动作文案覆盖，无需恢复
         }
         final String restored = backup + text.substring(end);
@@ -502,6 +510,12 @@ public class StatusFragment extends Fragment implements SetupActivity.PageAware 
             cancelFade();
             view.setText(restored);
         }
+    }
+
+    /** 作废首行替换的备份（结果已整段覆盖时调用，避免过期备份被后续失败分支误用）。 */
+    private void clearDeployFirstLineBackup() {
+        deployFirstLineBackup = null;
+        deployFirstLinePlaceholder = null;
     }
 
     /** 第一行结束位置（不含换行符）；无换行时返回整串长度。 */
@@ -721,20 +735,17 @@ public class StatusFragment extends Fragment implements SetupActivity.PageAware 
      * 判据与理由见 {@code app/逻辑说明.md} §8.1 与 §2.2。
      */
     /**
-     * 部署。
-     *
-     * @param quiet true = 自动更新触发的静默部署：不动状态文本（只亮进度条），
-     *              避免把 8 行状态换成一行占位导致状态卡收起再展开；结果仍照常整段替换
+     * 部署（手动与自动更新同一套状态文案）：当前文本以「部署状态：」开头时，只把结论行换成
+     * 「部署状态：部署中…」，其余行不动、行数不变，状态卡不会收起；不是部署状态文本时不替换。
+     * 失败时恢复被替换的结论行（成功时由结果整段覆盖）。
      */
-    private void deploy(boolean quiet) {
+    private void deploy() {
         daemonStoppedByUser = false;   // 部署结束会接着拉起（见本方法的 after 回调）
         final Context app = requireContext().getApplicationContext();
         final String busyText = getString(R.string.status_busy_deploy);
-        final CharSequence previousStatus = statusView != null ? statusView.getText() : null;
-        // 已有动作在跑时 runAsync 会直接返回（只写一条操作记录），此时不能写占位文案，否则会永久残留
-        final boolean busyShown = !actionRunning;
-        if (busyShown && !quiet) {
-            swapStatusTextAnimated(busyText);   // 立刻上屏；成功时随后由结果覆盖
+        // 已有动作在跑时 runAsync 会直接返回（只写一条操作记录），此时不能换占位文案，否则会永久残留
+        if (!actionRunning) {
+            replaceDeployFirstLine(R.string.status_deploy_busy);
         }
         runAsyncBlocking(busyText, () -> {
             Deployer.Result result = Deployer.get(app).deploy();
@@ -742,17 +753,15 @@ public class StatusFragment extends Fragment implements SetupActivity.PageAware 
             deployFailed = !result.ok;
             return result.status != null ? result.status.describe() : result.describe();
         }, false, true, () -> {
-            // 失败走对话框、不写状态区：占位文案此时仍在（或还在等选中结束），恢复部署前的文本，避免残留
-            if (!quiet && busyShown && statusView != null
-                    && (busyText.contentEquals(statusView.getText())
-                        || busyText.equals(pendingStatusText))) {
-                swapStatusTextAnimated(previousStatus != null ? previousStatus.toString() : "");
+            // 失败走对话框、不写状态区：结论行此时仍是占位（或还在等选中结束），恢复部署前的首行
+            if (deployFailed) {
+                restoreDeployFirstLineIfNeeded();
+                clearPromptMark();
+            } else {
+                clearDeployFirstLineBackup();   // 结果已整段覆盖，备份作废
             }
             if (deployPlaced) {
                 startDaemon();
-            }
-            if (deployFailed) {
-                clearPromptMark();
             }
         }, RESULT_HOLD_MS);
     }
@@ -1032,7 +1041,7 @@ public class StatusFragment extends Fragment implements SetupActivity.PageAware 
             // 「自动更新」开着且设备上的内容旧了：不弹窗，直接重装（写进操作记录，
             // 让用户能看出"刚才自动做了什么"）。deploy() 结束会自己接着拉起守护进程。
             appendLog(getString(R.string.status_auto_deploy_log));
-            deploy(true);   // 静默：不动状态文本，避免状态卡收起再展开
+            deploy();   // 自动更新与手动同一套：只换结论行
         } else if (pendingPrompt != PROMPT_NONE) {
             final int kind = pendingPrompt;
             pendingPrompt = PROMPT_NONE;
@@ -1297,7 +1306,7 @@ public class StatusFragment extends Fragment implements SetupActivity.PageAware 
      */
     private void showDeployRequest(int titleRes, int messageRes) {
         showDeployRequestPrompt(titleRes, messageRes, R.string.status_action_deploy,
-                () -> deploy(false));
+                this::deploy);
     }
 
     /** 二进制就位但进程没在跑：请求拉起（动作是"拉起 daemon"，不是重装一遍）。 */
@@ -1394,7 +1403,7 @@ public class StatusFragment extends Fragment implements SetupActivity.PageAware 
         showDismissOnOutside(new AlertDialog.Builder(requireContext())
                 .setTitle(R.string.status_root_ok_title)
                 .setMessage(R.string.status_root_ok_message)
-                .setPositiveButton(R.string.status_action_deploy, (d, w) -> deploy(false))
+                .setPositiveButton(R.string.status_action_deploy, (d, w) -> deploy())
                 .setNegativeButton(R.string.status_root_later, null)
                 .create());
     }
