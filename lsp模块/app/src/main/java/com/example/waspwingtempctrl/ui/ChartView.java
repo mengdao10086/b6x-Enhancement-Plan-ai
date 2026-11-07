@@ -1,5 +1,8 @@
 package com.example.waspwingtempctrl.ui;
 
+import android.animation.Animator;
+import android.animation.AnimatorListenerAdapter;
+import android.animation.ValueAnimator;
 import android.content.Context;
 import android.content.res.Resources;
 import android.content.res.Resources.Theme;
@@ -59,6 +62,7 @@ public class ChartView extends View {
     private static final float TOUCH_PANEL_GAP_DP = 6f;   // 面板与高亮虚线的水平间距
     private static final float TOUCH_PANEL_PAD_X_DP = 3f;
     private static final float TOUCH_PANEL_PAD_Y_DP = 2f;
+    private static final long TOUCH_PANEL_SIDE_MS = 140L; // 换边过渡时长
     // pid 曲线相邻两次重算样本的最大间隔（控制 5s + 写行落后 1s）；超过即视为不连续、不连线
     private static final float PID_CHAIN_MAX_SEC = 6f;
     // pid 曲线的孤立样本（前后都没有相邻重算点）：只画一个实心圆点，不连线、不描边
@@ -149,6 +153,16 @@ public class ChartView extends View {
     private float touchPanelB;
     private float touchTextX;
     private float touchPanelW;
+    /** 换边过渡：非 null = 正在从换边那一刻的绘制位置滑向新一侧。 */
+    private ValueAnimator panelSideAnim;
+    /** 换边过渡的固定起点（换边时刻的绘制 x）。 */
+    private float panelSideFromL;
+    /** 换边过渡的当前目标 x（同侧移动时每帧跟随手指更新）。 */
+    private float panelSideToL;
+    /** 当前目标侧：true = 右。用于判定是否换边。 */
+    private boolean panelOnRight;
+    /** 本段按住是否已落过位：首帧直接出现，不补间。 */
+    private boolean panelPlaced;
 
     public ChartView(Context context) {
         super(context);
@@ -1007,33 +1021,109 @@ public class ChartView extends View {
         }
     }
 
-    /** 面板默认贴高亮虚线右侧 6dp，右越界翻到左侧，再横向钳进绘图区。 */
+    /**
+     * 面板默认贴高亮虚线右侧 6dp，右越界翻到左侧，再横向钳进绘图区。
+     *
+     * <p>首帧出现与同侧跟随手指都直接落位；只有**换边**走约 140ms 的过渡（见
+     * {@link #startPanelSideAnim}）。动画进行中仍在同一侧时只更新目标，终点每帧跟随手指；
+     * 快速来回越界则从当前绘制位置重新起步，不抖不跳。
+     */
     private void placeTouchPanel() {
         if (touchRowCount == 0) {
             return;
         }
-        float gap = TOUCH_PANEL_GAP_DP * density;
-        float right = touchDashX + gap;
-        float l;
-        if (right + touchPanelW <= fPadL + fW) {
-            l = right;
-        } else {
-            l = touchDashX - gap - touchPanelW;
+        final float gap = TOUCH_PANEL_GAP_DP * density;
+        final float right = touchDashX + gap;
+        final boolean onRight = right + touchPanelW <= fPadL + fW;
+        final float targetL = clampPanelL(onRight ? right : touchDashX - gap - touchPanelW);
+
+        if (!panelPlaced) {
+            panelPlaced = true;   // 首帧出现：直接落位
+            panelOnRight = onRight;
+            applyPanelL(targetL);
+            return;
         }
-        float maxL = fPadL + fW - touchPanelW;
+        if (onRight != panelOnRight) {
+            // 换边（含动画中快速来回越界）：从当前绘制位置重新起步
+            panelOnRight = onRight;
+            startPanelSideAnim(targetL);
+            return;
+        }
+        if (panelSideAnim != null) {
+            panelSideToL = targetL;   // 动画中同侧：终点跟随最新目标，不重启
+            return;
+        }
+        applyPanelL(targetL);   // 同侧跟随手指：即时
+    }
+
+    /** 把面板左沿钳进绘图区：面板比绘图区还宽时贴左界，宁可右溢也不越出左界。 */
+    private float clampPanelL(float l) {
+        final float maxL = fPadL + fW - touchPanelW;
         if (l > maxL) {
             l = maxL;
         }
         if (l < fPadL) {
-            l = fPadL;   // 面板比绘图区还宽时贴左界，宁可右溢也不越出左界
+            l = fPadL;
         }
+        return l;
+    }
+
+    /** 把面板落位到左沿 {@code l}：右沿与文字 x 由此派生，onDraw 只读这几个字段。 */
+    private void applyPanelL(float l) {
         touchPanelL = l;
         touchPanelR = l + touchPanelW;
         touchTextX = l + TOUCH_PANEL_PAD_X_DP * density;
     }
 
-    /** 结束按住查看：清状态并复位父容器的拦截开关。 */
+    /**
+     * 换边过渡：进度 0→1 的 140ms ease-out，起点固定为换边那一刻的绘制位置，
+     * 终点每帧取 {@link #panelSideToL}（同侧移动时会被更新）。被打断时由下一次换边
+     * 从当前绘制位置重新起算。
+     */
+    private void startPanelSideAnim(float targetL) {
+        cancelPanelSideAnim();
+        panelSideFromL = touchPanelL;
+        panelSideToL = targetL;
+        if (!Motion.enabled(getContext())) {
+            applyPanelL(targetL);
+            return;
+        }
+        final ValueAnimator anim = ValueAnimator.ofFloat(0f, 1f);
+        anim.setDuration(TOUCH_PANEL_SIDE_MS);
+        anim.setInterpolator(Motion.easeOut());
+        anim.addUpdateListener(a -> {
+            final float p = (float) a.getAnimatedValue();
+            applyPanelL(panelSideFromL + (panelSideToL - panelSideFromL) * p);
+            invalidate();
+        });
+        anim.addListener(new AnimatorListenerAdapter() {
+            @Override
+            public void onAnimationEnd(Animator animation) {
+                if (panelSideAnim != anim) {
+                    return;   // 已被新的换边动画接管，不作收尾
+                }
+                panelSideAnim = null;
+                applyPanelL(panelSideToL);
+                invalidate();
+            }
+        });
+        panelSideAnim = anim;
+        anim.start();
+    }
+
+    /** 中止换边过渡；旧动画的收尾因对不上号而空跑。 */
+    private void cancelPanelSideAnim() {
+        final ValueAnimator running = panelSideAnim;
+        panelSideAnim = null;
+        if (running != null) {
+            running.cancel();
+        }
+    }
+
+    /** 结束按住查看：取消换边过渡、清状态并复位父容器的拦截开关。面板消失仍即时。 */
     private void clearTouch() {
+        cancelPanelSideAnim();
+        panelPlaced = false;
         touchActive = false;
         touchSample = -1;
         touchRowCount = 0;
@@ -1041,6 +1131,13 @@ public class ChartView extends View {
         if (parent != null) {
             parent.requestDisallowInterceptTouchEvent(false);
         }
+    }
+
+    @Override
+    protected void onDetachedFromWindow() {
+        cancelPanelSideAnim();
+        panelPlaced = false;
+        super.onDetachedFromWindow();
     }
 
     // ==================== 绘制（无计算、无分配） ====================

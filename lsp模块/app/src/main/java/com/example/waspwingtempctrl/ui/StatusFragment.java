@@ -296,8 +296,8 @@ public class StatusFragment extends Fragment implements SetupActivity.PageAware 
     @Override
     public void onResume() {
         super.onResume();
-        // 首次可见时先起首探（见 firstProbeIfNeeded），否则走静默刷新（不写记录、不碰文本、不做动画）；
-        // 手动路径的动画/记录不该被切页触发；静默刷新被 30 秒节流挡下，不会多跑一趟 su。
+        // 首次可见时先起首探（见 firstProbeIfNeeded），否则走静默刷新（不写记录、不播忙文本；
+        // 结果到达仍走交叉淡入 + 高度补间）；手动路径的动画/记录不该被切页触发；静默刷新被 30 秒节流挡下。
         if (!firstProbeIfNeeded()) {
             refreshStatus(false);
         }
@@ -363,7 +363,10 @@ public class StatusFragment extends Fragment implements SetupActivity.PageAware 
         return true;
     }
 
-    /** 首次探测：先试一次 root（只此一次），再探部署状态。静默路径（不写记录、不做动画）。 */
+    /**
+     * 首次探测：先试一次 root（只此一次），再探部署状态。静默路径（不写记录、不播忙文本）；
+     * 结果到达仍走交叉淡入 + 高度补间，从预填充骨架过渡到真实文本。
+     */
     private void firstProbe() {
         final Context app = requireContext().getApplicationContext();
         runAsync(getString(R.string.status_busy_probe), () -> {
@@ -991,8 +994,9 @@ public class StatusFragment extends Fragment implements SetupActivity.PageAware 
                         statusHoldUntilMs = System.currentTimeMillis() + holdStatusMs;
                     }
                 } else if (!result.contentEquals(statusView.getText())) {
-                    // 先比后写：内容没变就一个字都不动，连重绘都省掉
-                    statusView.setText(result);
+                    // 先比后写：内容没变就一个字都不动；变了也走交叉淡入 + 高度补间（与静默扫描同口径），
+                    // 首次探测从预填充骨架淡入结果，卡片高度由补间兜住残余差异
+                    swapStatusTextAnimated(result);
                 }
                 if (after != null) {
                     after.run();
