@@ -8,13 +8,16 @@ import android.graphics.DashPathEffect;
 import android.graphics.Paint;
 import android.graphics.Path;
 import android.util.AttributeSet;
+import android.view.MotionEvent;
 import android.view.View;
+import android.view.ViewParent;
 
 import androidx.annotation.Nullable;
 
 import com.example.waspwingtempctrl.R;
 
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
 
@@ -48,10 +51,20 @@ public class ChartView extends View {
     // 竖虚线：与网格线同宽同色（透明度含在网格色里），3dp 实 / 3dp 空
     private static final float DASH_ON_DP = 3f;
     private static final float DASH_OFF_DP = 3f;
+    // 按住查看：高亮虚线用轴色约 70% 透明；数值面板底 = 底色约 85% 透明、圆角 4dp
+    private static final float TOUCH_LINE_ALPHA = 0.7f;
+    private static final float TOUCH_PANEL_ALPHA = 0.85f;
+    private static final float TOUCH_PANEL_RADIUS_DP = 4f;
+    private static final float TOUCH_PANEL_TOP_DP = 2f;   // 面板顶距绘图区上沿
+    private static final float TOUCH_PANEL_GAP_DP = 6f;   // 面板与高亮虚线的水平间距
+    private static final float TOUCH_PANEL_PAD_X_DP = 3f;
+    private static final float TOUCH_PANEL_PAD_Y_DP = 2f;
     // pid 曲线相邻两次重算样本的最大间隔（控制 5s + 写行落后 1s）；超过即视为不连续、不连线
     private static final float PID_CHAIN_MAX_SEC = 6f;
-    // pid 曲线的孤立样本（前后都没有相邻重算点）：只画一个点，不连线；半径取线宽
-    private static final float PID_DOT_RADIUS_DP = LINE_WIDTH_DP;
+    // pid 曲线的孤立样本（前后都没有相邻重算点）：只画一个点，不连线。
+    // 点径 = 线宽 ×1.2（半径 = 线宽 ×0.6），外圈一圈底色描边把它从曲线上衬出来
+    private static final float MARK_RADIUS_DP = LINE_WIDTH_DP * 0.6f;
+    private static final float MARK_HALO_DP = 0.75f;
     private static final float TICK_TEXT_DP = 10f;   // 刻度 / 标注 / 轴标题字号
     private static final float EMPTY_TEXT_DP = 12f;  // 「采样中…」字号
     private static final float LABEL_GAP_DP = 6f;    // 标签与端点的水平间距
@@ -72,6 +85,8 @@ public class ChartView extends View {
     private final Paint dotPaint = new Paint();
     private final Paint dotHaloPaint = new Paint();
     private final Paint dashPaint = new Paint();     // 重算位置竖虚线（与网格同宽同色）
+    private final Paint highlightPaint = new Paint(); // 按住查看的高亮竖虚线（与重算虚线同节奏）
+    private final Paint panelPaint = new Paint();     // 按住查看的数值面板底色
 
     private final ChartSeries[] series = ChartSeries.createAll();
 
@@ -80,6 +95,10 @@ public class ChartView extends View {
     private int colorBg;
     private int colorGrid;
     private int colorAxis;
+    /** 按住查看的高亮虚线色（轴色 + 约 70% 透明）。 */
+    private int colorHighlight;
+    /** 按住查看的数值面板底色（底色 + 约 85% 透明）。 */
+    private int colorPanel;
     private final int[] seriesColors = new int[series.length];
     private boolean colorsReady;
 
@@ -111,6 +130,27 @@ public class ChartView extends View {
     private float[] pidDotY;
     private int pidDotColor;
     private int pidDotCount;
+
+    // ---- 按住查看：触摸回调里算好，onDraw 只画 ----
+    private boolean touchActive;
+    /** 手指 x（已钳进绘图区）。 */
+    private float touchRawX;
+    /** 高亮虚线的 x（已吸附到笔宽栅格）。 */
+    private float touchDashX;
+    /** 最近的样本下标；-1 = 无。 */
+    private int touchSample = -1;
+    /** 最近样本的时间戳：窗口每秒滑动时同一数组下标可能换人，靠它发现样本已变。 */
+    private long touchSampleT;
+    private String[] touchTexts;
+    private int[] touchColors;
+    private float[] touchTextY;
+    private int touchRowCount;
+    private float touchPanelL;
+    private float touchPanelT;
+    private float touchPanelR;
+    private float touchPanelB;
+    private float touchTextX;
+    private float touchPanelW;
 
     public ChartView(Context context) {
         super(context);
@@ -161,6 +201,13 @@ public class ChartView extends View {
         dashPaint.setStrokeWidth(GRID_WIDTH_DP * density);
         dashPaint.setPathEffect(new DashPathEffect(
                 new float[]{DASH_ON_DP * density, DASH_OFF_DP * density}, 0f));
+        highlightPaint.setAntiAlias(true);
+        highlightPaint.setStyle(Paint.Style.STROKE);
+        highlightPaint.setStrokeWidth(GRID_WIDTH_DP * density);
+        highlightPaint.setPathEffect(new DashPathEffect(
+                new float[]{DASH_ON_DP * density, DASH_OFF_DP * density}, 0f));
+        panelPaint.setAntiAlias(true);
+        panelPaint.setStyle(Paint.Style.FILL);
     }
 
     // ==================== 外部接口 ====================
@@ -225,7 +272,15 @@ public class ChartView extends View {
         }
         haloPaint.setColor(colorBg);
         dotHaloPaint.setColor(colorBg);
+        colorHighlight = withAlpha(colorAxis, TOUCH_LINE_ALPHA);
+        colorPanel = withAlpha(colorBg, TOUCH_PANEL_ALPHA);
         colorsReady = true;
+    }
+
+    /** 给已有色值换一个透明度（不动 RGB）。 */
+    private static int withAlpha(int color, float alpha) {
+        int a = Math.round(255f * alpha);
+        return (color & 0x00FFFFFF) | (a << 24);
     }
 
     // ==================== 预计算 ====================
@@ -259,6 +314,7 @@ public class ChartView extends View {
         fPadT = padT;
         fH = h - padT - padB;
         if (fH <= 8f * density) {
+            clearTouch();
             return;
         }
         titleLeft = getContext().getString(R.string.chart_axis_left);
@@ -267,6 +323,7 @@ public class ChartView extends View {
         ChartWindow win = window;
         if (win == null || win.samples.length < 2) {
             placeholder = getContext().getString(R.string.chart_waiting);
+            clearTouch();
             return;
         }
         List<ChartSeries> left = new ArrayList<>();
@@ -279,6 +336,7 @@ public class ChartView extends View {
         }
         if (left.isEmpty() && right.isEmpty()) {
             placeholder = getContext().getString(R.string.chart_no_series);
+            clearTouch();
             return;
         }
 
@@ -310,6 +368,7 @@ public class ChartView extends View {
             rAxis = ChartAxis.range(1f, top);
         }
         if (lAxis == null && rAxis == null) {
+            clearTouch();
             return;   // 双轴都不可画：只留底色
         }
 
@@ -318,6 +377,7 @@ public class ChartView extends View {
         applyAxisPads(w);
         if (fW <= 8f * density) {
             gridY = null;   // 窄到画不了：连网格一起撤掉，别只留一堆横线
+            clearTouch();
             return;
         }
         buildPaths(win, lAxis, rAxis);
@@ -325,6 +385,10 @@ public class ChartView extends View {
         buildPidSingles(win, lAxis);
         buildRecomputeMarks(win);
         buildMarkers(win, lAxis, rAxis);
+        // 数据每秒刷新会重算几何：手指还按着就按新窗口重定位一次（文本仅在下标/时间戳变化时重算）
+        if (touchActive) {
+            updateTouch(touchRawX);
+        }
     }
 
     /**
@@ -446,13 +510,33 @@ public class ChartView extends View {
         if (count == 0) {
             return;
         }
-        dashXs = new float[count];
+        float[] xs = new float[count];
         int k = 0;
         for (int i = 0; i < n; i++) {
             if (win.samples[i].recomp) {
-                dashXs[k++] = fPadL + fW * win.u[i];
+                xs[k++] = snapDashX(fPadL + fW * win.u[i]);
             }
         }
+        Arrays.sort(xs);
+        // 相邻重算点的 x 相差不到一笔宽时两条线会叠成一条宽线：按 x 升序去重，保留先出现（左侧）的那条
+        int m = 0;
+        float minGap = 1f * density;
+        for (int i = 0; i < xs.length; i++) {
+            if (m > 0 && xs[i] - xs[m - 1] < minGap) {
+                continue;
+            }
+            xs[m++] = xs[i];
+        }
+        dashXs = Arrays.copyOf(xs, m);
+    }
+
+    /**
+     * 把竖线的 x 吸附到笔宽栅格（像素）：笔宽落在半像素列时，抗锯齿会把 1dp 线摊到 4 列像素上，
+     * 视觉上明显变宽变糊；对齐后每条线渲染宽度一致。
+     */
+    private float snapDashX(float xPx) {
+        float swPx = GRID_WIDTH_DP * density;
+        return Math.round(xPx - swPx / 2f) + swPx / 2f;
     }
 
     /**
@@ -600,6 +684,9 @@ public class ChartView extends View {
             ChartSeries s = series[si];
             if (!s.on) {
                 continue;
+            }
+            if ("pid".equals(s.id)) {
+                continue;   // pid 不做末端数值标注（无文字、无末端圆点），口径见 app/逻辑说明.md §7
             }
             ChartAxis ax = s.axis == ChartSeries.AXIS_LEFT ? lAxis : rAxis;
             if (ax == null) {
@@ -776,6 +863,188 @@ public class ChartView extends View {
         return lyB + fm.ascent < lyA + fm.descent && lyA + fm.ascent < lyB + fm.descent;
     }
 
+    // ==================== 按住查看 ====================
+
+    /**
+     * 图内按下即生效（无需长按）：在手指 x 处画高亮竖虚线并显示各已启用系列在该时刻的数值；
+     * 移动跟随，抬手 / 取消立即消失。落在绘图区外不消费。文本只在最近样本变化时重算，
+     * 几何量全部在触摸回调里定稿，onDraw 仍只画。
+     */
+    @Override
+    public boolean onTouchEvent(MotionEvent e) {
+        switch (e.getActionMasked()) {
+            case MotionEvent.ACTION_DOWN:
+                if (!canInspect() || !inPlot(e.getX(), e.getY())) {
+                    return false;
+                }
+                // 触摸期间别让父容器（页面纵向滚动 / ViewPager2 翻页）抢走手势
+                ViewParent parent = getParent();
+                if (parent != null) {
+                    parent.requestDisallowInterceptTouchEvent(true);
+                }
+                updateTouch(e.getX());
+                invalidate();
+                return touchActive;
+            case MotionEvent.ACTION_MOVE:
+                if (!touchActive) {
+                    return false;
+                }
+                updateTouch(e.getX());
+                invalidate();
+                return true;
+            case MotionEvent.ACTION_UP:
+            case MotionEvent.ACTION_CANCEL:
+                if (!touchActive) {
+                    return false;
+                }
+                clearTouch();
+                invalidate();
+                return true;
+            default:
+                return touchActive;
+        }
+    }
+
+    /** 数据为空 / 占位态 / 尚无绘图区时不响应。 */
+    private boolean canInspect() {
+        return placeholder == null && gridY != null && window != null
+                && window.samples.length > 0 && fW > 0f;
+    }
+
+    private boolean inPlot(float x, float y) {
+        return x >= fPadL && x <= fPadL + fW && y >= fPadT && y <= fPadT + fH;
+    }
+
+    /** 按手指 x 更新高亮线与数值面板；最近样本未变（下标与时间戳都相同）时不重排文本。 */
+    private void updateTouch(float x) {
+        if (!canInspect()) {
+            clearTouch();
+            return;
+        }
+        float cx = Math.max(fPadL, Math.min(fPadL + fW, x));
+        touchRawX = cx;
+        touchDashX = snapDashX(cx);
+        int idx = nearestSampleIndex(cx);
+        if (idx < 0) {
+            clearTouch();
+            return;
+        }
+        touchActive = true;
+        long t = window.samples[idx].t;
+        if (idx != touchSample || t != touchSampleT) {
+            touchSample = idx;
+            touchSampleT = t;
+            buildTouchRows(idx);
+        }
+        placeTouchPanel();
+    }
+
+    /** 窗口内离给定 x 最近的样本（不插值）。u 单调不减，二分查找。 */
+    private int nearestSampleIndex(float xPx) {
+        ChartWindow win = window;
+        if (win == null || win.samples.length == 0 || fW <= 0f) {
+            return -1;
+        }
+        float u = (xPx - fPadL) / fW;
+        int lo = 0;
+        int hi = win.u.length - 1;
+        while (lo < hi) {
+            int mid = (lo + hi) >>> 1;
+            if (win.u[mid] < u) {
+                lo = mid + 1;
+            } else {
+                hi = mid;
+            }
+        }
+        if (lo > 0) {
+            float dPrev = Math.abs(win.u[lo - 1] - u);
+            float dCur = Math.abs(win.u[lo] - u);
+            if (dPrev <= dCur) {
+                lo--;
+            }
+        }
+        return lo;
+    }
+
+    /** 该样本上「已启用且有有效值」的系列 → 行文本 / 颜色 / 面板尺寸（只在触摸回调里调用）。 */
+    private void buildTouchRows(int idx) {
+        tickPaint.setTextSize(TICK_TEXT_DP * density);
+        ChartSample d = window.samples[idx];
+        String[] texts = new String[series.length];
+        int[] colors = new int[series.length];
+        float maxW = 0f;
+        int n = 0;
+        for (int si = 0; si < series.length; si++) {
+            ChartSeries s = series[si];
+            if (!s.on) {
+                continue;
+            }
+            float v = ChartSeries.value(s, d);
+            if (!ChartSample.valid(v)) {
+                continue;
+            }
+            String text = getContext().getString(s.labelRes) + " " + ChartSeries.format(s, v);
+            texts[n] = text;
+            colors[n] = seriesColors[si];
+            maxW = Math.max(maxW, tickPaint.measureText(text));
+            n++;
+        }
+        touchTexts = texts;
+        touchColors = colors;
+        touchRowCount = n;
+        if (n == 0) {
+            return;
+        }
+        Paint.FontMetrics fm = tickPaint.getFontMetrics();
+        float rowH = LABEL_H_DP * density;
+        float padY = TOUCH_PANEL_PAD_Y_DP * density;
+        touchPanelW = maxW + 2f * TOUCH_PANEL_PAD_X_DP * density;
+        touchPanelT = fPadT + TOUCH_PANEL_TOP_DP * density;
+        touchPanelB = touchPanelT + 2f * padY + rowH * n;
+        if (touchTextY == null || touchTextY.length < n) {
+            touchTextY = new float[n];
+        }
+        for (int i = 0; i < n; i++) {
+            touchTextY[i] = touchPanelT + padY + i * rowH - fm.ascent;
+        }
+    }
+
+    /** 面板默认贴高亮虚线右侧 6dp，右越界翻到左侧，再横向钳进绘图区。 */
+    private void placeTouchPanel() {
+        if (touchRowCount == 0) {
+            return;
+        }
+        float gap = TOUCH_PANEL_GAP_DP * density;
+        float right = touchDashX + gap;
+        float l;
+        if (right + touchPanelW <= fPadL + fW) {
+            l = right;
+        } else {
+            l = touchDashX - gap - touchPanelW;
+        }
+        float maxL = fPadL + fW - touchPanelW;
+        if (l > maxL) {
+            l = maxL;
+        }
+        if (l < fPadL) {
+            l = fPadL;   // 面板比绘图区还宽时贴左界，宁可右溢也不越出左界
+        }
+        touchPanelL = l;
+        touchPanelR = l + touchPanelW;
+        touchTextX = l + TOUCH_PANEL_PAD_X_DP * density;
+    }
+
+    /** 结束按住查看：清状态并复位父容器的拦截开关。 */
+    private void clearTouch() {
+        touchActive = false;
+        touchSample = -1;
+        touchRowCount = 0;
+        ViewParent parent = getParent();
+        if (parent != null) {
+            parent.requestDisallowInterceptTouchEvent(false);
+        }
+    }
+
     // ==================== 绘制（无计算、无分配） ====================
 
     @Override
@@ -842,12 +1111,32 @@ public class ChartView extends View {
             }
         }
 
-        // pid 曲线的孤立样本点：半径取线宽，先画（比重算标记点大一点）
+        // pid 曲线的孤立样本点：点模式画法——先铺一圈底色，再画系列色实心圆
         if (pidDotCount > 0) {
-            dotPaint.setColor(pidDotColor);
-            float pr = PID_DOT_RADIUS_DP * density;
+            float mr = MARK_RADIUS_DP * density;
+            float halo = mr + MARK_HALO_DP * density;
             for (int i = 0; i < pidDotCount; i++) {
-                canvas.drawCircle(pidDotX[i], pidDotY[i], pr, dotPaint);
+                dotPaint.setColor(colorBg);
+                canvas.drawCircle(pidDotX[i], pidDotY[i], halo, dotPaint);
+                dotPaint.setColor(pidDotColor);
+                canvas.drawCircle(pidDotX[i], pidDotY[i], mr, dotPaint);
+            }
+        }
+
+        // 按住查看：高亮虚线压在曲线之上、末端标注之下；数值面板垫底色块
+        if (touchActive) {
+            highlightPaint.setColor(colorHighlight);
+            canvas.drawLine(touchDashX, fPadT, touchDashX, fPadT + fH, highlightPaint);
+            if (touchRowCount > 0) {
+                panelPaint.setColor(colorPanel);
+                float radius = TOUCH_PANEL_RADIUS_DP * density;
+                canvas.drawRoundRect(touchPanelL, touchPanelT, touchPanelR, touchPanelB,
+                        radius, radius, panelPaint);
+                labelPaint.setTextSize(TICK_TEXT_DP * density);
+                for (int i = 0; i < touchRowCount; i++) {
+                    labelPaint.setColor(touchColors[i]);
+                    canvas.drawText(touchTexts[i], touchTextX, touchTextY[i], labelPaint);
+                }
             }
         }
 
