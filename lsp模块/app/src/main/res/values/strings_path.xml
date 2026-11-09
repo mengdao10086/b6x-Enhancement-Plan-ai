@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 路径短按小卡、复制与跳转反馈的文案（实现见 ui/TextCopy）。 -->
+<resources>
+    <string name="path_action_copy">复制</string>
+    <string name="path_action_open">跳转</string>
+    <string name="path_action_copied">已复制路径</string>
+    <!-- root/系统专属目录没有可用的 DocumentsProvider，普通文件管理器打不开 -->
+    <string name="path_action_open_root">该路径位于 root 专属目录，普通文件管理器打不开；请用支持 root 的文件管理器（如 MT 管理器）打开</string>
+    <string name="path_action_open_unsupported">该路径不是可浏览的存储目录，无法跳转</string>
+    <string name="path_action_open_no_manager">未找到能打开该目录的文件管理器</string>
+    <string name="path_action_open_denied">文件管理器无法访问该路径（可能缺少存储权限）</string>
+</resources>
