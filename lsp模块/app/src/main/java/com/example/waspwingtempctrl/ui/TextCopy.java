@@ -66,7 +66,10 @@ import java.util.regex.Pattern;
  */
 final class TextCopy {
 
-    /** 调试日志标签：跳转失败/候选情况只写 logcat，不把异常原文塞进 Toast。 */
+    /**
+     * 调试日志标签：跳转失败/候选情况只写 logcat，不把异常原文塞进 Toast。
+     * 用 W 级而非 D：真机 MIUI 会过滤掉 D 级日志，{@code logcat -s TextCopy:D} 抓不到。
+     */
     private static final String TAG = "TextCopy";
 
     private TextCopy() {
@@ -736,6 +739,7 @@ final class TextCopy {
 
         /** 跳转到路径所在目录（路径本身是文件时取父目录）；始终先弹系统选择器。 */
         static void open(@NonNull Context context, @NonNull String path) {
+            Log.w(TAG, "open path=" + path);
             Uri target = null;
             boolean degraded = false;
             String shared = toSharedPath(path);
@@ -751,7 +755,7 @@ final class TextCopy {
                 degraded = true;
             }
             if (target == null) {
-                Log.d(TAG, "open: no document uri for " + path);
+                Log.w(TAG, "open: no document uri for " + path);
                 toast(context, R.string.path_action_open_no_app);
                 return;
             }
@@ -761,10 +765,11 @@ final class TextCopy {
             Intent bare = new Intent(Intent.ACTION_VIEW, target);
             boolean typedOk = hasCandidates(context, typed);
             boolean bareOk = !typedOk && hasCandidates(context, bare);
-            Log.d(TAG, "open target=" + target + " degraded=" + degraded
+            Log.w(TAG, "open target=" + target + " degraded=" + degraded
                     + " typed=" + typedOk + " bare=" + bareOk);
             Intent primary = typedOk ? typed : (bareOk ? bare : null);
             if (primary == null) {
+                Log.w(TAG, "open: no candidate for " + target);
                 toast(context, R.string.path_action_open_no_app);
                 return;
             }
@@ -899,10 +904,10 @@ final class TextCopy {
                 context.startActivity(chooser);
                 return OpenResult.OPENED;
             } catch (ActivityNotFoundException e) {
-                Log.d(TAG, "chooser missing: " + e.getClass().getName() + ": " + e.getMessage(), e);
+                Log.w(TAG, "chooser missing: " + e.getClass().getName() + ": " + e.getMessage(), e);
                 return OpenResult.NO_APP;
             } catch (SecurityException e) {
-                Log.d(TAG, "chooser denied: " + e.getClass().getName() + ": " + e.getMessage(), e);
+                Log.w(TAG, "chooser denied: " + e.getClass().getName() + ": " + e.getMessage(), e);
                 return OpenResult.DENIED;
             }
         }
