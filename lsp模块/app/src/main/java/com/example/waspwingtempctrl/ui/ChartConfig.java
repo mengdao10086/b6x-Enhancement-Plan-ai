@@ -18,7 +18,7 @@ import java.util.List;
  * <p>两类来源（口径见 app/逻辑说明.md §7.1）：
  * <ol>
  *   <li>{@code UI_GAP_SEC} / {@code UI_RPM_AXIS_MIN} / {@code UI_CURVE_FILTER} /
- *       {@code UI_CURVE_FILTER_ON} / {@code UI_PID_MARK}，
+ *       {@code UI_PID_MARK}，
  *       以及右轴上限口径所需的 {@code COLD_RPM_MAP} /
  *       {@code PID_COLD_RANGE} / {@code PERF_ENABLED} —— 一律经 {@link ConfigStore} 读。
  *       字段缺项（如只写 {@code UI_CURVE_FILTER=15}）回落该字段在
@@ -45,11 +45,9 @@ final class ChartConfig {
     int gapMaxSec = 15;
     /** 左轴转速下限（RPM）——{@code UI_RPM_AXIS_MIN}；0 = 关闭。 */
     int rpmAxisMin = 3000;
-    /** 曲线滤波总开关（{@code UI_CURVE_FILTER_ON}）：关 = 不滤波，直接显示原始采样值；默认开。 */
-    boolean filterOn = true;
-    /** 双向 EMA 每遍权重 α = 第 1 值/100。 */
+    /** 双向 EMA 每遍权重 α = {@code UI_CURVE_FILTER} 第 2 值/100；总开关关时为 0。 */
     float alpha = 0.15f;
-    /** 最小步长 = 第 2 值/100。 */
+    /** 最小步长 = {@code UI_CURVE_FILTER} 第 3 值/100；总开关关时为 0。 */
     float quantStep = 0.05f;
     /** 右轴上限浮动区间下沿 = {@code COLD_RPM_MAP} 第 1 值（映射起始强度）。 */
     int coldMapStart = 40;
@@ -118,13 +116,26 @@ final class ChartConfig {
         rpmAxisMin = Math.max(0, field(store, snap, "UI_RPM_AXIS_MIN", 0, 3000));
         // 重算标记：缺键按 schema 默认（开）
         markDash = field(store, snap, "UI_PID_MARK", 0, 1) != 0;
-        // 滤波总开关：缺键按 schema 默认（开）
-        filterOn = field(store, snap, "UI_CURVE_FILTER_ON", 0, 1) != 0;
-        // 滤波：两个子值 0 都合法（= 关闭该级），负值回落默认（口径见 app/逻辑说明.md §7.2〈滤波关闭语义〉）
-        int a = field(store, snap, "UI_CURVE_FILTER", 0, 15);
-        int s = field(store, snap, "UI_CURVE_FILTER", 1, 5);
-        alpha = a >= 0 ? a / 100f : 0.15f;
-        quantStep = s >= 0 ? s / 100f : 0.05f;
+        // 滤波（三值）：第一值 = 总开关，后两值 = 每遍权重 / 最小步长（口径见 app/逻辑说明.md §7.2）。
+        // 兼容旧两值配置（权重 步长）：只有两段时视为开关开启，前两值即系数；不回写配置文件。
+        ConfigStore.Value fv = snap == null ? null : snap.get("UI_CURVE_FILTER");
+        boolean filterOn = true;
+        int a;
+        int s;
+        if (fv != null && fv.size() >= 3) {
+            filterOn = fv.intAt(0) != 0;
+            a = fv.intAt(1);
+            s = fv.intAt(2);
+        } else if (fv != null && fv.size() > 0) {
+            a = fv.intAt(0);
+            s = fv.size() > 1 ? fv.intAt(1) : 5;
+        } else {
+            a = 15;
+            s = 5;
+        }
+        // 两个子值 0 都合法（= 关闭该级），负值回落默认；总开关关时两者都按 0 走「不滤波」路径
+        alpha = !filterOn ? 0f : (a >= 0 ? a / 100f : 0.15f);
+        quantStep = !filterOn ? 0f : (s >= 0 ? s / 100f : 0.05f);
         // 右轴口径：总开关未开启时两端都回落代码默认（口径见 app/逻辑说明.md §7.3〈双纵轴〉）
         boolean perfOn = isOn(snap, "PERF_ENABLED");
         coldMapStart = perfOn ? clamp(single(store, snap, "COLD_RPM_MAP", 0, 40), 0, 194) : 40;
