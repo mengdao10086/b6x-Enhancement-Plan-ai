@@ -225,13 +225,21 @@ public class MainHook implements IXposedHookLoadPackage {
     private static final int STUCK_STATE_CLEAR_AFTER_TICKS = 30;     // state∈{1,2} 连续达此秒数才清（>SDK 5s 建连超时，不误拆）
     private static final long STUCK_STATE_CLEAR_COOLDOWN_MS = 60 * 1000;  // 清状态动作限频
 
-    // ========== R1·任务2：不受限频的 state 观测（10min 一条，仅 tick 线程读写）==========
+    // ========== R1·任务2：state 观测（仅稳定变化/翻转汇总时输出，仅 tick 线程读写）==========
     // 动机：`本段重连 N 次` 每 30 分钟才一条，上线后分不清「修好了」与「本来就会好」、
-    // 也分不清 state「卡 2」与「争用」。此观测不受聚合日志限频，但按 10min 节流（每秒读 state、10min 才输出）。
-    private static int lastObservedState = Integer.MIN_VALUE;  // 上次观测到的 state（哨兵=未观测过）
-    private static long observedStateSince = 0;                // 进入当前 state 的时刻（ms，算持续时长）
-    private static long lastStateObsLogAt = 0;                 // 上次输出时刻（10min 节流）
-    private static final long STATE_OBS_LOG_INTERVAL_MS = 10 * 60 * 1000;  // 观测输出间隔（不刷屏：≤1 条/10 分）
+    // 也分不清 state「卡 2」与「争用」。原实现每秒读、每 10min 打一条心跳（4 天 481 条/129.6 KB）；
+    // 实测断连期 state 随重连尝试每几秒在 0/1 间翻转，逐次打点会涨到几万条，故改为：
+    // ①首次观测打基线；②状态变化并稳定 STATE_OBS_SETTLE_MS 才输出「旧→新」（真实时间线）；
+    // ③未稳定就被换掉的翻转合并计数，每 STATE_OBS_FLAP_SUMMARY_MS 最多一条（保留争用/卡死判据）。
+    // 预期 4 天 481 条/129.6 KB → 约 80 条/16 KB（条数 -83%、体积 -88%）。
+    private static int lastObservedState = Integer.MIN_VALUE;  // 最近一次采样到的 state（含瞬态；哨兵=未观测过）
+    private static int lastFlipFromState = Integer.MIN_VALUE;  // 最近一次翻转前一刻的 state（供汇总日志）
+    private static long observedStateSince = 0;                // 最近一次 state 变化的时刻（ms，算当前态已持续）
+    private static int lastLoggedState = Integer.MIN_VALUE;    // 上次输出的稳定 state（哨兵=未输出过）
+    private static int mergedStateChangeCount = 0;             // 上次输出后被合并（未单独输出）的翻转次数
+    private static long lastStateObsLogAt = 0;                 // 上次输出时刻（翻转汇总限频 + 算「上条至今」）
+    private static final long STATE_OBS_SETTLE_MS = 60 * 1000;             // 变化后持续多久才算「稳定态」
+    private static final long STATE_OBS_FLAP_SUMMARY_MS = 60 * 60 * 1000;  // 高频翻转汇总最小间隔（≤1 条/小时）
 
     // ========== M2：SDK 扫描自锁（inScanning）解除 + 扫描侧观测 ==========
     // 动机：SDK 的「正在扫描」标志在 startLeScan() 内先置 true、唯一清除点是 stopScan()（只在连接成功后触发）；
@@ -719,7 +727,7 @@ public class MainHook implements IXposedHookLoadPackage {
             return;
         }
         int st = readConnectState(dic);
-        observeConnectState(st, readInScanning(dic));   // 任务2：不受限频的观测（10min 一条；含扫描侧 inScanning）
+        observeConnectState(st, readInScanning(dic));   // 任务2：稳定变化/翻转汇总观测（含扫描侧 inScanning）
         if (st != 1 && st != 2) {   // 0=空闲、-1=读失败、其它：一律清零
             stuckStateTicks = 0;
             return;
@@ -734,24 +742,56 @@ public class MainHook implements IXposedHookLoadPackage {
     }
 
     /**
-     * 任务2：不受重连聚合日志限频的观测。每次调用（断连期每秒）读一次，但**每
-     * {@link #STATE_OBS_LOG_INTERVAL_MS}(10min) 才输出一条**，输出当前 state 与该值「已持续」秒数，
-     * 并附带扫描侧信号（{@code inScanning} 标志 + 被拒累计次数，M2 观测扩展）：
-     * 持续秒数很小 ⇒ 门禁在快速翻转（争用）；持续秒数逐条增大且 state=2 ⇒ 卡死；inScanning=true 而
-     * 长时间无进展 ⇒ 扫描侧卡死（M2）。据此可分辨「卡 2 vs 争用」并验收两项修复是否生效。
-     * 仅 tick 线程调用（无并发）。
+     * 任务2：不受重连聚合日志限频的 state 观测。每秒调用一次，但只在「值得记」时输出：
+     * ① 首次观测输出基线（否则整段没有起点）；
+     * ② state 变化后稳定 {@link #STATE_OBS_SETTLE_MS} 才输出「旧→新 + 上条至今秒数」——
+     *    4 天实测日志里断连期 state 随重连尝试每几秒翻转，逐次输出会把 481 条心跳放大到几万条；
+     * ③ 未稳定即被换掉的翻转只计数，每 {@link #STATE_OBS_FLAP_SUMMARY_MS} 最多输出一条汇总，
+     *    保留「持续秒数很小 ⇒ 门禁快速翻转（争用）；持续秒数大且 state=2 ⇒ 卡死」的判据。
+     * 每行仍附带扫描侧信号（{@code inScanning} 标志 + 被拒累计次数，M2 观测扩展），
+     * 据此可区分「卡 2 vs 争用」并验收两项修复是否生效。仅 tick 线程调用（无并发）。
      */
     private static void observeConnectState(int st, boolean scanning) {
         long now = System.currentTimeMillis();
-        if (st != lastObservedState) {
+        if (st != lastObservedState) {   // 记录候选态与进入时刻；被换掉前未输出的变化计入合并数
+            lastFlipFromState = lastObservedState;
             lastObservedState = st;
             observedStateSince = now;
+            if (lastLoggedState != Integer.MIN_VALUE) mergedStateChangeCount++;
         }
-        if (now - lastStateObsLogAt < STATE_OBS_LOG_INTERVAL_MS) return;
-        lastStateObsLogAt = now;
-        XposedBridge.log(TAG + " 状态观测: state=" + stateDesc(st)
-                + " 已持续 " + ((now - observedStateSince) / 1000) + "s"
-                + " inScanning=" + scanning + " 自锁命中累计=" + scanRejectCount.get());
+        if (lastLoggedState == Integer.MIN_VALUE) {   // ① 基线：模块启动后首次观测
+            lastLoggedState = st;
+            lastStateObsLogAt = now;
+            mergedStateChangeCount = 0;
+            XposedBridge.log(TAG + " 状态观测: state=" + stateDesc(st) + "（基线）"
+                    + stateObsSuffix(scanning));
+            return;
+        }
+        if (st != lastLoggedState && now - observedStateSince >= STATE_OBS_SETTLE_MS) {   // ② 稳定迁移
+            int from = lastLoggedState;
+            long sinceLastLog = now - lastStateObsLogAt;
+            lastLoggedState = st;
+            lastStateObsLogAt = now;
+            mergedStateChangeCount = 0;
+            XposedBridge.log(TAG + " 状态观测: state=" + stateDesc(from) + "→" + stateDesc(st)
+                    + "（上条至今 " + (sinceLastLog / 1000) + "s）"
+                    + stateObsSuffix(scanning));
+            return;
+        }
+        if (mergedStateChangeCount > 0
+                && now - lastStateObsLogAt >= STATE_OBS_FLAP_SUMMARY_MS) {   // ③ 高频翻转汇总
+            XposedBridge.log(TAG + " 状态观测: 高频翻转 " + mergedStateChangeCount + " 次（无稳定态）"
+                    + " 最近 " + stateDesc(lastFlipFromState) + "→" + stateDesc(st)
+                    + " 已持续 " + ((now - observedStateSince) / 1000) + "s"
+                    + stateObsSuffix(scanning));
+            mergedStateChangeCount = 0;
+            lastStateObsLogAt = now;
+        }
+    }
+
+    /** 观测行公共后缀：扫描标志 + 自锁命中累计（M2 判据，三类观测行共用）。 */
+    private static String stateObsSuffix(boolean scanning) {
+        return " inScanning=" + scanning + " 自锁命中累计=" + scanRejectCount.get();
     }
 
     /**
@@ -986,6 +1026,48 @@ public class MainHook implements IXposedHookLoadPackage {
                 });
     }
 
+    // ========== 修复 #2 日志合并：累计计数 + 静默期输出 ==========
+    // 动机：每次 onDeviceConnected 都打一条，4 天 69 条/14.1 KB；同一次连接会连续触发多次。
+    // 取 60s 静默期：与文件内既有去抖冷却（STUCK_STATE_CLEAR_COOLDOWN_MS 等）一致，足够把
+    // 一次连接内的连续回调并成一条，又不会让排障信息延迟太久；累计满 10 次提前输出，
+    // 防「持续触发、永远等不到静默期」时计数无限积压。按实测 69 次/4 天 ≈ 13 批 → 约 13 条。
+    private static final int VM_FIX_LOG_MAX_BATCH = 10;
+    private static final long VM_FIX_LOG_QUIET_MS = 60 * 1000;
+    private static final Object vmFixLogLock = new Object();
+    private static final Runnable VM_FIX_FLUSH = MainHook::flushViewModelFixLog;
+    private static int vmFixPendingCount = 0;   // 待输出次数（钩子线程写 / 主线程输出）
+    private static long vmFixLastAt = 0;        // 最近一次修复时刻（算「最近一次」距现在多久）
+
+    /** 记一次 ViewModel 修复：静默 {@link #VM_FIX_LOG_QUIET_MS} 或累计满阈值时合并输出。可在任意线程调用。 */
+    private static void logViewModelFixEvent() {
+        boolean reachedMax;
+        synchronized (vmFixLogLock) {
+            vmFixPendingCount++;
+            vmFixLastAt = System.currentTimeMillis();
+            reachedMax = vmFixPendingCount >= VM_FIX_LOG_MAX_BATCH;
+        }
+        mainHandler().removeCallbacks(VM_FIX_FLUSH);   // 重新计时：只在「最后一次」之后静默满 60s 才输出
+        if (reachedMax) {
+            flushViewModelFixLog();
+        } else {
+            mainHandler().postDelayed(VM_FIX_FLUSH, VM_FIX_LOG_QUIET_MS);
+        }
+    }
+
+    /** 输出并清零待合并计数；无待输出则空转（重复回调/并发调用均安全）。 */
+    private static void flushViewModelFixLog() {
+        int count;
+        long lastAt;
+        synchronized (vmFixLogLock) {
+            count = vmFixPendingCount;
+            lastAt = vmFixLastAt;
+            vmFixPendingCount = 0;
+        }
+        if (count == 0) return;
+        long agoSec = (System.currentTimeMillis() - lastAt) / 1000;
+        XposedBridge.log(TAG + " ViewModel 修复完成 ×" + count + "（最近一次 " + agoSec + "s 前）");
+    }
+
     /** 修复 #2（仅 B6X）：ViewModel 层连接后更新 LiveData */
     private static void hookB6ViewModelFix(XC_LoadPackage.LoadPackageParam lpparam) {
         hookClassMethod(lpparam.classLoader, "com.example.extool.BluetoothViewModel",
@@ -1019,7 +1101,7 @@ public class MainHook implements IXposedHookLoadPackage {
                                 // 该字段在 WaspWingViewModel 上；回传由 onDeviceInfoUpdate 接管
                             }
 
-                            XposedBridge.log(TAG + " ViewModel 修复完成");
+                            logViewModelFixEvent();
                         } catch (Throwable t) {
                             XposedBridge.log(TAG + " ViewModel 修复异常: " + t.getMessage());
                         }
