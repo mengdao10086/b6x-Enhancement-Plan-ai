@@ -317,7 +317,8 @@ static float ki_cut_mult_dn = (float)KI_CUT_NONE;   // KI 降速率倍率（×10
 static int cooler_hot_temp = -1;          // 热端温度（0.1°C）
 static int cooler_cold_temp = -1;         // 冷端温度（0.1°C）
 static int cooler_rpm_real = -1;          // 实际风扇转速
-static int cooler_cold_real = -1;         // 实际制冷强度
+static int cooler_cold_real = -1;         // 目标制冷（设备回显的设定档；控制路径用它对齐/限速）
+static int cooler_cold_run = -1;          // 实际制冷（运行档，0x13 byte[0x0f]；仅入数据行，不参与控制）
 
 // --- 回传可信就绪 + 启动/重连对齐（不拿 -1/占位 1 兜底，等真实回传再定基线；理由见 逻辑说明.md「启动流程」）---
 #define REPORT_OK_N 2                      // 连续 N 帧读到真实回传才判可信（1 帧=1s）
@@ -355,6 +356,7 @@ static char status_file_path_b7[512] = "/data/local/tmp/tempctrl_b7x.status";
 #define STF_RUN_MODE       "RUN_MODE="
 #define STF_RPM_REAL       "RPM_REAL="
 #define STF_COLD_REAL      "COLD_REAL="
+#define STF_COLD_RUN       "COLD_RUN="
 
 /** 行首若为该字段名，返回值的起点指针；否则返回 NULL。长度直接取自字段名本身。 */
 static const char *status_field_value(const char *line, const char *field) {
@@ -367,10 +369,14 @@ static const char *status_field_value(const char *line, const char *field) {
 #define WEBUI_DATA_MAX_LINES  720   // = 曲线最大时间挡位（秒）
 
 // 曲线行格式：列数唯一声明（CI 断言可 grep 本行数 % 个数，须等于 WEBUI_DATA_COLS）
-// 列序：epoch, 电池, CPU, 热端, 冷端, 实际转速, 实际制冷, 目标制冷（0.1°C，未就绪为 -1）,
-//       PID 输入（0.01°C，仅重算行有值、其余行为 -1）, 本行是否触发 PID 重算（0/1）
-#define WEBUI_DATA_COLS       10
-#define WEBUI_ROW_FMT         "%ld,%d,%d,%d,%d,%d,%d,%d,%d,%d\n"
+// 列序：epoch, 电池, CPU, 热端, 冷端, 实际转速,
+//       目标制冷（设备回显的设定档，未就绪为 -1）, 下发目标制冷（0.1°C，未就绪为 -1）,
+//       PID 输入（0.01°C，仅重算行有值、其余行为 -1）, 本行是否触发 PID 重算（0/1）,
+//       实际制冷（运行档，未就绪为 -1）
+// 两列制冷语义不同：第 7 列是 getRealColdLevel() 回显的设定档，第 11 列才是 getColdRunLevel()
+// 的实际运行档（见 制冷值语义取证.md）；控制路径仍只用第 7 列。
+#define WEBUI_DATA_COLS       11
+#define WEBUI_ROW_FMT         "%ld,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d\n"
 
 // 生效制冷上限提示文件（写给 app 定 KI 分段倍率曲线横轴）；行格式与降级见 app/逻辑说明.md §6.6
 #define COLDMAX_HINT_PATH     PRIVATE_DIR "/tempctrl_coldmax"
@@ -2009,7 +2015,7 @@ static void read_cooler_params(void) {
     active_status_mtime = 0;   // 本拍先置未知；下面成功打开后刷新
 
     cooler_hot_temp = -1; cooler_cold_temp = -1;
-    cooler_rpm_real = -1; cooler_cold_real = -1;
+    cooler_rpm_real = -1; cooler_cold_real = -1; cooler_cold_run = -1;
 
     FILE *f = fopen(path, "r");
     if (!f) return;
@@ -2033,6 +2039,12 @@ static void read_cooler_params(void) {
             cooler_rpm_real = atoi(v);
         } else if ((v = status_field_value(line, STF_COLD_REAL)) != NULL) {
             cooler_cold_real = atoi(v);
+        } else if ((v = status_field_value(line, STF_COLD_RUN)) != NULL) {
+            // 缺失保持 -1；非法（非整数/负数/尾随垃圾）同样写 -1
+            char *end = NULL;
+            long run = strtol(v, &end, 10);
+            while (*end == ' ' || *end == '\r' || *end == '\n') end++;
+            cooler_cold_run = (end != v && *end == '\0' && run >= 0) ? (int)run : -1;
         }
     }
     fclose(f);
@@ -4505,7 +4517,7 @@ static void sample_webui_inputs(void) {
     webui_epoch_now = (long)time(NULL);
     webui_batt_now = read_battery_temp();
     webui_cpu_now  = read_cpu_temp_max();
-    read_cooler_params();   // 更新 cooler_* 全局（热/冷端、实际转速、实际制冷）+ app_ble_connected
+    read_cooler_params();   // 更新 cooler_* 全局（热/冷端、实际转速、设定档/运行档制冷）+ app_ble_connected
     // 更新 1s 采集缓存（保留上次成功值抗抖）
     if (webui_batt_now >= 0) cached_batt_raw = webui_batt_now;
     if (batt_temp_updated) batt_changed_since_ctrl = 1;  // 1s 层累积：自上次控制以来值变过
@@ -4532,7 +4544,8 @@ static void append_webui_row(void) {
                     webui_epoch_now, webui_batt_now, webui_cpu_now,
                     cooler_hot_temp, cooler_cold_temp,
                     cooler_rpm_real, cooler_cold_real, actual_cold,
-                    recomp ? pid_input_cdeg : -1, recomp) >= 0) {
+                    recomp ? pid_input_cdeg : -1, recomp,
+                    cooler_cold_run) >= 0) {
             fflush(webui_fp);   // 立即落盘：界面按秒读取
         } else {
             fclose(webui_fp);

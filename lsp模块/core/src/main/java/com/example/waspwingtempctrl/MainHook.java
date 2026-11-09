@@ -431,6 +431,8 @@ public class MainHook implements IXposedHookLoadPackage {
                     appendGetterValue(sb, lastWaspWingInfo, "getRealWindLevel", "RPM_REAL");
 
                     appendGetterValue(sb, lastWaspWingInfo, "getRealColdLevel", "COLD_REAL");
+                    // 实际运行档（0x13 byte[0x0f]）：与 COLD_REAL 的回显设定档不同，见 制冷值语义取证.md
+                    appendGetterValue(sb, lastWaspWingInfo, "getColdRunLevel", "COLD_RUN");
 
                     appendTenthValue(sb, lastWaspWingInfo, "getTargetTemperature", "TARGET_TEMP");
                     // 回传恢复：此前缺失则补一条（状态翻转才打）
