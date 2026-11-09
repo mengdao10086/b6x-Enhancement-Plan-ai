@@ -4,6 +4,12 @@
     结果弹对话框（正文可长按选中复制）。
     由 UiSettingsFragment#onGroupRowsBuilt 在键行建满后追加到 config_group_body；根标签声明
     app:wrapFullLine，让卡内的流式容器按整行铺开。样式与键行同一套字号/颜色，右侧副文案表明这是动作。
+
+    高度必须与相邻开关行同档：开关行盒高 = @dimen/field_height(36dp)（开关控件定高 36dp，
+    MaterialSwitch 的 48dp 触控高被 item_config_key_switch 明确压掉）。本行原先用
+    @dimen/row_min_height(48dp) + 上下 padding 4dp，文字在 48dp 盒内居中，比开关行上下各多 6dp，
+    卡片底部也随之多 6dp；改成 minHeight=@dimen/field_height 且不加上下 padding 后，文字与开关行
+    同心，行距仍由容器统一计算（前一开关行的 rowGapCap 1dp 对本行同样生效）。
 -->
 <LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:app="http://schemas.android.com/apk/res-auto"
@@ -13,10 +19,8 @@
     android:clickable="true"
     android:focusable="true"
     android:gravity="center_vertical"
-    android:minHeight="@dimen/row_min_height"
+    android:minHeight="@dimen/field_height"
     android:orientation="horizontal"
-    android:paddingTop="@dimen/space_xs"
-    android:paddingBottom="@dimen/space_xs"
     app:wrapFullLine="true">
 
     <TextView
