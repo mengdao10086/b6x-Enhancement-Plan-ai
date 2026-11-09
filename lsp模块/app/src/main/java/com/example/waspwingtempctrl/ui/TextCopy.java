@@ -250,6 +250,10 @@ final class TextCopy {
         /**
          * 按下起点：从这一刻起算「系统长按时长 + {@link #HOLD_TO_EXPAND_MS}」。
          * 不从 ActionMode 创建回调起算——部分系统把它推迟到抬手之后，那样就永远等不到"按住期间"。
+         *
+         * <p>开关关闭时不排计时：这条扩选链（计时 → {@link #expandIfStillHolding()} → 强设选区）
+         * 原先没有开关判断，关掉后长按仍会扩成整条，与「关 = 与安装前一致」不符。入口处就拦掉，
+         * 既不影响其它路径，也省掉一次注定空跑（且会读配置）的 {@code postDelayed}。
          */
         void onPressStart(float x, float y) {
             pressX = x;
@@ -257,6 +261,9 @@ final class TextCopy {
             holdElapsed = false;
             holding = true;
             view.removeCallbacks(expandAfterHold);
+            if (!isPathCopyEnabled(view.getContext())) {
+                return;   // 关：不扩选、不弹卡、不着色，手势原样交给系统
+            }
             long delay = ViewConfiguration.getLongPressTimeout() + holdToExpandMs(view.getContext());
             view.postDelayed(expandAfterHold, delay);
         }
@@ -472,7 +479,18 @@ final class TextCopy {
             }
         }
 
+        /**
+         * 计时到点：仍按着就把选区扩成整条。
+         *
+         * <p>入口已按开关决定是否排计时，这里再查一次，是因为配置在按住期间可被改（webui 开关实时生效）：
+         * 按下时还开着、到点前被关掉，仍然不能扩。守卫放在 {@code holdElapsed = true} 之前，
+         * 与「按下时已关、压根没排计时」保持同一状态（{@code holdElapsed} 仍为 false），
+         * 一致地表示"这次按压从未满足扩选条件"。
+         */
         private void expandIfStillHolding() {
+            if (!isPathCopyEnabled(view.getContext())) {
+                return;   // 按住期间开关被关：到点也不扩，退回系统那一段选区
+            }
             holdElapsed = true;
             if (!holding || expanded) {
                 return;   // 已抬手/已拖动：保留系统选中的那一段
