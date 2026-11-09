@@ -52,17 +52,18 @@ final class ChartSeries {
         return new ChartSeries[]{
                 new ChartSeries("batt", R.string.chart_series_batt, R.color.chart_series_batt,
                         AXIS_LEFT, FMT_TEMP, true),
-                new ChartSeries("cool", R.string.chart_series_cool, R.color.chart_series_cool,
-                        AXIS_RIGHT, FMT_INT, true),
+                // 实际制冷：不透明绿色实线，图例第一行第二个
+                new ChartSeries("coolActual", R.string.chart_series_cool_actual,
+                        R.color.chart_series_cool_actual, AXIS_RIGHT, FMT_INT, true),
                 new ChartSeries("rpm", R.string.chart_series_rpm, R.color.chart_series_rpm,
                         AXIS_LEFT, FMT_RPM, true),
                 new ChartSeries("hot", R.string.chart_series_hot, R.color.chart_series_hot,
                         AXIS_LEFT, FMT_TEMP, true),
                 new ChartSeries("pid", R.string.chart_series_pid, R.color.chart_series_pid,
                         AXIS_LEFT, FMT_TEMP, true),
-                // 实际制冷：与目标制冷同色半透明，图例第二行第二个
-                new ChartSeries("coolActual", R.string.chart_series_cool_actual,
-                        R.color.chart_series_cool_actual, AXIS_RIGHT, FMT_INT, true),
+                // 目标制冷：同 RGB、60% 透明（与 pid ℃ 同款），图例第二行第二个
+                new ChartSeries("cool", R.string.chart_series_cool, R.color.chart_series_cool,
+                        AXIS_RIGHT, FMT_INT, true),
                 new ChartSeries("cold", R.string.chart_series_cold, R.color.chart_series_cold,
                         AXIS_LEFT, FMT_TEMP, false),
                 new ChartSeries("cpu", R.string.chart_series_cpu, R.color.chart_series_cpu,
@@ -77,9 +78,8 @@ final class ChartSeries {
     /**
      * 图例是否在该条之前另起一行（经 {@link WrapRowLayout#setBreakBefore} 施加）。
      *
-     * <p>{@code true} 的是「pid ℃ / 实际制冷 / 冷端℃ / CPU℃」这一行：pid ℃ 作为第二行行首，
-     * 实际制冷紧随其后排第二；第一行是 电池℃ / 目标制冷 / 风扇rpm / 热端℃。
-     * 两行各 4 条，图例顺序即 {@link #createAll} 的数组顺序。
+     * <p>{@code true} 的是「pid ℃ / 目标制冷 / 冷端℃ / CPU℃」这一行：pid ℃ 作为第二行行首；
+     * 第一行是 电池℃ / 实际制冷 / 风扇rpm / 热端℃。两行各 4 条，图例顺序即 {@link #createAll} 的数组顺序。
      */
     static boolean startsLegendRow(ChartSeries s) {
         return "pid".equals(s.id);

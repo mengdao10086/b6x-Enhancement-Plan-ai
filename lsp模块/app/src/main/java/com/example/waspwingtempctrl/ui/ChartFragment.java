@@ -5,6 +5,7 @@ import android.content.res.ColorStateList;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
+import android.text.TextUtils;
 import android.view.LayoutInflater;
 import android.view.MotionEvent;
 import android.view.View;
@@ -32,7 +33,7 @@ import java.util.Locale;
 /**
  * 曲线区：档位选择 + 图例 + 自绘画布 + 失败可诊断。
  *
- * <p><b>布局</b>：档位行、图例（按自然宽排布、放不下换行）与画布同处一张卡内，全部按自然尺寸排布
+ * <p><b>布局</b>：档位行、图例（4+4 两行、同列等宽对齐）与画布同处一张卡内，全部按自然尺寸排布
  * ——不整体缩放、也不改写容器高度。画布高度初值由 {@code fragment_chart.xml} 给出，运行时可用画布
  * 下沿的拖柄在 {@code chart_canvas_min_height}～{@code chart_canvas_max_height} 之间改（改的是运行时
  * {@code LayoutParams}，不落盘）。见 app/逻辑说明.md §7.6。
@@ -402,15 +403,17 @@ public class ChartFragment extends Fragment {
     // ==================== 控件构建 ====================
 
     /**
-     * 图例：6 条曲线，默认开关照 {@code app/逻辑说明.md} §7.6〈系列开关〉；勾选框着色 = 该曲线的
+     * 图例：8 条曲线，默认开关照 {@code app/逻辑说明.md} §7.6〈系列开关〉；勾选框着色 = 该曲线的
      * chart_series_* 色（着色统一交给 {@link #applyLegendTints()}）。容器是可换行的 WrapRowLayout：
-     * 按自然宽依次排布，放不下自动换行，窄屏也不会被裁；行首由 {@link ChartSeries#startsLegendRow} 决定
-     * ——「冷端℃」「CPU℃」两条可选温度传感器固定另起第二行。
+     * 行首由 {@link ChartSeries#startsLegendRow} 决定（pid ℃ 另起第二行，两行各 4 条）；首次布局后
+     * 按列取较宽者统一宽度，使两行四列的勾选框与文字起点竖直对齐（见 {@link #alignLegendColumns}）。
      */
     private void buildLegend() {
         LayoutInflater inflater = LayoutInflater.from(requireContext());
         legendRow.removeAllViews();
-        for (int i = 0; i < chartView.seriesCount(); i++) {
+        int count = chartView.seriesCount();
+        CheckBox[] boxes = new CheckBox[count];
+        for (int i = 0; i < count; i++) {
             final int index = i;
             ChartSeries s = chartView.seriesAt(i);
             CheckBox box = (CheckBox) inflater.inflate(R.layout.item_chart_legend, legendRow, false);
@@ -419,12 +422,73 @@ public class ChartFragment extends Fragment {
             box.setOnCheckedChangeListener((button, checked) -> chartView.setSeriesEnabled(index, checked));
             legendRow.setBreakBefore(box, ChartSeries.startsLegendRow(s));
             legendRow.addView(box);
+            boxes[i] = box;
         }
+        // 列宽要等容器量出可用宽再定；Activity 自行处理 configChanges，宽度变化时按新宽度重算
+        legendRow.post(() -> alignLegendColumns(boxes));
+        legendRow.addOnLayoutChangeListener((v, l, t, r, b, ol, ot, or, ob) -> {
+            if (r - l != or - ol) {
+                legendRow.post(() -> alignLegendColumns(boxes));
+            }
+        });
         applyLegendTints();
     }
 
     /**
-     * 给已有 6 个勾选框重取一次 chart_series_* 色。
+     * 图例四列上下对齐：同一列（两行各一条）统一取较宽者的宽度，勾选框与文字起点因此竖直对齐。
+     * 可用宽装不下各列最大宽之和时退化为四列平分，文字单行、尾部省略号。
+     */
+    private void alignLegendColumns(CheckBox[] boxes) {
+        if (chartView == null) {
+            return;
+        }
+        int cols = -1;
+        for (int i = 1; i < boxes.length; i++) {
+            if (ChartSeries.startsLegendRow(chartView.seriesAt(i))) {
+                cols = i;
+                break;
+            }
+        }
+        if (cols <= 0 || boxes.length != cols * 2) {
+            return;   // 只按 4+4 两行排；行结构变了就保持自然宽
+        }
+        int unspecified = View.MeasureSpec.makeMeasureSpec(0, View.MeasureSpec.UNSPECIFIED);
+        int[] colW = new int[cols];
+        int marginEnd = 0;
+        for (int i = 0; i < boxes.length; i++) {
+            CheckBox box = boxes[i];
+            box.measure(unspecified, unspecified);
+            colW[i % cols] = Math.max(colW[i % cols], box.getMeasuredWidth());
+            ViewGroup.LayoutParams lp = box.getLayoutParams();
+            if (lp instanceof ViewGroup.MarginLayoutParams) {
+                marginEnd = Math.max(marginEnd, ((ViewGroup.MarginLayoutParams) lp).rightMargin);
+            }
+        }
+        int rowLimit = legendRow.getWidth() - legendRow.getPaddingLeft() - legendRow.getPaddingRight();
+        int reserved = cols * marginEnd + (cols - 1) * legendRow.colGap();
+        int need = reserved;
+        for (int w : colW) {
+            need += w;
+        }
+        boolean narrow = rowLimit > 0 && need > rowLimit;
+        if (narrow) {
+            int each = Math.max(0, (rowLimit - reserved) / cols);
+            for (int c = 0; c < cols; c++) {
+                colW[c] = each;
+            }
+        }
+        for (int i = 0; i < boxes.length; i++) {
+            CheckBox box = boxes[i];
+            box.setSingleLine(true);
+            box.setEllipsize(narrow ? TextUtils.TruncateAt.END : null);
+            ViewGroup.LayoutParams lp = box.getLayoutParams();
+            lp.width = colW[i % cols];
+            box.setLayoutParams(lp);
+        }
+    }
+
+    /**
+     * 给已有勾选框重取一次 chart_series_* 色。
      *
      * <p>色值按当前主题现取，故运行中切明暗要再走一遍——原先只在 {@link #buildLegend} 建视图时取一次，
      * 主题一变曲线会跟着变、图例却不跟（{@link #onResume} 只刷新了 {@link ChartView}）。
