@@ -118,6 +118,13 @@ final class ConfigResetBar {
      * <p>状态页后两行是 M3 TextButton（无框）；本栏沿用 {@code item_config_reset_button.xml} 的
      * OutlinedButton 骨架，把描边收成 0 即同款无框观感（两者其余样式同源，背景/涟漪/文字色一致）。
      * 水平 inset 只收背景圆角块、不影响排版宽，无框后已不可见，故不设。
+     *
+     * <p><b>必须抹掉 AppCompat 基样式的最小尺寸</b>：OutlinedButton 的父链
+     * （Base.Widget.AppCompat.Button）写死 {@code minWidth=88dp、minHeight=48dp}，
+     * 而 TextView#setMinHeight/setMinWidth 只约束文本自身，改不掉 View 的这两个下限。
+     * 不抹掉时按钮高 48dp（状态页 TextButton 是 46dp）；2 字标签（「界面」「控制」）被 88dp
+     * 下限撑宽、文字居中后左右各多出约 14dp，行内文字间隙会从 40dp 涨到 54dp 左右。
+     * 故高度用 View#setMinimumHeight 对齐 46dp，宽度两层下限都归零、让按钮按内容自然量宽。
      */
     private void alignWithStatusButtons(@NonNull MaterialButton button) {
         int hPad = card.getResources().getDimensionPixelSize(R.dimen.status_button_padding_horizontal);
@@ -126,6 +133,12 @@ final class ConfigResetBar {
         button.setStrokeWidth(0);
         button.setInsetTop(vInset);
         button.setInsetBottom(vInset);
+        // View 级下限：高度对齐状态页 46dp；宽度归零，使每个按钮 = 文字 + 左右内边距。
+        // 状态页 TextButton 也带 88dp 下限，但其行内标签的「文字 + 内边距」本来已 ≥88dp，
+        // 下限不产生额外宽；本栏有 2 字标签，必须去掉这一层才能与它的文字间隙一致。
+        button.setMinimumHeight(minHeight);
+        button.setMinimumWidth(0);
+        button.setMinWidth(0);   // TextView 自己的最小文本宽，与 View 下限是两条独立的线
         button.setMinHeight(minHeight);
         button.setPaddingRelative(hPad, button.getPaddingTop(), hPad, button.getPaddingBottom());
     }

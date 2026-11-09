@@ -10,10 +10,14 @@
     （推导口径见 dimens_status.xml 的 status_* 注释）：
       · 横向 @dimen/space_s：与状态页行1 相邻按钮的 layout_marginStart 是同一个值；
         本栏按钮的水平内边距也取自 status_button_padding_horizontal（ConfigResetBar 动态设置），
-        故相邻按钮的文字间隙与状态页行1 的 TextButton 之间逐值一致。
-      · 纵向 @dimen/config_reset_row_gap(-2dp)：换行容器给的是两行<b>布局盒</b>的间距，不是可见空白；
-        按钮背景被 InsetDrawable 上下各内缩 status_button_inset_vertical(3dp)，目标可见空白 4dp
-        （状态页行1→行2 的折算结果），故 4 − 3 − 3 = −2dp，细则见 dimens_config.xml。
+        故相邻按钮的文字间隙与状态页行1 的 TextButton 之间逐值一致。2 字标签会被 AppCompat
+        基样式的 88dp 下限撑宽，该下限已在 ConfigResetBar#alignWithStatusButtons 里清掉。
+      · 纵向 @dimen/config_reset_row_gap(-1dp)：换行容器给的是两行<b>布局盒</b>的间距。状态页行1 的
+        TextButton 与本栏同为 46dp 盒、上下 inset 3dp；状态页该行被 48dp 的「一键部署」撑高、
+        行2 容器再上移 3dp，两行文字中心相差 45dp。本栏两行都是 46dp，故 46 + (−1) = 45dp，
+        对应可见空白 3 + (−1) + 3 = 5dp，与状态页 TextButton→TextButton 的空白同值。
+        （status_button_row_gap 的 4dp 属于 48dp/inset 4dp 的「一键部署」，本栏没有这种按钮。）
+        细则见 dimens_config.xml。
     标题到按钮组只有这一段间距，由按钮组的 marginTop 独自承担，取 space_s(8dp)：
     原先中间夹着一行说明时，说明的 marginTop(space_xs 4dp) 与按钮组的 marginTop 各管一段，
     删掉说明后按钮组的 marginTop 即全部间距——若跟着改成 4dp 会偏紧，故保持既有 space_s 口径。

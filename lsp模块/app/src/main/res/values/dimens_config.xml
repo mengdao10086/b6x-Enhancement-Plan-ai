@@ -189,20 +189,28 @@
     <!--
         ===== 设置页「参数重置」栏 =====
         换行行距（view_config_reset_bar.xml 里 WrapRowLayout 的 app:wrapRowGap）。
-        WrapRowLayout 的 rowGap 是两行<b>布局盒</b>之间的距离，不是可见空白：按钮背景由
-        MaterialButtonHelper.wrapDrawableWithInset() 包成 InsetDrawable，上下各内缩
-        status_button_inset_vertical(3dp)（由 ConfigResetBar#alignWithStatusButtons 设置）。
-        目标可见空白 4dp，与状态页按钮行1→行2 一致——那一处：
-            status_button_row_gap(-3dp) + 行1 insetBottom(4dp) + 行2 insetTop(3dp) = 4dp。
-        本栏每行都是 3dp inset，故：
-            可见空白 = 3dp + 本值 + 3dp = 4dp  →  本值 = -2dp。
-        为什么取负：正值最小取 0dp 时可见空白仍有 6dp，压不到 4dp；只能让相邻两行布局盒
-        重叠 2dp。重叠区落在按钮上下内缩的空白里（无框、描边已收成 0，文字行盒小于可见块高
+        WrapRowLayout 的 rowGap 是两行<b>布局盒</b>之间的距离，不是可见空白。对齐按「同类按钮
+        对同类按钮」取：状态页的 4dp 那一档属于 48dp 盒、inset 4dp 的「一键部署」，本栏没有
+        这种按钮，不能照搬。
+
+        状态页（fragment_status.xml）行1→行2 的实际几何：
+          · 行1 容器被「一键部署」撑到 48dp；行1 的 TextButton 是 46dp 盒、inset 3dp，
+            在水平 LinearLayout 里默认顶对齐 → 盒顶 0、文字中心 23dp；
+          · 行2 容器 marginTop = status_button_row_gap(-3dp) → 盒顶 48 − 3 = 45dp，
+            文字中心 45 + 23 = 68dp；
+          · 两行文字中心相差 45dp；两个 TextButton 的可见块空白 =
+            行1 下沿 (46 − 3 = 43dp) → 行2 上沿 (45 + 3 = 48dp) = 5dp。
+        本栏按钮已由 ConfigResetBar 把 AppCompat 基样式的 48dp 下限压回 46dp，两行同高、inset 同 3dp：
+            文字中心相差 = 46dp + 本值 = 45dp  →  本值 = -1dp
+            可见空白 = 3dp + 本值 + 3dp = 5dp（与状态页 TextButton→TextButton 同值）
+        为什么取负：正值最小取 0dp 时文字中心相差 46dp（比状态页松 1dp）；只能让两行布局盒
+        重叠 1dp。重叠区落在按钮上下内缩的空白里（无框、描边已收成 0，文字行盒小于可见块高
         40dp），不压文字、不改按钮尺寸。
-        不能直接复用 status_button_row_gap：那一项按「行1 最高按钮 insetBottom 4dp +
-        行2 insetTop 3dp」算出 -3dp，两行 inset 不同；本栏两行都是 3dp，套用 -3dp 只会得到
-        3dp 可见空白，对不上 4dp。横向间隔不另设项，直接复用 @dimen/space_s（与状态页行1 的
-        layout_marginStart 同值），见 view_config_reset_bar.xml 顶部注释。
+        不能直接复用 status_button_row_gap(-3dp)：那是「48dp 行1 + 46dp 行2」不同盒高的换算；
+        本栏两行同高，套用 -3dp 会得到 43dp，比状态页紧 2dp。
+        横向间隔不另设项，直接复用 @dimen/space_s（与状态页行1 的 layout_marginStart 同值）；
+        短标签的 88dp 基样式下限已在 ConfigResetBar 里清掉，否则「界面」「控制」被撑宽后
+        文字居中、两侧各多约 14dp，文字间隙会从 40dp 涨到 54dp 左右。
     -->
-    <dimen name="config_reset_row_gap">-2dp</dimen>
+    <dimen name="config_reset_row_gap">-1dp</dimen>
 </resources>
