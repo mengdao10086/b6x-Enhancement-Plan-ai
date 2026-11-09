@@ -15,7 +15,7 @@
     "fields[].cVar 指向 tempctrl.c 内的 C 变量名，供 gen_params.py --audit 自动核对默认值与 clamp 范围；null 表示该字段无需核对或无法自动核对。",
     "禁止手改 gen_params.py 的任何产物（app/src/main/assets/params.json、lsp模块/daemon/profile.conf、params_generated.h、逻辑说明.md 的参数表段）—— 手改会被 check_params.py 判红。",
     "【内部溯源，不进产物】本文件是唯一允许写内部来源的地方；desc / unitNote / defaultNote / factoryNote / rangeNote 等**会进产物**的字段只写用户可读的事实，禁止出现源文件名、宏名、C 符号名或历史沿革（产物是界面直接渲染的文本，用户读不到仓库）。",
-    "【内部溯源】WebUI 组 8 键（UI_*）中除 UI_BACK_HIDE 外只有界面读取；范围与语义无 C 端依据，须人工在 逻辑说明.md 的「曲线」/「状态页」两节核对。",
+    "【内部溯源】控制组 4 键：UI_TEMP_STOP / UI_BACK_HIDE 由守护进程读取（后者只转写给界面侧），UI_AUTO_UPDATE 由开机脚本读取，UI_DEPLOY_ENTRY 仅界面读取；WebUI 组 7 键仅界面读取，范围与语义无 C 端依据，须人工在 逻辑说明.md 的「曲线」/「状态页」两节核对。",
     "【内部溯源】chart 段：档位上限 720 = tempctrl.c 的 WEBUI_DATA_MAX_LINES（crossChecks 自动核对）；默认档位 360 为界面默认值，须落在档位表内。",
     "【内部溯源】PERF_ENABLED 的 factory=0 沿用合并前 profile.conf 的出厂值，非代码默认（代码默认见 default=1）。",
     "【字段用途】docOrder/docDesc 决定 逻辑说明.md 参数表（docOrder = 表序，docDesc = 说明列，按功能重排）。",
@@ -106,7 +106,13 @@
     {
       "id": "webui",
       "title": "[4] 界面",
-      "confTitleNote": "（多数仅界面读取；UI_BACK_HIDE 由守护进程读取）",
+      "confTitleNote": "（以下均仅界面读取）",
+      "master": null
+    },
+    {
+      "id": "control",
+      "title": "[5] 控制",
+      "confTitleNote": "（独立于性能总开关；UI_TEMP_STOP / UI_BACK_HIDE 由守护进程读取，UI_AUTO_UPDATE 由开机脚本读取）",
       "master": null
     }
   ],
@@ -2087,30 +2093,6 @@
       ]
     },
     {
-      "key": "UI_BACK_HIDE",
-      "group": "webui",
-      "role": "setting",
-      "type": "switch",
-      "label": "返回隐藏",
-      "desc": "开启后，按返回把散热器 app 收进后台并从最近任务列表隐藏（自动拉起/锁死重启拉起的收后台也隐藏）；关闭则恢复系统默认退出",
-      "docOrder": 56,
-      "docDesc": "返回隐藏（0/1，默认 1）：开启后，宿主内页面按返回都收进后台并从最近任务列表隐藏；关闭则恢复系统默认退出。**守护进程拉起的收后台同受本开关控制**：开启时（自动拉起 / 锁死自动重启后拉起）也与返回键一样从最近任务隐藏，关闭时两条路径都只收后台、不动最近任务。本键是本组唯一被守护进程读取的键——界面与守护进程分属两个进程、不共享内存，故由守护进程把开关同步给界面侧读取。",
-      "confNote": [
-        "返回隐藏（0/1，默认 1）：关闭则返回键恢复系统默认退出，守护进程拉起的收后台也不再隐藏",
-        "  本组唯一被守护进程读取的键：由守护进程把开关同步给界面侧（内部机制，无需用户配置）"
-      ],
-      "confInline": "返回隐藏",
-      "unit": "",
-      "unitNote": "布尔开关，取值 0/1，无单位",
-      "default": 1,
-      "factory": 1,
-      "min": 0,
-      "max": 1,
-      "requires": [],
-      "daemonConsumes": true,
-      "fields": null
-    },
-    {
       "key": "UI_START_PAGE",
       "group": "webui",
       "role": "setting",
@@ -2136,53 +2118,6 @@
         { "value": "config", "label": "配置 · 曲线" },
         { "value": "log", "label": "日志" }
       ]
-    },
-    {
-      "key": "UI_AUTO_UPDATE",
-      "group": "webui",
-      "role": "setting",
-      "type": "switch",
-      "label": "自动更新",
-      "desc": "设备上的部署产物与 APK 内不一致时，由开机脚本在开机时自动重装并重启守护进程；关闭则只在 app 内弹窗请求",
-      "docOrder": 58,
-      "docDesc": "自动更新（0/1，默认 1）：开机脚本在开机时先比 APK 文件的修改时间、有变化再校验内容，不一致就自动重装并重启守护进程；时间戳未变则整段短路（其后的看门狗周期内还会再试，次数有上限）。值为 1 时 app 侧发现不一致也静默重新部署（不弹窗），关闭则退回弹窗请求。本键由开机脚本直接读配置文件，界面与脚本不共享内存",
-      "confNote": [
-        "自动更新（0/1，默认 1）：设备上的部署产物与 APK 内不一致时，由开机脚本在开机时自动重装并重启守护进程；关闭则只在 app 内弹窗请求",
-        "  本键由开机脚本直接读本文件，读不到按 1 处理"
-      ],
-      "unit": "",
-      "unitNote": "布尔开关，取值 0/1，无单位",
-      "default": 1,
-      "factory": 1,
-      "min": 0,
-      "max": 1,
-      "requires": [],
-      "daemonConsumes": false,
-      "fields": null
-    },
-    {
-      "key": "UI_DEPLOY_ENTRY",
-      "group": "webui",
-      "role": "setting",
-      "type": "switch",
-      "label": "部署入口",
-      "desc": "需重新部署时先进入状态页并给出提示；关闭则照常进入默认页面。自动更新开启时本项隐藏；未取得 root 时仍按已保存的值生效（但本行仍会隐藏，可在关闭自动更新后调整）。",
-      "docOrder": 59,
-      "docDesc": "部署入口（0/1，默认 1）：界面检测到需重新部署时，先进入状态页并给出提示；关闭则照常进入默认页面。自动更新开启时本项隐藏并按关闭处理；未取得 root 时仍按已保存的值生效（本行仍会隐藏，可在关闭自动更新后调整）。**仅界面读取，守护进程忽略**",
-      "confNote": [
-        "部署入口（0/1，默认 1）：需重新部署时先进入状态页并给出提示；关闭则照常进入默认页面",
-        "  自动更新开启时本项隐藏并按关闭处理；未取得 root 时仍按已保存的值生效（本行仍会隐藏，可在关闭自动更新后调整）"
-      ],
-      "unit": "",
-      "unitNote": "布尔开关，取值 0/1，无单位",
-      "default": 1,
-      "factory": 1,
-      "min": 0,
-      "max": 1,
-      "requires": [],
-      "hiddenWhen": ["UI_AUTO_UPDATE"],
-      "daemonConsumes": false,
-      "fields": null
     },
     {
       "key": "UI_PATH_COPY",
@@ -2232,6 +2167,101 @@
           "cVar": null
         }
       ]
+    },
+    {
+      "key": "UI_TEMP_STOP",
+      "group": "control",
+      "role": "setting",
+      "type": "switch",
+      "label": "临时停止",
+      "desc": "开启后守护进程停止下发风扇与温控，散热器保持当前状态；本开关持续到手机下次重启，重启后自动关闭并把配置值写回 0。手动重启守护进程不会关闭本开关。",
+      "docOrder": 64,
+      "docDesc": "临时停止（0/1，默认 0）：=1 时守护进程跳过风扇/温控下发（不再做任何调节，散热器保持当场状态）；开关持续到手机下次重启，重启后自动失效并把本键写回 0。判定用系统本次开机标识，手动重启守护进程不会误判为重启手机。**守护进程读取**",
+      "confNote": [
+        "临时停止（0/1，默认 0）：开启后守护进程停止下发风扇与温控，散热器保持当前状态",
+        "  持续到手机下次重启：重启后自动关闭并把本键写回 0；手动重启守护进程不会关闭"
+      ],
+      "confInline": "临时停止",
+      "unit": "",
+      "unitNote": "布尔开关，取值 0/1，无单位",
+      "default": 0,
+      "factory": 0,
+      "min": 0,
+      "max": 1,
+      "requires": [],
+      "daemonConsumes": true,
+      "fields": null
+    },
+    {
+      "key": "UI_BACK_HIDE",
+      "group": "control",
+      "role": "setting",
+      "type": "switch",
+      "label": "返回隐藏",
+      "desc": "开启后，按返回把散热器 app 收进后台并从最近任务列表隐藏（自动拉起/锁死重启拉起的收后台也隐藏）；关闭则恢复系统默认退出",
+      "docOrder": 56,
+      "docDesc": "返回隐藏（0/1，默认 1）：开启后，宿主内页面按返回都收进后台并从最近任务列表隐藏；关闭则恢复系统默认退出。**守护进程拉起的收后台同受本开关控制**：开启时（自动拉起 / 锁死自动重启后拉起）也与返回键一样从最近任务隐藏，关闭时两条路径都只收后台、不动最近任务。本键由守护进程读取——界面与守护进程分属两个进程、不共享内存，故由守护进程把开关同步给界面侧读取。",
+      "confNote": [
+        "返回隐藏（0/1，默认 1）：关闭则返回键恢复系统默认退出，守护进程拉起的收后台也不再隐藏",
+        "  由守护进程把开关同步给界面侧（内部机制，无需用户配置）"
+      ],
+      "confInline": "返回隐藏",
+      "unit": "",
+      "unitNote": "布尔开关，取值 0/1，无单位",
+      "default": 1,
+      "factory": 1,
+      "min": 0,
+      "max": 1,
+      "requires": [],
+      "daemonConsumes": true,
+      "fields": null
+    },
+    {
+      "key": "UI_AUTO_UPDATE",
+      "group": "control",
+      "role": "setting",
+      "type": "switch",
+      "label": "自动更新",
+      "desc": "设备上的部署产物与 APK 内不一致时，由开机脚本在开机时自动重装并重启守护进程；关闭则只在 app 内弹窗请求",
+      "docOrder": 58,
+      "docDesc": "自动更新（0/1，默认 1）：开机脚本在开机时先比 APK 文件的修改时间、有变化再校验内容，不一致就自动重装并重启守护进程；时间戳未变则整段短路（其后的看门狗周期内还会再试，次数有上限）。值为 1 时 app 侧发现不一致也静默重新部署（不弹窗），关闭则退回弹窗请求。本键由开机脚本直接读配置文件，界面与脚本不共享内存",
+      "confNote": [
+        "自动更新（0/1，默认 1）：设备上的部署产物与 APK 内不一致时，由开机脚本在开机时自动重装并重启守护进程；关闭则只在 app 内弹窗请求",
+        "  本键由开机脚本直接读本文件，读不到按 1 处理"
+      ],
+      "unit": "",
+      "unitNote": "布尔开关，取值 0/1，无单位",
+      "default": 1,
+      "factory": 1,
+      "min": 0,
+      "max": 1,
+      "requires": [],
+      "daemonConsumes": false,
+      "fields": null
+    },
+    {
+      "key": "UI_DEPLOY_ENTRY",
+      "group": "control",
+      "role": "setting",
+      "type": "switch",
+      "label": "部署入口",
+      "desc": "需重新部署时先进入状态页并给出提示；关闭则照常进入默认页面。自动更新开启时本项隐藏；未取得 root 时仍按已保存的值生效（但本行仍会隐藏，可在关闭自动更新后调整）。",
+      "docOrder": 59,
+      "docDesc": "部署入口（0/1，默认 1）：界面检测到需重新部署时，先进入状态页并给出提示；关闭则照常进入默认页面。自动更新开启时本项隐藏并按关闭处理；未取得 root 时仍按已保存的值生效（本行仍会隐藏，可在关闭自动更新后调整）。**仅界面读取，守护进程忽略**",
+      "confNote": [
+        "部署入口（0/1，默认 1）：需重新部署时先进入状态页并给出提示；关闭则照常进入默认页面",
+        "  自动更新开启时本项隐藏并按关闭处理；未取得 root 时仍按已保存的值生效（本行仍会隐藏，可在关闭自动更新后调整）"
+      ],
+      "unit": "",
+      "unitNote": "布尔开关，取值 0/1，无单位",
+      "default": 1,
+      "factory": 1,
+      "min": 0,
+      "max": 1,
+      "requires": [],
+      "hiddenWhen": ["UI_AUTO_UPDATE"],
+      "daemonConsumes": false,
+      "fields": null
     }
   ],
   "conf": {
@@ -2243,7 +2273,7 @@
       "删行恢复默认需重启守护进程",
       "设备上的副本可自由修改；仓库内的源文件由生成脚本产出，请勿手改",
       "单位标记（勿删）：cfg-unit: CPU_ZONE_RESCAN=cycles",
-      "段标：[0]日志 [1]性能参数 [2]接口与外围 [3]拉起应用 [4]界面"
+      "段标：[0]日志 [1]性能参数 [2]接口与外围 [3]拉起应用 [4]界面 [5]控制"
     ]
   },
   "doc": {
@@ -2359,6 +2389,7 @@
       "UI_ANIM_TUNING": [],
       "UI_RPM_AXIS_MIN": [],
       "UI_CURVE_FILTER": [],
+      "UI_TEMP_STOP": ["temp_stop_enabled"],
       "UI_BACK_HIDE": ["back_hide_enabled"],
       "UI_GATE_LE": ["gate_le_enabled"],
       "WD_KEEPALIVE": ["wd_keepalive_enabled"],

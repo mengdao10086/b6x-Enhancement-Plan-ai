@@ -375,6 +375,10 @@ static const char *status_field_value(const char *line, const char *field) {
 // 生效制冷上限提示文件（写给 app 定 KI 分段倍率曲线横轴）；行格式与降级见 app/逻辑说明.md §6.6
 #define COLDMAX_HINT_PATH     PRIVATE_DIR "/tempctrl_coldmax"
 
+// 临时停止（UI_TEMP_STOP）的 boot_id 标记：与 profile.conf 同落私有目录，卸载/清除数据随目录一并清除
+#define TEMP_STOP_BOOT_PATH   PRIVATE_DIR "/tempctrl_temp_stop_boot"
+#define KERNEL_BOOT_ID_PATH   "/proc/sys/kernel/random/boot_id"
+
 // 三方 app 包名（farsef 在最近连 B6X 散热器时也参与仲裁）
 #define APP_PKG_B6X_OLD "com.flydigi.waspwing.experimental"
 #define APP_PKG_B6X_NEW "com.flydigi.waspwing.experimentanliuliu"
@@ -434,6 +438,12 @@ static int last_screen_off = 0;          // 上次观察到的屏幕状态：1=�
 #define UIPREFS_PATH "/data/local/tmp/tempctrl_uiprefs"
 static int back_hide_enabled     = 1;    // UI_BACK_HIDE：1=返回键收后台（默认），0=恢复系统默认退出
 static int gate_le_enabled       = 1;    // UI_GATE_LE：1=连接期把目标地址视为 BLE 设备（默认），0=恢复原行为
+
+// --- 临时停止（UI_TEMP_STOP）---
+// 1=停止对散热器的写控制（保持现场）；默认持续到手机下次重启，靠 boot_id 标记判定失效。
+static int temp_stop_enabled         = 0;    // 配置值（每轮控制前由热重载刷新）
+static int temp_stop_active_last     = 0;    // 上次是否处于停止态（只用于状态切换日志）
+static int temp_stop_writeback_pending = 0;  // 重启后写回 0 失败：本地已恢复控制，逐轮重试写回
 static int uiprefs_last_back_hide = -1;  // 上次已写出的值（-1 = 尚未写过，首轮必写一次）
 static int uiprefs_last_gate_le   = -1;  // 同上的 GATE_LE 记录（哨兵=尚未写过）
 static int uiprefs_last_bt_sec    = -2147483647;  // 同上的 BT_ON_SEC 记录（哨兵=尚未写过）
@@ -981,6 +991,9 @@ static int config_apply_prepass_key(struct PrepassCfg *out, const char *key, con
             if (n >= 1) app_launch_screen_gate_enabled = (on != 0);
             if (n >= 2) app_launch_screen_dozing_on  = (dz != 0);
         }
+    } else if (strcmp(key, "UI_TEMP_STOP") == 0) {
+        // 临时停止：守护进程自己的控制闸门，同样必须在第一遍读掉（三层全关时也要生效）。
+        if (out) temp_stop_enabled = clamp(atoi(val_str), 0, 1);
     } else if (strcmp(key, "UI_BACK_HIDE") == 0) {
         // 界面键里唯一被守护进程读取的一个：本机不消费，只转写标志文件供钩子读取。
         // 与 APP_LAUNCH_ENABLED 同理，必须在第一遍读掉——否则 PERF/DEBUG/SYSFS 全关时本函数会提前 return。
@@ -3424,6 +3437,136 @@ static int commit_config_rewrite(const char *path, const char *tmp, FILE *g,
     return 1;
 }
 
+/** 读文本文件首行（去首尾空白）；成功返回 1。 */
+static int read_first_line(const char *path, char *out, size_t out_size) {
+    FILE *f = fopen(path, "r");
+    if (!f) return 0;
+    char buf[128];
+    int ok = 0;
+    if (fgets(buf, sizeof(buf), f)) {
+        char *v = trim_value(buf);
+        if (*v) {
+            strncpy(out, v, out_size - 1);
+            out[out_size - 1] = '\0';
+            ok = 1;
+        }
+    }
+    fclose(f);
+    return ok;
+}
+
+/** 记录本次开机的 boot_id 标记（临时停止的失效判据）；返回 1=已写。 */
+static int write_boot_marker(const char *boot_id) {
+    FILE *f = fopen(TEMP_STOP_BOOT_PATH, "w");
+    if (!f) return 0;
+    int ok = fprintf(f, "%s\n", boot_id) > 0;
+    fclose(f);
+    return ok;
+}
+
+/**
+ * 把配置文件里的 UI_TEMP_STOP 值写回 0（只改该行值，保留行首空白与行内注释）。
+ * 复用 commit_config_rewrite 的原子替换与属主/权限对齐。返回 1=已改写。
+ */
+static int writeback_temp_stop_disabled(const char *path) {
+    FILE *f = fopen(path, "r");
+    if (!f) return 0;
+    struct stat st;
+    if (stat(path, &st) != 0) { fclose(f); return 0; }
+
+    char tmp[300];
+    snprintf(tmp, sizeof(tmp), "%s.tmpstop", path);
+    FILE *g = fopen(tmp, "w");
+    if (!g) { fclose(f); return 0; }
+
+    static const char KEY[] = "UI_TEMP_STOP";
+    const size_t KEY_LEN = sizeof(KEY) - 1;
+    int changed = 0;
+    char line[640];
+    while (fgets(line, sizeof(line), f)) {
+        const char *p = line;
+        while (*p == ' ' || *p == '\t') p++;
+        const char *eq = strchr(p, '=');
+        if (*p != '#' && eq) {
+            size_t klen = (size_t)(eq - p);
+            while (klen > 0 && (p[klen - 1] == ' ' || p[klen - 1] == '\t')) klen--;
+            if (klen == KEY_LEN && strncmp(p, KEY, KEY_LEN) == 0) {
+                const char *hash = strchr(eq + 1, '#');
+                fwrite(line, 1, (size_t)(p - line), g);   // 保留行首缩进
+                fprintf(g, "%.*s=0", (int)KEY_LEN, KEY);
+                if (hash) fprintf(g, "  %s", hash);        // 保留行内注释（含行尾换行）
+                else fputc('\n', g);
+                changed = 1;
+                continue;
+            }
+        }
+        fputs(line, g);
+    }
+    fclose(f);
+    if (!changed) { fclose(g); remove(tmp); return 0; }
+    return commit_config_rewrite(path, tmp, g, &st, "临时停止失效写回");
+}
+
+/**
+ * 维护「临时停止」的到下次重启自动失效：
+ *   开关为 1 时把首次观察到的 boot_id 记进标记文件，之后每轮比对；boot_id 变化 = 手机已重启，
+ *   自动置 0 并把配置值写回 0。手动重启 daemon 时 boot_id 不变，故不会误判。
+ */
+static void maintain_temp_stop(void) {
+    if (!temp_stop_enabled) {
+        // 关闭状态不保留标记：下次开启必须重新记录本次开机标识，
+        // 否则上一开机周期留下的旧标记会把新开启误判成「重启后失效」。
+        remove(TEMP_STOP_BOOT_PATH);
+        if (temp_stop_active_last) {
+            debug_log(debug_main, "临时停止 已关闭，恢复风扇/温控下发");
+            temp_stop_active_last = 0;
+        }
+        if (temp_stop_writeback_pending && writeback_temp_stop_disabled(config_path)) {
+            temp_stop_writeback_pending = 0;
+            struct stat mst;
+            if (stat(config_path, &mst) == 0) config_mtime = mst.st_mtime;
+            write_log("临时停止 失效写回完成（UI_TEMP_STOP=0）");
+        }
+        return;
+    }
+
+    char boot_id[64];
+    int boot_ok = read_first_line(KERNEL_BOOT_ID_PATH, boot_id, sizeof(boot_id));
+    char marker[64];
+    int have_marker = read_first_line(TEMP_STOP_BOOT_PATH, marker, sizeof(marker));
+
+    if (!have_marker) {
+        // 首次观察到开启（或升级后首次读到）：记下本次开机标识，持续到下次重启
+        if (boot_ok) write_boot_marker(boot_id);
+    } else if (boot_ok && strcmp(marker, boot_id) != 0) {
+        // 开机标识变了 = 手机已重启：自动关闭并写回配置 0
+        temp_stop_enabled = 0;
+        ramp_slots_left = 0;
+        write_boot_marker(boot_id);
+        if (writeback_temp_stop_disabled(config_path)) {
+            struct stat mst;
+            if (stat(config_path, &mst) == 0) config_mtime = mst.st_mtime;
+        } else {
+            temp_stop_writeback_pending = 1;
+        }
+        if (temp_stop_active_last) {
+            debug_log(debug_main, "临时停止 已关闭，恢复风扇/温控下发");
+            temp_stop_active_last = 0;
+        }
+        write_log("临时停止 已在重启后失效，配置写回 UI_TEMP_STOP=0");
+        return;
+    }
+
+    temp_stop_active_last = 1;
+    ramp_slots_left = 0;   // 丢弃开启前未走完的平滑下发
+    debug_log(debug_main, "临时停止 生效，跳过风扇/温控下发（保持现场）");
+}
+
+/** 临时停止是否生效（纯读取，供下发闸门判断） */
+static int temp_stop_active(void) {
+    return temp_stop_enabled;
+}
+
 /**
  * 一次性迁移写回（方案 B）：把配置文件里的旧键就地改名——
  *   KI_CUT_<簇号>=<三元组> → PID_CUT_<簇号>=<四元组>（每点补 KDP 倍率 100=不削）；
@@ -3817,6 +3960,12 @@ static int compute_fan_target(void) {
  */
 static int apply_gear_direct(int mode, int target,
                                int send_rpm, int cold, int wl) {
+    // 临时停止：抑制一切下发（含平滑下发的登记），保持散热器现场
+    if (temp_stop_active()) {
+        debug_log(debug_exec, "临时停止 生效，抑制下发（冷%d RPM%d）", cold, send_rpm);
+        return 0;
+    }
+
     // 纯下发：制冷限速与风扇目标已由 rate_limited_execute 完成，此处只去重/日志/广播
 
     // ---- 热端过温边界钳制（去重前生效；不同步 actual_cold，风扇由 actual_cold 推算保持高转速散热）----
@@ -3895,6 +4044,8 @@ static int apply_gear_direct(int mode, int target,
  * 每次走 min(每份步长, 剩余量)；到达目标即结束本轮，剩余份数作废。
  */
 static void ramp_tick(void) {
+    // 临时停止：丢弃未走完的平滑下发，绝不在停止期间继续写散热器
+    if (temp_stop_active()) { ramp_slots_left = 0; return; }
     if (ramp_slots_left <= 0) return;
 
     int step_r = ramp_step_rpm;
@@ -4278,10 +4429,11 @@ static void pid_cycle(void) {
 
 /**
  * 单次控制循环（纯计算，不下发）
- * 配置重载 → 热端过温/有效范围 → PID 周期
+ * 配置重载 → 临时停止闸门 → 热端过温/有效范围 → PID 周期
  * 调用者在外部立即执行速率限制下发，本函数只做决策
+ * @return 1=临时停止生效，本轮未做任何控制；0=已走完控制决策
  */
-static void main_loop(void) {
+static int main_loop(void) {
     // 温度窗口变化：自上次 5s 控制以来，1s 采集层是否检测到值变化（防漏判：变过又回原位仍算变化）。
     batt_window_changed = batt_changed_since_ctrl;
     batt_changed_since_ctrl = 0;                 // 开启新窗口
@@ -4310,6 +4462,11 @@ static void main_loop(void) {
         apply_cpu_affinity();
     }
 
+    // 0.3. 临时停止闸门：生效时跳过本轮全部写控制（保持散热器现场），
+    //      但前面的配置热重载照跑，否则开关无法在运行中被关闭。
+    maintain_temp_stop();
+    if (temp_stop_active()) return 1;
+
     // 0.4. CPU_ZONE 区间变化 → 本周期立即重建候选名单（全量扫描约 1s，仍在 5s 控制块内）
     if (cpu_zone_list_dirty) rescan_cpu_zones();
 
@@ -4320,6 +4477,7 @@ static void main_loop(void) {
 
     // --- 控制周期分发（本实现仅 PID） ---
     pid_cycle();
+    return 0;
 }
 
 // ======================== 程序入口 ========================
@@ -4860,10 +5018,14 @@ int main(int argc, char *argv[]) {
         // 强制首次下发（起点=当前回传值，同样走平滑下发）
         sent_cold = actual_cold;
         sent_rpm  = actual_rpm;
-        last_bcast_valid = 0;
-        rate_limit_cold(pid_align_cold);
-        int send_rpm = rate_limit_fan(compute_fan_target());
-        apply_gear_direct(1, 5, send_rpm, actual_cold, 0);
+        if (temp_stop_active()) {
+            write_log("临时停止 生效，跳过启动首下（保持散热器现状）");
+        } else {
+            last_bcast_valid = 0;
+            rate_limit_cold(pid_align_cold);
+            int send_rpm = rate_limit_fan(compute_fan_target());
+            apply_gear_direct(1, 5, send_rpm, actual_cold, 0);
+        }
     } else {
         actual_cold = -1;      // 未就绪：不设兜底基线，待 try_align_actual 对齐后起步
         actual_rpm = -1;
@@ -4977,21 +5139,24 @@ int main(int argc, char *argv[]) {
                 reconnect_align();
             }
 
-            main_loop();
+            int control_skipped = main_loop();
 
-            // ★ 待对齐：启动/长断连重置后先等真实回传就绪再对齐实际值（对齐后允许强制首下）
-            if (pending_align && try_align_actual())
-                last_bcast_valid = 0;
+            // 临时停止生效：本轮不执行任何下发/对齐/看死链动作，散热器保持现场
+            if (!control_skipped) {
+                // ★ 待对齐：启动/长断连重置后先等真实回传就绪再对齐实际值（对齐后允许强制首下）
+                if (pending_align && try_align_actual())
+                    last_bcast_valid = 0;
 
-            // ★ 速率限制执行
-            cycle_batt_temp = cached_batt_raw;   // 1s 采集缓存
-            int dispatched = rate_limited_execute();   // 1=实际下发了制冷变化，0=跳过
+                // ★ 速率限制执行
+                cycle_batt_temp = cached_batt_raw;   // 1s 采集缓存
+                int dispatched = rate_limited_execute();   // 1=实际下发了制冷变化，0=跳过
 
-            // ★ 锁死自动重启检测（watchdog）：仅在本次实际下发制冷变化后判定——
-            // 实际停滞（=上周期实际）且未达目标（≠上周期下发）连续 N 次 → kill app 重新拉起
-            if (dispatched) watchdog_check();
-            // ★ 死链检测：BLE 已连但回传全 0（与本次是否下发无关）
-            deadlink_check();
+                // ★ 锁死自动重启检测（watchdog）：仅在本次实际下发制冷变化后判定——
+                // 实际停滞（=上周期实际）且未达目标（≠上周期下发）连续 N 次 → kill app 重新拉起
+                if (dispatched) watchdog_check();
+                // ★ 死链检测：BLE 已连但回传全 0（与本次是否下发无关）
+                deadlink_check();
+            }
         }
 
         // 曲线数据：放在 5s 控制块之后——本拍是否重算 PID 已确定，标记与重算落在同一行；
