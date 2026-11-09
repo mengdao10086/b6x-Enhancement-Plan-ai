@@ -21,13 +21,12 @@ import com.example.waspwingtempctrl.R;
 
 import java.util.ArrayList;
 import java.util.Arrays;
-import java.util.Collections;
 import java.util.List;
 
 /**
  * 曲线自绘控件。口径逐条对齐 {@code app/逻辑说明.md} §7。
  *
- * <p><b>性能硬约束</b>：{@code onDraw} 只画，全部几何量（轴与刻度、每系列 {@link Path}、标注位置与文本宽度、
+ * <p><b>性能硬约束</b>：{@code onDraw} 只画，全部几何量（轴与刻度、每系列 {@link Path}、末端圆点、
  * 断联空白）都在 {@link #rebuild()} 里算好并缓存，<b>绝不在 onDraw 内重建 Path</b>（口径见 app/逻辑说明.md §7）。
  *
  * <p><b>本控件不读文件</b>：数据由 {@link ChartLoader} 在后台线程读好后经
@@ -48,7 +47,6 @@ public class ChartView extends View {
     private static final int PAD_B_DP = 4;
     private static final float LINE_WIDTH_DP = 1.6f; // 折线
     private static final float GRID_WIDTH_DP = 1f;   // 网格
-    private static final float HALO_WIDTH_DP = 3f;   // 文字 halo
     private static final float DOT_RADIUS_DP = 3.2f; // 头部圆点
     private static final float DOT_HALO_DP = 1f;     // 圆点外圈
     // 竖虚线：与网格线同宽同色（透明度含在网格色里），3dp 实 / 3dp 空
@@ -67,22 +65,15 @@ public class ChartView extends View {
     private static final float PID_CHAIN_MAX_SEC = 6f;
     // pid 曲线的孤立样本（前后都没有相邻重算点）：只画一个实心圆点，不连线、不描边
     private static final float PID_DOT_RADIUS_DP = LINE_WIDTH_DP * 1.3f;
-    private static final float TICK_TEXT_DP = 10f;   // 刻度 / 标注 / 轴标题字号
+    private static final float TICK_TEXT_DP = 10f;   // 刻度 / 轴标题 / 按住查看字号
     private static final float EMPTY_TEXT_DP = 12f;  // 「采样中…」字号
-    private static final float LABEL_GAP_DP = 6f;    // 标签与端点的水平间距
-    // 标签落在簇上方时相对簇顶端的抬升量（原 WebUI 同名口径：top − 4）；落下方的间距见 LABEL_H_DP + 1dp
-    private static final float LABEL_LIFT_DP = 4f;
-    // 标注行高：取 webui 同名常量 LABEL_H，不用实测 descent − ascent（见 app/逻辑说明.md §7.4）
+    // 按住查看的数值行高（webui 同名常量 LABEL_H）
     private static final float LABEL_H_DP = 11f;
-    // 近同锚点判据：两条曲线末端相距不到该值就直接并成一组——它们视觉上本就是一个点。
-    // 取 8dp（略大于圆点直径 6.4dp），宁可多并一点；见 app/逻辑说明.md §7.4。
-    private static final float NEAR_DUP_DP = 8f;
 
     private final Paint gridPaint = new Paint();
     private final Paint tickPaint = new Paint();     // 左轴刻度（右对齐）
     private final Paint axisTextPaint = new Paint(); // 右轴刻度 / 轴标题（左对齐）
     private final Paint seriesPaint = new Paint();
-    private final Paint haloPaint = new Paint();     // 文字 halo（STROKE）
     private final Paint labelPaint = new Paint();
     private final Paint dotPaint = new Paint();
     private final Paint dotHaloPaint = new Paint();
@@ -123,7 +114,6 @@ public class ChartView extends View {
     private String[] gridText;
     private String[] rightText;
     private Path[] paths;
-    private ChartLabelOp[] labels;
     private ChartDotOp[] dots;
     /** PID 重算标记：竖向虚线（x 坐标）。 */
     private float[] dashXs;
@@ -193,12 +183,6 @@ public class ChartView extends View {
         seriesPaint.setAntiAlias(true);
         seriesPaint.setStyle(Paint.Style.STROKE);
         seriesPaint.setStrokeWidth(LINE_WIDTH_DP * density);
-        haloPaint.setAntiAlias(true);
-        haloPaint.setStyle(Paint.Style.STROKE);
-        haloPaint.setStrokeWidth(HALO_WIDTH_DP * density);
-        // 描边文字的字号必须与 labelPaint 一致：halo 是「同一串字先描边再填色」，
-        // 字号不同就描出一个与字形不重合的底色轮廓（原先漏设，halo 按 Paint 的默认字号画）
-        haloPaint.setTextSize(TICK_TEXT_DP * density);
         labelPaint.setAntiAlias(true);
         labelPaint.setStyle(Paint.Style.FILL);
         labelPaint.setTextSize(TICK_TEXT_DP * density);
@@ -232,7 +216,7 @@ public class ChartView extends View {
         invalidate();
     }
 
-    /** 图例开关（主线程调用）：切换后轴范围与标注同步重算。 */
+    /** 图例开关（主线程调用）：切换后轴范围与末端圆点同步重算。 */
     public void setSeriesEnabled(int index, boolean on) {
         if (index < 0 || index >= series.length) {
             return;
@@ -274,7 +258,7 @@ public class ChartView extends View {
     private void loadColors() {
         Resources res = getResources();
         Theme theme = getContext().getTheme();
-        // 底色 = 卡片底色（halo 与圆点外圈靠它遮住穿过的曲线）；见 app/逻辑说明.md §7.5
+        // 底色 = 卡片底色（圆点外圈靠它遮住穿过的曲线）；见 app/逻辑说明.md §7.5
         colorBg = res.getColor(R.color.app_surface_container, theme);
         // 网格线走主题分隔线色（可见度论证见 app/逻辑说明.md §7.5）
         colorGrid = res.getColor(R.color.app_outline_variant, theme);
@@ -282,7 +266,6 @@ public class ChartView extends View {
         for (int i = 0; i < series.length; i++) {
             seriesColors[i] = res.getColor(series[i].colorRes, theme);
         }
-        haloPaint.setColor(colorBg);
         dotHaloPaint.setColor(colorBg);
         colorHighlight = withAlpha(colorAxis, TOUCH_LINE_ALPHA);
         colorPanel = withAlpha(colorBg, TOUCH_PANEL_ALPHA);
@@ -298,7 +281,7 @@ public class ChartView extends View {
     // ==================== 预计算 ====================
 
     /**
-     * 算出本次绘制的全部几何量：轴定标 → 网格 → 断联空白 → 每系列 Path → 头部标注。
+     * 算出本次绘制的全部几何量：轴定标 → 网格 → 断联空白 → 每系列 Path → 末端圆点。
      */
     private void rebuild() {
         placeholder = null;
@@ -306,7 +289,6 @@ public class ChartView extends View {
         gridText = null;
         rightText = null;
         paths = null;
-        labels = null;
         dots = null;
         dashXs = null;
         pidDotX = null;
@@ -677,28 +659,18 @@ public class ChartView extends View {
     }
 
     /**
-     * 头部标注：每条系列取最后一个有效样本作锚点。合并用**顺序贪心**——锚点按 y 升序，沿序扫、只与
-     * **当前组的第一条**比：两者的标注纵向占位盒相交（或两锚点距离不到 {@link #NEAR_DUP_DP}）就并进来，
-     * 一旦不交即**封组、不回头**（不再并查集跑传递闭包、不再迭代到不动点）。
-     *
-     * <p><b>组盒与落点同源</b>：每个锚点先各自算一次理想落点（{@link #placeSingleAnchors}），合并组的
-     * 标签就画在该组**第一条**的落点上——判据用的盒与画出来的盒是同一个，故相邻两组必不重叠、组内
-     * 锚点跨度有硬上界（一个文字盒高 + 上/下落点相对锚点的极差 ≈ 27.7dp）。每条的理想落点只算一次，
-     * 不存在「合并 → 落点外移 → 又压上邻居」的反馈回路。详见 app/逻辑说明.md §7.4。
-     *
-     * <p><b>选边</b>：比较「锚点到上方最近障碍物」与「下方最近障碍物到锚点」的空隙，空隙更大的一侧
-     * 放标签；障碍物 = 同页其它曲线的端点圆点（即相邻锚点的圆点边缘）与绘图区上下沿，<b>不含曲线中段</b>。
-     * 两侧都放不下时同样取空隙更大的一侧。
+     * 末端圆点：每条开启系列取最后一个有效样本，在其端点画一个实心圆点。
+     * 边缘数值标签已取消；按住查看面板里的数值由 {@link #buildTouchRows} 单独生成。
      */
     private void buildMarkers(ChartWindow win, ChartAxis lAxis, ChartAxis rAxis) {
-        List<ChartLabelOp> entries = new ArrayList<>();
+        List<ChartDotOp> dotOps = new ArrayList<>();
         for (int si = 0; si < series.length; si++) {
             ChartSeries s = series[si];
             if (!s.on) {
                 continue;
             }
             if ("pid".equals(s.id)) {
-                continue;   // pid 不做末端数值标注（无文字、无末端圆点），口径见 app/逻辑说明.md §7
+                continue;   // pid 稀疏曲线由 buildPidSingles 单独画点
             }
             ChartAxis ax = s.axis == ChartSeries.AXIS_LEFT ? lAxis : rAxis;
             if (ax == null) {
@@ -727,152 +699,12 @@ public class ChartView extends View {
             if (ey < fPadT) {
                 ey = fPadT;
             }
-            entries.add(new ChartLabelOp(ChartSeries.format(s, lv), ex, ey, seriesColors[si]));
+            dotOps.add(new ChartDotOp(ex, ey, seriesColors[si]));
         }
-        if (entries.isEmpty()) {
+        if (dotOps.isEmpty()) {
             return;
         }
-
-        for (ChartLabelOp e : entries) {
-            e.w = tickPaint.measureText(e.text);
-        }
-        Collections.sort(entries, (a, b) -> Float.compare(a.y, b.y));
-
-        Paint.FontMetrics fm = tickPaint.getFontMetrics();
-        // 落位公式里的行高取 webui 同名常量（11dp）；判据用的真实文字占位走实测 descent − ascent
-        // （≈ 11.7dp，比常量多 0.7dp）。两者口径不同是有意的，见 app/逻辑说明.md §7.4。
-        float labelH = LABEL_H_DP * density;
-        // 标注基线允许的最低位置：绘图区下沿 + 一行高再被「画布下沿 − descent」收住，否则最低那条标注
-        // 会越出画布被裁。PAD_B_DP 缩到 4 后第一项恒高于第二项，实际恒取 h − descent（口径不变）。
-        // 上侧不用额外钳制：ly 下限是 fPadT（17dp），已大于 10dp 文字的 ascent(≈9.3dp)
-        float labelMaxY = Math.min(fPadT + fH + labelH, getHeight() - fm.descent);
-        // 标注要占的高度：上方 = 抬升量 + 文字 ascent（负值取反）；下方 = 一行高 + 1dp 间隙 + 文字 descent
-        float dotR = (DOT_RADIUS_DP + DOT_HALO_DP) * density;
-        float needAbove = LABEL_LIFT_DP * density - fm.ascent;
-        float needBelow = labelH + 1f * density + fm.descent;
-
-        // 每个锚点先各自算一次理想落点（只此一次、不再随合并重算 → 无反馈回路）
-        int n = entries.size();
-        float[] lyS = new float[n];
-        placeSingleAnchors(entries, lyS, dotR, needAbove, needBelow, labelMaxY);
-
-        // 顺序贪心封组：只与当前组首成员比——两锚点过近（视觉同一处）或标注盒相交即并入，否则封组、不回头
-        float nearDup = NEAR_DUP_DP * density;
-        List<List<ChartLabelOp>> groups = new ArrayList<>();
-        List<Float> groupLy = new ArrayList<>();
-        List<ChartLabelOp> cur = new ArrayList<>();
-        int first = 0;
-        for (int i = 0; i < n; i++) {
-            if (cur.isEmpty()) {
-                cur.add(entries.get(i));
-                first = i;
-                continue;
-            }
-            boolean join = entries.get(i).y - entries.get(first).y <= nearDup
-                    || overlapsVertically(lyS[first], lyS[i], fm);
-            if (join) {
-                cur.add(entries.get(i));
-            } else {
-                groups.add(cur);
-                groupLy.add(lyS[first]);
-                cur = new ArrayList<>();
-                cur.add(entries.get(i));
-                first = i;
-            }
-        }
-        if (!cur.isEmpty()) {
-            groups.add(cur);
-            groupLy.add(lyS[first]);
-        }
-
-        List<ChartLabelOp> textOps = new ArrayList<>();
-        List<ChartDotOp> dotOps = new ArrayList<>();
-        float sep = tickPaint.measureText(" / ");
-        for (int ci = 0; ci < groups.size(); ci++) {
-            List<ChartLabelOp> cl = groups.get(ci);
-            float ly = groupLy.get(ci);
-            float tx = clusterTx(cl, sep);
-            for (int i = 0; i < cl.size(); i++) {
-                ChartLabelOp e = cl.get(i);
-                textOps.add(new ChartLabelOp(e.text, tx, ly, e.color));
-                tx += e.w;
-                if (i < cl.size() - 1) {
-                    textOps.add(new ChartLabelOp(" / ", tx, ly, colorAxis));
-                    tx += sep;
-                }
-            }
-            for (ChartLabelOp e : cl) {
-                dotOps.add(new ChartDotOp(e.x, e.y, e.color));
-            }
-        }
-        labels = textOps.toArray(new ChartLabelOp[0]);
         dots = dotOps.toArray(new ChartDotOp[0]);
-    }
-
-    /**
-     * 给每个锚点算各自的理想落点（单成员口径），按下标写进 ly。选边公式与旧 placeClusters 的单簇分支相同，
-     * 但只调用一次、不再随合并重算——这是「顺序贪心能真正封住链」的前提（见 app/逻辑说明.md §7.4）。
-     */
-    private void placeSingleAnchors(List<ChartLabelOp> entries, float[] ly, float dotR,
-                                    float needAbove, float needBelow, float labelMaxY) {
-        int n = entries.size();
-        for (int i = 0; i < n; i++) {
-            float y = entries.get(i).y;
-            // 空隙只量到最近的那个障碍物：相邻锚点的圆点边缘；该侧没有别的锚点时就量到绘图区上沿/下沿。
-            // 障碍物不含曲线中段：标签压在某条曲线腰部这种情况本口径不判。
-            float obstacleAbove = fPadT;
-            if (i > 0) {
-                obstacleAbove = Math.max(obstacleAbove, entries.get(i - 1).y + dotR);
-            }
-            float obstacleBelow = fPadT + fH;
-            if (i + 1 < n) {
-                obstacleBelow = Math.min(obstacleBelow, entries.get(i + 1).y - dotR);
-            }
-            float gapAbove = y - obstacleAbove;
-            float gapBelow = obstacleBelow - y;
-            // 两侧都放得下（或都放不下）→ 取空隙更大的一侧；只有一侧放得下 → 取那一侧
-            boolean fitsAbove = gapAbove >= needAbove;
-            boolean fitsBelow = gapBelow >= needBelow;
-            boolean placeAbove = fitsAbove == fitsBelow ? gapAbove >= gapBelow : fitsAbove;
-            float lyLine = placeAbove ? y - LABEL_LIFT_DP * density
-                                      : y + LABEL_H_DP * density + 1f * density;
-            if (lyLine < fPadT) {
-                lyLine = fPadT;
-            }
-            if (lyLine > labelMaxY) {
-                lyLine = labelMaxY;
-            }
-            ly[i] = lyLine;
-        }
-    }
-
-    /** 组的横向起点：成员锚点 x 的均值 + 间距，右越界翻到左侧，左界钳到 2dp。 */
-    private float clusterTx(List<ChartLabelOp> cl, float sep) {
-        float cx = 0f;
-        for (ChartLabelOp e : cl) {
-            cx += e.x;
-        }
-        cx /= cl.size();
-        float total = 0f;
-        for (ChartLabelOp e : cl) {
-            total += e.w;
-        }
-        total += sep * (cl.size() - 1);
-        float tx = cx + LABEL_GAP_DP * density;
-        if (tx + total > fPadL + fW) {
-            tx = cx - LABEL_GAP_DP * density - total;
-        }
-        if (tx < 2f * density) {
-            tx = 2f * density;
-        }
-        return tx;
-    }
-
-    /**
-     * 两个标注基线位置的**纵向**占位盒是否相交。只判纵向、横向不参与——横向取舍见 app/逻辑说明.md §7.4。
-     */
-    private static boolean overlapsVertically(float lyA, float lyB, Paint.FontMetrics fm) {
-        return lyB + fm.ascent < lyA + fm.descent && lyA + fm.ascent < lyB + fm.descent;
     }
 
     // ==================== 按住查看 ====================
@@ -1238,7 +1070,7 @@ public class ChartView extends View {
             }
         }
 
-        // 按住查看：高亮虚线压在曲线之上、末端标注之下；数值面板垫底色块
+        // 按住查看：高亮虚线压在曲线之上；数值面板垫底色块
         if (touchActive) {
             highlightPaint.setColor(colorHighlight);
             canvas.drawLine(touchDashX, fPadT, touchDashX, fPadT + fH, highlightPaint);
@@ -1255,19 +1087,6 @@ public class ChartView extends View {
             }
         }
 
-        // 标注先描边（halo）再填色，避免曲线穿过字形时同色糊在一起
-        if (labels != null) {
-            haloPaint.setColor(colorBg);
-            haloPaint.setStrokeWidth(HALO_WIDTH_DP * density);
-            labelPaint.setTextSize(TICK_TEXT_DP * density);
-            haloPaint.setTextSize(TICK_TEXT_DP * density);   // 与 labelPaint 同字号，见 init
-            for (ChartLabelOp e : labels) {
-                labelPaint.setColor(e.color);
-                canvas.drawText(e.text, e.x, e.y, haloPaint);
-                canvas.drawText(e.text, e.x, e.y, labelPaint);
-            }
-        }
-
         if (dots != null) {
             dotHaloPaint.setColor(colorBg);
             float r = DOT_RADIUS_DP * density;
@@ -1276,23 +1095,6 @@ public class ChartView extends View {
                 canvas.drawCircle(e.x, e.y, r, dotPaint);
                 canvas.drawCircle(e.x, e.y, r, dotHaloPaint);
             }
-        }
-    }
-
-    /** 一条标注文本（位置/宽度/颜色在 rebuild 定死，onDraw 只画）。 */
-    private static final class ChartLabelOp {
-        final String text;
-        final float x;
-        final float y;
-        final int color;
-        /** 文本宽度（rebuild 测量，合并成簇时用）。 */
-        float w;
-
-        ChartLabelOp(String text, float x, float y, int color) {
-            this.text = text;
-            this.x = x;
-            this.y = y;
-            this.color = color;
         }
     }
 

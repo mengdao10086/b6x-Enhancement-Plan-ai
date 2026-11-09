@@ -56,13 +56,13 @@ final class ChartSeries {
                         AXIS_LEFT, FMT_RPM, true),
                 new ChartSeries("hot", R.string.chart_series_hot, R.color.chart_series_hot,
                         AXIS_LEFT, FMT_TEMP, true),
-                // 目标制冷 / 实际制冷：同走右轴，顺序相邻、在换行处成组（startsLegendRow 以实际制冷为行首）
                 new ChartSeries("cool", R.string.chart_series_cool, R.color.chart_series_cool,
                         AXIS_RIGHT, FMT_INT, true),
-                new ChartSeries("coolActual", R.string.chart_series_cool_actual,
-                        R.color.chart_series_cool_actual, AXIS_RIGHT, FMT_INT, true),
                 new ChartSeries("pid", R.string.chart_series_pid, R.color.chart_series_pid,
                         AXIS_LEFT, FMT_TEMP, true),
+                // 实际制冷：与目标制冷同色半透明，图例第二行第二个
+                new ChartSeries("coolActual", R.string.chart_series_cool_actual,
+                        R.color.chart_series_cool_actual, AXIS_RIGHT, FMT_INT, true),
                 new ChartSeries("cold", R.string.chart_series_cold, R.color.chart_series_cold,
                         AXIS_LEFT, FMT_TEMP, false),
                 new ChartSeries("cpu", R.string.chart_series_cpu, R.color.chart_series_cpu,
@@ -77,12 +77,12 @@ final class ChartSeries {
     /**
      * 图例是否在该条之前另起一行（经 {@link WrapRowLayout#setBreakBefore} 施加）。
      *
-     * <p>{@code true} 的是「实际制冷 / pid ℃ / 冷端℃ / CPU℃」这一行：实际制冷紧跟目标制冷，
-     * 二者在换行处相邻成组；同时它作为第二行行首固定下来（与 pid℃ 此前作为第二行行首的机制相同）。
+     * <p>{@code true} 的是「pid ℃ / 实际制冷 / 冷端℃ / CPU℃」这一行：pid ℃ 作为第二行行首，
+     * 实际制冷紧随其后排第二；第一行仍是 电池℃ / 风扇rpm / 热端℃ / 目标制冷。
      * 图例顺序即 {@link #createAll} 的数组顺序。
      */
     static boolean startsLegendRow(ChartSeries s) {
-        return "coolActual".equals(s.id);
+        return "pid".equals(s.id);
     }
 
     /** 按住查看时即使当前样本无值也保留该行（显示「-」）：pid 稀疏、实际制冷常为未就绪 -1。 */
@@ -90,7 +90,7 @@ final class ChartSeries {
         return "pid".equals(s.id) || "coolActual".equals(s.id);
     }
 
-    /** 绘图与标注取值：热端/电池走滤波值，风扇 ÷100 与 ℃ 共轴。 */
+    /** 绘图与按住查看取值：热端/电池走滤波值，风扇 ÷100 与 ℃ 共轴。 */
     static float value(ChartSeries s, ChartSample d) {
         switch (s.id) {
             case "batt":

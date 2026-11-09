@@ -56,8 +56,8 @@
     <color name="chart_series_cpu">#FF9800</color>
     <color name="chart_series_rpm">#9C27B0</color>
     <color name="chart_series_cool">#4CAF50</color>
-    <!-- 实际制冷：Material Cyan 500，与目标制冷（绿）区分；明暗共用本值 -->
-    <color name="chart_series_cool_actual">#00BCD4</color>
+    <!-- 实际制冷：与目标制冷同色、60% 透明（与 pid 输入同款 alpha） -->
+    <color name="chart_series_cool_actual">#994CAF50</color>
     <!-- pid 输入：与电池同色、60% 透明，叠在电池线上时能同时看出两条 -->
     <color name="chart_series_pid">#99F44336</color>
     <color name="chart_axis">#888888</color>
