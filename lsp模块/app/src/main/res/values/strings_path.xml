@@ -4,9 +4,10 @@
     <string name="path_action_copy">复制</string>
     <string name="path_action_open">跳转</string>
     <string name="path_action_copied">已复制路径</string>
-    <!-- root/系统专属目录没有可用的 DocumentsProvider，普通文件管理器打不开 -->
-    <string name="path_action_open_root">该路径位于 root 专属目录，普通文件管理器打不开；请用支持 root 的文件管理器（如 MT 管理器）打开</string>
-    <string name="path_action_open_unsupported">该路径不是可浏览的存储目录，无法跳转</string>
-    <string name="path_action_open_no_manager">未找到能打开该目录的文件管理器</string>
-    <string name="path_action_open_denied">文件管理器无法访问该路径（可能缺少存储权限）</string>
+    <!-- 系统里没有任何能处理该 ACTION_VIEW 的应用 -->
+    <string name="path_action_open_no_app">没有能打开该路径的应用</string>
+    <!-- 用户选中的应用在启动时抛 SecurityException / ActivityNotFoundException -->
+    <string name="path_action_open_failed">所选应用打不开该路径（无权限或路径不可访问）</string>
+    <!-- root/系统目录没有可用的文档 URI：用户选过应用后再说明，不事前拦截 -->
+    <string name="path_action_open_root_degraded">该 root 路径无法通过系统接口传给所选应用，请在已打开的文件管理器中自行导航（需 root 权限）</string>
 </resources>

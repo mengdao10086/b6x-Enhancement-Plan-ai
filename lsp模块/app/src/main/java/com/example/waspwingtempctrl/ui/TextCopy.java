@@ -8,15 +8,18 @@ import android.content.ClipboardManager;
 import android.content.Context;
 import android.content.ContextWrapper;
 import android.content.Intent;
-import android.content.pm.PackageManager;
 import android.graphics.Color;
+import android.graphics.Rect;
 import android.graphics.drawable.ColorDrawable;
 import android.net.Uri;
 import android.provider.DocumentsContract;
 import android.text.Layout;
 import android.text.Selection;
 import android.text.Spannable;
+import android.text.Spanned;
+import android.text.style.ForegroundColorSpan;
 import android.view.ActionMode;
+import android.view.Gravity;
 import android.view.HapticFeedbackConstants;
 import android.view.LayoutInflater;
 import android.view.Menu;
@@ -25,18 +28,18 @@ import android.view.MotionEvent;
 import android.view.View;
 import android.view.ViewConfiguration;
 import android.view.ViewGroup;
-import android.view.Window;
-import android.view.WindowManager;
+import android.view.ViewTreeObserver;
 import android.widget.EditText;
+import android.widget.PopupWindow;
 import android.widget.TextView;
 import android.widget.Toast;
 
 import androidx.annotation.NonNull;
 import androidx.annotation.Nullable;
-import androidx.appcompat.app.AlertDialog;
 
 import com.example.waspwingtempctrl.ConfigStore;
 import com.example.waspwingtempctrl.R;
+import com.google.android.material.color.MaterialColors;
 
 import java.lang.ref.WeakReference;
 import java.util.ArrayList;
@@ -124,7 +127,8 @@ final class TextCopy {
 
     /**
      * 方案 B：保留系统选择态，只在选区 ActionMode 创建时把选区扩到「当前词所在的整条路径」；
-     * 同时让路径支持短按弹「复制 / 跳转」小卡（见 {@link PathSelectionCallback#onTap}）。
+     * 同时让路径支持短按弹「复制 / 跳转」小卡（见 {@link PathSelectionCallback#onTap}），
+     * 并把路径染成与 TextButton 同源的强调色（pre-draw 一次性变化检测补色，见 {@link #syncPathStyles}）。
      * 递归处理 root 下所有 {@code textIsSelectable} 的 {@link TextView}（跳过 {@link EditText}）。
      *
      * <p>同一控件可能被父子两级页面各装一次（配置页根 + 曲线子页）：重复安装会互相覆盖
@@ -142,6 +146,20 @@ final class TextCopy {
                 text.setCustomSelectionActionModeCallback(callback);
                 // 只观察按住/抬手/拖动：返回 false，系统选择与手柄拖动原样走（两段式计时与短按判定都用它）
                 text.setOnTouchListener(new HoldWatcher(callback));
+                // 文本由各页面 setText 刷新、不会重新 install：用 pre-draw 做一次性的文本变化检测补色。
+                // 监听器只在「已附着」时挂到当前窗口的 ViewTreeObserver；换窗口后由附着监听重新挂。
+                text.addOnAttachStateChangeListener(new View.OnAttachStateChangeListener() {
+                    @Override
+                    public void onViewAttachedToWindow(View v) {
+                        callback.attachPreDraw();
+                    }
+
+                    @Override
+                    public void onViewDetachedFromWindow(View v) {
+                        callback.detachPreDraw();
+                    }
+                });
+                callback.attachPreDraw();
             }
         }
         if (root instanceof ViewGroup) {
@@ -177,11 +195,18 @@ final class TextCopy {
         @Nullable
         private CharSequence indexedText;
         private int indexedLength = -1;
+        /** 上次索引时开关是否开启：关闭时保留空表，重新开启后由点按补索引。 */
+        private boolean indexedEnabled;
         private int[][] pathSpans = NO_PATH_SPANS;
+        /** 当前挂着 pre-draw 的观察者：换窗口/重新附着时用它去重。 */
+        @Nullable
+        private ViewTreeObserver styledObserver;
+        /** 固定实例，挂/摘 pre-draw 用同一个对象（方法引用每次求值不保证同一实例）。 */
+        private final ViewTreeObserver.OnPreDrawListener preDrawListener = this::onPreDraw;
 
         PathSelectionCallback(TextView view) {
             this.view = view;
-            ensurePathIndex();   // 安装时先索引一次；setText 换文本后由点按路径按需重建
+            syncPathStyles();   // 安装时先索引并着色一次
         }
 
         @Override
@@ -247,21 +272,21 @@ final class TextCopy {
             if (!isPathCopyEnabled(view.getContext()) || view.hasSelection()) {
                 return;
             }
-            String path = pathAt(x, y);
-            if (path == null) {
+            PathHit hit = pathHitAt(x, y);
+            if (hit == null) {
                 return;
             }
             // 等本次触摸分发结束再弹窗：避免在 dispatchTouchEvent 里同步换窗口焦点
             view.post(() -> {
                 if (view.isAttachedToWindow() && !view.hasSelection()) {
-                    PathActionCard.show(view, path);
+                    PathActionCard.show(view, hit);
                 }
             });
         }
 
-        /** 触点命中的路径文本；落在行间空白、行尾留白或路径外时返回 null。 */
+        /** 触点命中的路径；落在行间空白、行尾留白或路径外时返回 null。 */
         @Nullable
-        private String pathAt(float x, float y) {
+        private PathHit pathHitAt(float x, float y) {
             Layout layout = view.getLayout();
             CharSequence text = view.getText();
             if (layout == null || text == null || text.length() == 0) {
@@ -281,26 +306,140 @@ final class TextCopy {
             }
             for (int[] span : ensurePathIndex()) {
                 if (offset >= span[0] && offset < span[1]) {
-                    return text.subSequence(span[0], span[1]).toString();
+                    return hitFor(layout, line, span);
                 }
             }
             return null;
         }
 
         /**
-         * 路径区间缓存：安装时算一次；{@code setText} 会换掉整个 CharSequence（各页面刷新时都重设文本，
-         * 且不会重新 install），故在点按时按文本对象身份检测并重建。正则只走这里，
-         * <b>不在滚动/绘制路径上</b>。
+         * 以「被点路径在当前行上的那段」为锚：水平中心 x 与行盒上下沿（屏幕坐标）。
+         * 路径可能跨行，这里只取被点那一行，保证小卡贴着手指附近。
          */
-        private int[][] ensurePathIndex() {
+        @Nullable
+        private PathHit hitFor(@NonNull Layout layout, int line, @NonNull int[] span) {
+            int lineStart = layout.getLineStart(line);
+            int lineEnd = layout.getLineEnd(line);
+            int segStart = Math.max(span[0], lineStart);
+            int segEnd = Math.min(span[1], lineEnd);
+            if (segStart >= segEnd) {
+                return null;
+            }
+            float left = layout.getPrimaryHorizontal(segStart);
+            // segEnd == 行尾时 getPrimaryHorizontal 可能落到下一行行首；改用行右沿
+            float right = segEnd < lineEnd
+                    ? layout.getPrimaryHorizontal(segEnd)
+                    : layout.getLineRight(line);
+            if (left > right) {
+                float swap = left;
+                left = right;
+                right = swap;
+            }
+            int[] location = new int[2];
+            view.getLocationOnScreen(location);
+            float originX = location[0] + view.getTotalPaddingLeft() - view.getScrollX();
+            float originY = location[1] + view.getTotalPaddingTop() - view.getScrollY();
+            CharSequence text = view.getText();
+            return new PathHit(
+                    text.subSequence(span[0], span[1]).toString(),
+                    Math.round(originX + (left + right) / 2f),
+                    Math.round(originY + layout.getLineTop(line)),
+                    Math.round(originY + layout.getLineBottom(line)));
+        }
+
+        /** pre-draw：只在文本对象/长度变化时重建区间与着色；未变化时每帧只做一次身份比较。 */
+        boolean onPreDraw() {
+            syncPathStyles();
+            return true;   // 不取消绘制
+        }
+
+        /** 挂到当前窗口的观察者；同一观察者只挂一次。 */
+        void attachPreDraw() {
+            if (!view.isAttachedToWindow()) {
+                return;
+            }
+            ViewTreeObserver observer = view.getViewTreeObserver();
+            if (observer == styledObserver) {
+                return;
+            }
+            styledObserver = observer;
+            try {
+                observer.addOnPreDrawListener(preDrawListener);
+            } catch (IllegalStateException ignored) {
+                styledObserver = null;   // 观察者已失效：等下次附着再挂
+            }
+        }
+
+        /** 离开窗口时摘掉监听并清引用，重新附着时再挂到新的观察者。 */
+        void detachPreDraw() {
+            ViewTreeObserver observer = styledObserver;
+            styledObserver = null;
+            if (observer != null) {
+                try {
+                    observer.removeOnPreDrawListener(preDrawListener);
+                } catch (IllegalStateException ignored) {
+                    // 观察者已随窗口销毁：无需再摘
+                }
+            }
+        }
+
+        /**
+         * 文本变化检测：{@code setText} 会换掉整个 CharSequence（各页面刷新时都重设文本且不会重装），
+         * 以对象身份 + 长度判定；只有变化时才跑正则并补色。开关关闭时连正则都不跑。
+         */
+        private void syncPathStyles() {
             CharSequence text = view.getText();
             int length = text == null ? 0 : text.length();
-            if (text != indexedText || length != indexedLength) {
-                indexedText = text;
-                indexedLength = length;
+            if (text == indexedText && length == indexedLength) {
+                return;
+            }
+            indexedText = text;
+            indexedLength = length;
+            if (!isPathCopyEnabled(view.getContext())) {
+                indexedEnabled = false;
+                pathSpans = NO_PATH_SPANS;
+                return;
+            }
+            indexedEnabled = true;
+            pathSpans = findPathSpans(text);
+            applyPathColors(text);
+        }
+
+        /** 点按时兜底：开关刚打开、文本没变时补一次索引与着色。 */
+        private int[][] ensurePathIndex() {
+            syncPathStyles();
+            if (!indexedEnabled && isPathCopyEnabled(view.getContext())) {
+                indexedEnabled = true;
+                CharSequence text = view.getText();
                 pathSpans = findPathSpans(text);
+                applyPathColors(text);
             }
             return pathSpans;
+        }
+
+        /** 给当前 Spannable 里的每条路径套上「按钮强调色」；只清本功能自己的标记 span。 */
+        private void applyPathColors(@Nullable CharSequence text) {
+            if (!(text instanceof Spannable)) {
+                return;
+            }
+            Spannable spannable = (Spannable) text;
+            for (PathColorSpan old : spannable.getSpans(0, spannable.length(), PathColorSpan.class)) {
+                spannable.removeSpan(old);
+            }
+            if (!indexedEnabled || pathSpans.length == 0) {
+                return;
+            }
+            final int color;
+            try {
+                // 与 TextButton 的 enabled 文字色同源：?attr/colorPrimary（本项目即 @color/brand_primary）
+                color = MaterialColors.getColor(view, androidx.appcompat.R.attr.colorPrimary);
+            } catch (RuntimeException e) {
+                return;   // 主题异常时不着色，不影响文本其余功能
+            }
+            for (int[] span : pathSpans) {
+                spannable.setSpan(new PathColorSpan(color), span[0], span[1],
+                        Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+            }
         }
 
         /** 当前是否正有选中（点背景清除的判据）。 */
@@ -388,6 +527,13 @@ final class TextCopy {
         }
     }
 
+    /** 只用于标记本功能加的路径颜色，清理时不会误删文本上其它 ForegroundColorSpan。 */
+    private static final class PathColorSpan extends ForegroundColorSpan {
+        PathColorSpan(int color) {
+            super(color);
+        }
+    }
+
     /**
      * 触摸观察者：只记录按下/移动/抬起/多指，<b>不消费事件</b>（返回 false，系统选择与手柄拖动原样走）。
      *
@@ -460,70 +606,97 @@ final class TextCopy {
         }
     }
 
+    /** 一次路径命中的结果：文本本身 + 小卡的锚点几何（屏幕坐标）。 */
+    private static final class PathHit {
+        final String path;
+        /** 被点路径该行片段的水平中心（屏幕 x）。 */
+        final int centerX;
+        /** 该行行盒的上下沿（屏幕 y）。 */
+        final int lineTopY;
+        final int lineBottomY;
+
+        PathHit(String path, int centerX, int lineTopY, int lineBottomY) {
+            this.path = path;
+            this.centerX = centerX;
+            this.lineTopY = lineTopY;
+            this.lineBottomY = lineBottomY;
+        }
+    }
+
     /**
-     * 路径操作小卡：一条路径 +「复制 / 跳转」两个动作。用 {@link AlertDialog} 承载（窗口背景透明、
-     * 内容本身是主题卡片），点外部或返回键即收起；同一时刻只保留一张。
+     * 路径操作小卡：只有「复制 / 跳转」两个按钮，紧贴被点路径那一行的上方弹出；
+     * 上方放不下就翻到下方。用 {@link PopupWindow} 承载（不压暗背景），点外部或返回键即收起。
      */
     private static final class PathActionCard {
 
+        /** 卡片与行盒之间的间隙、距窗口可见边缘的最小留白（dp）。 */
+        private static final float GAP_DP = 4f;
+        private static final float MARGIN_DP = 8f;
+
         @Nullable
-        private static WeakReference<AlertDialog> current;
+        private static WeakReference<PopupWindow> current;
 
         private PathActionCard() {
         }
 
-        static void show(@NonNull View anchor, @NonNull String path) {
+        static void show(@NonNull View anchor, @NonNull PathHit hit) {
             Context context = anchor.getContext();
             View card = LayoutInflater.from(context)
                     .inflate(R.layout.view_path_action_card, null, false);
-            TextView pathView = card.findViewById(R.id.path_card_path);
-            pathView.setText(path);
-
-            AlertDialog dialog = new AlertDialog.Builder(context).setView(card).create();
-            dialog.setCanceledOnTouchOutside(true);
+            PopupWindow popup = new PopupWindow(card,
+                    ViewGroup.LayoutParams.WRAP_CONTENT,
+                    ViewGroup.LayoutParams.WRAP_CONTENT,
+                    true);
+            popup.setBackgroundDrawable(new ColorDrawable(Color.TRANSPARENT));
+            popup.setOutsideTouchable(true);
             card.findViewById(R.id.path_card_copy).setOnClickListener(v -> {
-                copy(context, path);
+                copy(context, hit.path);
                 Toast.makeText(context.getApplicationContext(),
                         R.string.path_action_copied, Toast.LENGTH_SHORT).show();
-                dialog.dismiss();
+                popup.dismiss();
             });
             card.findViewById(R.id.path_card_open).setOnClickListener(v -> {
-                dialog.dismiss();
-                PathOpener.open(context, path);
+                popup.dismiss();
+                PathOpener.open(context, hit.path);
             });
-            dialog.setOnDismissListener(d -> {
-                WeakReference<AlertDialog> ref = current;
-                if (ref != null && ref.get() == dialog) {
+            popup.setOnDismissListener(() -> {
+                WeakReference<PopupWindow> ref = current;
+                if (ref != null && ref.get() == popup) {
                     current = null;
                 }
             });
 
-            // 先配好窗口再 show：自定义内容会被 AlertDialog 拉成 MATCH_PARENT，这里给窗口一个
-            // 紧凑宽度（上限「当前窗口宽 − 48dp」），避免首帧以全宽闪一下。
-            Window window = dialog.getWindow();
-            if (window != null) {
-                window.setBackgroundDrawable(new ColorDrawable(Color.TRANSPARENT));
-                float density = context.getResources().getDisplayMetrics().density;
-                int available = anchor.getRootView().getWidth();
-                if (available <= 0) {
-                    available = context.getResources().getDisplayMetrics().widthPixels;
-                }
-                int width = Math.min(Math.round(300 * density),
-                        Math.max(1, available - Math.round(48 * density)));
-                window.setLayout(width, WindowManager.LayoutParams.WRAP_CONTENT);
+            // 先量出卡片实宽实高，再决定「贴上方还是翻到下方」以及水平居中位置
+            card.measure(View.MeasureSpec.makeMeasureSpec(0, View.MeasureSpec.UNSPECIFIED),
+                    View.MeasureSpec.makeMeasureSpec(0, View.MeasureSpec.UNSPECIFIED));
+            int width = card.getMeasuredWidth();
+            int height = card.getMeasuredHeight();
+            float density = context.getResources().getDisplayMetrics().density;
+            int gap = Math.round(GAP_DP * density);
+            int margin = Math.round(MARGIN_DP * density);
+            Rect frame = new Rect();
+            anchor.getWindowVisibleDisplayFrame(frame);
+
+            int x = hit.centerX - width / 2;
+            x = Math.max(frame.left + margin, Math.min(x, frame.right - width - margin));
+            int y = hit.lineTopY - height - gap;   // 优先贴上方
+            if (y < frame.top + margin) {
+                y = hit.lineBottomY + gap;         // 上方放不下：翻到下方
             }
+            y = Math.max(frame.top + margin,
+                    Math.min(y, frame.bottom - height - margin));
 
             dismissCurrent();
             try {
-                dialog.show();
-            } catch (WindowManager.BadTokenException e) {
-                return;   // 宿主已经在退出：不弹卡，也不留下失效引用
+                popup.showAtLocation(anchor, Gravity.NO_GRAVITY, x, y);
+            } catch (RuntimeException e) {
+                return;   // 宿主窗口已失效（退出/切页）：不弹卡，也不留下失效引用
             }
-            current = new WeakReference<>(dialog);
+            current = new WeakReference<>(popup);
         }
 
         private static void dismissCurrent() {
-            AlertDialog previous = current == null ? null : current.get();
+            PopupWindow previous = current == null ? null : current.get();
             current = null;
             if (previous != null && previous.isShowing()) {
                 previous.dismiss();
@@ -532,71 +705,58 @@ final class TextCopy {
     }
 
     /**
-     * 路径跳转：把共享存储路径换算成 {@code com.android.externalstorage.documents} 的文档 URI，
-     * 再探测可用的文件管理器。
+     * 路径跳转：能换算成共享存储文档 URI 的路径，直接交给系统选择器；
+     * 换算不了的（root/系统目录等）也不按目录性质事前拒绝，先让用户选应用，再提示降级原因。
      *
      * <p><b>为什么不用 {@code file://}：</b>本应用 {@code targetSdk=34}，向其他应用发送
-     * {@code file://} 会触发 {@code FileUriExposedException}（StrictMode 默认策略），因此只能走
-     * {@code content://}。root/系统专属目录（如 {@code /data/adb/…}）没有可用的 DocumentsProvider，
-     * 普通文件管理器也读不到，故如实提示，不做静默失败。
+     * {@code file://} 会触发 {@code FileUriExposedException}（StrictMode 默认策略），不能用反射去关；
+     * 因此只能走 {@code content://}。{@code /data/adb/…} 没有对应的 DocumentsProvider，
+     * 任何 App 都拿不到它的文档 URI，这是降级提示的依据。
      */
     private static final class PathOpener {
 
         /** 共享存储的 DocumentsProvider：唯一能把普通路径换成可授权 content:// 的通道。 */
         private static final String EXTERNAL_STORAGE_AUTHORITY = "com.android.externalstorage.documents";
-        /** 按 MT → 小米文件管理 → 系统文件 → Google 文件的顺序探测；不在列表里的包交给系统解析。 */
-        private static final String[] FILE_MANAGER_PACKAGES = {
-                "bin.mt.plus",
-                "com.mi.android.globalFileexplorer",
-                "com.android.documentsui",
-                "com.google.android.documentsui"
-        };
-        /** root/系统专属目录：普通应用与普通文件管理器都无权浏览。 */
-        private static final String[] PRIVILEGED_PREFIXES = {
-                "/data", "/system", "/vendor", "/product", "/apex", "/odm", "/oem",
-                "/proc", "/sys", "/dev", "/mnt", "/root", "/metadata", "/cache", "/config"
-        };
         /** 主存储在 DocumentsProvider 里的绝对路径；其余共享路径按卷 id 换算。 */
         private static final String PRIMARY_ROOT = "/storage/emulated/0";
 
         private PathOpener() {
         }
 
-        /** 跳转到路径所在目录（路径本身是文件时取父目录）。 */
+        /** 跳转到路径所在目录（路径本身是文件时取父目录）；不写死文件管理器，交给系统选择。 */
         static void open(@NonNull Context context, @NonNull String path) {
+            Uri target = null;
+            boolean degraded = false;
             String shared = toSharedPath(path);
-            if (shared == null) {
-                toast(context, isPrivilegedPath(path)
-                        ? R.string.path_action_open_root
-                        : R.string.path_action_open_unsupported);
-                return;
+            if (shared != null) {
+                Uri uri = documentUri(shared);
+                String directory = uri == null ? null : directoryOf(context, uri, shared);
+                target = directory == null ? null : documentUri(directory);
             }
-            Uri uri = documentUri(shared);
-            if (uri == null) {
-                toast(context, R.string.path_action_open_unsupported);
-                return;
+            if (target == null) {
+                // root/不可表达的路径：不事前拦截，先用「内部存储根」把用户带到文件管理器；
+                // 真正传不过去的原因在启动后提示（见下方 degraded）。
+                target = documentUri(PRIMARY_ROOT);
+                degraded = true;
             }
-            String directory = directoryOf(context, uri, shared);
-            Uri directoryUri = directory == null ? null : documentUri(directory);
-            if (directoryUri == null) {
-                toast(context, R.string.path_action_open_unsupported);
+            if (target == null) {
+                toast(context, R.string.path_action_open_no_app);
                 return;
             }
             Intent withType = new Intent(Intent.ACTION_VIEW)
-                    .setDataAndType(directoryUri, DocumentsContract.Document.MIME_TYPE_DIR);
-            LaunchResult result = launch(context, withType);
-            if (result == LaunchResult.STARTED) {
-                return;
+                    .setDataAndType(target, DocumentsContract.Document.MIME_TYPE_DIR);
+            OpenResult result = start(context, withType);
+            if (result == OpenResult.NO_APP) {
+                // 有的应用只声明裸 ACTION_VIEW、不认目录 MIME
+                result = start(context, new Intent(Intent.ACTION_VIEW, target));
             }
-            // 有的管理器只声明裸 ACTION_VIEW、不认目录 MIME：去掉 type 再探一次
-            Intent bare = new Intent(Intent.ACTION_VIEW, directoryUri);
-            LaunchResult bareResult = launch(context, bare);
-            if (bareResult == LaunchResult.STARTED) {
-                return;
+            if (result == OpenResult.NO_APP) {
+                toast(context, R.string.path_action_open_no_app);
+            } else if (result == OpenResult.DENIED) {
+                toast(context, R.string.path_action_open_failed);
+            } else if (degraded) {
+                toast(context, R.string.path_action_open_root_degraded);
             }
-            toast(context, (result == LaunchResult.DENIED || bareResult == LaunchResult.DENIED)
-                    ? R.string.path_action_open_denied
-                    : R.string.path_action_open_no_manager);
         }
 
         /** 路径若指向文件则取其父目录；无法确定类型时按「最后一段带扩展名」判断。 */
@@ -683,68 +843,25 @@ final class TextCopy {
             return null;
         }
 
-        private static boolean isPrivilegedPath(@NonNull String path) {
-            for (String prefix : PRIVILEGED_PREFIXES) {
-                if (path.equals(prefix) || path.startsWith(prefix + "/")) {
-                    return true;
-                }
-            }
-            return false;
-        }
+        /** 启动结果：区分「系统里没有应用」「所选应用打不开」与成功。 */
+        private enum OpenResult { OPENED, NO_APP, DENIED }
 
-        /** 启动结果：用来区分「没有管理器」与「管理器拒绝了路径」，失败提示才说得清原因。 */
-        private enum LaunchResult { STARTED, UNAVAILABLE, DENIED }
-
-        /** 先探已知文件管理器（显式包名），再退回系统解析；任一成功即停。 */
-        private static LaunchResult launch(@NonNull Context context, @NonNull Intent base) {
-            base.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
-            PackageManager pm = context.getPackageManager();
-            LaunchResult result = LaunchResult.UNAVAILABLE;
-            for (String pkg : FILE_MANAGER_PACKAGES) {
-                Intent explicit = new Intent(base).setPackage(pkg);
-                if (explicit.resolveActivity(pm) == null) {
-                    continue;
-                }
-                LaunchResult attempt = startQuietly(context, explicit);
-                if (attempt == LaunchResult.STARTED) {
-                    return attempt;
-                }
-                if (attempt == LaunchResult.DENIED) {
-                    result = attempt;
-                }
-            }
-            if (base.resolveActivity(pm) != null) {
-                LaunchResult attempt = startQuietly(context, base);
-                if (attempt == LaunchResult.STARTED) {
-                    return attempt;
-                }
-                if (attempt == LaunchResult.DENIED) {
-                    result = attempt;
-                }
-            } else if (!pm.queryIntentActivities(base, PackageManager.MATCH_DEFAULT_ONLY).isEmpty()) {
-                // 有多个候选但没有默认：交给系统选择器，总比直接报“没有管理器”好
-                LaunchResult attempt = startQuietly(context, base);
-                if (attempt == LaunchResult.STARTED) {
-                    return attempt;
-                }
-                if (attempt == LaunchResult.DENIED) {
-                    result = attempt;
-                }
-            }
-            return result;
-        }
-
-        private static LaunchResult startQuietly(@NonNull Context context, @NonNull Intent intent) {
+        /**
+         * 用隐式 Intent 交给系统：首次会弹出带「仅此一次 / 始终」的选择器，
+         * 用户选过「始终」后系统直接打开默认应用；这里不写死任何包名顺序。
+         */
+        private static OpenResult start(@NonNull Context context, @NonNull Intent intent) {
+            intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
             if (!isActivityContext(context)) {
                 intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
             }
             try {
                 context.startActivity(intent);
-                return LaunchResult.STARTED;
+                return OpenResult.OPENED;
             } catch (ActivityNotFoundException e) {
-                return LaunchResult.UNAVAILABLE;   // 该管理器实际不接这个 URI：继续试下一个
+                return OpenResult.NO_APP;   // 系统里没有任何可处理的应用
             } catch (SecurityException e) {
-                return LaunchResult.DENIED;        // 没有该路径的读权限
+                return OpenResult.DENIED;   // 所选应用打不开（无权限等）
             }
         }
 
