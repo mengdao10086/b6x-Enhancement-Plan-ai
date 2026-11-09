@@ -48,13 +48,15 @@ import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 /**
- * 文本复制：长按整段复制、对话框正文可选、以及「这个控件是否正被选中」的判据。
+ * 文本复制与路径操作：长按整段复制、对话框正文可选、路径短按弹「复制 / 跳转」小卡，
+ * 以及「这个控件是否正被选中」的判据。
  *
  * <p>两种复制方式互斥：开了 {@code textIsSelectable} 的控件由系统提供选择与复制，<b>不再</b>挂长按复制
  * （View 的长按监听会先吃掉手势，系统选择根本进不去）；反过来，长按复制的控件<b>不开</b>
  * {@code textIsSelectable} —— 后者会顺带把控件设为可聚焦/可点击（AOSP 实现），在配置页会干扰输入框焦点。
  *
- * <p>复制成功不额外提示：Android 13+ 系统自带剪贴板预览，再弹一条提示是重复反馈。
+ * <p>长按复制不额外提示：Android 13+ 系统自带剪贴板预览，再弹一条提示是重复反馈。
+ * 路径小卡里的「复制」例外：卡片本身就是一次明确的选择动作，按用户要求给一条 Toast。
  */
 final class TextCopy {
 
@@ -151,8 +153,9 @@ final class TextCopy {
     }
 
     /**
-     * 单个控件的选区回调：<b>两段式</b>——系统长按先按词选中一段，继续按住满 {@link #HOLD_TO_EXPAND_MS}
+     * 单个控件的路径交互：<b>两段式扩选</b>——系统长按先按词选中一段，继续按住满 {@link #HOLD_TO_EXPAND_MS}
      * 才扩成整条路径；抬手或改成拖选即保持系统那一段。每次 ActionMode 至多扩一次。
+     * <b>短按</b>则由 {@link #onTap} 弹「复制 / 跳转」小卡，两者共用同一套触摸观察。
      */
     private static final class PathSelectionCallback implements ActionMode.Callback {
 
