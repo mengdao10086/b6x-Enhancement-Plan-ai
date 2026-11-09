@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- kill daemon：红色圆形底 + 白色电源符号 -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="48dp"
+    android:height="48dp"
+    android:viewportWidth="24"
+    android:viewportHeight="24">
+    <path
+        android:fillColor="#FFD32F2F"
+        android:pathData="M12,12m-12,0a12,12 0,1 1,24 0a12,12 0,1 1,-24 0" />
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:pathData="M12,2C11.45,2 11,2.45 11,3V12C11,12.55 11.45,13 12,13C12.55,13 13,12.55 13,12V3C13,2.45 12.55,2 12,2Z" />
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:pathData="M16,4.01V6.01C18.36,7.18 20,9.61 20,12.41C20,16.28 16.87,19.41 13,19.41C9.13,19.41 6,16.28 6,12.41C6,9.61 7.64,7.18 10,6.01V4.01C6.58,5.29 4,8.55 4,12.41C4,17.38 8.03,21.41 13,21.41C17.97,21.41 22,17.38 22,12.41C22,8.55 19.42,5.29 16,4.01Z" />
+</vector>

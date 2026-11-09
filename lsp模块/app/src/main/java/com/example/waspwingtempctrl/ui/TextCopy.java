@@ -718,6 +718,15 @@ final class TextCopy {
                 if (attempt == LaunchResult.DENIED) {
                     result = attempt;
                 }
+            } else if (!pm.queryIntentActivities(base, PackageManager.MATCH_DEFAULT_ONLY).isEmpty()) {
+                // 有多个候选但没有默认：交给系统选择器，总比直接报“没有管理器”好
+                LaunchResult attempt = startQuietly(context, base);
+                if (attempt == LaunchResult.STARTED) {
+                    return attempt;
+                }
+                if (attempt == LaunchResult.DENIED) {
+                    result = attempt;
+                }
             }
             return result;
         }

@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- 快捷方式标签：用户要求的中文/英文原文，勿翻译成其他措辞 -->
+    <string name="shortcut_kill_daemon_short">kill daemon</string>
+    <string name="shortcut_kill_daemon_long">kill daemon</string>
+    <string name="shortcut_temp_stop_short">临时停止</string>
+    <string name="shortcut_temp_stop_long">临时停止</string>
+
+    <!-- 动作结果 Toast -->
+    <string name="shortcut_toast_kill_ok">守护进程已停止</string>
+    <string name="shortcut_toast_kill_failed">停止失败：%1$s</string>
+    <string name="shortcut_toast_temp_stop_ok">已临时停止</string>
+    <string name="shortcut_toast_temp_stop_failed">临时停止失败：%1$s</string>
+    <string name="shortcut_toast_root_denied">root 不可用或未授权，停止失败</string>
+    <string name="shortcut_toast_unknown_action">未知的快捷方式操作</string>
+    <string name="shortcut_toast_error">快捷方式执行异常</string>
+</resources>

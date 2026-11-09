@@ -1,0 +1,34 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    静态 App Shortcuts：长按桌面图标直接出现。
+    android:action 与 ShortcutActionActivity 中的常量保持一致，改一处必须同步改另一处。
+-->
+<shortcuts xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <shortcut
+        android:shortcutId="kill_daemon"
+        android:enabled="true"
+        android:icon="@drawable/ic_shortcut_kill_daemon"
+        android:shortcutShortLabel="@string/shortcut_kill_daemon_short"
+        android:shortcutLongLabel="@string/shortcut_kill_daemon_long"
+        android:rank="0">
+        <intent
+            android:action="com.example.waspwingtempctrl.action.KILL_DAEMON"
+            android:targetPackage="com.example.waspwingtempctrl"
+            android:targetClass="com.example.waspwingtempctrl.ShortcutActionActivity" />
+    </shortcut>
+
+    <shortcut
+        android:shortcutId="temp_stop"
+        android:enabled="true"
+        android:icon="@drawable/ic_shortcut_temp_stop"
+        android:shortcutShortLabel="@string/shortcut_temp_stop_short"
+        android:shortcutLongLabel="@string/shortcut_temp_stop_long"
+        android:rank="1">
+        <intent
+            android:action="com.example.waspwingtempctrl.action.TEMP_STOP"
+            android:targetPackage="com.example.waspwingtempctrl"
+            android:targetClass="com.example.waspwingtempctrl.ShortcutActionActivity" />
+    </shortcut>
+
+</shortcuts>

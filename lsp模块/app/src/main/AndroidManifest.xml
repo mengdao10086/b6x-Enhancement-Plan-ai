@@ -14,11 +14,24 @@
         <activity
             android:name=".SetupActivity"
             android:exported="true">
+            <!-- 静态快捷方式：长按桌面图标展示 res/xml/shortcuts.xml 中的两条动作 -->
+            <meta-data
+                android:name="android.app.shortcuts"
+                android:resource="@xml/shortcuts" />
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+
+        <!-- 快捷方式动作入口：透明无界面，执行完立即 finish -->
+        <activity
+            android:name=".ShortcutActionActivity"
+            android:configChanges="keyboardHidden|orientation|screenSize|smallestScreenSize|uiMode"
+            android:excludeFromRecents="true"
+            android:exported="true"
+            android:launchMode="singleTop"
+            android:theme="@style/Theme.WaspWing.Shortcut" />
 
         <!-- 设置页：原「[4] 界面」那组界面参数（含「返回退出自动隐藏后台」）的落点，
              入口是 SetupActivity 标题栏右侧的设置按钮，故不导出 -->
