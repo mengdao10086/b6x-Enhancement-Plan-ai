@@ -26,7 +26,7 @@ import java.util.List;
 /**
  * 曲线自绘控件。口径逐条对齐 {@code app/逻辑说明.md} §7。
  *
- * <p><b>性能硬约束</b>：{@code onDraw} 只画，全部几何量（轴与刻度、每系列 {@link Path}、末端圆点、
+ * <p><b>性能硬约束</b>：{@code onDraw} 只画，全部几何量（轴与刻度、每系列 {@link Path}、末端圆点与标签、
  * 断联空白）都在 {@link #rebuild()} 里算好并缓存，<b>绝不在 onDraw 内重建 Path</b>（口径见 app/逻辑说明.md §7）。
  *
  * <p><b>本控件不读文件</b>：数据由 {@link ChartLoader} 在后台线程读好后经
@@ -47,6 +47,7 @@ public class ChartView extends View {
     private static final int PAD_B_DP = 4;
     private static final float LINE_WIDTH_DP = 1.6f; // 折线
     private static final float GRID_WIDTH_DP = 1f;   // 网格
+    private static final float HALO_WIDTH_DP = 3f;   // 文字 halo
     private static final float DOT_RADIUS_DP = 3.2f; // 头部圆点
     private static final float DOT_HALO_DP = 1f;     // 圆点外圈
     // 竖虚线：与网格线同宽同色（透明度含在网格色里），3dp 实 / 3dp 空
@@ -67,6 +68,9 @@ public class ChartView extends View {
     private static final float PID_DOT_RADIUS_DP = LINE_WIDTH_DP * 1.3f;
     private static final float TICK_TEXT_DP = 10f;   // 刻度 / 轴标题 / 按住查看字号
     private static final float EMPTY_TEXT_DP = 12f;  // 「采样中…」字号
+    // 末端数值标签与端点的水平间距、标签相对端点的抬升量（沿用原多系列标注口径）
+    private static final float LABEL_GAP_DP = 6f;
+    private static final float LABEL_LIFT_DP = 4f;
     // 按住查看的数值行高（webui 同名常量 LABEL_H）
     private static final float LABEL_H_DP = 11f;
 
@@ -74,6 +78,7 @@ public class ChartView extends View {
     private final Paint tickPaint = new Paint();     // 左轴刻度（右对齐）
     private final Paint axisTextPaint = new Paint(); // 右轴刻度 / 轴标题（左对齐）
     private final Paint seriesPaint = new Paint();
+    private final Paint haloPaint = new Paint();     // 文字 halo（STROKE）
     private final Paint labelPaint = new Paint();
     private final Paint dotPaint = new Paint();
     private final Paint dotHaloPaint = new Paint();
@@ -115,6 +120,8 @@ public class ChartView extends View {
     private String[] rightText;
     private Path[] paths;
     private ChartDotOp[] dots;
+    /** 末端数值标签（仅实际制冷，单条）。 */
+    private ChartLabelOp endLabel;
     /** PID 重算标记：竖向虚线（x 坐标）。 */
     private float[] dashXs;
     /** pid 曲线的孤立样本点（x/y 同长，颜色恒为 pid 系列色）。 */
@@ -183,6 +190,10 @@ public class ChartView extends View {
         seriesPaint.setAntiAlias(true);
         seriesPaint.setStyle(Paint.Style.STROKE);
         seriesPaint.setStrokeWidth(LINE_WIDTH_DP * density);
+        haloPaint.setAntiAlias(true);
+        haloPaint.setStyle(Paint.Style.STROKE);
+        haloPaint.setStrokeWidth(HALO_WIDTH_DP * density);
+        haloPaint.setTextSize(TICK_TEXT_DP * density);
         labelPaint.setAntiAlias(true);
         labelPaint.setStyle(Paint.Style.FILL);
         labelPaint.setTextSize(TICK_TEXT_DP * density);
@@ -258,7 +269,7 @@ public class ChartView extends View {
     private void loadColors() {
         Resources res = getResources();
         Theme theme = getContext().getTheme();
-        // 底色 = 卡片底色（圆点外圈靠它遮住穿过的曲线）；见 app/逻辑说明.md §7.5
+        // 底色 = 卡片底色（halo 与圆点外圈靠它遮住穿过的曲线）；见 app/逻辑说明.md §7.5
         colorBg = res.getColor(R.color.app_surface_container, theme);
         // 网格线走主题分隔线色（可见度论证见 app/逻辑说明.md §7.5）
         colorGrid = res.getColor(R.color.app_outline_variant, theme);
@@ -266,6 +277,7 @@ public class ChartView extends View {
         for (int i = 0; i < series.length; i++) {
             seriesColors[i] = res.getColor(series[i].colorRes, theme);
         }
+        haloPaint.setColor(colorBg);
         dotHaloPaint.setColor(colorBg);
         colorHighlight = withAlpha(colorAxis, TOUCH_LINE_ALPHA);
         colorPanel = withAlpha(colorBg, TOUCH_PANEL_ALPHA);
@@ -290,6 +302,7 @@ public class ChartView extends View {
         rightText = null;
         paths = null;
         dots = null;
+        endLabel = null;
         dashXs = null;
         pidDotX = null;
         pidDotY = null;
@@ -659,11 +672,13 @@ public class ChartView extends View {
     }
 
     /**
-     * 末端圆点：每条开启且允许端点圆点的系列取最后一个有效样本，在其端点画一个实心圆点。
-     * 边缘数值标签已取消；按住查看面板里的数值由 {@link #buildTouchRows} 单独生成。
+     * 末端标记：每条开启系列取最后一个有效样本；圆点按 {@link ChartSeries#drawsEndDot} 决定是否画，
+     * 数值标签按 {@link ChartSeries#drawsEndLabel} 白名单只给实际制冷生成（位置见 {@link #placeEndpointLabel}）。
+     * 按住查看面板里的数值由 {@link #buildTouchRows} 单独生成。
      */
     private void buildMarkers(ChartWindow win, ChartAxis lAxis, ChartAxis rAxis) {
         List<ChartDotOp> dotOps = new ArrayList<>();
+        ChartLabelOp label = null;
         for (int si = 0; si < series.length; si++) {
             ChartSeries s = series[si];
             if (!s.on) {
@@ -672,8 +687,10 @@ public class ChartView extends View {
             if ("pid".equals(s.id)) {
                 continue;   // pid 稀疏曲线由 buildPidSingles 单独画点
             }
-            if (!ChartSeries.drawsEndDot(s)) {
-                continue;   // 目标制冷不画端点圆点
+            boolean wantDot = ChartSeries.drawsEndDot(s);
+            boolean wantLabel = ChartSeries.drawsEndLabel(s);
+            if (!wantDot && !wantLabel) {
+                continue;   // 目标制冷既不画圆点也不标数值
             }
             ChartAxis ax = s.axis == ChartSeries.AXIS_LEFT ? lAxis : rAxis;
             if (ax == null) {
@@ -702,12 +719,52 @@ public class ChartView extends View {
             if (ey < fPadT) {
                 ey = fPadT;
             }
-            dotOps.add(new ChartDotOp(ex, ey, seriesColors[si]));
+            if (wantDot) {
+                dotOps.add(new ChartDotOp(ex, ey, seriesColors[si]));
+            }
+            if (wantLabel) {
+                label = placeEndpointLabel(s, lv, ex, ey, seriesColors[si]);
+            }
         }
-        if (dotOps.isEmpty()) {
-            return;
+        dots = dotOps.isEmpty() ? null : dotOps.toArray(new ChartDotOp[0]);
+        endLabel = label;
+    }
+
+    /**
+     * 单个末端数值标签的落位（沿用原多系列标注的单锚点口径）：
+     * 横向放锚点右侧 {@link #LABEL_GAP_DP}，右越界翻到左侧，左界钳到 2dp；
+     * 纵向比较锚点上下空隙，优先选放得下且空隙更大的一侧，两侧都放不下时取空隙更大的一侧，
+     * 再钳在绘图区上沿与「画布下沿 − descent」之间。
+     */
+    private ChartLabelOp placeEndpointLabel(ChartSeries s, float v, float ex, float ey, int color) {
+        String text = ChartSeries.format(s, v);
+        float textW = tickPaint.measureText(text);
+        Paint.FontMetrics fm = tickPaint.getFontMetrics();
+        float labelH = LABEL_H_DP * density;
+        float needAbove = LABEL_LIFT_DP * density - fm.ascent;
+        float needBelow = labelH + 1f * density + fm.descent;
+        float labelMaxY = Math.min(fPadT + fH + labelH, getHeight() - fm.descent);
+        float gapAbove = ey - fPadT;
+        float gapBelow = (fPadT + fH) - ey;
+        boolean fitsAbove = gapAbove >= needAbove;
+        boolean fitsBelow = gapBelow >= needBelow;
+        boolean placeAbove = fitsAbove == fitsBelow ? gapAbove >= gapBelow : fitsAbove;
+        float ly = placeAbove ? ey - LABEL_LIFT_DP * density
+                              : ey + LABEL_H_DP * density + 1f * density;
+        if (ly < fPadT) {
+            ly = fPadT;
         }
-        dots = dotOps.toArray(new ChartDotOp[0]);
+        if (ly > labelMaxY) {
+            ly = labelMaxY;
+        }
+        float tx = ex + LABEL_GAP_DP * density;
+        if (tx + textW > fPadL + fW) {
+            tx = ex - LABEL_GAP_DP * density - textW;
+        }
+        if (tx < 2f * density) {
+            tx = 2f * density;
+        }
+        return new ChartLabelOp(text, tx, ly, color);
     }
 
     // ==================== 按住查看 ====================
@@ -1090,6 +1147,16 @@ public class ChartView extends View {
             }
         }
 
+        // 末端数值标签（仅实际制冷）：先描边（halo）再填色，避免曲线穿过字形时同色糊在一起
+        if (endLabel != null) {
+            haloPaint.setColor(colorBg);
+            labelPaint.setTextSize(TICK_TEXT_DP * density);
+            haloPaint.setTextSize(TICK_TEXT_DP * density);
+            labelPaint.setColor(endLabel.color);
+            canvas.drawText(endLabel.text, endLabel.x, endLabel.y, haloPaint);
+            canvas.drawText(endLabel.text, endLabel.x, endLabel.y, labelPaint);
+        }
+
         if (dots != null) {
             dotHaloPaint.setColor(colorBg);
             float r = DOT_RADIUS_DP * density;
@@ -1098,6 +1165,21 @@ public class ChartView extends View {
                 canvas.drawCircle(e.x, e.y, r, dotPaint);
                 canvas.drawCircle(e.x, e.y, r, dotHaloPaint);
             }
+        }
+    }
+
+    /** 一条末端数值标签（位置/颜色在 rebuild 定死，onDraw 只画）。 */
+    private static final class ChartLabelOp {
+        final String text;
+        final float x;
+        final float y;
+        final int color;
+
+        ChartLabelOp(String text, float x, float y, int color) {
+            this.text = text;
+            this.x = x;
+            this.y = y;
+            this.color = color;
         }
     }
 

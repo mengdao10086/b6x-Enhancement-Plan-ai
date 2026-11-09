@@ -80,6 +80,11 @@ final class ChartSeries {
         return !"cool".equals(s.id);
     }
 
+    /** 是否绘制末端数值标签：白名单，只给实际制冷（目标制冷及其它系列都不标）。 */
+    static boolean drawsEndLabel(ChartSeries s) {
+        return "coolActual".equals(s.id);
+    }
+
     /**
      * 图例是否在该条之前另起一行（经 {@link WrapRowLayout#setBreakBefore} 施加）。
      *
