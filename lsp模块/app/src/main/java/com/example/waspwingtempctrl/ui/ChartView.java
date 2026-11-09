@@ -659,7 +659,7 @@ public class ChartView extends View {
     }
 
     /**
-     * 末端圆点：每条开启系列取最后一个有效样本，在其端点画一个实心圆点。
+     * 末端圆点：每条开启且允许端点圆点的系列取最后一个有效样本，在其端点画一个实心圆点。
      * 边缘数值标签已取消；按住查看面板里的数值由 {@link #buildTouchRows} 单独生成。
      */
     private void buildMarkers(ChartWindow win, ChartAxis lAxis, ChartAxis rAxis) {
@@ -671,6 +671,9 @@ public class ChartView extends View {
             }
             if ("pid".equals(s.id)) {
                 continue;   // pid 稀疏曲线由 buildPidSingles 单独画点
+            }
+            if (!ChartSeries.drawsEndDot(s)) {
+                continue;   // 目标制冷不画端点圆点
             }
             ChartAxis ax = s.axis == ChartSeries.AXIS_LEFT ? lAxis : rAxis;
             if (ax == null) {

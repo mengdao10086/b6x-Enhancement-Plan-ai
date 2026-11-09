@@ -41,15 +41,19 @@
     <color name="badge_muted_bg">#2A3133</color>
     <color name="badge_muted_fg">#B0B8BA</color>
 
-    <!-- ===== 曲线（与 values 同名，值也相同） =====
-         原 WebUI 只有一套色吃明暗两种底色，故本轮按「逐项对齐 WebUI」改为与浅色同值，
-         不再提亮（理由与色号见 values/colors.xml 同名段）。 -->
+    <!-- ===== 曲线（与 values 同名；除实际制冷外同值） =====
+         原 WebUI 只有一套色吃明暗两种底色，故按「逐项对齐 WebUI」保持与浅色同值，
+         不再提亮（理由与色号见 values/colors.xml 同名段）。
+         例外：实际制冷的不透明绿在深底上提亮一档（Green 400 #66BB6A），保证对比度。 -->
     <color name="chart_series_batt">#F44336</color>
     <color name="chart_series_hot">#E91E63</color>
     <color name="chart_series_cold">#2196F3</color>
     <color name="chart_series_cpu">#FF9800</color>
     <color name="chart_series_rpm">#9C27B0</color>
-    <color name="chart_series_cool">#4CAF50</color>
+    <!-- 目标制冷：与浅色同值，60% 透明（与 pid 同款 alpha） -->
+    <color name="chart_series_cool">#994CAF50</color>
+    <!-- 实际制冷：不透明绿提亮一档，深底对比更清楚 -->
+    <color name="chart_series_cool_actual">#66BB6A</color>
     <!-- pid 输入：同色 60% 透明（口径见 values/colors.xml 同名段） -->
     <color name="chart_series_pid">#99F44336</color>
     <color name="chart_axis">#888888</color>

@@ -75,6 +75,11 @@ final class ChartSeries {
         return "rpm".equals(s.id);
     }
 
+    /** 是否绘制末端圆点：默认是；目标制冷只保留曲线、不画端点圆点（pid 的稀疏圆点另有来源，不受此开关影响）。 */
+    static boolean drawsEndDot(ChartSeries s) {
+        return !"cool".equals(s.id);
+    }
+
     /**
      * 图例是否在该条之前另起一行（经 {@link WrapRowLayout#setBreakBefore} 施加）。
      *
