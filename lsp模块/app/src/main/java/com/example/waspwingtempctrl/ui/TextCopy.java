@@ -1,20 +1,15 @@
 package com.example.waspwingtempctrl.ui;
 
-import android.app.Activity;
 import android.app.Dialog;
-import android.content.ActivityNotFoundException;
 import android.content.ClipData;
 import android.content.ClipboardManager;
 import android.content.Context;
-import android.content.ContextWrapper;
-import android.content.Intent;
-import android.content.pm.PackageManager;
-import android.content.pm.ResolveInfo;
 import android.graphics.Color;
 import android.graphics.Rect;
 import android.graphics.drawable.ColorDrawable;
 import android.net.Uri;
-import android.provider.DocumentsContract;
+import android.os.Handler;
+import android.os.Looper;
 import android.text.Layout;
 import android.text.Selection;
 import android.text.Spannable;
@@ -42,8 +37,10 @@ import androidx.annotation.Nullable;
 
 import com.example.waspwingtempctrl.ConfigStore;
 import com.example.waspwingtempctrl.R;
+import com.example.waspwingtempctrl.RootShell;
 import com.google.android.material.color.MaterialColors;
 
+import java.io.File;
 import java.lang.ref.WeakReference;
 import java.util.ArrayList;
 import java.util.List;
@@ -714,105 +711,52 @@ final class TextCopy {
     }
 
     /**
-     * 路径跳转：能换算成共享存储文档 URI 的路径，直接交给系统选择器；
-     * 换算不了的（root/系统目录等）也不按目录性质事前拒绝，先让用户选应用，再提示降级原因。
+     * 路径跳转：用 root 身份执行 {@code am start -a VIEW -d file://…}，把路径交给文件管理器。
      *
-     * <p><b>为什么不用 {@code file://}：</b>本应用 {@code targetSdk=34}，向其他应用发送
-     * {@code file://} 会触发 {@code FileUriExposedException}（StrictMode 默认策略），不能用反射去关；
-     * 因此只能走 {@code content://}。{@code /data/adb/…} 没有对应的 DocumentsProvider，
-     * 任何 App 都拿不到它的文档 URI，这是降级提示的依据。
+     * <p><b>为什么不自己 startActivity：</b>{@code content://} 方案会被 system_server 的 URI 授权检查
+     * 拦下（{@code UriGrantsManagerService#checkGrantUriPermissionUnlocked} 要求调用方持有 provider 的
+     * {@code MANAGE_DOCUMENTS} 或既存 URI 授权，普通应用都拿不到），连选择器都弹不出来；
+     * {@code file://} 又会被本应用 {@code targetSdk=34} 的 StrictMode
+     * 判 {@code FileUriExposedException}。改由 su 拉起的 {@code am} 进程（uid 0）发送 file URI，
+     * 既绕开 targetSdk 的暴露检查，也不需要 URI 授权——隐式 Intent 命中多个应用时由系统自己弹选择器。
      */
     private static final class PathOpener {
 
-        /** 共享存储的 DocumentsProvider：唯一能把普通路径换成可授权 content:// 的通道。 */
-        private static final String EXTERNAL_STORAGE_AUTHORITY = "com.android.externalstorage.documents";
-        /** 主存储在 DocumentsProvider 里的绝对路径；其余共享路径按卷 id 换算。 */
+        /** 主存储的规范路径：/sdcard、/storage/self/primary 等写法统一归一到它。 */
         private static final String PRIMARY_ROOT = "/storage/emulated/0";
-        /** root 路径的补充候选（只在降级场景加进选择器，不替用户决定、也不要求安装）。 */
-        private static final String[] ROOT_MANAGER_PACKAGES = {
-                "bin.mt.plus",
-                "com.mi.android.globalFileexplorer"
-        };
+        /** am 只提交启动请求，正常几百毫秒即返回；超过这个时间按失败处理。 */
+        private static final long AM_TIMEOUT_MS = 5_000L;
+        /** 结果提示统一回主线程弹出（root 调用会阻塞 I/O，必须离开主线程）。 */
+        private static final Handler MAIN = new Handler(Looper.getMainLooper());
 
         private PathOpener() {
         }
 
-        /** 跳转到路径所在目录（路径本身是文件时取父目录）；始终先弹系统选择器。 */
+        /** 跳转到路径所在目录（路径本身是文件时取父目录），由 root 的 am 发起。 */
         static void open(@NonNull Context context, @NonNull String path) {
-            Log.w(TAG, "open path=" + path);
-            Uri target = null;
-            boolean degraded = false;
-            String shared = toSharedPath(path);
-            if (shared != null) {
-                Uri uri = documentUri(shared);
-                String directory = uri == null ? null : directoryOf(context, uri, shared);
-                target = directory == null ? null : documentUri(directory);
-            }
-            if (target == null) {
-                // root/不可表达的路径：不事前拦截，先用「内部存储根」把用户带到文件管理器；
-                // 真正传不过去的原因在启动后提示（见下方 degraded）。
-                target = documentUri(PRIMARY_ROOT);
-                degraded = true;
-            }
-            if (target == null) {
-                Log.w(TAG, "open: no document uri for " + path);
-                toast(context, R.string.path_action_open_no_app);
-                return;
-            }
-            // 两条声明形式都预检：目录 MIME 优先，裸 ACTION_VIEW 兜底；空列表不进入 catch。
-            Intent typed = new Intent(Intent.ACTION_VIEW)
-                    .setDataAndType(target, DocumentsContract.Document.MIME_TYPE_DIR);
-            Intent bare = new Intent(Intent.ACTION_VIEW, target);
-            boolean typedOk = hasCandidates(context, typed);
-            boolean bareOk = !typedOk && hasCandidates(context, bare);
-            Log.w(TAG, "open target=" + target + " degraded=" + degraded
-                    + " typed=" + typedOk + " bare=" + bareOk);
-            Intent primary = typedOk ? typed : (bareOk ? bare : null);
-            if (primary == null) {
-                Log.w(TAG, "open: no candidate for " + target);
-                toast(context, R.string.path_action_open_no_app);
-                return;
-            }
-            OpenResult result = launchChooser(context, primary, degraded);
-            if (result == OpenResult.NO_APP) {
-                toast(context, R.string.path_action_open_no_app);
-            } else if (result == OpenResult.DENIED) {
-                toast(context, R.string.path_action_open_failed);
-            } else if (degraded) {
-                toast(context, R.string.path_action_open_root_degraded);
-            }
+            String directory = directoryOf(path);
+            String shared = toSharedPath(directory);
+            boolean rootOnly = shared == null;
+            String target = rootOnly ? directory : shared;
+            Uri uri = Uri.fromFile(new File(target));
+            String command = "am start -a android.intent.action.VIEW -d "
+                    + shellQuote(uri.toString());
+            Log.w(TAG, "open: su cmd=" + command + " rootOnly=" + rootOnly);
+            Context app = context.getApplicationContext();
+            // RootShell 会阻塞 I/O 且内部串行取锁：一次性后台线程，结果再回主线程提示
+            Thread worker = new Thread(() -> launch(app, command, path, rootOnly), "ww-path-open");
+            worker.setDaemon(true);
+            worker.start();
         }
 
-        /** 预检：隐式 Intent 是否有默认可处理的 Activity。 */
-        private static boolean hasCandidates(@NonNull Context context, @NonNull Intent intent) {
-            List<ResolveInfo> resolved = context.getPackageManager()
-                    .queryIntentActivities(intent, PackageManager.MATCH_DEFAULT_ONLY);
-            return resolved != null && !resolved.isEmpty();
-        }
-
-        /** 路径若指向文件则取其父目录；无法确定类型时按「最后一段带扩展名」判断。 */
-        @Nullable
-        private static String directoryOf(@NonNull Context context, @NonNull Uri uri,
-                                          @NonNull String path) {
-            String mime = null;
-            try {
-                mime = context.getContentResolver().getType(uri);
-            } catch (RuntimeException ignored) {
-                // 没有存储权限等：类型未知，退回按路径形状判断
-            }
-            boolean isDirectory;
-            if (DocumentsContract.Document.MIME_TYPE_DIR.equals(mime)) {
-                isDirectory = true;
-            } else if (mime != null) {
-                isDirectory = false;
-            } else {
-                isDirectory = !looksLikeFile(path);
-            }
-            if (isDirectory) {
+        /** 路径若指向文件则取父目录；无法确定类型时按「最后一段带扩展名」判断。 */
+        @NonNull
+        private static String directoryOf(@NonNull String path) {
+            if (!looksLikeFile(path)) {
                 return path;
             }
             int slash = path.lastIndexOf('/');
-            return slash > 0 ? path.substring(0, slash) : null;
+            return slash > 0 ? path.substring(0, slash) : "/";
         }
 
         /** 最后一段带扩展名（且不是隐藏文件）就当作文件。 */
@@ -843,123 +787,47 @@ final class TextCopy {
             return null;
         }
 
-        @Nullable
-        private static Uri documentUri(@NonNull String path) {
-            String id = documentId(path);
-            return id == null ? null
-                    : DocumentsContract.buildDocumentUri(EXTERNAL_STORAGE_AUTHORITY, id);
-        }
-
-        /** {@code /storage/emulated/0/x} → {@code primary:x}；SD 卡 → {@code <卷id>:x}。 */
-        @Nullable
-        private static String documentId(@NonNull String path) {
-            if (path.equals(PRIMARY_ROOT) || path.startsWith(PRIMARY_ROOT + "/")) {
-                String relative = path.substring(PRIMARY_ROOT.length());
-                if (relative.startsWith("/")) {
-                    relative = relative.substring(1);
-                }
-                return "primary:" + relative;
-            }
-            String storagePrefix = "/storage/";
-            if (path.startsWith(storagePrefix)) {
-                String rest = path.substring(storagePrefix.length());
-                int slash = rest.indexOf('/');
-                String volume = slash < 0 ? rest : rest.substring(0, slash);
-                if (volume.isEmpty() || "emulated".equals(volume) || "self".equals(volume)) {
-                    return null;   // 非主存储 / 用户目录：不猜
-                }
-                String relative = slash < 0 ? "" : rest.substring(slash + 1);
-                return volume + ":" + relative;
-            }
-            return null;
-        }
-
-        /** 启动结果：区分「系统里没有应用」「所选应用打不开」与成功。 */
-        private enum OpenResult { OPENED, NO_APP, DENIED }
-
-        /**
-         * 显式构造系统选择器：即使用户已有默认应用、或只有唯一候选，第一次跳转也一定让用户选。
-         * （代价是「始终」默认不再生效——这是本次真机反馈要求的取舍。）
-         *
-         * <p>直接 {@code startActivity(target)} 时，系统会以<b>本应用</b>身份检查 content URI 的授权；
-         * 本应用没有存储权限，可能在启动前同步抛 {@code SecurityException}——这正是之前不弹选择器、
-         * 直接提示「所选应用打不开」的原因。改为启动系统选择器后，由系统把带授权 flag 的 target
-         * 交给用户选中的应用，绕开调用方这一层授权检查。
-         */
-        private static OpenResult launchChooser(@NonNull Context context, @NonNull Intent target,
-                                                boolean degraded) {
-            target.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
-            Intent chooser = Intent.createChooser(target, null);
-            if (degraded) {
-                // root 路径补候选：已安装、且未被主 target 解析出的 root 文件管理器
-                List<Intent> extras = rootManagerExtras(context, target);
-                if (!extras.isEmpty()) {
-                    chooser.putExtra(Intent.EXTRA_INITIAL_INTENTS, extras.toArray(new Intent[0]));
-                }
-            }
-            if (!isActivityContext(context)) {
-                chooser.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
-            }
+        /** 后台：su 执行 am；超时、通道失败、输出没有 Starting 或带 Error 都算失败。 */
+        private static void launch(@NonNull Context app, @NonNull String command,
+                                   @NonNull String path, boolean rootOnly) {
+            RootShell.Result result;
             try {
-                context.startActivity(chooser);
-                return OpenResult.OPENED;
-            } catch (ActivityNotFoundException e) {
-                Log.w(TAG, "chooser missing: " + e.getClass().getName() + ": " + e.getMessage(), e);
-                return OpenResult.NO_APP;
-            } catch (SecurityException e) {
-                Log.w(TAG, "chooser denied: " + e.getClass().getName() + ": " + e.getMessage(), e);
-                return OpenResult.DENIED;
+                result = RootShell.get(app).exec(command, AM_TIMEOUT_MS);
+            } catch (RuntimeException e) {
+                Log.w(TAG, "open: su failed " + e.getClass().getName() + ": " + e.getMessage());
+                fail(app, path, rootOnly);
+                return;
+            }
+            String output = (result.stdout + '\n' + result.stderr).trim();
+            // am 对「解析不到应用」也先打印 Starting 再把 Error 写到 stderr，故必须两者一起判
+            boolean started = output.contains("Starting: Intent")
+                    && !output.contains("Error:") && !output.contains("Exception");
+            Log.w(TAG, "open: su done started=" + started + " exit=" + result.exitCode
+                    + " timedOut=" + result.timedOut + " output=" + output);
+            if (!result.isOk() || !started) {
+                fail(app, path, rootOnly);
             }
         }
 
-        /** root 路径的补充候选（显式包名，只作为选项交给选择器展示，不替用户决定）。 */
-        private static List<Intent> rootManagerExtras(@NonNull Context context,
-                                                      @NonNull Intent target) {
-            List<Intent> extras = new ArrayList<>();
-            PackageManager pm = context.getPackageManager();
-            List<ResolveInfo> resolved =
-                    pm.queryIntentActivities(target, PackageManager.MATCH_DEFAULT_ONLY);
-            Uri data = target.getData();
-            for (String pkg : ROOT_MANAGER_PACKAGES) {
-                if (containsPackage(resolved, pkg)) {
-                    continue;   // 主 target 已经能列出它，避免重复
-                }
-                Intent explicit = new Intent(Intent.ACTION_VIEW, data)
-                        .setPackage(pkg)
-                        .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
-                if (explicit.resolveActivity(pm) != null) {
-                    extras.add(explicit);
-                }
+        /** 失败：普通路径只提示没有应用；root 路径先把路径写进剪贴板，便于换有 root 的文件管理器粘贴定位。 */
+        private static void fail(@NonNull Context app, @NonNull String path, boolean rootOnly) {
+            if (rootOnly) {
+                copy(app, path);
+                show(app, R.string.path_action_open_root_failed);
+            } else {
+                show(app, R.string.path_action_open_no_app);
             }
-            return extras;
         }
 
-        private static boolean containsPackage(@Nullable List<ResolveInfo> resolved, String pkg) {
-            if (resolved == null) {
-                return false;
-            }
-            for (ResolveInfo info : resolved) {
-                if (info.activityInfo != null && pkg.equals(info.activityInfo.packageName)) {
-                    return true;
-                }
-            }
-            return false;
+        /** 单引号包裹并转义其中的单引号：空格、中文、$ 等都原样交给 shell。 */
+        @NonNull
+        private static String shellQuote(@NonNull String value) {
+            return "'" + value.replace("'", "'\\''") + "'";
         }
 
-        /** 通过 ThemeWrapper 逐层找 Activity：非 Activity 上下文起 Activity 需要 NEW_TASK。 */
-        private static boolean isActivityContext(@NonNull Context context) {
-            Context current = context;
-            while (current instanceof ContextWrapper) {
-                if (current instanceof Activity) {
-                    return true;
-                }
-                current = ((ContextWrapper) current).getBaseContext();
-            }
-            return false;
-        }
-
-        private static void toast(@NonNull Context context, int textRes) {
-            Toast.makeText(context.getApplicationContext(), textRes, Toast.LENGTH_LONG).show();
+        /** 后台线程只投递消息，Toast 在主线程弹。 */
+        private static void show(@NonNull Context app, int textRes) {
+            MAIN.post(() -> Toast.makeText(app, textRes, Toast.LENGTH_LONG).show());
         }
     }
 
