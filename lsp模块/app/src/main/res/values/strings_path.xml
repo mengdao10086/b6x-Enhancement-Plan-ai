@@ -4,8 +4,10 @@
     <string name="path_action_copy">复制</string>
     <string name="path_action_open">跳转</string>
     <string name="path_action_copied">已复制路径</string>
-    <!-- 系统里没有任何能处理该 ACTION_VIEW（file://）的应用 -->
-    <string name="path_action_open_no_app">没有能打开该路径的应用</string>
+    <!-- 普通共享存储：没有应用声明 SAF 目录 MIME，系统目录选择器也不可用 -->
+    <string name="path_action_open_no_app">没有能打开该路径的文件管理器</string>
     <!-- root 路径启动失败：路径已写入剪贴板，便于换用支持 root 的文件管理器粘贴定位 -->
     <string name="path_action_open_root_failed">已复制路径，请在具备 root 权限的文件管理器中粘贴定位</string>
+    <!-- 多个候选时的选择框标题 -->
+    <string name="path_action_open_choose">选择打开方式</string>
 </resources>

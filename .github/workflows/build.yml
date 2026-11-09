@@ -442,7 +442,8 @@ jobs:
           # 5,426 → 5,425：路径跳转改走 root 的 am start，删除 1 个不再使用的失败文案
           # 5,425 → 5,427：曲线新增「实际制冷」系列（1 个 color + 1 条 string）；
           #   重置栏仅改 dimen 值、条数不变
-          [ "$BEFORE_ENTRIES" -eq 5427 ]           || { echo "基线资源条目数不是 5,427（$BEFORE_ENTRIES）"; exit 1; }
+          # 5,427 → 5,428：路径跳转新增「选择打开方式」对话框标题
+          [ "$BEFORE_ENTRIES" -eq 5428 ]           || { echo "基线资源条目数不是 5,428（$BEFORE_ENTRIES）"; exit 1; }
           [ "$BEFORE_NTYPES" -eq 17 ]              || { echo "基线资源类型数不是 17（$BEFORE_NTYPES）"; exit 1; }
           [ "$REMOVE_N" -eq 19 ]                   || { echo "待移除 layout 数量不是 19（$REMOVE_N）"; exit 1; }
           [ "$AFTER_ENTRIES" -eq $((BEFORE_ENTRIES - REMOVE_N)) ] \

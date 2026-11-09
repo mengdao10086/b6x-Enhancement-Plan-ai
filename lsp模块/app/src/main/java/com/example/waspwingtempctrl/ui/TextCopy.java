@@ -1,15 +1,23 @@
 package com.example.waspwingtempctrl.ui;
 
 import android.app.Dialog;
+import android.content.ActivityNotFoundException;
 import android.content.ClipData;
 import android.content.ClipboardManager;
+import android.content.ComponentName;
 import android.content.Context;
+import android.content.Intent;
+import android.content.pm.PackageManager;
+import android.content.pm.ResolveInfo;
 import android.graphics.Color;
 import android.graphics.Rect;
 import android.graphics.drawable.ColorDrawable;
+import android.graphics.drawable.Drawable;
 import android.net.Uri;
+import android.os.Build;
 import android.os.Handler;
 import android.os.Looper;
+import android.provider.DocumentsContract;
 import android.text.Layout;
 import android.text.Selection;
 import android.text.Spannable;
@@ -27,13 +35,17 @@ import android.view.View;
 import android.view.ViewConfiguration;
 import android.view.ViewGroup;
 import android.view.ViewTreeObserver;
+import android.widget.BaseAdapter;
 import android.widget.EditText;
+import android.widget.ImageView;
+import android.widget.LinearLayout;
 import android.widget.PopupWindow;
 import android.widget.TextView;
 import android.widget.Toast;
 
 import androidx.annotation.NonNull;
 import androidx.annotation.Nullable;
+import androidx.appcompat.app.AlertDialog;
 
 import com.example.waspwingtempctrl.ConfigStore;
 import com.example.waspwingtempctrl.R;
@@ -43,8 +55,10 @@ import com.google.android.material.color.MaterialColors;
 import java.io.File;
 import java.lang.ref.WeakReference;
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.WeakHashMap;
 import java.util.function.Supplier;
 import java.util.regex.Matcher;
@@ -679,9 +693,16 @@ final class TextCopy {
                         R.string.path_action_copied, Toast.LENGTH_SHORT).show();
                 popup.dismiss();
             });
-            card.findViewById(R.id.path_card_open).setOnClickListener(v -> {
+            View openButton = card.findViewById(R.id.path_card_open);
+            openButton.setOnClickListener(v -> {
                 popup.dismiss();
-                PathOpener.open(context, hit.path);
+                PathOpener.open(context, hit.path, false);
+            });
+            // 长按「跳转」强制重选：本会话记住的选择之外，仍可换应用
+            openButton.setOnLongClickListener(v -> {
+                popup.dismiss();
+                PathOpener.open(context, hit.path, true);
+                return true;
             });
             popup.setOnDismissListener(() -> {
                 WeakReference<PopupWindow> ref = current;
@@ -729,42 +750,202 @@ final class TextCopy {
     }
 
     /**
-     * 路径跳转：用 root 身份执行 {@code am start -a VIEW -d file://…}，把路径交给文件管理器。
+     * 路径跳转：普通共享存储交给系统文件管理器（DocumentsUI）直达目录；root 路径交给支持 root 的
+     * 文件管理器（当前按 MT 的显式组件尝试），都不可达时复制路径让用户自行粘贴定位。
      *
-     * <p><b>为什么不自己 startActivity：</b>{@code content://} 方案会被 system_server 的 URI 授权检查
-     * 拦下（{@code UriGrantsManagerService#checkGrantUriPermissionUnlocked} 要求调用方持有 provider 的
-     * {@code MANAGE_DOCUMENTS} 或既存 URI 授权，普通应用都拿不到），连选择器都弹不出来；
-     * {@code file://} 又会被本应用 {@code targetSdk=34} 的 StrictMode
-     * 判 {@code FileUriExposedException}。改由 su 拉起的 {@code am} 进程（uid 0）发送 file URI，
-     * 既绕开 targetSdk 的暴露检查，也不需要 URI 授权——隐式 Intent 命中多个应用时由系统自己弹选择器。
+     * <p><b>为什么普通路径用 content:// + {@code vnd.android.document/directory}：</b>这是 SAF 对
+     * 「目录」的标准表达，AOSP DocumentsUI 的 FilesActivity 正是声明这个 MIME；浏览器不声明它，
+     * 不会像裸 {@code file://} 那样被浏览器接走。这里<b>不加</b>
+     * {@code FLAG_GRANT_READ_URI_PERMISSION}：不加授权 flag 就不会触发调用方的 URI 授权检查，
+     * 而 DocumentsUI 自己持有 {@code MANAGE_DOCUMENTS}，能读 externalstorage provider。
+     *
+     * <p><b>为什么 root 路径不塞 content URI：</b>{@code /data/adb} 这类路径没有对应的
+     * DocumentsProvider，构造不出可用的文档 URI；只能借 root 显式启动文件管理器，或用剪贴板兜底。
      */
     private static final class PathOpener {
 
+        /** 共享存储的 DocumentsProvider：把普通路径换算成 SAF 文档 URI。 */
+        private static final String EXTERNAL_STORAGE_AUTHORITY = "com.android.externalstorage.documents";
         /** 主存储的规范路径：/sdcard、/storage/self/primary 等写法统一归一到它。 */
         private static final String PRIMARY_ROOT = "/storage/emulated/0";
+        /** SAF 的目录 MIME：声明它的应用就是要找的文件管理器，浏览器不声明它。 */
+        private static final String DIRECTORY_MIME = DocumentsContract.Document.MIME_TYPE_DIR;
+        /** root 路径的启动目标：MT 管理器的开文件入口（显式组件可绕过 manifest filter 匹配）。 */
+        private static final String MT_COMPONENT = "bin.mt.plus/bin.mt.plus.OpenFileActivity";
         /** am 只提交启动请求，正常几百毫秒即返回；超过这个时间按失败处理。 */
         private static final long AM_TIMEOUT_MS = 5_000L;
-        /** 结果提示统一回主线程弹出（root 调用会阻塞 I/O，必须离开主线程）。 */
+        /** 提示统一回主线程弹出（root 调用会阻塞 I/O，必须离开主线程）。 */
         private static final Handler MAIN = new Handler(Looper.getMainLooper());
+
+        /** 本会话记住的普通路径上次选择；长按「跳转」可强制重选。 */
+        @Nullable
+        private static ComponentName remembered;
 
         private PathOpener() {
         }
 
-        /** 跳转到路径所在目录（路径本身是文件时取父目录），由 root 的 am 发起。 */
-        static void open(@NonNull Context context, @NonNull String path) {
+        /** 跳转到路径所在目录（路径本身是文件时取父目录）。 */
+        static void open(@NonNull Context context, @NonNull String path, boolean forcePicker) {
             String directory = directoryOf(path);
             String shared = toSharedPath(directory);
-            boolean rootOnly = shared == null;
-            String target = rootOnly ? directory : shared;
-            Uri uri = Uri.fromFile(new File(target));
-            String command = "am start -a android.intent.action.VIEW -d "
-                    + shellQuote(uri.toString());
-            Log.w(TAG, "open: su cmd=" + command + " rootOnly=" + rootOnly);
-            Context app = context.getApplicationContext();
-            // RootShell 会阻塞 I/O 且内部串行取锁：一次性后台线程，结果再回主线程提示
-            Thread worker = new Thread(() -> launch(app, command, path, rootOnly), "ww-path-open");
+            String docId = shared == null ? null : documentId(shared);
+            if (docId == null) {
+                openRoot(context.getApplicationContext(), path, directory);
+                return;
+            }
+            Uri uri = DocumentsContract.buildDocumentUri(EXTERNAL_STORAGE_AUTHORITY, docId);
+            Log.w(TAG, "open path=" + path + " shared=" + shared + " uri=" + uri
+                    + " forcePicker=" + forcePicker);
+            openDocument(context, uri, forcePicker);
+        }
+
+        /** root 路径：先按 MT 的显式组件启动，失败换带目录 MIME 再试，仍失败复制原路径兜底。 */
+        private static void openRoot(@NonNull Context app, @NonNull String path,
+                                     @NonNull String directory) {
+            Uri uri = Uri.fromFile(new File(directory));
+            Log.w(TAG, "open: root path=" + path + " uri=" + uri);
+            Thread worker = new Thread(() -> {
+                String command = "am start -n " + shellQuote(MT_COMPONENT)
+                        + " -a android.intent.action.VIEW -d " + shellQuote(uri.toString());
+                if (tryAm(app, command, "plain")) {
+                    return;
+                }
+                if (tryAm(app, command + " -t " + DIRECTORY_MIME, "dir-mime")) {
+                    return;
+                }
+                MAIN.post(() -> {
+                    copy(app, path);   // 原路径进剪贴板，供有 root 的文件管理器粘贴定位
+                    Toast.makeText(app, R.string.path_action_open_root_failed,
+                            Toast.LENGTH_LONG).show();
+                });
+            }, "ww-path-open");
             worker.setDaemon(true);
             worker.start();
+        }
+
+        /** 跑一次 am：输出含 Starting 且无 Error/Exception、进程正常退出才算成功。 */
+        private static boolean tryAm(@NonNull Context app, @NonNull String command,
+                                     @NonNull String tag) {
+            Log.w(TAG, "open: root am[" + tag + "] cmd=" + command);
+            RootShell.Result result;
+            try {
+                result = RootShell.get(app).exec(command, AM_TIMEOUT_MS);
+            } catch (RuntimeException e) {
+                Log.w(TAG, "open: root am[" + tag + "] failed "
+                        + e.getClass().getName() + ": " + e.getMessage());
+                return false;
+            }
+            String output = (result.stdout + '\n' + result.stderr).trim();
+            // am 解析不到目标也先打印 Starting 再把 Error 写到 stderr，故必须两者一起判
+            boolean started = output.contains("Starting: Intent")
+                    && !output.contains("Error:") && !output.contains("Exception");
+            Log.w(TAG, "open: root am[" + tag + "] started=" + started
+                    + " exit=" + result.exitCode + " timedOut=" + result.timedOut
+                    + " output=" + output);
+            return result.isOk() && started;
+        }
+
+        /** 普通路径：列候选 → 唯一/记住的直接启动，多个弹自建选择器；无候选退系统目录选择器。 */
+        private static void openDocument(@NonNull Context context, @NonNull Uri uri,
+                                         boolean forcePicker) {
+            List<Target> candidates = findTargets(context, uri);
+            Log.w(TAG, "open: candidates=" + candidates.size());
+            if (candidates.isEmpty()) {
+                openDocumentTree(context, uri);
+                return;
+            }
+            Target last = forcePicker ? null : findRemembered(candidates);
+            if (last == null && candidates.size() > 1) {
+                showPicker(context, candidates, uri);
+                return;
+            }
+            Target chosen = last != null ? last : candidates.get(0);
+            remembered = chosen.component;
+            start(context, chosen, uri);
+        }
+
+        /** 查能处理该目录文档 URI 的应用；浏览器不声明这个 MIME，天然出局。 */
+        @NonNull
+        private static List<Target> findTargets(@NonNull Context context, @NonNull Uri uri) {
+            PackageManager pm = context.getPackageManager();
+            Intent intent = new Intent(Intent.ACTION_VIEW).setDataAndType(uri, DIRECTORY_MIME);
+            List<ResolveInfo> resolved;
+            try {
+                resolved = pm.queryIntentActivities(intent, PackageManager.MATCH_DEFAULT_ONLY);
+            } catch (RuntimeException e) {
+                Log.w(TAG, "open: query failed " + e.getClass().getName() + ": " + e.getMessage());
+                return new ArrayList<>();
+            }
+            List<Target> targets = new ArrayList<>();
+            if (resolved == null) {
+                return targets;
+            }
+            Set<String> seen = new HashSet<>();
+            for (ResolveInfo info : resolved) {
+                if (info.activityInfo == null
+                        || context.getPackageName().equals(info.activityInfo.packageName)) {
+                    continue;
+                }
+                Target candidate = new Target(info, pm);
+                if (seen.add(candidate.component.getPackageName())) {
+                    targets.add(candidate);
+                }
+            }
+            targets.sort((a, b) -> String.CASE_INSENSITIVE_ORDER.compare(
+                    a.label.toString(), b.label.toString()));
+            return targets;
+        }
+
+        /** 本会话记住的应用仍可用时优先用它。 */
+        @Nullable
+        private static Target findRemembered(@NonNull List<Target> candidates) {
+            ComponentName last = remembered;
+            if (last == null) {
+                return null;
+            }
+            for (Target candidate : candidates) {
+                if (last.getPackageName().equals(candidate.component.getPackageName())) {
+                    return candidate;
+                }
+            }
+            return null;
+        }
+
+        /** 显式启动用户选中的应用（或唯一候选）：不再让系统默认处理器改写目标。 */
+        private static void start(@NonNull Context context, @NonNull Target target,
+                                  @NonNull Uri uri) {
+            Intent intent = new Intent(Intent.ACTION_VIEW)
+                    .setDataAndType(uri, DIRECTORY_MIME)
+                    .setComponent(target.component);
+            Log.w(TAG, "open: start " + target.component.flattenToString() + " uri=" + uri);
+            try {
+                // 不加授权 flag：不触发调用方授权检查；DocumentsUI 自带 MANAGE_DOCUMENTS
+                context.startActivity(intent);
+            } catch (ActivityNotFoundException e) {
+                Log.w(TAG, "open: start missing " + e.getClass().getName() + ": " + e.getMessage());
+                openDocumentTree(context, uri);
+            } catch (SecurityException e) {
+                Log.w(TAG, "open: start denied " + e.getClass().getName() + ": " + e.getMessage());
+                show(context.getApplicationContext(), R.string.path_action_open_no_app);
+            }
+        }
+
+        /** 无候选时退到系统目录选择器：EXTRA_INITIAL_URI 让它直接落在该目录。 */
+        private static void openDocumentTree(@NonNull Context context, @NonNull Uri uri) {
+            Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT_TREE);
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                intent.putExtra(DocumentsContract.EXTRA_INITIAL_URI, uri);
+            }
+            Log.w(TAG, "open: document tree initial=" + uri);
+            try {
+                context.startActivity(intent);
+            } catch (ActivityNotFoundException e) {
+                Log.w(TAG, "open: tree missing " + e.getClass().getName() + ": " + e.getMessage());
+                show(context.getApplicationContext(), R.string.path_action_open_no_app);
+            } catch (SecurityException e) {
+                Log.w(TAG, "open: tree denied " + e.getClass().getName() + ": " + e.getMessage());
+                show(context.getApplicationContext(), R.string.path_action_open_no_app);
+            }
         }
 
         /** 路径若指向文件则取父目录；无法确定类型时按「最后一段带扩展名」判断。 */
@@ -805,35 +986,115 @@ final class TextCopy {
             return null;
         }
 
-        /** 后台：su 执行 am；超时、通道失败、输出没有 Starting 或带 Error 都算失败。 */
-        private static void launch(@NonNull Context app, @NonNull String command,
-                                   @NonNull String path, boolean rootOnly) {
-            RootShell.Result result;
-            try {
-                result = RootShell.get(app).exec(command, AM_TIMEOUT_MS);
-            } catch (RuntimeException e) {
-                Log.w(TAG, "open: su failed " + e.getClass().getName() + ": " + e.getMessage());
-                fail(app, path, rootOnly);
-                return;
+        /** {@code /storage/emulated/0/x} → {@code primary:x}；SD 卡 → {@code <卷id>:x}。 */
+        @Nullable
+        private static String documentId(@NonNull String path) {
+            if (path.equals(PRIMARY_ROOT) || path.startsWith(PRIMARY_ROOT + "/")) {
+                String relative = path.substring(PRIMARY_ROOT.length());
+                if (relative.startsWith("/")) {
+                    relative = relative.substring(1);
+                }
+                return "primary:" + relative;
             }
-            String output = (result.stdout + '\n' + result.stderr).trim();
-            // am 对「解析不到应用」也先打印 Starting 再把 Error 写到 stderr，故必须两者一起判
-            boolean started = output.contains("Starting: Intent")
-                    && !output.contains("Error:") && !output.contains("Exception");
-            Log.w(TAG, "open: su done started=" + started + " exit=" + result.exitCode
-                    + " timedOut=" + result.timedOut + " output=" + output);
-            if (!result.isOk() || !started) {
-                fail(app, path, rootOnly);
+            if (path.startsWith("/storage/")) {
+                String rest = path.substring("/storage/".length());
+                int slash = rest.indexOf('/');
+                String volume = slash < 0 ? rest : rest.substring(0, slash);
+                if (volume.isEmpty() || "emulated".equals(volume) || "self".equals(volume)) {
+                    return null;   // 非主存储 / 用户目录：不猜，交给 root 分支
+                }
+                String relative = slash < 0 ? "" : rest.substring(slash + 1);
+                return volume + ":" + relative;
+            }
+            return null;
+        }
+
+        /** 自建应用选择框：图标 + 名称；选中后记入本会话。 */
+        private static void showPicker(@NonNull Context context, @NonNull List<Target> candidates,
+                                       @NonNull Uri uri) {
+            BaseAdapter adapter = new BaseAdapter() {
+                @Override
+                public int getCount() {
+                    return candidates.size();
+                }
+
+                @Override
+                public Object getItem(int position) {
+                    return candidates.get(position);
+                }
+
+                @Override
+                public long getItemId(int position) {
+                    return position;
+                }
+
+                @Override
+                public View getView(int position, View convertView, ViewGroup parent) {
+                    LinearLayout row = convertView instanceof LinearLayout
+                            ? (LinearLayout) convertView : buildRow(parent.getContext());
+                    Target item = candidates.get(position);
+                    ImageView icon = (ImageView) row.getChildAt(0);
+                    if (item.icon != null) {
+                        icon.setImageDrawable(item.icon);
+                    } else {
+                        icon.setImageResource(android.R.drawable.sym_def_app_icon);
+                    }
+                    ((TextView) row.getChildAt(1)).setText(item.label);
+                    return row;
+                }
+            };
+            try {
+                new AlertDialog.Builder(context)
+                        .setTitle(R.string.path_action_open_choose)
+                        .setAdapter(adapter, (dialog, which) -> {
+                            Target chosen = candidates.get(which);
+                            remembered = chosen.component;
+                            start(context, chosen, uri);
+                        })
+                        .show();
+            } catch (RuntimeException e) {
+                Log.w(TAG, "open: picker failed " + e.getClass().getName() + ": " + e.getMessage());
+                show(context.getApplicationContext(), R.string.path_action_open_no_app);
             }
         }
 
-        /** 失败：普通路径只提示没有应用；root 路径先把路径写进剪贴板，便于换有 root 的文件管理器粘贴定位。 */
-        private static void fail(@NonNull Context app, @NonNull String path, boolean rootOnly) {
-            if (rootOnly) {
-                copy(app, path);
-                show(app, R.string.path_action_open_root_failed);
-            } else {
-                show(app, R.string.path_action_open_no_app);
+        /** 列表行：图标 + 名称（代码构建，不新增 layout 资源）。 */
+        @NonNull
+        private static LinearLayout buildRow(@NonNull Context context) {
+            LinearLayout row = new LinearLayout(context);
+            row.setOrientation(LinearLayout.HORIZONTAL);
+            row.setGravity(Gravity.CENTER_VERTICAL);
+            int pad = dp(context, 16);
+            row.setPadding(pad, dp(context, 8), pad, dp(context, 8));
+            ImageView icon = new ImageView(context);
+            int size = dp(context, 36);
+            row.addView(icon, new LinearLayout.LayoutParams(size, size));
+            TextView label = new TextView(context);
+            label.setTextSize(16);
+            LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+            params.setMarginStart(dp(context, 16));
+            row.addView(label, params);
+            return row;
+        }
+
+        private static int dp(@NonNull Context context, int value) {
+            return Math.round(value * context.getResources().getDisplayMetrics().density);
+        }
+
+        /** 一个候选应用：组件 + 展示用名称/图标。 */
+        private static final class Target {
+            final ComponentName component;
+            final CharSequence label;
+            @Nullable
+            final Drawable icon;
+
+            Target(@NonNull ResolveInfo info, @NonNull PackageManager pm) {
+                component = new ComponentName(info.activityInfo.packageName,
+                        info.activityInfo.name);
+                CharSequence text = info.loadLabel(pm);
+                label = text == null ? info.activityInfo.packageName : text;
+                icon = info.loadIcon(pm);
             }
         }
 
