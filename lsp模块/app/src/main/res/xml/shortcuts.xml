@@ -10,8 +10,7 @@
         android:enabled="true"
         android:icon="@drawable/ic_shortcut_kill_daemon"
         android:shortcutShortLabel="@string/shortcut_kill_daemon_short"
-        android:shortcutLongLabel="@string/shortcut_kill_daemon_long"
-        android:rank="0">
+        android:shortcutLongLabel="@string/shortcut_kill_daemon_long">
         <intent
             android:action="com.example.waspwingtempctrl.action.KILL_DAEMON"
             android:targetPackage="com.example.waspwingtempctrl"
@@ -23,8 +22,7 @@
         android:enabled="true"
         android:icon="@drawable/ic_shortcut_temp_stop"
         android:shortcutShortLabel="@string/shortcut_temp_stop_short"
-        android:shortcutLongLabel="@string/shortcut_temp_stop_long"
-        android:rank="1">
+        android:shortcutLongLabel="@string/shortcut_temp_stop_long">
         <intent
             android:action="com.example.waspwingtempctrl.action.TEMP_STOP"
             android:targetPackage="com.example.waspwingtempctrl"
