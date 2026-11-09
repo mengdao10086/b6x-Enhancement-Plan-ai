@@ -24,13 +24,7 @@
     <string name="status_action_deploy">一键部署</string>
     <string name="status_action_uninstall">卸载部署</string>
     <string name="status_action_start">拉起daemon</string>
-    <string name="status_action_stop">停止daemon</string>
-    <string name="status_action_stop_app">停止控制app</string>
-    <string name="status_action_diag">su 诊断</string>
-    <string name="status_action_auto_update">自动更新</string>
-    <string name="status_auto_update_desc_on">自动更新，当前已开启</string>
-    <string name="status_auto_update_desc_off">自动更新，当前已关闭</string>
-    <string name="status_auto_update_write_failed">自动更新开关写入失败：%1$s</string>
+    <string name="status_action_stop">kill daemon</string>
     <string name="status_busy_other">上一个动作还没结束，请稍候</string>
     <string name="status_dialog_diag">诊断</string>
     <string name="status_dialog_failed">执行失败</string>
@@ -45,24 +39,19 @@
     <string name="status_busy_uninstall">卸载部署中…</string>
     <!-- 拉起＝停旧实例再起新实例，空窗只来自等旧实例退出（最多 8 秒），故把代价写在忙态文案里（手动动作会进「操作记录」） -->
     <string name="status_busy_start">拉起daemon…（停旧实例→起新实例，温控空窗约 10 秒内）</string>
-    <string name="status_busy_stop">停止daemon…</string>
-    <string name="status_busy_stop_app">停止控制app…</string>
-    <string name="status_busy_diag">采集 su 诊断…</string>
+    <string name="status_busy_stop">kill daemon…</string>
 
     <!--
         状态页：破坏性动作的二次确认（与配置页「重置」同一口径：确认才动手，默认不动作）。
-        三个动作都会中断或移除温控增强，故各给一句后果说明；肯定按钮用动作本身的名字，不用泛化的「确定」。
+        两个动作都会中断或移除温控增强，故各给一句后果说明；肯定按钮用动作本身的名字，不用泛化的「确定」。
     -->
     <string name="status_dialog_cancel">取消</string>
     <string name="status_dialog_uninstall_title">卸载部署？</string>
     <string name="status_dialog_uninstall_message">将从设备移除 service.d 脚本与 c-daemon 二进制，温控增强失效，需重新「一键部署」才能恢复。是否继续？</string>
     <string name="status_dialog_uninstall_confirm">卸载</string>
-    <string name="status_dialog_stop_title">停止daemon？</string>
-    <string name="status_dialog_stop_message">将停止正在运行的 c-daemon，温控增强随之失效，需重新「拉起daemon」才能恢复。是否继续？</string>
-    <string name="status_dialog_stop_confirm">停止</string>
-    <string name="status_dialog_stop_app_title">停止控制app？</string>
-    <string name="status_dialog_stop_app_message">将强制停止正在运行的散热器控制 app（超频 app），连接与控温随之中断。若已开启自动拉起，守护进程可能再次拉起它。是否继续？</string>
-    <string name="status_dialog_stop_app_confirm">停止</string>
+    <string name="status_dialog_stop_title">kill daemon？</string>
+    <string name="status_dialog_stop_message">将 kill 正在运行的 c-daemon，温控增强随之失效，需重新「拉起daemon」才能恢复。是否继续？</string>
+    <string name="status_dialog_stop_confirm">kill daemon</string>
 
     <!-- 状态页：设备与版本（不显示本应用包名与 targetSdk） -->
     <string name="status_info_version">模块版本: %1$s (%2$d)</string>

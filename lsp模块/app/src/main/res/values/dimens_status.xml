@@ -5,55 +5,52 @@
     <!--
         按钮行1 上方的间隔，只服务这一处：「进度条 → 按钮行1」，目标可见空白 5dp。
         该处上下都不挨按钮：上方是文本与进度条，进度条只是一条 4dp 色带、不带 button inset，
-        所以本值就是该处的可见空白，可见空白 = 本值（与下面两条行间项的口径差异见它们）。
+        所以本值就是该处的可见空白，可见空白 = 本值（与行间项的口径差异见 status_button_row_gap）。
         取 5dp 而不随行间一起收紧：这是「内容 → 按钮」的过渡，留白比按钮之间略松，
-        上方才不至于与进度条粘成一块；行间两处（可见 3dp / 2dp）才是被压紧的节奏。
+        上方才不至于与进度条粘成一块；行间只有一处（可见 4dp），才是被压紧的节奏。
         沿革：space_m(12dp) → 7dp（3/5）→ 5dp（与第 2 行原引用的 space_s(8dp) 同收 2/3 时一并取整，
         原先分开的两个值合并成本项，space_s 的定义不能动、只换引用点）→ 一度取 2dp → 回到 5dp。
-        注意：按钮行1→行2 走 status_button_row_gap、行2→行3 走 status_button_last_gap，都不走本项；
+        注意：按钮行1→行2 走 status_button_row_gap，不走本项；
         同一行内相邻按钮之间的 marginStart 仍是 space_s，也不在本项口径内。
     -->
     <dimen name="status_buttons_gap">5dp</dimen>
 
     <!--
-        按钮行1 → 行2 的间隔：保持真机当前观感，目标可见空白 3dp。
+        按钮行1 → 行2 的间隔：保持真机当前观感，目标可见空白 4dp。
         本项是 margin，不是可见空白——两者相差两侧 inset，换算见下。
-        这几个按钮都用 M3 按钮样式，本页统一 android:insetTop/Bottom = 3dp；
+        行1 里最高的是「一键部署」（垂直 inset 4dp），行2 两个都是 TextButton（垂直 inset 3dp）；
         MaterialButtonHelper.wrapDrawableWithInset() 把背景 drawable 包成 InsetDrawable，
-        于是按钮可见的圆角块比它的布局盒上下各小 3dp。所以：
-            可见空白 = 3dp(上按钮 insetBottom) + margin(本值) + 3dp(下按钮 insetTop) = 本值 + 6dp
-        取 -3dp：可见空白 = 3 - 3 + 3 = 3dp（上一版 inset 4dp、margin -5dp → 同为 3dp）。
-        为什么取负：正数最小取 0 时可见空白仍有 6dp，压不到当前观感；按钮外观不变，
+        于是按钮可见的圆角块比它的布局盒上下各小 inset。所以：
+            可见空白 = 4dp(行1 insetBottom) + margin(本值) + 3dp(行2 insetTop) = 本值 + 7dp
+        取 -3dp：可见空白 = 4 - 3 + 3 = 4dp。
+        为什么取负：正数最小取 0 时可见空白仍有 7dp，压不到当前观感；按钮外观不变，
         只能让两行布局盒互相吃掉一点。重叠区落在两侧按钮的内缩空白/文字按钮的空白内边距里，
         不压文字、不改按钮尺寸；下按钮是 TextButton（无可见底色），不会被上按钮圆角块盖住文字。
     -->
     <dimen name="status_button_row_gap">-3dp</dimen>
 
     <!--
-        按钮行2 → 行3（「卸载部署」）的间隔：目标「两行文字之间的空白」= 12dp
-        （直接取两行触控外扩量之和：触控盒 46dp、可见块 40dp，每行外扩 6dp，两行合计 12dp）。
-        行2/行3 都是 TextButton，无可见圆角块，可见内容就是文字：14sp 行高约 20dp，
-        居中在 46dp 盒内、上下各留约 13dp。故：
-            文字间空白 = 13dp(行2 下方) + margin(本值) + 13dp(行3 上方) = 本值 + 26dp
-        取 -14dp：文字间空白 = 13 - 14 + 13 = 12dp。
-        注意不要直接把「盒间距」取 12dp——那会让文字之间空 38dp。
-        文字高若随字号变化，按 margin = 12 − (46 − 文字高) 重算本项。
-    -->
-    <dimen name="status_button_last_gap">-14dp</dimen>
-
-    <!--
-        三行 8 个按钮统一尺寸（行1 新增「自动更新」后，360dp 最小屏宽仍须放得下且文字不换行）。
+        按钮统一尺寸（「一键部署」单独恢复 M3 默认尺寸，见 status_deploy_button_*）。
         M3 默认：insetTop/Bottom = 4dp、minHeight = 48dp、实心/描边按钮左右内边距 = 24dp。
         本组：insetTop/Bottom = 3dp、minHeight = 46dp → 可见圆角块高 40dp、触控高 46dp；
         水平 inset 2dp（只收背景圆角块，不改布局宽）。
-        水平内边距：窄屏（默认，覆盖 360dp）取 13dp——16dp 时行3 三个按钮约 314dp，
-        超出 304dp 可用宽；宽屏（≥400dp）取 16dp，见 values-sw400dp。
-        行 1→行 2、行 2→行 3 的间隔分别见下面的 status_button_row_gap / status_button_last_gap。
+        水平内边距：窄屏（默认，覆盖 360dp）取 13dp；宽屏（≥400dp）取 16dp，见 values-sw400dp。
     -->
     <dimen name="status_button_inset_horizontal">2dp</dimen>
     <dimen name="status_button_inset_vertical">3dp</dimen>
     <dimen name="status_button_padding_horizontal">13dp</dimen>
     <dimen name="status_button_min_height">46dp</dimen>
+
+    <!--
+        「一键部署」恢复「自动更新开关迁入状态区首行之前」的 M3 默认尺寸：
+        minHeight 48dp、水平内边距 24dp（m3_btn_padding_left/right）、垂直 inset 4dp（m3_btn_inset）、
+        水平 inset 0dp。可见圆角块高 = 48 − 4 × 2 = 40dp，与其余按钮一致；触控高回到 48dp。
+        宽屏不另设覆盖：收窄前也没有 sw400dp 覆盖项，这里保持同一口径。
+    -->
+    <dimen name="status_deploy_button_inset_horizontal">0dp</dimen>
+    <dimen name="status_deploy_button_inset_vertical">4dp</dimen>
+    <dimen name="status_deploy_button_padding_horizontal">24dp</dimen>
+    <dimen name="status_deploy_button_min_height">48dp</dimen>
 
     <!--
         进度条与上方「部署状态」文本之间的间隔，目标可见空白 0dp。

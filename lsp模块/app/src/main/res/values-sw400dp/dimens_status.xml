@@ -3,8 +3,9 @@
 <resources>
 
     <!--
-        400dp 起可用宽（400 − 页边距 32 − 卡内边距 24 = 344dp）足以容纳行3 三个按钮；
+        400dp 起可用宽（400 − 页边距 32 − 卡内边距 24 = 344dp）足以容纳行1 三个按钮；
         360dp 下 16dp 会超宽，故默认取 13dp，见 values/dimens_status.xml。
+        「一键部署」走独立的 status_deploy_button_padding_horizontal（24dp），不在此覆盖范围内。
     -->
     <dimen name="status_button_padding_horizontal">16dp</dimen>
 </resources>
