@@ -285,7 +285,8 @@ public class ConfigFormFragment extends Fragment
 
     /**
      * 键渲染自检：<b>每个定义键都要有可编辑入口</b>——本页键行（role=setting）、设置页的键
-     * （{@code webui} 组）、状态页承载的键（如首行「自动更新」）或组头开关（role=master）。
+     * （{@code webui} 与 {@code control} 组，一并由 {@code UiSettingsFragment.settingsKeys} 给出）、
+     * 状态页承载的键或组头开关（role=master）。
      * 前三个分项在建表时一次算定（见 {@link ConfigFormController#rowKeyCount()}），不会因展开先后而变。
      * 结论写进诊断块的「参数定义」行的展开态文案：该行收起只报文件名，点开原地换成本页/设置页/状态页/
      * 组头开关四项计数，不再单独占一行。
@@ -296,8 +297,8 @@ public class ConfigFormFragment extends Fragment
         ConfigStore store = form.store();
         int renderedRowCount = form.rowKeyCount();
         int renderedMasterCount = form.masterKeyCount();
-        // 设置页键数取自 UiSettingsFragment.webuiKeys()——那是设置页真正渲染的那一份，不另写数字
-        int renderedSettingsCount = UiSettingsFragment.webuiKeys(store).size();
+        // 设置页键数取自 UiSettingsFragment.settingsKeys()——那是设置页各组真正渲染的那一份，不另写数字
+        int renderedSettingsCount = UiSettingsFragment.settingsKeys(store).size();
         // 状态页首行承载的键（如「自动更新」）：不在两页表单里，但仍是可编辑入口
         int renderedStatusPageCount = StatusFragment.statusPageKeyCount(store);
         int defined = store.keyCount();

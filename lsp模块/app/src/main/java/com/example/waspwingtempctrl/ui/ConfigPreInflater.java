@@ -153,22 +153,22 @@ public final class ConfigPreInflater {
         ViewGroup cardParent = new LinearLayout(inflater.getContext());
         ViewGroup rowParent = new WrapRowLayout(inflater.getContext());
         // 只备本页会取的件（设置页不取池子，见类注释的〈备料口径〉）：
-        //   ① 只在设置页渲染的那一组——它的卡与它那些键的件都不备；
+        //   ① 只在设置页渲染的那些组——它们的卡与那些键的件都不备；
         //   ② 总开关键——它只以卡头开关的形态出现（在 item_config_group 里），不出行、也没有键内控件。
         final Set<String> masterKeys = new LinkedHashSet<>();
-        final Set<String> settingsOnlyKeys = new LinkedHashSet<>();
+        final Set<String> settingsPageKeys = new LinkedHashSet<>();
         for (GroupMeta group : store.groups()) {
             if (group.master != null) {
                 masterKeys.add(group.master);
             }
             if (UiSettingsFragment.isSettingsGroup(group)) {
-                settingsOnlyKeys.addAll(group.keys);
+                settingsPageKeys.addAll(group.keys);
                 continue;
             }
             put(inflater, R.layout.item_config_group, cardParent);
         }
         for (KeyMeta meta : store.keys()) {
-            if (masterKeys.contains(meta.key) || settingsOnlyKeys.contains(meta.key)) {
+            if (masterKeys.contains(meta.key) || settingsPageKeys.contains(meta.key)) {
                 continue;
             }
             produceKey(inflater, rowParent, meta);

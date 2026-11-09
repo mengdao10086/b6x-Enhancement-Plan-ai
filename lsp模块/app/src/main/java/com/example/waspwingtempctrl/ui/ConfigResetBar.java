@@ -106,8 +106,28 @@ final class ConfigResetBar {
         MaterialButton button = (MaterialButton) LayoutInflater.from(context)
                 .inflate(R.layout.item_config_reset_button, buttons, false);
         button.setText(label);
+        alignWithStatusButtons(button);
         button.setOnClickListener(v -> confirm(group, label));
         return button;
+    }
+
+    /**
+     * 按钮几何与观感对齐状态页：宽度（水平内边距）、触控高、垂直 inset 全取 {@code status_button_*}
+     * 那一套（<b>只读</b>，不改 dimens_status.xml）。
+     *
+     * <p>状态页后两行是 M3 TextButton（无框）；本栏沿用 {@code item_config_reset_button.xml} 的
+     * OutlinedButton 骨架，把描边收成 0 即同款无框观感（两者其余样式同源，背景/涟漪/文字色一致）。
+     * 水平 inset 只收背景圆角块、不影响排版宽，无框后已不可见，故不设。
+     */
+    private void alignWithStatusButtons(@NonNull MaterialButton button) {
+        int hPad = card.getResources().getDimensionPixelSize(R.dimen.status_button_padding_horizontal);
+        int vInset = card.getResources().getDimensionPixelSize(R.dimen.status_button_inset_vertical);
+        int minHeight = card.getResources().getDimensionPixelSize(R.dimen.status_button_min_height);
+        button.setStrokeWidth(0);
+        button.setInsetTop(vInset);
+        button.setInsetBottom(vInset);
+        button.setMinHeight(minHeight);
+        button.setPaddingRelative(hPad, button.getPaddingTop(), hPad, button.getPaddingBottom());
     }
 
     /** 确认后才动手：重置不可撤销，且会连带把该组的组头总开关一起改掉。 */

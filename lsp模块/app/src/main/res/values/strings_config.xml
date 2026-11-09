@@ -63,13 +63,20 @@
     <string name="config_ki_cut_limit_cluster">已达上限：最多 %1$d 簇</string>
     <string name="config_ki_cut_limit_point">已达上限：每簇最多 %1$d 点</string>
 
-    <!-- ===== 设置页（[4] 界面 组的独立页，从顶栏设置按钮进入） ===== -->
+    <!-- ===== 设置页（界面 / 控制组的独立页，从顶栏设置按钮进入） ===== -->
     <string name="config_back_desc">返回上一页</string>
-    <string name="config_settings_empty">参数定义里没有「界面」分组，本页暂无可调项</string>
+    <string name="config_settings_empty">参数定义里没有可调分组，本页暂无可调项</string>
+    <!-- 「su 诊断」动作行：不是参数键，点一下跑只读探测并弹一段可长按选中的文本。 -->
+    <string name="config_settings_su_diag">su 诊断</string>
+    <string name="config_settings_su_diag_hint">点击探测</string>
+    <string name="config_settings_su_diag_busy">正在采集 su 诊断…</string>
+    <string name="config_settings_su_diag_failed">su 诊断失败：%1$s</string>
+    <string name="config_settings_su_diag_dialog_title">su 诊断</string>
+    <string name="config_settings_su_diag_close">关闭</string>
 
     <!--
-        参数重置栏（设置页内容末尾：在「界面」分组卡之后）。按钮上的组名不在这里：它由 ConfigResetBar 从分组标题
-        去掉段标编号得到（与卡头同一口径），写死这 5 个组名就会与定义分家。
+        参数重置栏（设置页内容末尾：在各分组卡之后）。按钮上的组名不在这里：它由 ConfigResetBar 从分组标题
+        去掉段标编号得到（与卡头同一口径），写死组名就会与定义分家。
         重置基准是定义里的 factory（出厂值），不是 default（代码内默认值），故文案一律说"出厂值"。
     -->
     <string name="config_reset_title">参数重置</string>
@@ -87,8 +94,8 @@
     <string name="config_diag_mtime_missing">配置 mtime：配置文件不存在</string>
     <!--
         参数定义行：点一下原地换文案——收起只报文件名，展开报键渲染自检的分项计数。
-          本页 = 本页键行（role=setting，不含 webui 组）
-          设置页 = webui 组的键（搬到独立设置页，来源同 UiSettingsFragment.webuiKeys()）
+          本页 = 本页键行（role=setting，不含设置页组）
+          设置页 = webui 与 control 组的键（搬到独立设置页，来源同 UiSettingsFragment.settingsKeys()）
           状态页 = 由状态页首行承载、不在表单渲染的键（当前为「自动更新」）
           组头 = role=master 的键（由 ConfigGroupBinder 渲染成卡头开关）
         四处入口相加应等于定义键数；不等时用 mismatch 那条如实提示。展开态末尾的「键」是单位。

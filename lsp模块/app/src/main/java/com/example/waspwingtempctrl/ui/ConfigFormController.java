@@ -63,10 +63,10 @@ final class ConfigFormController implements ConfigKeyRow.Host, ConfigWriteQueue.
         @NonNull
         ViewGroup cardContainer();
 
-        /** 本页是否渲染该分组（配置页：除 {@code webui} 外全部；设置页：只有 {@code webui}）。 */
+        /** 本页是否渲染该分组（配置页：除设置页组外全部；设置页：{@code webui} 与 {@code control}）。 */
         boolean rendersGroup(@NonNull GroupMeta group);
 
-        /** 本页是否渲染该键（缺省全渲染）；设置页据此跳过由状态页承载的键。 */
+        /** 本页是否渲染该键（缺省全渲染）；个别页可据此跳过由其它页承载的键。 */
         default boolean rendersKey(@NonNull KeyMeta key) {
             return true;
         }
@@ -112,6 +112,13 @@ final class ConfigFormController implements ConfigKeyRow.Host, ConfigWriteQueue.
         /** 每次快照上屏：页面在这里刷自己那块随快照变的东西（配置页：键渲染自检）。 */
         void onValuesApplied(@NonNull Snapshot snapshot);
 
+        /**
+         * 某个分组的键行建满之后的收尾（每轮建表、每组一次）：页面在这里追加自己的非表单行
+         * （设置页：{@code control} 组末尾的「su 诊断」动作行）。缺省不做任何事。
+         */
+        default void onGroupRowsBuilt(@NonNull GroupMeta group, @NonNull ViewGroup body) {
+        }
+
         /** 人话反馈（Snackbar）。 */
         void notifyUser(@NonNull String message, boolean error);
     }
@@ -138,6 +145,8 @@ final class ConfigFormController implements ConfigKeyRow.Host, ConfigWriteQueue.
     /** 磁盘上（或最近一次读取时）的值："值未变不写"的判定基准。仅主线程访问。 */
     private final Map<String, Value> diskValues = new LinkedHashMap<>();
     private final List<ConfigGroupBinder> groups = new ArrayList<>();
+    /** 已建分组卡 → 对应的定义分组（行阶段给页面回调要用；只记由定义建出的卡，"未分组"兜底卡不在内）。 */
+    private final Map<ConfigGroupBinder, GroupMeta> groupDefinitions = new LinkedHashMap<>();
 
     /**
      * 建表时一次算定的三件小账（见 {@link #indexBuiltForm()}）：本页各分组的行、键行键数、组头开关数。
@@ -511,6 +520,15 @@ final class ConfigFormController implements ConfigKeyRow.Host, ConfigWriteQueue.
         try {
             for (ConfigGroupBinder group : groups) {
                 group.buildRows();
+                // 行建满后让页面补自己的非表单行（设置页：control 组的「su 诊断」动作行）。
+                // 放在建行之后，动作行才落在键行末尾；未分组兜底卡没有定义，不回调。
+                GroupMeta definition = groupDefinitions.get(group);
+                if (definition != null) {
+                    ViewGroup body = group.card().findViewById(R.id.config_group_body);
+                    if (body != null) {
+                        page.onGroupRowsBuilt(definition, body);
+                    }
+                }
             }
             indexBuiltForm();   // 行与自检分项一次算定（紧随其后的自检与上屏都要用）
             // 快照可能还没回来（定义就绪即建表）：此时只把行建出来，值等 onSnapshotReady 补铺。
@@ -571,6 +589,7 @@ final class ConfigFormController implements ConfigKeyRow.Host, ConfigWriteQueue.
      */
     private void buildForm(@Nullable Snapshot snapshot) {
         groups.clear();
+        groupDefinitions.clear();
         final ViewGroup container = page.cardContainer();
         // 快照为准铺底：read() 已把文件里缺失的键补成定义默认值，故每个定义键都有值；
         // 快照还没回来（定义就绪即建壳）时留空，值由 onSnapshotReady / 段二补铺
@@ -603,7 +622,7 @@ final class ConfigFormController implements ConfigKeyRow.Host, ConfigWriteQueue.
             if (master != null) {
                 covered.add(master.key);
             }
-            addGroup(container, page.groupTitle(group), group.id, master, keyMetas);
+            addGroup(container, group, page.groupTitle(group), master, keyMetas);
         }
 
         if (page.showsUngroupedGroup()) {
@@ -615,9 +634,9 @@ final class ConfigFormController implements ConfigKeyRow.Host, ConfigWriteQueue.
                 }
             }
             if (!orphans.isEmpty()) {
-                addGroup(container,
+                addGroup(container, null,
                         container.getContext().getString(R.string.config_group_ungrouped),
-                        null, null, orphans);
+                        null, orphans);
             }
         }
     }
@@ -627,20 +646,23 @@ final class ConfigFormController implements ConfigKeyRow.Host, ConfigWriteQueue.
      * 摆出来只是噪音（设置页的定义里没有本组时即走这条路，由
      * {@link Page#onFormBuilt} 给空态提示）。
      */
-    private void addGroup(@NonNull ViewGroup container, @NonNull String title,
-                          @Nullable String groupId, @Nullable KeyMeta master,
+    private void addGroup(@NonNull ViewGroup container, @Nullable GroupMeta definition,
+                          @NonNull String title, @Nullable KeyMeta master,
                           @NonNull List<KeyMeta> keyMetas) {
         if (keyMetas.isEmpty() && master == null) {
             return;
         }
         // 组样式按 id 判定：取不到（未分组兜底）或 id 不匹配 → 常规整行
-        boolean twoColumn = TWO_COLUMN_GROUP_ID.equals(groupId);
+        boolean twoColumn = definition != null && TWO_COLUMN_GROUP_ID.equals(definition.id);
         ConfigGroupBinder binder = ConfigGroupBinder.create(container, title, master,
                 keyMetas, this, views, twoColumn);
         long startedAt = StartupTiming.accBegin(StartupTiming.FORM_SUB_ATTACH);
         container.addView(binder.card());
         StartupTiming.accEnd(StartupTiming.FORM_SUB_ATTACH, startedAt);
         groups.add(binder);
+        if (definition != null) {
+            groupDefinitions.put(binder, definition);
+        }
         // 默认展开（设置页）这一句发生在容器仍 GONE 时（revealBuiltForm(boolean) 排在 buildRowsPhase() 之后才露），
         // 故 Motion 量不到宽 → 直接落位、不播入场动画。若哪天把容器提前置可见（或改成 INVISIBLE，它会被
         // 排版），此处就会带着"键行尚未建满"的矮高进动画、行一建起来即跳——届时须同时保证键行已建满。
@@ -905,6 +927,7 @@ final class ConfigFormController implements ConfigKeyRow.Host, ConfigWriteQueue.
             diagnostics = null;
         }
         groups.clear();
+        groupDefinitions.clear();
         allRows = Collections.emptyList();   // 与 groups 同寿：行随视图一起没了
         builtRowKeyCount = 0;
         builtMasterKeyCount = 0;

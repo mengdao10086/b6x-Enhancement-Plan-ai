@@ -14,7 +14,7 @@ import com.example.waspwingtempctrl.ui.UiSettingsFragment;
 
 /**
  * 设置页外壳：顶栏设置按钮点进来的独立页面，内容只有 {@link UiSettingsFragment}
- * （{@code params.json} 里 {@code webui} 组——标题 {@code [4] 界面}——那几个界面自用参数）。
+ * （{@code params.json} 里归设置页的分组：界面 / 控制）。
  *
  * <p><b>本类不含业务</b>：读、改、落盘全在 Fragment 里，返回键只结束本页（设置页是独立页面，
  * 不退到主界面，主界面由它自己的页签状态恢复）。

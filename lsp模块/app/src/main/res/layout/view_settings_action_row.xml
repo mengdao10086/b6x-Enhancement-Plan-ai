@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    设置页「控制」组卡末的非表单动作行（当前只有「su 诊断」）：不是参数键，点一下跑一趟只读探测，
+    结果弹对话框（正文可长按选中复制）。
+    由 UiSettingsFragment#onGroupRowsBuilt 在键行建满后追加到 config_group_body；根标签声明
+    app:wrapFullLine，让卡内的流式容器按整行铺开。样式与键行同一套字号/颜色，右侧副文案表明这是动作。
+-->
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content"
+    android:background="?attr/selectableItemBackground"
+    android:clickable="true"
+    android:focusable="true"
+    android:gravity="center_vertical"
+    android:minHeight="@dimen/row_min_height"
+    android:orientation="horizontal"
+    android:paddingTop="@dimen/space_xs"
+    android:paddingBottom="@dimen/space_xs"
+    app:wrapFullLine="true">
+
+    <TextView
+        android:layout_width="0dp"
+        android:layout_height="wrap_content"
+        android:layout_weight="1"
+        android:text="@string/config_settings_su_diag"
+        android:textColor="@color/app_on_surface"
+        android:textSize="@dimen/text_body" />
+
+    <TextView
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:text="@string/config_settings_su_diag_hint"
+        android:textAppearance="@style/TextAppearance.B6XTempCtrl.Caption" />
+</LinearLayout>
