@@ -112,7 +112,8 @@ am broadcast -a com.flydigi.SET_TEMPERATURE_B7 \
 | `HOT_TEMP=` | 热端温度 | `getHotSurfaceTemperature()` byte ×10 | 0.1°C |
 | `COLD_TEMP=` | 冷端温度 | `getTemperature()` ×10 + `getTemperatureDecimal()` | 0.1°C |
 | `RPM_REAL=` | 实际风扇转速（经超频逻辑折算） | `getRealWindLevel()` | int |
-| `COLD_REAL=` | 实际制冷强度（经超频逻辑折算） | `getRealColdLevel()` | int |
+| `COLD_REAL=` | 制冷设定回显（经超频逻辑折算） | `getRealColdLevel()` | int |
+| `COLD_RUN=` | 实际制冷运行档（设备 0x13 包 byte[0x0f]，与 `COLD_REAL` 的设定回显不同） | `getColdRunLevel()` | int |
 | `TARGET_TEMP=` | 散热器目标温度 | `getTargetTemperature()` int ×10 | 0.1°C |
 
 ### 解析端（tempctrl `read_status_ble_both` → `select_active_device`）
