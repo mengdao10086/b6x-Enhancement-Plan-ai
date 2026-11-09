@@ -430,7 +430,7 @@ jobs:
             echo "资源 ID: $BEFORE_NIDS -> $AFTER_NIDS";
             echo "APK 字节: $BEFORE_SIZE -> $AFTER_SIZE（净减 $((BEFORE_SIZE - AFTER_SIZE))）"; } >> "$GITHUB_STEP_SUMMARY"
 
-          # 基线断言：GUI 资源集合为 5,427 条 / 17 个类型（改动基线时需同步本检查）
+          # 基线断言：GUI 资源集合为 5,428 条 / 17 个类型（改动基线时需同步本检查）
           # 5,380 → 5,386：日志整行跨选新增 1 个 drawable、3 个 id、2 个 string
           # 5,386 → 5,393：停止控制app 新增 6 个 string、1 个 id
           # 5,393 → 5,392：清理旧版遗留键移入诊断行，删除 1 个 id
