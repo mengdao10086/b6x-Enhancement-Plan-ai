@@ -978,7 +978,7 @@ public class ChartView extends View {
         return lo;
     }
 
-    /** 该样本上「已启用且有有效值」的系列 → 行文本 / 颜色 / 面板尺寸（只在触摸回调里调用）。 */
+    /** 该样本上「已启用」的系列 → 行文本 / 颜色 / 面板尺寸（pid 与实际制冷无值也保留行；只在触摸回调里调用）。 */
     private void buildTouchRows(int idx) {
         tickPaint.setTextSize(TICK_TEXT_DP * density);
         ChartSample d = window.samples[idx];
@@ -991,20 +991,14 @@ public class ChartView extends View {
             if (!s.on) {
                 continue;
             }
-            String text;
-            if ("pid".equals(s.id)) {
-                // pid 稀疏（只有重算行有值）：取按住点左侧最近的有效值；左侧没有则显示「-」，
-                // 但行始终保留，避免按住滑动时该行忽隐忽现
-                float v = pidTouchValue(idx);
-                text = getContext().getString(s.labelRes) + " "
-                        + (ChartSample.valid(v) ? ChartSeries.format(s, v) : "-");
-            } else {
-                float v = ChartSeries.value(s, d);
-                if (!ChartSample.valid(v)) {
-                    continue;
-                }
-                text = getContext().getString(s.labelRes) + " " + ChartSeries.format(s, v);
+            // pid 稀疏（只有重算行有值）：取按住点左侧最近的有效值。pid 与实际制冷（常为未就绪 -1）
+            // 无论有无值都保留行，避免按住滑动时该行忽隐忽现；无值显示「-」。
+            float v = "pid".equals(s.id) ? pidTouchValue(idx) : ChartSeries.value(s, d);
+            if (!ChartSeries.keepsTouchRow(s) && !ChartSample.valid(v)) {
+                continue;
             }
+            String text = getContext().getString(s.labelRes) + " "
+                    + (ChartSample.valid(v) ? ChartSeries.format(s, v) : "-");
             texts[n] = text;
             colors[n] = seriesColors[si];
             maxW = Math.max(maxW, tickPaint.measureText(text));

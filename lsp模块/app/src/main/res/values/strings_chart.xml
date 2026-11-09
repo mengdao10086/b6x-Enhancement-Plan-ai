@@ -31,8 +31,9 @@
     <string name="chart_series_cold">冷端℃</string>
     <string name="chart_series_cpu">CPU℃</string>
     <string name="chart_series_rpm">风扇rpm</string>
-    <string name="chart_series_cool">制冷</string>
-    <string name="chart_series_pid">pid℃</string>
+    <string name="chart_series_cool">目标制冷</string>
+    <string name="chart_series_cool_actual">实际制冷</string>
+    <string name="chart_series_pid">pid ℃</string>
 
     <!-- ===== 画布内文字 ===== -->
     <string name="chart_axis_left">℃/百rpm</string>
@@ -47,5 +48,5 @@
     <string name="chart_fail_no_perm">读取失败：文件存在，但 app 无读权限（SELinux/属主问题）。</string>
     <string name="chart_fail_empty">读取失败：数据文件为 0 字节，c-daemon 还没有写入过。</string>
     <string name="chart_fail_read">读取失败：%1$s</string>
-    <string name="chart_fail_parse_empty">读取成功（%1$d 字节）但解析出 0 行有效数据：每行至少需要 8 列（epoch,电池,CPU,热端,冷端,转速,实际制冷,目标制冷）。</string>
+    <string name="chart_fail_parse_empty">读取成功（%1$d 字节）但解析出 0 行有效数据：每行至少需要 8 列（epoch,电池,CPU,热端,冷端,转速,目标制冷,下发目标制冷）。</string>
 </resources>

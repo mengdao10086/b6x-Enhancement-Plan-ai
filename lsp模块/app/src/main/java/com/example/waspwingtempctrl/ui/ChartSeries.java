@@ -7,8 +7,9 @@ import java.util.Locale;
 /**
  * 一条曲线的静态定义与会话内开关状态。
  *
- * <p>图例顺序与默认开关（口径见 {@code app/逻辑说明.md} §7.6〈系列开关〉）：7 条曲线，
- * 默认除「冷端℃」「CPU℃」外全开；左轴 6 条（温度 ℃ 与风扇百 rpm 共轴），右轴恒 1 条（制冷）。
+ * <p>图例顺序与默认开关（口径见 {@code app/逻辑说明.md} §7.6〈系列开关〉）：8 条曲线，
+ * 默认除「冷端℃」「CPU℃」外全开；左轴 6 条（温度 ℃ 与风扇百 rpm 共轴），右轴 2 条
+ * （目标制冷 / 实际制冷）。
  *
  * <p>取值分两种口径，<b>不可混用</b>：
  * <ul>
@@ -51,12 +52,15 @@ final class ChartSeries {
         return new ChartSeries[]{
                 new ChartSeries("batt", R.string.chart_series_batt, R.color.chart_series_batt,
                         AXIS_LEFT, FMT_TEMP, true),
-                new ChartSeries("cool", R.string.chart_series_cool, R.color.chart_series_cool,
-                        AXIS_RIGHT, FMT_INT, true),
                 new ChartSeries("rpm", R.string.chart_series_rpm, R.color.chart_series_rpm,
                         AXIS_LEFT, FMT_RPM, true),
                 new ChartSeries("hot", R.string.chart_series_hot, R.color.chart_series_hot,
                         AXIS_LEFT, FMT_TEMP, true),
+                // 目标制冷 / 实际制冷：同走右轴，顺序相邻、在换行处成组（startsLegendRow 以实际制冷为行首）
+                new ChartSeries("cool", R.string.chart_series_cool, R.color.chart_series_cool,
+                        AXIS_RIGHT, FMT_INT, true),
+                new ChartSeries("coolActual", R.string.chart_series_cool_actual,
+                        R.color.chart_series_cool_actual, AXIS_RIGHT, FMT_INT, true),
                 new ChartSeries("pid", R.string.chart_series_pid, R.color.chart_series_pid,
                         AXIS_LEFT, FMT_TEMP, true),
                 new ChartSeries("cold", R.string.chart_series_cold, R.color.chart_series_cold,
@@ -73,12 +77,17 @@ final class ChartSeries {
     /**
      * 图例是否在该条之前另起一行（经 {@link WrapRowLayout#setBreakBefore} 施加）。
      *
-     * <p>{@code true} 的是「pid℃ / 冷端℃ / CPU℃」这一行——pid 输入与两条可选温度传感器同排，
-     * 第一行留给主曲线；排到第二行后图例不再随机掉行（见 app/逻辑说明.md §7.6）。
+     * <p>{@code true} 的是「实际制冷 / pid ℃ / 冷端℃ / CPU℃」这一行：实际制冷紧跟目标制冷，
+     * 二者在换行处相邻成组；同时它作为第二行行首固定下来（与 pid℃ 此前作为第二行行首的机制相同）。
      * 图例顺序即 {@link #createAll} 的数组顺序。
      */
     static boolean startsLegendRow(ChartSeries s) {
-        return "pid".equals(s.id);
+        return "coolActual".equals(s.id);
+    }
+
+    /** 按住查看时即使当前样本无值也保留该行（显示「-」）：pid 稀疏、实际制冷常为未就绪 -1。 */
+    static boolean keepsTouchRow(ChartSeries s) {
+        return "pid".equals(s.id) || "coolActual".equals(s.id);
     }
 
     /** 绘图与标注取值：热端/电池走滤波值，风扇 ÷100 与 ℃ 共轴。 */
@@ -98,6 +107,8 @@ final class ChartSeries {
                 return ChartSample.valid(d.rpm) ? d.rpm / 100f : ChartSample.INVALID;
             case "cool":
                 return d.cool;
+            case "coolActual":
+                return d.coolActual;
             default:
                 return ChartSample.INVALID;
         }

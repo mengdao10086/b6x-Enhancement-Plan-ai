@@ -17,8 +17,9 @@ package com.example.waspwingtempctrl.ui;
 final class ChartDataset {
 
     /**
-     * 一行至少有这么多列 —— 等于 C 端 {@code WEBUI_DATA_COLS}（{@code tempctrl.c} 的
-     * {@code WEBUI_ROW_FMT = "%ld,%d,%d,%d,%d,%d,%d,%d\n"}，共 8 个转换符）。改本值必须同步改 C 端声明。
+     * 一行至少有这么多列才参与解析 —— <b>不是 C 端当前列数</b>。C 端已升到 11 列
+     * （{@code tempctrl.c} 的 {@code WEBUI_DATA_COLS}/{@code WEBUI_ROW_FMT}），本值只作为旧行兼容下限：
+     * 旧数据（8/10 列）照常解析，缺的列取无效，不整行丢弃。
      *
      * <p>列序（与 C 端 {@code write_webui_data()} 里 {@code fprintf} 的实参一一对应，
      * 权威声明在 {@code tempctrl.c} 的 {@code WEBUI_ROW_FMT} 上方注释）：
@@ -29,18 +30,19 @@ final class ChartDataset {
      *   [3] 热端            0.1°C              → temp()
      *   [4] 冷端            0.1°C              → temp()
      *   [5] 实际转速        原始 RPM            → raw()
-     *   [6] 实际制冷        制冷档位            → raw()
-     *   [7] 目标制冷        制冷档位            → 不消费
+     *   [6] 目标制冷        设备回显的设定档     → raw()
+     *   [7] 下发目标制冷    0.1°C              → 不消费
      *   [8] PID 输入        0.01°C              → pidInput()
      *   [9] 重算标记        0/1                 → asOne()
+     *   [10] 实际制冷       设备运行档          → raw()
      * </pre>
      *
-     * <p><b>[7] 目标制冷：写端有，读端有意不消费。</b>本界面（图例 7 条系列 + 实时数值列）
-     * 都不展示目标制冷（{@code app/逻辑说明.md} §7.6〈实时数值列〉明确"不含目标制冷"），
-     * 故 8 列里只读前 7 列；<b>但列数校验仍按 8 列</b>——校验的是"写端格式"，读端不擅自放宽或收紧。
+     * <p><b>[7] 下发目标制冷：写端有，读端有意不消费。</b>本界面（图例 + 实时数值列）
+     * 都不展示下发目标制冷（{@code app/逻辑说明.md} §7.6〈实时数值列〉明确"不含目标制冷"）。
+     * 界面消费的「目标制冷」是 [6] 设备回显的设定档，「实际制冷」是 [10] 运行档，两者语义不同。
      *
-     * <p><b>[8] PID 输入 / [9] 重算标记：后加的可选列。</b>写端已升到 10 列；读端仍按「至少
-     * {@link #COL_COUNT} 列」校验，旧数据（8 列）照常解析，这两项取无效/false，不会整行丢弃。
+     * <p><b>[8] PID 输入 / [9] 重算标记 / [10] 实际制冷：后加的可选列。</b>旧行缺列时
+     * 对应项取无效/false，不会整行丢弃。
      */
     static final int COL_COUNT = 8;
 
@@ -53,7 +55,10 @@ final class ChartDataset {
     private static final int COL_HOT = 3;
     private static final int COL_COLD = 4;
     private static final int COL_RPM = 5;
+    /** 目标制冷：设备回显的设定档。 */
     private static final int COL_COOL = 6;
+    /** 实际制冷（设备运行档）：后加列，旧行没有 → 无效。 */
+    private static final int COL_COOL_ACTUAL = 10;
     /** PID 输入（0.01°C）：后加列，旧行没有 → 无效。 */
     private static final int COL_PID = 8;
     /** PID 重算标记（0/1）：后加列，旧行没有 → false。 */
@@ -97,6 +102,7 @@ final class ChartDataset {
                     temp(parseInt(p[COL_COLD])),
                     rawNonZero(parseInt(p[COL_RPM])),
                     rawNonZero(parseInt(p[COL_COOL])),
+                    rawNonZero(p.length > COL_COOL_ACTUAL ? parseInt(p[COL_COOL_ACTUAL]) : null),
                     pidInput(p.length > COL_PID ? parseInt(p[COL_PID]) : null),
                     p.length > COL_RECOMP && asOne(p[COL_RECOMP]));
             total++;
