@@ -13,6 +13,7 @@ package com.example.waspwingtempctrl.ui;
  * 最近 N 行，与 C 端压缩口径一致。
  *
  * <p>滤波<b>在解析后对全量样本做一次</b>（与显示窗口无关），窗口只做切片——同一份数据永远得到同一条曲线（见 app/逻辑说明.md §7.2）。
+ * 总开关 {@code UI_CURVE_FILTER_ON}=0 时跳过两级滤波，输出即原始采样值。
  */
 final class ChartDataset {
 
@@ -115,8 +116,11 @@ final class ChartDataset {
         }
         applyColdZeroRuns(out, cfg == null ? 0 : cfg.gapDetectSec);
         if (cfg != null) {
-            applyOne(out, true, cfg.alpha, cfg.quantStep);
-            applyOne(out, false, cfg.alpha, cfg.quantStep);
+            // 总开关关 = 两级都按关闭处理：输出即原始采样值（曲线与按住查看同源）
+            float alpha = cfg.filterOn ? cfg.alpha : 0f;
+            float step = cfg.filterOn ? cfg.quantStep : 0f;
+            applyOne(out, true, alpha, step);
+            applyOne(out, false, alpha, step);
         }
         return new ChartDataset(out, total, skipped);
     }

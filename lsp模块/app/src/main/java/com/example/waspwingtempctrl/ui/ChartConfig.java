@@ -18,7 +18,7 @@ import java.util.List;
  * <p>两类来源（口径见 app/逻辑说明.md §7.1）：
  * <ol>
  *   <li>{@code UI_GAP_SEC} / {@code UI_RPM_AXIS_MIN} / {@code UI_CURVE_FILTER} /
- *       {@code UI_PID_MARK}，
+ *       {@code UI_CURVE_FILTER_ON} / {@code UI_PID_MARK}，
  *       以及右轴上限口径所需的 {@code COLD_RPM_MAP} /
  *       {@code PID_COLD_RANGE} / {@code PERF_ENABLED} —— 一律经 {@link ConfigStore} 读。
  *       字段缺项（如只写 {@code UI_CURVE_FILTER=15}）回落该字段在
@@ -45,6 +45,8 @@ final class ChartConfig {
     int gapMaxSec = 15;
     /** 左轴转速下限（RPM）——{@code UI_RPM_AXIS_MIN}；0 = 关闭。 */
     int rpmAxisMin = 3000;
+    /** 曲线滤波总开关（{@code UI_CURVE_FILTER_ON}）：关 = 不滤波，直接显示原始采样值；默认开。 */
+    boolean filterOn = true;
     /** 双向 EMA 每遍权重 α = 第 1 值/100。 */
     float alpha = 0.15f;
     /** 最小步长 = 第 2 值/100。 */
@@ -116,6 +118,8 @@ final class ChartConfig {
         rpmAxisMin = Math.max(0, field(store, snap, "UI_RPM_AXIS_MIN", 0, 3000));
         // 重算标记：缺键按 schema 默认（开）
         markDash = field(store, snap, "UI_PID_MARK", 0, 1) != 0;
+        // 滤波总开关：缺键按 schema 默认（开）
+        filterOn = field(store, snap, "UI_CURVE_FILTER_ON", 0, 1) != 0;
         // 滤波：两个子值 0 都合法（= 关闭该级），负值回落默认（口径见 app/逻辑说明.md §7.2〈滤波关闭语义〉）
         int a = field(store, snap, "UI_CURVE_FILTER", 0, 15);
         int s = field(store, snap, "UI_CURVE_FILTER", 1, 5);

@@ -2044,6 +2044,26 @@
       "fields": null
     },
     {
+      "key": "UI_CURVE_FILTER_ON",
+      "group": "webui",
+      "role": "setting",
+      "type": "switch",
+      "label": "曲线滤波开关",
+      "desc": "曲线滤波总开关：关 = 不滤波，曲线与按住查看都直接显示原始采样值；开 = 按「曲线滤波」的双值参数处理。仅影响界面显示。",
+      "docOrder": 54.8,
+      "docDesc": "曲线滤波总开关（0/1，默认 1）：关 = 跳过「曲线滤波」的全部处理，曲线与按住查看面板直接显示原始采样值；开 = 按 `UI_CURVE_FILTER` 的双值参数（零相位平滑 + 最小步长格点吸附）处理。**仅界面读取，守护进程忽略**",
+      "confNote": ["曲线滤波总开关（0/1，默认 1）：1=按「曲线滤波」的双值参数滤波；0=不滤波，曲线与按住查看显示原始采样值"],
+      "unit": "",
+      "unitNote": "开关，取值 0/1，无单位",
+      "default": 1,
+      "factory": 1,
+      "min": 0,
+      "max": 1,
+      "requires": [],
+      "daemonConsumes": false,
+      "fields": null
+    },
+    {
       "key": "UI_CURVE_FILTER",
       "group": "webui",
       "role": "setting",
