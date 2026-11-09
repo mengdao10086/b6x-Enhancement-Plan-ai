@@ -8,6 +8,8 @@ import android.content.ClipboardManager;
 import android.content.Context;
 import android.content.ContextWrapper;
 import android.content.Intent;
+import android.content.pm.PackageManager;
+import android.content.pm.ResolveInfo;
 import android.graphics.Color;
 import android.graphics.Rect;
 import android.graphics.drawable.ColorDrawable;
@@ -18,6 +20,7 @@ import android.text.Selection;
 import android.text.Spannable;
 import android.text.Spanned;
 import android.text.style.ForegroundColorSpan;
+import android.util.Log;
 import android.view.ActionMode;
 import android.view.Gravity;
 import android.view.HapticFeedbackConstants;
@@ -62,6 +65,9 @@ import java.util.regex.Pattern;
  * 路径小卡里的「复制」例外：卡片本身就是一次明确的选择动作，按用户要求给一条 Toast。
  */
 final class TextCopy {
+
+    /** 调试日志标签：跳转失败/候选情况只写 logcat，不把异常原文塞进 Toast。 */
+    private static final String TAG = "TextCopy";
 
     private TextCopy() {
     }
@@ -719,11 +725,16 @@ final class TextCopy {
         private static final String EXTERNAL_STORAGE_AUTHORITY = "com.android.externalstorage.documents";
         /** 主存储在 DocumentsProvider 里的绝对路径；其余共享路径按卷 id 换算。 */
         private static final String PRIMARY_ROOT = "/storage/emulated/0";
+        /** root 路径的补充候选（只在降级场景加进选择器，不替用户决定、也不要求安装）。 */
+        private static final String[] ROOT_MANAGER_PACKAGES = {
+                "bin.mt.plus",
+                "com.mi.android.globalFileexplorer"
+        };
 
         private PathOpener() {
         }
 
-        /** 跳转到路径所在目录（路径本身是文件时取父目录）；不写死文件管理器，交给系统选择。 */
+        /** 跳转到路径所在目录（路径本身是文件时取父目录）；始终先弹系统选择器。 */
         static void open(@NonNull Context context, @NonNull String path) {
             Uri target = null;
             boolean degraded = false;
@@ -740,16 +751,24 @@ final class TextCopy {
                 degraded = true;
             }
             if (target == null) {
+                Log.d(TAG, "open: no document uri for " + path);
                 toast(context, R.string.path_action_open_no_app);
                 return;
             }
-            Intent withType = new Intent(Intent.ACTION_VIEW)
+            // 两条声明形式都预检：目录 MIME 优先，裸 ACTION_VIEW 兜底；空列表不进入 catch。
+            Intent typed = new Intent(Intent.ACTION_VIEW)
                     .setDataAndType(target, DocumentsContract.Document.MIME_TYPE_DIR);
-            OpenResult result = start(context, withType);
-            if (result == OpenResult.NO_APP) {
-                // 有的应用只声明裸 ACTION_VIEW、不认目录 MIME
-                result = start(context, new Intent(Intent.ACTION_VIEW, target));
+            Intent bare = new Intent(Intent.ACTION_VIEW, target);
+            boolean typedOk = hasCandidates(context, typed);
+            boolean bareOk = !typedOk && hasCandidates(context, bare);
+            Log.d(TAG, "open target=" + target + " degraded=" + degraded
+                    + " typed=" + typedOk + " bare=" + bareOk);
+            Intent primary = typedOk ? typed : (bareOk ? bare : null);
+            if (primary == null) {
+                toast(context, R.string.path_action_open_no_app);
+                return;
             }
+            OpenResult result = launchChooser(context, primary, degraded);
             if (result == OpenResult.NO_APP) {
                 toast(context, R.string.path_action_open_no_app);
             } else if (result == OpenResult.DENIED) {
@@ -757,6 +776,13 @@ final class TextCopy {
             } else if (degraded) {
                 toast(context, R.string.path_action_open_root_degraded);
             }
+        }
+
+        /** 预检：隐式 Intent 是否有默认可处理的 Activity。 */
+        private static boolean hasCandidates(@NonNull Context context, @NonNull Intent intent) {
+            List<ResolveInfo> resolved = context.getPackageManager()
+                    .queryIntentActivities(intent, PackageManager.MATCH_DEFAULT_ONLY);
+            return resolved != null && !resolved.isEmpty();
         }
 
         /** 路径若指向文件则取其父目录；无法确定类型时按「最后一段带扩展名」判断。 */
@@ -847,22 +873,72 @@ final class TextCopy {
         private enum OpenResult { OPENED, NO_APP, DENIED }
 
         /**
-         * 用隐式 Intent 交给系统：首次会弹出带「仅此一次 / 始终」的选择器，
-         * 用户选过「始终」后系统直接打开默认应用；这里不写死任何包名顺序。
+         * 显式构造系统选择器：即使用户已有默认应用、或只有唯一候选，第一次跳转也一定让用户选。
+         * （代价是「始终」默认不再生效——这是本次真机反馈要求的取舍。）
+         *
+         * <p>直接 {@code startActivity(target)} 时，系统会以<b>本应用</b>身份检查 content URI 的授权；
+         * 本应用没有存储权限，可能在启动前同步抛 {@code SecurityException}——这正是之前不弹选择器、
+         * 直接提示「所选应用打不开」的原因。改为启动系统选择器后，由系统把带授权 flag 的 target
+         * 交给用户选中的应用，绕开调用方这一层授权检查。
          */
-        private static OpenResult start(@NonNull Context context, @NonNull Intent intent) {
-            intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
+        private static OpenResult launchChooser(@NonNull Context context, @NonNull Intent target,
+                                                boolean degraded) {
+            target.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
+            Intent chooser = Intent.createChooser(target, null);
+            if (degraded) {
+                // root 路径补候选：已安装、且未被主 target 解析出的 root 文件管理器
+                List<Intent> extras = rootManagerExtras(context, target);
+                if (!extras.isEmpty()) {
+                    chooser.putExtra(Intent.EXTRA_INITIAL_INTENTS, extras.toArray(new Intent[0]));
+                }
+            }
             if (!isActivityContext(context)) {
-                intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+                chooser.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
             }
             try {
-                context.startActivity(intent);
+                context.startActivity(chooser);
                 return OpenResult.OPENED;
             } catch (ActivityNotFoundException e) {
-                return OpenResult.NO_APP;   // 系统里没有任何可处理的应用
+                Log.d(TAG, "chooser missing: " + e.getClass().getName() + ": " + e.getMessage(), e);
+                return OpenResult.NO_APP;
             } catch (SecurityException e) {
-                return OpenResult.DENIED;   // 所选应用打不开（无权限等）
+                Log.d(TAG, "chooser denied: " + e.getClass().getName() + ": " + e.getMessage(), e);
+                return OpenResult.DENIED;
             }
+        }
+
+        /** root 路径的补充候选（显式包名，只作为选项交给选择器展示，不替用户决定）。 */
+        private static List<Intent> rootManagerExtras(@NonNull Context context,
+                                                      @NonNull Intent target) {
+            List<Intent> extras = new ArrayList<>();
+            PackageManager pm = context.getPackageManager();
+            List<ResolveInfo> resolved =
+                    pm.queryIntentActivities(target, PackageManager.MATCH_DEFAULT_ONLY);
+            Uri data = target.getData();
+            for (String pkg : ROOT_MANAGER_PACKAGES) {
+                if (containsPackage(resolved, pkg)) {
+                    continue;   // 主 target 已经能列出它，避免重复
+                }
+                Intent explicit = new Intent(Intent.ACTION_VIEW, data)
+                        .setPackage(pkg)
+                        .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
+                if (explicit.resolveActivity(pm) != null) {
+                    extras.add(explicit);
+                }
+            }
+            return extras;
+        }
+
+        private static boolean containsPackage(@Nullable List<ResolveInfo> resolved, String pkg) {
+            if (resolved == null) {
+                return false;
+            }
+            for (ResolveInfo info : resolved) {
+                if (info.activityInfo != null && pkg.equals(info.activityInfo.packageName)) {
+                    return true;
+                }
+            }
+            return false;
         }
 
         /** 通过 ThemeWrapper 逐层找 Activity：非 Activity 上下文起 Activity 需要 NEW_TASK。 */
