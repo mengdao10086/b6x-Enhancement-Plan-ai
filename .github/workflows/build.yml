@@ -430,14 +430,16 @@ jobs:
             echo "资源 ID: $BEFORE_NIDS -> $AFTER_NIDS";
             echo "APK 字节: $BEFORE_SIZE -> $AFTER_SIZE（净减 $((BEFORE_SIZE - AFTER_SIZE))）"; } >> "$GITHUB_STEP_SUMMARY"
 
-          # 基线断言：GUI 资源集合为 5,427 条 / 17 个类型（改动基线时需同步本检查）
+          # 基线断言：GUI 资源集合为 5,426 条 / 17 个类型（改动基线时需同步本检查）
           # 5,380 → 5,386：日志整行跨选新增 1 个 drawable、3 个 id、2 个 string
           # 5,386 → 5,393：停止控制app 新增 6 个 string、1 个 id
           # 5,393 → 5,392：清理旧版遗留键移入诊断行，删除 1 个 id
           # 5,392 → 5,405：曲线按住查看、状态区按钮与自动更新开关等改动新增 13 条资源
           # 5,405 → 5,427：快捷方式（1 xml + 2 drawable + 4 string + 1 主题样式）、路径小卡（1 layout + 7 string）、
           #   设置页控制分组与 su 诊断（1 layout + 5 string）、状态页尺寸与文案调整，净增 22 条；新增 xml 资源类型（16 → 17）
-          [ "$BEFORE_ENTRIES" -eq 5427 ]           || { echo "基线资源条目数不是 5,427（$BEFORE_ENTRIES）"; exit 1; }
+          # 5,427 → 5,426：重置栏间距新增 1 个 dimen；路径小卡改版在既有 layout/string 上改写，
+          #   净减 1 个 id 与 1 个 string，合计净减 1 条；layout 数与类型数不变
+          [ "$BEFORE_ENTRIES" -eq 5426 ]           || { echo "基线资源条目数不是 5,426（$BEFORE_ENTRIES）"; exit 1; }
           [ "$BEFORE_NTYPES" -eq 17 ]              || { echo "基线资源类型数不是 17（$BEFORE_NTYPES）"; exit 1; }
           [ "$REMOVE_N" -eq 19 ]                   || { echo "待移除 layout 数量不是 19（$REMOVE_N）"; exit 1; }
           [ "$AFTER_ENTRIES" -eq $((BEFORE_ENTRIES - REMOVE_N)) ] \

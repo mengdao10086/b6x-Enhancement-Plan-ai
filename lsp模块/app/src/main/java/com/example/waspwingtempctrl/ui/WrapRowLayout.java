@@ -18,8 +18,8 @@ import java.util.Arrays;
  *
  * <h3>三种子视图</h3>
  * <ul>
- *   <li><b>leading</b>（缺省）：从行左界起依次排，列距 {@code wrapColGap}（该 XML 属性当前全仓
- *       未被设置，列距恒取缺省 {@code @dimen/space_m}），放不下换行。</li>
+ *   <li><b>leading</b>（缺省）：从行左界起依次排，列距 {@code wrapColGap}（缺省
+ *       {@code @dimen/space_m}，可由 {@code app:wrapColGap} 指定），放不下换行。</li>
  *   <li><b>trailing</b>：连续的一串 trailing 构成「尾段」，每行都贴本行<b>行尾（右界）</b>对齐；
  *       分配按「换行偏好顺序」逐档尝试（详见 {@link #placeTailRun}）——<b>能用整行解决就不混排，
  *       混排只在连整行都放不下时才用</b>（① ~ ⑤ 明细见 app/逻辑说明.md §7.7）。</li>
