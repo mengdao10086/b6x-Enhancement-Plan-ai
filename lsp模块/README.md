@@ -111,7 +111,8 @@ am broadcast -a com.flydigi.SET_TEMPERATURE_B7 \
 | `RUN_MODE=` | 散热器当前运行模式（设备回传原值，不随下发换算） | `WaspWingInfo.getRunMode()` | B6X：0=智能 / 1=手动 / 2=超频（宿主固定功率）；B7X：0=智能 / 1=手动 / 2=超频 / 3=实验智能 |
 | `HOT_TEMP=` | 热端温度 | `getHotSurfaceTemperature()` byte ×10 | 0.1°C |
 | `COLD_TEMP=` | 冷端温度 | `getTemperature()` ×10 + `getTemperatureDecimal()` | 0.1°C |
-| `RPM_REAL=` | 实际风扇转速（经超频逻辑折算） | `getRealWindLevel()` | int |
+| `RPM_REAL=` | 设定风扇转速（设备回显，经超频逻辑折算） | `getRealWindLevel()` | int |
+| `RPM_RUN=` | 设备实际风扇转速原始值（0x13 `value[0x0b]<<8 \| value[0x0a]`，与 `RPM_REAL` 的设定回显不同） | `getSpeed()` | int |
 | `COLD_REAL=` | 制冷设定回显（经超频逻辑折算） | `getRealColdLevel()` | int |
 | `COLD_RUN=` | 实际制冷运行档（设备 0x13 包 byte[0x0f]，与 `COLD_REAL` 的设定回显不同） | `getColdRunLevel()` | int |
 | `TARGET_TEMP=` | 散热器目标温度 | `getTargetTemperature()` int ×10 | 0.1°C |
@@ -125,9 +126,22 @@ RUN_MODE=1
 HOT_TEMP=420        ← 42.0°C
 COLD_TEMP=58         ← 5.8°C
 RPM_REAL=77
+RPM_RUN=1850        ← 设备实际转速原始值
 COLD_REAL=115
 TARGET_TEMP=180     ← 18.0°C
 ```
+
+> `RPM_RUN` 由独立 try/catch 写入：B7X 或旧版本无 `getSpeed()` 时该行缺失，其余字段不受影响；daemon 缺该行时按 -1（无效）处理。
+
+### 临时停止标记文件（daemon → 文件 → 模块）
+
+| 项 | 值 |
+|------|------|
+| 路径 | `/data/local/tmp/tempctrl_temp_stop` |
+| 内容 | 单行 `1\n` 或 `0\n`（1=临时停止生效） |
+| 写入方 | tempctrl daemon：启动时预创建（`chmod 0666`）并写当前值；BLE 已连的 5s 控制块内随 `maintain_temp_stop()` 重写（状态变化立即写，未变化也每 5s 刷新 mtime） |
+| 读取方 | `MainHook.checkCommandStall()` 每秒读取；内容为 `1` 且 mtime ≤15s 时跳过「回传停滞 → forceReconnect」分支 |
+| 过期/缺失 | 按 `0` 处理（daemon 被杀或断联停止刷新后，模块恢复既有自愈逻辑） |
 
 ### 注意
 - 温度字段全部使用 0.1°C 内部单位（C 端 `atoi()` 直接解析，无需浮点）
@@ -209,6 +223,7 @@ TARGET_TEMP=180     ← 18.0°C
 | `tempctrl_b6x.status` / `tempctrl_b7x.status` | `/data/local/tmp/`（**原样未动**） | daemon 预创建 + `chmod 0666`；LSPosed 侧每秒覆写（详见上文 status 文件协议） |
 | `tempctrl_uiprefs` | `/data/local/tmp/` | daemon（按需转写，详见上文界面开关文件协议） |
 | `tempctrl_bt_req` | `/data/local/tmp/` | daemon 预创建 + `chmod 0666`；LSPosed 侧按需覆写 `REQ=<epoch秒>`（断连自动开蓝牙请求，daemon 读出后执行开蓝牙命令链） |
+| `tempctrl_temp_stop` | `/data/local/tmp/` | daemon 预创建 + `chmod 0666` 并每 5s 重写 `1/0`；LSPosed 侧每秒读取（临时停止期间跳过回传停滞重连，详见上文临时停止标记文件） |
 | `tempctrl_bt_on_at` | `/data/data/<飞智包名>/files/`（**各包各记**） | LSPosed 侧（`MainHook`）自建自用（断连自动开蓝牙限频时间戳），daemon 不参与 |
 | `tempctrl_last_dev` | `/data/data/<飞智包名>/files/`（**各包各记**） | LSPosed 侧（`MainHook`）自建自用，daemon 不参与 |
 | `tempctrl`（二进制） | `/data/local/tmp/tempctrl`（沿用 noexec 规避） | 部署时由 root 从 APK assets 落盘 + `chmod 0755` |
@@ -219,7 +234,7 @@ TARGET_TEMP=180     ← 18.0°C
 
 > 卸载自清的清理清单与「清除数据」的已知代价见 [app/逻辑说明.md](app/逻辑说明.md) §2.5。
 >
-> **三份跨进程协议文件原样未动**：`tempctrl_b6x.status` / `tempctrl_b7x.status`、`tempctrl_uiprefs`、`tempctrl_bt_req` 仍落 `/data/local/tmp/`，本轮**未迁移**（涉及 3 个宿主包寻址 + SELinux 未验证），列为后续待真机验证项。
+> **跨进程协议文件原样未迁移**：`tempctrl_b6x.status` / `tempctrl_b7x.status`、`tempctrl_uiprefs`、`tempctrl_bt_req`、`tempctrl_temp_stop` 仍落 `/data/local/tmp/`（涉及 3 个宿主包寻址 + SELinux 未验证），列为后续待真机验证项。
 
 ---
 

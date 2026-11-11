@@ -120,8 +120,8 @@ public class ChartView extends View {
     private String[] rightText;
     private Path[] paths;
     private ChartDotOp[] dots;
-    /** 末端数值标签（仅实际制冷，单条）。 */
-    private ChartLabelOp endLabel;
+    /** 末端数值标签（成对系列里当前强调的实际/目标两条，最多两条）。 */
+    private ChartLabelOp[] endLabels;
     /** PID 重算标记：竖向虚线（x 坐标）。 */
     private float[] dashXs;
     /** pid 曲线的孤立样本点（x/y 同长，颜色恒为 pid 系列色）。 */
@@ -221,8 +221,12 @@ public class ChartView extends View {
 
     /** 数据与口径参数（主线程调用）。 */
     public void setData(@Nullable ChartWindow win, @Nullable ChartConfig cfg) {
+        boolean configChanged = this.config != cfg;
         this.window = win;
         this.config = cfg;
+        if (!colorsReady || configChanged) {
+            loadColors();   // 交换开关改变强调角色 → 线色要按新角色重取
+        }
         rebuild();
         invalidate();
     }
@@ -244,6 +248,11 @@ public class ChartView extends View {
 
     int seriesCount() {
         return series.length;
+    }
+
+    /** 当前配置下的图例/按住查看显示顺序（存的是系列数组下标；交换开关只换成对两条的槽位）。 */
+    int[] seriesOrder(@Nullable ChartConfig cfg) {
+        return ChartSeries.displayOrder(series, cfg);
     }
 
     /** 主题/字体变化后重新取色并重算（本类不缓存跨主题的色值）。 */
@@ -275,7 +284,8 @@ public class ChartView extends View {
         colorGrid = res.getColor(R.color.app_outline_variant, theme);
         colorAxis = res.getColor(R.color.chart_axis, theme);
         for (int i = 0; i < series.length; i++) {
-            seriesColors[i] = res.getColor(series[i].colorRes, theme);
+            // 强调方取不透明色、参考方取同 RGB 半透明色；交换开关因此同时交换两条线的颜色
+            seriesColors[i] = res.getColor(ChartSeries.colorRes(series[i], config), theme);
         }
         haloPaint.setColor(colorBg);
         dotHaloPaint.setColor(colorBg);
@@ -302,7 +312,7 @@ public class ChartView extends View {
         rightText = null;
         paths = null;
         dots = null;
-        endLabel = null;
+        endLabels = null;
         dashXs = null;
         pidDotX = null;
         pidDotY = null;
@@ -673,12 +683,12 @@ public class ChartView extends View {
 
     /**
      * 末端标记：每条开启系列取最后一个有效样本；圆点按 {@link ChartSeries#drawsEndDot} 决定是否画，
-     * 数值标签按 {@link ChartSeries#drawsEndLabel} 白名单只给实际制冷生成（位置见 {@link #placeEndpointLabel}）。
-     * 按住查看面板里的数值由 {@link #buildTouchRows} 单独生成。
+     * 数值标签按 {@link ChartSeries#drawsEndLabel} 决定是否生成（只剩成对系列的强调方，最多两条；
+     * 位置见 {@link #placeEndpointLabel}）。按住查看面板里的数值由 {@link #buildTouchRows} 单独生成。
      */
     private void buildMarkers(ChartWindow win, ChartAxis lAxis, ChartAxis rAxis) {
         List<ChartDotOp> dotOps = new ArrayList<>();
-        ChartLabelOp label = null;
+        List<ChartLabelOp> labelOps = new ArrayList<>();
         for (int si = 0; si < series.length; si++) {
             ChartSeries s = series[si];
             if (!s.on) {
@@ -687,10 +697,10 @@ public class ChartView extends View {
             if ("pid".equals(s.id)) {
                 continue;   // pid 稀疏曲线由 buildPidSingles 单独画点
             }
-            boolean wantDot = ChartSeries.drawsEndDot(s);
-            boolean wantLabel = ChartSeries.drawsEndLabel(s);
+            boolean wantDot = ChartSeries.drawsEndDot(s, config);
+            boolean wantLabel = ChartSeries.drawsEndLabel(s, config);
             if (!wantDot && !wantLabel) {
-                continue;   // 目标制冷既不画圆点也不标数值
+                continue;   // 参考方（半透明那条）既不画圆点也不标数值
             }
             ChartAxis ax = s.axis == ChartSeries.AXIS_LEFT ? lAxis : rAxis;
             if (ax == null) {
@@ -723,20 +733,22 @@ public class ChartView extends View {
                 dotOps.add(new ChartDotOp(ex, ey, seriesColors[si]));
             }
             if (wantLabel) {
-                label = placeEndpointLabel(s, lv, ex, ey, seriesColors[si]);
+                labelOps.add(placeEndpointLabel(s, lv, ex, ey, seriesColors[si], labelOps));
             }
         }
         dots = dotOps.isEmpty() ? null : dotOps.toArray(new ChartDotOp[0]);
-        endLabel = label;
+        endLabels = labelOps.isEmpty() ? null : labelOps.toArray(new ChartLabelOp[0]);
     }
 
     /**
      * 单个末端数值标签的落位（沿用原多系列标注的单锚点口径）：
      * 横向放锚点右侧 {@link #LABEL_GAP_DP}，右越界翻到左侧，左界钳到 2dp；
      * 纵向比较锚点上下空隙，优先选放得下且空隙更大的一侧，两侧都放不下时取空隙更大的一侧，
-     * 再钳在绘图区上沿与「画布下沿 − descent」之间。
+     * 再钳在绘图区上沿与「画布下沿 − descent」之间。最多两条标签（实际制冷 / 实际rpm）同高时，
+     * 后放的一条上下错开一行，避免两条数字叠在一起。
      */
-    private ChartLabelOp placeEndpointLabel(ChartSeries s, float v, float ex, float ey, int color) {
+    private ChartLabelOp placeEndpointLabel(ChartSeries s, float v, float ex, float ey, int color,
+                                            List<ChartLabelOp> placed) {
         String text = ChartSeries.format(s, v);
         float textW = tickPaint.measureText(text);
         Paint.FontMetrics fm = tickPaint.getFontMetrics();
@@ -764,7 +776,32 @@ public class ChartView extends View {
         if (tx < 2f * density) {
             tx = 2f * density;
         }
-        return new ChartLabelOp(text, tx, ly, color);
+        float rowStep = LABEL_H_DP * density + 1f * density;
+        if (overlapsLabel(placed, tx, textW, ly)) {
+            float down = ly + rowStep;
+            float up = ly - rowStep;
+            if (down <= labelMaxY && !overlapsLabel(placed, tx, textW, down)) {
+                ly = down;
+            } else if (up >= fPadT && !overlapsLabel(placed, tx, textW, up)) {
+                ly = up;
+            } else {
+                ly = Math.max(fPadT, Math.min(labelMaxY, down));
+            }
+        }
+        return new ChartLabelOp(text, tx, ly, textW, color);
+    }
+
+    /** 新标签与已放标签是否在横纵两个方向都相交（纵向按一行字高判定）。 */
+    private boolean overlapsLabel(List<ChartLabelOp> placed, float tx, float textW, float ly) {
+        float lineH = LABEL_H_DP * density;
+        for (ChartLabelOp p : placed) {
+            boolean xHit = tx < p.x + p.w && p.x < tx + textW;
+            boolean yHit = Math.abs(p.y - ly) < lineH;
+            if (xHit && yHit) {
+                return true;
+            }
+        }
+        return false;
     }
 
     // ==================== 按住查看 ====================
@@ -870,7 +907,10 @@ public class ChartView extends View {
         return lo;
     }
 
-    /** 该样本上「已启用」的系列 → 行文本 / 颜色 / 面板尺寸（pid 与实际制冷无值也保留行；只在触摸回调里调用）。 */
+    /**
+     * 该样本上「已启用」的系列 → 行文本 / 颜色 / 面板尺寸。行顺序与图例一致（交换开关同样换位）；
+     * pid 与成对系列的强调方无值也保留行；只在触摸回调里调用。
+     */
     private void buildTouchRows(int idx) {
         tickPaint.setTextSize(TICK_TEXT_DP * density);
         ChartSample d = window.samples[idx];
@@ -878,15 +918,17 @@ public class ChartView extends View {
         int[] colors = new int[series.length];
         float maxW = 0f;
         int n = 0;
-        for (int si = 0; si < series.length; si++) {
+        int[] order = ChartSeries.displayOrder(series, config);
+        for (int oi = 0; oi < order.length; oi++) {
+            int si = order[oi];
             ChartSeries s = series[si];
             if (!s.on) {
                 continue;
             }
-            // pid 稀疏（只有重算行有值）：取按住点左侧最近的有效值。pid 与实际制冷（常为未就绪 -1）
+            // pid 稀疏（只有重算行有值）：取按住点左侧最近的有效值。pid 与成对系列的强调方
             // 无论有无值都保留行，避免按住滑动时该行忽隐忽现；无值显示「-」。
             float v = "pid".equals(s.id) ? pidTouchValue(idx) : ChartSeries.value(s, d);
-            if (!ChartSeries.keepsTouchRow(s) && !ChartSample.valid(v)) {
+            if (!ChartSeries.keepsTouchRow(s, config) && !ChartSample.valid(v)) {
                 continue;
             }
             String text = getContext().getString(s.labelRes) + " "
@@ -1147,14 +1189,16 @@ public class ChartView extends View {
             }
         }
 
-        // 末端数值标签（仅实际制冷）：先描边（halo）再填色，避免曲线穿过字形时同色糊在一起
-        if (endLabel != null) {
+        // 末端数值标签（成对系列的强调方，最多两条）：先描边（halo）再填色，避免曲线穿过字形时同色糊在一起
+        if (endLabels != null) {
             haloPaint.setColor(colorBg);
             labelPaint.setTextSize(TICK_TEXT_DP * density);
             haloPaint.setTextSize(TICK_TEXT_DP * density);
-            labelPaint.setColor(endLabel.color);
-            canvas.drawText(endLabel.text, endLabel.x, endLabel.y, haloPaint);
-            canvas.drawText(endLabel.text, endLabel.x, endLabel.y, labelPaint);
+            for (ChartLabelOp e : endLabels) {
+                labelPaint.setColor(e.color);
+                canvas.drawText(e.text, e.x, e.y, haloPaint);
+                canvas.drawText(e.text, e.x, e.y, labelPaint);
+            }
         }
 
         if (dots != null) {
@@ -1173,12 +1217,14 @@ public class ChartView extends View {
         final String text;
         final float x;
         final float y;
+        final float w;
         final int color;
 
-        ChartLabelOp(String text, float x, float y, int color) {
+        ChartLabelOp(String text, float x, float y, float w, int color) {
             this.text = text;
             this.x = x;
             this.y = y;
+            this.w = w;
             this.color = color;
         }
     }

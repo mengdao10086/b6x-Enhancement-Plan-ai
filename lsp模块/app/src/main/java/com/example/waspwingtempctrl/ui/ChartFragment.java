@@ -33,7 +33,7 @@ import java.util.Locale;
 /**
  * 曲线区：档位选择 + 图例 + 自绘画布 + 失败可诊断。
  *
- * <p><b>布局</b>：档位行、图例（4+4 两行、同列等宽对齐）与画布同处一张卡内，全部按自然尺寸排布
+ * <p><b>布局</b>：档位行、图例（5+4 两行、同列等宽对齐）与画布同处一张卡内，全部按自然尺寸排布
  * ——不整体缩放、也不改写容器高度。画布高度初值由 {@code fragment_chart.xml} 给出，运行时可用画布
  * 下沿的拖柄在 {@code chart_canvas_min_height}～{@code chart_canvas_max_height} 之间改（改的是运行时
  * {@code LayoutParams}，不落盘）。见 app/逻辑说明.md §7.6。
@@ -71,6 +71,8 @@ public class ChartFragment extends Fragment {
     private TextView failureText;
     /** 图例容器（可换行的 WrapRowLayout，冷端℃/CPU℃ 由 {@code setBreakBefore} 固定另起第二行）。 */
     private WrapRowLayout legendRow;
+    /** 图例宽度变化监听：图例可能因交换开关重建，复用同一个 listener 避免重复挂载。 */
+    private View.OnLayoutChangeListener legendLayoutListener;
     private MaterialButtonToggleGroup windowGroup;
     /** 画布容器：拖柄改的只是它的 LayoutParams.height（画布自身 match_parent 跟随）。 */
     private View canvasContainer;
@@ -104,6 +106,9 @@ public class ChartFragment extends Fragment {
 
     private File dataFile;
     private ChartConfig config;
+    /** 上次建图例时的交换开关值；变化时重建图例，使成对两条换到新的槽位。 */
+    private boolean legendSwapCool;
+    private boolean legendSwapRpm;
     private ChartDataset dataset;
     private String lastFingerprint;
     /** 页面重新可见时置位：下次刷新顺带重读配置（用户可能在配置页改过口径键）。 */
@@ -239,6 +244,7 @@ public class ChartFragment extends Fragment {
         failureScroll = null;
         failureText = null;
         legendRow = null;
+        legendLayoutListener = null;
         windowGroup = null;
         canvasContainer = null;
         resizeHandle = null;
@@ -314,6 +320,9 @@ public class ChartFragment extends Fragment {
         // 当前档位不在新档位集合里才回落默认，避免每次切页都把用户选的档位冲掉
         boolean configChanged = config != cfg;
         config = cfg;
+        if (legendSwapCool != cfg.swapCool || legendSwapRpm != cfg.swapRpm) {
+            buildLegend();   // 交换开关变化 → 成对两条的图例槽位/颜色随之换位
+        }
         boolean windowInvalid = windowSec <= 0 || !contains(cfg.windowOptions, windowSec);
         if (windowInvalid) {
             windowSec = cfg.windowDefaultSec;
@@ -403,54 +412,62 @@ public class ChartFragment extends Fragment {
     // ==================== 控件构建 ====================
 
     /**
-     * 图例：8 条曲线，默认开关照 {@code app/逻辑说明.md} §7.6〈系列开关〉；勾选框着色 = 该曲线的
-     * chart_series_* 色（着色统一交给 {@link #applyLegendTints()}）。容器是可换行的 WrapRowLayout：
-     * 行首由 {@link ChartSeries#startsLegendRow} 决定（pid ℃ 另起第二行，两行各 4 条）；首次布局后
-     * 按列取较宽者统一宽度，使两行四列的勾选框与文字起点竖直对齐（见 {@link #alignLegendColumns}）。
+     * 图例：9 条曲线，默认开关照 {@code app/逻辑说明.md} §7.6〈系列开关〉；勾选框着色 = 该曲线
+     * 当前角色对应的 chart_series_* 色（着色统一交给 {@link #applyLegendTints()}）。容器是可换行的
+     * WrapRowLayout：显示顺序由 {@link ChartView#seriesOrder} 给出（交换开关只换成对两条的槽位），
+     * 行首由 {@link ChartSeries#startsLegendRow} 决定（pid ℃ 另起第二行，两行 5+4）；首次布局后
+     * 按列取较宽者统一宽度，使两行各列的勾选框与文字起点竖直对齐（见 {@link #alignLegendColumns}）。
      */
     private void buildLegend() {
         LayoutInflater inflater = LayoutInflater.from(requireContext());
         legendRow.removeAllViews();
-        int count = chartView.seriesCount();
-        CheckBox[] boxes = new CheckBox[count];
-        for (int i = 0; i < count; i++) {
-            final int index = i;
-            ChartSeries s = chartView.seriesAt(i);
+        int[] order = chartView.seriesOrder(config);
+        CheckBox[] boxes = new CheckBox[order.length];
+        for (int i = 0; i < order.length; i++) {
+            final int seriesIndex = order[i];
+            ChartSeries s = chartView.seriesAt(seriesIndex);
             CheckBox box = (CheckBox) inflater.inflate(R.layout.item_chart_legend, legendRow, false);
             box.setText(s.labelRes);
             box.setChecked(s.on);
-            box.setOnCheckedChangeListener((button, checked) -> chartView.setSeriesEnabled(index, checked));
+            box.setOnCheckedChangeListener(
+                    (button, checked) -> chartView.setSeriesEnabled(seriesIndex, checked));
             legendRow.setBreakBefore(box, ChartSeries.startsLegendRow(s));
             legendRow.addView(box);
             boxes[i] = box;
         }
+        legendSwapCool = config != null && config.swapCool;
+        legendSwapRpm = config != null && config.swapRpm;
         // 列宽要等容器量出可用宽再定；Activity 自行处理 configChanges，宽度变化时按新宽度重算
-        legendRow.post(() -> alignLegendColumns(boxes));
-        legendRow.addOnLayoutChangeListener((v, l, t, r, b, ol, ot, or, ob) -> {
+        legendRow.post(() -> alignLegendColumns(boxes, order));
+        if (legendLayoutListener != null) {
+            legendRow.removeOnLayoutChangeListener(legendLayoutListener);
+        }
+        legendLayoutListener = (v, l, t, r, b, ol, ot, or, ob) -> {
             if (r - l != or - ol) {
-                legendRow.post(() -> alignLegendColumns(boxes));
+                legendRow.post(() -> alignLegendColumns(boxes, order));
             }
-        });
+        };
+        legendRow.addOnLayoutChangeListener(legendLayoutListener);
         applyLegendTints();
     }
 
     /**
-     * 图例四列上下对齐：同一列（两行各一条）统一取较宽者的宽度，勾选框与文字起点因此竖直对齐。
-     * 可用宽装不下各列最大宽之和时退化为四列平分，文字单行、尾部省略号。
+     * 图例各列上下对齐：同一列（两行同列）统一取较宽者的宽度，勾选框与文字起点因此竖直对齐。
+     * 两行 5+4，第二行末列可空；可用宽装不下各列最大宽之和时退化为五列平分，文字单行、尾部省略号。
      */
-    private void alignLegendColumns(CheckBox[] boxes) {
+    private void alignLegendColumns(CheckBox[] boxes, int[] order) {
         if (chartView == null) {
             return;
         }
         int cols = -1;
         for (int i = 1; i < boxes.length; i++) {
-            if (ChartSeries.startsLegendRow(chartView.seriesAt(i))) {
+            if (ChartSeries.startsLegendRow(chartView.seriesAt(order[i]))) {
                 cols = i;
                 break;
             }
         }
-        if (cols <= 0 || boxes.length != cols * 2) {
-            return;   // 只按 4+4 两行排；行结构变了就保持自然宽
+        if (cols <= 0 || boxes.length <= cols || boxes.length > cols * 2) {
+            return;   // 只按 5+4（第二行末列留空）排；行结构变了就保持自然宽
         }
         int unspecified = View.MeasureSpec.makeMeasureSpec(0, View.MeasureSpec.UNSPECIFIED);
         int[] colW = new int[cols];
@@ -490,21 +507,21 @@ public class ChartFragment extends Fragment {
     /**
      * 给已有勾选框重取一次 chart_series_* 色。
      *
-     * <p>色值按当前主题现取，故运行中切明暗要再走一遍——原先只在 {@link #buildLegend} 建视图时取一次，
-     * 主题一变曲线会跟着变、图例却不跟（{@link #onResume} 只刷新了 {@link ChartView}）。
-     * 子项顺序与 {@link ChartView#seriesAt} 的下标一一对应（{@link #buildLegend} 按序 addView，
-     * 容器内不放别的子项）。
+     * <p>色值按当前主题与强调角色现取，故运行中切明暗或改交换开关都要再走一遍。子项顺序是
+     * {@link ChartView#seriesOrder} 的显示顺序（{@link #buildLegend} 按该顺序 addView，容器内不放别的子项）。
      */
     private void applyLegendTints() {
         if (legendRow == null || chartView == null) {
             return;
         }
         Context context = requireContext();
-        int count = Math.min(legendRow.getChildCount(), chartView.seriesCount());
+        int[] order = chartView.seriesOrder(config);
+        int count = Math.min(legendRow.getChildCount(), order.length);
         for (int i = 0; i < count; i++) {
             View child = legendRow.getChildAt(i);
             if (child instanceof CheckBox) {
-                int color = context.getResources().getColor(chartView.seriesAt(i).colorRes,
+                ChartSeries s = chartView.seriesAt(order[i]);
+                int color = context.getResources().getColor(ChartSeries.colorRes(s, config),
                         context.getTheme());
                 ((CheckBox) child).setButtonTintList(ColorStateList.valueOf(color));
             }

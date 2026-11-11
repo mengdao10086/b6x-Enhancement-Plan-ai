@@ -2109,6 +2109,50 @@
       ]
     },
     {
+      "key": "UI_CHART_SWAP_COOL",
+      "group": "webui",
+      "role": "setting",
+      "type": "switch",
+      "label": "交换目标/实际 · 制冷",
+      "desc": "交换制冷曲线的目标/实际显示：打开后图例位置与曲线样式互换（实线+末端数值 ↔ 半透明无圆点无数值）；与「交换目标/实际 · 风扇」互不影响。仅影响界面显示。",
+      "docOrder": 55.1,
+      "docDesc": "交换目标/实际 · 制冷（0/1，默认 0）：打开后制冷曲线的目标/实际在图例位置与曲线样式上互换——原本实线+末端数值的一侧变为半透明无圆点无数值，另一侧反之；与「交换目标/实际 · 风扇」互不影响。**仅界面读取，守护进程忽略**",
+      "confNote": [
+        "交换目标/实际 · 制冷（0/1，默认 0）：打开后目标/实际交换图例位置与曲线样式（实线+末端数值 ↔ 半透明无圆点无数值）；与风扇交换项互不影响"
+      ],
+      "unit": "",
+      "unitNote": "开关，取值 0/1，无单位",
+      "default": 0,
+      "factory": 0,
+      "min": 0,
+      "max": 1,
+      "requires": [],
+      "daemonConsumes": false,
+      "fields": null
+    },
+    {
+      "key": "UI_CHART_SWAP_RPM",
+      "group": "webui",
+      "role": "setting",
+      "type": "switch",
+      "label": "交换目标/实际 · 风扇",
+      "desc": "交换风扇曲线的目标/实际显示：打开后图例位置与曲线样式互换（实线+末端数值 ↔ 半透明无圆点无数值）；与「交换目标/实际 · 制冷」互不影响。仅影响界面显示。",
+      "docOrder": 55.2,
+      "docDesc": "交换目标/实际 · 风扇（0/1，默认 0）：打开后风扇曲线的目标/实际在图例位置与曲线样式上互换——原本实线+末端数值的一侧变为半透明无圆点无数值，另一侧反之；与「交换目标/实际 · 制冷」互不影响。**仅界面读取，守护进程忽略**",
+      "confNote": [
+        "交换目标/实际 · 风扇（0/1，默认 0）：打开后目标/实际交换图例位置与曲线样式（实线+末端数值 ↔ 半透明无圆点无数值）；与制冷交换项互不影响"
+      ],
+      "unit": "",
+      "unitNote": "开关，取值 0/1，无单位",
+      "default": 0,
+      "factory": 0,
+      "min": 0,
+      "max": 1,
+      "requires": [],
+      "daemonConsumes": false,
+      "fields": null
+    },
+    {
       "key": "UI_START_PAGE",
       "group": "webui",
       "role": "setting",
@@ -2405,6 +2449,8 @@
       "UI_ANIM_TUNING": [],
       "UI_RPM_AXIS_MIN": [],
       "UI_CURVE_FILTER": [],
+      "UI_CHART_SWAP_COOL": [],
+      "UI_CHART_SWAP_RPM": [],
       "UI_TEMP_STOP": ["temp_stop_enabled"],
       "UI_BACK_HIDE": ["back_hide_enabled"],
       "UI_GATE_LE": ["gate_le_enabled"],

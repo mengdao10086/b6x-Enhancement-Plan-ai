@@ -316,7 +316,8 @@ static float ki_cut_mult_dn = (float)KI_CUT_NONE;   // KI 降速率倍率（×10
 // ======================== 散热器回传参数 ========================
 static int cooler_hot_temp = -1;          // 热端温度（0.1°C）
 static int cooler_cold_temp = -1;         // 冷端温度（0.1°C）
-static int cooler_rpm_real = -1;          // 实际风扇转速
+static int cooler_rpm_real = -1;          // 设定风扇转速（设备回显，经超频逻辑折算）
+static int cooler_rpm_run = -1;           // 实际风扇转速（0x13 value[0x0b]<<8|value[0x0a]；未就绪 -1）
 static int cooler_cold_real = -1;         // 目标制冷（设备回显的设定档；控制路径用它对齐/限速）
 static int cooler_cold_run = -1;          // 实际制冷（运行档，0x13 byte[0x0f]；仅入数据行，不参与控制）
 
@@ -355,6 +356,7 @@ static char status_file_path_b7[512] = "/data/local/tmp/tempctrl_b7x.status";
 #define STF_COLD_TEMP      "COLD_TEMP="
 #define STF_RUN_MODE       "RUN_MODE="
 #define STF_RPM_REAL       "RPM_REAL="
+#define STF_RPM_RUN        "RPM_RUN="
 #define STF_COLD_REAL      "COLD_REAL="
 #define STF_COLD_RUN       "COLD_RUN="
 
@@ -369,14 +371,16 @@ static const char *status_field_value(const char *line, const char *field) {
 #define WEBUI_DATA_MAX_LINES  720   // = 曲线最大时间挡位（秒）
 
 // 曲线行格式：列数唯一声明（CI 断言可 grep 本行数 % 个数，须等于 WEBUI_DATA_COLS）
-// 列序：epoch, 电池, CPU, 热端, 冷端, 实际转速,
+// 列序：epoch, 电池, CPU, 热端, 冷端, 设定转速（RPM_REAL，设备回显折算）,
 //       目标制冷（设备回显的设定档，未就绪为 -1）, 下发目标制冷（0.1°C，未就绪为 -1）,
 //       PID 输入（0.01°C，仅重算行有值、其余行为 -1）, 本行是否触发 PID 重算（0/1）,
-//       实际制冷（运行档，未就绪为 -1）
+//       实际制冷（运行档，未就绪为 -1）, 实际转速原始值（RPM_RUN，未就绪为 -1）
 // 两列制冷语义不同：第 7 列是 getRealColdLevel() 回显的设定档，第 11 列才是 getColdRunLevel()
 // 的实际运行档（见 制冷值语义取证.md）；控制路径仍只用第 7 列。
-#define WEBUI_DATA_COLS       11
-#define WEBUI_ROW_FMT         "%ld,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d\n"
+// 两列转速语义不同：第 6 列是 getRealWindLevel() 的设定回显（控制用），第 12 列才是
+// getSpeed() 的设备实际转速原始值（0x13 value[0x0b]<<8|value[0x0a]）。
+#define WEBUI_DATA_COLS       12
+#define WEBUI_ROW_FMT         "%ld,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d\n"
 
 // 生效制冷上限提示文件（写给 app 定 KI 分段倍率曲线横轴）；行格式与降级见 app/逻辑说明.md §6.6
 #define COLDMAX_HINT_PATH     PRIVATE_DIR "/tempctrl_coldmax"
@@ -460,6 +464,8 @@ static int uiprefs_fail_logged    = 0;   // 写失败只记一条日志，避免
 // token 变大才执行一次开蓝牙命令链。限频（两次之间至少间隔 N 秒、0=关闭）在钩子侧完成，
 // 这里只负责「新请求即执行」。文件由本进程预建 0666（方向是 app 写 / daemon 读，同 status 文件）。
 #define BT_REQ_PATH "/data/local/tmp/tempctrl_bt_req"
+// 临时停止状态发布：daemon 写 / 模块读（内容 "1\n"/"0\n"，每 5s 重写刷新 mtime）
+#define TEMP_STOP_FLAG_PATH "/data/local/tmp/tempctrl_temp_stop"
 static int bt_auto_enable_sec = 300;     // BT_AUTO_ENABLE_SEC：两次自动开蓝牙最小间隔（秒，默认 300，0=关闭）
 static long long bt_req_handled = -1;    // 已处理的最大请求 token；-1=尚未处理
 static int bt_req_primed = 0;            // 首拍只记下当前 token（不执行），避免重启后对旧请求补执行
@@ -1883,6 +1889,20 @@ static void update_cpu_filtered(int cpu_now) {
 // ======================== 状态文件（模块心跳 + BLE 状态） ========================
 
 /**
+ * 发布临时停止状态到 TEMP_STOP_FLAG_PATH（daemon 写 / 模块读）。
+ * 单行 "1\n" 或 "0\n"；每次控制周期重写以刷新 mtime（模块按 mtime≤15s 判新鲜）。
+ * @return 1=写入成功，0=失败
+ */
+static int publish_temp_stop_state(void) {
+    FILE *f = fopen(TEMP_STOP_FLAG_PATH, "w");
+    if (!f) return 0;
+    fputs(temp_stop_enabled ? "1\n" : "0\n", f);
+    fclose(f);
+    chmod(TEMP_STOP_FLAG_PATH, 0666);
+    return 1;
+}
+
+/**
  * 创建（或触摸）状态文件，设 0666 权限
  *
  * 模块（App 进程）通过此文件向 daemon 发送 BLE 连接状态和心跳。
@@ -1909,6 +1929,12 @@ static void create_status_files(void) {
         write_log("开蓝牙请求文件 就绪 %s", BT_REQ_PATH);
     } else {
         write_log("开蓝牙请求文件 创建失败 %s", BT_REQ_PATH);
+    }
+    // 临时停止状态文件：预建 0666 并写入当前值（配置已加载，反映启动时的 UI_TEMP_STOP）
+    if (publish_temp_stop_state()) {
+        write_log("临时停止状态文件 就绪 %s", TEMP_STOP_FLAG_PATH);
+    } else {
+        write_log("临时停止状态文件 创建失败 %s", TEMP_STOP_FLAG_PATH);
     }
 }
 
@@ -2015,7 +2041,7 @@ static void read_cooler_params(void) {
     active_status_mtime = 0;   // 本拍先置未知；下面成功打开后刷新
 
     cooler_hot_temp = -1; cooler_cold_temp = -1;
-    cooler_rpm_real = -1; cooler_cold_real = -1; cooler_cold_run = -1;
+    cooler_rpm_real = -1; cooler_rpm_run = -1; cooler_cold_real = -1; cooler_cold_run = -1;
 
     FILE *f = fopen(path, "r");
     if (!f) return;
@@ -2037,6 +2063,12 @@ static void read_cooler_params(void) {
             run_mode_seen = 1;
         } else if ((v = status_field_value(line, STF_RPM_REAL)) != NULL) {
             cooler_rpm_real = atoi(v);
+        } else if ((v = status_field_value(line, STF_RPM_RUN)) != NULL) {
+            // 旧 status 文件缺该行时保持上面重置的 -1，不沿用旧值；非法值同样写 -1
+            char *end = NULL;
+            long run_rpm = strtol(v, &end, 10);
+            while (*end == ' ' || *end == '\r' || *end == '\n') end++;
+            cooler_rpm_run = (end != v && *end == '\0' && run_rpm >= 0) ? (int)run_rpm : -1;
         } else if ((v = status_field_value(line, STF_COLD_REAL)) != NULL) {
             cooler_cold_real = atoi(v);
         } else if ((v = status_field_value(line, STF_COLD_RUN)) != NULL) {
@@ -3539,6 +3571,7 @@ static void maintain_temp_stop(void) {
             if (stat(config_path, &mst) == 0) config_mtime = mst.st_mtime;
             write_log("临时停止 失效写回完成（UI_TEMP_STOP=0）");
         }
+        publish_temp_stop_state();   // 未启用：发布 0（同时刷新 mtime）
         return;
     }
 
@@ -3566,12 +3599,14 @@ static void maintain_temp_stop(void) {
             temp_stop_active_last = 0;
         }
         write_log("临时停止 已在重启后失效，配置写回 UI_TEMP_STOP=0");
+        publish_temp_stop_state();   // 本周期已关闭：发布 0
         return;
     }
 
     temp_stop_active_last = 1;
     ramp_slots_left = 0;   // 丢弃开启前未走完的平滑下发
     debug_log(debug_main, "临时停止 生效，跳过风扇/温控下发（保持现场）");
+    publish_temp_stop_state();   // 生效：发布 1（未变化也每 5s 重写刷新 mtime）
 }
 
 /** 临时停止是否生效（纯读取，供下发闸门判断） */
@@ -4545,7 +4580,7 @@ static void append_webui_row(void) {
                     cooler_hot_temp, cooler_cold_temp,
                     cooler_rpm_real, cooler_cold_real, actual_cold,
                     recomp ? pid_input_cdeg : -1, recomp,
-                    cooler_cold_run) >= 0) {
+                    cooler_cold_run, cooler_rpm_run) >= 0) {
             fflush(webui_fp);   // 立即落盘：界面按秒读取
         } else {
             fclose(webui_fp);
@@ -4557,7 +4592,9 @@ static void append_webui_row(void) {
     // 每 WEBUI_COMPACT_EVERY 行压缩：读文件 → 删最旧行 → 写回，文件收敛回 ~720 行
     if (webui_lines_since_compact >= WEBUI_COMPACT_EVERY) {
         webui_lines_since_compact = 0;
-        char buf[WEBUI_DATA_MAX_LINES][96];
+        // 单行容量：12 列 int（含 6 位 PID 输入）+ 10 位 epoch + 逗号/换行，128 足够；
+        // 行被截断会破坏列结构，容量与 WEBUI_DATA_COLS 同步核对。
+        char buf[WEBUI_DATA_MAX_LINES][128];
         int total = 0;
         FILE *rf = fopen(WEBUI_DATA_PATH, "r");
         if (rf) {

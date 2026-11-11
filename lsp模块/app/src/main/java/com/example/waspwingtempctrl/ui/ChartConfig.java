@@ -55,6 +55,10 @@ final class ChartConfig {
     int coldMax = 190;
     /** 曲线上的 PID 重算标记（{@code UI_PID_MARK}）：在重算位置画竖虚线，默认开。 */
     boolean markDash = true;
+    /** 制冷两条交换强调方（{@code UI_CHART_SWAP_COOL}）：0 = 强调实际（默认），1 = 强调目标。 */
+    boolean swapCool;
+    /** 风扇两条交换强调方（{@code UI_CHART_SWAP_RPM}）：0 = 强调实际（默认），1 = 强调目标。 */
+    boolean swapRpm;
 
     int[] windowOptions = FALLBACK_WINDOW_OPTIONS.clone();
     int windowDefaultSec = FALLBACK_WINDOW_DEFAULT;
@@ -116,6 +120,9 @@ final class ChartConfig {
         rpmAxisMin = Math.max(0, field(store, snap, "UI_RPM_AXIS_MIN", 0, 3000));
         // 重算标记：缺键按 schema 默认（开）
         markDash = field(store, snap, "UI_PID_MARK", 0, 1) != 0;
+        // 制冷 / 风扇强调方交换：缺键（旧配置或旧 params）一律按 0 = 强调实际
+        swapCool = field(store, snap, "UI_CHART_SWAP_COOL", 0, 0) != 0;
+        swapRpm = field(store, snap, "UI_CHART_SWAP_RPM", 0, 0) != 0;
         // 滤波（三值）：第一值 = 总开关，后两值 = 每遍权重 / 最小步长（口径见 app/逻辑说明.md §7.2）。
         // 兼容旧两值配置（权重 步长）：只有两段时视为开关开启，前两值即系数；不回写配置文件。
         ConfigStore.Value fv = snap == null ? null : snap.get("UI_CURVE_FILTER");

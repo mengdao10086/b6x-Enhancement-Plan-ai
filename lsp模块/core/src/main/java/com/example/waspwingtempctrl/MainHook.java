@@ -18,6 +18,7 @@ import android.os.PowerManager;
 
 import java.io.BufferedReader;
 import java.io.File;
+import java.io.FileInputStream;
 import java.io.FileOutputStream;
 import java.util.ArrayList;
 import java.util.Iterator;
@@ -49,6 +50,9 @@ public class MainHook implements IXposedHookLoadPackage {
     // 双文件路径
     private static final String STATUS_FILE_B6 = "/data/local/tmp/tempctrl_b6x.status";
     private static final String STATUS_FILE_B7 = "/data/local/tmp/tempctrl_b7x.status";
+    // 临时停止标记（daemon 每 5s 重写、模块每秒读）：内容 "1\n"/"0\n"，mtime 超 15s 视为失效。
+    private static final String TEMP_STOP_FILE = "/data/local/tmp/tempctrl_temp_stop";
+    private static final long TEMP_STOP_FRESH_MS = 15000;
     // 界面开关标志文件（守护进程写、本进程读）；界面 → 钩子的唯一通道。
     // 跨进程通道说明见 app/逻辑说明.md §1.4，写入端见 tempctrl.c 的 UIPREFS_PATH。
     private static final String UIPREFS_FILE = "/data/local/tmp/tempctrl_uiprefs";
@@ -443,6 +447,14 @@ public class MainHook implements IXposedHookLoadPackage {
                     appendGetterValue(sb, lastWaspWingInfo, "getColdRunLevel", "COLD_RUN");
 
                     appendTenthValue(sb, lastWaspWingInfo, "getTargetTemperature", "TARGET_TEMP");
+
+                    // 设备实际风扇转速（0x13 value[0x0b]<<8|value[0x0a]），与 RPM_REAL 的设定回显不同。
+                    // 独立 try/catch：B7X 或旧版本缺 getSpeed 时不得影响上面已写入的字段。
+                    try {
+                        appendGetterValue(sb, lastWaspWingInfo, "getSpeed", "RPM_RUN");
+                    } catch (Throwable tRpmRun) {
+                        // 缺失该 getter 属兼容路径，静默忽略
+                    }
                     // 回传恢复：此前缺失则补一条（状态翻转才打）
                     if (paramMissingLogged) {
                         paramMissingLogged = false;
@@ -2801,6 +2813,30 @@ public class MainHook implements IXposedHookLoadPackage {
     }
 
     /**
+     * 临时停止标记是否新鲜生效：daemon 每 5s 重写，内容为 1 且 mtime 距今 ≤15s 才算生效。
+     * 文件缺失、过期、内容异常或读取失败一律按 0 处理（daemon 被杀后自愈不能永久关闭）。
+     */
+    private static boolean isTempStopFresh() {
+        try {
+            File f = new File(TEMP_STOP_FILE);
+            if (!f.isFile()) return false;
+            if (System.currentTimeMillis() - f.lastModified() > TEMP_STOP_FRESH_MS) return false;
+            byte[] buf = new byte[8];
+            FileInputStream in = new FileInputStream(f);
+            int n;
+            try {
+                n = in.read(buf);
+            } finally {
+                in.close();
+            }
+            if (n <= 0) return false;
+            return "1".equals(new String(buf, 0, n, "US-ASCII").trim());
+        } catch (Throwable t) {
+            return false;
+        }
+    }
+
+    /**
      * 锁死检测——双信号并行判断、独立处置：
      * ① 队列持续非空超时 → runFetchLoop 疑似崩溃，启动守护线程接管；
      * ② 回传停滞持续超时 → 强制重连；两信号可同时触发。
@@ -2811,6 +2847,7 @@ public class MainHook implements IXposedHookLoadPackage {
         if (deviceLockedAlerted) { dispatchStallSinceMs = 0; return; }
         if (!bleConnected || lastWaspWingInfo == null) { dispatchStallSinceMs = 0; return; }
         checkZeroInfoTimeout();
+        boolean tempStopFresh = isTempStopFresh();   // 每秒读一次标记文件
         try {
             // ═══ 回传新鲜度验证（先于值停滞判定）═══
             // 重连后长时间无新 onDeviceInfoUpdate → 无回传，仍是旧缓存；
@@ -2840,7 +2877,13 @@ public class MainHook implements IXposedHookLoadPackage {
                     && now - queueNonEmptySinceMs >= QUEUE_STALL_TIMEOUT_MS;
 
             // ② 回传停滞持续超时 → 连接/设备问题
-            if (cold == stallLastCold && rpm == stallLastRpm) {
+            // 临时停止期间 daemon 刻意不下发，回显值与目标长期不等属预期，跳过停滞判定并清零起点；
+            // 仍更新快照，结束临时停止后从当前实际值重新计时。
+            if (tempStopFresh) {
+                stallLastCold = cold;
+                stallLastRpm = rpm;
+                dispatchStallSinceMs = 0;
+            } else if (cold == stallLastCold && rpm == stallLastRpm) {
                 if (dispatchStallSinceMs == 0) dispatchStallSinceMs = now;
             } else {
                 stallLastCold = cold;

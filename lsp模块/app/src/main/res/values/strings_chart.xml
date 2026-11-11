@@ -30,7 +30,8 @@
     <string name="chart_series_hot">热端℃</string>
     <string name="chart_series_cold">冷端℃</string>
     <string name="chart_series_cpu">CPU℃</string>
-    <string name="chart_series_rpm">风扇rpm</string>
+    <string name="chart_series_rpm_actual">实际rpm</string>
+    <string name="chart_series_rpm">目标rpm</string>
     <string name="chart_series_cool">目标制冷</string>
     <string name="chart_series_cool_actual">实际制冷</string>
     <string name="chart_series_pid">pid ℃</string>
