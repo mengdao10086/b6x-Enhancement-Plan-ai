@@ -1,8 +1,9 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!--
     图例勾选框的两态拼装：按 state_checked 切到 ic_chart_legend_box_on / _off。
-    固有尺寸 18dp——这个值同时决定 CompoundButton 给勾选框下的最小高度（见
-    item_chart_legend.xml 的说明），故图例项能压到 chart_legend_item_height(22dp)。
+    子图固有尺寸 18dp 只是画稿基准；实际显示尺寸由 ChartFragment 在运行时包成
+    16dp × k 的 ScaledDrawable（k=1 时 16dp，窄屏按统一比例缩小），
+    CompoundButton 的最小高随之变化（见 item_chart_legend.xml 的说明）。
 -->
 <selector xmlns:android="http://schemas.android.com/apk/res/android">
     <item

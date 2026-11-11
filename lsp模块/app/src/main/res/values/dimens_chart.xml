@@ -16,26 +16,34 @@
     <dimen name="chart_window_button_height">21dp</dimen>
 
     <!--
-        图例项高度 20dp = 自绘勾选框 ic_chart_legend_box 的 18dp 方框 + 上下各 1dp。
-        三者关系（谁在约束项高）：20dp(本值) > 18dp(drawable 固有高 = CompoundButton 给勾选框
-        设的最小高，即"地板") > 约 17dp(12sp 文字行高)。故实际量到 20dp，即"地板之上 2dp"；
-        行与行之间的可见空白 = 1 + 行距 0 + 1 = 2dp（见 chart_legend_row_gap）。
-        本值能生效的前提就是勾选框换成了那张 18dp 图：原先 material 勾选框的固有高 32dp，
-        地板就是 32dp，minHeight 写多小都压不动；地板降到 18dp 后本值才成为约束。
-        下限：再往下就要动勾选框尺寸（图已是 18dp，方框与描边再小就糊了）。
+        图例项高度基准 18dp（k=1）：勾选框方框 16dp、14sp 文字行高约 16dp，本值成为实际下限。
+        窄屏时由 ChartFragment 按统一比例 k 重设（行高、字号、方框、间距同时乘 k）。
+        行与行之间的可见空白 = 行距 0（见 chart_legend_row_gap）。
     -->
-    <dimen name="chart_legend_item_height">20dp</dimen>
+    <dimen name="chart_legend_item_height">18dp</dimen>
+
+    <!-- 勾选框方框边长基准 16dp（k=1）；绘制时由 ChartFragment 按 k 重设为 16dp × k。 -->
+    <dimen name="chart_legend_box_size">16dp</dimen>
+
+    <!-- 相邻图例项总间距基准 4dp（k=1）：WrapRowLayout 列距置 0 + 项 marginEnd 4dp。 -->
+    <dimen name="chart_legend_item_gap">4dp</dimen>
+
+    <!-- 图例文字字号基准 14sp（k=1），窄屏按 k 等比缩小。 -->
+    <dimen name="chart_legend_text_size">14sp</dimen>
+
+    <!-- 图例文字可读下限 9sp：k 小到低于它时才允许省略号兜底。 -->
+    <dimen name="chart_legend_text_min_size">9sp</dimen>
 
     <!--
-        图例行距归零：两行之间不再留任何间距，只剩图例项各自的上下留白。
-        图例是"轻量开关"，行距压到 0 后视觉间距 ≈ 2dp（比"图例 → 时间选择栏"的 chart_row_gap 4dp 更紧，
-        这是明确选定的口径）；列距（space_m）与图例项的 layout_marginEnd 都不动。
+        图例行距归零：两行之间不再留任何间距，只剩图例项自身的上下留白。
+        图例是"轻量开关"，行距压到 0 后视觉间距更紧；相邻项横向总间距由
+        chart_legend_item_gap 控制（列距 0 + marginEnd 4dp）。
     -->
     <dimen name="chart_legend_row_gap">0dp</dimen>
 
     <!--
         卡内纵向三段（档位行 → 图例 → 画布）之间的间距，两处共用同一个值（原为 space_s 与 space_xs）。
-        取 space_xs(4dp) 的一半：图例项现在按 chart_legend_item_height(22dp) 贴内容排布，
+        取 space_xs(4dp) 的一半：图例项按 chart_legend_item_height(18dp) 贴内容排布，
         自身不再留行内空白，再加 4dp 视觉上就散了。
     -->
     <dimen name="chart_row_gap">2dp</dimen>

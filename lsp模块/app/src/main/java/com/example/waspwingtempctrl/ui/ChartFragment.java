@@ -2,10 +2,16 @@ package com.example.waspwingtempctrl.ui;
 
 import android.content.Context;
 import android.content.res.ColorStateList;
+import android.content.res.Resources;
+import android.graphics.Canvas;
+import android.graphics.ColorFilter;
+import android.graphics.PorterDuff;
+import android.graphics.drawable.Drawable;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
 import android.text.TextUtils;
+import android.util.TypedValue;
 import android.view.LayoutInflater;
 import android.view.MotionEvent;
 import android.view.View;
@@ -27,13 +33,14 @@ import com.google.android.material.button.MaterialButtonToggleGroup;
 
 import java.io.File;
 import java.text.SimpleDateFormat;
+import java.util.Arrays;
 import java.util.Date;
 import java.util.Locale;
 
 /**
  * 曲线区：档位选择 + 图例 + 自绘画布 + 失败可诊断。
  *
- * <p><b>布局</b>：档位行、图例（5+4 两行、同列等宽对齐）与画布同处一张卡内，全部按自然尺寸排布
+ * <p><b>布局</b>：档位行、图例（5+4 两行、同列等宽对齐，窄屏整体等比缩小）与画布同处一张卡内，全部按自然尺寸排布
  * ——不整体缩放、也不改写容器高度。画布高度初值由 {@code fragment_chart.xml} 给出，运行时可用画布
  * 下沿的拖柄在 {@code chart_canvas_min_height}～{@code chart_canvas_max_height} 之间改（改的是运行时
  * {@code LayoutParams}，不落盘）。见 app/逻辑说明.md §7.6。
@@ -416,11 +423,14 @@ public class ChartFragment extends Fragment {
      * 当前角色对应的 chart_series_* 色（着色统一交给 {@link #applyLegendTints()}）。容器是可换行的
      * WrapRowLayout：显示顺序由 {@link ChartView#seriesOrder} 给出（交换开关只换成对两条的槽位），
      * 行首由 {@link ChartSeries#startsLegendRow} 决定（pid ℃ 另起第二行，两行 5+4）；首次布局后
-     * 按列取较宽者统一宽度，使两行各列的勾选框与文字起点竖直对齐（见 {@link #alignLegendColumns}）。
+     * 按统一比例 k 缩放字号/勾选框/间距/行高并重算列宽，两行各列的勾选框与文字起点仍竖直对齐
+     * （见 {@link #alignLegendColumns}）。
      */
     private void buildLegend() {
         LayoutInflater inflater = LayoutInflater.from(requireContext());
         legendRow.removeAllViews();
+        // 横向间距只走项的 marginEnd（4dp × k），容器列距归零；否则会变成 12 + 4 = 16dp
+        legendRow.setColGap(0);
         int[] order = chartView.seriesOrder(config);
         CheckBox[] boxes = new CheckBox[order.length];
         for (int i = 0; i < order.length; i++) {
@@ -452,11 +462,13 @@ public class ChartFragment extends Fragment {
     }
 
     /**
-     * 图例各列上下对齐：同一列（两行同列）统一取较宽者的宽度，勾选框与文字起点因此竖直对齐。
-     * 两行 5+4，第二行末列可空；可用宽装不下各列最大宽之和时退化为五列平分，文字单行、尾部省略号。
+     * 图例排版：先按 k=1 的自然尺寸量列宽；两行按列宽对齐后最宽一行超过可用宽时，
+     * 用统一比例 k = 可用宽 / 自然宽 把字号、勾选框、项间距、行高一起缩小后重排。
+     * 两行都用同一 k（基准是最宽的一行），列宽按缩放后的实测宽重算。
+     * 只有 k 缩到文字低于 9sp 时才退化为五列平分 + 尾部省略号。
      */
     private void alignLegendColumns(CheckBox[] boxes, int[] order) {
-        if (chartView == null) {
+        if (chartView == null || legendRow == null) {
             return;
         }
         int cols = -1;
@@ -469,38 +481,231 @@ public class ChartFragment extends Fragment {
         if (cols <= 0 || boxes.length <= cols || boxes.length > cols * 2) {
             return;   // 只按 5+4（第二行末列留空）排；行结构变了就保持自然宽
         }
-        int unspecified = View.MeasureSpec.makeMeasureSpec(0, View.MeasureSpec.UNSPECIFIED);
-        int[] colW = new int[cols];
-        int marginEnd = 0;
-        for (int i = 0; i < boxes.length; i++) {
-            CheckBox box = boxes[i];
-            box.measure(unspecified, unspecified);
-            colW[i % cols] = Math.max(colW[i % cols], box.getMeasuredWidth());
-            ViewGroup.LayoutParams lp = box.getLayoutParams();
-            if (lp instanceof ViewGroup.MarginLayoutParams) {
-                marginEnd = Math.max(marginEnd, ((ViewGroup.MarginLayoutParams) lp).rightMargin);
-            }
-        }
         int rowLimit = legendRow.getWidth() - legendRow.getPaddingLeft() - legendRow.getPaddingRight();
-        int reserved = cols * marginEnd + (cols - 1) * legendRow.colGap();
-        int need = reserved;
-        for (int w : colW) {
-            need += w;
+        if (rowLimit <= 0) {
+            return;   // 还没量出可用宽，等布局回调
         }
-        boolean narrow = rowLimit > 0 && need > rowLimit;
-        if (narrow) {
-            int each = Math.max(0, (rowLimit - reserved) / cols);
-            for (int c = 0; c < cols; c++) {
-                colW[c] = each;
+
+        Resources res = getResources();
+        LegendMetrics base = new LegendMetrics(
+                res.getDimension(R.dimen.chart_legend_text_size),
+                res.getDimensionPixelSize(R.dimen.chart_legend_box_size),
+                res.getDimensionPixelSize(R.dimen.chart_legend_item_height),
+                res.getDimensionPixelSize(R.dimen.chart_legend_item_gap));
+        float minK = base.textPx > 0f
+                ? res.getDimension(R.dimen.chart_legend_text_min_size) / base.textPx : 0f;
+
+        // 1) k = 1 的自然排版：列宽取两行同列较宽者
+        applyLegendMetrics(boxes, 1f, base);
+        int[] colW = measureLegendColumns(boxes, cols);
+        float k = 1f;
+        int need = legendWidth(colW, base.gapPx, cols);
+        if (need > rowLimit) {
+            // 留 1px 安全余量：避免最终取整后为塞进宽度而削列，把最后一个字形裁掉 1px
+            float fit = Math.max(0f, rowLimit - 1f);
+            k = fit / need;
+            // 2) 应用 k 后按实测宽重算 k（字号/取整不严格线性），最多收敛 3 轮
+            for (int pass = 0; pass < 3; pass++) {
+                applyLegendMetrics(boxes, k, base);
+                colW = measureLegendColumns(boxes, cols);
+                need = legendWidth(colW, Math.round(base.gapPx * k), cols);
+                if (need <= rowLimit) {
+                    break;
+                }
+                k *= fit / need;
             }
         }
+
+        boolean narrowFallback = k < minK;
+        if (narrowFallback) {
+            // 3) 低于 9sp 才允许省略号：字号钉在 9sp，五列平分剩余宽
+            k = minK;
+            applyLegendMetrics(boxes, k, base);
+            int gap = Math.round(base.gapPx * k);
+            int each = Math.max(0, (rowLimit - cols * gap) / cols);
+            Arrays.fill(colW, each);
+        } else {
+            // 4) 用最终 k 再量一次；取整后仍差几像素时从最宽列削平，避免换到第三行
+            applyLegendMetrics(boxes, k, base);
+            colW = measureLegendColumns(boxes, cols);
+            int gap = Math.round(base.gapPx * k);
+            int overflow = legendWidth(colW, gap, cols) - rowLimit;
+            if (overflow > 0) {
+                shrinkWidestColumns(colW, overflow);
+            }
+        }
+
         for (int i = 0; i < boxes.length; i++) {
             CheckBox box = boxes[i];
             box.setSingleLine(true);
-            box.setEllipsize(narrow ? TextUtils.TruncateAt.END : null);
+            box.setEllipsize(narrowFallback ? TextUtils.TruncateAt.END : null);
             ViewGroup.LayoutParams lp = box.getLayoutParams();
             lp.width = colW[i % cols];
             box.setLayoutParams(lp);
+        }
+        legendRow.requestLayout();
+    }
+
+    /** 给所有图例项应用统一比例 k：字号、勾选框、项间距、行高一起缩。 */
+    private void applyLegendMetrics(CheckBox[] boxes, float k, LegendMetrics base) {
+        Context context = requireContext();
+        float textPx = base.textPx * k;
+        int boxPx = Math.max(1, Math.round(base.boxPx * k));
+        int itemPx = Math.max(1, Math.round(base.itemPx * k));
+        int gapPx = Math.max(0, Math.round(base.gapPx * k));
+        for (CheckBox box : boxes) {
+            box.setTextSize(TypedValue.COMPLEX_UNIT_PX, textPx);
+            box.setIncludeFontPadding(false);
+            box.setSingleLine(true);
+            Drawable button = context.getDrawable(R.drawable.ic_chart_legend_box);
+            if (button != null) {
+                box.setButtonDrawable(new ScaledDrawable(button.mutate(), boxPx));
+                // 换 drawable 后显式重涂当前 tint，确保强调/参考色在每次重排后都不丢
+                ColorStateList tint = box.getButtonTintList();
+                if (tint != null) {
+                    box.setButtonTintList(tint);
+                }
+            }
+            // CompoundButton.setButtonDrawable 会把最小高改成 drawable 固有高，故 minHeight 必须在它之后设
+            box.setMinHeight(itemPx);
+            box.setMinWidth(0);
+            ViewGroup.LayoutParams lp = box.getLayoutParams();
+            if (lp instanceof ViewGroup.MarginLayoutParams) {
+                ViewGroup.MarginLayoutParams mlp = (ViewGroup.MarginLayoutParams) lp;
+                // layout_marginEnd 会在方向解析时回写 rightMargin，故 start/end 与 left/right 都设
+                mlp.setMarginStart(0);
+                mlp.setMarginEnd(gapPx);
+                mlp.leftMargin = 0;
+                mlp.rightMargin = gapPx;
+            }
+        }
+    }
+
+    /** 按列取两行中较宽者的自然宽（UNSPECIFIED 测量，不受上一轮 lp.width 影响）。 */
+    private static int[] measureLegendColumns(CheckBox[] boxes, int cols) {
+        int unspecified = View.MeasureSpec.makeMeasureSpec(0, View.MeasureSpec.UNSPECIFIED);
+        int[] colW = new int[cols];
+        for (int i = 0; i < boxes.length; i++) {
+            boxes[i].measure(unspecified, unspecified);
+            colW[i % cols] = Math.max(colW[i % cols], boxes[i].getMeasuredWidth());
+        }
+        return colW;
+    }
+
+    /** 列宽对齐后的整行宽：各列宽 + 每个项的 marginEnd（列距已置 0）。 */
+    private static int legendWidth(int[] colW, int gapPx, int cols) {
+        int width = cols * gapPx;
+        for (int w : colW) {
+            width += w;
+        }
+        return width;
+    }
+
+    /** 取整后仍超出几像素时，从最宽的列逐个削 1px，避免 WrapRowLayout 换到第三行。 */
+    private static void shrinkWidestColumns(int[] colW, int overflow) {
+        while (overflow > 0) {
+            int max = 0;
+            for (int i = 1; i < colW.length; i++) {
+                if (colW[i] > colW[max]) {
+                    max = i;
+                }
+            }
+            if (colW[max] <= 0) {
+                return;
+            }
+            colW[max]--;
+            overflow--;
+        }
+    }
+
+    /** 图例基准尺寸（像素）：文字、方框、项高、相邻项 marginEnd，全部随 k 等比缩放。 */
+    private static final class LegendMetrics {
+        final float textPx;
+        final int boxPx;
+        final int itemPx;
+        final int gapPx;
+
+        LegendMetrics(float textPx, int boxPx, int itemPx, int gapPx) {
+            this.textPx = textPx;
+            this.boxPx = boxPx;
+            this.itemPx = itemPx;
+            this.gapPx = gapPx;
+        }
+    }
+
+    /**
+     * 把 18dp 画稿包成指定边长的可缩放 drawable：只改固有宽高，绘制时把内层缩放进 bounds。
+     * 不用 setScaleX/Y（文字/矢量缩放会发虚）；state/tint 全部转发给内层，勾选态与着色不变。
+     */
+    @SuppressWarnings("deprecation")   // Drawable.getOpacity 是抽象方法，必须实现
+    private static final class ScaledDrawable extends Drawable {
+        private final Drawable inner;
+        private final int sizePx;
+
+        ScaledDrawable(Drawable inner, int sizePx) {
+            this.inner = inner;
+            this.sizePx = Math.max(1, sizePx);
+        }
+
+        @Override
+        public void draw(Canvas canvas) {
+            inner.setBounds(getBounds());
+            inner.draw(canvas);
+        }
+
+        @Override
+        public int getIntrinsicWidth() {
+            return sizePx;
+        }
+
+        @Override
+        public int getIntrinsicHeight() {
+            return sizePx;
+        }
+
+        @Override
+        public void setAlpha(int alpha) {
+            inner.setAlpha(alpha);
+        }
+
+        @Override
+        public void setColorFilter(ColorFilter colorFilter) {
+            inner.setColorFilter(colorFilter);
+        }
+
+        @Override
+        public int getOpacity() {
+            return inner.getOpacity();
+        }
+
+        @Override
+        public boolean isStateful() {
+            return inner.isStateful();
+        }
+
+        @Override
+        public boolean setState(int[] stateSet) {
+            return inner.setState(stateSet);
+        }
+
+        @Override
+        public boolean setVisible(boolean visible, boolean restart) {
+            return inner.setVisible(visible, restart);
+        }
+
+        @Override
+        public void jumpToCurrentState() {
+            inner.jumpToCurrentState();
+        }
+
+        @Override
+        public void setTintList(ColorStateList tint) {
+            inner.setTintList(tint);
+        }
+
+        @Override
+        public void setTintMode(PorterDuff.Mode tintMode) {
+            inner.setTintMode(tintMode);
         }
     }
 

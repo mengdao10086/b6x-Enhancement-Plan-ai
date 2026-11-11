@@ -73,6 +73,11 @@
         <item name="android:textColor">@color/app_on_surface_variant</item>
     </style>
 
+    <!-- 曲线图例专用：Caption 被多处复用，字号只在这里加大到 14sp，不全局改。 -->
+    <style name="TextAppearance.B6XTempCtrl.Legend" parent="TextAppearance.B6XTempCtrl.Caption">
+        <item name="android:textSize">@dimen/chart_legend_text_size</item>
+    </style>
+
     <!-- 日志与诊断等宽文本 -->
     <style name="TextAppearance.B6XTempCtrl.Mono" parent="TextAppearance.Material3.BodySmall">
         <item name="android:fontFamily">monospace</item>

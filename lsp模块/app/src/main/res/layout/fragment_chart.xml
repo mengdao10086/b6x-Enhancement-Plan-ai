@@ -2,9 +2,10 @@
 <!--
     曲线区（合并进配置页，挂在 fragment_config.xml 的 config_chart_container 下）。
     按要求「曲线/时间/图例/数据展示在视觉上不要分窗口」：本区只用一张卡，卡内自上而下四段——
-      ① 时间窗口档位按钮 → ② 图例 6 项（按自然宽排布，装不下向下换行）→ ③ 曲线画布
+      ① 时间窗口档位按钮 → ② 图例 9 项（固定 5+4 两行，窄屏整体等比缩放）→ ③ 曲线画布
       → ④ 画布下沿拖柄（拖动改画布高）。
-    四段一律按自然尺寸排布：不做任何缩放，也不改写容器高度（原「整块缩放到 0.5 并覆写
+    档位行与画布按自然尺寸、画布不缩放；图例仅按统一比例缩放字号/勾选框/间距/行高
+    （见下方 ② 段），不缩放画布，也不改写容器高度（原「整块缩放到 0.5 并覆写
     chart_tools_clip 高度」的做法已删，见 ChartFragment）。
     卡内不出现第二块底色/描边/圆角：画布自身不铺底色，与卡片底色连成一片（见 ChartView#onDraw）。
 
@@ -45,14 +46,18 @@
                 app:singleSelection="true" />
 
             <!--
-                ===== ② 图例：按自然尺寸排布，放不下自动换行（窄屏也全部可见，不缩放不裁切） =====
+                ===== ② 图例：固定 5+4 两行，窄屏按统一比例 k 整体等比缩放 =====
                 用配置页同一套可换行容器：项目里只保留一种换行实现，也不依赖 GridLayout 的
                 「columnCount 是否会自动另起一行」这一行为（该行为未在本机核实过）。
-                行距单给 chart_legend_row_gap（配置页仍是默认的 space_m），列距与图例项的
-                layout_marginEnd 都不动。
-                行首不靠自然宽碰运气：前四条（电池/制冷/风扇/热端）排第一行，「冷端℃」「CPU℃」按
-                ChartSeries#startsLegendRow 经 WrapRowLayout#setBreakBefore 固定另起第二行——
-                这两条是可选的温度传感器，与上面四条不是一类。
+                行距单给 chart_legend_row_gap（配置页仍是默认的 space_m）。k=1 基准：文字 14sp、
+                勾选框方框 16dp、相邻项总间距 4dp、行高 18dp；列距由 ChartFragment 置 0，横向间距
+                全部走图例项的 marginEnd（chart_legend_item_gap），避免列距与 margin 叠加。
+                首次布局后按 k=1 量两行同列较宽者定列宽；最宽一行超出可用宽时取
+                k = 可用宽 / 自然宽，把字号、勾选框、间距、行高一起缩小后重排（最多 3 轮收敛），
+                两行各列的勾选框与文字起点仍竖直对齐；仅当字号低于 9sp 才五列平分 + 省略号。
+                行首不靠自然宽碰运气：前五条（电池/实际制冷/实际rpm/热端/冷端）排第一行，
+                第二行以 pid℃ 起（其后为目标制冷/目标rpm/CPU℃），按 ChartSeries#startsLegendRow
+                经 WrapRowLayout#setBreakBefore 固定断行。
             -->
             <com.example.waspwingtempctrl.ui.WrapRowLayout
                 android:id="@+id/chart_legend_row"

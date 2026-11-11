@@ -1,31 +1,33 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!--
     图例项：勾选框（着色 = 该曲线的 chart_series_* 色，运行时按主题取）。
-    高度写 chart_legend_item_height(20dp)，这个值现在真的生效：buttonCompat 指向自绘的
-    ic_chart_legend_box（固有高 18dp），而 CompoundButton.setButtonDrawable 会把最小高设成该固有高，
-    18dp 的地板低于 20dp，故 20dp 成为实际下限（原先用 material 的 32dp 勾选框时地板就是 32dp，
-    minHeight 怎么改都压不动，行高一直是 32dp）。勾选框方框 18dp、上下各留 1dp 正好 20dp。
+    尺寸基准（k=1）：文字 14sp（TextAppearance.B6XTempCtrl.Legend，Caption 被别处复用，不能全局改）、
+    勾选框方框 16dp、相邻项总间距 4dp（WrapRowLayout colGap 置 0 + 本项 layout_marginEnd 4dp）、
+    项高 18dp。ChartFragment 在窄屏按统一比例 k 重设字号/方框/间距/行高（不用 setScaleX/Y）。
+    高度：includeFontPadding=false 后 14sp 文字行高约 16dp，minHeight 18dp 成为实际下限；
+    这个值现在真的生效：buttonCompat 指向自绘的 ic_chart_legend_box（固有 18dp 图，运行时由
+    ChartFragment 用 16dp × k 的包装 drawable 重设），CompoundButton 给勾选框设的最小高随之变化。
+    minWidth=0dp 去掉 Material 复选框样式的 48dp 横向地板，否则窄屏等比缩小会被它顶住；
+    代价是触控宽高更小（见验收报告的触控风险）。
     用 buttonCompat 而非 android:button：AppCompatCompoundButtonHelper 先判 buttonCompat、命中即
     setButtonDrawable 并跳过 android:button，且它在框架构造函数之后执行，最后落地的就是这份 drawable。
-    默认走 Material 复选行的 48dp 触控高，6 项在窄屏会摊成三行、占掉一大块曲线区；
-    这里与图例的"轻量开关"定位一致。本项不决定自己落在哪一行：图例的行首（冷端℃/CPU℃ 固定
-    另起第二行）由 ChartSeries#startsLegendRow 经 WrapRowLayout#setBreakBefore 施加，
-    见 fragment_chart.xml 的 ② 段。不再与档位按钮共用尺寸：档位按钮另有
-    chart_window_button_height(21dp)，两者已解耦。
+    本项不决定自己落在哪一行：图例的行首（pid ℃ 固定另起第二行）由 ChartSeries#startsLegendRow
+    经 WrapRowLayout#setBreakBefore 施加，见 fragment_chart.xml 的 ② 段。
     颜色由勾选框自己的 buttonTint（M3 样式的 m3_checkbox_button_tint）着色，两态自动跟深浅色主题；
     选中态的对勾走挖空、透出卡片底色，深色主题下对比度略低于 material 的 onPrimary 对勾。
-    触控：纵向目标就是 20dp（低于 Material 建议的 48dp），行距 0 使相邻项的触控矩形直接相接、
-    无死区；纵向补偿在 0 行距下受鸽笼原理限制做不到，横向加宽又治不了"边界误点落到相邻系列"，
-    故维持现状，真机确认误触率后再定。横向另有样式给的 minWidth = 48dp 兜底。
 -->
 <CheckBox xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:app="http://schemas.android.com/apk/res-auto"
     android:id="@+id/chart_legend_check"
     android:layout_width="wrap_content"
     android:layout_height="wrap_content"
-    android:layout_marginEnd="@dimen/space_xs"
+    android:layout_marginEnd="@dimen/chart_legend_item_gap"
+    android:includeFontPadding="false"
     android:minHeight="@dimen/chart_legend_item_height"
+    android:minWidth="0dp"
+    android:paddingStart="0dp"
     android:paddingTop="0dp"
+    android:paddingEnd="0dp"
     android:paddingBottom="0dp"
-    android:textAppearance="@style/TextAppearance.B6XTempCtrl.Caption"
+    android:textAppearance="@style/TextAppearance.B6XTempCtrl.Legend"
     app:buttonCompat="@drawable/ic_chart_legend_box" />

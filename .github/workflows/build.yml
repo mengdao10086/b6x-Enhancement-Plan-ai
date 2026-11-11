@@ -430,7 +430,7 @@ jobs:
             echo "资源 ID: $BEFORE_NIDS -> $AFTER_NIDS";
             echo "APK 字节: $BEFORE_SIZE -> $AFTER_SIZE（净减 $((BEFORE_SIZE - AFTER_SIZE))）"; } >> "$GITHUB_STEP_SUMMARY"
 
-          # 基线断言：GUI 资源集合为 5,430 条 / 17 个类型（改动基线时需同步本检查）
+          # 基线断言：GUI 资源集合为 5,435 条 / 17 个类型（改动基线时需同步本检查）
           # 5,380 → 5,386：日志整行跨选新增 1 个 drawable、3 个 id、2 个 string
           # 5,386 → 5,393：停止控制app 新增 6 个 string、1 个 id
           # 5,393 → 5,392：清理旧版遗留键移入诊断行，删除 1 个 id
@@ -444,7 +444,8 @@ jobs:
           #   重置栏仅改 dimen 值、条数不变
           # 5,427 → 5,428：路径跳转新增「选择打开方式」对话框标题
           # 5,428 → 5,430：曲线新增「实际rpm」系列（1 个 color + 1 条 string）；类型数不变
-          [ "$BEFORE_ENTRIES" -eq 5430 ]           || { echo "基线资源条目数不是 5,430（$BEFORE_ENTRIES）"; exit 1; }
+          # 5,430 → 5,435：图例自适应缩放新增 4 个 dimen、1 个 TextAppearance 样式；类型数不变
+          [ "$BEFORE_ENTRIES" -eq 5435 ]           || { echo "基线资源条目数不是 5,435（$BEFORE_ENTRIES）"; exit 1; }
           [ "$BEFORE_NTYPES" -eq 17 ]              || { echo "基线资源类型数不是 17（$BEFORE_NTYPES）"; exit 1; }
           [ "$REMOVE_N" -eq 19 ]                   || { echo "待移除 layout 数量不是 19（$REMOVE_N）"; exit 1; }
           [ "$AFTER_ENTRIES" -eq $((BEFORE_ENTRIES - REMOVE_N)) ] \

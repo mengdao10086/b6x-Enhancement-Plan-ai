@@ -318,6 +318,8 @@ static int cooler_hot_temp = -1;          // 热端温度（0.1°C）
 static int cooler_cold_temp = -1;         // 冷端温度（0.1°C）
 static int cooler_rpm_real = -1;          // 设定风扇转速（设备回显，经超频逻辑折算）
 static int cooler_rpm_run = -1;           // 实际风扇转速（0x13 value[0x0b]<<8|value[0x0a]；未就绪 -1）
+static int rpm_run_missing_streak = 0;    // 连续 N 帧 status 有真实回传但缺 RPM_RUN（诊断用）
+static int rpm_run_missing_logged = 0;    // 缺 RPM_RUN 的提示只打一条
 static int cooler_cold_real = -1;         // 目标制冷（设备回显的设定档；控制路径用它对齐/限速）
 static int cooler_cold_run = -1;          // 实际制冷（运行档，0x13 byte[0x0f]；仅入数据行，不参与控制）
 
@@ -2051,6 +2053,7 @@ static void read_cooler_params(void) {
     }
     char line[64];
     int run_mode_seen = 0;   // 本帧是否读到 RUN_MODE（与 COLD_REAL 同块写入，lastWaspWingInfo 就绪才有）
+    int rpm_run_seen = 0;    // 本帧是否读到 RPM_RUN（诊断旧模块 / getSpeed 不可用）
     while (fgets(line, sizeof(line), f)) {
         const char *v;
         if ((v = status_field_value(line, STF_BLE)) != NULL) {
@@ -2065,6 +2068,7 @@ static void read_cooler_params(void) {
             cooler_rpm_real = atoi(v);
         } else if ((v = status_field_value(line, STF_RPM_RUN)) != NULL) {
             // 旧 status 文件缺该行时保持上面重置的 -1，不沿用旧值；非法值同样写 -1
+            rpm_run_seen = 1;
             char *end = NULL;
             long run_rpm = strtol(v, &end, 10);
             while (*end == ' ' || *end == '\r' || *end == '\n') end++;
@@ -2080,6 +2084,18 @@ static void read_cooler_params(void) {
         }
     }
     fclose(f);
+
+    // 诊断：模块已在写真实回传（RUN_MODE）却连续 3 帧无 RPM_RUN → 旧模块或 getSpeed 不可用；
+    // 只打一条，避免每秒刷日志。实际转速列此时恒为 -1。
+    if (run_mode_seen && app_ble_connected && !rpm_run_seen) {
+        if (rpm_run_missing_streak < 3) rpm_run_missing_streak++;
+        if (rpm_run_missing_streak >= 3 && !rpm_run_missing_logged) {
+            rpm_run_missing_logged = 1;
+            write_log("status 缺少 RPM_RUN（模块未更新或 getSpeed 不可用），曲线实际转速列将为 -1");
+        }
+    } else if (rpm_run_seen) {
+        rpm_run_missing_streak = 0;
+    }
 
     // 回传可信判定：本帧 RUN_MODE 存在（真实回传已就绪）+ 冷/rpm 值合法 → 累计连续帧；
     // 任一帧缺失/异常即清零。连续 REPORT_OK_N 帧（≈N 秒）才置 report_ok=1，用于启动/重连对齐。

@@ -285,6 +285,7 @@ public class MainHook implements IXposedHookLoadPackage {
     private static volatile long lastReconnectExLogAt = 0;       // 连接期异常日志限频（防风暴）
     private static volatile boolean paramMissingLogged = false;     // 参数回传缺失：状态翻转才打（进入一条/恢复一条）
     private static volatile boolean statusWriteFailLogged = false;  // 状态文件写入失败：状态翻转才打（进入一条/恢复一条）
+    private static volatile boolean rpmRunFailLogged = false;       // getSpeed 不可用：只打一条
     private static volatile boolean loggedResolveFallback = false;  // resolveWaspWingManager 兜底失败仅记一次（进程内）
     private static volatile boolean nonTargetLogged = false;        // 非目标包跳过日志：每进程最多一条
 
@@ -447,14 +448,6 @@ public class MainHook implements IXposedHookLoadPackage {
                     appendGetterValue(sb, lastWaspWingInfo, "getColdRunLevel", "COLD_RUN");
 
                     appendTenthValue(sb, lastWaspWingInfo, "getTargetTemperature", "TARGET_TEMP");
-
-                    // 设备实际风扇转速（0x13 value[0x0b]<<8|value[0x0a]），与 RPM_REAL 的设定回显不同。
-                    // 独立 try/catch：B7X 或旧版本缺 getSpeed 时不得影响上面已写入的字段。
-                    try {
-                        appendGetterValue(sb, lastWaspWingInfo, "getSpeed", "RPM_RUN");
-                    } catch (Throwable tRpmRun) {
-                        // 缺失该 getter 属兼容路径，静默忽略
-                    }
                     // 回传恢复：此前缺失则补一条（状态翻转才打）
                     if (paramMissingLogged) {
                         paramMissingLogged = false;
@@ -468,7 +461,23 @@ public class MainHook implements IXposedHookLoadPackage {
                     }
                 }
             } catch (Throwable t) {
-                XposedBridge.log(TAG + " 参数回传异常: " + t.getMessage());
+                // 带上异常类型：NoSuchMethodError 等的 message 常为 null，只有类型能定位缺哪个 getter
+                XposedBridge.log(TAG + " 参数回传异常: "
+                        + t.getClass().getSimpleName() + " msg=" + t.getMessage());
+            }
+
+            // 设备实际风扇转速（0x13 value[0x0b]<<8|value[0x0a]），与 RPM_REAL 的设定回显不同。
+            // 独立于上方整段 getter：任一既有 getter 抛异常也不跳过本行（status 按行解析，行序无关）。
+            try {
+                if (lastWaspWingInfo != null) {
+                    appendGetterValue(sb, lastWaspWingInfo, "getSpeed", "RPM_RUN");
+                }
+            } catch (Throwable tRpmRun) {
+                if (!rpmRunFailLogged) {
+                    rpmRunFailLogged = true;
+                    XposedBridge.log(TAG + " 实际转速 getSpeed 不可用: "
+                            + tRpmRun.getClass().getSimpleName() + " msg=" + tRpmRun.getMessage());
+                }
             }
 
             // 跨进程写竞争：先写临时文件 (.tmp) 再原子 rename 替换目标，读者只看到完整内容。
