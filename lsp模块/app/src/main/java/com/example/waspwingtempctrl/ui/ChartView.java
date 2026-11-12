@@ -367,7 +367,7 @@ public class ChartView extends View {
         if (ext != null) {
             lAxis = ChartAxis.fit(ext[0], ext[1]);
         }
-        // 右轴：下限恒 1，上限 = 窗口内制冷峰值夹进 [映射起始强度, 制冷上限]
+        // 右轴：下限恒 1，上限 = max(制冷上限, 窗口内实际制冷峰值)，再夹进映射起始强度与峰值
         ChartAxis rAxis = null;
         if (!right.isEmpty()) {
             float peak = ChartSample.INVALID;
@@ -379,8 +379,25 @@ public class ChartView extends View {
                     }
                 }
             }
+            // 实际制冷峰值按数据语义取 id=coolActual，不受交换开关与图例开关影响；
+            // 窗口内无有效值时退回配置上限。上限至少覆盖实际制冷，避免末端点无故越界。
+            float actualPeak = ChartSample.INVALID;
+            for (ChartSeries s : series) {
+                if (!"coolActual".equals(s.id)) {
+                    continue;
+                }
+                for (ChartSample d : win.samples) {
+                    float v = ChartSeries.value(s, d);
+                    if (ChartSample.valid(v) && (!ChartSample.valid(actualPeak) || v > actualPeak)) {
+                        actualPeak = v;
+                    }
+                }
+                break;
+            }
             float cLow = config != null ? config.coldMapStart : 40;
-            float cHigh = config != null ? config.coldMax : 190;
+            float configuredHigh = config != null ? config.coldMax : 190;
+            float cHigh = ChartSample.valid(actualPeak)
+                    ? Math.max(configuredHigh, actualPeak) : configuredHigh;
             float top = ChartSample.valid(peak) ? Math.max(cLow, Math.min(cHigh, peak)) : cHigh;
             rAxis = ChartAxis.range(1f, top);
         }
@@ -722,15 +739,21 @@ public class ChartView extends View {
             float ex = fPadL + fW * win.u[last];
             float ey = ax.y(lv, fPadT, fH);
             // 风扇转速低于纵轴下限时，圆点落到画布下沿：下半被画布裁掉、只露上半边，
-            // 直观表示"已在轴下限之外"。其余系列（含右轴制冷）钳在作图区下沿。
+            // 直观表示"已在轴下限之外"。其余系列钳在作图区下沿。
+            boolean overflow = false;
             if (ey > fPadT + fH) {
-                ey = ChartSeries.isRpm(s) ? getHeight() : fPadT + fH;
+                if (ChartSeries.isRpm(s)) {
+                    ey = getHeight();
+                    overflow = true;   // 只露半个的越界点，绘制时放到最后
+                } else {
+                    ey = fPadT + fH;
+                }
             }
             if (ey < fPadT) {
-                ey = fPadT;
+                ey = fPadT;   // 制冷等其余系列一律钳在绘图区上沿
             }
             if (wantDot) {
-                dotOps.add(new ChartDotOp(ex, ey, seriesColors[si]));
+                dotOps.add(new ChartDotOp(ex, ey, seriesColors[si], overflow));
             }
             if (wantLabel) {
                 labelOps.add(placeEndpointLabel(s, lv, ex, ey, seriesColors[si], labelOps));
@@ -909,7 +932,8 @@ public class ChartView extends View {
 
     /**
      * 该样本上「已启用」的系列 → 行文本 / 颜色 / 面板尺寸。行顺序与图例一致（交换开关同样换位）；
-     * pid 与成对系列的强调方无值也保留行；只在触摸回调里调用。
+     * pid 与成对系列的强调方无值也保留行；图例第二行起点前留 rowH/3 空白作两段分割。
+     * 只在触摸回调里调用。
      */
     private void buildTouchRows(int idx) {
         tickPaint.setTextSize(TICK_TEXT_DP * density);
@@ -919,6 +943,16 @@ public class ChartView extends View {
         float maxW = 0f;
         int n = 0;
         int[] order = ChartSeries.displayOrder(series, config);
+        // 图例第二行起点（pid）在显示顺序中的位置。即使该系列被关闭，分割也按这个阈值位置插入，
+        // 不因行被过滤而丢失。
+        int legendBreak = -1;
+        for (int oi = 0; oi < order.length; oi++) {
+            if (ChartSeries.startsLegendRow(series[order[oi]])) {
+                legendBreak = oi;
+                break;
+            }
+        }
+        int dividerBefore = -1;
         for (int oi = 0; oi < order.length; oi++) {
             int si = order[oi];
             ChartSeries s = series[si];
@@ -930,6 +964,9 @@ public class ChartView extends View {
             float v = "pid".equals(s.id) ? pidTouchValue(idx) : ChartSeries.value(s, d);
             if (!ChartSeries.keepsTouchRow(s, config) && !ChartSample.valid(v)) {
                 continue;
+            }
+            if (legendBreak >= 0 && oi >= legendBreak && dividerBefore < 0) {
+                dividerBefore = n;   // 这一行起往下整体让出 rowH/3 的分段空白
             }
             String text = getContext().getString(s.labelRes) + " "
                     + (ChartSample.valid(v) ? ChartSeries.format(s, v) : "-");
@@ -947,14 +984,20 @@ public class ChartView extends View {
         Paint.FontMetrics fm = tickPaint.getFontMetrics();
         float rowH = LABEL_H_DP * density;
         float padY = TOUCH_PANEL_PAD_Y_DP * density;
+        float dividerH = rowH / 3f;
+        float dividerTotal = dividerBefore >= 0 ? dividerH : 0f;
         touchPanelW = maxW + 2f * TOUCH_PANEL_PAD_X_DP * density;
         touchPanelT = fPadT + TOUCH_PANEL_TOP_DP * density;
-        touchPanelB = touchPanelT + 2f * padY + rowH * n;
+        touchPanelB = touchPanelT + 2f * padY + rowH * n + dividerTotal;
         if (touchTextY == null || touchTextY.length < n) {
             touchTextY = new float[n];
         }
         for (int i = 0; i < n; i++) {
-            touchTextY[i] = touchPanelT + padY + i * rowH - fm.ascent;
+            float y = touchPanelT + padY + i * rowH - fm.ascent;
+            if (dividerBefore >= 0 && i >= dividerBefore) {
+                y += dividerH;
+            }
+            touchTextY[i] = y;
         }
     }
 
@@ -1205,11 +1248,24 @@ public class ChartView extends View {
             dotHaloPaint.setColor(colorBg);
             float r = DOT_RADIUS_DP * density;
             for (ChartDotOp e : dots) {
-                dotPaint.setColor(e.color);
-                canvas.drawCircle(e.x, e.y, r, dotPaint);
-                canvas.drawCircle(e.x, e.y, r, dotHaloPaint);
+                if (!e.overflow) {
+                    drawEndpointDot(canvas, e, r);
+                }
+            }
+            // 越界点半露在绘图区外，最后画，保证不被普通端点（含 pid 点、另一条末端点）盖住
+            for (ChartDotOp e : dots) {
+                if (e.overflow) {
+                    drawEndpointDot(canvas, e, r);
+                }
             }
         }
+    }
+
+    /** 画一个末端圆点：先实心填充再描背景色 halo（口径与改动前一致）。 */
+    private void drawEndpointDot(Canvas canvas, ChartDotOp e, float r) {
+        dotPaint.setColor(e.color);
+        canvas.drawCircle(e.x, e.y, r, dotPaint);
+        canvas.drawCircle(e.x, e.y, r, dotHaloPaint);
     }
 
     /** 一条末端数值标签（位置/颜色在 rebuild 定死，onDraw 只画）。 */
@@ -1233,11 +1289,14 @@ public class ChartView extends View {
         final float x;
         final float y;
         final int color;
+        /** true = 越界只露半个（rpm 低于下限），绘制时放到最后。 */
+        final boolean overflow;
 
-        ChartDotOp(float x, float y, int color) {
+        ChartDotOp(float x, float y, int color, boolean overflow) {
             this.x = x;
             this.y = y;
             this.color = color;
+            this.overflow = overflow;
         }
     }
 }

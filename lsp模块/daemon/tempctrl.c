@@ -449,7 +449,6 @@ static int last_screen_off = 0;          // 上次观察到的屏幕状态：1=�
 // 界面 → 钩子的唯一通道（两进程不共享内存，方向与 status 文件相反）；见 README「界面开关文件协议」。
 #define UIPREFS_PATH "/data/local/tmp/tempctrl_uiprefs"
 static int back_hide_enabled     = 1;    // UI_BACK_HIDE：1=返回键收后台（默认），0=恢复系统默认退出
-static int gate_le_enabled       = 1;    // UI_GATE_LE：1=连接期把目标地址视为 BLE 设备（默认），0=恢复原行为
 
 // --- 临时停止（UI_TEMP_STOP）---
 // 1=停止对散热器的写控制（保持现场）；默认持续到手机下次重启，靠 boot_id 标记判定失效。
@@ -460,6 +459,7 @@ static int uiprefs_last_back_hide = -1;  // 上次已写出的值（-1 = 尚未�
 static int uiprefs_last_gate_le   = -1;  // 同上的 GATE_LE 记录（哨兵=尚未写过）
 static int uiprefs_last_bt_sec    = -2147483647;  // 同上的 BT_ON_SEC 记录（哨兵=尚未写过）
 static int uiprefs_fail_logged    = 0;   // 写失败只记一条日志，避免每轮重复刷屏
+static int temp_stop_active(void);       // 前置声明：自动拉起守卫早于定义处使用
 
 // --- 断连自动开蓝牙（BT_AUTO_ENABLE_SEC）---
 // 钩子在「确认蓝牙未开启」时把请求写进 BT_REQ_PATH（REQ=<epoch秒>）；本进程 1s 拍读取，
@@ -871,7 +871,8 @@ static int parse_common_cfg(const char *key, int val, const char *val_str) {
  */
 static void publish_uiprefs(void) {
     // 受 APP_LAUNCH_ENABLED 控制（用户 2026-10-24 定）：总开关关闭时不发布放行/自开蓝牙请求。
-    int gate_le_eff = (APP_LAUNCH_ENABLED && gate_le_enabled) ? 1 : 0;
+    // GATE_LE 不再有独立开关，恒等于自动拉起总开关。
+    int gate_le_eff = APP_LAUNCH_ENABLED ? 1 : 0;
     int bt_sec_eff  = APP_LAUNCH_ENABLED ? bt_auto_enable_sec : 0;
     if (back_hide_enabled == uiprefs_last_back_hide
             && gate_le_eff == uiprefs_last_gate_le
@@ -1012,9 +1013,6 @@ static int config_apply_prepass_key(struct PrepassCfg *out, const char *key, con
         // 界面键里唯一被守护进程读取的一个：本机不消费，只转写标志文件供钩子读取。
         // 与 APP_LAUNCH_ENABLED 同理，必须在第一遍读掉——否则 PERF/DEBUG/SYSFS 全关时本函数会提前 return。
         if (out) back_hide_enabled = (atoi(val_str) != 0);
-    } else if (strcmp(key, "UI_GATE_LE") == 0) {
-        // 同 UI_BACK_HIDE：本机不消费，只转写 GATE_LE= 供宿主钩子读取（类型门禁放行）
-        if (out) gate_le_enabled = (atoi(val_str) != 0);
     } else if (strcmp(key, "WD_KEEPALIVE") == 0) {
         // 反向保活开关：与 UI_BACK_HIDE 同理必须在第一遍读掉（它是基础设施，不受 PERF/DEBUG/SYSFS 层开关管辖，
         // 三层全关时本函数会提前 return，那时也必须已生效）。
@@ -3022,6 +3020,11 @@ static int am_start_app(const char *pkg) {
  *   0 = 无此已知信息（断连分支）→ 内部自行单包扫描。
  */
 static void launch_last_app(int pkg_known_dead) {
+    // 临时停止期间保持现场：任何调用点（断联分支、仲裁）都不得拉起宿主 app。
+    if (temp_stop_active()) {
+        debug_log(debug_launch, "临时停止 生效，跳过自动拉起");
+        return;
+    }
     time_t now = time(NULL);
     if (now - last_launch_attempt < app_launch_cooldown) return;   // 冷却节流（仅在真正 am start 前记录尝试）
     if (!APP_LAUNCH_ENABLED) {
@@ -3226,6 +3229,11 @@ static void arbitrate_apps(void) {
 
     // 无任何散热器 app 存活 → 自动拉起上次使用的 app（复用下方 keep 的选择逻辑，冷却节流）
     if (old_alive + new_alive + far_alive == 0) {
+        // 临时停止期间只做仲裁/状态判定，不拉起（保持散热器现场）
+        if (temp_stop_active()) {
+            debug_log(debug_launch, "临时停止 生效，跳过自动拉起");
+            return;
+        }
         // 传 1：上面那次三包合并扫描刚确认三方 app 全灭，候选目标必是这三者之一 → 内部免去重复的全量 /proc 扫描
         launch_last_app(1);
         return;
@@ -3578,7 +3586,19 @@ static void maintain_temp_stop(void) {
         // 否则上一开机周期留下的旧标记会把新开启误判成「重启后失效」。
         remove(TEMP_STOP_BOOT_PATH);
         if (temp_stop_active_last) {
-            debug_log(debug_main, "临时停止 已关闭，恢复风扇/温控下发");
+            // 恢复控制：把限速起点重置为设备当前回传（非法时退回上次下发值，再退回最小合法值），
+            // 保证恢复后的第一包也从真实值按 RATE_LIMIT_* 步长走，不会补发停止前未走完的整段。
+            int base_cold = (cooler_cold_real >= COLD_MIN) ? cooler_cold_real
+                          : (sent_cold >= COLD_MIN ? sent_cold : pid_cold_min);
+            int base_rpm  = (cooler_rpm_real >= fan_rpm_min) ? cooler_rpm_real
+                          : (sent_rpm >= fan_rpm_min ? sent_rpm : fan_rpm_min);
+            actual_cold = base_cold;
+            actual_rpm  = base_rpm;
+            sent_cold   = base_cold;
+            sent_rpm    = base_rpm;
+            ramp_slots_left = 0;   // 丢弃停止前未走完的平滑下发
+            debug_log(debug_main, "临时停止 已关闭，恢复风扇/温控下发（限速起点 冷%d rpm%d）",
+                      base_cold, base_rpm);
             temp_stop_active_last = 0;
         }
         if (temp_stop_writeback_pending && writeback_temp_stop_disabled(config_path)) {
@@ -5036,6 +5056,17 @@ int main(int argc, char *argv[]) {
         // 那是"按当前设备刷新上限"的活，选到设备时 select_active_device 之后自会刷一次。
         // CPU 亲和与设备无关（apply_cpu_affinity 只读配置与自身），故这里补一次即可。
         if (config_retry_if_needed()) apply_cpu_affinity();
+        // 已加载配置的等待期热重载：临时停止可能要在等待期间被关闭，不重载会让下面的
+        // 拉起守卫一直按旧值执行（用户关了也永远不拉起，直到重启 daemon）。口径同主循环：
+        // mtime 变化即 load_config，再按新配置重算 CPU 亲和。
+        struct stat st_cfg;
+        if (config_loaded && config_path[0] != '\0'
+                && stat(config_path, &st_cfg) == 0 && st_cfg.st_mtime != config_mtime) {
+            load_config(config_path);
+            struct stat st_cfg2;
+            if (stat(config_path, &st_cfg2) == 0) config_mtime = st_cfg2.st_mtime;
+            apply_cpu_affinity();
+        }
         // CPU 亲和低频重申：等待设备这段可能很久（开机早期甚至一直等不到设备），
         // 同样挂在既有的 5s 节拍上、由函数内部自限流（真读 /proc/self/cgroup 至多每 300s 一次）。
         cpu_affinity_reassert();
@@ -5051,8 +5082,12 @@ int main(int argc, char *argv[]) {
             read_cooler_params();
             break;
         }
+        // 临时停止：先应用「重启后自动失效」。否则开机后残留的停止态会让下面的拉起守卫
+        // 永久挡住启动（无 app → 无设备 → 永远进不了主循环，失效逻辑也就永远跑不到）。
+        maintain_temp_stop();
         // 等待设备期间无 app 存活则自动拉起上次使用的 app；复用 ARBITRATE_INTERVAL 节流
         // （与主循环同口径：进程扫描由每 5s 一次降到每 15s 一次，拉起/清理响应上限随之为 15s）
+        // 临时停止生效时仲裁照跑，拉起动作由 arbitrate_apps 内部守卫跳过。
         if (time(NULL) - last_arbitrate >= ARBITRATE_INTERVAL) {
             arbitrate_apps();
             last_arbitrate = time(NULL);

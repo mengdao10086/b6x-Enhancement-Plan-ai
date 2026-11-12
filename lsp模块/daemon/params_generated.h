@@ -6,16 +6,16 @@
 #define PARAMS_GENERATED_H
 
 /* 键数：守护进程消费 / 仅界面读取 */
-#define CFG_DAEMON_KEY_COUNT 51
+#define CFG_DAEMON_KEY_COUNT 50
 #define CFG_WEBUI_KEY_COUNT 11
 
 /* 性能层单值键表（PERF_ENABLED=1）→ INT_CFG_KEYS[]：X(键名, C 变量, min, max) */
 #define CFG_PERF_INT_KEYS(X) \
-    X("RECONNECT_KEEP_CYCLES", reconnect_keep_cycles, 0, 30) \
     X("BATT_BASELINE", BATT_BASELINE, 300, 500) \
+    X("PID_KDP", pid_kdp_coef, 1, 1000) \
+    X("RECONNECT_KEEP_CYCLES", reconnect_keep_cycles, 0, 30) \
     X("CPU_FILTER_ALPHA", CPU_FILTER_ALPHA, 1, 100) \
     X("MAP_INPUT_SMOOTH_ALPHA", rpm_smooth_alpha, 1, 99) \
-    X("PID_KDP", pid_kdp_coef, 1, 1000) \
     X("PID_CH_THRESHOLD", pid_ch_threshold, 1, 100)
 
 /* sysfs 层键表（SYSFS_ENABLED=1）→ SYSFS_CFG_KEYS[]：
@@ -36,6 +36,20 @@
 
 /* 逐键/逐字段 clamp 边界（单值键 = 键名；多值键 = 键名_字段序号）。
  * 多值键与 SK_ZONE/SK_RESCAN 的解析代码仍在 tempctrl.c 手写，此处只提供边界值。 */
+#define CFG_MIN_BATT_BASELINE 300  /* C 变量 BATT_BASELINE */
+#define CFG_MAX_BATT_BASELINE 500
+#define CFG_MIN_FAN_RPM_RANGE_1 1000  /* C 变量 fan_rpm_min */
+#define CFG_MAX_FAN_RPM_RANGE_1 6000
+#define CFG_MIN_FAN_RPM_RANGE_2 1000  /* C 变量 fan_rpm_max */
+#define CFG_MAX_FAN_RPM_RANGE_2 6000
+#define CFG_MIN_FAN_RPM_RANGE_3 2000  /* C 变量 b7_fan_rpm_max */
+#define CFG_MAX_FAN_RPM_RANGE_3 8000
+#define CFG_MIN_PID_KDP 1  /* C 变量 pid_kdp_coef */
+#define CFG_MAX_PID_KDP 1000
+#define CFG_MIN_PID_KI_RATE_1 1  /* C 变量 pid_ki_up_coef */
+#define CFG_MAX_PID_KI_RATE_1 1000
+#define CFG_MIN_PID_KI_RATE_2 1  /* C 变量 pid_ki_down_coef */
+#define CFG_MAX_PID_KI_RATE_2 1000
 #define CFG_MIN_RATE_LIMIT_FAN_1 50  /* C 变量 RATE_LIMIT_FAN */
 #define CFG_MAX_RATE_LIMIT_FAN_1 2000
 #define CFG_MIN_RATE_LIMIT_FAN_2 0  /* C 变量 RATE_LIMIT_FAN_DEBOUNCE */
@@ -50,8 +64,6 @@
 #define CFG_MAX_RATE_LIMIT_COLD_3 50
 #define CFG_MIN_RECONNECT_KEEP_CYCLES 0  /* C 变量 reconnect_keep_cycles */
 #define CFG_MAX_RECONNECT_KEEP_CYCLES 30
-#define CFG_MIN_BATT_BASELINE 300  /* C 变量 BATT_BASELINE */
-#define CFG_MAX_BATT_BASELINE 500
 #define CFG_MIN_CPU_FILTER_ALPHA 1  /* C 变量 CPU_FILTER_ALPHA */
 #define CFG_MAX_CPU_FILTER_ALPHA 100
 #define CFG_MIN_COLD_RPM_MAP_1 0  /* C 变量 cold_map_start */
@@ -64,24 +76,12 @@
 #define CFG_MAX_HOT_RPM_MAP_2 500
 #define CFG_MIN_MAP_INPUT_SMOOTH_ALPHA 1  /* C 变量 rpm_smooth_alpha */
 #define CFG_MAX_MAP_INPUT_SMOOTH_ALPHA 99
-#define CFG_MIN_FAN_RPM_RANGE_1 1000  /* C 变量 fan_rpm_min */
-#define CFG_MAX_FAN_RPM_RANGE_1 6000
-#define CFG_MIN_FAN_RPM_RANGE_2 1000  /* C 变量 fan_rpm_max */
-#define CFG_MAX_FAN_RPM_RANGE_2 6000
-#define CFG_MIN_FAN_RPM_RANGE_3 2000  /* C 变量 b7_fan_rpm_max */
-#define CFG_MAX_FAN_RPM_RANGE_3 8000
 #define CFG_MIN_HOT_DERATE_1 350  /* C 变量 HOT_DERATE_THRESHOLD */
 #define CFG_MAX_HOT_DERATE_1 700
 #define CFG_MIN_HOT_DERATE_2 1  /* C 变量 HOT_DERATE_MULT */
 #define CFG_MAX_HOT_DERATE_2 20
 #define CFG_MIN_HOT_DERATE_3 0  /* C 变量 HOT_DERATE_COOLDOWN */
 #define CFG_MAX_HOT_DERATE_3 20
-#define CFG_MIN_PID_KDP 1  /* C 变量 pid_kdp_coef */
-#define CFG_MAX_PID_KDP 1000
-#define CFG_MIN_PID_KI_RATE_1 1  /* C 变量 pid_ki_up_coef */
-#define CFG_MAX_PID_KI_RATE_1 1000
-#define CFG_MIN_PID_KI_RATE_2 1  /* C 变量 pid_ki_down_coef */
-#define CFG_MAX_PID_KI_RATE_2 1000
 #define CFG_MIN_PID_SPEED_1 0  /* C 变量 pid_speed_coef */
 #define CFG_MAX_PID_SPEED_1 1000
 #define CFG_MIN_PID_SPEED_2 10  /* C 变量 pid_spd_nl_thr_p100 */
@@ -163,6 +163,13 @@
  * （该函数按二进制名派生路径，私有目录不可用时兜底 /cache，照抄宏会绕过兜底）。
  * 各层总开关自身同样不入表（PERF_ENABLED 默认 1，复位它会立刻自我重开）。 */
 #define CFG_PERF_DEFAULTS(X) \
+    X(BATT_BASELINE, 350) \
+    X(fan_rpm_min, 2000) \
+    X(fan_rpm_max, 6000) \
+    X(b7_fan_rpm_max, 6000) \
+    X(pid_kdp_coef, 300) \
+    X(pid_ki_up_coef, 20) \
+    X(pid_ki_down_coef, 30) \
     X(RATE_LIMIT_FAN, 200) \
     X(RATE_LIMIT_FAN_DEBOUNCE, 50) \
     X(fan_rpm_round_unit, 10) \
@@ -171,22 +178,15 @@
     X(COLD_DEADZONE, 3) \
     X(ramp_dispatch, 1) \
     X(reconnect_keep_cycles, 3) \
-    X(BATT_BASELINE, 350) \
     X(CPU_FILTER_ALPHA, 25) \
     X(cold_map_start, 40) \
     X(cold_map_exp, 150) \
     X(hot_map_min, 350) \
     X(hot_map_max, 450) \
     X(rpm_smooth_alpha, 33) \
-    X(fan_rpm_min, 2000) \
-    X(fan_rpm_max, 6000) \
-    X(b7_fan_rpm_max, 6000) \
     X(HOT_DERATE_THRESHOLD, 450) \
     X(HOT_DERATE_MULT, 5) \
     X(HOT_DERATE_COOLDOWN, 5) \
-    X(pid_kdp_coef, 300) \
-    X(pid_ki_up_coef, 20) \
-    X(pid_ki_down_coef, 30) \
     X(pid_speed_coef, 100) \
     X(pid_spd_nl_thr_p100, 20) \
     X(pid_spd_nl_exp_p100, 100) \

@@ -5,8 +5,8 @@
     动态加进 @id/config_hint_body，按序渲染。
     尺寸：宽固定 4/5 屏宽、高上限 1/4 屏高（由 HintOverlay 就地测量后写进 LayoutParams）；
     **内容超出高度上限时由内层 ScrollView 承接滚动**——所以卡里套一层 ScrollView，超出可上下滚。
-    触摸：卡本体（含滚动、点击）正常消费——把"不拦截"限定为「只有卡以外的区域才放行」，
-    故这里不禁止交互、也不用"点了当没点"那套。
+    触摸：卡本体（含滚动、点击）正常消费并保持显示；卡外点击由浮层收起并吞掉，卡外滑动收起后
+    被转发给下层内容视图继续滚动（判定与转发都在 ConfigKeyRow.HintOverlay，故这里不禁止交互）。
     卡片外观沿用主题的 materialCardViewStyle（与分组卡同源），不在这里写死颜色/圆角以外的样式。
 -->
 <com.google.android.material.card.MaterialCardView xmlns:android="http://schemas.android.com/apk/res/android"

@@ -10,6 +10,7 @@ import android.graphics.Paint;
 import android.graphics.Typeface;
 import android.os.Handler;
 import android.os.Looper;
+import android.os.SystemClock;
 import android.text.Editable;
 import android.text.InputType;
 import android.text.Layout;
@@ -20,6 +21,7 @@ import android.view.Gravity;
 import android.view.LayoutInflater;
 import android.view.MotionEvent;
 import android.view.View;
+import android.view.ViewConfiguration;
 import android.view.ViewGroup;
 import android.view.ViewParent;
 import android.view.ViewTreeObserver;
@@ -29,6 +31,9 @@ import android.widget.LinearLayout;
 import android.widget.ScrollView;
 import android.widget.TextView;
 
+import androidx.activity.ComponentActivity;
+import androidx.activity.OnBackPressedCallback;
+import androidx.activity.OnBackPressedDispatcher;
 import androidx.annotation.NonNull;
 import androidx.annotation.Nullable;
 import androidx.core.content.ContextCompat;
@@ -1024,9 +1029,12 @@ final class ConfigKeyRow {
         TextCopy.copyOnLongPress(captionView);
 
         // 失焦即提交（钳制后的值回写控件并落盘；path 的落盘时机也只有这一处）；获焦即弹参数说明浮窗
+        // （UI_HINT_AUTO=0 时获焦不弹，「?」不受该开关限制）
         input.setOnFocusChangeListener((v, hasFocus) -> {
             if (hasFocus) {
-                showHintFor(meta, fieldView);
+                if (HintOverlay.autoShowOnFocus(v.getContext())) {
+                    showHintFor(meta, fieldView);
+                }
             } else {
                 commit(true);
                 HintOverlay.dismissFor(meta.key);
@@ -1725,29 +1733,35 @@ final class ConfigKeyRow {
      * 参数说明浮窗：点输入框（获焦）或开关行的「?」时，在 Activity 内容根（{@code android.R.id.content}）
      * 上叠一层全屏浮层（压暗 + 说明卡）并渐入。
      *
-     * <p>「不影响任何操作」的准确含义是——<b>只有触摸「说明窗口以外」的区域才放行</b>：
+     * <p>触摸口径（卡外一律不再「原样放行」）：
      * <ul>
      *   <li>落在<b>说明卡上</b>（含卡内滚动 / 点击）：由卡<b>正常消费</b>，保持显示；</li>
-     *   <li>落在<b>触发控件</b>（输入框 /「?」）上：放行（事件落到下面的真实控件），保持显示；</li>
-     *   <li>落在<b>别处</b>（含从别处起滑）：放行<b>并</b>渐隐——渐隐与这次操作并行，不吞掉它。</li>
+     *   <li>落在<b>卡外</b>且是<b>点击</b>（DOWN→UP 未超过 touch slop）：收起浮窗，并<b>消费</b>这次点击，
+     *       下层控件不响应；</li>
+     *   <li>落在<b>卡外</b>且<b>超过 slop</b>（或出现第二根手指）：立刻收起，并把缓存的 DOWN 与后续事件
+     *       <b>转发给下层的兄弟内容视图</b>，这次滑动继续滚动页面。</li>
      * </ul>
      * 键盘是另一个窗口，本浮层收不到它的触摸，点键盘不受影响。
      *
-     * <p>「放行」靠本浮层在卡片以外<b>不消费</b>触摸（{@link ViewGroup} 会把事件继续派给兄弟子视图）——
-     * 这也是不采用 {@code PopupWindow} 的原因：窗外的触摸会被它消费后再消失，下层拿不到这次手势。
+     * <p>「转发」不是把事件还给系统重新命中（浮层已消费 DOWN，后续事件只会送到浮层），而是由本类把
+     * 同一坐标空间的事件直接 {@code dispatchTouchEvent} 给浮动层下面的兄弟视图；因此抬起手指前不能
+     * 移除浮层，否则转发链断掉、页面立刻停滚。
      *
      * <p>定位在<b>首次绘制之前</b>完成：挂上去时卡 {@code alpha=0}（不可见），量好尺寸、摆到锚点旁之后
      * 才开始入场动画——绝不让人看到"从左上角闪一下再跳过去"。退场是淡出动画（{@code alpha→0}，结束
-     * 之后才 {@code removeView}），不是瞬时消失。
+     * 之后才 {@code removeView}），不是瞬时消失；淡出期间位置冻结，不再跟随页面滚动重定位。
+     *
+     * <p>显示期间返回键由 {@link OnBackPressedDispatcher} 的回调收起浮窗（不退出页面），
+     * 收起/移除时反注册；不动输入框焦点与键盘逻辑。
      *
      * <p>实例在进程内至多一个（同一时刻只有一页在操作）；由 {@link #show} 复用/重建，{@link #hide()}
      * 淡出后移除。取不到内容根/锚点时不挂浮层（安全退化）。浮层不请求焦点、不动既有键盘逻辑。
      */
     private static final class HintOverlay {
 
-        /** 入/退场时长（ms），均 ≤300：入场强 ease-out，退场 ease-out（退场比入场快，满足进出不对称）。 */
-        private static final int IN_MS = 200;
-        private static final int OUT_MS = 150;
+        /** 入/退场时长（ms）：入场强 ease-out，退场 ease-out（退场比入场快，满足进出不对称）。 */
+        private static final int IN_MS = 300;
+        private static final int OUT_MS = 225;
         /** 入场位移（dp）：从下往上 8dp 浮起；起始缩放 0.98（不从 0 起）。 */
         private static final float IN_TRANSLATE_DP = 8f;
         private static final float IN_SCALE = 0.98f;
@@ -1765,6 +1779,31 @@ final class ConfigKeyRow {
         private final TextView titleView;
         private final LinearLayout bodyView;
         private final ViewTreeObserver.OnScrollChangedListener scrollListener = this::reposition;
+        private final int touchSlop;
+        /** 返回键回调：只在显示期间注册；收起/移除时反注册（{@link OnBackPressedCallback#remove()}）。 */
+        private final OnBackPressedCallback backCallback = new OnBackPressedCallback(false) {
+            @Override
+            public void handleOnBackPressed() {
+                hide();
+            }
+        };
+        @Nullable
+        private final OnBackPressedDispatcher backDispatcher;
+
+        /** 卡外按下后、尚未判定是点击还是滑动；为 true 时 DOWN 已消费，MOVE/UP 都归本浮层。 */
+        private boolean outsideGesturePending;
+        /** 已越过 slop（或多指）：把 DOWN 与后续事件转发给 {@link #forwardTarget}。 */
+        private boolean forwarding;
+        /** 缓存的卡外 DOWN，越过 slop 后补投给下层视图，让它从完整手势开始。 */
+        @Nullable
+        private MotionEvent pendingDown;
+        @Nullable
+        private View forwardTarget;
+        private float downX;
+        private float downY;
+        /** 淡出已结束但手指还在滑：先留壳继续转发，抬手后再移除。 */
+        private boolean removeAfterGesture;
+        private boolean backRegistered;
 
         private String key = "";
         private View anchor;
@@ -1796,8 +1835,25 @@ final class ConfigKeyRow {
             }
         }
 
-        private HintOverlay(@NonNull ViewGroup host, @NonNull Context context) {
+        /**
+         * 「输入状态自动显示说明」开关 {@code UI_HINT_AUTO}（group webui，出厂 1）：只在输入框获焦时
+         * 决定要不要自动弹；「?」点击不走这个判据。每个焦点事件现读一次，改设置后无需重启。
+         */
+        static boolean autoShowOnFocus(@NonNull Context context) {
+            try {
+                Value value = ConfigStore.get(context).get("UI_HINT_AUTO");
+                return value == null || value.intAt(0) != 0;
+            } catch (Throwable t) {
+                return true;   // 读盘异常时退回出厂行为（自动显示）
+            }
+        }
+
+        private HintOverlay(@NonNull ViewGroup host, @NonNull Activity activity) {
+            Context context = activity;
             this.host = host;
+            this.touchSlop = ViewConfiguration.get(context).getScaledTouchSlop();
+            this.backDispatcher = activity instanceof ComponentActivity
+                    ? ((ComponentActivity) activity).getOnBackPressedDispatcher() : null;
             overlay = new FrameLayout(context);
             overlay.setLayoutParams(new ViewGroup.LayoutParams(
                     ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
@@ -1830,6 +1886,8 @@ final class ConfigKeyRow {
                 @Override
                 public void onViewDetachedFromWindow(View v) {
                     if (current == HintOverlay.this) {
+                        abortForwarding();
+                        unregisterBack();
                         unregisterScroll();
                         current = null;
                     }
@@ -1843,6 +1901,8 @@ final class ConfigKeyRow {
             // 抢占上一次未完成的入/退场：先取消，免得旧退场的收尾把新浮层移除
             card.animate().cancel();
             scrim.animate().cancel();
+            abortForwarding();
+            registerBack();
             this.key = meta.key;
             this.anchor = anchor;
             titleView.setText(meta.label);
@@ -1859,23 +1919,169 @@ final class ConfigKeyRow {
         }
 
         /**
-         * 触摸分发：只在按下时判定落点。<b>卡片本体正常消费</b>（返回 true，含卡内滚动/点击）；
-         * 触发控件上放行、不消失；别处放行并渐隐——返回 false 即「未消费」，事件继续派给下面的
-         * 真实视图，原操作照常。注意：卡内（ScrollView/子控件）自己会消费，通常根本到不了这里，
-         * 这一支只是"卡内空白处也当卡本体"的兜底。
+         * 触摸分发。<b>卡片本体正常消费</b>（含卡内滚动/点击，保持显示）。卡外先消费 DOWN，
+         * 抬手时再区分：未超过 slop = 点击（收起并吞掉，下层不响应）；超过 slop 或多指 = 滑动
+         * （立刻收起，并把 DOWN 与后续事件转发给下层内容视图，页面继续滚）。
+         *
+         * <p>注意：卡内（ScrollView/子控件）自己会消费 DOWN，通常根本到不了这里；这里的卡内分支
+         * 只是"卡内空白处也当卡本体"的兜底。
          */
         private boolean onTouch(View v, MotionEvent ev) {
-            if (ev.getActionMasked() != MotionEvent.ACTION_DOWN) {
+            // 已在收起/淡出：不再拦截新触摸（转发中的那一串除外），免得吃掉淡出窗口内的下一次点击
+            if (!showing && !forwarding && !outsideGesturePending) {
                 return false;
             }
-            if (hit(card, ev)) {
-                return true;
+            switch (ev.getActionMasked()) {
+                case MotionEvent.ACTION_DOWN:
+                    abortForwarding();
+                    if (hit(card, ev)) {
+                        return true;
+                    }
+                    // 卡外：DOWN 先吞下——tap 要在抬手时吞掉这次点击，swipe 要据此自行转发
+                    outsideGesturePending = true;
+                    downX = ev.getX();
+                    downY = ev.getY();
+                    pendingDown = MotionEvent.obtain(ev);
+                    forwardTarget = findForwardTarget(ev);
+                    return true;
+                case MotionEvent.ACTION_POINTER_DOWN:
+                    if (outsideGesturePending) {
+                        beginForwarding(ev);   // 多指一律按滑动处理
+                    } else if (forwarding) {
+                        dispatchToTarget(ev);
+                    }
+                    return true;
+                case MotionEvent.ACTION_MOVE:
+                    if (outsideGesturePending) {
+                        float dx = ev.getX() - downX;
+                        float dy = ev.getY() - downY;
+                        if (dx * dx + dy * dy > touchSlop * touchSlop) {
+                            beginForwarding(ev);
+                        }
+                    } else if (forwarding) {
+                        dispatchToTarget(ev);
+                    }
+                    return true;
+                case MotionEvent.ACTION_POINTER_UP:
+                    if (forwarding) {
+                        dispatchToTarget(ev);
+                    }
+                    return true;
+                case MotionEvent.ACTION_UP:
+                case MotionEvent.ACTION_CANCEL:
+                    if (outsideGesturePending) {
+                        // 卡外点击：收起并消费（不转给下层）
+                        outsideGesturePending = false;
+                        recyclePendingDown();
+                        forwardTarget = null;
+                        hide();
+                    } else if (forwarding) {
+                        dispatchToTarget(ev);
+                        endForwarding();
+                    }
+                    return true;
+                default:
+                    return true;
             }
-            if (anchor != null && hit(anchor, ev)) {
-                return false;
+        }
+
+        /** 越过 slop：立刻收起，再把缓存的 DOWN 和当前事件补给下层，让页面从完整手势开始滚。 */
+        private void beginForwarding(@NonNull MotionEvent ev) {
+            outsideGesturePending = false;
+            forwarding = true;
+            hide();   // 先冻结/收起，避免这次滑动触发重定位把淡出吞掉
+            dispatchToTarget(pendingDown);
+            recyclePendingDown();
+            dispatchToTarget(ev);
+        }
+
+        /** 抬手：结束转发；若淡出已先结束、浮层还在留壳，就在这里移除。 */
+        private void endForwarding() {
+            forwarding = false;
+            recyclePendingDown();
+            forwardTarget = null;
+            if (removeAfterGesture) {
+                removeAfterGesture = false;
+                remove();
             }
-            hide();
-            return false;
+        }
+
+        /** 放弃转发（被重新 bind 等打断）：给下层补一个 CANCEL，免得它停在按下态。 */
+        private void abortForwarding() {
+            if (forwarding) {
+                MotionEvent cancel = MotionEvent.obtain(
+                        SystemClock.uptimeMillis(), SystemClock.uptimeMillis(),
+                        MotionEvent.ACTION_CANCEL, downX, downY, 0);
+                dispatchToTarget(cancel);
+                cancel.recycle();
+            }
+            forwarding = false;
+            outsideGesturePending = false;
+            removeAfterGesture = false;
+            recyclePendingDown();
+            forwardTarget = null;
+        }
+
+        private void recyclePendingDown() {
+            if (pendingDown != null) {
+                pendingDown.recycle();
+                pendingDown = null;
+            }
+        }
+
+        /**
+         * 把事件（浮层坐标）转发给浮层下面最上层的兄弟视图。浮层已消费 DOWN，系统不会再重新命中
+         * 下层，只能由这里直接派发；浮层与兄弟同处 {@code android.R.id.content} 的坐标空间。
+         */
+        private void dispatchToTarget(@Nullable MotionEvent ev) {
+            View target = forwardTarget;
+            if (ev == null || target == null || target.getParent() == null) {
+                return;
+            }
+            int[] overlayLoc = new int[2];
+            int[] targetLoc = new int[2];
+            overlay.getLocationInWindow(overlayLoc);
+            target.getLocationInWindow(targetLoc);
+            MotionEvent copy = MotionEvent.obtain(ev);
+            copy.offsetLocation(overlayLoc[0] - targetLoc[0], overlayLoc[1] - targetLoc[1]);
+            target.dispatchTouchEvent(copy);
+            copy.recycle();
+        }
+
+        /** 卡外按下的落点下面、浮层之下的兄弟视图（通常是页面内容根）；取不到就不转发。 */
+        @Nullable
+        private View findForwardTarget(@NonNull MotionEvent ev) {
+            for (int i = host.getChildCount() - 1; i >= 0; i--) {
+                View child = host.getChildAt(i);
+                if (child == overlay || child.getVisibility() != View.VISIBLE) {
+                    continue;
+                }
+                if (hit(child, ev)) {
+                    return child;
+                }
+            }
+            return null;
+        }
+
+        private void registerBack() {
+            if (backDispatcher == null) {
+                return;
+            }
+            // 先移除再挂：上一次若被更高优先级回调 cancel()，dispatcher 侧已摘掉、这边的标记却可能还在
+            if (backRegistered) {
+                backCallback.remove();
+                backRegistered = false;
+            }
+            backCallback.setEnabled(true);
+            backDispatcher.addCallback(backCallback);
+            backRegistered = true;
+        }
+
+        private void unregisterBack() {
+            if (backDispatcher != null && backRegistered) {
+                backCallback.remove();
+                backRegistered = false;
+            }
         }
 
         /** 事件坐标落点（窗口坐标）是否在 {@code view} 的窗口矩形内。 */
@@ -1896,7 +2102,7 @@ final class ConfigKeyRow {
          * 下一帧再试——期间卡 {@code alpha=0}，用户看不到任何中间位置。
          */
         private void layoutAndShow() {
-            if (overlay.getParent() == null || anchor == null) {
+            if (!showing || overlay.getParent() == null || anchor == null) {
                 return;
             }
             if (overlay.getWidth() <= 0 || overlay.getHeight() <= 0) {
@@ -1961,18 +2167,32 @@ final class ConfigKeyRow {
             scrim.animate().alpha(1f).setDuration(IN_MS).setInterpolator(easeOut).start();
         }
 
-        /** 渐隐并移除（与正在进行的手势并行，不阻塞、不吞事件）。退场与入场同向（一起收一点 scale）。 */
+        /**
+         * 渐隐并移除（不阻塞、不吞事件）。退场与入场同向（一起收一点 scale）。
+         * <b>淡出期间位置冻结</b>：先注销滚动跟随，页面这两百毫秒里怎么滚都不再重定位这张卡。
+         *
+         * <p>若起滑时手指还在屏幕上（{@link #forwarding}），淡出结束后<b>不能</b>立刻移除——
+         * 浮层是那次手势的接收者，移除即断掉转发、页面停滚；此时留壳（alpha=0、不可见）到抬手，
+         * 由 {@link #endForwarding()} 收尾。
+         */
         private void hide() {
             if (!showing) {
                 return;
             }
             showing = false;
+            unregisterScroll();   // 冻结位置：淡出期间不再跟随滚动重定位
+            unregisterBack();
             PathInterpolator easeOut = new PathInterpolator(0.05f, 0.7f, 0.1f, 1f);
             // 收尾先复核 showing：期间若又被 bind() 唤起，就不该把它移除
             card.animate().alpha(0f).scaleX(IN_SCALE).scaleY(IN_SCALE)
                     .setDuration(OUT_MS).setInterpolator(easeOut)
                     .withEndAction(() -> {
-                        if (!showing) {
+                        if (showing) {
+                            return;
+                        }
+                        if (forwarding) {
+                            removeAfterGesture = true;
+                        } else {
                             remove();
                         }
                     }).start();
@@ -1980,6 +2200,8 @@ final class ConfigKeyRow {
         }
 
         private void remove() {
+            abortForwarding();
+            unregisterBack();
             unregisterScroll();
             host.removeView(overlay);
             if (current == this) {
@@ -1990,6 +2212,8 @@ final class ConfigKeyRow {
         /** 立即移除（换内容根时用，不走退场动画）。 */
         private void removeNow() {
             showing = false;
+            abortForwarding();
+            unregisterBack();
             unregisterScroll();
             host.removeView(overlay);
             if (current == this) {

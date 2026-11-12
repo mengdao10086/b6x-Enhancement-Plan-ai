@@ -163,13 +163,15 @@ TARGET_TEMP=180     ← 18.0°C
 
 需要送达宿主编进程的界面开关有两个：`UI_BACK_HIDE`（「返回隐藏后台」，返回键每次读取）与
 `BT_AUTO_ENABLE_SEC`（断连自动开蓝牙间隔，钩子按 tick 读取、带 30s 缓存）。
+文件还携带 `GATE_LE`（类型门禁放行）——它已无独立开关，恒等于 `APP_LAUNCH_ENABLED` 的镜像，
+供旧版模块继续读取。
 界面与钩子分属两个进程、不共享内存，故由 daemon 转写成标志文件：
 
 | 项 | 值 |
 |---|---|
 | 路径 | `/data/local/tmp/tempctrl_uiprefs` |
-| 内容 | `BACK_HIDE=0/1` 与 `BT_ON_SEC=<秒>`（各一行，换行结尾；`.tmp` + `rename` 原子替换） |
-| 写入方 | tempctrl daemon（root），每次配置重载时按需写（两值都没变才不写） |
+| 内容 | `BACK_HIDE=0/1`、`GATE_LE=0/1` 与 `BT_ON_SEC=<秒>`（各一行，换行结尾；`.tmp` + `rename` 原子替换） |
+| 写入方 | tempctrl daemon（root），每次配置重载时按需写（三值都没变才不写）；`GATE_LE` 恒为 `APP_LAUNCH_ENABLED ? 1 : 0` |
 | 读取方 | `MainHook.readBackHideEnabled()` 与 `btAutoEnableSec()`（宿主 app 进程）；前者**读不到按 1（开启）**、后者**读不到按 300 秒（开启）**处理 |
 
 > 方向与 status 文件相反：status 是「钩子写、daemon 读」，本文件是「daemon 写、钩子读」。
@@ -198,7 +200,7 @@ TARGET_TEMP=180     ← 18.0°C
 ## 反向保活（daemon → service.d 脚本）
 
 既有链路是「`service.d` 脚本（看门狗）守护守护进程」；本节是其**反方向**：守护进程反过来探测看门狗是否存活，不在就把它拉起来。
-开关是 `profile.conf` 的 `WD_KEEPALIVE`（0/1，**默认 1**，界面「[3] 自动拉起 app」组可改，热重载生效）。**注意**：`profile.conf` 里已写入的旧值**优先于**默认值——设备上若曾被写过 `WD_KEEPALIVE=0`，改默认值不会自动把它打开，要在界面里开启（或删掉该行）才生效。拉起冷却的时间戳落 APK 私有目录 `tempctrl_wd_spawn`（落点见〈文件落点〉）。
+开关是 `profile.conf` 的 `WD_KEEPALIVE`（0/1，**默认 1**，界面「[5] 控制」组可改，热重载生效）。**注意**：`profile.conf` 里已写入的旧值**优先于**默认值——设备上若曾被写过 `WD_KEEPALIVE=0`，改默认值不会自动把它打开，要在界面里开启（或删掉该行）才生效。拉起冷却的时间戳落 APK 私有目录 `tempctrl_wd_spawn`（落点见〈文件落点〉）。
 
 探测节奏、拉起条件与形态、三重节流、与脚本侧「先查后拉」的对称约定等**机制细节见 [daemon/逻辑说明.md](daemon/逻辑说明.md)「看门狗反向保活（WD_KEEPALIVE）」**（此处不重复）。
 

@@ -113,9 +113,8 @@ public class ChartFragment extends Fragment {
 
     private File dataFile;
     private ChartConfig config;
-    /** 上次建图例时的交换开关值；变化时重建图例，使成对两条换到新的槽位。 */
-    private boolean legendSwapCool;
-    private boolean legendSwapRpm;
+    /** 上次建图例时的交换开关值；变化时重建图例，使两对曲线换到新的槽位。 */
+    private boolean legendSwap;
     private ChartDataset dataset;
     private String lastFingerprint;
     /** 页面重新可见时置位：下次刷新顺带重读配置（用户可能在配置页改过口径键）。 */
@@ -327,8 +326,8 @@ public class ChartFragment extends Fragment {
         // 当前档位不在新档位集合里才回落默认，避免每次切页都把用户选的档位冲掉
         boolean configChanged = config != cfg;
         config = cfg;
-        if (legendSwapCool != cfg.swapCool || legendSwapRpm != cfg.swapRpm) {
-            buildLegend();   // 交换开关变化 → 成对两条的图例槽位/颜色随之换位
+        if (legendSwap != cfg.swap) {
+            buildLegend();   // 交换开关变化 → 两对曲线的图例槽位/颜色随之换位
         }
         boolean windowInvalid = windowSec <= 0 || !contains(cfg.windowOptions, windowSec);
         if (windowInvalid) {
@@ -445,8 +444,7 @@ public class ChartFragment extends Fragment {
             legendRow.addView(box);
             boxes[i] = box;
         }
-        legendSwapCool = config != null && config.swapCool;
-        legendSwapRpm = config != null && config.swapRpm;
+        legendSwap = config != null && config.swap;
         // 列宽要等容器量出可用宽再定；Activity 自行处理 configChanges，宽度变化时按新宽度重算
         legendRow.post(() -> alignLegendColumns(boxes, order));
         if (legendLayoutListener != null) {

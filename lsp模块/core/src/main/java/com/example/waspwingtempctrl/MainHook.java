@@ -59,12 +59,9 @@ public class MainHook implements IXposedHookLoadPackage {
     // ===== 修复 #5：SDK 类型门禁放行（仅目标包、仅 connect() 执行期、仅目标地址）=====
     // 动机：冷启动只能凭地址重建设备对象，getType() 恒为 UNKNOWN，SDK 的 connect() 因此在
     //   发令前直接拒绝（日志 "current device is not a valid BLE device"），后台重连永不生效。
-    // 边界与开关语义见 参数定义/params.def.json 的 UI_GATE_LE；结论依据见 app/逻辑说明.md §1.7。
-    private static final String GATE_LE_PREFIX = "GATE_LE=";   // 界面开关（守护进程转写进 uiprefs）
-    private static final long GATE_LE_CACHE_MS = 30 * 1000L;   // 开关缓存（读不到按默认=开）
+    // 无独立开关、恒生效；uiprefs 的 GATE_LE 仅保留给旧版模块读取（见 tempctrl.c 的 publish_uiprefs）。
+    // 结论依据见 app/逻辑说明.md §1.7。
     private static final ThreadLocal<Boolean> gateLeActive = new ThreadLocal<>();  // 仅 connect() 执行期置位
-    private static volatile boolean gateLeCfg = true;          // 开关当前值（默认开）
-    private static volatile long gateLeCfgAt = 0;              // 开关上次读取时刻（0=未读过）
     private static long gateLeLogAt = 0;                       // "门禁放行"日志限频
     // 修复 #4 的适用边界：-1=未知（按放行处理，保留 Android 16 修复）、1=已授予、0=未授予。
     // 全新安装时宿主尚未申请 BLUETOOTH_CONNECT，无条件放行会让 SDK 走到 connectGatt() 抛 SecurityException。
@@ -1385,9 +1382,9 @@ public class MainHook implements IXposedHookLoadPackage {
      * 模块只能凭地址重建设备对象（{@code getRemoteDevice}/{@code getRemoteLeDevice}），其类型恒为 UNKNOWN，
      * 于是后台重连永远停在门禁前（依据见 app/逻辑说明.md §1.7）。
      *
-     * <p>本钩子只在三个条件同时成立时把返回值改成 LE：① 当前线程处于 SDK {@code connect()} 执行期
-     * （{@link #gateLeActive}，由 connect 钩子置/清）；② 设备地址等于 {@link #lastDevice} 的地址；
-     * ③ 界面开关 {@code GATE_LE} 非 0（缺省开）。缺一即原样返回，故不影响模块自身的类型探针
+     * <p>本钩子在两个条件同时成立时把返回值改成 LE：① 当前线程处于 SDK {@code connect()} 执行期
+     * （{@link #gateLeActive}，由 connect 钩子置/清）；② 设备地址等于 {@link #lastDevice} 的地址。
+     * 缺一即原样返回，故不影响模块自身的类型探针
      * （它在 tick 线程调用，不在连接期），也不影响其它设备与经典通道的门禁。
      */
     private static void hookDeviceTypeGate(XC_LoadPackage.LoadPackageParam lpparam) {
@@ -1407,7 +1404,6 @@ public class MainHook implements IXposedHookLoadPackage {
                         if (target == null) return;
                         String addr = dev.getAddress();
                         if (addr == null || !addr.equals(target.getAddress())) return;   // 只放行目标设备
-                        if (!readGateLeEnabled()) return;                                // 开关关闭：保持原行为
                         param.setResult(BluetoothDevice.DEVICE_TYPE_LE);
                         if (gateLeLogAllowed())
                             XposedBridge.log(TAG + " [修复] getType 门禁放行 -> " + addr);
@@ -1420,35 +1416,6 @@ public class MainHook implements IXposedHookLoadPackage {
         } catch (Throwable t) {
             XposedBridge.log(TAG + " 钩 BluetoothDevice.getType 失败: " + t.getMessage());
         }
-    }
-
-    /**
-     * 读界面开关 {@code GATE_LE=0/1}（守护进程写 {@link #UIPREFS_FILE}，与 UI_BACK_HIDE 同通道）。
-     * 读不到 / 无该行 / 值异常一律按默认值「开」，只有明确的 0 才关闭。带 30s 缓存，改动最迟半分钟生效。
-     */
-    private static boolean readGateLeEnabled() {
-        long now = System.currentTimeMillis();
-        if (gateLeCfgAt != 0 && now - gateLeCfgAt < GATE_LE_CACHE_MS) return gateLeCfg;
-        gateLeCfgAt = now;
-        boolean v = true;
-        try {
-            BufferedReader br = new BufferedReader(new java.io.FileReader(UIPREFS_FILE));
-            try {
-                String line;
-                while ((line = br.readLine()) != null) {
-                    if (line.startsWith(GATE_LE_PREFIX)) {
-                        v = !"0".equals(line.substring(GATE_LE_PREFIX.length()).trim());
-                        break;
-                    }
-                }
-            } finally {
-                br.close();
-            }
-        } catch (Throwable ignored) {
-            // 文件不存在属正常（守护进程尚未写过），走默认值
-        }
-        gateLeCfg = v;
-        return v;
     }
 
     /**

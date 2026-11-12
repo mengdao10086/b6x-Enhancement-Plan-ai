@@ -21,9 +21,8 @@ import java.util.Locale;
  *
  * <p><b>强调 / 参考</b>：制冷与风扇各是一对「实际 / 目标」。同一时刻每对只有一条是强调方
  * （不透明实线 + 末端圆点 + 末端数值），另一条是参考方（同 RGB 半透明、无圆点无数值）。
- * 默认强调「实际」，{@code UI_CHART_SWAP_COOL} / {@code UI_CHART_SWAP_RPM} 分别把对应一对
- * 换成强调「目标」。判定只此一处 {@link #emphasized}，图例位置、颜色、线样式、末端圆点/数值、
- * 按住查看全部由它派生。
+ * 默认强调「实际」，{@code UI_CHART_SWAP} 为 1 时两对一起换成强调「目标」。判定只此一处
+ * {@link #emphasized}，图例位置、颜色、线样式、末端圆点/数值、按住查看全部由它派生。
  */
 final class ChartSeries {
 
@@ -101,22 +100,16 @@ final class ChartSeries {
 
     /**
      * <b>单一强调判定</b>：成对系列里当前谁是强调方。默认（开关 0）强调「实际」；
-     * 对应交换开关为 1 时强调「目标」。非成对系列返回 {@code true}（不参与强调/参考切换）。
+     * 交换开关为 1 时制冷与风扇两对一起换成强调「目标」。非成对系列返回 {@code true}
+     * （不参与强调/参考切换）。
      */
     static boolean emphasized(ChartSeries s, ChartConfig cfg) {
-        if ("coolActual".equals(s.id)) {
-            return cfg == null || !cfg.swapCool;
+        if (!isPair(s)) {
+            return true;
         }
-        if ("cool".equals(s.id)) {
-            return cfg != null && cfg.swapCool;
-        }
-        if ("rpmActual".equals(s.id)) {
-            return cfg == null || !cfg.swapRpm;
-        }
-        if ("rpm".equals(s.id)) {
-            return cfg != null && cfg.swapRpm;
-        }
-        return true;
+        boolean swap = cfg != null && cfg.swap;
+        boolean isActual = "coolActual".equals(s.id) || "rpmActual".equals(s.id);
+        return isActual != swap;   // 强调方 = 实际方 XOR 交换
     }
 
     /**

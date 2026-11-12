@@ -56,9 +56,13 @@ final class KiCutData {
         }
     }
 
-    /** 当前冷值（曲线数据文件最后一行的目标制冷）；取不到或为哨兵值时返回 -1。 */
+    /** 当前冷值（曲线数据文件最后一行的目标制冷）；取不到、为哨兵值或临时停止生效时返回 -1。 */
     static int targetCold(@NonNull Context context) {
         try {
+            // 临时停止期间不画「当前冷值」指示线（此时 daemon 不下发，红线没有意义）
+            if (isOn(ConfigStore.get(context).read(), "UI_TEMP_STOP")) {
+                return -1;
+            }
             String text = AppFiles.readTailText(AppFiles.dataFile(context), 4096);
             String line = lastLine(text);
             if (line == null) {
