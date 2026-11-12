@@ -401,7 +401,7 @@ static const char *status_field_value(const char *line, const char *field) {
 // 自动拉起散热器 app（优先上次使用的 app）
 static int APP_LAUNCH_ENABLED = 0;      // 总开关：1=允许自动拉起，0=关闭（默认关，刷入时可选开）
 // 锁死自动重启（watchdog）：每次实际下发制冷变化时判定——实际停滞（=上周期实际）且≠上周期下发持续 N 次 → kill app 并重新拉起
-static int app_watchdog_cycles = 6;     // APP_WATCHDOG：连续停滞次数（0=关闭，默认 6）
+static int app_watchdog_cycles = 6;     // APP_LAUNCH_TIMING 第 2 值：连续停滞次数（0=关闭，默认 6）
 static int watchdog_stall_count = 0;    // 当前连续停滞次数（按实际下发周期计数）
 // 死链自动重启：BLE 已连但冷/热/转速回传同时是全 0（宿主 connect 时的默认对象）连续 N 个周期
 // → kill app 重新拉起。与通用停滞判定互补：只看回传是否有效，不看下发目标。
@@ -415,7 +415,14 @@ static time_t last_launch_probe_at = 0; // 上次「探测链」（屏检+进程
 static time_t last_disconnect_time = 0; // 最近一次断联时间戳（0=未处于断联）。定义上移至此：launch_last_app
                                         // 的断联初期探测节流要读它，故须先于其声明；清零仍在 reconnect_align
 static time_t last_arbitrate = 0;       // 上次 app 存活仲裁时间（ARBITRATE_INTERVAL 节流）
-static int app_launch_cooldown = 60;    // APP_LAUNCH_COOLDOWN：两次拉起最小间隔（秒，默认 60）
+static int app_launch_cooldown = 60;    // APP_LAUNCH_TIMING 第 1 值：两次拉起最小间隔（秒，默认 60）
+// 旧键兼容（永久读）：APP_LAUNCH_COOLDOWN / APP_WATCHDOG → APP_LAUNCH_TIMING 两槽。
+// 新键出现时新键优先；旧键仅在新键缺失时按槽覆盖。首次读到旧键一次性迁移写回，失败保留原文件。
+static int launch_timing_seen = 0;       // 本轮读到新键 APP_LAUNCH_TIMING
+static int legacy_launch_seen = 0;       // 本轮读到任一旧键
+static int legacy_launch_cooldown = -1;  // 旧键暂存（-1=未出现）
+static int legacy_launch_watchdog = -1;
+static int launch_migrate_give_up = 0;   // 迁移写回失败后不再重试（读兼容已生效，行为不丢）
 static int app_launch_screen_gate_enabled = 1;  // APP_LAUNCH_SCREEN_GATE 第一值：屏幕门禁开关
 static int app_launch_screen_dozing_on  = 0;    // 第二值：Dozing 是否算亮屏（默认 0）
 static int legacy_screen_gate_logged    = 0;    // 旧三值行只提示一次（避免每轮配置热重载刷屏）
@@ -430,7 +437,7 @@ static int last_screen_off = 0;          // 上次观察到的屏幕状态：1=�
 // 用途：app 存活时 launch_last_app 会被反复调用（断连路径 5s/次、仲裁），若不节流则每次都要
 // fork 一次 dumpsys + 全量扫 /proc。本间隔把整链限到 ≤1 次/此值。**代价（必须知道）**：
 // 它同时是「app 死亡后重新拉起的检测延迟上限」——app 死亡后最晚本间隔才被拉起（改前 ≤5s）。
-// 与 am start 冷却（APP_LAUNCH_COOLDOWN=60s）无关、也不参与其判定；取 12s 使其显著短于 60s、
+// 与 am start 冷却（APP_LAUNCH_TIMING 第 1 值=60s）无关、也不参与其判定；取 12s 使其显著短于 60s、
 // 且与 APP_LAUNCH_PROBE_OFF_INTERVAL=10 同量级。
 #define APP_LAUNCH_PROBE_INTERVAL 12
 
@@ -534,6 +541,7 @@ static int  parse_legacy_pidcut_cfg(const char *key, const char *val_str);  // l
 static void apply_legacy_pidcut(void);     // load_config 调用（旧键按新键优先生效），定义在 KI 削减区
 static int  migrate_pid_cut_config(const char *path);   // load_config 调用（旧键一次性迁移写回），定义在 KI 削减区
 static int  migrate_rescan_unit_config(const char *path, int cycles);  // load_config 调用（旧秒值一次性迁移写回），定义在 KI 削减区
+static int  migrate_launch_timing_config(const char *path, int cooldown, int watchdog);  // 旧两键合并写回
 static void reset_ki_cut_defaults(void);   // reset_perf_layer_defaults 与 main 调用，定义在 KI 削减区
 static void install_cache_mark(const char *pkg);   // /proc 命中正向标记（定义在安装缓存区，供 app_process_scan 调用）
 
@@ -965,6 +973,31 @@ struct PrepassCfg {
 };
 
 /**
+ * 旧键兼容（永久读）：APP_LAUNCH_COOLDOWN / APP_WATCHDOG → APP_LAUNCH_TIMING 的两个槽。
+ * 只暂存、不直接生效——第一遍结束后由 load_config 按「新键优先」合并。
+ * 用 strncmp 而非 strcmp：既避免被 gen_params.py 的「已定义键」扫描误算成新键，
+ * 又让 compat.daemonAccept 的「C 端接受集」核对能识别这两个旧键。
+ * @return 1=属于旧键集合；0=不属于
+ */
+static int config_apply_legacy_launch_key(struct PrepassCfg *out, const char *key, const char *val_str) {
+    if (strncmp(key, "APP_WATCHDOG", 12) == 0 && key[12] == '\0') {
+        if (out) {
+            legacy_launch_watchdog = clamp(atoi(val_str), 0, 120);   // 停滞重启连续周期数（0=关闭）
+            legacy_launch_seen = 1;
+        }
+        return 1;
+    }
+    if (strncmp(key, "APP_LAUNCH_COOLDOWN", 19) == 0 && key[19] == '\0') {
+        if (out) {
+            legacy_launch_cooldown = clamp(atoi(val_str), 0, 3600);  // 两次拉起最小间隔（秒，0=不冷却）
+            legacy_launch_seen = 1;
+        }
+        return 1;
+    }
+    return 0;
+}
+
+/**
  * 第一遍预读键的**唯一名单与处理入口**：层总开关，以及不受层开关管辖的基础设施键。
  * <p>out != NULL：第一遍读取并生效；out == NULL：第二遍只判断「是否属于预读集合」用于跳过。
  * 两遍共用本函数，新增预读键只在此加一行——不得在第二遍另抄一份键名列表，否则漏改会让
@@ -972,6 +1005,7 @@ struct PrepassCfg {
  * @return 1=属于预读集合；0=不属于
  */
 static int config_apply_prepass_key(struct PrepassCfg *out, const char *key, const char *val_str) {
+    if (config_apply_legacy_launch_key(out, key, val_str)) return 1;   // 旧两键（永久读兼容）
     if (strcmp(key, "PERF_ENABLED") == 0) {
         if (out) out->perf_enabled = atoi(val_str) != 0;
     } else if (strcmp(key, "DEBUG_ENABLED") == 0) {
@@ -980,10 +1014,20 @@ static int config_apply_prepass_key(struct PrepassCfg *out, const char *key, con
         if (out) out->sysfs_enabled = atoi(val_str) != 0;   // sysfs 路径与缩放独立大类
     } else if (strcmp(key, "APP_LAUNCH_ENABLED") == 0) {
         if (out) APP_LAUNCH_ENABLED = (atoi(val_str) != 0);   // 任何模式下都生效（含 PERF=0/DEBUG=0）
-    } else if (strcmp(key, "APP_WATCHDOG") == 0) {
-        if (out) app_watchdog_cycles = clamp(atoi(val_str), 0, 120);   // 锁死自动重启停滞周期数（0=关闭）
-    } else if (strcmp(key, "APP_LAUNCH_COOLDOWN") == 0) {
-        if (out) app_launch_cooldown = clamp(atoi(val_str), 0, 3600);  // 两次拉起最小间隔（秒，0=不冷却）
+    } else if (strcmp(key, "APP_LAUNCH_TIMING") == 0) {
+        // 拉起冷却 + 停滞重启（二值）：第 1 值秒、第 2 值连续周期数；新键优先于两个旧键。
+        if (!out) return 1;
+        int cooldown = app_launch_cooldown;
+        int cycles = app_watchdog_cycles;
+        int n = sscanf(val_str, "%d %d", &cooldown, &cycles);
+        if (n >= 1) {
+            app_launch_cooldown = clamp(cooldown, 0, 3600);
+            launch_timing_seen = 1;
+        }
+        if (n >= 2) {
+            app_watchdog_cycles = clamp(cycles, 0, 120);
+            launch_timing_seen = 1;
+        }
     } else if (strcmp(key, "APP_LAUNCH_SCREEN_GATE") == 0) {
         // 屏幕门禁（二值：开关 Dozing是否算亮屏）；仅 mWakefulness=Awake（或按配置算亮屏的 Dozing）才拉起
         // 旧三值行「开关 读取失败默认值 Dozing」：按原语义取第一、第三值（第二值已废弃），并记一次日志。
@@ -1037,6 +1081,10 @@ static int load_config(const char *path) {
     char line[640];
     struct PrepassCfg pre = {1, 0, 0};   // 见 config_apply_prepass_key
     struct RescanCfgState rescan = {0};
+    launch_timing_seen = 0;
+    legacy_launch_seen = 0;
+    legacy_launch_cooldown = -1;
+    legacy_launch_watchdog = -1;
     while (fgets(line, sizeof(line), f)) {
         // 单位标记是注释行，config_parse_line 会跳过，故在解析前单独识别
         if (strstr(line, "cfg-unit: CPU_ZONE_RESCAN=cycles") != NULL)
@@ -1047,12 +1095,30 @@ static int load_config(const char *path) {
         config_apply_prepass_key(&pre, key, val_str);   // 名单与第二遍跳过共用同一函数
     }
 
+    // 旧键兼容（永久）：新键未出现时，旧两键按槽覆盖；新键出现则以新键为准。
+    if (!launch_timing_seen) {
+        if (legacy_launch_cooldown >= 0) app_launch_cooldown = legacy_launch_cooldown;
+        if (legacy_launch_watchdog >= 0) app_watchdog_cycles = legacy_launch_watchdog;
+    }
+
+    // 旧两键一次性迁移写回：合并为 APP_LAUNCH_TIMING 一行并删除旧行。
+    // 失败保留原文件（上面的读兼容已把旧值装入内存，行为不丢），且不再重试避免刷日志。
+    if (legacy_launch_seen && !launch_migrate_give_up) {
+        if (migrate_launch_timing_config(path, app_launch_cooldown, app_watchdog_cycles)) {
+            struct stat mst;
+            if (stat(path, &mst) == 0) config_mtime = mst.st_mtime;
+        } else {
+            launch_migrate_give_up = 1;
+        }
+    }
+    legacy_launch_seen = 0;
+
     // 转写要在下面的前置处理与提前 return 之前完成（总开关全关时也要发布）
     publish_uiprefs();
 
     // 前置条件：自动拉起关闭 → 锁死自动重启（watchdog）强制关闭（不改配置，仅运行时生效）。
     if (!APP_LAUNCH_ENABLED && app_watchdog_cycles > 0) {
-        write_log("配置 自动拉起关闭 → 锁死自动重启 强制关闭（APP_WATCHDOG=%d 运行时置 0）", app_watchdog_cycles);
+        write_log("配置 自动拉起关闭 → 锁死自动重启 强制关闭（APP_LAUNCH_TIMING 第 2 值=%d 运行时置 0）", app_watchdog_cycles);
         app_watchdog_cycles = 0;
     }
 
@@ -3803,6 +3869,68 @@ static int migrate_rescan_unit_config(const char *path, int cycles) {
     if (!commit_config_rewrite(path, tmp, g, &st, "CPU_ZONE_RESCAN 单位迁移")) return 0;
     write_log("配置 CPU_ZONE_RESCAN 旧值 %d 秒 → 已写回为 %d 个控制周期并追加单位标记",
               migrated_from_sec, cycles);
+    return 1;
+}
+
+/**
+ * 旧两键 APP_LAUNCH_COOLDOWN（秒）/ APP_WATCHDOG（周期数）→ APP_LAUNCH_TIMING 的一次性写回：
+ *   合并为一行「拉起冷却 停滞重启」，并删除旧行；文件已有新键时只删旧行（新键优先，不重复写出）。
+ * 原子性/属主对齐与旧键迁移一致；失败保留原文件（读兼容已生效，行为不丢）。幂等：迁移后无旧键。
+ */
+static int migrate_launch_timing_config(const char *path, int cooldown, int watchdog) {
+    FILE *f = fopen(path, "r");
+    if (!f) return 0;
+    struct stat st;
+    if (stat(path, &st) != 0) { fclose(f); return 0; }
+
+    char tmp[300];
+    snprintf(tmp, sizeof(tmp), "%s.mig", path);
+    FILE *g = fopen(tmp, "w");
+    if (!g) { fclose(f); return 0; }
+
+    // 预扫：新键已存在时只删旧行，避免写出重复行
+    int has_new = 0;
+    {
+        char l2[640];
+        while (fgets(l2, sizeof(l2), f)) {
+            const char *q = l2;
+            while (*q == ' ' || *q == '\t') q++;
+            if (*q == '#' || strncmp(q, "APP_LAUNCH_TIMING", 17) != 0) continue;
+            const char *e2 = q + 17;
+            while (*e2 == ' ' || *e2 == '\t') e2++;
+            if (*e2 == '=') has_new = 1;
+        }
+        rewind(f);
+    }
+
+    int changed = 0;
+    int emitted = has_new;   // 已有新键 = 不再写出
+    char line[640];
+    while (fgets(line, sizeof(line), f)) {
+        const char *p = line;
+        while (*p == ' ' || *p == '\t') p++;
+        const char *eq = (*p == '#') ? NULL : strchr(p, '=');
+        if (eq) {
+            size_t klen = (size_t)(eq - p);
+            while (klen > 0 && (p[klen - 1] == ' ' || p[klen - 1] == '\t')) klen--;
+            if ((klen == 19 && strncmp(p, "APP_LAUNCH_COOLDOWN", 19) == 0) ||
+                (klen == 12 && strncmp(p, "APP_WATCHDOG", 12) == 0)) {
+                changed = 1;
+                if (!emitted) {
+                    fprintf(g, "APP_LAUNCH_TIMING=%d %d\n", cooldown, watchdog);
+                    emitted = 1;
+                }
+                continue;   // 旧行删除（含行内注释）
+            }
+        }
+        fputs(line, g);     // 其余行原样保留
+    }
+    fclose(f);
+
+    if (!changed) { fclose(g); remove(tmp); return 0; }
+    if (!commit_config_rewrite(path, tmp, g, &st, "APP_LAUNCH_TIMING 旧键迁移")) return 0;
+    write_log("配置 旧键 APP_LAUNCH_COOLDOWN/APP_WATCHDOG 已迁移为 APP_LAUNCH_TIMING=%d %d",
+              cooldown, watchdog);
     return 1;
 }
 

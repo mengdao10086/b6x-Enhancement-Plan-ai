@@ -5,7 +5,7 @@
     "两个默认值概念必须分开，不得混用：",
     "  default = 代码默认（tempctrl.c 内编译进二进制的初值）。配置项缺失时 C 端使用它。界面只读展示，逻辑说明参数表写出的是它。",
     "  factory = 出厂值（配置文件**不存在**时由部署流程写入的值）。配置文件已存在时一律保留既有值，不覆盖。profile.conf 写出的是它。",
-    "  绝大多数键两者相同；不同者仅 PERF_ENABLED / APP_LAUNCH_ENABLED / APP_WATCHDOG 三个（见 对齐报告.md）。",
+    "  绝大多数键两者相同；不同者仅 PERF_ENABLED（见 对齐报告.md）。",
     "键序 = profile.conf 的书写顺序（同时也是界面渲染顺序）；范围以 tempctrl.c 的 clamp/护栏为准。",
     "type 取值：switch（0/1 布尔）· int（单整数）· multi（多值，范围在 fields）· path（路径字符串，无范围）· enum（文本枚举，取值域在 options）· table（表键：rowPrefix 行前缀 + rowFields 逐字段范围 + defaultRows 默认行，界面渲染为表编辑器，如 PID_CUT）。",
     "min/max：switch/int 为整数；multi 为 null（逐字段见 fields）；path 为 null（字符串无范围）；enum 为 null（值域见 options）；table 为 null（逐字段见 rowFields）。",
@@ -47,14 +47,14 @@
     ],
     "daemonAccept": {
       "prefixes": ["KI_CUT_"],
-      "exact": ["KI_CUT_SMOOTH"],
+      "exact": ["KI_CUT_SMOOTH", "APP_LAUNCH_COOLDOWN", "APP_WATCHDOG"],
       "exempted": {
         "DEBUG_": "C 端对任意 DEBUG_*（除 DEBUG_ENABLED）只静默消费、不产生任何效果；界面不据此判定为「已定义」，以保留对 DEBUG 拼写错的告警。"
       }
     },
     "cleanup": {
       "prefixes": ["KI_CUT_"],
-      "exact": ["KI_CUT_SMOOTH"],
+      "exact": ["KI_CUT_SMOOTH", "APP_LAUNCH_COOLDOWN", "APP_WATCHDOG"],
       "counterparts": {"KI_CUT_": "PID_CUT_"}
     },
     "renames": {
@@ -78,7 +78,9 @@
       "UI_ANIM_RATE": "（来源不明，已废弃）",
       "UI_ANIM_START_MS": "（来源不明，已废弃）",
       "KI_CUT_1": "→ PID_CUT_1",
-      "KI_CUT_SMOOTH": "（已删除）"
+      "KI_CUT_SMOOTH": "（已删除）",
+      "APP_LAUNCH_COOLDOWN": "已并入 APP_LAUNCH_TIMING（现为第 1 字段「拉起冷却」，单位秒）",
+      "APP_WATCHDOG": "已并入 APP_LAUNCH_TIMING（现为第 2 字段「停滞重启」，连续下发周期数）"
     }
   },
   "groups": [
@@ -1695,10 +1697,10 @@
       "role": "master",
       "type": "switch",
       "label": "自动拉起 app",
-      "desc": "自动拉起 app 开关（独立于性能总开关（PERF_ENABLED），任何模式生效）。无散热器 app 存活时自动拉起上次使用的 app（目标已运行/未安装则跳过；拉起后自动后台化，但依旧会闪烁一下界面）；是锁死自动重启（APP_WATCHDOG）的前置条件：本开关关闭时守护进程在运行时强制关闭锁死自动重启（不改配置文件）",
+      "desc": "自动拉起 app 开关（独立于性能总开关（PERF_ENABLED），任何模式生效）。无散热器 app 存活时自动拉起上次使用的 app（目标已运行/未安装则跳过；拉起后自动后台化，但依旧会闪烁一下界面）；是锁死自动重启（「停滞重启」，即 APP_LAUNCH_TIMING 第 2 值）的前置条件：本开关关闭时守护进程在运行时强制关闭锁死自动重启（不改配置文件）",
       "cTable": "pre",
       "docOrder": 37,
-      "docDesc": "自动拉起 app 开关（独立于性能总开关（PERF_ENABLED），任何模式生效）。无散热器 app 存活时按上次使用的 app 自动拉起（启动等待/运行中断联时，按拉起冷却间隔（APP_LAUNCH_COOLDOWN）冷却，默认关闭，需在界面中开启）。是锁死自动重启（APP_WATCHDOG）的前置条件：守护进程检测到本开关关闭时，无论停滞重启（APP_WATCHDOG）配置如何都会在运行时强制关闭锁死自动重启",
+      "docDesc": "自动拉起 app 开关（独立于性能总开关（PERF_ENABLED），任何模式生效）。无散热器 app 存活时按上次使用的 app 自动拉起（启动等待/运行中断联时，按拉起冷却间隔（APP_LAUNCH_TIMING 第 1 值）冷却，默认关闭，需在界面中开启）。是锁死自动重启（「停滞重启」，即 APP_LAUNCH_TIMING 第 2 值）的前置条件：守护进程检测到本开关关闭时，无论停滞重启配置如何都会在运行时强制关闭锁死自动重启",
       "confNote": [
         "=1：断联或无散热器 app 存活时，自动拉起上次使用的 app（目标已运行/未安装则跳过；拉起后自动后台化，但依旧会闪烁一下界面）；=0：关闭（默认，需在界面中开启）"
       ],
@@ -1713,25 +1715,50 @@
       "fields": null
     },
     {
-      "key": "APP_LAUNCH_COOLDOWN",
+      "key": "APP_LAUNCH_TIMING",
       "group": "launch",
       "role": "setting",
-      "type": "int",
-      "label": "拉起间隔",
-      "desc": "两次拉起的最小间隔，防断联频繁拉起；0=不冷却",
+      "type": "multi",
+      "label": "拉起冷却 / 停滞重启",
+      "desc": "两值：第 1 值 = 拉起冷却（秒，0~3600，默认 60；两次拉起的最小间隔，防断联频繁拉起，0=不冷却）；第 2 值 = 停滞重启（连续下发周期数，0~120，默认 6；实际制冷停滞（=上周期实际）且未达目标（≠上周期下发）连续 N 次下发 → 结束散热器 app 进程并重新拉起，0=关闭；两次结束进程之间至少间隔 300 秒，冷却期内不判定/不重启）。前置条件：自动拉起 app 开关（APP_LAUNCH_ENABLED）=1；关闭时两项运行期按 0 处理（不改配置文件）。",
       "cTable": "pre",
       "docOrder": 38,
-      "docDesc": "两次拉起最小间隔（秒，0~3600），防断联频繁拉起；0=不冷却",
-      "confNote": ["拉起冷却间隔（秒，0~3600，默认 60）：两次拉起的最小间隔，防断联频繁拉起；0=不冷却"],
-      "unit": "秒",
-      "unitNote": "",
-      "default": 60,
-      "factory": 60,
-      "min": 0,
-      "max": 3600,
+      "docDesc": "拉起冷却 / 停滞重启（二值）：第 1 值 = 拉起冷却（秒，0~3600，默认 60；两次拉起最小间隔，防断联频繁拉起，0=不冷却）；第 2 值 = 停滞重启（连续下发周期数，0~120，默认 6；实际制冷停滞（=上周期实际）且未达目标（≠上周期下发）连续 N 次下发 → 结束散热器 app 进程并重新拉起，0=关闭；两次结束进程之间至少间隔 300 秒，冷却期内不判定/不重启）。**独立于性能总开关（PERF_ENABLED），任何模式生效；前置条件：自动拉起 app 开关（APP_LAUNCH_ENABLED）=1，关闭时两项运行期按 0 处理（配置值不改）**",
+      "confNote": [
+        "拉起冷却 / 停滞重启（二值）：拉起冷却（秒，0~3600，默认 60，0=不冷却）· 停滞重启（连续周期数，0~120，默认 6，0=关闭）",
+        "  第 1 值：两次拉起的最小间隔，防断联频繁拉起",
+        "  第 2 值：实际制冷停滞（=上周期实际）且未达目标（≠上周期下发）连续 N 次下发 → 结束散热器 app 进程并重新拉起；两次结束进程之间至少间隔 300 秒，冷却期内不判定、不重启",
+        "  前置条件：自动拉起 app 开关（APP_LAUNCH_ENABLED）=1；关闭时两项运行期按 0 处理（不改配置文件）"
+      ],
+      "unit": "",
+      "unitNote": "第 1 值为秒；第 2 值为连续下发周期数（无单位）",
+      "default": [60, 6],
+      "factory": [60, 6],
+      "min": null,
+      "max": null,
+      "rangeNote": "第 1 值 0~3600 秒；第 2 值 0~120 个连续下发周期",
       "requires": ["APP_LAUNCH_ENABLED"],
       "daemonConsumes": true,
-      "fields": null
+      "fields": [
+        {
+          "label": "拉起冷却",
+          "unit": "秒",
+          "unitNote": "0=不冷却",
+          "min": 0,
+          "max": 3600,
+          "default": 60,
+          "cVar": "app_launch_cooldown"
+        },
+        {
+          "label": "停滞重启",
+          "unit": "次（连续下发周期数）",
+          "unitNote": "0=关闭",
+          "min": 0,
+          "max": 120,
+          "default": 6,
+          "cVar": "app_watchdog_cycles"
+        }
+      ]
     },
     {
       "key": "APP_LAUNCH_SCREEN_GATE",
@@ -1788,34 +1815,6 @@
           "cVar": null
         }
       ]
-    },
-    {
-      "key": "APP_WATCHDOG",
-      "group": "launch",
-      "role": "setting",
-      "type": "int",
-      "label": "停滞重启",
-      "desc": "实际制冷停滞（=上周期实际）且未达目标（≠上周期下发）连续 N 次下发 → 结束散热器 app 进程并重新拉起；0=关闭；两次结束进程之间至少间隔 300 秒（5 分钟），冷却期内不判定/不重启；前置条件：自动拉起 app 开关（APP_LAUNCH_ENABLED）=1（自动拉起关闭时运行时强制置 0）",
-      "cTable": "pre",
-      "docOrder": 40,
-      "docDesc": "停滞重启（独立于性能总开关（PERF_ENABLED），任何模式生效）。每次实际下发制冷变化后判定：实际制冷停滞（=上周期实际）且未达目标（≠上周期下发）连续 N 次时，结束散热器 app 进程并重新拉起（散热器重启无效，需重建 App 进程恢复连接栈）；0=关闭（默认 6）；两次结束进程之间至少间隔 300 秒，冷却期内每周期刷新锚点、不判定/不重启；前置条件：自动拉起 app 开关（APP_LAUNCH_ENABLED）=1 才生效（自动拉起关闭时运行时强制关闭）",
-      "confNote": [
-        "散热器锁死自动重启（锁死自动重启，独立于性能总开关，任何模式都生效）",
-        "停滞次数（0~120，默认 6，0=关闭）：实际制冷停滞（=上周期实际）且未达目标（≠上周期下发）连续 N 次下发 → 结束散热器 app 进程并重新拉起",
-        "  两次结束进程之间至少间隔 300 秒；冷却期内不判定、不重启",
-        "  前置条件：自动拉起 app 开关（APP_LAUNCH_ENABLED）=1；自动拉起关闭时运行时强制置 0（不改配置文件）"
-      ],
-      "unit": "次（连续下发周期数）",
-      "unitNote": "",
-      "default": 6,
-      "factory": 6,
-      "min": 0,
-      "max": 120,
-      "requires": [
-        "APP_LAUNCH_ENABLED"
-      ],
-      "daemonConsumes": true,
-      "fields": null
     },
     {
       "key": "BT_AUTO_ENABLE_SEC",
@@ -2417,9 +2416,8 @@
       "LOG_FILE": ["log_file_path"],
       "LOG_MAX": ["LOG_MAX"],
       "APP_LAUNCH_ENABLED": ["APP_LAUNCH_ENABLED"],
-      "APP_LAUNCH_COOLDOWN": ["app_launch_cooldown"],
+      "APP_LAUNCH_TIMING": ["app_launch_cooldown", "app_watchdog_cycles"],
       "APP_LAUNCH_SCREEN_GATE": ["app_launch_screen_gate_enabled", "app_launch_screen_dozing_on"],
-      "APP_WATCHDOG": ["app_watchdog_cycles"],
       "UI_GAP_SEC": [],
       "UI_ANIM_TUNING": [],
       "UI_RPM_AXIS_MIN": [],

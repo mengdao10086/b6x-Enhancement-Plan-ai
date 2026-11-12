@@ -6,7 +6,7 @@
 #define PARAMS_GENERATED_H
 
 /* 键数：守护进程消费 / 仅界面读取 */
-#define CFG_DAEMON_KEY_COUNT 50
+#define CFG_DAEMON_KEY_COUNT 49
 #define CFG_WEBUI_KEY_COUNT 11
 
 /* 性能层单值键表（PERF_ENABLED=1）→ INT_CFG_KEYS[]：X(键名, C 变量, min, max) */
@@ -130,10 +130,10 @@
 #define CFG_MAX_CPU_ZONE_RESCAN_2 64
 #define CFG_MIN_LOG_MAX 0  /* C 变量 LOG_MAX */
 #define CFG_MAX_LOG_MAX 1048576
-#define CFG_MIN_APP_LAUNCH_COOLDOWN 0  /* C 变量 app_launch_cooldown */
-#define CFG_MAX_APP_LAUNCH_COOLDOWN 3600
-#define CFG_MIN_APP_WATCHDOG 0  /* C 变量 app_watchdog_cycles */
-#define CFG_MAX_APP_WATCHDOG 120
+#define CFG_MIN_APP_LAUNCH_TIMING_1 0  /* C 变量 app_launch_cooldown */
+#define CFG_MAX_APP_LAUNCH_TIMING_1 3600
+#define CFG_MIN_APP_LAUNCH_TIMING_2 0  /* C 变量 app_watchdog_cycles */
+#define CFG_MAX_APP_LAUNCH_TIMING_2 120
 #define CFG_MIN_BT_AUTO_ENABLE_SEC 0  /* C 变量 bt_auto_enable_sec */
 #define CFG_MAX_BT_AUTO_ENABLE_SEC 3600
 
