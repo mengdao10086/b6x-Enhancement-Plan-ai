@@ -19,6 +19,8 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.locks.ReentrantLock;
 
 /**
  * 部署链路核心。界面只允许调 {@link #probe()}、{@link #deploy()}、{@link #uninstall()}、
@@ -149,6 +151,16 @@ public final class Deployer {
     private volatile String watchdogPidsCache = "";
     /** md5sum 能力："" 未探测 / "1" 有 / "0" 无（进程内只探测一次）。 */
     private volatile String md5ToolCap = "";
+
+    /**
+     * 部署动作锁：{@link #deploy()}、{@link #updateScript()}、{@link #uninstall()} 共用同一个私有目录
+     * 中转区（{@code files/deploy/}），两个动作并发会把同一个中转文件截成半截再交给 root。
+     * su 通道本身是串行的（{@link RootShell}），但落盘发生在那之前，故此锁单独存在。
+     */
+    private final ReentrantLock actionLock = new ReentrantLock();
+
+    /** 中转文件名的序号：并发的落盘各自用不同临时名（见 {@link #stageAsset}）。 */
+    private static final AtomicInteger STAGE_SEQ = new AtomicInteger();
 
     private Deployer(Context context) {
         this.appContext = context.getApplicationContext();
@@ -645,6 +657,16 @@ public final class Deployer {
      * 详见 app/逻辑说明.md §2.1、§2.2。
      */
     public Result deploy() {
+        actionLock.lock();
+        try {
+            return deployLocked();
+        } finally {
+            actionLock.unlock();
+        }
+    }
+
+    /** {@link #deploy()} 的主体；调用方已持有 {@link #actionLock}。 */
+    private Result deployLocked() {
         List<String> steps = new ArrayList<>();
         // 用户主动动作：清掉上一次的失败退避与缓存的 su 命令，等价于"重启 app"对通道的复位（不必真重启）
         shell.resetChannel();
@@ -675,9 +697,14 @@ public final class Deployer {
         }
         String svcd = nvl(kv.get("SVCD"));
         String ksuVer = nvl(kv.get("KSU_VER"));
+        String svcdAlt = nvl(kv.get("SVCD_ALT"));
         steps.add("service.d 目录：" + svcd + (ksuVer.isEmpty() ? "" : "（KernelSU verCode=" + ksuVer + "）"));
         if (svcd.isEmpty()) {
             return new Result(false, "部署", steps, "未能确定 service.d 目录", null);
+        }
+        if (!svcdAlt.isEmpty()) {
+            steps.add("KernelSU 版本号无法识别：脚本同时安装到旧目录 " + svcdAlt
+                    + "（两个目录都成功才算装上）");
         }
         if (!"1".equals(kv.get("BIN_OK"))) {
             return new Result(false, "部署", steps,
@@ -692,15 +719,21 @@ public final class Deployer {
         steps.add("已清旧版迁移残留 /data/local/tmp/tempctrl_last_dev（daemon 不再读写）");
         String deployedBinMd5 = nvl(kv.get("BIN_MD5"));
         String deployedScriptMd5 = nvl(kv.get("SCRIPT_MD5"));
-        if (!binMd5.equals(deployedBinMd5) || !scriptMd5.equals(deployedScriptMd5)) {
+        boolean md5ToolAbsent = "0".equals(nvl(kv.get("MD5TOOL")).trim());
+        if (md5ToolAbsent) {
+            // 设备没有 md5sum：回吐值必然为空，不能据此判"内容不一致"（盘面其实已就位）。
+            // 就位判据退回设备侧的 BIN_OK / SCRIPT_OK；同时不把空值记成"设备上已知哈希"。
+            steps.add("设备缺少 md5sum：跳过落盘内容核对（就位以二进制/脚本写入结果为准）");
+        } else if (!binMd5.equals(deployedBinMd5) || !scriptMd5.equals(deployedScriptMd5)) {
             return new Result(false, "部署", steps,
                     "落盘内容与 APK 内资源不一致（apk=" + binMd5 + "/" + scriptMd5
                             + "，设备=" + deployedBinMd5 + "/" + deployedScriptMd5 + "）",
                     null);
+        } else {
+            steps.add("内容哈希核对通过（二进制与脚本均与 APK 内一致）");
+            // 设备侧哈希已读回且核对通过：此刻的缓存就是设备上真实内容（供下次启动落页判定）
+            rememberDeployedBinMd5(appContext, deployedBinMd5);
         }
-        steps.add("内容哈希核对通过（二进制与脚本均与 APK 内一致）");
-        // 设备侧哈希已读回且核对通过：此刻的缓存就是设备上真实内容（供下次启动落页判定）
-        rememberDeployedBinMd5(appContext, deployedBinMd5);
 
         ConfigStore.WriteResult cfg = configStore.writeFactoryIfAbsent();
         steps.add(cfg.describe());
@@ -721,7 +754,8 @@ public final class Deployer {
                 : probe();
         steps.add(st.deployed ? "部署后自检通过"
                 : "部署后自检未通过（内容或进程未符合判据）——盘面已就位，仍交由随后的拉起动作换进程");
-        // placementsOk 恒真：三条硬判据（BIN_OK / SCRIPT_OK / 双侧哈希一致）都过了；自检未过也照回吐。
+        // placementsOk 恒真：BIN_OK / SCRIPT_OK 都过了，哈希核对也在能核对时通过了
+        // （没有 md5sum 的设备跳过该项，见上）。自检未过只影响 ok，不影响"可以接着拉起"。
         return new Result(st.deployed, true, "部署", steps,
                 st.deployed ? "" : "部署后自检未通过（盘面已就位）", st);
     }
@@ -732,6 +766,16 @@ public final class Deployer {
      * <b>阻塞</b>。详见 app/逻辑说明.md §2.2。
      */
     public Result updateScript() {
+        actionLock.lock();
+        try {
+            return updateScriptLocked();
+        } finally {
+            actionLock.unlock();
+        }
+    }
+
+    /** {@link #updateScript()} 的主体；调用方已持有 {@link #actionLock}。 */
+    private Result updateScriptLocked() {
         List<String> steps = new ArrayList<>();
         File staging = new File(configStore.getPrivateDir(), "deploy");
         if (!staging.isDirectory() && !staging.mkdirs()) {
@@ -784,6 +828,16 @@ public final class Deployer {
      * 它的旧落点残留另由 {@link #deploy()} 部署时主动清，此处卸载兜底再清一次。<b>阻塞</b>。详见 app/逻辑说明.md §2.4。
      */
     public Result uninstall() {
+        actionLock.lock();
+        try {
+            return uninstallLocked();
+        } finally {
+            actionLock.unlock();
+        }
+    }
+
+    /** {@link #uninstall()} 的主体；调用方已持有 {@link #actionLock}。 */
+    private Result uninstallLocked() {
         List<String> steps = new ArrayList<>();
         RootShell.Result r = shell.exec(uninstallScript(), EXEC_TIMEOUT_MS);
         Map<String, String> kv = parseKv(r.stdout);
@@ -812,8 +866,8 @@ public final class Deployer {
         steps.add("已删私有目录不可用时的兜底日志 /cache/tempctrl.log");
 
         if (daemonStopped && watchdogStopped) {
-            List<String> removed = cleanPrivateRuntime();
-            steps.add("已清私有目录运行时产物：" + (removed.isEmpty() ? "无" : join(removed, "、")));
+            RuntimeCleanup cleaned = cleanPrivateRuntime();
+            steps.add(cleaned.describe());
             steps.add("保留 " + configStore.getConfigFile().getName() + "（用户配置）");
         } else {
             steps.add("私有目录运行时产物未删（进程可能仍在跑）");
@@ -821,7 +875,15 @@ public final class Deployer {
 
         Status st = buildStatus(kv, true, md5OfAssetOrEmpty(appContext, BIN_ASSET),
                 md5OfAssetOrEmpty(appContext, SCRIPT_ASSET), new ArrayList<>());
-        return new Result(!st.deployed, "卸载部署", steps, "", st);
+        // 进程没确认退出时盘面即使已经删干净也不算卸载完成：运行中的进程仍持旧 inode 继续控温
+        boolean ok = daemonStopped && watchdogStopped && !st.deployed;
+        String error = "";
+        if (!daemonStopped || !watchdogStopped) {
+            error = "有进程未确认退出，卸载未完成";
+        } else if (st.deployed) {
+            error = "卸载后仍探测到盘面残留（二进制或脚本）";
+        }
+        return new Result(ok, "卸载部署", steps, error, st);
     }
 
     // ==================== 拉起（界面手动入口） ====================
@@ -889,6 +951,9 @@ public final class Deployer {
             if ("1".equals(kv.get("OLD_KILLED"))) {
                 steps.add("旧实例未响应 kill（SIGTERM），已用 kill -9 结束");
             }
+        }
+        if ("1".equals(kv.get("BIN_ROLLED_BACK"))) {
+            steps.add("新二进制未能启动，已自动退回上一版（" + BIN_DEST + ".prev）；请重新部署正确产物");
         }
         if (!"1".equals(kv.get("STARTED"))) {
             steps.add(viaWatchdog
@@ -993,15 +1058,20 @@ public final class Deployer {
      * 把 APK 内资源落到私有目录并授权（照 Scene 的做法：Framework File API +
      * {@code setExecutable(true,false)} 沿父目录链逐级向上，不调外部 chmod）。
      *
+     * <p>先写同目录的唯一临时文件再 rename：{@link #deploy()} / {@link #updateScript()} 与
+     * {@link #writeSyncManifestIfNeeded()} 共用同一个中转路径，就地覆写会让另一个写者把它读成半截。
+     *
      * @return 落盘内容的 md5（十六进制小写）
      */
     private String stageAsset(String assetPath, File dest, boolean executable) throws IOException {
         MessageDigest digest = newDigest();
+        File tmp = new File(dest.getParentFile(), dest.getName() + ".tmp-"
+                + android.os.Process.myPid() + "-" + STAGE_SEQ.incrementAndGet());
         InputStream in = null;
         FileOutputStream out = null;
         try {
             in = appContext.getAssets().open(assetPath);
-            out = new FileOutputStream(dest, false);
+            out = new FileOutputStream(tmp, false);
             byte[] buf = new byte[64 * 1024];
             int n;
             while ((n = in.read(buf)) > 0) {
@@ -1011,13 +1081,18 @@ public final class Deployer {
             out.flush();
             out.getFD().sync();
         } catch (IOException e) {
+            tmp.delete();
             throw new IOException("资源 " + assetPath + " 落盘失败：" + e.getMessage());
         } finally {
             closeQuietly(in);
             closeQuietly(out);
         }
         if (executable) {
-            ensureExecutableUpTo(dest, configStore.getPrivateDir());
+            ensureExecutableUpTo(tmp, configStore.getPrivateDir());
+        }
+        if (!tmp.renameTo(dest)) {
+            tmp.delete();
+            throw new IOException("资源 " + assetPath + " 就位失败：" + tmp + " → " + dest);
         }
         return toHex(digest.digest());
     }
@@ -1219,27 +1294,55 @@ public final class Deployer {
      * 删私有目录里的运行时产物（{@code profile.conf} 不在列，属用户配置）。清单/时间戳/看门狗标记也在列
      * （否则脚本会认为"本机部署过"、下次开机把卸载掉的重装回来）。详见 app/逻辑说明.md §2.5。
      */
-    private List<String> cleanPrivateRuntime() {
-        List<String> removed = new ArrayList<>();
+    /** 私有目录清理的结果：删掉了哪些、哪些没删掉（失败必须上屏，不能报「已清」）。 */
+    private static final class RuntimeCleanup {
+        final List<String> removed = new ArrayList<>();
+        final List<String> failed = new ArrayList<>();
+
+        String describe() {
+            String head = removed.isEmpty() ? "无" : join(removed, "、");
+            if (failed.isEmpty()) {
+                return "已清私有目录运行时产物：" + head;
+            }
+            return "私有目录运行时产物：已清 " + head + "；未删掉 " + join(failed, "、")
+                    + "（被占用或只读，可重试或手动删除）";
+        }
+    }
+
+    private RuntimeCleanup cleanPrivateRuntime() {
+        RuntimeCleanup result = new RuntimeCleanup();
         String[] names = {"tempctrl.lock", "tempctrl.log", "tempctrl_webui.data",
                 MANIFEST_NAME, "tempctrl_deploy_stamp", "tempctrl_wd_spawn"};
         for (String name : names) {
             File f = new File(configStore.getPrivateDir(), name);
-            if (f.exists() && f.delete()) {
-                removed.add(name);
+            if (!f.exists()) {
+                continue;
+            }
+            if (f.delete()) {
+                result.removed.add(name);
+            } else {
+                result.failed.add(name);
             }
         }
         File staging = new File(configStore.getPrivateDir(), "deploy");
+        boolean childFailed = false;
         File[] children = staging.listFiles();
         if (children != null) {
             for (File c : children) {
-                c.delete();
+                if (!c.delete()) {
+                    result.failed.add("deploy/" + c.getName());
+                    childFailed = true;
+                }
             }
         }
-        if (staging.isDirectory() && staging.delete()) {
-            removed.add("deploy/（中转副本）");
+        if (staging.isDirectory()) {
+            if (staging.delete()) {
+                result.removed.add("deploy/（中转副本）");
+            } else if (!childFailed) {
+                result.failed.add("deploy/（目录不可删）");
+            }
         }
-        return removed;
+        return result;
     }
 
     // ==================== 内部：shell 片段 ====================
@@ -1412,29 +1515,51 @@ public final class Deployer {
      */
     private static String serviceDirPreamble() {
         return "svcd=\"\"\n"
+                // 版本号读不出来时（ksud 缺失 / 输出格式变了）无法判断 KSU 认哪个目录：
+                // 主装现代目录，同时把旧目录记进 svcd_alt，两处都装（见 scriptInstallSnippet）。
+                + "svcd_alt=\"\"\n"
                 + "ver=\"\"\n"
                 + "if [ -d /data/adb/ksu ]; then\n"
                 + "  ksud=$(command -v ksud 2>/dev/null || echo /data/adb/ksu/bin/ksud)\n"
                 + "  ver=$(\"$ksud\" -V 2>/dev/null | sed -n 's/.*[^0-9]\\([0-9][0-9][0-9][0-9][0-9][0-9]*\\).*/\\1/p' | tail -1)\n"
-                + "  if [ -n \"$ver\" ] && [ \"$ver\" -lt " + KSU_MODERN_VER_CODE + " ] 2>/dev/null; then svcd="
+                + "  if [ -z \"$ver\" ]; then\n"
+                + "    svcd=" + SERVICE_D_MODERN + "\n"
+                + "    svcd_alt=" + SERVICE_D_KSU_LEGACY + "\n"
+                + "  elif [ \"$ver\" -lt " + KSU_MODERN_VER_CODE + " ] 2>/dev/null; then svcd="
                 + SERVICE_D_KSU_LEGACY + "; fi\n"
                 + "fi\n"
                 + "[ -n \"$svcd\" ] || svcd=" + SERVICE_D_MODERN + "\n"
+                + "[ \"$svcd_alt\" = \"$svcd\" ] && svcd_alt=\"\"\n"
                 + "echo \"SVCD=$svcd\"\n"
+                + "echo \"SVCD_ALT=$svcd_alt\"\n"
                 + "echo \"KSU_VER=$ver\"\n";
     }
 
     /** 把脚本装到 $svcd 并回吐 SCRIPT_OK（部署与单独更新脚本共用）。<b>先落 {@code .new} 再 {@code mv}</b>：
      *  脚本自己是常驻看门狗，覆写它在读的文件会读到半截；mv 换目录项，正在跑的 shell 继续持旧 inode。
-     *  详见 app/逻辑说明.md §2.2。 */
+     *  {@code $svcd_alt} 非空（KSU 版本号读不出来）时两处都装，两个目录都成功才算 SCRIPT_OK。详见 app/逻辑说明.md §2.2。 */
     private static String scriptInstallSnippet(File stagedScript) {
         // .new 先删再建：/data/adb 是 root-only，属纵深防御（不把“目标已被预置”当成信任前提）。
-        return "rm -f \"$svcd/" + SCRIPT_NAME + ".new\"\n"
-                + "cp -f " + quote(stagedScript.getAbsolutePath()) + " \"$svcd/" + SCRIPT_NAME + ".new\" "
-                + "&& chmod 0755 \"$svcd/" + SCRIPT_NAME + ".new\" "
-                + "&& mv -f \"$svcd/" + SCRIPT_NAME + ".new\" \"$svcd/" + SCRIPT_NAME + "\" "
-                + "&& echo SCRIPT_OK=1 || echo SCRIPT_OK=0\n"
-                + "rm -f \"$svcd/" + SCRIPT_NAME + ".new\" 2>/dev/null\n";
+        return "install_ww_script() {\n"
+                + "  d=\"$1\"\n"
+                + "  [ -n \"$d\" ] || return 1\n"
+                + "  mkdir -p \"$d\" 2>/dev/null\n"
+                + "  rm -f \"$d/" + SCRIPT_NAME + ".new\"\n"
+                + "  cp -f " + quote(stagedScript.getAbsolutePath()) + " \"$d/" + SCRIPT_NAME + ".new\" "
+                + "&& chmod 0755 \"$d/" + SCRIPT_NAME + ".new\" "
+                + "&& mv -f \"$d/" + SCRIPT_NAME + ".new\" \"$d/" + SCRIPT_NAME + "\"\n"
+                + "}\n"
+                + "if install_ww_script \"$svcd\"; then SCRIPT_OK=1; else SCRIPT_OK=0; fi\n"
+                + "SCRIPT_ALT_OK=1\n"
+                + "if [ -n \"$svcd_alt\" ]; then\n"
+                + "  if install_ww_script \"$svcd_alt\"; then SCRIPT_ALT_OK=1; else SCRIPT_ALT_OK=0; fi\n"
+                + "  echo \"SCRIPT_ALT_OK=$SCRIPT_ALT_OK\"\n"
+                + "fi\n"
+                + "rm -f \"$svcd/" + SCRIPT_NAME + ".new\" 2>/dev/null\n"
+                + "[ -n \"$svcd_alt\" ] && rm -f \"$svcd_alt/" + SCRIPT_NAME + ".new\" 2>/dev/null\n"
+                // 两个目录都成功才算装上（KSU 版本号读不出来时不知道它读哪个目录）
+                + "if [ \"$SCRIPT_OK\" = 1 ] && [ \"$SCRIPT_ALT_OK\" = 1 ]; then"
+                + " echo SCRIPT_OK=1; else echo SCRIPT_OK=0; fi\n";
     }
 
     /** 只重推脚本时的 shell（完全不碰 $BIN）。先停看门狗 shell，再由 {@link #restartCore()} 用磁盘上的
@@ -1445,7 +1570,7 @@ public final class Deployer {
                 + "mkdir -p \"$svcd\" 2>&1\n"
                 + scriptInstallSnippet(stagedScript)
                 + "echo \"SCRIPT_MD5=$(md5sum \"$svcd/" + SCRIPT_NAME + "\" 2>/dev/null | cut -d' ' -f1)\"\n"
-                + killAndWaitSnippet("wd_pids", "WATCHDOG")
+                + killAndWaitSnippet("wd_pids", "wd_match", "WATCHDOG")
                 + restartCore();
     }
 
@@ -1455,18 +1580,27 @@ public final class Deployer {
                 + "mkdir -p \"$svcd\" 2>&1\n"
                 // 旧版迁移残留（daemon 侧预创建已删、无人读写）：部署顺手清掉，免得只在卸载时才清
                 + "rm -f /data/local/tmp/tempctrl_last_dev\n"
-                // 原子替换：先写 $BIN.new 再 mv。既避开"覆写正在运行的二进制 ETXTBSY"，也避开
+                // 换盘前留一份上一版：CI 产物本身不可运行时（架构/依赖错误），拉起失败还能退回它
+                // （回退由 restartCore 的启动失败分支做）。同样先删再用 set -C 新建，不跟随预置的符号链接。
+                + "if [ -f \"$BIN\" ] && [ ! -L \"$BIN\" ]"
+                + " && [ \"$(stat -c %u \"$BIN\" 2>/dev/null)\" = \"0\" ]; then\n"
+                + "  rm -f \"$BIN.prev\"\n"
+                + "  ( set -C; cat \"$BIN\" > \"$BIN.prev\" ) && chmod 0755 \"$BIN.prev\" 2>/dev/null\n"
+                + "fi\n"
+                // 原子替换：先写临时文件再 mv。既避开"覆写正在运行的二进制 ETXTBSY"，也避开
                 // "先删后落"被打断留下"二进制不存在"的半成品；在跑的旧进程继续持旧 inode 跑完自己那一轮。
-                // /data/local/tmp 可被 shell uid 预置符号链接：先删旧 .new，再用 set -C（noclobber）
+                // 临时名带 .app 后缀：service.d 脚本自动更新时写的是 $BIN.new，两个写入者不共用同一个中转文件
+                // （同一路径同时 cat 会留下两份内容交错的半截二进制）。
+                // /data/local/tmp 可被 shell uid 预置符号链接：先删旧临时文件，再用 set -C（noclobber）
                 // 让重定向以 O_EXCL 创建——删除到创建之间再被换成链接时直接失败，不会跟随写穿。
                 // 源是 app 私有 staging（不经过 shell 可写目录），最终文件在 /data/local/tmp 新建，
                 // 保持该目录原有的 SELinux 标签（不能从 /data/adb rename 过来）。
-                + "rm -f \"$BIN.new\"\n"
-                + "( set -C; cat " + quote(stagedBin.getAbsolutePath()) + " > \"$BIN.new\" ) "
-                + "&& [ ! -L \"$BIN.new\" ] "
-                + "&& chmod 0755 \"$BIN.new\" "
-                + "&& mv -f \"$BIN.new\" \"$BIN\" && echo BIN_OK=1 || echo BIN_OK=0\n"
-                + "rm -f \"$BIN.new\" 2>/dev/null\n"
+                + "rm -f \"$BIN.new.app\"\n"
+                + "( set -C; cat " + quote(stagedBin.getAbsolutePath()) + " > \"$BIN.new.app\" ) "
+                + "&& [ ! -L \"$BIN.new.app\" ] "
+                + "&& chmod 0755 \"$BIN.new.app\" "
+                + "&& mv -f \"$BIN.new.app\" \"$BIN\" && echo BIN_OK=1 || echo BIN_OK=0\n"
+                + "rm -f \"$BIN.new.app\" 2>/dev/null\n"
                 + scriptInstallSnippet(stagedScript)
                 // 末尾接探测尾段：md5 与运行状态随本趟一起回吐，不再另起一趟 su 探测
                 + probeTail();
@@ -1514,14 +1648,16 @@ public final class Deployer {
     private String uninstallScript() {
         // 停止序列与 stopDaemonScript() 同源（同一个片段），差别只在后面这堆 rm。
         return pidsPreamble()
-                + killAndWaitSnippet("wd_pids", "WATCHDOG")
-                + killAndWaitSnippet("bin_pids", "DAEMON")
+                + killAndWaitSnippet("wd_pids", "wd_match", "WATCHDOG")
+                + killAndWaitSnippet("bin_pids", "bin_pid_ok", "DAEMON")
                 // 3) 两个进程都停稳后再删文件
                 + "rm -f " + SERVICE_D_MODERN + "/" + SCRIPT_NAME + "\n"
                 + "rm -f " + SERVICE_D_KSU_LEGACY + "/" + SCRIPT_NAME + "\n"
                 + "rm -f \"$BIN\"\n"
                 + "# 攻击面/旧版残留：先删目录项（符号链接只删链接本身，不跟随）\n"
                 + "rm -f \"$BIN.new\"\n"
+                + "rm -f \"$BIN.new.app\"\n"
+                + "rm -f \"$BIN.prev\"\n"
                 + "# 兜底单实例锁（C 端在私有目录不可用时用的那把，LOCK_FALLBACK_PATH）：只在 c-daemon 确认\n"
                 + "# 已停之后删 —— 它若还在跑就握着这把锁，删掉文件会让新实例锁到新的 inode、单实例保护被绕过。\n"
                 + "if [ \"$DAEMON_STOPPED\" = 1 ]; then rm -f /data/local/tmp/tempctrl.lock; fi\n"
@@ -1566,7 +1702,7 @@ public final class Deployer {
                 + "[ -n \"$(wd_pids)\" ] && WD_ALIVE=1 || WD_ALIVE=0\n"
                 + "echo \"WD_ALIVE=$WD_ALIVE\"\n"
                 // 2) 两条路都要先把在跑的旧实例停稳（flock 的持有者必须先消失）
-                + killAndWaitSnippet("bin_pids", "OLD")
+                + killAndWaitSnippet("bin_pids", "bin_pid_ok", "OLD")
                 // 3) 看门狗不在就拉起它、由它停旧起新；在就自己起
                 + "if [ \"$WD_ALIVE\" = \"0\" ]; then\n"
                 + "  if [ -f \"$WD\" ]; then\n"
@@ -1607,6 +1743,18 @@ public final class Deployer {
                 + "    NEW_PID=$(bin_pids | head -1)\n"
                 + "    [ -n \"$NEW_PID\" ] && break\n"
                 + "  done\n"
+                // 新二进制两轮都没起来（产物本身不可运行）：退回部署时留的上一版，别让温控就这么离线
+                + "  if [ -z \"$NEW_PID\" ] && [ -f \"$BIN.prev\" ] && [ ! -L \"$BIN.prev\" ]"
+                + " && [ \"$(stat -c %u \"$BIN.prev\" 2>/dev/null)\" = \"0\" ]; then\n"
+                + "    rm -f \"$BIN\"\n"
+                + "    if ( set -C; cat \"$BIN.prev\" > \"$BIN\" ) && chmod 0755 \"$BIN\"; then\n"
+                + "      echo BIN_ROLLED_BACK=1\n"
+                + "      [ -L /data/local/tmp/tempctrl_service.log ] && rm -f /data/local/tmp/tempctrl_service.log\n"
+                + "      nohup \"$BIN\" >> /data/local/tmp/tempctrl_service.log 2>&1 < /dev/null &\n"
+                + "      sleep 2\n"
+                + "      NEW_PID=$(bin_pids | head -1)\n"
+                + "    fi\n"
+                + "  fi\n"
                 + "fi\n"
                 // 4) 新 PID 必须与旧的不同，否则只是"读到了同一个残留进程"
                 + "if [ -n \"$NEW_PID\" ] && [ \"$NEW_PID\" = \"$OLD_PID\" ]; then NEW_PID=\"\"; fi\n"
@@ -1623,8 +1771,8 @@ public final class Deployer {
                 // 先杀看门狗 shell：它的可执行映像就是 /system/bin/sh（与一切 shell 共享），故不能按
                 // $BIN 找，用 wd_pids（某个参数恰好等于候选脚本路径，见 pidsPreamble）。
                 // 不先杀它，它下一轮 tick 就会把刚停掉的守护进程再拉起来，「停止」不成立。
-                + killAndWaitSnippet("wd_pids", "WATCHDOG")
-                + killAndWaitSnippet("bin_pids", "DAEMON")
+                + killAndWaitSnippet("wd_pids", "wd_match", "WATCHDOG")
+                + killAndWaitSnippet("bin_pids", "bin_pid_ok", "DAEMON")
                 + probeTail();
     }
 
@@ -1687,35 +1835,44 @@ public final class Deployer {
      * 「按 pid 停进程 + 轮询等它真退出」的 shell 片段——<b>停止序列的唯一出处</b>：
      * {@code kill}(SIGTERM) → 轮询 ≤{@value #KILL_WAIT_LOOPS} 秒 → {@code kill -9} → 再轮询 ≤{@value #KILL9_WAIT_LOOPS} 秒。
      * 目标 pid 由 {@code pidSource}（{@code bin_pids}/{@code wd_pids}）提供；<b>不再用 {@code pkill -f}</b>。
-     * 详见 app/逻辑说明.md §2.2。
+     * 每次下发信号前都用 {@code pidCheck} 复核该 pid 仍是目标进程：枚举到 kill 之间目标可能已退出、
+     * pid 可能已被系统复用，不复核就会以 root 误杀无关进程。详见 app/逻辑说明.md §2.2。
      *
      * @param pidSource 打印目标 pid（每行一个）的 shell 函数名，调用方传字面量
+     * @param pidCheck  复核单个 pid 身份的函数名（{@code bin_pid_ok}/{@code wd_match}），调用方传字面量
      * @param tag       回吐键前缀，必须是合法的 shell 变量名片段（调用方传字面量）
      */
-    private static String killAndWaitSnippet(String pidSource, String tag) {
+    private static String killAndWaitSnippet(String pidSource, String pidCheck, String tag) {
+        // 每次下发信号前先复核身份：枚举到 kill 之间目标可能已退出、pid 可能已被复用
+        String termLoop = "  for p in $" + tag + "_PIDS; do "
+                + pidCheck + " \"$p\" && kill $p 2>/dev/null; done\n";
+        String innerTermLoop = "    for p in $" + tag + "_PIDS; do "
+                + pidCheck + " \"$p\" && kill $p 2>/dev/null; done\n";
+        String innerKillLoop = "      for p in $" + tag + "_PIDS; do "
+                + pidCheck + " \"$p\" && kill -9 $p 2>/dev/null; done\n";
         return tag + "_PIDS=$(" + pidSource + ")\n"
                 + tag + "_PID=$(printf '%s\\n' \"$" + tag + "_PIDS\" | head -1)\n"
                 + tag + "_STOPPED=1\n"
                 + tag + "_KILLED=0\n"
                 + "if [ -n \"$" + tag + "_PIDS\" ]; then\n"
-                + "  for p in $" + tag + "_PIDS; do kill $p 2>/dev/null; done\n"
+                + termLoop
                 + "  i=0\n"
                 + "  while [ $i -lt " + KILL_WAIT_LOOPS + " ]; do\n"
                 + "    " + tag + "_PIDS=$(" + pidSource + ")\n"
                 + "    [ -z \"$" + tag + "_PIDS\" ] && break\n"
-                + "    for p in $" + tag + "_PIDS; do kill $p 2>/dev/null; done\n"
+                + innerTermLoop
                 + "    sleep 1\n"
                 + "    i=$((i + 1))\n"
                 + "  done\n"
                 + "  " + tag + "_PIDS=$(" + pidSource + ")\n"
                 + "  if [ -n \"$" + tag + "_PIDS\" ]; then\n"
                 + "    " + tag + "_KILLED=1\n"
-                + "    for p in $" + tag + "_PIDS; do kill -9 $p 2>/dev/null; done\n"
+                + innerKillLoop
                 + "    i=0\n"
                 + "    while [ $i -lt " + KILL9_WAIT_LOOPS + " ]; do\n"
                 + "      " + tag + "_PIDS=$(" + pidSource + ")\n"
                 + "      [ -z \"$" + tag + "_PIDS\" ] && break\n"
-                + "      for p in $" + tag + "_PIDS; do kill -9 $p 2>/dev/null; done\n"
+                + innerKillLoop
                 + "      sleep 1\n"
                 + "      i=$((i + 1))\n"
                 + "    done\n"

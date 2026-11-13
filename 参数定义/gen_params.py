@@ -419,21 +419,16 @@ def find_doc_region(text):
 
 # --------------------------------------------------------------------------
 # 产物构建：C 端键表与 clamp 边界（params_generated.h）
-#   逐键/逐字段的 clamp 边界全部由定义给出；多值键的**解析代码**仍在 tempctrl.c
-#   手写（取位、全或无提交等语义不在定义表达范围内），只由审计覆盖。
+#   表驱动键（perf-int / sysfs 两张 X 表）的 clamp 边界随表行生成，C 端展开即用；
+#   多值键与 SK_ZONE/SK_RESCAN 的解析仍在 tempctrl.c 手写，其边界只由审计核对。
+#   只输出 C 端有展开点的宏：逐键/逐字段的 CFG_MIN/MAX_* 曾全量生成但无人引用，
+#   2026-11-13 删除（唯一例外是 PID_CUT 的表键宏，解析代码直接引用）。
 # --------------------------------------------------------------------------
 
 def first_cvar(definition, key):
     """键在 tempctrl.c 内的首个 C 变量名（无则 None）。"""
     vars_ = definition["audit"]["cVars"].get(key) or []
     return vars_[0] if vars_ else None
-
-
-def c_slot_ident(entry, idx):
-    """clamp 边界宏的标识：单值键 = 键名；多值键 = 键名_字段序号（1 起）。"""
-    if entry["type"] == "multi":
-        return "%s_%d" % (entry["key"], idx + 1)
-    return entry["key"]
 
 
 def _c_default(entry):
@@ -475,7 +470,6 @@ def c_layer_defaults(definition, group):
 def build_c_header(definition):
     entries = definition["keys"]
     daemon = [e for e in entries if e.get("daemonConsumes", True)]
-    webui = [e for e in entries if not e.get("daemonConsumes", True)]
     perf_int = [e for e in entries if e.get("cTable") == "perf-int"]
     sysfs = [e for e in entries if e.get("cTable") == "sysfs"]
 
@@ -486,10 +480,6 @@ def build_c_header(definition):
     lines.append(" * static 变量（BATT_TEMP_PATH、log_file_path、LOG_MAX 等）声明之后。 */")
     lines.append("#ifndef PARAMS_GENERATED_H")
     lines.append("#define PARAMS_GENERATED_H")
-    lines.append("")
-    lines.append("/* 键数：守护进程消费 / 仅界面读取 */")
-    lines.append("#define CFG_DAEMON_KEY_COUNT %d" % len(daemon))
-    lines.append("#define CFG_WEBUI_KEY_COUNT %d" % len(webui))
     lines.append("")
 
     lines.append("/* 性能层单值键表（PERF_ENABLED=1）→ INT_CFG_KEYS[]：X(键名, C 变量, min, max) */")
@@ -503,7 +493,7 @@ def build_c_header(definition):
 
     lines.append("/* sysfs 层键表（SYSFS_ENABLED=1）→ SYSFS_CFG_KEYS[]：")
     lines.append(" *   X(键名, kind, ivar, imin, imax, svar, ssize)")
-    lines.append(" * kind/SK_INT 槽位钳制范围由本表给出；SK_ZONE/SK_RESCAN 的逐字段范围见 CFG_MIN/MAX_*。 */")
+    lines.append(" * kind/SK_INT 槽位钳制范围由本表给出；SK_ZONE/SK_RESCAN 的逐字段校验在 tempctrl.c 解析代码内。 */")
     lines.append("#define %s(X) \\" % C_TABLE_MACRO["sysfs"])
     rows = []
     for e in sysfs:
@@ -520,30 +510,10 @@ def build_c_header(definition):
     lines.append(" \\\n".join(rows))
     lines.append("")
 
-    lines.append("/* 逐键/逐字段 clamp 边界（单值键 = 键名；多值键 = 键名_字段序号）。")
-    lines.append(" * 多值键与 SK_ZONE/SK_RESCAN 的解析代码仍在 tempctrl.c 手写，此处只提供边界值。 */")
-    for e in daemon:
-        if e["type"] not in ("int", "multi"):
-            continue
-        fields = e.get("fields")
-        if e["type"] == "multi" and fields:
-            for i, f in enumerate(fields):
-                if f.get("bool"):
-                    continue
-                ident = c_slot_ident(e, i)
-                cvar = f.get("cVar")
-                tail = ("  /* C 变量 %s */" % cvar) if cvar else ""
-                lines.append("#define CFG_MIN_%s %d%s" % (ident, f["min"], tail))
-                lines.append("#define CFG_MAX_%s %d" % (ident, f["max"]))
-        else:
-            cvar = first_cvar(definition, e["key"])
-            tail = ("  /* C 变量 %s */" % cvar) if cvar else ""
-            lines.append("#define CFG_MIN_%s %d%s" % (e["key"], e["min"], tail))
-            lines.append("#define CFG_MAX_%s %d" % (e["key"], e["max"]))
-    lines.append("")
-
-    paths = [e for e in daemon if e["type"] == "path"]
-    lines.append("/* 路径键默认值（C 端同名变量初值；LOG_FILE 运行期由 PRIVATE_DIR + 二进制名派生）*/")
+    # LOG_FILE 的默认值由 set_default_log_path() 在运行期按二进制名派生，不生成宏
+    # （固化路径会绕过「私有目录不可用→兜底 /cache」的逻辑）。
+    paths = [e for e in daemon if e["type"] == "path" and e["key"] != "LOG_FILE"]
+    lines.append("/* 路径键默认值（C 端同名变量初值；LOG_FILE 不在此列，运行期由 PRIVATE_DIR + 二进制名派生）*/")
     for e in paths:
         lines.append("#define CFG_DEFAULT_%s %s" % (e["key"], _c_default(e)))
     lines.append("")
@@ -551,7 +521,7 @@ def build_c_header(definition):
     tables = [e for e in daemon if e["type"] == "table"]
     if tables:
         lines.append("/* 表键（type=table）：行前缀、逐字段 clamp 边界与默认行。解析代码在 tempctrl.c")
-        lines.append(" * 手写，用这些宏取前缀/边界/默认行，避免与定义各写一份（行数可变，故不进上方逐键边界表）。 */")
+        lines.append(" * 手写，用这些宏取前缀/边界/默认行，避免与定义各写一份（行数可变，故不并入上方 X 表）。 */")
         for e in tables:
             lines.append("#define CFG_ROW_PREFIX_%s %s"
                          % (e["key"], json.dumps(e["rowPrefix"], ensure_ascii=False)))
@@ -565,7 +535,7 @@ def build_c_header(definition):
 
     lines.append("/* 各层 int 取值位的**代码默认值**表：层开关由 1→0 时，tempctrl.c 展开本表把该层")
     lines.append(" * 运行时参数批量赋回代码默认值（= 等同该层配置不存在）。行格式 X(C 变量, 默认值)。")
-    lines.append(" * 路径键不入表：3 个走上方 CFG_DEFAULT_* 宏；LOG_FILE 走 set_default_log_path()")
+    lines.append(" * 路径键不入表：非 LOG_FILE 的走上方 CFG_DEFAULT_* 宏；LOG_FILE 走 set_default_log_path()")
     lines.append(" * （该函数按二进制名派生路径，私有目录不可用时兜底 /cache，照抄宏会绕过兜底）。")
     lines.append(" * 各层总开关自身同样不入表（PERF_ENABLED 默认 1，复位它会立刻自我重开）。 */")
     for group, macro in (("perf", "CFG_PERF_DEFAULTS"), ("sysfs", "CFG_SYSFS_DEFAULTS")):
@@ -1349,6 +1319,35 @@ def audit(definition, verbose=True):
                 if chart["windowDefaultSec"] not in chart["windowOptionsSec"]:
                     err("曲线默认档位 %d 不在档位表内"
                         % chart["windowDefaultSec"])
+            elif rule["kind"] == "structInitEqualDefaults":
+                # 结构体成员没有独立 static 初值，parse_c_defaults 抓不到（如层总开关存在
+                # struct PrepassCfg 里）。按成员名取其在结构体声明中的序号，与该实例的
+                # 初始化列表逐位比对，避免 cVars 只能映射到「不存在的变量」而恒跳过。
+                sname, inst = rule["struct"], rule["instance"]
+                members = rule.get("members") or {}
+                sbody = _block(c_text, r"struct\s+%s\s*\{" % re.escape(sname), r"\};")
+                order = re.findall(r"(?m)^\s*int\s+(\w+)\s*;", sbody)
+                minit = re.search(r"struct\s+%s\s+%s\s*=\s*\{([^}]*)\}"
+                                  % (re.escape(sname), re.escape(inst)), c_text)
+                if not order or not minit:
+                    info("crossCheck「%s」无法自动核对：未找到 struct %s 的声明或 %s 的初始化列表"
+                         % (rid, sname, inst))
+                else:
+                    vals = [v.strip() for v in minit.group(1).split(",")]
+                    for member, key in sorted(members.items()):
+                        entry = next((e for e in entries if e["key"] == key), None)
+                        if entry is None:
+                            err("crossCheck「%s」引用了不存在的键 %s" % (rid, key))
+                        elif member not in order:
+                            err("crossCheck「%s」：struct %s 无成员 %s"
+                                % (rid, sname, member))
+                        elif order.index(member) >= len(vals):
+                            err("crossCheck「%s」：%s 的初始化列表缺成员 %s"
+                                % (rid, inst, member))
+                        elif vals[order.index(member)] != str(entry["default"]):
+                            err("crossCheck「%s」不一致：%s.%s=%s ≠ 定义 %s 的 default=%s"
+                                % (rid, inst, member, vals[order.index(member)],
+                                   key, entry["default"]))
             else:
                 err("未知 crossCheck 类型 %r（%s）" % (rule["kind"], rid))
 

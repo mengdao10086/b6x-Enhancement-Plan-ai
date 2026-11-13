@@ -399,6 +399,13 @@ cleanup_all() {
     fi
 }
 
+# pm path 退出码口径（与 C 端 app_installed_probe 一致）：0=已安装；1=包未找到（唯一可判「已卸载」）；
+# 其余（255/pm 未就绪/被杀/超时）=无法判定——不得按「未安装」处理，否则会误触发不可逆清理（审查 S2-5）。
+pm_says_missing() {
+    "$PM_BIN" path "$HOST_PKG" > /dev/null 2>&1
+    [ $? -eq 1 ]
+}
+
 # 1. 等「亮屏 且 私有目录就绪」（亮屏不等于已解锁；判据取私有目录可列、超时兜底见 逻辑说明.md「配置路径自动检测」）
 CE_WAIT_MAX=600         # 等解锁的上限（秒）；每轮 sleep 5，另有探测开销，实际 ≥ 此值
 CE_WAIT_TRIES=$((CE_WAIT_MAX / 5))
@@ -435,9 +442,9 @@ while true; do
     # --- 宿主 APK 卸载自清理（兜底）---
     # 判据与 C 端 host_app_uninstalled() 同构（父目录 + pm path 二次确认），隔 5s 复核一次；
     # 必须排在最前、排在任何 start() 之前、全程静默——理由见 app/逻辑说明.md §2.4。
-    if [ ! -d "$HOST_DIR" ] && ! "$PM_BIN" path "$HOST_PKG" > /dev/null 2>&1; then
+    if [ ! -d "$HOST_DIR" ] && pm_says_missing; then
         sleep 5
-        if [ ! -d "$HOST_DIR" ] && ! "$PM_BIN" path "$HOST_PKG" > /dev/null 2>&1; then
+        if [ ! -d "$HOST_DIR" ] && pm_says_missing; then
             cleanup_all
             exit 0
         fi

@@ -503,6 +503,12 @@ public final class RootShell {
      */
     private static final class Channel {
 
+        /**
+         * stdout 读到 EOF 时投进队列的哨兵：唤醒 {@link #run} 里的 {@code poll}。
+         * 没有它，su 退出但没吐出结束标记时只能干等满超时（探测 15s / 部署 60s / 卸载 120s）。
+         */
+        private static final String EOF_SENTINEL = "\u0000__WW_EOF__";
+
         private final String command;
         private final Process process;
         private final BufferedWriter stdin;
@@ -518,7 +524,10 @@ public final class RootShell {
             this.marker = "__WW_END_" + id + "__";
             this.stdin = new BufferedWriter(
                     new OutputStreamWriter(process.getOutputStream(), StandardCharsets.UTF_8));
-            startGobbler(process.getInputStream(), stdout, () -> stdoutEof = true);
+            startGobbler(process.getInputStream(), stdout, () -> {
+                stdoutEof = true;
+                stdout.offer(EOF_SENTINEL);   // 唤醒 run()：此后不会再有结束标记
+            });
             startGobbler(process.getErrorStream(), stderr, () -> stderrEof = true);
             try {
                 // 只追加，不覆盖 su 自带 PATH
@@ -595,6 +604,9 @@ public final class RootShell {
                     timedOut = true;
                     break;
                 }
+                if (EOF_SENTINEL.equals(line)) {
+                    break;          // stdout 已 EOF：结束标记不会再来（exitCode 保持 -1 → 判通道失败）
+                }
                 if (line.startsWith(marker)) {
                     exitCode = parseExitCode(line.substring(marker.length()).trim());
                     break;
@@ -635,6 +647,9 @@ public final class RootShell {
             List<String> tmp = new ArrayList<>();
             queue.drainTo(tmp);
             for (String line : tmp) {
+                if (EOF_SENTINEL.equals(line)) {
+                    continue;   // 哨兵只用于唤醒，不是脚本输出
+                }
                 sink.append(line).append('\n');
             }
         }

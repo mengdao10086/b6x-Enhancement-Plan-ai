@@ -58,8 +58,11 @@ public final class ConfigPreInflater {
     /** 造好的件：布局 id → 件队列（后台线程放、主线程取）。 */
     private final Map<Integer, Queue<View>> pool = new ConcurrentHashMap<>();
 
-    /** 这批件是用谁的上下文造的（按<b>引用</b>比对本页的上下文，见 {@link #get(Context)}）。 */
-    private final Context owner;
+    /**
+     * 这批件是用谁的上下文造的（按<b>引用</b>比对本页的上下文，见 {@link #get(Context)}）；
+     * 关门时置 null，断开对 Activity 的强引用。
+     */
+    private Context owner;
 
     /**
      * 池子已关门（{@link #clearLeftovers()} 置位，主线程写、后台线程读）：保证"release 之后池子必空"。
@@ -129,6 +132,7 @@ public final class ConfigPreInflater {
     void clearLeftovers() {
         closed = true;
         pool.clear();
+        owner = null;   // 断开对 Activity 的强引用：关门后不会再有人取件
     }
 
     /** 备料（后台线程跑一遍）。任何意外都直接放弃：池子里有几件算几件，其余由主线程现场造。 */

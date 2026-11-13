@@ -14,6 +14,7 @@ import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.concurrent.ExecutorService;
+import java.util.concurrent.RejectedExecutionException;
 
 /**
  * 「改即存」的防抖写入队列：连续改动合并成一次 {@link ConfigStore#setAll}，只触发一次临时文件
@@ -45,6 +46,9 @@ final class ConfigWriteQueue {
      *  仅主线程访问。某个键的批次交接给 io 时撤掉它的项（见 {@link #flushNow}）；写盘期间被重新编辑的键
      *  由 {@link #schedule} 重新登记。 */
     private final HashMap<String, Long> dueAt = new HashMap<>();
+
+    /** 键 → 已提交 io、结果尚未回主线程的批次数。仅主线程访问；判据见 {@link #isInFlight}。 */
+    private final HashMap<String, Integer> inFlight = new HashMap<>();
 
     private final Runnable flushTask = new Runnable() {
         @Override
@@ -90,7 +94,10 @@ final class ConfigWriteQueue {
         main.postDelayed(flushTask, Math.max(0L, earliest - SystemClock.uptimeMillis()));
     }
 
-    /** 撤销某键的待写项（用户把值改回了磁盘上的原值）。 */
+    /**
+     * 撤销某键的待写项（用户把值改回了磁盘上的原值）。
+     * <b>已提交 io 的批次不在撤销范围</b>：调用方用 {@link #isInFlight} 判定后自行补排磁盘值。
+     */
     void cancel(@NonNull String key) {
         pending.remove(key);
         dueAt.remove(key);
@@ -101,6 +108,25 @@ final class ConfigWriteQueue {
     @Nullable
     Value pendingValue(@NonNull String key) {
         return pending.get(key);
+    }
+
+    /** 该键是否有一批已提交 io、结果尚未回来（仅主线程）："已提交批次"的判据。 */
+    boolean isInFlight(@NonNull String key) {
+        Integer n = inFlight.get(key);
+        return n != null && n > 0;
+    }
+
+    /** 一批写完（无论成败）后释放该键的在途计数。仅主线程。 */
+    private void releaseInFlight(@NonNull String key) {
+        Integer n = inFlight.get(key);
+        if (n == null) {
+            return;
+        }
+        if (n <= 1) {
+            inFlight.remove(key);
+        } else {
+            inFlight.put(key, n - 1);
+        }
     }
 
     /**
@@ -120,19 +146,28 @@ final class ConfigWriteQueue {
         // pending 仍保留到 finish 返回，故界面在写盘期间不会回退到旧值。
         for (String key : batch.keySet()) {
             dueAt.remove(key);
+            Integer n = inFlight.get(key);
+            inFlight.put(key, n == null ? 1 : n + 1);
         }
-        io.execute(new Runnable() {
-            @Override
-            public void run() {
-                final WriteResult result = store.setAll(batch);
-                main.post(new Runnable() {
-                    @Override
-                    public void run() {
-                        finish(result, batch);
-                    }
-                });
+        try {
+            io.execute(new Runnable() {
+                @Override
+                public void run() {
+                    final WriteResult result = store.setAll(batch);
+                    main.post(new Runnable() {
+                        @Override
+                        public void run() {
+                            finish(result, batch);
+                        }
+                    });
+                }
+            });
+        } catch (RejectedExecutionException e) {
+            // 批未提交：撤销在途计数，pending 保留给下一次冲刷
+            for (String key : batch.keySet()) {
+                releaseInFlight(key);
             }
-        });
+        }
     }
 
     /** 丢弃定时器（页面销毁时调；不碰 executor，executor 由页面自己关）。 */
@@ -144,6 +179,7 @@ final class ConfigWriteQueue {
         // 只摘掉「提交时的那一份」：写盘期间被改成新值的键继续留在待写表里，等下一轮冲刷
         boolean dueAtChanged = false;
         for (Map.Entry<String, Value> entry : written.entrySet()) {
+            releaseInFlight(entry.getKey());
             Value current = pending.get(entry.getKey());
             if (current != null && current.equals(entry.getValue())) {
                 pending.remove(entry.getKey());

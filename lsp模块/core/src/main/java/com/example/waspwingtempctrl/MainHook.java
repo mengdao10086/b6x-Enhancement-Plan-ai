@@ -21,8 +21,10 @@ import java.io.File;
 import java.io.FileInputStream;
 import java.io.FileOutputStream;
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.Iterator;
 import java.util.List;
+import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -286,9 +288,20 @@ public class MainHook implements IXposedHookLoadPackage {
     private static volatile boolean loggedResolveFallback = false;  // resolveWaspWingManager 兜底失败仅记一次（进程内）
     private static volatile boolean nonTargetLogged = false;        // 非目标包跳过日志：每进程最多一条
     private static volatile boolean nonMainProcessLogged = false;   // 非主进程跳过日志：每进程最多一条
+    private static volatile boolean bcastRejectLogged = false;      // 非法广播参数被拒日志：每进程最多一条
+    private static volatile boolean bcastUnknownUidLogged = false;  // 非白名单广播来源留痕：每进程最多一条
+    /** 已记录过的 getter 失败键（每键只记一次，避免每秒刷屏）。 */
+    private static final Set<String> sGetterFailLogged = new HashSet<>();
 
     // ========== 智能温控广播接收器 ==========
     // 接收 tempctrl 发送的 am broadcast，调用 setRunMode 控制散热器
+
+    // 广播参数边界：只防外部伪造/异常值，daemon 正常下发均在范围内。
+    private static final int BCAST_TEMP_MAX = 60;
+    private static final int BCAST_FAN_MAX_B6X = 6000;   // FAN_RPM_RANGE 第二值上限
+    private static final int BCAST_FAN_MAX_B7X = 8000;   // B7X_FAN_RPM_MAX
+    private static final int BCAST_COLD_MAX_B6X = 194;   // COLD_MAX
+    private static final int BCAST_COLD_MAX_B7X = 255;   // B7X_COLD_MAX
 
     private static void registerTemperatureReceiver(Context ctx) {
         try {
@@ -305,6 +318,25 @@ public class MainHook implements IXposedHookLoadPackage {
                         int windLevel   = intent.getIntExtra("windLevel", 0);
                         int modeCustom  = intent.getIntExtra("modeCustom", 0);
                         int extra       = intent.getIntExtra("extra", 0);
+
+                        // 来源留痕（API 34+ 尽力）：未知 UID 放行并记日志，不拦截正常指令。
+                        noteBroadcastSender(this);
+                        // 参数钳制：接收器导出，任意应用可伪造；越界值不得直达 SDK。
+                        if (mode != 0 && mode != 1) {
+                            if (!bcastRejectLogged) {
+                                bcastRejectLogged = true;
+                                XposedBridge.log(TAG + " 忽略非法广播 mode=" + mode);
+                            }
+                            return;
+                        }
+                        int fanMax = (appKind == 7) ? BCAST_FAN_MAX_B7X : BCAST_FAN_MAX_B6X;
+                        int coldMax = (appKind == 7) ? BCAST_COLD_MAX_B7X : BCAST_COLD_MAX_B6X;
+                        temperature = clampInt(temperature, 0, BCAST_TEMP_MAX);
+                        windOC = clampInt(windOC, 0, fanMax);
+                        coldOC = clampInt(coldOC, 0, coldMax);
+                        windLevel = clampInt(windLevel, 0, fanMax);
+                        modeCustom = 0;   // 保留字段：模块协议约定传 0
+                        extra = 0;
 
                         // 诊断：每次连接最多 1 对——"收到广播参数" + "1s 后散热器实际回传"
                         logDiagOnBroadcast(mode, temperature, windOC, coldOC, windLevel);
@@ -331,6 +363,32 @@ public class MainHook implements IXposedHookLoadPackage {
         } catch (Throwable t) {
             XposedBridge.log(TAG + " 注册广播接收器失败: " + t.getMessage());
         }
+    }
+
+    /**
+     * 广播来源留痕（不拒绝）：root(0) / system(1000) / shell(2000) / 本进程 直接放行。
+     * 其它 UID 可能是不同 ROM 的 daemon 启动方式（无法在仓库内证明），故只记一条日志、
+     * 不拦截，避免把正常控制指令静默拒掉。{@code getSentFromUid()} 为 API 34+；
+     * 低版本、反射失败或 UID 未知一律不处理。
+     */
+    private static void noteBroadcastSender(BroadcastReceiver receiver) {
+        if (Build.VERSION.SDK_INT < 34) return;
+        try {
+            Object uid = BroadcastReceiver.class.getMethod("getSentFromUid").invoke(receiver);
+            if (!(uid instanceof Integer)) return;
+            int u = (Integer) uid;
+            if (u < 0 || u == 0 || u == 1000 || u == 2000 || u == android.os.Process.myUid()) return;
+            if (!bcastUnknownUidLogged) {
+                bcastUnknownUidLogged = true;
+                XposedBridge.log(TAG + " 广播来源 uid=" + u + " 不在 daemon 白名单，已放行（待真机确认）");
+            }
+        } catch (Throwable ignored) {
+            // 反射失败/方法不存在：不处理来源
+        }
+    }
+
+    private static int clampInt(int value, int min, int max) {
+        return value < min ? min : (value > max ? max : value);
     }
 
     /** 连接诊断日志门控：每连接最多 DIAG_CONN_LOG_MAX 条。 */
@@ -413,6 +471,9 @@ public class MainHook implements IXposedHookLoadPackage {
     // ========== 双文件状态写入 ==========
     // tempctrl 通过 stat() 检查文件 mtime 判断进程存活
     private static synchronized void writeStatusFile() {
+        // 从未连接过的进程不写 status：B6X 老/新两个包同时存活时，未连接方会把连接方的
+        // BLE=1/2 覆盖为 BLE=0。连接/断连事件仍即时写（bleLastOwner!=0），mtime 判死兜底。
+        if (!bleConnected && bleLastOwner == 0) return;
         try {
             StringBuilder sb = new StringBuilder();
             // status 文件各字段的语义与量纲见 ../README.md 的 status 协议表
@@ -421,47 +482,28 @@ public class MainHook implements IXposedHookLoadPackage {
             sb.append("CONNECTED_AT=").append(bleConnectedTimestamp).append("\n");
             sb.append("BLE_OWNER_LAST=").append(bleLastOwner).append(" ").append(bleLastOwnerAt).append("\n");
 
-            // 散热器全参数回传
-            try {
-                if (lastWaspWingInfo != null) {
-                    appendGetterValue(sb, lastWaspWingInfo, "getRunMode", "RUN_MODE");
-
-                    appendTenthValue(sb, lastWaspWingInfo, "getHotSurfaceTemperature", "HOT_TEMP");
-
-                    Object cold = XposedHelpers.callMethod(lastWaspWingInfo, "getTemperature");
-                    Object coldDec = XposedHelpers.callMethod(lastWaspWingInfo, "getTemperatureDecimal");
-                    if (cold != null && coldDec != null) {
-                        // 用 Number.intValue() 兼容 Byte/Short/Integer 等返回值类型
-                        int c = ((Number) cold).intValue();
-                        int d = ((Number) coldDec).intValue();
-                        if (d >= 10) d = (d + 5) / 10;  // 多位小数 → 四舍五入到 0.1°C
-                        // 负温度换算：c 为带符号整数°C，d 恒为正小数位，负温结果为 c*10 - d
-                        sb.append("COLD_TEMP=").append((c < 0) ? c * 10 - d : c * 10 + d).append("\n");
-                    }
-
-                    appendGetterValue(sb, lastWaspWingInfo, "getRealWindLevel", "RPM_REAL");
-
-                    appendGetterValue(sb, lastWaspWingInfo, "getRealColdLevel", "COLD_REAL");
-                    // 实际运行档（0x13 byte[0x0f]）：与 COLD_REAL 的回显设定档不同，见 制冷值语义取证.md
-                    appendGetterValue(sb, lastWaspWingInfo, "getColdRunLevel", "COLD_RUN");
-
-                    appendTenthValue(sb, lastWaspWingInfo, "getTargetTemperature", "TARGET_TEMP");
-                    // 回传恢复：此前缺失则补一条（状态翻转才打）
-                    if (paramMissingLogged) {
-                        paramMissingLogged = false;
-                        XposedBridge.log(TAG + " 参数回传已恢复");
-                    }
-                } else if (bleConnected) {
-                    // 参数回传缺失：BLE 已连接但 lastWaspWingInfo 未就绪（如首包未到/回传断）
-                    if (!paramMissingLogged) {
-                        paramMissingLogged = true;
-                        XposedBridge.log(TAG + " 参数回传缺失: lastWaspWingInfo 未就绪（BLE 已连接但无回传）");
-                    }
+            // 散热器全参数回传：每个字段独立 try/catch——任一 getter 不可用只丢该行，
+            // 不影响其它字段（历史 RPM_RUN 整列缺失即同源问题）。
+            if (lastWaspWingInfo != null) {
+                appendGetterValueGuarded(sb, lastWaspWingInfo, "getRunMode", "RUN_MODE");
+                appendTenthValueGuarded(sb, lastWaspWingInfo, "getHotSurfaceTemperature", "HOT_TEMP");
+                appendColdTemp(sb, lastWaspWingInfo);
+                appendGetterValueGuarded(sb, lastWaspWingInfo, "getRealWindLevel", "RPM_REAL");
+                appendGetterValueGuarded(sb, lastWaspWingInfo, "getRealColdLevel", "COLD_REAL");
+                // 实际运行档（0x13 byte[0x0f]）：与 COLD_REAL 的回显设定档不同，见 制冷值语义取证.md
+                appendGetterValueGuarded(sb, lastWaspWingInfo, "getColdRunLevel", "COLD_RUN");
+                appendTenthValueGuarded(sb, lastWaspWingInfo, "getTargetTemperature", "TARGET_TEMP");
+                // 回传恢复：此前缺失则补一条（状态翻转才打）
+                if (paramMissingLogged) {
+                    paramMissingLogged = false;
+                    XposedBridge.log(TAG + " 参数回传已恢复");
                 }
-            } catch (Throwable t) {
-                // 带上异常类型：NoSuchMethodError 等的 message 常为 null，只有类型能定位缺哪个 getter
-                XposedBridge.log(TAG + " 参数回传异常: "
-                        + t.getClass().getSimpleName() + " msg=" + t.getMessage());
+            } else if (bleConnected) {
+                // 参数回传缺失：BLE 已连接但 lastWaspWingInfo 未就绪（如首包未到/回传断）
+                if (!paramMissingLogged) {
+                    paramMissingLogged = true;
+                    XposedBridge.log(TAG + " 参数回传缺失: lastWaspWingInfo 未就绪（BLE 已连接但无回传）");
+                }
             }
 
             // 设备实际风扇转速（0x13 value[0x0b]<<8|value[0x0a]），与 RPM_REAL 的设定回显不同。
@@ -1385,8 +1427,12 @@ public class MainHook implements IXposedHookLoadPackage {
                     new XC_MethodHook() {
                         @Override
                         protected void beforeHookedMethod(MethodHookParam param) {
+                            BluetoothGatt gatt = (BluetoothGatt) param.thisObject;
+                            // 只处理当前控制 gatt：宿主进程内还有 DFU/耳机/手柄等其它 GATT，
+                            // 它们的 disconnect 不能把散热器状态清成 BLE=0。
+                            if (gatt != currentValidGatt) return;
                             // 断连保留 CONNECTED_AT / BLE_OWNER_LAST（上次连接信息供仲裁）
-                            markDisconnected((BluetoothGatt) param.thisObject);
+                            markDisconnected(gatt);
                             // [底层]：本地 disconnect；权威在 onConnectionStateChange
                             if (disconnectLogAllowed())
                                 XposedBridge.log(TAG + " [底层] BLE 断联 device="
@@ -1500,7 +1546,7 @@ public class MainHook implements IXposedHookLoadPackage {
                     try {
                         Object ctrl = param.thisObject;
                         Object originalQueue = XposedHelpers.getObjectField(
-                                ctrl, "mConcurrentLinkedQueue");
+                                ctrl, queueFieldName());
 
                         // 包装 ConcurrentLinkedQueue：peek 空时 sleep 50ms
                         ConcurrentLinkedQueue<Object> wrapped =
@@ -1531,7 +1577,7 @@ public class MainHook implements IXposedHookLoadPackage {
 
                         // volatile 字段，替换后运行中的协程线程立即可见
                         XposedHelpers.setObjectField(ctrl,
-                                "mConcurrentLinkedQueue", wrapped);
+                                queueFieldName(), wrapped);
 
                         XposedBridge.log(TAG + " runFetchLoop 队列已替换（空待 sleep 50ms）");
                     } catch (Throwable t) {
@@ -2049,14 +2095,22 @@ public class MainHook implements IXposedHookLoadPackage {
 
     /** B7X 专属：c0.s1() 权限修复 + 完整混淆适配 */
     private static void hookB7Obfuscated(XC_LoadPackage.LoadPackageParam lpparam) {
-        // ========== c0.s1() 权限检查强制 true（Android 16 连接失败）
-        // c0.s1() 检查 BLUETOOTH_CONNECT 权限，A16 返回 false
+        // ========== c0.s1() 权限检查：与 B6X 同口径（仅在实测已授予时放行） ==========
+        // c0.s1() 是 SDK 的 BLUETOOTH_CONNECT 检查（A16 未授权时返回 false）。未授予时
+        // 保持 SDK 原判断、让它安全早退；否则强制 true 会让 SDK 走到 getType()/connectGatt()
+        // 抛 SecurityException（宿主该链路无 try/catch）。
         hookClassMethod(lpparam.classLoader, "com.flydigi.sdk.bluetooth.c0",
-                "s1", "c0.s1()（强制返回 true，修复 b7x 连接）", "钩 c0.s1() 失败",
+                "s1", "c0.s1()（实测已授予才放行）", "钩 c0.s1() 失败",
                 new XC_MethodHook() {
                     @Override
+                    protected void beforeHookedMethod(MethodHookParam param) {
+                        probeBtConnectPermission();   // 与崩溃同线程实测权限
+                    }
+
+                    @Override
                     protected void afterHookedMethod(MethodHookParam param) {
-                        param.setResult(true);   // 跳过 BLUETOOTH_CONNECT 权限检查，让连接流程走完
+                        if (btConnectPerm == 0) return;   // 实测未授予：交回 SDK 自行早退
+                        param.setResult(true);
                     }
                 });
 
@@ -2510,6 +2564,8 @@ public class MainHook implements IXposedHookLoadPackage {
     private static String stateFieldName() { return (appKind == 7) ? "E" : "mDataConnectState"; }
     /** gatt 字段名：B6X=mBluetoothGatt，B7X=I */
     private static String gattFieldName() { return (appKind == 7) ? "I" : "mBluetoothGatt"; }
+    /** 命令队列字段名：B6X=mConcurrentLinkedQueue，B7X=H（b7 反编译 AbstractDataInteractionController.java:30） */
+    private static String queueFieldName() { return (appKind == 7) ? "H" : "mConcurrentLinkedQueue"; }
     /** 扫描标志字段名：B6X=inScanning，B7X=f16228r（AbstractBluetoothController，双设备同构） */
     private static String inScanningFieldName() { return (appKind == 7) ? "f16228r" : "inScanning"; }
     /** 扫描入口方法名（无参，内部检查并拒绝重复扫描）：B6X=startLeScan，B7X=A0 */
@@ -2563,8 +2619,9 @@ public class MainHook implements IXposedHookLoadPackage {
             return;
         }
 
-        // 状态自愈兜底：GATT 已就绪但 state≠2 时强制同步 state=2。
-        // 风险登记（不改行为）：这是全仓唯一「裸写」SDK mDataConnectState 的位置（受 gatt!=null && st!=2 双重约束）。
+        // 状态自愈兜底：GATT 已就绪但 state 仍为 0（空闲）时同步为 2；state=1 是正在建连，
+        // 不能裸写（否则会把异步建立中的连接当成已连）。
+        // 风险登记：这是全仓唯一「裸写」SDK mDataConnectState 的位置（受 gatt!=null && st==0 双重约束）。
         //   若此写入与 SDK 自身状态机不一致（gatt 实为陈旧/已断），会造成「模块以为已连、SDK 实为未连」的去同步，
         //   属独立审查 F9 与 B 报告点名的风险来源之一。保留既有语义，仅登记。
         try {
@@ -2574,7 +2631,7 @@ public class MainHook implements IXposedHookLoadPackage {
             if (dic != null) {
                 int st = XposedHelpers.getIntField(dic, stateField);
                 Object gatt = XposedHelpers.getObjectField(dic, gattField);
-                if (st != 2 && gatt != null) {
+                if (st == 0 && gatt != null) {
                     XposedHelpers.setIntField(dic, stateField, 2);
                     XposedBridge.log(TAG + " 状态自愈: static controller state " + st + "→2（gatt 已就绪）");
                 } else if (st == 0 && gatt == null) {
@@ -2879,21 +2936,29 @@ public class MainHook implements IXposedHookLoadPackage {
                     && now - queueNonEmptySinceMs >= QUEUE_STALL_TIMEOUT_MS;
 
             // ② 回传停滞持续超时 → 连接/设备问题
-            // 临时停止期间 daemon 刻意不下发，回显值与目标长期不等属预期，跳过停滞判定并清零起点；
-            // 仍更新快照，结束临时停止后从当前实际值重新计时。
-            if (tempStopFresh) {
-                stallLastCold = cold;
-                stallLastRpm = rpm;
-                dispatchStallSinceMs = 0;
-            } else if (cold == stallLastCold && rpm == stallLastRpm) {
-                if (dispatchStallSinceMs == 0) dispatchStallSinceMs = now;
+            // 未成功下发过任何命令（lastBcast 仍为 -1）时没有可比较的目标，值停滞判据不成立；
+            // 否则 daemon 未部署/未运行时模块会每 15s 强断一次。队列信号不受此门禁影响。
+            boolean hasDispatchTarget = lastBcastColdLv >= 0 && lastBcastRpmLv >= 0;
+            boolean deviceStalled = false;
+            if (hasDispatchTarget) {
+                // 临时停止期间 daemon 刻意不下发，回显值与目标长期不等属预期，跳过停滞判定并清零起点；
+                // 仍更新快照，结束临时停止后从当前实际值重新计时。
+                if (tempStopFresh) {
+                    stallLastCold = cold;
+                    stallLastRpm = rpm;
+                    dispatchStallSinceMs = 0;
+                } else if (cold == stallLastCold && rpm == stallLastRpm) {
+                    if (dispatchStallSinceMs == 0) dispatchStallSinceMs = now;
+                } else {
+                    stallLastCold = cold;
+                    stallLastRpm = rpm;
+                    dispatchStallSinceMs = 0;
+                }
+                deviceStalled = dispatchStallSinceMs != 0
+                        && now - dispatchStallSinceMs >= DISPATCH_STALL_TIMEOUT_MS;
             } else {
-                stallLastCold = cold;
-                stallLastRpm = rpm;
                 dispatchStallSinceMs = 0;
             }
-            boolean deviceStalled = dispatchStallSinceMs != 0
-                    && now - dispatchStallSinceMs >= DISPATCH_STALL_TIMEOUT_MS;
 
             if (queueStalled) startConsumerThreadIfNeeded();
             if (deviceStalled) {
@@ -2922,7 +2987,7 @@ public class MainHook implements IXposedHookLoadPackage {
             Object ctrl = getStaticController();
             if (ctrl == null) return 0;
             ConcurrentLinkedQueue<?> q = (ConcurrentLinkedQueue<?>) XposedHelpers.getObjectField(
-                    ctrl, "mConcurrentLinkedQueue");
+                    ctrl, queueFieldName());
             return q != null ? q.size() : 0;
         } catch (Throwable t) { return 0; }
     }
@@ -2933,7 +2998,7 @@ public class MainHook implements IXposedHookLoadPackage {
             Object ctrl = getStaticController();
             if (ctrl == null) return;
             ConcurrentLinkedQueue<?> q = (ConcurrentLinkedQueue<?>) XposedHelpers.getObjectField(
-                    ctrl, "mConcurrentLinkedQueue");
+                    ctrl, queueFieldName());
             if (q != null) q.clear();
         } catch (Throwable t) { /* 队列不可用忽略 */ }
     }
@@ -2966,7 +3031,7 @@ public class MainHook implements IXposedHookLoadPackage {
                             int state = XposedHelpers.getIntField(ctrl, "mDataConnectState");
                             if (state == 2) {
                                 ConcurrentLinkedQueue<?> q = (ConcurrentLinkedQueue<?>) XposedHelpers
-                                        .getObjectField(ctrl, "mConcurrentLinkedQueue");
+                                        .getObjectField(ctrl, queueFieldName());
                                 if (q != null) {
                                     // peek 只取一次存局部变量，消除"判断后二次 peek"的双消费窗口；
                                     // 接管仅当同一队首停留超过 QUEUE_TAKEOVER_MS。
@@ -3099,9 +3164,9 @@ public class MainHook implements IXposedHookLoadPackage {
     }
 
     /**
-     * 获取 WaspWingManager 实例：优先构造函数捕获的实例，其次试单例静态方法，
-     * 再试 Kotlin INSTANCE 字段与 B7X 混淆单例（t9.j.f50990a）。
-     * 主类 loadClass 失败时向上抛异常，由调用方记录 setRunMode 异常。
+     * 获取 WaspWingManager 实例：优先构造函数捕获的实例；B7X 走 t9.j.f50990a，
+     * B6X 试单例静态方法与 Kotlin INSTANCE 字段。
+     * B6X 主类 loadClass 失败时向上抛异常，由调用方记录 setRunMode 异常；B7X 兜底失败返回 null。
      */
     private static Object resolveWaspWingManager(Context ctx) throws Throwable {
         Object inst = capturedWaspWingMgr;
@@ -3110,9 +3175,32 @@ public class MainHook implements IXposedHookLoadPackage {
         // 构造函数还没触发过，试单例方式兜底（日志仅在首次兜底时输出一次）
         boolean firstFallback = !loggedResolveFallback;
         if (firstFallback) loggedResolveFallback = true;
+        StringBuilder failed = new StringBuilder();
+
+        // B7X：管理器就是混淆后的 t9.j（farsef 无未混淆的 WaspWingManager 类）。
+        // 必须先走这条兜底；否则下面的 loadClass 会先抛 ClassNotFoundException，
+        // 使原实现里的 t9.j.f50990a 分支永远不可达。
+        if (appKind == 7) {
+            try {
+                Class<?> mgrCls7 = ctx.getClassLoader().loadClass("t9.j");
+                inst = XposedHelpers.getStaticObjectField(mgrCls7, "f50990a");
+                if (firstFallback) {
+                    XposedBridge.log(TAG + (inst != null
+                            ? " resolveWaspWingManager: t9.j.f50990a 成功"
+                            : " resolveWaspWingManager: t9.j.f50990a 为空"));
+                }
+            } catch (Throwable t) {
+                if (firstFallback) XposedBridge.log(TAG + " resolveWaspWingManager: t9.j.f50990a 失败: " + t.getMessage());
+                failed.append("f50990a ");
+            }
+            if (inst == null && firstFallback) {
+                XposedBridge.log(TAG + " resolveWaspWingManager: 全部兜底失败 [" + failed.toString().trim() + "]");
+            }
+            return inst;
+        }
+
         Class<?> mgrCls = ctx.getClassLoader().loadClass("com.flydigi.sdk.waspwing.WaspWingManager");
         String[] methods = {"getInstance", "get", "getDefault"};
-        StringBuilder failed = new StringBuilder();
         for (String m : methods) {
             try {
                 inst = XposedHelpers.callStaticMethod(mgrCls, m);
@@ -3135,19 +3223,6 @@ public class MainHook implements IXposedHookLoadPackage {
             } catch (Throwable t) {
                 if (firstFallback) XposedBridge.log(TAG + " resolveWaspWingManager: INSTANCE 字段失败: " + t.getMessage());
                 failed.append("INSTANCE ");
-            }
-        }
-        if (inst == null && appKind == 7) {
-            // B7X 混淆管理器 t9.j 的 Kotlin 单例字段 f50990a（反编译确认）
-            try {
-                Class<?> mgrCls7 = ctx.getClassLoader().loadClass("t9.j");
-                inst = XposedHelpers.getStaticObjectField(mgrCls7, "f50990a");
-                if (inst != null) {
-                    if (firstFallback) XposedBridge.log(TAG + " resolveWaspWingManager: t9.j.f50990a 成功");
-                }
-            } catch (Throwable t) {
-                if (firstFallback) XposedBridge.log(TAG + " resolveWaspWingManager: t9.j.f50990a 失败: " + t.getMessage());
-                failed.append("f50990a ");
             }
         }
         if (inst == null && firstFallback) {
@@ -3225,7 +3300,9 @@ public class MainHook implements IXposedHookLoadPackage {
     private static void updateModelFromInfo(Object info) {
         try {
             Object codeObj = XposedHelpers.callMethod(info, "getDeviceCode");
-            connectedModel = modelFromDeviceCode(codeObj);
+            // 未知型号（空 deviceCode/无法识别）不覆盖 markConnected 的包名兜底。
+            int model = modelFromDeviceCode(codeObj);
+            if (model != 0) connectedModel = model;
             // B7X：顺手把原始型号码落盘，供下次冷启动自动进入控制页（值未变不写盘）
             if (appKind == 7 && codeObj != null) saveLastWaspwingCode(String.valueOf(codeObj));
             refreshLastOwnerIfNeeded();  // 型号修正后同步 BLE_OWNER_LAST
@@ -3274,5 +3351,49 @@ public class MainHook implements IXposedHookLoadPackage {
         if (value != null) {
             sb.append(key).append("=").append(((Number) value).intValue() * 10).append("\n");
         }
+    }
+
+    /** 独立 try 的 getter 写入：单个 getter 不可用只丢该行，不影响其它字段。 */
+    private static void appendGetterValueGuarded(StringBuilder sb, Object info, String getter, String key) {
+        try {
+            appendGetterValue(sb, info, getter, key);
+        } catch (Throwable t) {
+            logGetterFailure(key, getter, t);
+        }
+    }
+
+    /** 独立 try 的 ×10 写入：单个 getter 不可用只丢该行，不影响其它字段。 */
+    private static void appendTenthValueGuarded(StringBuilder sb, Object info, String getter, String key) {
+        try {
+            appendTenthValue(sb, info, getter, key);
+        } catch (Throwable t) {
+            logGetterFailure(key, getter, t);
+        }
+    }
+
+    /** COLD_TEMP 由两个 getter 组合，单独隔离，失败只丢这一行。 */
+    private static void appendColdTemp(StringBuilder sb, Object info) {
+        try {
+            Object cold = XposedHelpers.callMethod(info, "getTemperature");
+            Object coldDec = XposedHelpers.callMethod(info, "getTemperatureDecimal");
+            if (cold == null || coldDec == null) return;
+            // 用 Number.intValue() 兼容 Byte/Short/Integer 等返回值类型
+            int c = ((Number) cold).intValue();
+            int d = ((Number) coldDec).intValue();
+            if (d >= 10) d = (d + 5) / 10;  // 多位小数 → 四舍五入到 0.1°C
+            // 负温度换算：c 为带符号整数°C，d 恒为正小数位，负温结果为 c*10 - d
+            sb.append("COLD_TEMP=").append((c < 0) ? c * 10 - d : c * 10 + d).append("\n");
+        } catch (Throwable t) {
+            logGetterFailure("COLD_TEMP", "getTemperature/getTemperatureDecimal", t);
+        }
+    }
+
+    /** getter 失败留痕：每个键只记一条，避免每秒写盘路径刷屏。 */
+    private static void logGetterFailure(String key, String getter, Throwable t) {
+        synchronized (sGetterFailLogged) {
+            if (!sGetterFailLogged.add(key)) return;
+        }
+        XposedBridge.log(TAG + " 参数回传字段不可用: " + key + " (" + getter + ") "
+                + t.getClass().getSimpleName() + " msg=" + t.getMessage());
     }
 }

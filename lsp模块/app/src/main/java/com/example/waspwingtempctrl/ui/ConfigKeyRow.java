@@ -211,6 +211,9 @@ final class ConfigKeyRow {
     /** 本行的字段是否吃满整行（path 的框）——此时参数名与框不在同一行，{@link #alignLabelToField} 不钉框体中心。 */
     private boolean fieldFillsRow;
 
+    /** 参数名是否仍钉在框体中心；标签折行超过 2×钉点时由布局回调改为行高居中。 */
+    private boolean labelPinned = true;
+
     /** true 时忽略控件回调：程序化回填值不该被当成用户改动作业。 */
     private boolean suppressChange;
 
@@ -322,6 +325,30 @@ final class ConfigKeyRow {
             // 「?」用同一个锚：控件换行导致行高塌陷时，它仍与参数名同一条中线（不再被行高居中带走）
             root.setVerticalCenterAt(hintIcon, center);
         }
+        attachLabelPinGuard(center);
+    }
+
+    /**
+     * 钉框体中心只对单行参数名成立：标签高超过 2×钉点时首行会顶出行上界并被父容器裁剪
+     * （{@link WrapRowLayout} 只按"下沿"算占用高，不兜上沿）。布局后实测一次，超限即改回
+     * 行高居中；宽度/字号变化后若又放得下，允许重新钉回。
+     */
+    private void attachLabelPinGuard(int center) {
+        final int pinCenter = center;
+        labelView.addOnLayoutChangeListener((v, left, top, right, bottom,
+                oldLeft, oldTop, oldRight, oldBottom) -> {
+            boolean shouldPin = v.getHeight() <= pinCenter * 2;
+            if (shouldPin == labelPinned) {
+                return;
+            }
+            labelPinned = shouldPin;
+            int offset = shouldPin
+                    ? pinCenter : WrapRowLayout.LayoutParams.VERTICAL_CENTER_UNSET;
+            root.setVerticalCenterAt(labelView, offset);
+            if (hintIcon != null) {
+                root.setVerticalCenterAt(hintIcon, offset);
+            }
+        });
     }
 
     /**
@@ -646,6 +673,13 @@ final class ConfigKeyRow {
     private int fillValueAt(@NonNull Value value, int i) {
         if ("UI_CHART_SWAP".equals(meta.key) && value.size() == 1) {
             return value.intAt(0);
+        }
+        if ("UI_CURVE_FILTER".equals(meta.key)
+                && value.size() > 0 && value.size() < meta.fieldCount()) {
+            // 旧版没有「总开关」槽：[权重 步长]（或仅权重）展开成 [1, 权重, 步长]，
+            // 与 ChartConfig.readKeys 的旧格式分支同口径；缺的步长回定义默认值。
+            return i == 0 ? 1
+                    : (i - 1 < value.size() ? value.intAt(i - 1) : meta.defaultValue.intAt(i));
         }
         if ("UI_CHART_VIEW".equals(meta.key)) {
             return chartViewFillValue(value, i);
@@ -1414,6 +1448,8 @@ final class ConfigKeyRow {
         Value raw = renderer.read(false);
         if (raw == null) {
             if (fromBlur) {
+                // 恢复磁盘值前先撤 pending；已提交 io 的旧值由 cancelPending 补排磁盘值覆盖
+                cancelPending(meta, host, host.diskValue(meta.key));
                 restoreInputs();
                 setStatus(root.getContext().getString(R.string.config_input_restored),
                         R.color.state_warn);
@@ -1458,14 +1494,27 @@ final class ConfigKeyRow {
     private static boolean writeOrCancel(@NonNull KeyMeta meta, @NonNull Host host, @NonNull Value value) {
         Value onDisk = host.diskValue(meta.key);
         if (onDisk != null && value.equals(onDisk)) {
-            // 值未变则不写：连 mtime 都不碰，避免无谓触发 C 端重载
-            host.queue().cancel(meta.key);
-            host.onPendingChange();
+            // 值未变则不写：连 mtime 都不碰，避免无谓触发 C 端重载（已提交批次例外，见 cancelPending）
+            cancelPending(meta, host, onDisk);
             return false;
         }
         host.queue().schedule(meta.key, value);
         host.onPendingChange();
         return true;
+    }
+
+    /**
+     * 撤掉待写项；若该键有一批已提交 io 的旧值（撤不掉），补排磁盘值，让它在旧批次之后覆盖回去。
+     * 仅用于"用户的最终值就是磁盘值"的撤销场景；编辑中的空框只撤不补。
+     */
+    private static void cancelPending(@NonNull KeyMeta meta, @NonNull Host host,
+                                      @Nullable Value onDisk) {
+        boolean inFlight = host.queue().isInFlight(meta.key);
+        host.queue().cancel(meta.key);
+        if (inFlight && onDisk != null) {
+            host.queue().schedule(meta.key, onDisk);
+        }
+        host.onPendingChange();
     }
 
     /**

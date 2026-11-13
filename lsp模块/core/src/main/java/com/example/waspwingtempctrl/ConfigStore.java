@@ -15,7 +15,11 @@ import java.io.FileInputStream;
 import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
+import java.io.RandomAccessFile;
 import java.nio.ByteBuffer;
+import java.nio.channels.FileChannel;
+import java.nio.channels.FileLock;
+import java.nio.channels.OverlappingFileLockException;
 import java.nio.charset.CharacterCodingException;
 import java.nio.charset.CodingErrorAction;
 import java.nio.charset.StandardCharsets;
@@ -33,6 +37,8 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 import java.util.TreeMap;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.locks.ReentrantLock;
 
 /**
  * <b>I3（已冻结）：配置读写归属</b> —— 界面只用本类读写 {@code profile.conf}，
@@ -58,6 +64,26 @@ public final class ConfigStore {
     public static final String DAEMON_PRIVATE_DIR = "/data/data/com.example.waspwingtempctrl/files";
 
     private static volatile ConfigStore instance;
+
+    /**
+     * 写锁：{@link #setAll}、{@link #removeKeys}、{@link #writeFactoryIfAbsent} 的「读—改—写」整体串行，
+     * 避免两个写者各自读到旧文本、各写一份、后落盘者覆盖先落盘者的改动（丢失更新）。
+     * <b>只覆盖本进程</b>：跨进程（daemon 的写回）由 {@link #lockForWrite()} 的 fcntl 记录锁闭合，
+     * 指纹复核仍保留作第二道保险（见 {@link #writeChanges}）。
+     */
+    private static final ReentrantLock WRITE_LOCK = new ReentrantLock();
+
+    /** 临时文件名序号：同进程内并发写不共用同一个 {@code .tmp}。 */
+    private static final AtomicInteger TMP_SEQ = new AtomicInteger();
+
+    /** 「读—改—写」被其他写者打断时的重试次数。 */
+    private static final int WRITE_ATTEMPTS = 3;
+
+    /** 跨进程配置写锁：独立锁文件后缀，路径与 daemon 侧 {@code <config>.lock} 一致。 */
+    private static final String LOCK_FILE_SUFFIX = ".lock";
+    /** 等锁上限（毫秒）：超时不写并报错，不静默跳过。 */
+    private static final long LOCK_TIMEOUT_MS = 2000;
+    private static final long LOCK_POLL_MS = 50;
 
     /** {@link #read()} 的最近一次结果；指纹一致就直接回吐（见 app/逻辑说明.md §3.5）。 */
     private volatile Memo memo;
@@ -102,6 +128,22 @@ public final class ConfigStore {
     private final Map<String, String> compatCleanupCounterparts = new LinkedHashMap<>();
     /** 旧键名 → 现名 / 下落（确认弹窗标注；无据的键不在此表，界面只列键名）。 */
     private final Map<String, String> compatRenames = new LinkedHashMap<>();
+
+    /**
+     * 整键族遗留键的「迁移源守卫」：旧键 → 它已并入的现键。旧键仅当现键已写在当前文件里时才可删。
+     *
+     * <p>{@code compat.cleanup.counterparts} 只表达「旧前缀 → 现前缀」，整键族没有对应字段；
+     * {@code params.def.json} 的 {@code compat.renames} 里只有人话说明（「已并入 APP_LAUNCH_TIMING」），
+     * 不能当判据解析。这两条与 counterparts 同义，只能在此收口；改定义里这两处时必须同步本表。
+     */
+    private static final Map<String, String> CLEANUP_EXACT_REQUIRES;
+
+    static {
+        Map<String, String> m = new LinkedHashMap<>();
+        m.put("APP_LAUNCH_COOLDOWN", "APP_LAUNCH_TIMING");
+        m.put("APP_WATCHDOG", "APP_LAUNCH_TIMING");
+        CLEANUP_EXACT_REQUIRES = Collections.unmodifiableMap(m);
+    }
 
     private final String configFileNameFromDef;
     /** 构造时解析出的 params.json 根对象（只读复用，避免各处重复 open + 解析整份资产）；加载失败为 null。 */
@@ -332,7 +374,10 @@ public final class ConfigStore {
     }
 
     /**
-     * 配置文件指纹（{@code mtime:size}）；文件不存在时 {@code "-"}。必带 {@code size}，
+     * 配置文件指纹（{@code mtime:size:inode}）；文件不存在时 {@code "-"}。
+     *
+     * <p>{@code size} 与 {@code inode} 都必须带：C 端写回是「临时文件 + rename」，同一秒内换掉同尺寸的文件时
+     * 只有 inode 会变；不带它，memo 会把旧快照登记到新文件上，写入前的指纹复核也看不出文件已被换过。
      * 共用口径与理由见 app/逻辑说明.md §3.5。
      */
     public String configFingerprint() {
@@ -349,9 +394,9 @@ public final class ConfigStore {
         }
     }
 
-    /** 指纹串 {@code mtime(ms):size}；{@code null} = 文件不存在。{@code st_mtime} 为秒，×1000 转毫秒。 */
+    /** 指纹串 {@code mtime(ms):size:inode}；{@code null} = 文件不存在。{@code st_mtime} 为秒，×1000 转毫秒。 */
     private static String fingerprintOf(StructStat st) {
-        return st == null ? "-" : (st.st_mtime * 1000L) + ":" + st.st_size;
+        return st == null ? "-" : (st.st_mtime * 1000L) + ":" + st.st_size + ":" + st.st_ino;
     }
 
     /** 读不到盘时的快照：每个定义键取出厂默认值，附一条说明（{@link #read()} 的两条退化路径共用）。 */
@@ -411,7 +456,7 @@ public final class ConfigStore {
                 }
                 continue;
             }
-            fromFile.put(rawKey, parseValue(meta, rawVal));
+            fromFile.put(rawKey, parseInts(meta, rawVal, true));
         }
         // 对外按 params.json 顺序输出（与界面表单顺序一致）；文件中缺失的键用出厂默认值补齐
         for (KeyMeta meta : keys.values()) {
@@ -439,7 +484,8 @@ public final class ConfigStore {
     /**
      * 可清理的旧版遗留键：死键（{@code unknown}，界面与 cdaemon 都不认）加上「可安全删除的遗留族键」。
      * 遗留族键（{@code compat.cleanup}）按前缀 / 整键命中；前缀族的某行仅在其「现表同号行」已存在于
-     * 本文件时才可删——否则它是 C 端的迁移源（读兼容 + 一次性改写），删了会丢那段旧配置，须保留。
+     * 本文件时才可删，整键族仅在其「已并入的现键」已存在时才可删——否则它是 C 端的迁移源
+     * （读兼容 + 一次性改写），删了会丢那段旧配置，须保留。
      * 不碰「cdaemon 认得的活键」（如任意 {@code DEBUG_*}）：它们不是遗留族，留着不碍事。
      */
     private List<String> removableOf(Set<String> present, List<String> unknown) {
@@ -449,9 +495,8 @@ public final class ConfigStore {
             if (seen.contains(key) || !isCleanupCandidate(key)) {
                 continue;
             }
-            String counterpart = cleanupCounterpartOf(key);
-            if (counterpart != null && !present.contains(counterpart)) {
-                continue;   // 现表同号行不存在 → 迁移源，保留
+            if (!guardAllows(key, present)) {
+                continue;   // 现键/现表同号行不存在 → 迁移源，保留
             }
             if (seen.add(key)) {
                 out.add(key);
@@ -494,11 +539,16 @@ public final class ConfigStore {
 
     /**
      * 落盘前重算的迁移源守卫：前缀族遗留键仅在其「现表同号行」仍存在于<b>当前文件</b>时才可删；
-     * 其余（两边都不认的死键、整键族遗留键）恒可删。见 {@link #removeKeys}。
+     * 整键族遗留键仅在其「已并入的现键」存在时才可删（{@link #CLEANUP_EXACT_REQUIRES}）；
+     * 其余（两边都不认的死键）恒可删。见 {@link #removeKeys}。
      */
     private boolean guardAllows(String key, Set<String> present) {
         String counterpart = cleanupCounterpartOf(key);
-        return counterpart == null || present.contains(counterpart);
+        if (counterpart != null) {
+            return present.contains(counterpart);
+        }
+        String requires = CLEANUP_EXACT_REQUIRES.get(key);
+        return requires == null || present.contains(requires);
     }
 
     /** 该键是否被 cdaemon 认得（compat.daemonAccept 的前缀 / 整键）；界面参数表外的键据此不算未定义。 */
@@ -649,6 +699,8 @@ public final class ConfigStore {
         LinkedHashMap<String, String> appendComments = new LinkedHashMap<>();
         // 表型键的落点：逻辑键 → 行键前缀。它的值是多行文本，由 ConfText 展开成 rowPrefix1/2/… 多行
         LinkedHashMap<String, String> families = new LinkedHashMap<>();
+        // 路径键：值里的一切字符（含 '#'）都是路径本身，不能按"值 + 行内注释"切分
+        Set<String> wholeValueKeys = new HashSet<>();
         for (Map.Entry<String, Value> e : changes.entrySet()) {
             KeyMeta meta = keys.get(e.getKey());
             if (meta == null) {
@@ -662,36 +714,134 @@ public final class ConfigStore {
             if (meta.isTable() && !meta.rowPrefix.isEmpty()) {
                 families.put(e.getKey(), meta.rowPrefix);
             }
-        }
-        String text;
-        boolean fileExists = exists();
-        if (fileExists) {
-            try {
-                String decoded = decodeUtf8OrNull(readAllBytes(configFile));
-                if (decoded == null) {
-                    return WriteResult.failure("配置文件不是合法 UTF-8，拒绝改写以免损坏内容");
-                }
-                text = decoded;
-            } catch (IOException e) {
-                return WriteResult.failure("读取失败：" + e.getMessage());
+            if (meta.isPath()) {
+                wholeValueKeys.add(e.getKey());
             }
-        } else {
-            text = header();
         }
-        ConfText.Edit edit = ConfText.apply(text, pending, appendComments, families);
-        int replaced = edit.replaced;
-        int appended = edit.appended;
+        WRITE_LOCK.lock();
+        try {
+            return writeChanges(pending, appendComments, families, wholeValueKeys);
+        } finally {
+            WRITE_LOCK.unlock();
+        }
+    }
 
-        if (edit.text.equals(text) && fileExists) {
-            return new WriteResult(true, false, false, replaced, appended, configFile.lastModified(), "", "");
+    /**
+     * 取跨进程配置写锁：独立锁文件 {@code <profile.conf>.lock} 上的整文件 fcntl 记录锁。
+     * {@code FileChannel.tryLock()} 底层即 fcntl 记录锁，与 daemon 侧 {@code fcntl(F_SETLK)} 互相可见；
+     * 不能用 flock（两者在 Linux 上互不阻塞）。锁文件必须独立于 profile.conf——提交用 rename 换 inode，
+     * 锁配置文件本身挡不住后来打开新 inode 的写者。
+     * <p>用 {@link RandomAccessFile} 而不是 {@code FileChannel.open(Path,…)}：后者属 java.nio.file，
+     * minSdk 25 上不可用。调用方必须在 finally 里 {@link #unlockForWrite(RandomAccessFile)}（close 即释放）。
+     * 等锁 {@value #LOCK_TIMEOUT_MS}ms；超时返回 null，调用方不写并报错。
+     */
+    private RandomAccessFile lockForWrite() throws IOException {
+        File lockFile = new File(configFile.getParentFile(), CONFIG_FILE_NAME + LOCK_FILE_SUFFIX);
+        RandomAccessFile raf = new RandomAccessFile(lockFile, "rw");
+        FileChannel ch = raf.getChannel();
+        long deadline = System.currentTimeMillis() + LOCK_TIMEOUT_MS;
+        while (true) {
+            FileLock lock = null;
+            try {
+                lock = ch.tryLock();   // 独占整文件
+            } catch (OverlappingFileLockException ignored) {
+                // 同 JVM 另一线程持有（WRITE_LOCK 已串行化写者，正常不会走到）
+            }
+            if (lock != null) {
+                return raf;            // 锁随 channel 存续，close 即释放
+            }
+            if (System.currentTimeMillis() >= deadline) {
+                raf.close();
+                return null;
+            }
+            try {
+                Thread.sleep(LOCK_POLL_MS);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                raf.close();
+                return null;
+            }
+        }
+    }
+
+    /** 释放跨进程写锁（close 会释放该 channel 持有的全部 FileLock）。 */
+    private static void unlockForWrite(RandomAccessFile raf) {
+        if (raf == null) return;
+        try {
+            raf.close();
+        } catch (IOException ignored) {
+            // 关闭失败也随进程退出释放，不改变写入结果
+        }
+    }
+
+    /**
+     * {@link #setAll} 的「读—改—写」主体：全程持有跨进程写锁（读 → 写临时文件 → rename）。
+     * 读到提交之间若目标文件仍被不认识锁的写者换过，指纹复核会作废本次结果、重读重算
+     * （最多 {@value #WRITE_ATTEMPTS} 次）。提交仍是「临时文件 + rename」，读者永远看到完整文本。
+     */
+    private WriteResult writeChanges(Map<String, String> pending, Map<String, String> appendComments,
+                                     Map<String, String> families, Set<String> wholeValueKeys) {
+        RandomAccessFile lockCh;
+        try {
+            lockCh = lockForWrite();
+        } catch (IOException e) {
+            return WriteResult.failure("配置写锁打开失败：" + e.getMessage());
+        }
+        if (lockCh == null) {
+            return WriteResult.failure("配置正被其他进程写入（等锁超时 " + LOCK_TIMEOUT_MS + "ms），本次未写入，请重试");
         }
         try {
-            atomicWrite(configFile, edit.text);
-        } catch (IOException e) {
-            return WriteResult.failure(e.getMessage());
+            return writeChangesLocked(pending, appendComments, families, wholeValueKeys);
+        } finally {
+            unlockForWrite(lockCh);
         }
-        rememberWritten(edit.text);
-        return new WriteResult(true, false, true, replaced, appended, configFile.lastModified(), "", "");
+    }
+
+    /** {@link #writeChanges} 的「读—改—写」主体；调用方已持跨进程写锁。 */
+    private WriteResult writeChangesLocked(Map<String, String> pending, Map<String, String> appendComments,
+                                           Map<String, String> families, Set<String> wholeValueKeys) {
+        for (int attempt = 0; attempt < WRITE_ATTEMPTS; attempt++) {
+            String before = configFingerprint();
+            boolean fileExists = exists();
+            String text;
+            if (fileExists) {
+                try {
+                    String decoded = decodeUtf8OrNull(readAllBytes(configFile));
+                    if (decoded == null) {
+                        return WriteResult.failure("配置文件不是合法 UTF-8，拒绝改写以免损坏内容");
+                    }
+                    text = decoded;
+                } catch (IOException e) {
+                    return WriteResult.failure("读取失败：" + e.getMessage());
+                }
+            } else {
+                text = header();
+            }
+            ConfText.Edit edit = ConfText.apply(text, pending, appendComments, families, wholeValueKeys);
+            if (edit.text.equals(text) && fileExists) {
+                return new WriteResult(true, false, false, edit.replaced, edit.appended,
+                        configFile.lastModified(), "", "");
+            }
+            File tmp;
+            try {
+                tmp = writeTemp(configFile, edit.text);
+            } catch (IOException e) {
+                return WriteResult.failure(e.getMessage());
+            }
+            if (!before.equals(configFingerprint())) {
+                tmp.delete();   // 读到提交之间被别的写者改了：作废本次结果，重读重算
+                continue;
+            }
+            try {
+                commitTemp(tmp, configFile);
+            } catch (IOException e) {
+                return WriteResult.failure(e.getMessage());
+            }
+            rememberWritten(edit.text);
+            return new WriteResult(true, false, true, edit.replaced, edit.appended,
+                    configFile.lastModified(), "", "");
+        }
+        return WriteResult.failure("配置文件在写入期间被其他写入者反复改动，本次未写入（请重试）");
     }
 
     /**
@@ -704,6 +854,33 @@ public final class ConfigStore {
         if (!definitionsLoaded()) {
             return WriteResult.failure("参数定义未加载：" + loadError);
         }
+        WRITE_LOCK.lock();
+        try {
+            return writeFactoryIfAbsentLocked();
+        } finally {
+            WRITE_LOCK.unlock();
+        }
+    }
+
+    private WriteResult writeFactoryIfAbsentLocked() {
+        RandomAccessFile lockCh;
+        try {
+            lockCh = lockForWrite();
+        } catch (IOException e) {
+            return WriteResult.failure("配置写锁打开失败：" + e.getMessage());
+        }
+        if (lockCh == null) {
+            return WriteResult.failure("配置正被其他进程写入（等锁超时 " + LOCK_TIMEOUT_MS + "ms），本次未写入，请重试");
+        }
+        try {
+            return writeFactoryIfAbsentUnderLock();
+        } finally {
+            unlockForWrite(lockCh);
+        }
+    }
+
+    /** {@link #writeFactoryIfAbsentLocked} 的主体；调用方已持跨进程写锁。 */
+    private WriteResult writeFactoryIfAbsentUnderLock() {
         if (exists()) {
             return WriteResult.skipped("配置已存在，按决策保留不覆盖：" + configFile.getAbsolutePath());
         }
@@ -742,7 +919,13 @@ public final class ConfigStore {
         }
         String text = sb.toString();
         try {
-            atomicWrite(configFile, text);
+            File tmp = writeTemp(configFile, text);
+            if (exists()) {
+                // 构造这段文本期间被别的写者抢先建了文件：按"已存在不覆盖"处理，删掉自己的临时文件
+                tmp.delete();
+                return WriteResult.skipped("配置已存在，按决策保留不覆盖：" + configFile.getAbsolutePath());
+            }
+            commitTemp(tmp, configFile);
         } catch (IOException e) {
             return WriteResult.failure(e.getMessage());
         }
@@ -893,7 +1076,8 @@ public final class ConfigStore {
      * 删除给定的遗留键行（候选见 {@link #removableKeys(Snapshot)}），一次原子写。
      *
      * <p><b>为什么安全</b>：候选只含「界面与 cdaemon 都不认」的死键，以及「可安全删除的遗留族键」
-     * （其现表同号行已存在）——没有任何一方会读它们。删前先把要删的行写成一份备份文件（可恢复），
+     * （其现表同号行已存在；整键族则要求已并入的现键已存在）——没有一方还会读它们。
+     * 删前先把要删的行写成一份备份文件（可恢复），
      * 再原子替换 {@code profile.conf}。写入一律走本类的「临时文件 → fsync → rename」（I3）。
      */
     public RemoveResult removeKeys(List<String> keys) {
@@ -907,55 +1091,93 @@ public final class ConfigStore {
             return RemoveResult.failure("配置文件不存在");
         }
         Set<String> target = new HashSet<>(keys);
-        String text;
+        WRITE_LOCK.lock();
         try {
-            String decoded = decodeUtf8OrNull(readAllBytes(configFile));
-            if (decoded == null) {
-                return RemoveResult.failure("配置文件不是合法 UTF-8，拒绝改写以免损坏内容");
+            RandomAccessFile lockCh;
+            try {
+                lockCh = lockForWrite();
+            } catch (IOException e) {
+                return RemoveResult.failure("配置写锁打开失败：" + e.getMessage());
             }
-            text = decoded;
-        } catch (IOException e) {
-            return RemoveResult.failure("读取失败：" + e.getMessage());
-        }
-        List<String> lines = ConfText.splitLines(text);
-        // 落盘前按<b>当前文件</b>重算一遍「迁移源守卫」：弹窗确认到落盘之间，配置可能已被别的路径改过
-        // （如 PID_CUT_<n> 被删）。若仍按旧快照删 KI_CUT_<n>，会丢掉那段还没迁走的旧配置——故在此重算，
-        // 不满足守卫的行一律保留（删不删以"落盘那一刻的磁盘状态"为准，不是以弹窗那一刻为准）。
-        Set<String> present = new HashSet<>();
-        for (String line : lines) {
-            int eq = ConfText.configLineEq(line);
-            if (eq >= 0) {
-                present.add(ConfText.trimRight(line.substring(ConfText.lineStartOf(line), eq)));
+            if (lockCh == null) {
+                return RemoveResult.failure("配置正被其他进程写入（等锁超时 " + LOCK_TIMEOUT_MS + "ms），本次未清理，请重试");
             }
-        }
-        List<String> kept = new ArrayList<>();
-        List<String> removed = new ArrayList<>();
-        for (String line : lines) {
-            int eq = ConfText.configLineEq(line);
-            String rawKey = eq < 0 ? null
-                    : ConfText.trimRight(line.substring(ConfText.lineStartOf(line), eq));
-            if (rawKey != null && target.contains(rawKey) && guardAllows(rawKey, present)) {
-                removed.add(line);
-            } else {
-                kept.add(line);
+            try {
+                return removeKeysLocked(target);
+            } finally {
+                unlockForWrite(lockCh);
             }
+        } finally {
+            WRITE_LOCK.unlock();
         }
-        if (removed.isEmpty()) {
-            return RemoveResult.failure("配置里已没有这些键（可能已被清理）");
+    }
+
+    /** {@link #removeKeys} 的主体；调用方已持进程内写锁（{@link #WRITE_LOCK}）与跨进程写锁。 */
+    private RemoveResult removeKeysLocked(Set<String> target) {
+        for (int attempt = 0; attempt < WRITE_ATTEMPTS; attempt++) {
+            String before = configFingerprint();
+            String text;
+            try {
+                String decoded = decodeUtf8OrNull(readAllBytes(configFile));
+                if (decoded == null) {
+                    return RemoveResult.failure("配置文件不是合法 UTF-8，拒绝改写以免损坏内容");
+                }
+                text = decoded;
+            } catch (IOException e) {
+                return RemoveResult.failure("读取失败：" + e.getMessage());
+            }
+            List<String> lines = ConfText.splitLines(text);
+            // 落盘前按<b>当前文件</b>重算一遍「迁移源守卫」：弹窗确认到落盘之间，配置可能已被别的路径改过
+            // （如 PID_CUT_<n> 被删）。若仍按旧快照删 KI_CUT_<n>，会丢掉那段还没迁走的旧配置——故在此重算，
+            // 不满足守卫的行一律保留（删不删以"落盘那一刻的磁盘状态"为准，不是以弹窗那一刻为准）。
+            Set<String> present = new HashSet<>();
+            for (String line : lines) {
+                int eq = ConfText.configLineEq(line);
+                if (eq >= 0) {
+                    present.add(ConfText.trimRight(line.substring(ConfText.lineStartOf(line), eq)));
+                }
+            }
+            List<String> kept = new ArrayList<>();
+            List<String> removed = new ArrayList<>();
+            for (String line : lines) {
+                int eq = ConfText.configLineEq(line);
+                String rawKey = eq < 0 ? null
+                        : ConfText.trimRight(line.substring(ConfText.lineStartOf(line), eq));
+                if (rawKey != null && target.contains(rawKey) && guardAllows(rawKey, present)) {
+                    removed.add(line);
+                } else {
+                    kept.add(line);
+                }
+            }
+            if (removed.isEmpty()) {
+                return RemoveResult.failure("配置里已没有这些键（可能已被清理）");
+            }
+            File tmp;
+            try {
+                tmp = writeTemp(configFile, String.join("\n", kept));
+            } catch (IOException e) {
+                return RemoveResult.failure("写盘失败：" + e.getMessage());
+            }
+            if (!before.equals(configFingerprint())) {
+                tmp.delete();   // 读到提交之间被别的写者改过：作废本次结果，重读重算
+                continue;
+            }
+            String backupPath;
+            try {
+                backupPath = writeRemovedBackup(removed);
+            } catch (IOException e) {
+                tmp.delete();
+                return RemoveResult.failure("备份失败（未改动配置）：" + e.getMessage());
+            }
+            try {
+                commitTemp(tmp, configFile);
+            } catch (IOException e) {
+                return RemoveResult.failure("写盘失败：" + e.getMessage());
+            }
+            memo = null;   // 文件已改：作废快照缓存，下次 read() 按新指纹重读
+            return new RemoveResult(true, removed.size(), backupPath, "");
         }
-        String backupPath;
-        try {
-            backupPath = writeRemovedBackup(removed);
-        } catch (IOException e) {
-            return RemoveResult.failure("备份失败（未改动配置）：" + e.getMessage());
-        }
-        try {
-            atomicWrite(configFile, String.join("\n", kept));
-        } catch (IOException e) {
-            return RemoveResult.failure("写盘失败：" + e.getMessage());
-        }
-        memo = null;   // 文件已改：作废快照缓存，下次 read() 按新指纹重读
-        return new RemoveResult(true, removed.size(), backupPath, "");
+        return RemoveResult.failure("配置文件在写入期间被其他写入者反复改动，本次未清理（请重试）");
     }
 
     /** 把删掉的行写进一份带时间戳的备份文件（同目录原子写）；返回其绝对路径。 */
@@ -1286,6 +1508,17 @@ public final class ConfigStore {
             return rawMax;
         }
 
+        /**
+         * 第 {@code i} 个字段的定义默认值：多值键取 {@code fields[i].default}，单值键取键自己的
+         * {@code defaultValue}。供「文件里只写了前几个 token」时补齐缺槽。
+         */
+        int defaultFor(int i) {
+            if (fields != null && i < fields.size()) {
+                return fields.get(i).defaultValue;
+            }
+            return defaultValue == null ? 0 : defaultValue.intAt(0);
+        }
+
         /** 生成配置文件注释行用（label + 单位 + 范围 + 依赖）。 */
         String commentLine() {
             StringBuilder sb = new StringBuilder(label);
@@ -1488,13 +1721,20 @@ public final class ConfigStore {
 
     // ==================== 内部：文本改写 ====================
 
-    /** 文件头（新生成时使用）。 */
+    /**
+     * 文件头（新生成时使用）。
+     *
+     * <p>末尾的 {@code cfg-unit} 是给 C 端的单位标记（{@code params.def.json} 的 {@code conf.header}
+     * 也要求保留它）：没有它，C 会把 {@code CPU_ZONE_RESCAN} 的第一值当「秒」换算成控制周期并写回，
+     * 12（12 个周期 = 60 秒）会被改成 3（15 秒）。
+     */
     private String header() {
         return "# 飞智 B6X 增强计划 — 智能温控配置\n"
                 + "# 由 APK 首次部署生成，值取自 assets/" + PARAMS_ASSET + " 的 factory 字段\n"
                 + "# 格式：KEY=VALUE（等号两边不要空格），# 开头为注释，空行自动跳过\n"
                 + "# 多值键用单个空格分隔；行内注释请写在值的后面（路径类键不要写行内注释）\n"
-                + "# 修改后无需重启 daemon，下一轮 5 秒循环自动热重载\n";
+                + "# 修改后无需重启 daemon，下一轮 5 秒循环自动热重载\n"
+                + "# 单位标记（勿删）：cfg-unit: CPU_ZONE_RESCAN=cycles\n";
     }
 
     /**
@@ -1532,9 +1772,11 @@ public final class ConfigStore {
          *
          * @param appendComments 追加时用的注释文本（键 → 说明），缺省时用键名
          * @param families       逻辑键 → 行键前缀（只含本次要改的表键）；非表键不在其中
+         * @param wholeValueKeys 值即整段原文的键（路径键）：{@code #} 不是注释起点，替换时整段换掉
          */
         public static Edit apply(String text, Map<String, String> changes,
-                                 Map<String, String> appendComments, Map<String, String> families) {
+                                 Map<String, String> appendComments, Map<String, String> families,
+                                 Set<String> wholeValueKeys) {
             Map<String, String> pending = new LinkedHashMap<>(changes);
             // 前缀 → 逻辑键：逐行认领"这一行是不是本次要改的某张表的行"
             Map<String, String> familyByPrefix = new LinkedHashMap<>();
@@ -1572,7 +1814,8 @@ public final class ConfigStore {
                 String newValue = pending.get(rawKey);
                 if (newValue != null) {
                     // 同键多行时每一行都替换：C 端按行顺序覆盖，只改一行会不生效
-                    out.add(spliceValue(line, eq, newValue));
+                    out.add(spliceValue(line, eq, newValue,
+                            wholeValueKeys != null && wholeValueKeys.contains(rawKey)));
                     replaced++;
                     matched.add(rawKey);
                 } else {
@@ -1683,8 +1926,22 @@ public final class ConfigStore {
         /**
          * 把一行的值片段换成 {@code newValue}：保留 {@code =} 之前的内容、值前后的空白
          * 与 {@code #} 之后的注释原文。详见 app/逻辑说明.md §3.2。
+         *
+         * @param wholeValue true = 值占满 {@code =} 之后的整行（路径键）：{@code #} 属于值本身，
+         *                   C 端也不剥行内注释，故整段替换、只保留首尾空白与 CRLF 的 {@code \r}
          */
-        public static String spliceValue(String line, int eq, String newValue) {
+        public static String spliceValue(String line, int eq, String newValue, boolean wholeValue) {
+            if (wholeValue) {
+                int head = eq + 1;
+                while (head < line.length() && (line.charAt(head) == ' ' || line.charAt(head) == '\t')) {
+                    head++;
+                }
+                int tail = line.length();
+                while (tail > head && isSpace(line.charAt(tail - 1))) {
+                    tail--;
+                }
+                return line.substring(0, head) + newValue + line.substring(tail);
+            }
             int hash = line.indexOf('#', eq + 1);
             int regionEnd = hash >= 0 ? hash : line.length();
             String region = line.substring(eq + 1, regionEnd);
@@ -1725,17 +1982,30 @@ public final class ConfigStore {
 
     /** 原子替换：同目录临时文件 → write → flush → fsync → rename（I3 原子写语义的唯一实现点）。 */
     private static void atomicWrite(File target, String content) throws IOException {
+        commitTemp(writeTemp(target, content), target);
+    }
+
+    /**
+     * 写同目录临时文件并 fsync，返回该临时文件。文件名带 pid + 序号：两个写者（含并发线程）不共用
+     * 同一个 {@code .tmp}，不会互相截断。
+     * <p>调用方自己决定何时 {@link #commitTemp} ——「读—改—写」路径要在提交前复核指纹。
+     */
+    private static File writeTemp(File target, String content) throws IOException {
         File dir = target.getParentFile();
         if (dir != null && !dir.isDirectory() && !dir.mkdirs()) {
             throw new IOException("目录不可用：" + dir);
         }
-        File tmp = new File(dir, target.getName() + ".tmp");
+        File tmp = new File(dir, target.getName() + ".tmp-"
+                + android.os.Process.myPid() + "-" + TMP_SEQ.incrementAndGet());
         FileOutputStream fos = null;
         try {
             fos = new FileOutputStream(tmp, false);
             fos.write(content.getBytes(StandardCharsets.UTF_8));
             fos.flush();
             fos.getFD().sync();
+        } catch (IOException e) {
+            tmp.delete();   // 写一半失败：不留残件（名字唯一，否则会越积越多）
+            throw e;
         } finally {
             if (fos != null) {
                 try {
@@ -1745,13 +2015,19 @@ public final class ConfigStore {
                 }
             }
         }
-        if (!tmp.renameTo(target)) {
-            // rename 失败（极少见）→ 不留下半截文件，删掉临时文件并明确报错
-            if (!tmp.delete()) {
-                throw new IOException("rename 失败且临时文件无法删除：" + tmp);
-            }
-            throw new IOException("rename 失败：" + tmp + " → " + target);
+        return tmp;
+    }
+
+    /** 把已 fsync 的临时文件换到目标路径；rename 失败时删掉临时文件并明确报错。 */
+    private static void commitTemp(File tmp, File target) throws IOException {
+        if (tmp.renameTo(target)) {
+            return;
         }
+        // rename 失败（极少见）→ 不留下半截文件，删掉临时文件并明确报错
+        if (!tmp.delete()) {
+            throw new IOException("rename 失败且临时文件无法删除：" + tmp);
+        }
+        throw new IOException("rename 失败：" + tmp + " → " + target);
     }
 
     // ==================== 内部：解析辅助 ====================
@@ -1759,16 +2035,39 @@ public final class ConfigStore {
     /**
      * 按类型解析文件里的一行值（口径同 C 端：数值取前 N 个整数 token，文本型（path / enum）
      * 取 trim 后原文）。
+     *
+     * <p>定义解析阶段（{@code defaultValue} 尚未就位）走这里：缺 token 只能回 0。
      */
     private static Value parseValue(KeyMeta meta, String raw) {
+        return parseInts(meta, raw, false);
+    }
+
+    /**
+     * 解析文件里实际写出的值；文本型取 trim 后原文。
+     *
+     * <p>数值 token 少于字段数（含一个都没有，如 {@code PID_SPEED=}、{@code PID_SPEED= #…}）时，
+     * 缺的槽按定义默认值补齐 —— C 端对没给出的槽保持代码默认值，不补就等于界面显示 0、
+     * 用户改同行别的字段时把 0 写回文件。
+     *
+     * @param withDefaults true = 缺 token 回落定义默认值（读盘）；false = 定义解析阶段（无默认可回）
+     */
+    private static Value parseInts(KeyMeta meta, String raw, boolean withDefaults) {
         if (meta.isText() || meta.isTable()) {
             return Value.ofText(trimValue(raw));
         }
-        int[] nums = scanInts(raw, Math.max(1, meta.fieldCount()));
+        int n = Math.max(1, meta.fieldCount());
+        int[] nums = scanInts(raw, n);
         if (nums.length == 0) {
-            return Value.ofInt(0);
+            return withDefaults ? meta.defaultValue : Value.ofInt(0);
         }
-        return nums.length == 1 ? Value.ofInt(nums[0]) : Value.ofNumbers(nums);
+        if (n == 1) {
+            return Value.ofInt(nums[0]);
+        }
+        int[] full = new int[n];
+        for (int i = 0; i < n; i++) {
+            full[i] = i < nums.length ? nums[i] : (withDefaults ? meta.defaultFor(i) : 0);
+        }
+        return Value.ofNumbers(full);
     }
 
     /**

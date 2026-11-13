@@ -30,6 +30,13 @@ final class LogTailReader {
     /** 单次渲染的行数上限（性能硬约束，列表走 RecyclerView 虚拟化，不一次性全排版）。 */
     static final int MAX_LINES = 3000;
 
+    /**
+     * 单行显示上限（字符数）：正常日志行远小于它。只防外部写入 / 文件损坏造成的超长行
+     * （尾读上限内可整行无换行）把大段文本塞进一个 TextView、在主线程排版时卡死。
+     * 截断后追加一条可见提示，不静默吞内容。
+     */
+    static final int MAX_LINE_CHARS = 4096;
+
     private LogTailReader() {
     }
 
@@ -143,11 +150,19 @@ final class LogTailReader {
         String kwLower = kw.toLowerCase(Locale.ROOT);
         List<LogLine> out = new ArrayList<>();
         for (int i = 0; i < candidate; i++) {
-            String line = stripCr(tail[i]);
-            if (!kwLower.isEmpty() && !line.toLowerCase(Locale.ROOT).contains(kwLower)) {
+            String body = stripCr(tail[i]);
+            boolean truncated = body.length() > MAX_LINE_CHARS;
+            if (truncated) {
+                // 只留前 MAX_LINE_CHARS 个字符参与匹配与分级；提示附加在显示文本尾部
+                body = body.substring(0, MAX_LINE_CHARS);
+            }
+            if (!kwLower.isEmpty() && !body.toLowerCase(Locale.ROOT).contains(kwLower)) {
                 continue;
             }
-            out.add(new LogLine(line, LogClassifier.classify(line)));
+            String display = truncated
+                    ? body + appContext.getString(R.string.log_line_truncated, MAX_LINE_CHARS)
+                    : body;
+            out.add(new LogLine(display, LogClassifier.classify(body)));
         }
         return new Snapshot(probe, true, null, out, end, candidate, fingerprint, false);
     }

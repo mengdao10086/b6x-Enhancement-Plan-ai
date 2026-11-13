@@ -66,6 +66,12 @@ final class ChartConfig {
     /** 回落/异常说明（信息条要如实上屏，不静默）。 */
     final List<String> notes = new ArrayList<>();
 
+    /**
+     * 本份口径对应的 {@link ConfigStore#configFingerprint()}（profile.conf 的 mtime:size）。
+     * 供 {@link ChartLoader} 的解析缓存区分口径：配置键一变，同一数据文件也必须重新解析。
+     */
+    String sourceFingerprint;
+
     private ChartConfig() {
     }
 
@@ -94,6 +100,7 @@ final class ChartConfig {
             return hit.config;
         }
         ChartConfig c = new ChartConfig();
+        c.sourceFingerprint = fingerprint;
         c.readKeys(store);
         c.readChartBlock(store);
         cached = new Cached(fingerprint, c);

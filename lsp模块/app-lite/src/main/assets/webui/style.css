@@ -361,6 +361,8 @@ input.invalid { border-color: var(--danger); background: var(--danger-soft); }
 .row-control > input[type="number"] { width: 112px; }
 /* 长值可被行容器压缩（内容再靠 input 自身横向滚动查看） */
 .row-control > input { min-width: 0; }
+/* 多值键里的 bool 字段：开关是行内元素，对齐到数字框的垂直中线 */
+.field-bool { display: inline-flex; align-items: center; }
 
 .switch {
     width: 44px;

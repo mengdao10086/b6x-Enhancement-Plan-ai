@@ -27,8 +27,9 @@ import java.io.File;
  *       界面必须给得出可诊断文本（见 app/逻辑说明.md §7.1）。</li>
  * </ol>
  *
- * <p><b>进程级缓存</b>：最近一次成功读取的结果按数据文件指纹（{@code size:mtime}）留一份，命中即复用
- * 解析产物；<b>只缓存解析产物</b>、不缓存原始文本，失败一律不进缓存（诊断绝不陈旧）。返回的
+ * <p><b>进程级缓存</b>：最近一次成功读取的结果按「数据文件指纹（{@code size:mtime}）+ 配置口径指纹
+ * （{@link ChartConfig#sourceFingerprint}）」留一份，命中即复用解析产物——口径键改了而数据文件没变时
+ * 也不会复用旧口径的解析结果；<b>只缓存解析产物</b>、不缓存原始文本，失败一律不进缓存（诊断绝不陈旧）。返回的
  * {@link Snapshot} 因此<b>可能被多处共用</b>：只读。见 app/逻辑说明.md §7.1。
  */
 public final class ChartLoader {
@@ -36,13 +37,15 @@ public final class ChartLoader {
     /** 尾读上限：C 端文件最多 780 行（约 40KB），这里给足余量，绝不整文件无界读。 */
     static final int TAIL_BYTES = 256 * 1024;
 
-    /** 最近一次成功读取的结果 + 它对应的数据文件指纹（不可变，故 volatile 一次读写即一致）。 */
+    /** 最近一次成功读取的结果 + 它对应的数据文件指纹与配置口径指纹（不可变，故 volatile 一次读写即一致）。 */
     private static final class Cached {
         final String fingerprint;
+        final String configFingerprint;
         final Snapshot snapshot;
 
-        Cached(String fingerprint, Snapshot snapshot) {
+        Cached(String fingerprint, String configFingerprint, Snapshot snapshot) {
             this.fingerprint = fingerprint;
+            this.configFingerprint = configFingerprint;
             this.snapshot = snapshot;
         }
     }
@@ -149,9 +152,11 @@ public final class ChartLoader {
         if (fingerprint.equals(lastFingerprint)) {
             return Snapshot.unchanged();
         }
+        String cfgKey = configKey(cfg);
         Cached hit = cached;
-        if (hit != null && fingerprint.equals(hit.fingerprint)) {
-            // 进程内已解过这一份内容（但调用方手上没有可比的指纹）：读盘与解析都不必再做
+        if (hit != null && fingerprint.equals(hit.fingerprint)
+                && cfgKey.equals(hit.configFingerprint)) {
+            // 进程内已用同一份口径解过这一份内容（但调用方手上没有可比的指纹）：读盘与解析都不必再做
             return hit.snapshot;
         }
 
@@ -175,8 +180,13 @@ public final class ChartLoader {
                     + "\n\n" + AppFiles.diagnose(file));
         }
         Snapshot snapshot = new Snapshot(probe, true, null, ds, fingerprint, false);
-        cached = new Cached(fingerprint, snapshot);
+        cached = new Cached(fingerprint, cfgKey, snapshot);
         return snapshot;
+    }
+
+    /** 配置口径指纹（{@link ChartConfig#sourceFingerprint}）；缺失时为空串，不与任何已缓存口径混用。 */
+    private static String configKey(@NonNull ChartConfig cfg) {
+        return cfg.sourceFingerprint != null ? cfg.sourceFingerprint : "";
     }
 
     /**

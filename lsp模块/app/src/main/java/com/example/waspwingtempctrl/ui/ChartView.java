@@ -73,6 +73,8 @@ public class ChartView extends View {
     private static final float LABEL_LIFT_DP = 4f;
     // 按住查看的数值行高（webui 同名常量 LABEL_H）
     private static final float LABEL_H_DP = 11f;
+    // 无左轴（左轴系列全关或窗口内无有效左轴值）时，整图横线改按右轴值域等分 4 段（5 条）
+    private static final int RIGHT_ONLY_GRID_SEGMENTS = 4;
 
     private final Paint gridPaint = new Paint();
     private final Paint tickPaint = new Paint();     // 左轴刻度（右对齐）
@@ -406,7 +408,13 @@ public class ChartView extends View {
             return;   // 双轴都不可画：只留底色
         }
 
-        buildGrid(lAxis, rAxis);
+        if (lAxis != null) {
+            buildGrid(lAxis, rAxis);
+        } else {
+            // 左轴不可画（左轴系列全关或窗口内无有效值）但右轴可画：仍要建一套横线，
+            // 否则 gridY 为 null，onDraw 会连右轴曲线/圆点一起跳过（见 app/逻辑说明.md §7.3）。
+            buildRightOnlyGrid(rAxis);
+        }
         // 左右内边距要等刻度文字算好才能量（buildGrid 只依赖上下内边距，与它无关）
         applyAxisPads(w);
         if (fW <= 8f * density) {
@@ -656,6 +664,39 @@ public class ChartView extends View {
             }
             rightText[i] = String.valueOf(n);
         }
+    }
+
+    /**
+     * 只有右轴可画时的横线。<b>判据 = {@code lAxis == null}</b>：既覆盖「所有左轴系列都被关掉」，
+     * 也覆盖「左轴系列仍开着、但窗口内没有任何有效左轴值」（两者都定不出左轴）；
+     * 右轴系列有任一开启时 {@code rAxis} 必然非 null（无有效制冷数据也会退到配置上限），故本分支必可画。
+     *
+     * <p>网格与 Y 轴刻度<b>改按右轴（制冷档位）的量纲定</b>：把右轴值域
+     * [{@link ChartAxis#min}, {@link ChartAxis#max}] 等分 {@link #RIGHT_ONLY_GRID_SEGMENTS} 段，
+     * 右标签取该高度的制冷值四舍五入（值域过窄时相邻重复标签只显示第一条）；左轴无刻度、左轴标题不画。
+     * 左轴存在时仍走 {@link #buildGrid}，本方法不参与。
+     */
+    private void buildRightOnlyGrid(ChartAxis rAxis) {
+        int lines = RIGHT_ONLY_GRID_SEGMENTS + 1;
+        gridY = new float[lines];
+        gridText = new String[lines];
+        rightText = new String[lines];
+        float span = rAxis.max - rAxis.min;
+        String lastLabel = null;
+        for (int i = 0; i < lines; i++) {
+            float frac = 1f - i / (float) RIGHT_ONLY_GRID_SEGMENTS;   // 顶 → 底
+            float v = rAxis.min + span * frac;
+            gridY[i] = rAxis.y(v, fPadT, fH);
+            gridText[i] = "";   // 左轴无刻度：保留空串占位，onDraw 照常调用（空串不显示）
+            String label = String.valueOf(Math.round(v));
+            if (label.equals(lastLabel)) {
+                rightText[i] = "";   // 窄值域四舍五入会重复：只留首条，避免叠字
+            } else {
+                rightText[i] = label;
+                lastLabel = label;
+            }
+        }
+        titleLeft = null;   // 无左轴：不画左轴标题
     }
 
     /** 每条开启系列一条 Path；断联处 moveTo 断开、不连桥（口径见 app/逻辑说明.md §7.2〈断联空白〉）。 */
@@ -1182,7 +1223,10 @@ public class ChartView extends View {
             axisTextPaint.setTextAlign(Paint.Align.LEFT);
         }
         // 左轴标题左沿与左侧刻度数字的左沿平齐（数字是右对齐的，左沿按最宽那条算）
-        canvas.drawText(titleLeft, titleLeftX, fPadT - 7f * density, axisTextPaint);
+        // 无左轴时 titleLeft 为 null（buildRightOnlyGrid），此时不画
+        if (titleLeft != null) {
+            canvas.drawText(titleLeft, titleLeftX, fPadT - 7f * density, axisTextPaint);
+        }
 
         // 重算位置竖虚线：压在网格之上、曲线之下（与网格同宽同色，含透明度）
         if (dashXs != null && dashXs.length > 0) {

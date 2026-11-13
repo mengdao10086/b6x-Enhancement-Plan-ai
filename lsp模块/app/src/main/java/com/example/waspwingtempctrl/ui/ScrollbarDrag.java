@@ -51,6 +51,9 @@ public final class ScrollbarDrag {
             public boolean onTouch(View v, MotionEvent event) {
                 switch (event.getActionMasked()) {
                     case MotionEvent.ACTION_DOWN:
+                        // 已知边界（待真机，见审查报告 S2-4）：命中带压在子 View（如可点击的日志行）上时，
+                        // DOWN 会被子 View 消费、本监听收不到，实际可用宽度可能只剩容器的内边距。
+                        // 静态无法证伪，本轮不改事件分发方式。
                         if (event.getX() < v.getWidth() - hitWidth) {
                             return false;   // 不在滚动条窄带内：完全放行
                         }

@@ -30,8 +30,9 @@ C 守护程序（`tempctrl`）与 `service.d` 拉起脚本由 APK 内的部署�
 
 - 修复蓝牙连接bug，死循环吃满一个核心bug → [完整修复历程](参考资料/完整修复历程.md)
 - 广播控制接口（完整 7 参数散热器控制），协议详见 [lsp模块 README](lsp模块/README.md)
-- 状态文件（tempctrl_b6x.status / tempctrl_b7x.status）向 C 守护程序回传散热器参数
+- 状态文件（tempctrl_b6x.status / tempctrl_b7x.status）向 C 守护程序回传散热器参数——**只由已连接或曾连接过设备的主进程写**：同一宿主包同时有 B6X 老/新两个进程时，未连接方不会把连接方的 `BLE=1/2` 覆盖成 `BLE=0`（`:remote` 等子进程只记一条日志、不装钩子）
 - **原生配置界面（Material）**：部署状态 / 一键部署 / su 诊断 / 参数表单 / 实时曲线 / 日志，共三页签
+- **静态快捷方式**（`kill daemon` / 临时停止）：目标 Activity 必须 `exported`，故动作前先校验调用方（`getLaunchedFromPackage` / `getCallingPackage`；`getReferrer` 可伪造、不作信任依据），识别不到身份时**多一次确认框**；manifest 里的 `HOME` `<queries>` 只解决包可见性、**不是权限**
 
 ### C 智能温控守护程序
 

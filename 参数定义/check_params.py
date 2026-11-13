@@ -7,7 +7,8 @@
 
 断言（任一不过即非 0 退出）：
   A 产物可复现：重跑生成逻辑，与落盘的 4 个产物必须一致（比较按换行归一化） → 退出 1
-  B 产物自洽：59 键齐全、必需字段完整、min ≤ default/factory ≤ max、分组可解析 → 退出 1
+  B 产物自洽：键数 = EXPECTED_KEY_COUNT、必需字段完整、min ≤ default/factory ≤ max、
+    分组可解析 → 退出 1
   C 三源无漂移：与 profile.conf / 逻辑说明.md 参数表 / tempctrl.c 对账（含包名） → 退出 2
   D 产物形态自检：C 头括号配平、X 宏实参个数、tempctrl.c 格式串转换符 vs 实参、
     **层默认值表覆盖面**（PERF/SYSFS 每个守护进程取值位要么在表里、要么在显式白名单里；
@@ -426,7 +427,7 @@ LAYER_DEFAULT_TABLES = {"perf": "CFG_PERF_DEFAULTS", "sysfs": "CFG_SYSFS_DEFAULT
 
 # 不进默认值表、由专段代码显式复位的路径键。目前只有 LOG_FILE：它由
 # set_default_log_path() 按二进制名派生（私有目录不可用时兜底 /cache），
-# 照抄 CFG_DEFAULT_LOG_FILE 会绕过兜底。
+# 生成头因此不为它产出 CFG_DEFAULT_*（固化路径会绕过兜底）。
 DEFAULT_TABLE_EXEMPT = ("LOG_FILE",)
 
 

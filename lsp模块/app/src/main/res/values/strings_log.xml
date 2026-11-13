@@ -28,6 +28,9 @@
     <string name="log_failure_title">读取失败（下方为原始诊断）</string>
     <string name="log_empty_file_hint">提示：文件存在但为 0 字节 —— c-daemon 还没写过日志，或 LOG_MAX=0 关闭了日志。</string>
 
+    <!-- 单行超长截断提示（阈值见 LogTailReader.MAX_LINE_CHARS），不静默隐藏内容 -->
+    <string name="log_line_truncated">…（超长行，仅显示前 %1$d 字符）</string>
+
     <string name="log_action_follow_bottom">回到底部</string>
 
     <!-- 整行选择操作条（长按日志行后浮出） -->

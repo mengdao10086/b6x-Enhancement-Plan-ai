@@ -12,6 +12,7 @@ import android.view.View;
 import android.view.ViewGroup;
 import android.widget.ImageView;
 import android.widget.TextView;
+import android.widget.Toast;
 
 import androidx.annotation.NonNull;
 import androidx.annotation.Nullable;
@@ -81,6 +82,11 @@ public class StatusFragment extends Fragment implements SetupActivity.PageAware 
     private static final long HEIGHT_SYNC_MS = FADE_OUT_DELAY_MS + FADE_OUT_MS;
     /** 部署/拉起结果在状态区的最短保留时长：在此期间周期扫描不覆盖状态文本。 */
     private static final long RESULT_HOLD_MS = 10_000L;
+    /** 自动部署失败退避：首次 60 秒，逐次翻倍，上限 30 分钟（进程内；成功或 APK 变化时重置）。 */
+    private static final long AUTO_DEPLOY_BACKOFF_BASE_MS = 60_000L;
+    private static final long AUTO_DEPLOY_BACKOFF_MAX_MS = 30 * 60_000L;
+    /** 静默探测失败写操作记录的最小间隔：避免 5 秒周期把同一异常反复刷进记录。 */
+    private static final long SILENT_FAILURE_LOG_MIN_INTERVAL_MS = 60_000L;
     /** 部署状态文本的结论行前缀（须与 {@code Deployer.Status.summaryLine()} 保持一致）。 */
     private static final String DEPLOY_STATUS_PREFIX = "部署状态：";
     /** 动作期间按钮压暗后的透明度与渐变时长（压暗快、恢复稍慢）。 */
@@ -151,6 +157,15 @@ public class StatusFragment extends Fragment implements SetupActivity.PageAware 
     private volatile boolean deployPlaced;
     /** 后台任务里置位、主线程回调读取：本次部署整体是否失败（据此清掉一次性标记，允许下次自动重试）。 */
     private volatile boolean deployFailed;
+    /** 自动部署连续失败次数与退避截止时刻（进程级：视图/Activity 重建不重置，进程重启才清零）。 */
+    private static volatile int autoDeployFailures;
+    private static volatile long autoDeployBackoffUntilMs;
+    /** 上次自动部署失败所针对的 APK 内二进制 md5；变了即重置退避（装新包不必等满窗口）。 */
+    private static volatile String autoDeployFailedMd5 = "";
+    /** 最近一次探测到的 APK 内二进制 md5（供部署失败时给退避定位版本）。 */
+    private static volatile String lastProbeExpectedMd5 = "";
+    /** 上次静默探测失败写入操作记录的时刻（仅主线程读写）。 */
+    private long lastSilentFailureLogMs;
     /** 上次探测的开始时刻（手动与静默共用）；静默刷新据此节流。内存态，进程重启即失效。 */
     private long lastProbeAtMs;
     /** 部署/拉起结果上屏后的保留截止时刻（ms）：在此之前周期扫描不覆盖状态文本。 */
@@ -417,6 +432,7 @@ public class StatusFragment extends Fragment implements SetupActivity.PageAware 
         }
         if (actionRunning) {
             appendLog(getString(R.string.status_busy_other));
+            Toast.makeText(requireContext(), R.string.status_busy_other, Toast.LENGTH_SHORT).show();
             return;
         }
         appendLog(getString(R.string.status_busy_probe));
@@ -618,11 +634,12 @@ public class StatusFragment extends Fragment implements SetupActivity.PageAware 
         }
         if (failed) {
             restoreDeployFirstLineIfNeeded();
-            showDismissOnOutside(new AlertDialog.Builder(requireContext())
-                    .setTitle(R.string.status_dialog_failed)
-                    .setMessage(result)
-                    .setPositiveButton(R.string.status_dialog_close, null)
-                    .create());
+            // 静默/周期探测失败不弹窗（否则每 5 秒叠一个）；限频写操作记录，状态区保持上次成功结果
+            final long now = System.currentTimeMillis();
+            if (now - lastSilentFailureLogMs >= SILENT_FAILURE_LOG_MIN_INTERVAL_MS) {
+                lastSilentFailureLogMs = now;
+                appendLog(result);
+            }
             return;
         }
         if (System.currentTimeMillis() < statusHoldUntilMs) {
@@ -675,12 +692,14 @@ public class StatusFragment extends Fragment implements SetupActivity.PageAware 
     private String probeAndAutoFixScript(Context app, boolean allowAutoFix) {
         final Deployer deployer = Deployer.get(app);
         Deployer.Status status = deployer.probe();
+        lastProbeExpectedMd5 = status.binExpectedMd5;
         final String head;
         // su 不可用时不尝试（否则每次进页面都白撞一次授权框）
         if (allowAutoFix && status.suOk && status.scriptPresent && !status.scriptHashOk) {
             // 三选一，判据取自紧随其后的那次 probe（更晚、更权威，且不额外增加 su 往返）——见 app/逻辑说明.md §8.1
             Deployer.Result r = deployer.updateScript();
             status = deployer.probe();
+            lastProbeExpectedMd5 = status.binExpectedMd5;
             int res;
             if (!r.ok) {
                 res = R.string.status_script_autofix_failed;
@@ -731,41 +750,89 @@ public class StatusFragment extends Fragment implements SetupActivity.PageAware 
     }
 
     /**
-     * 部署：直接上屏 {@link Deployer#deploy()} 自己带回的状态（不再补一次 probe），随后按
-     * {@link Deployer.Result#placementsOk} 决定要不要自动「点」一次拉起daemon；部署失败时清掉一次性去重标记。
-     * 开始即把忙态文案写进状态区（避免只有进度条、看起来像卡住），结束未出结果时恢复原文本。
-     * 判据与理由见 {@code app/逻辑说明.md} §8.1 与 §2.2。
-     */
-    /**
-     * 部署（手动与自动更新同一套状态文案）：当前文本以「部署状态：」开头时，只把结论行换成
-     * 「部署状态：部署中…」，其余行不动、行数不变，状态卡不会收起；不是部署状态文本时不替换。
-     * 失败时恢复被替换的结论行（成功时由结果整段覆盖）。
+     * 手动「一键部署」入口：与自动更新共用 {@link #runDeploy(boolean)}，不另写一份状态机。
      */
     private void deploy() {
+        runDeploy(false);
+    }
+
+    /**
+     * 部署的唯一实现：手动按钮与自动更新走同一条动作链——同一个 {@code runAsyncBlocking→runAsync}
+     * 回调、同一组 {@code deployPlaced/deployFailed/actionGeneration/statusHoldUntilMs} 字段；
+     * 部署成功后的拉起仍调用手动按钮的同一个 {@link #startDaemon()}，不复制其代码。
+     * 自动路径只在成功回调里补一条「已自动重新部署」，失败不再提前写永久归档。
+     * 开始即把忙态文案写进操作记录；当前文本是部署状态时只换结论行（行数不变）。
+     */
+    private void runDeploy(final boolean auto) {
+        if (auto && System.currentTimeMillis() < autoDeployBackoffUntilMs) {
+            return;   // 退避期内（含并发扫描刚武装的）不自动部署
+        }
         daemonStoppedByUser = false;   // 部署结束会接着拉起（见本方法的 after 回调）
         final Context app = requireContext().getApplicationContext();
         final String busyText = getString(R.string.status_busy_deploy);
+        // 上一次的结论不得残留：任务在赋值前抛异常时，失败分支会误判为成功
+        deployPlaced = false;
+        deployFailed = false;
         // 已有动作在跑时 runAsync 会直接返回（只写一条操作记录），此时不能换占位文案，否则会永久残留
         if (!actionRunning) {
             replaceDeployFirstLine(R.string.status_deploy_busy);
         }
         runAsyncBlocking(busyText, () -> {
-            Deployer.Result result = Deployer.get(app).deploy();
-            deployPlaced = result.placementsOk;
-            deployFailed = !result.ok;
-            return result.status != null ? result.status.describe() : result.describe();
+            try {
+                Deployer.Result result = Deployer.get(app).deploy();
+                deployPlaced = result.placementsOk;
+                deployFailed = !result.ok;
+                return result.status != null ? result.status.describe() : result.describe();
+            } catch (Throwable t) {
+                deployPlaced = false;
+                deployFailed = true;
+                if (t instanceof Exception) {
+                    throw (Exception) t;
+                }
+                if (t instanceof Error) {
+                    throw (Error) t;
+                }
+                throw new RuntimeException(t);
+            }
         }, false, true, () -> {
-            // 失败走对话框、不写状态区：结论行此时仍是占位（或还在等选中结束），恢复部署前的首行
             if (deployFailed) {
+                // 失败恢复被替换的结论行；清一次性标记，允许下一轮重新判定
                 restoreDeployFirstLineIfNeeded();
                 clearPromptMark();
+                if (Deployer.isAutoUpdateEnabled(app)) {
+                    noteAutoDeployFailure();   // 手动失败也要退避，否则下一拍自动更新会立即重跑
+                }
             } else {
                 clearDeployFirstLineBackup();   // 结果已整段覆盖，备份作废
+                resetAutoDeployBackoff();
+                if (auto) {
+                    // 成功后才写这条永久归档；失败不再留下「已重新部署」
+                    appendLog(getString(R.string.status_auto_deploy_log));
+                }
             }
             if (deployPlaced) {
-                startDaemon();
+                startDaemon();   // 手动按钮的同一条路径（同一方法）
             }
         }, RESULT_HOLD_MS);
+    }
+
+    /** 记一次自动部署失败并设置指数退避：60s、120s、240s…上限 30 分钟。 */
+    private void noteAutoDeployFailure() {
+        final int failures = Math.min(autoDeployFailures + 1, 8);
+        autoDeployFailures = failures;
+        if (!lastProbeExpectedMd5.isEmpty()) {
+            autoDeployFailedMd5 = lastProbeExpectedMd5;
+        }
+        final long delay = AUTO_DEPLOY_BACKOFF_BASE_MS << Math.min(failures - 1, 5);
+        autoDeployBackoffUntilMs = System.currentTimeMillis()
+                + Math.min(delay, AUTO_DEPLOY_BACKOFF_MAX_MS);
+    }
+
+    /** 成功部署（自动或手动）、检测到 APK md5 变化或进程重启时清空退避。 */
+    private void resetAutoDeployBackoff() {
+        autoDeployFailures = 0;
+        autoDeployBackoffUntilMs = 0L;
+        autoDeployFailedMd5 = "";
     }
 
     /**
@@ -907,6 +974,10 @@ public class StatusFragment extends Fragment implements SetupActivity.PageAware 
         if (actionRunning) {
             if (manual) {
                 appendLog(getString(R.string.status_busy_other));
+                Context context = getContext();
+                if (context != null) {
+                    Toast.makeText(context, R.string.status_busy_other, Toast.LENGTH_SHORT).show();
+                }
             }
             return;
         }
@@ -944,9 +1015,17 @@ public class StatusFragment extends Fragment implements SetupActivity.PageAware 
                 return;
             }
             activity.runOnUiThread(() -> {
+                if (generation != actionGeneration) {
+                    // 期间已起了新动作：旧结果与 after 整段丢弃，绝不覆盖新动作的状态
+                    return;
+                }
                 if (!isAdded() || statusView == null) {
-                    // 视图已没了：至少把占用位放开（进度条随视图一起消失，由 onDestroyView 收尾）
+                    // 视图暂时不在：放开占用位；若动作未被新动作取代，after 仍要跑
+                    // （部署后的拉起不能因为一次视图重建而丢）
                     finishAction(generation);
+                    if (after != null && isAdded()) {
+                        after.run();
+                    }
                     return;
                 }
                 // 结果已回到主线程：本动作到此结束，先放掉占用——紧接着要接的那一段（after）
@@ -1021,10 +1100,9 @@ public class StatusFragment extends Fragment implements SetupActivity.PageAware 
             showDeployPrompt();
         } else if (autoDeployPending) {
             autoDeployPending = false;
-            // 「自动更新」开着且设备上的内容旧了：不弹窗，直接重装（写进操作记录，
-            // 让用户能看出"刚才自动做了什么"）。deploy() 结束会自己接着拉起守护进程。
-            appendLog(getString(R.string.status_auto_deploy_log));
-            deploy();   // 自动更新与手动同一套：只换结论行
+            // 「自动更新」开着且设备上的内容旧了：不弹窗，走与手动部署完全相同的动作链；
+            // 成功日志由 runDeploy 的成功回调补写，失败则进入退避。
+            runDeploy(true);
         } else if (pendingPrompt != PROMPT_NONE) {
             final int kind = pendingPrompt;
             pendingPrompt = PROMPT_NONE;
@@ -1072,13 +1150,24 @@ public class StatusFragment extends Fragment implements SetupActivity.PageAware 
         } else {
             return;
         }
+        final boolean auto = kind == PROMPT_HASH_MISMATCH && Deployer.isAutoUpdateEnabled(app);
+        if (auto) {
+            // 装新 APK 后 md5 变了必须立即重置，不能等满上一版的退避窗口
+            if (!autoDeployFailedMd5.isEmpty()
+                    && !status.binExpectedMd5.equals(autoDeployFailedMd5)) {
+                resetAutoDeployBackoff();
+            }
+            if (System.currentTimeMillis() < autoDeployBackoffUntilMs) {
+                return;   // 退避期内不武装、不写去重标记，下一拍自然跳过
+            }
+        }
         final SharedPreferences prefs =
                 app.getSharedPreferences(Deployer.PREFS_ROOT_PROBE, Context.MODE_PRIVATE);
         if (mark.equals(prefs.getString(Deployer.KEY_HASH_PROMPTED_MD5, null))) {
             return;
         }
         prefs.edit().putString(Deployer.KEY_HASH_PROMPTED_MD5, mark).apply();
-        if (kind == PROMPT_HASH_MISMATCH && Deployer.isAutoUpdateEnabled(app)) {
+        if (auto) {
             autoDeployPending = true;
             return;
         }

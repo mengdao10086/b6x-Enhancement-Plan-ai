@@ -339,6 +339,12 @@ public class ChartFragment extends Fragment {
             buildWindowButtons(cfg.windowOptions, windowSec);
         }
         if (snap.unchanged) {
+            if (configChanged) {
+                // 口径变了而数据文件没变：窗口切片（断联阈值/封顶/档位）必须按新口径重算；
+                // 并作废文件指纹，下一拍强制按新口径重读/重解析（解析结果本身不在这里）
+                lastFingerprint = null;
+                rebuildWindow();
+            }
             // 内容没变也要补发一次信息：宿主（配置页）可能是刚接上的，或者刚重建过
             updateInfoText();
             return;

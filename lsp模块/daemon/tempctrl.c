@@ -422,7 +422,8 @@ static time_t last_arbitrate = 0;       // 上次 app 存活仲裁时间（ARBIT
 static int app_launch_cooldown = 60;    // APP_LAUNCH_TIMING 第 1 值：两次拉起最小间隔（秒，默认 60）
 // 旧键兼容（永久读）：APP_LAUNCH_COOLDOWN / APP_WATCHDOG → APP_LAUNCH_TIMING 两槽。
 // 新键出现时新键优先；旧键仅在新键缺失时按槽覆盖。首次读到旧键一次性迁移写回，失败保留原文件。
-static int launch_timing_seen = 0;       // 本轮读到新键 APP_LAUNCH_TIMING
+static int launch_timing_seen_cooldown = 0;  // 本轮新键 APP_LAUNCH_TIMING 给出了第 1 槽（拉起冷却）
+static int launch_timing_seen_watchdog = 0;  // 本轮新键给出了第 2 槽（停滞重启）；按槽记录，单值行不得吞掉旧键的另槽
 static int legacy_launch_seen = 0;       // 本轮读到任一旧键
 static int legacy_launch_cooldown = -1;  // 旧键暂存（-1=未出现）
 static int legacy_launch_watchdog = -1;
@@ -536,6 +537,7 @@ static int last_wind_level = -1;
 // 前向声明（配置函数位于 write_log/clamp 之前）
 static void write_log(const char *fmt, ...);
 static inline int clamp(int val, int lo, int hi);
+static time_t mono_now(void);   // 单调秒：早于定义处的节拍/超时函数使用
 static void alarm_handler(int sig);
 static int compute_fan_target(void);
 static void set_default_log_path(void);   // 层开关复位用（定义在 write_log 之后）
@@ -1026,11 +1028,11 @@ static int config_apply_prepass_key(struct PrepassCfg *out, const char *key, con
         int n = sscanf(val_str, "%d %d", &cooldown, &cycles);
         if (n >= 1) {
             app_launch_cooldown = clamp(cooldown, 0, 3600);
-            launch_timing_seen = 1;
+            launch_timing_seen_cooldown = 1;
         }
         if (n >= 2) {
             app_watchdog_cycles = clamp(cycles, 0, 120);
-            launch_timing_seen = 1;
+            launch_timing_seen_watchdog = 1;
         }
     } else if (strcmp(key, "APP_LAUNCH_SCREEN_GATE") == 0) {
         // 屏幕门禁（二值：开关 Dozing是否算亮屏）；仅 mWakefulness=Awake（或按配置算亮屏的 Dozing）才拉起
@@ -1085,7 +1087,8 @@ static int load_config(const char *path) {
     char line[640];
     struct PrepassCfg pre = {1, 0, 0};   // 见 config_apply_prepass_key
     struct RescanCfgState rescan = {0};
-    launch_timing_seen = 0;
+    launch_timing_seen_cooldown = 0;
+    launch_timing_seen_watchdog = 0;
     legacy_launch_seen = 0;
     legacy_launch_cooldown = -1;
     legacy_launch_watchdog = -1;
@@ -1099,11 +1102,12 @@ static int load_config(const char *path) {
         config_apply_prepass_key(&pre, key, val_str);   // 名单与第二遍跳过共用同一函数
     }
 
-    // 旧键兼容（永久）：新键未出现时，旧两键按槽覆盖；新键出现则以新键为准。
-    if (!launch_timing_seen) {
-        if (legacy_launch_cooldown >= 0) app_launch_cooldown = legacy_launch_cooldown;
-        if (legacy_launch_watchdog >= 0) app_watchdog_cycles = legacy_launch_watchdog;
-    }
+    // 旧键兼容（永久）：按槽合并——新键写出的槽优先，新键未写的槽才由同槽旧键覆盖。
+    // 例：APP_LAUNCH_TIMING=60（单值）+ 旧 APP_WATCHDOG=10 → 冷却=60、停滞重启=10。
+    if (!launch_timing_seen_cooldown && legacy_launch_cooldown >= 0)
+        app_launch_cooldown = legacy_launch_cooldown;
+    if (!launch_timing_seen_watchdog && legacy_launch_watchdog >= 0)
+        app_watchdog_cycles = legacy_launch_watchdog;
 
     // 旧两键一次性迁移写回：合并为 APP_LAUNCH_TIMING 一行并删除旧行。
     // 失败保留原文件（上面的读兼容已把旧值装入内存，行为不丢），且不再重试避免刷日志。
@@ -1750,7 +1754,7 @@ static void apply_cpu_affinity(void) {
  */
 static int cpu_affinity_reassert(void) {
     static time_t last = 0;
-    time_t now = time(NULL);
+    time_t now = mono_now();   // 重申间隔用单调时钟
     if (last == 0) { last = now; return 0; }        // 首次只记时刻：启动那次已由 main() 应用过
     if (now - last < CPU_AFF_REASSERT_SEC) return 0;
     last = now;
@@ -1837,7 +1841,7 @@ static int detect_config_path(void) {
  */
 static int config_retry_if_needed(void) {
     if (config_loaded) return 0;                 // 已加载：交回调用方原有的 mtime 热重载路径
-    time_t now = time(NULL);
+    time_t now = mono_now();                     // 重试间隔用单调时钟（墙钟回拨不影响）
     if (config_retry_at != 0 && now - config_retry_at < CONFIG_RETRY_INTERVAL) return 0;
     config_retry_at = now;
     // --config 显式指定过路径就沿用原路径重试，不去改换落点。
@@ -2096,6 +2100,11 @@ static void update_active_limits(void) {
         active_fan_max  = fan_rpm_max;        // 使用 profile.conf 中的配置值
         active_pid_cold_max = pid_cold_max;   // 使用 profile.conf 中的配置值
     }
+    // 基准上限变了（切设备 / 改配置）：旧的「相对削减量」及其冷却一并清零。
+    // 否则旧基线（如 B7X 上 actual_cold>190）会算出负的 hot_derate，使生效上限反向高于配置（审查 S2-4）。
+    hot_derate = 0;
+    hot_derate_cooldown = 0;
+    hot_recover_cooldown = 0;
 }
 
 // active status 文件的 mtime 缓存：read_cooler_params 每次成功打开时刷新（打开失败清 0），
@@ -2329,7 +2338,7 @@ static int cmp_zone_desc(const void *a, const void *b) {
  * 全量扫描 ~100 个 zone 阻塞近 1s，故周期重扫放 5s 控制块（见 逻辑说明.md「注意事项」）。
  */
 static void rescan_cpu_zones(void) {
-    time_t now = time(NULL);
+    time_t now = mono_now();   // 重扫间隔用单调时钟
     ZoneReading readings[CPU_ZONE_MAX_CACHE];
     int count = 0;
 
@@ -2387,7 +2396,7 @@ static void maybe_rescan_cpu_zones(void) {
         return;
     }
     if (!cpu_zone_scanned) return;   // 首次扫描由 read_cpu_temp_max 同步完成
-    time_t now = time(NULL);
+    time_t now = mono_now();
     if (now - cpu_zone_last_scan < (time_t)cpu_zone_rescan_cycles * 5) return;
     rescan_cpu_zones();
 }
@@ -2447,12 +2456,17 @@ static void update_hot_derate(void) {
             if (reduction > 0) {   // 刚过阈值整数截断为 0 时跳过，不触发冷却
                 int before = eff_cold_max(active_pid_cold_max, pid_cold_min);
                 if (hot_derate == 0) {
-                    // 首次削减：就地把上限压到「当前实际制冷值 − 削减量」（未就绪时按配置上限算）
+                    // 首次削减：就地把上限压到「当前实际制冷值 − 削减量」（未就绪时按配置上限算）。
+                    // cold_now 必须先钳进 [COLD_MIN, active_pid_cold_max]：跨设备时实际值可能高于
+                    // 当前上限（B7X 实际 255 → 切到 B6X 上限 194），否则 hot_derate 为负、上限反向抬高。
                     int cold_now = (actual_cold >= COLD_MIN) ? actual_cold : active_pid_cold_max;
+                    if (cold_now > active_pid_cold_max) cold_now = active_pid_cold_max;
+                    if (cold_now < COLD_MIN) cold_now = COLD_MIN;
                     hot_derate = active_pid_cold_max - cold_now + reduction;
                 } else {
                     hot_derate += reduction;   // 再次触发：在当前生效上限上累减
                 }
+                if (hot_derate < 0) hot_derate = 0;   // 兜底：削减量恒 ≥0
                 hot_derate_cooldown = HOT_DERATE_COOLDOWN;
                 write_log("热端过温 %d.%d°C 削减制冷上限 %d→%d（削减量 %d）",
                           cooler_hot_temp / 10, cooler_hot_temp % 10,
@@ -2504,6 +2518,18 @@ static long long mono_ms(void) {
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);
     return (long long)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
+}
+
+/**
+ * 单调秒时钟（CLOCK_MONOTONIC）：节拍、冷却、超时的统一时基。
+ * 墙钟被 NTP 校正/手动改时间回拨时不会倒退；但**不含设备休眠时间**（休眠期间主循环也不跑），
+ * 故跨休眠后各冷却按「实际运行时长」继续，而不是按自然时间。墙钟语义的场合
+ * （日志时间戳、曲线 epoch 列、status/config mtime、开蓝牙 token、看门狗持久化时间戳）仍用 time()。
+ */
+static time_t mono_now(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return ts.tv_sec;
 }
 
 /**
@@ -2579,7 +2605,7 @@ static int    am_pending_n = 0;
 
 /** 回收已结束的 am 子进程；未退出的超过 3 秒强杀，日志口径与原同步等待一致。 */
 static void reap_am_children(void) {
-    time_t now = time(NULL);
+    time_t now = mono_now();   // 3 秒回收界限用单调时钟
     for (int i = 0; i < am_pending_n; ) {
         int status = 0;
         pid_t r = waitpid(am_pending_pid[i], &status, WNOHANG);
@@ -2652,7 +2678,7 @@ static void send_am_broadcast(int mode, int target, int windOC, int coldOC, int 
         am_pending_at[0]  = am_pending_at[am_pending_n];
     }
     am_pending_pid[am_pending_n] = pid;
-    am_pending_at[am_pending_n]  = time(NULL);
+    am_pending_at[am_pending_n]  = mono_now();
     am_pending_n++;
     debug_log(debug_exec, "am broadcast 已派发 mode=%d target=%d windOC=%d coldOC=%d windLevel=%d",
               mode, target, windOC, coldOC, windLevel);
@@ -2817,14 +2843,19 @@ static int should_skip_dispatch(int mode, int target, int windOC, int cold, int 
 
 // ======================== App 进程 + 心跳检测 ========================
 
+// status mtime 的「变化观测」：mtime 是墙钟值，不能直接和单调时钟相减；
+// 改为记录「何时（单调）第一次看到这个 mtime」，用单调时长度量它有多久没变。
+static time_t status_mtime_seen = 0;   // 上次观察到的 status mtime
+static time_t status_fresh_at   = 0;   // 观察到该 mtime 的单调时刻
+
 /**
- * 检测 App 是否存活：状态文件 mtime 不超过 STATUS_TIMEOUT 秒
- * LSP 每 1 秒写一次 status 文件，mtime 超时即判进程死
+ * 检测 App 是否存活：状态文件 mtime 在 STATUS_TIMEOUT 秒内发生过变化。
+ * LSP 每 1 秒写一次 status 文件，mtime 持续不变超过阈值即判进程死。
+ * 用「mtime 变化 + 单调时钟计时」而非 time(NULL)−mtime：墙钟回拨时后者为负、会恒判存活。
  */
 static int is_app_alive(void) {
     // 复用本拍 read_cooler_params 打开 active 状态文件时读到的 mtime（两个调用点都在同一拍紧随其后，
-    // 陈旧度上界 = 一条主循环语句之间）。未读到（打开失败 / 尚未调用）则自行 stat。判定口径
-    //（now − mtime ≤ STATUS_TIMEOUT）与单位不变。
+    // 陈旧度上界 = 一条主循环语句之间）。未读到（打开失败 / 尚未调用）则自行 stat。
     time_t mt = active_status_mtime;
     if (mt == 0) {
         const char *path = (active_device == DEVICE_B7X) ? status_file_path_b7 : status_file_path_b6;
@@ -2832,7 +2863,13 @@ static int is_app_alive(void) {
         if (stat(path, &st) != 0) return 0;
         mt = st.st_mtime;
     }
-    return (time(NULL) - mt <= STATUS_TIMEOUT);
+    time_t now = mono_now();
+    if (mt != status_mtime_seen) {   // 本拍观察到的 mtime 与上次不同 = 刚写过
+        status_mtime_seen = mt;
+        status_fresh_at   = now;
+        return 1;
+    }
+    return (now - status_fresh_at <= STATUS_TIMEOUT);
 }
 
 // ======================== 双 app 存活仲裁 ========================
@@ -3261,7 +3298,7 @@ static void launch_last_app(int pkg_known_dead) {
         debug_log(debug_launch, "临时停止 生效，跳过自动拉起");
         return;
     }
-    time_t now = time(NULL);
+    time_t now = mono_now();   // 拉起/探测节流全用单调时钟（墙钟回拨不会把冷却拉长）
     if (now - last_launch_attempt < app_launch_cooldown) return;   // 冷却节流（仅在真正 am start 前记录尝试）
     if (!APP_LAUNCH_ENABLED) {
         debug_log(debug_launch, "自动拉起 开关关闭，跳过");
@@ -3363,7 +3400,7 @@ static void watchdog_check(void) {
         watchdog_last_cmd  = last_cold;
         return;
     }
-    time_t now = time(NULL);
+    time_t now = mono_now();   // kill 冷却用单调时钟
 
     // 首次锚定：记录上周期实际 + 上周期下发基准，不计数
     if (watchdog_last_cold < 0 || watchdog_last_cmd < 0) {
@@ -3411,7 +3448,7 @@ static void deadlink_check(void) {
     int dead = (cooler_cold_real == 0 && cooler_rpm_real == 0
                 && cooler_hot_temp <= 0 && cooler_cold_temp <= 0);
     if (!dead)                               { deadlink_cycles = 0; return; }
-    time_t now = time(NULL);
+    time_t now = mono_now();   // 与锁死重启共用同一单调时基
     if (watchdog_last_kill_at > 0 && now - watchdog_last_kill_at < 300) {
         deadlink_cycles = 0;   // 与锁死重启共用 5 分钟冷却，防风暴
         return;
@@ -3772,19 +3809,85 @@ static int write_boot_marker(const char *boot_id) {
 }
 
 /**
+ * 取配置写回的跨进程锁（fcntl 记录锁，锁整个独立锁文件 <path>.lock）。
+ * 与 app 侧 ConfigStore 的 FileChannel.lock() 是同一套 fcntl 锁——不要换成 flock()：
+ * Linux 上 flock 与 fcntl 记录锁互不可见，混用等于没锁。锁文件必须独立于配置文件：
+ * 提交走 rename 会换掉 profile.conf 的 inode，锁配置本身挡不住后来打开新 inode 的写者。
+ * 拿到后覆盖「读 → 写 tmp → rename」整个区间；失败不写（返回 -1，调用方记日志/跳过）。
+ * 用 F_SETLK 轮询而非 F_SETLKW：后者无超时，锁被对端长时间持有时会拖住 5s 控制节拍。
+ * @return 锁 fd（>=0）；-1=打不开锁文件 / 加锁出错 / 等锁超时
+ */
+#define CONFIG_LOCK_TIMEOUT_MS 2000
+#define CONFIG_LOCK_POLL_US    50000
+
+static int config_write_lock(const char *path) {
+    char lock_path[576];
+    int n = snprintf(lock_path, sizeof(lock_path), "%s.lock", path);
+    if (n < 0 || n >= (int)sizeof(lock_path)) return -1;
+    int fd = open(lock_path, O_RDWR | O_CREAT | O_CLOEXEC, 0600);
+    if (fd < 0) {
+        write_log("配置写回 打不开锁文件 %s（errno=%d），本次不写", lock_path, errno);
+        return -1;
+    }
+    // 锁文件由 root 首次创建时 app 打不开：属主/权限对齐配置文件（app uid 的 profile.conf）
+    struct stat cst;
+    if (stat(path, &cst) == 0) {
+        fchown(fd, cst.st_uid, cst.st_gid);
+        fchmod(fd, 0600);
+    }
+    struct flock fl;
+    memset(&fl, 0, sizeof(fl));
+    fl.l_type   = F_WRLCK;
+    fl.l_whence = SEEK_SET;
+    fl.l_start  = 0;
+    fl.l_len    = 0;                 // 0 = 到文件末尾（整文件）
+    int waited_ms = 0;
+    for (;;) {
+        if (fcntl(fd, F_SETLK, &fl) == 0) return fd;
+        if (errno != EACCES && errno != EAGAIN) {
+            write_log("配置写回 加锁失败（%s errno=%d），本次不写", lock_path, errno);
+            close(fd);
+            return -1;
+        }
+        if (waited_ms >= CONFIG_LOCK_TIMEOUT_MS) {
+            write_log("配置写回 等锁超时（%dms，%s），本次不写", CONFIG_LOCK_TIMEOUT_MS, lock_path);
+            close(fd);
+            return -1;
+        }
+        usleep(CONFIG_LOCK_POLL_US);
+        waited_ms += CONFIG_LOCK_POLL_US / 1000;
+    }
+}
+
+/** 释放配置写回锁（显式 F_UNLCK 后 close；close 本身也会释放该进程在此文件上的锁）。 */
+static void config_write_unlock(int fd) {
+    if (fd < 0) return;
+    struct flock fl;
+    memset(&fl, 0, sizeof(fl));
+    fl.l_type   = F_UNLCK;
+    fl.l_whence = SEEK_SET;
+    fl.l_start  = 0;
+    fl.l_len    = 0;
+    fcntl(fd, F_SETLK, &fl);
+    close(fd);
+}
+
+/**
  * 把配置文件里的 UI_TEMP_STOP 值写回 0（只改该行值，保留行首空白与行内注释）。
  * 复用 commit_config_rewrite 的原子替换与属主/权限对齐。返回 1=已改写。
  */
 static int writeback_temp_stop_disabled(const char *path) {
+    int lock_fd = config_write_lock(path);
+    if (lock_fd < 0) return 0;
     FILE *f = fopen(path, "r");
-    if (!f) return 0;
+    if (!f) { config_write_unlock(lock_fd); return 0; }
     struct stat st;
-    if (stat(path, &st) != 0) { fclose(f); return 0; }
+    if (stat(path, &st) != 0) { fclose(f); config_write_unlock(lock_fd); return 0; }
 
     char tmp[300];
     snprintf(tmp, sizeof(tmp), "%s.tmpstop", path);
     FILE *g = fopen(tmp, "w");
-    if (!g) { fclose(f); return 0; }
+    if (!g) { fclose(f); config_write_unlock(lock_fd); return 0; }
 
     static const char KEY[] = "UI_TEMP_STOP";
     const size_t KEY_LEN = sizeof(KEY) - 1;
@@ -3810,8 +3913,10 @@ static int writeback_temp_stop_disabled(const char *path) {
         fputs(line, g);
     }
     fclose(f);
-    if (!changed) { fclose(g); remove(tmp); return 0; }
-    return commit_config_rewrite(path, tmp, g, &st, "临时停止失效写回");
+    if (!changed) { fclose(g); remove(tmp); config_write_unlock(lock_fd); return 0; }
+    int ok = commit_config_rewrite(path, tmp, g, &st, "临时停止失效写回");
+    config_write_unlock(lock_fd);
+    return ok;
 }
 
 /**
@@ -3898,15 +4003,17 @@ static int temp_stop_active(void) {
  *   读兼容路径已生效，行为不丢）。幂等：迁移后文件无旧键，重跑不再触发。
  */
 static int migrate_pid_cut_config(const char *path) {
+    int lock_fd = config_write_lock(path);   // 跨进程写锁：覆盖读→写 tmp→rename
+    if (lock_fd < 0) return 0;
     FILE *f = fopen(path, "r");
-    if (!f) return 0;
+    if (!f) { config_write_unlock(lock_fd); return 0; }
     struct stat st;
-    if (stat(path, &st) != 0) { fclose(f); return 0; }
+    if (stat(path, &st) != 0) { fclose(f); config_write_unlock(lock_fd); return 0; }
 
     char tmp[300];
     snprintf(tmp, sizeof(tmp), "%s.mig", path);
     FILE *g = fopen(tmp, "w");
-    if (!g) { fclose(f); return 0; }
+    if (!g) { fclose(f); config_write_unlock(lock_fd); return 0; }
 
     // 预扫：先记录文件里已存在的 PID_CUT_<n> 簇号；迁移时对「已有新键的同簇旧行」丢弃，避免写出重复行
     int new_seen[KI_CUT_MAX_CLUSTERS] = {0};
@@ -3981,9 +4088,13 @@ static int migrate_pid_cut_config(const char *path) {
     }
     fclose(f);
 
-    if (!changed) { fclose(g); remove(tmp); return 0; }
-    if (!commit_config_rewrite(path, tmp, g, &st, "旧键迁移")) return 0;
+    if (!changed) { fclose(g); remove(tmp); config_write_unlock(lock_fd); return 0; }
+    if (!commit_config_rewrite(path, tmp, g, &st, "旧键迁移")) {
+        config_write_unlock(lock_fd);
+        return 0;
+    }
     write_log("配置 旧键 KI_CUT_* 已迁移为 PID_CUT_*（并清除已废弃的 KI_CUT_SMOOTH）");
+    config_write_unlock(lock_fd);
     return 1;
 }
 
@@ -3993,15 +4104,17 @@ static int migrate_pid_cut_config(const char *path) {
  * 原子性/属主处理与旧键迁移一致；失败保留原文件，内存中的迁移值仍生效。
  */
 static int migrate_rescan_unit_config(const char *path, int cycles) {
+    int lock_fd = config_write_lock(path);   // 跨进程写锁：覆盖读→写 tmp→rename
+    if (lock_fd < 0) return 0;
     FILE *f = fopen(path, "r");
-    if (!f) return 0;
+    if (!f) { config_write_unlock(lock_fd); return 0; }
     struct stat st;
-    if (stat(path, &st) != 0) { fclose(f); return 0; }
+    if (stat(path, &st) != 0) { fclose(f); config_write_unlock(lock_fd); return 0; }
 
     char tmp[300];
     snprintf(tmp, sizeof(tmp), "%s.mig", path);
     FILE *g = fopen(tmp, "w");
-    if (!g) { fclose(f); return 0; }
+    if (!g) { fclose(f); config_write_unlock(lock_fd); return 0; }
 
     int changed = 0;
     int has_marker = 0;
@@ -4037,32 +4150,40 @@ static int migrate_rescan_unit_config(const char *path, int cycles) {
     }
     fclose(f);
 
-    if (!changed) { fclose(g); remove(tmp); return 0; }
+    if (!changed) { fclose(g); remove(tmp); config_write_unlock(lock_fd); return 0; }
     if (!has_marker) fputs("\n# cfg-unit: CPU_ZONE_RESCAN=cycles\n", g);
-    if (!commit_config_rewrite(path, tmp, g, &st, "CPU_ZONE_RESCAN 单位迁移")) return 0;
+    if (!commit_config_rewrite(path, tmp, g, &st, "CPU_ZONE_RESCAN 单位迁移")) {
+        config_write_unlock(lock_fd);
+        return 0;
+    }
     write_log("配置 CPU_ZONE_RESCAN 旧值 %d 秒 → 已写回为 %d 个控制周期并追加单位标记",
               migrated_from_sec, cycles);
+    config_write_unlock(lock_fd);
     return 1;
 }
 
 /**
  * 旧两键 APP_LAUNCH_COOLDOWN（秒）/ APP_WATCHDOG（周期数）→ APP_LAUNCH_TIMING 的一次性写回：
- *   合并为一行「拉起冷却 停滞重启」，并删除旧行；文件已有新键时只删旧行（新键优先，不重复写出）。
+ *   合并为一行「拉起冷却 停滞重启」，并删除旧行；文件已有完整新键（两值）时只删旧行。
+ *   新键是单值行时保留其第 1 槽、用合并后的有效值补齐第 2 槽（否则旧 APP_WATCHDOG 被删且值丢失）。
  * 原子性/属主对齐与旧键迁移一致；失败保留原文件（读兼容已生效，行为不丢）。幂等：迁移后无旧键。
  */
 static int migrate_launch_timing_config(const char *path, int cooldown, int watchdog) {
+    int lock_fd = config_write_lock(path);   // 跨进程写锁：覆盖读→写 tmp→rename
+    if (lock_fd < 0) return 0;
     FILE *f = fopen(path, "r");
-    if (!f) return 0;
+    if (!f) { config_write_unlock(lock_fd); return 0; }
     struct stat st;
-    if (stat(path, &st) != 0) { fclose(f); return 0; }
+    if (stat(path, &st) != 0) { fclose(f); config_write_unlock(lock_fd); return 0; }
 
     char tmp[300];
     snprintf(tmp, sizeof(tmp), "%s.mig", path);
     FILE *g = fopen(tmp, "w");
-    if (!g) { fclose(f); return 0; }
+    if (!g) { fclose(f); config_write_unlock(lock_fd); return 0; }
 
-    // 预扫：新键已存在时只删旧行，避免写出重复行
+    // 预扫：新键已存在时按其值数量决定「只删旧行」还是「补齐第 2 槽」
     int has_new = 0;
+    int new_has_watchdog = 0;   // 新键行已带第 2 槽（两值）
     {
         char l2[640];
         while (fgets(l2, sizeof(l2), f)) {
@@ -4071,13 +4192,17 @@ static int migrate_launch_timing_config(const char *path, int cooldown, int watc
             if (*q == '#' || strncmp(q, "APP_LAUNCH_TIMING", 17) != 0) continue;
             const char *e2 = q + 17;
             while (*e2 == ' ' || *e2 == '\t') e2++;
-            if (*e2 == '=') has_new = 1;
+            if (*e2 == '=') {
+                has_new = 1;
+                int c1 = 0, c2 = 0;
+                if (sscanf(e2 + 1, "%d %d", &c1, &c2) >= 2) new_has_watchdog = 1;
+            }
         }
         rewind(f);
     }
 
     int changed = 0;
-    int emitted = has_new;   // 已有新键 = 不再写出
+    int emitted = (has_new && new_has_watchdog);   // 已有完整新键 = 不再写出
     char line[640];
     while (fgets(line, sizeof(line), f)) {
         const char *p = line;
@@ -4095,15 +4220,28 @@ static int migrate_launch_timing_config(const char *path, int cooldown, int watc
                 }
                 continue;   // 旧行删除（含行内注释）
             }
+            if (!new_has_watchdog && klen == 17 && strncmp(p, "APP_LAUNCH_TIMING", 17) == 0) {
+                // 单值新键：用合并后的有效值补齐第 2 槽；若合并行已在别处写出则丢弃本行
+                changed = 1;
+                if (!emitted) {
+                    fprintf(g, "APP_LAUNCH_TIMING=%d %d\n", cooldown, watchdog);
+                    emitted = 1;
+                }
+                continue;
+            }
         }
         fputs(line, g);     // 其余行原样保留
     }
     fclose(f);
 
-    if (!changed) { fclose(g); remove(tmp); return 0; }
-    if (!commit_config_rewrite(path, tmp, g, &st, "APP_LAUNCH_TIMING 旧键迁移")) return 0;
+    if (!changed) { fclose(g); remove(tmp); config_write_unlock(lock_fd); return 0; }
+    if (!commit_config_rewrite(path, tmp, g, &st, "APP_LAUNCH_TIMING 旧键迁移")) {
+        config_write_unlock(lock_fd);
+        return 0;
+    }
     write_log("配置 旧键 APP_LAUNCH_COOLDOWN/APP_WATCHDOG 已迁移为 APP_LAUNCH_TIMING=%d %d",
               cooldown, watchdog);
+    config_write_unlock(lock_fd);
     return 1;
 }
 
@@ -4536,7 +4674,7 @@ static int host_app_uninstalled(void) {
     }
 
     // 一级命中：父目录不存在。二级 pm 确认（节流窗口内复用上次结论）
-    time_t now = time(NULL);
+    time_t now = mono_now();   // 探测节流用单调时钟
     if (now - host_probe_at >= HOST_PROBE_INTERVAL) {
         host_probe_at = now;
         // 走实时探测而非缓存版：卸载自清理需要在同一次开机内看到安装状态变化，缓存对它只有风险没有收益
@@ -4627,7 +4765,7 @@ static int try_align_actual(void) {
         pending_align = 0;
         return 1;
     }
-    if (pending_align_since > 0 && time(NULL) - pending_align_since >= ALIGN_WAIT_TIMEOUT) {
+    if (pending_align_since > 0 && mono_now() - pending_align_since >= ALIGN_WAIT_TIMEOUT) {
         actual_cold = pid_cold_min;
         actual_rpm = fan_rpm_min;
         sent_cold = actual_cold;
@@ -4651,7 +4789,7 @@ static void reconnect_align(void) {
     // 断联→重连汇总行（常驻）：断联时长 + 重连后散热器回传实际值
     int discon_sec = 0;
     if (last_disconnect_time > 0) {
-        discon_sec = (int)(time(NULL) - last_disconnect_time);
+        discon_sec = (int)(mono_now() - last_disconnect_time);
         write_log("重连 断联%d秒 回传冷%d RPM%d",
                   discon_sec, cooler_cold_real, cooler_rpm_real);
         last_disconnect_time = 0;
@@ -4673,7 +4811,7 @@ static void reconnect_align(void) {
             logged_target_cold = -1;   // 日志去重基线失效，恢复后首条走普通日志
             logged_target_rpm  = -1;
             pending_align = 1;
-            pending_align_since = time(NULL);
+            pending_align_since = mono_now();
             write_log("重连 PID 状态已重置，进入待对齐（等待真实回传）");
             first_run = 1;
         }
@@ -4700,7 +4838,8 @@ static int rate_limited_execute(void) {
  * 输入用原始电池温度（无滤波），重算由温度窗口变化或补偿变化门控。
  */
 static void pid_cycle(void) {
-    time_t now = time(NULL);
+    time_t now = mono_now();          // dt/锚点用单调时钟（墙钟回拨会让 dt 基线错乱）
+    time_t now_wall = time(NULL);     // 日志 epoch 仍用墙钟
     pid_ctrl_cycles++;               // 单调周期计数
     int batt_raw = cached_batt_raw;   // 1s 采集缓存
     if (batt_raw < 0) return;
@@ -4809,30 +4948,22 @@ static void pid_cycle(void) {
     pid_align_cold = clamp(pid_cold_min + (int)(pid_out * range), pid_cold_min, cmax);
 
     pid_log("epoch=%ld Tbatt=%d+comp%+.1f(cpu)=Tinp%d Ttgt=%d Thot=%d dt=%.1f周期",
-            now, batt_raw, cpu_comp, batt_raw + total_comp_10, BATT_BASELINE, cooler_hot_temp, dt);
+            now_wall, batt_raw, cpu_comp, batt_raw + total_comp_10, BATT_BASELINE, cooler_hot_temp, dt);
 
     pid_last_comp_10 = total_comp_10;
     pid_last_change_time = now;
 }
 
 /**
- * 单次控制循环（纯计算，不下发）
- * 配置重载 → 临时停止闸门 → 热端过温/有效范围 → PID 周期
- * 调用者在外部立即执行速率限制下发，本函数只做决策
- * @return 1=临时停止生效，本轮未做任何控制；0=已走完控制决策
+ * 配置加载/热重载 + 临时停止状态维护（每 5s 一次，由主循环在设备/存活判定之前调用）。
+ * 必须排在两处 `continue`（无设备 / app 失活）之前：断联期间 main_loop() 不跑，
+ * 若把它们放在 main_loop 内，断联时改配置不生效、临时停止标记也不刷新（审查 S2-1）。
  */
-static int main_loop(void) {
-    // 温度窗口变化：自上次 5s 控制以来，1s 采集层是否检测到值变化（防漏判：变过又回原位仍算变化）。
-    batt_window_changed = batt_changed_since_ctrl;
-    batt_changed_since_ctrl = 0;                 // 开启新窗口
-
-    // 0. 配置文件：未加载成功 → 周期重试探测；已加载 → 按 mtime 热重载
-    debug_log(debug_main, "main_loop 开始 温度窗口=%s",
-              batt_window_changed ? "变化" : "未变");
+static void maintain_config_and_temp_stop(void) {
     struct stat st;
     if (!config_loaded) {
         // 自愈分支：开机早期探测失败时按周期补加载（实现与理由见 config_retry_if_needed）。
-        // 到这里已经选到设备了，故与下面的热重载同一套后处理：设备限制与 CPU 亲和都按新配置重算。
+        // 与下面的热重载同一套后处理：设备限制与 CPU 亲和都按新配置重算。
         if (config_retry_if_needed()) {
             update_active_limits();
             apply_cpu_affinity();
@@ -4849,10 +4980,24 @@ static int main_loop(void) {
         // 亲和同样按重载后的值重算（CPU_AFFINITY 可能被改，也可能随层关闭被复位为默认）
         apply_cpu_affinity();
     }
-
-    // 0.3. 临时停止闸门：生效时跳过本轮全部写控制（保持散热器现场），
-    //      但前面的配置热重载照跑，否则开关无法在运行中被关闭。
     maintain_temp_stop();
+}
+
+/**
+ * 单次控制循环（纯计算，不下发）
+ * 热端过温/有效范围 → PID 周期（配置热重载与临时停止维护已移到 maintain_config_and_temp_stop）
+ * 调用者在外部立即执行速率限制下发，本函数只做决策
+ * @return 1=临时停止生效，本轮未做任何控制；0=已走完控制决策
+ */
+static int main_loop(void) {
+    // 温度窗口变化：自上次 5s 控制以来，1s 采集层是否检测到值变化（防漏判：变过又回原位仍算变化）。
+    batt_window_changed = batt_changed_since_ctrl;
+    batt_changed_since_ctrl = 0;                 // 开启新窗口
+
+    debug_log(debug_main, "main_loop 开始 温度窗口=%s",
+              batt_window_changed ? "变化" : "未变");
+
+    // 临时停止闸门：状态已由本拍 maintain_config_and_temp_stop() 刷新；生效时跳过本轮全部写控制。
     if (temp_stop_active()) return 1;
 
     // 0.4. CPU_ZONE 区间变化 → 本周期立即重建候选名单（全量扫描约 1s，仍在 5s 控制块内）
@@ -4876,6 +5021,7 @@ static int main_loop(void) {
 #define WEBUI_COMPACT_EVERY 60   // 每追加 60 行（≈60s）压缩一次，文件最多膨胀到 720+60=780 行
 static int webui_lines_since_compact = 0;   // 自上次压缩以来追加的行数
 static FILE *webui_fp = NULL;              // WebUI 曲线文件的常驻追加句柄（"a"=O_APPEND）
+static int webui_io_error_logged = 0;      // 曲线写失败日志去重（恢复后复位）
 
 // 一块采样在本拍的快照：采集在循环开头（控制块要用新鲜缓存），写行在控制块之后
 // （这样「本拍是否重算 PID」已经确定，标记与重算落在同一行）。
@@ -4912,21 +5058,42 @@ static void append_webui_row(void) {
     pid_recompute_pending = 0;
     if (!webui_conn_ok) return;
 
-    // 追加 1 行到常驻句柄；O_APPEND 使压缩段用 "w" 截断后写入仍落在新 EOF。写失败（文件被外部
-    // 删除/替换等）时关句柄，下一拍重开。
-    if (!webui_fp) webui_fp = fopen(WEBUI_DATA_PATH, "a");
+    // 常驻句柄每拍复核一次路径 inode：文件被删除/替换后旧 fd 会继续写旧 inode，
+    // 界面读路径上的新文件，曲线静默停更（审查 S2-3）。
     if (webui_fp) {
-        if (fprintf(webui_fp, WEBUI_ROW_FMT,
-                    webui_epoch_now, webui_batt_now, webui_cpu_now,
-                    cooler_hot_temp, cooler_cold_temp,
-                    cooler_rpm_real, cooler_cold_real, actual_cold,
-                    recomp ? pid_input_cdeg : -1, recomp,
-                    cooler_cold_run, cooler_rpm_run) >= 0) {
-            fflush(webui_fp);   // 立即落盘：界面按秒读取
-        } else {
+        struct stat fst, pst;
+        if (fstat(fileno(webui_fp), &fst) != 0 || stat(WEBUI_DATA_PATH, &pst) != 0
+                || fst.st_dev != pst.st_dev || fst.st_ino != pst.st_ino) {
             fclose(webui_fp);
             webui_fp = NULL;
         }
+    }
+    // 追加 1 行到常驻句柄；O_APPEND 使压缩段用 "w" 截断后写入仍落在新 EOF。
+    // 写入与 fflush 的结果都要检查：失败（如磁盘满）关句柄、下一拍重开，并记一次日志。
+    if (!webui_fp) webui_fp = fopen(WEBUI_DATA_PATH, "a");
+    int io_ok = (webui_fp != NULL);
+    if (io_ok) {
+        io_ok = fprintf(webui_fp, WEBUI_ROW_FMT,
+                        webui_epoch_now, webui_batt_now, webui_cpu_now,
+                        cooler_hot_temp, cooler_cold_temp,
+                        cooler_rpm_real, cooler_cold_real, actual_cold,
+                        recomp ? pid_input_cdeg : -1, recomp,
+                        cooler_cold_run, cooler_rpm_run) >= 0
+                && fflush(webui_fp) == 0;   // 立即落盘：界面按秒读取
+        if (!io_ok) {
+            int err = errno;
+            if (!webui_io_error_logged) {
+                webui_io_error_logged = 1;
+                write_log("曲线写入失败（errno=%d），已关句柄下一拍重开", err);
+            }
+            fclose(webui_fp);
+            webui_fp = NULL;
+        } else {
+            webui_io_error_logged = 0;
+        }
+    } else if (!webui_io_error_logged) {
+        webui_io_error_logged = 1;
+        write_log("曲线文件打开失败（errno=%d），下一拍重试", errno);
     }
     webui_lines_since_compact++;
 
@@ -5179,7 +5346,8 @@ static int spawn_watchdog(const char *path) {
 static void maybe_keepalive_watchdog(void) {
     // 受 APP_LAUNCH_ENABLED 控制（用户 2026-10-24 定）：拉起应用总开关关闭时不执行反向保活。
     if (!APP_LAUNCH_ENABLED || !wd_keepalive_enabled) return;
-    time_t now = time(NULL);
+    time_t now  = mono_now();   // 本进程内节流/冷却用单调时钟
+    time_t wall = time(NULL);   // 持久化冷却戳仍用墙钟 epoch（跨重启可比）
     if (wd_check_at != 0 && now - wd_check_at < WD_KEEPALIVE_INTERVAL) return;
     wd_check_at = now;
 
@@ -5219,15 +5387,17 @@ static void maybe_keepalive_watchdog(void) {
         }
         return;
     }
-    // 4) 冷却（取本进程内与持久化时间戳的较晚者）+ 连续失败退避
+    // 4) 冷却 + 连续失败退避：两个时基各算各的（持久化戳=墙钟、进程内=单调），不能混减。
     time_t stamp = wd_spawn_stamp_read();
-    time_t last = stamp > wd_spawn_at ? stamp : wd_spawn_at;
-    if (last != 0 && now - last < WD_SPAWN_MIN_INTERVAL) return;
-    if (wd_fail_hits >= WD_SPAWN_BACKOFF_FAILS && now - last < WD_SPAWN_BACKOFF) return;
+    if (stamp > wall) stamp = 0;   // 墙钟回拨后旧戳不可信：按无戳处理，避免冷却被无限拉长
+    if (stamp != 0 && wall - stamp < WD_SPAWN_MIN_INTERVAL) return;
+    if (wd_spawn_at != 0 && now - wd_spawn_at < WD_SPAWN_MIN_INTERVAL) return;
+    if (wd_fail_hits >= WD_SPAWN_BACKOFF_FAILS
+            && wd_spawn_at != 0 && now - wd_spawn_at < WD_SPAWN_BACKOFF) return;
 
     wd_spawn_at = now;
     if (spawn_watchdog(path)) {
-        wd_spawn_stamp_write(now);
+        wd_spawn_stamp_write(wall);
         wd_spawn_pending = 1;   // 下一轮复查它是否真起来（exec 结果只能这样观测）
         wd_miss_hits = 0;   // 已拉起：计数清零，下一轮以判活结果为准
         wd_fail_hits = 0;
@@ -5324,7 +5494,7 @@ int main(int argc, char *argv[]) {
     }
     if (!config_loaded) {
         if (!config_explicit) write_log("配置 未找到 %s/profile.conf，使用代码默认值", PRIVATE_DIR);
-        config_retry_at = time(NULL);   // 首次重试等满一个周期，不在启动瞬间连打
+        config_retry_at = mono_now();   // 首次重试等满一个周期，不在启动瞬间连打
     }
     debug_log(debug_main, "main 启动 ALPHA=%d ZONE=%d~%d", CPU_FILTER_ALPHA, CPU_ZONE_MIN, CPU_ZONE_MAX);
 
@@ -5392,9 +5562,9 @@ int main(int argc, char *argv[]) {
         // 等待设备期间无 app 存活则自动拉起上次使用的 app；复用 ARBITRATE_INTERVAL 节流
         // （与主循环同口径：进程扫描由每 5s 一次降到每 15s 一次，拉起/清理响应上限随之为 15s）
         // 临时停止生效时仲裁照跑，拉起动作由 arbitrate_apps 内部守卫跳过。
-        if (time(NULL) - last_arbitrate >= ARBITRATE_INTERVAL) {
+        if (mono_now() - last_arbitrate >= ARBITRATE_INTERVAL) {
             arbitrate_apps();
-            last_arbitrate = time(NULL);
+            last_arbitrate = mono_now();
         }
         sleep(5);
     }
@@ -5440,7 +5610,7 @@ int main(int argc, char *argv[]) {
         logged_target_rpm  = -1;
         pid_align_cold = 1;    // 待对齐期间保持最小，等 PID 重算/对齐后推进
         pending_align = 1;
-        pending_align_since = time(NULL);
+        pending_align_since = mono_now();
         write_log("LSP 回传未就绪，进入待对齐（等待真实回传）");
     }
 
@@ -5454,8 +5624,12 @@ int main(int argc, char *argv[]) {
         write_coldmax_hint(); // 每 1s 核对生效制冷上限，变了才写给 app（定 KI 曲线横轴）
         poll_bt_request();    // 每 1s 查开蓝牙请求，有新请求才执行一次命令链
 
-        if (last_ctrl == 0 || time(NULL) - last_ctrl >= 5) {
-            last_ctrl = time(NULL);
+        if (last_ctrl == 0 || mono_now() - last_ctrl >= 5) {
+            last_ctrl = mono_now();
+
+            // -0.5. 配置热重载 + 临时停止维护：必须排在所有 `continue`（无设备 / app 失活）之前，
+            //        否则断联期间这两件事完全不跑（审查 S2-1）。
+            maintain_config_and_temp_stop();
 
             // -1. 宿主 APK 卸载自清理（走 5s 节拍：一级 stat 每轮可跑，二级 pm 自带 60s 节流）
             if (host_app_uninstalled()) {
@@ -5481,9 +5655,9 @@ int main(int argc, char *argv[]) {
 
             // 1. 读取双状态文件 + 仲裁
             read_status_ble_both();
-            if (time(NULL) - last_arbitrate >= ARBITRATE_INTERVAL) {
+            if (mono_now() - last_arbitrate >= ARBITRATE_INTERVAL) {
                 arbitrate_apps();  // 双 app 存活仲裁（ARBITRATE_INTERVAL 节流 + 合并扫描，降低 /proc 遍历开销）
-                last_arbitrate = time(NULL);
+                last_arbitrate = mono_now();
             }
             DeviceType new_device = select_active_device();
 
@@ -5495,7 +5669,7 @@ int main(int argc, char *argv[]) {
                         write_log("%s 已断开，无其他设备可切换\n",
                                   device_tag_of(active_device));
                         if (last_disconnect_time == 0)
-                            last_disconnect_time = time(NULL);   // 断联起点（重连汇总行用）
+                            last_disconnect_time = mono_now();   // 断联起点（重连汇总行用）
                     }
                     active_device = DEVICE_NONE;
                     app_was_alive = 0;
@@ -5530,7 +5704,7 @@ int main(int argc, char *argv[]) {
             if (!app_proc_ok || !app_ble_connected) {
                 // 每断联只打一次：last_disconnect_time==0 表示本次断联尚未记录，恢复由 reconnect_align 清零
                 if (last_disconnect_time == 0) {
-                    last_disconnect_time = time(NULL);   // 断联起点（重连汇总行用）
+                    last_disconnect_time = mono_now();   // 断联起点（重连汇总行用）
                     write_log("%s 连接丢失", device_tag_of(active_device));
                 }
                 launch_last_app(0);   // 断联时也尝试拉起散热器 app（无 app 存活时真正拉起；存活时 debug 提示）

@@ -27,6 +27,8 @@
     var CHART_WINDOWS = [120, 180, 240, 360, 480, 720];
     var CHART_DEFAULT_WIN = 360;
     var CHART_MAX_WIN = 720;
+    // 写盘失败的退避重试：首次失败后 800ms / 2000ms 各再试一次，全部失败才回滚
+    var WRITE_RETRY_DELAYS = [800, 2000];
 
     var state = {
         defs: null,
@@ -39,7 +41,9 @@
         statusRetryTimer: null,
         statusEnteredAt: 0,
         writeTimer: null,
+        writeRetryTimer: null,
         pending: {},
+        diskValues: {},
         theme: 'follow',
         chart: {
             points: [],
@@ -370,6 +374,13 @@
                     ? String(values[key]) : defaultValue(defs.keys[key]);
             }
         }
+        // 磁盘基准值：写失败回滚时用它把界面退回「盘上的样子」
+        state.diskValues = {};
+        for (var k in state.values) {
+            if (Object.prototype.hasOwnProperty.call(state.values, k)) {
+                state.diskValues[k] = state.values[k];
+            }
+        }
         var unknown = (snap && snap.unknown) || [];
         if (unknown.length) {
             appendBanner('配置里有 ' + unknown.length + ' 个未知键（已忽略）：' + unknown.join(', '));
@@ -575,7 +586,9 @@
             var commitMulti = function () {
                 var out = [];
                 for (var j = 0; j < multiInputs.length; j++) {
-                    var r = clampInput(multiInputs[j], meta.fields[j], multiHint);
+                    var field = meta.fields[j];
+                    var r = field.bool ? (multiInputs[j].checked ? 1 : 0)
+                        : clampInput(multiInputs[j], field, multiHint);
                     if (r === null) {
                         return;
                     }
@@ -696,9 +709,20 @@
         return n;
     }
 
+    /** 多值键的一个字段：定义里 bool 的渲染成开关（同 GUI），其余是数字框。 */
     function makeMultiInput(field, value) {
         var wrap = make('span', 'field');
-        var input = make('input');
+        var input;
+        if (field.bool) {
+            addClass(wrap, 'field-bool');
+            input = make('input', 'switch');
+            input.type = 'checkbox';
+            input.checked = asInt(value) !== 0;
+            input.title = field.label || '';
+            wrap.appendChild(input);
+            return {wrap: wrap, input: input};
+        }
+        input = make('input');
         input.type = 'number';
         input.value = textOf(value);
         applyRange(input, field);
@@ -970,9 +994,29 @@
         refreshGates();
     }
 
-    function targetOf(keys) {
-        var meta = state.defs && state.defs.keys ? state.defs.keys[keys[0]] : null;
+    /** 键所属页面：webui 组在设置页，其余在配置页。 */
+    function pageOf(key) {
+        var meta = state.defs && state.defs.keys ? state.defs.keys[key] : null;
         return meta && meta.group === 'webui' ? 'settings' : 'config';
+    }
+
+    /** 一批键可能横跨两页：涉及到的每一页都收到结果，不能只看首键。 */
+    function pagesOf(keys) {
+        var pages = [];
+        for (var i = 0; i < keys.length; i++) {
+            var page = pageOf(keys[i]);
+            if (pages.indexOf(page) === -1) {
+                pages.push(page);
+            }
+        }
+        return pages.length ? pages : ['config'];
+    }
+
+    function showOnPages(keys, msg, ok) {
+        var pages = pagesOf(keys);
+        for (var i = 0; i < pages.length; i++) {
+            showMessage(pages[i] + '-message', msg, ok);
+        }
     }
 
     function flushWrites() {
@@ -986,15 +1030,67 @@
         if (!keys.length) {
             return;
         }
-        var target = targetOf(keys);
+        submitWrites(payload, keys, 0);
+    }
+
+    /** 提交一批键；失败按 WRITE_RETRY_DELAYS 退避重试，全部用尽才回滚界面值。 */
+    function submitWrites(payload, keys, attempt) {
         var res = call('setValues', JSON.stringify(payload));
         if (res && res.ok) {
-            showMessage(target + '-message',
+            for (var i = 0; i < keys.length; i++) {
+                state.diskValues[keys[i]] = serializeValue(payload[keys[i]]);
+            }
+            showOnPages(keys,
                 (res.message || '已写入') + '（changed=' + res.changed + ', skipped=' + res.skipped + '）',
                 true);
-        } else {
-            showMessage(target + '-message', '写入失败：' + errOf(res), false);
+            refreshGates();
+            return;
         }
+        if (attempt < WRITE_RETRY_DELAYS.length) {
+            // 等待期间用户又改了同一键（界面值已变）就放弃旧值，交给新一轮 flush
+            var retry = {};
+            var retryKeys = [];
+            for (var j = 0; j < keys.length; j++) {
+                if (state.values[keys[j]] === serializeValue(payload[keys[j]])) {
+                    retry[keys[j]] = payload[keys[j]];
+                    retryKeys.push(keys[j]);
+                }
+            }
+            if (retryKeys.length) {
+                showOnPages(keys, '写入失败，正在重试（' + (attempt + 1) + '/' + WRITE_RETRY_DELAYS.length
+                    + '）：' + errOf(res), false);
+                if (state.writeRetryTimer) {
+                    clearTimeout(state.writeRetryTimer);
+                }
+                state.writeRetryTimer = setTimeout(function () {
+                    state.writeRetryTimer = null;
+                    submitWrites(retry, retryKeys, attempt + 1);
+                }, WRITE_RETRY_DELAYS[attempt]);
+            }
+            refreshGates();
+            return;
+        }
+        rollbackWrites(keys, payload, errOf(res));
+    }
+
+    /** 最终失败：把没再被编辑过的键恢复成磁盘值并重渲染，界面不再显示「已改」。 */
+    function rollbackWrites(keys, payload, error) {
+        var snap = call('snapshot');
+        var disk = snap && snap.ok && snap.values ? snap.values : null;
+        var defs = state.defs && state.defs.keys ? state.defs.keys : {};
+        for (var i = 0; i < keys.length; i++) {
+            var key = keys[i];
+            if (state.values[key] !== serializeValue(payload[key])) {
+                continue;   // 期间又改过：保留新值，等新一轮写入
+            }
+            var v = disk ? disk[key] : undefined;
+            state.values[key] = v !== undefined ? String(v)
+                : (defs[key] ? defaultValue(defs[key]) : state.diskValues[key] || '');
+            state.diskValues[key] = state.values[key];
+        }
+        renderConfig();
+        renderSettings();
+        showOnPages(keys, '写入失败：' + error + '（已恢复为磁盘值）', false);
         refreshGates();
     }
 

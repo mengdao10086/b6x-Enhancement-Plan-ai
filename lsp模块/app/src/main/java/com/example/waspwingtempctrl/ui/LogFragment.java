@@ -210,6 +210,10 @@ public class LogFragment extends Fragment
         statView.setText(R.string.log_loading);
         countView.setText("");
         lastFollowCount = -1;
+        // 视图重建后必须重读一次：指纹是「这次视图已经渲染过」的标记，
+        // 沿用旧值会让第一拍被 unchanged 短路，新视图永远停在「正在读取日志…」。
+        lastFingerprint = null;
+        lastKeyword = null;
         TextCopy.installPathSelection(view);
     }
 
@@ -331,7 +335,16 @@ public class LogFragment extends Fragment
         if (snap.unchanged) {
             return;
         }
-        render(snap, keyword);
+        boolean applied = render(snap, keyword);
+        // 只有「成功读取且确实落到视图」才记指纹；选择中跳过、读取失败都清空。
+        // 否则下一拍会被 unchanged 短路：失败态留在屏幕上不恢复，选择结束后列表也不再更新。
+        if (applied && snap.ok) {
+            lastFingerprint = snap.fingerprint;
+            lastKeyword = keyword;
+        } else {
+            lastFingerprint = null;
+            lastKeyword = null;
+        }
         // 读的这段时间里关键词又变了 → 立刻按新关键词补一次
         if (!keyword.equals(currentKeyword())) {
             loadNow();
@@ -340,9 +353,12 @@ public class LogFragment extends Fragment
 
     // ==================== 渲染（主线程） ====================
 
-    private void render(LogTailReader.Snapshot snap, String keyword) {
+    /**
+     * @return true = 本次快照已落到视图（列表 / 失败态 / 空态）；false = 因整行选择中或视图已销毁而跳过
+     */
+    private boolean render(LogTailReader.Snapshot snap, String keyword) {
         if (infoView == null) {
-            return;
+            return false;
         }
         // 正在选中的控件本轮不重写：setText 会清掉选择与手柄。其余控件照常刷新，选择结束后下一轮自动补上
         if (!TextCopy.isSelecting(infoView)) {
@@ -356,7 +372,7 @@ public class LogFragment extends Fragment
         if (!snap.ok) {
             // 选择期间不切视图：列表一旦让位给诊断，高亮与操作条就失去了作用对象
             if (isSelectingLines()) {
-                return;
+                return false;
             }
             // 失败：原样展示诊断，列表与跟随入口全部让位
             adapter.submit(java.util.Collections.emptyList());
@@ -365,13 +381,13 @@ public class LogFragment extends Fragment
             listView.setVisibility(View.GONE);
             emptyView.setVisibility(View.GONE);
             followButton.setVisibility(View.GONE);
-            return;
+            return true;
         }
 
         // 选择期间不重绑列表：新一批行会顶掉选中区间（下标对不上），高亮也跟着失效。
         // 这里只暂停列表本身，信息行/统计行已在上方按各自的选择状态单独处理
         if (isSelectingLines()) {
-            return;
+            return false;
         }
         failureScroll.setVisibility(View.GONE);
         listView.setVisibility(View.VISIBLE);
@@ -394,6 +410,7 @@ public class LogFragment extends Fragment
             lastFollowCount = count;
         }
         updateFollowButton();
+        return true;
     }
 
     // ==================== 整行选择 ====================

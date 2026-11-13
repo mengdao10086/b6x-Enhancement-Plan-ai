@@ -142,8 +142,16 @@ final class TextCopy {
     /** 空路径表：没有命中时直接共用，避免每次点按新建数组。 */
     private static final int[][] NO_PATH_SPANS = new int[0][];
 
-    /** 本进程里装过选区回调的控件：点背景时按它找"当前有选区的控件"。只增不减（弱引用随控件回收）。 */
-    private static final Map<TextView, PathSelectionCallback> CALLBACKS = new WeakHashMap<>();
+    /**
+     * 本进程里装过选区回调的控件：点背景时按它找"当前有选区的控件"。
+     *
+     * <p>value 必须包一层 {@link WeakReference}：回调本体强引用 TextView（其 {@code view} 字段），
+     * 若直接 put 回调本体，WeakHashMap 的 value 会把 key 强引用住，条目永不可回收（整棵视图树/Activity 泄漏）。
+     * 回调另有 3 个由 TextView 自己持有的强引用（{@code setCustomSelectionActionModeCallback}、
+     * {@code setOnTouchListener(HoldWatcher)}、附着状态监听），故这里的弱引用不会让回调被提前回收；
+     * 控件不可达后 key 被回收，条目由 WeakHashMap 自动摘除。
+     */
+    private static final Map<TextView, WeakReference<PathSelectionCallback>> CALLBACKS = new WeakHashMap<>();
 
     /**
      * 方案 B：保留系统选择态，只在选区 ActionMode 创建时把选区扩到「当前词所在的整条路径」；
@@ -162,7 +170,7 @@ final class TextCopy {
             TextView text = (TextView) root;
             if (text.isTextSelectable() && !CALLBACKS.containsKey(text)) {
                 PathSelectionCallback callback = new PathSelectionCallback(text);
-                CALLBACKS.put(text, callback);
+                CALLBACKS.put(text, new WeakReference<>(callback));
                 text.setCustomSelectionActionModeCallback(callback);
                 // 只观察按住/抬手/拖动：返回 false，系统选择与手柄拖动原样走（两段式计时与短按判定都用它）
                 text.setOnTouchListener(new HoldWatcher(callback));
@@ -550,8 +558,12 @@ final class TextCopy {
             if (!(text instanceof Spannable) || layout == null || text.length() == 0) {
                 return;
             }
-            int line = layout.getLineForVertical((int) pressY);
-            int offset = layout.getOffsetForHorizontal(line, pressX);
+            // pressX/pressY 是控件内坐标（含内边距），Layout 用的是文本内容坐标：
+            // 与 pathHitAt 同口径，先扣 totalPadding、再加滚动偏移。
+            float localX = pressX - view.getTotalPaddingLeft() + view.getScrollX();
+            float localY = pressY - view.getTotalPaddingTop() + view.getScrollY();
+            int line = layout.getLineForVertical((int) localY);
+            int offset = layout.getOffsetForHorizontal(line, localX);
             if (offset < 0 || offset >= text.length()) {
                 return;
             }
@@ -1116,12 +1128,13 @@ final class TextCopy {
      */
     static void dismissSelectionsOutside(float rawX, float rawY) {
         // 先复制一份：WeakHashMap 在迭代期间可能因 GC 清理条目而变结构
-        List<Map.Entry<TextView, PathSelectionCallback>> entries =
+        List<Map.Entry<TextView, WeakReference<PathSelectionCallback>>> entries =
                 new ArrayList<>(CALLBACKS.entrySet());
         List<PathSelectionCallback> selecting = new ArrayList<>();
-        for (Map.Entry<TextView, PathSelectionCallback> entry : entries) {
+        for (Map.Entry<TextView, WeakReference<PathSelectionCallback>> entry : entries) {
             TextView text = entry.getKey();
-            PathSelectionCallback callback = entry.getValue();
+            WeakReference<PathSelectionCallback> ref = entry.getValue();
+            PathSelectionCallback callback = ref == null ? null : ref.get();
             if (text == null || callback == null || !callback.isSelecting() || !text.isShown()) {
                 continue;
             }
