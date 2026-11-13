@@ -52,9 +52,10 @@ public class MainHook implements IXposedHookLoadPackage {
     // 双文件路径
     private static final String STATUS_FILE_B6 = "/data/local/tmp/tempctrl_b6x.status";
     private static final String STATUS_FILE_B7 = "/data/local/tmp/tempctrl_b7x.status";
-    // 临时停止标记（daemon 每 5s 重写、模块每秒读）：内容 "1\n"/"0\n"，mtime 超 15s 视为失效。
+    // 临时停止标记（daemon 每 5s 重写、模块按需读且 5s 缓存）：内容 "1\n"/"0\n"，mtime 超 15s 视为失效。
     private static final String TEMP_STOP_FILE = "/data/local/tmp/tempctrl_temp_stop";
     private static final long TEMP_STOP_FRESH_MS = 15000;
+    private static final long TEMP_STOP_POLL_MS = 5000;   // 标记复读间隔；＜15s 新鲜度窗口，最坏生效延迟 5s
     // 界面开关标志文件（守护进程写、本进程读）；界面 → 钩子的唯一通道。
     // 跨进程通道说明见 app/逻辑说明.md §1.4，写入端见 tempctrl.c 的 UIPREFS_PATH。
     private static final String UIPREFS_FILE = "/data/local/tmp/tempctrl_uiprefs";
@@ -130,6 +131,8 @@ public class MainHook implements IXposedHookLoadPackage {
     private static volatile boolean consumerThreadStarted = false; // 守护消费线程已启动（幂等，进程内一次）
     private static volatile long consumerThreadStartedAt = 0;      // 守护线程启动防抖（10s 内不重复触发）
     private static final long CONSUMER_START_MIN_INTERVAL_MS = 10000;
+    private static final long CONSUMER_POLL_MS = 250;            // 队列有积压时的轮询间隔
+    private static final long CONSUMER_IDLE_POLL_MS = 1000;      // 队列空/不可读时退避间隔
 
     // ========== 设备型号识别 + B6X 自动进入设置界面 ==========
     private static volatile int connectedModel = 0;           // 0=未知, 6=B6X型号, 7=B7X型号（BLE 字段 0/6/7）
@@ -492,7 +495,6 @@ public class MainHook implements IXposedHookLoadPackage {
                 appendGetterValueGuarded(sb, lastWaspWingInfo, "getRealColdLevel", "COLD_REAL");
                 // 实际运行档（0x13 byte[0x0f]）：与 COLD_REAL 的回显设定档不同，见 制冷值语义取证.md
                 appendGetterValueGuarded(sb, lastWaspWingInfo, "getColdRunLevel", "COLD_RUN");
-                appendTenthValueGuarded(sb, lastWaspWingInfo, "getTargetTemperature", "TARGET_TEMP");
                 // 回传恢复：此前缺失则补一条（状态翻转才打）
                 if (paramMissingLogged) {
                     paramMissingLogged = false;
@@ -2873,27 +2875,36 @@ public class MainHook implements IXposedHookLoadPackage {
 
     /**
      * 临时停止标记是否新鲜生效：daemon 每 5s 重写，内容为 1 且 mtime 距今 ≤15s 才算生效。
+     * 结果缓存 5s（与 daemon 重写周期一致，窗口内仍有效），最坏生效延迟 5s。
      * 文件缺失、过期、内容异常或读取失败一律按 0 处理（daemon 被杀后自愈不能永久关闭）。
      */
     private static boolean isTempStopFresh() {
+        long now = System.currentTimeMillis();
+        if (now - tempStopCheckedAtMs < TEMP_STOP_POLL_MS) return tempStopFreshCached;
+        tempStopCheckedAtMs = now;
+        boolean fresh = false;
         try {
             File f = new File(TEMP_STOP_FILE);
-            if (!f.isFile()) return false;
-            if (System.currentTimeMillis() - f.lastModified() > TEMP_STOP_FRESH_MS) return false;
-            byte[] buf = new byte[8];
-            FileInputStream in = new FileInputStream(f);
-            int n;
-            try {
-                n = in.read(buf);
-            } finally {
-                in.close();
+            if (f.isFile() && now - f.lastModified() <= TEMP_STOP_FRESH_MS) {
+                byte[] buf = new byte[8];
+                FileInputStream in = new FileInputStream(f);
+                int n;
+                try {
+                    n = in.read(buf);
+                } finally {
+                    in.close();
+                }
+                fresh = n > 0 && "1".equals(new String(buf, 0, n, "US-ASCII").trim());
             }
-            if (n <= 0) return false;
-            return "1".equals(new String(buf, 0, n, "US-ASCII").trim());
         } catch (Throwable t) {
-            return false;
+            fresh = false;
         }
+        tempStopFreshCached = fresh;
+        return fresh;
     }
+
+    private static long tempStopCheckedAtMs = 0;     // 上次实际读取标记文件的时刻（5s 缓存时间戳）
+    private static boolean tempStopFreshCached = false;
 
     /**
      * 锁死检测——双信号并行判断、独立处置：
@@ -2906,7 +2917,6 @@ public class MainHook implements IXposedHookLoadPackage {
         if (deviceLockedAlerted) { dispatchStallSinceMs = 0; return; }
         if (!bleConnected || lastWaspWingInfo == null) { dispatchStallSinceMs = 0; return; }
         checkZeroInfoTimeout();
-        boolean tempStopFresh = isTempStopFresh();   // 每秒读一次标记文件
         try {
             // ═══ 回传新鲜度验证（先于值停滞判定）═══
             // 重连后长时间无新 onDeviceInfoUpdate → 无回传，仍是旧缓存；
@@ -2941,14 +2951,14 @@ public class MainHook implements IXposedHookLoadPackage {
             boolean hasDispatchTarget = lastBcastColdLv >= 0 && lastBcastRpmLv >= 0;
             boolean deviceStalled = false;
             if (hasDispatchTarget) {
-                // 临时停止期间 daemon 刻意不下发，回显值与目标长期不等属预期，跳过停滞判定并清零起点；
-                // 仍更新快照，结束临时停止后从当前实际值重新计时。
-                if (tempStopFresh) {
-                    stallLastCold = cold;
-                    stallLastRpm = rpm;
-                    dispatchStallSinceMs = 0;
-                } else if (cold == stallLastCold && rpm == stallLastRpm) {
-                    if (dispatchStallSinceMs == 0) dispatchStallSinceMs = now;
+                // 临时停止期间 daemon 刻意不下发，回显值与目标长期不等属预期，跳过停滞判定并清零起点。
+                // 仅在"回显值未变化"（疑似停滞）时读标记文件，避免健康路径每秒 stat+open。
+                if (cold == stallLastCold && rpm == stallLastRpm) {
+                    if (isTempStopFresh()) {
+                        dispatchStallSinceMs = 0;
+                    } else if (dispatchStallSinceMs == 0) {
+                        dispatchStallSinceMs = now;
+                    }
                 } else {
                     stallLastCold = cold;
                     stallLastRpm = rpm;
@@ -3025,6 +3035,7 @@ public class MainHook implements IXposedHookLoadPackage {
                 Object headSeen = null;    // 上次观察到的队首对象（接管判定用）
                 long headSeenAt = 0;       // 该队首对象首次被观察到的时刻（ms）
                 while (true) {
+                    long pollMs = CONSUMER_IDLE_POLL_MS;   // 队列空/不可读：退避 1s
                     try {
                         Object ctrl = getStaticController();
                         if (ctrl != null) {
@@ -3037,6 +3048,7 @@ public class MainHook implements IXposedHookLoadPackage {
                                     // 接管仅当同一队首停留超过 QUEUE_TAKEOVER_MS。
                                     Object head = q.peek();
                                     long nowMs = System.currentTimeMillis();
+                                    if (head != null) pollMs = CONSUMER_POLL_MS;   // 有积压：恢复 250ms
                                     if (head != null && head == headSeen) {
                                         if (nowMs - headSeenAt > QUEUE_TAKEOVER_MS) {
                                             processData.invoke(ctrl, head);
@@ -3048,8 +3060,8 @@ public class MainHook implements IXposedHookLoadPackage {
                                 }
                             }
                         }
-                        // 250ms 轮询（原 50ms；粒度论证见 app/逻辑说明.md §1.3）
-                        Thread.sleep(250);
+                        // 有积压 250ms；队列空退避 1s（粒度论证见 app/逻辑说明.md §1.3）
+                        Thread.sleep(pollMs);
                     } catch (InterruptedException e) {
                         break;
                     } catch (Throwable t2) {

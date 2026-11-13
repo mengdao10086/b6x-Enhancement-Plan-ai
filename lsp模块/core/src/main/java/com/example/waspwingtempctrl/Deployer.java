@@ -24,7 +24,7 @@ import java.util.concurrent.locks.ReentrantLock;
 
 /**
  * 部署链路核心。界面只允许调 {@link #probe()}、{@link #deploy()}、{@link #uninstall()}、
- * {@link #startDaemon()}、{@link #stopDaemon()}、{@link #stopControlApp()}，不得自己拼 shell、
+ * {@link #startDaemon()}、{@link #stopDaemon()}，不得自己拼 shell、
  * 不得直接碰文件；root 调用一律走 {@link RootShell}（I2）。本类方法全部阻塞，<b>禁止在主线程调用</b>。
  *
  * <p>I4 部署完成判据、二进制/脚本为何经私有目录中转 —— 详见 app/逻辑说明.md §2.1、§2.5。
@@ -52,20 +52,6 @@ public final class Deployer {
      * （「停止daemon」静默失效），白名单含它即为此。详见 app/逻辑说明.md §2.3。
      */
     private static final String WD_COMM_WHITELIST = "sh|ash|busybox|mksh|dash|toybox";
-    /** C 端单实例锁退出码：已有实例在运行。 */
-    public static final int EXIT_ALREADY_RUNNING = 2;
-
-    /**
-     * 散热器控制 app（超频 app）的包名。来源：{@code MainHook} 的 PACKAGE_B6X / PACKAGE_B6X_NEW /
-     * PACKAGE_B7X，与 {@code core/src/main/res/values/arrays.xml} 的自动拉起列表一致。
-     * 「停止控制app」对三者逐个查存活并 force-stop。
-     */
-    private static final String CONTROL_APP_B6X_OLD = "com.flydigi.waspwing.experimental";        // B6X 旧
-    private static final String CONTROL_APP_B6X_NEW = "com.flydigi.waspwing.experimentanliuliu";  // B6X 新
-    private static final String CONTROL_APP_B7X     = "com.fdg.flashplay.farsef";                 // B7X
-    private static final String[] CONTROL_APP_PACKAGES = {
-            CONTROL_APP_B6X_OLD, CONTROL_APP_B6X_NEW, CONTROL_APP_B7X
-    };
 
     /** 同步清单文件名（放私有目录，随卸载连目录一起删）。 */
     public static final String MANIFEST_NAME = "tempctrl_sync_manifest";
@@ -1014,44 +1000,6 @@ public final class Deployer {
         return new Result(ok, "停止daemon", steps, ok ? "" : "有进程未确认退出，见步骤", st);
     }
 
-    /**
-     * 停止散热器控制 app（超频 app）：对三个已知包逐个查存活并 {@code am force-stop}，
-     * 只杀进程、<b>不停 daemon、不改任何配置</b>。自动拉起开启时可能被守护进程再次拉起。
-     * 无 root 或 am 报错只回失败结果，不向 UI 抛异常。<b>阻塞</b>。
-     */
-    public Result stopControlApp() {
-        List<String> steps = new ArrayList<>();
-        RootShell.Result r = shell.exec(stopControlAppScript(), EXEC_TIMEOUT_MS);
-        if (!r.isOk()) {
-            return new Result(false, "停止控制app", steps, "root 执行失败：" + r.describe(), null);
-        }
-        Map<String, String> kv = parseKv(r.stdout);
-        if (!kv.containsKey("STOP_FAIL")) {
-            return new Result(false, "停止控制app", steps,
-                    "root 输出缺少预期结果：" + r.describe(), null);
-        }
-        boolean allStopped = true;
-        for (int i = 0; i < CONTROL_APP_PACKAGES.length; i++) {
-            String tag = "APP" + i;
-            String pkg = CONTROL_APP_PACKAGES[i];
-            if (!"1".equals(kv.get(tag + "_RUNNING"))) {
-                steps.add(pkg + " 未在运行");
-                continue;
-            }
-            String pid = nvl(kv.get(tag + "_PID"));
-            if ("1".equals(kv.get(tag + "_STOPPED"))) {
-                steps.add("已停止 " + pkg + (pid.isEmpty() ? "" : "（PID " + pid + "）"));
-            } else {
-                allStopped = false;
-                String rc = nvl(kv.get(tag + "_RC"));
-                steps.add("警告：" + pkg + " 未能停止" + (pid.isEmpty() ? "" : "（PID " + pid + "）")
-                        + (rc.isEmpty() ? "" : "，am 退出码 " + rc));
-            }
-        }
-        boolean ok = allStopped && "0".equals(kv.get("STOP_FAIL"));
-        return new Result(ok, "停止控制app", steps, ok ? "" : "有控制 app 未能停止，见步骤", null);
-    }
-
     // ==================== 内部：资源落盘 ====================
 
     /**
@@ -1774,61 +1722,6 @@ public final class Deployer {
                 + killAndWaitSnippet("wd_pids", "wd_match", "WATCHDOG")
                 + killAndWaitSnippet("bin_pids", "bin_pid_ok", "DAEMON")
                 + probeTail();
-    }
-
-    /**
-     * 停止控制 app 的 shell：对每个包先用 {@code pidof} 查存活，取不到再用
-     * {@code ps -A -o PID,NAME | grep -F} 兜底；存活则 {@code am force-stop}，并轮询确认已退出。
-     * 每包回吐 RUNNING / PID / STOPPED / RC，末尾回吐 ALIVE_TOTAL / STOP_FAIL。
-     * <b>不碰 daemon、不删文件、不改配置</b>。
-     */
-    private String stopControlAppScript() {
-        StringBuilder sb = new StringBuilder();
-        sb.append("alive_pids() {\n")
-                .append("  P=$(pidof \"$1\" 2>/dev/null)\n")
-                .append("  if [ -z \"$P\" ]; then\n")
-                .append("    P=$(ps -A -o PID,NAME 2>/dev/null | grep -F \"$1\" | grep -v grep | awk '{print $1}')\n")
-                .append("  fi\n")
-                // 多个 PID 时一行一个，便于调用方只取首个用于展示。
-                .append("  printf '%s\\n' \"$P\" | tr ' ' '\\n'\n")
-                .append("}\n")
-                .append("ALIVE_TOTAL=0\n")
-                .append("STOP_FAIL=0\n");
-        for (int i = 0; i < CONTROL_APP_PACKAGES.length; i++) {
-            String tag = "APP" + i;
-            sb.append(tag).append("_PKG='").append(CONTROL_APP_PACKAGES[i]).append("'\n")
-                    .append(tag).append("_PIDS=$(alive_pids \"$").append(tag).append("_PKG\")\n")
-                    .append(tag).append("_PID=$(printf '%s\\n' \"$").append(tag)
-                    .append("_PIDS\" | head -n 1)\n")
-                    .append("if [ -n \"$").append(tag).append("_PIDS\" ]; then\n")
-                    .append("  ALIVE_TOTAL=$((ALIVE_TOTAL + 1))\n")
-                    .append("  am force-stop \"$").append(tag).append("_PKG\" >/dev/null 2>&1\n")
-                    .append("  ").append(tag).append("_RC=$?\n")
-                    // force-stop 是异步的：最多观察 3 秒，确认进程真退出再判「已停止」。
-                    .append("  i=0\n")
-                    .append("  while [ $i -lt 3 ]; do\n")
-                    .append("    ").append(tag).append("_LEFT=$(alive_pids \"$").append(tag).append("_PKG\")\n")
-                    .append("    [ -z \"$").append(tag).append("_LEFT\" ] && break\n")
-                    .append("    sleep 1\n")
-                    .append("    i=$((i + 1))\n")
-                    .append("  done\n")
-                    .append("  if [ -z \"$").append(tag).append("_LEFT\" ] && [ $")
-                    .append(tag).append("_RC -eq 0 ]; then\n")
-                    .append("    echo \"").append(tag).append("_STOPPED=1\"\n")
-                    .append("  else\n")
-                    .append("    echo \"").append(tag).append("_STOPPED=0\"\n")
-                    .append("    STOP_FAIL=1\n")
-                    .append("  fi\n")
-                    .append("  echo \"").append(tag).append("_RUNNING=1\"\n")
-                    .append("  echo \"").append(tag).append("_PID=$").append(tag).append("_PID\"\n")
-                    .append("  echo \"").append(tag).append("_RC=$").append(tag).append("_RC\"\n")
-                    .append("else\n")
-                    .append("  echo \"").append(tag).append("_RUNNING=0\"\n")
-                    .append("fi\n");
-        }
-        sb.append("echo \"ALIVE_TOTAL=$ALIVE_TOTAL\"\n")
-                .append("echo \"STOP_FAIL=$STOP_FAIL\"\n");
-        return sb.toString();
     }
 
     /**

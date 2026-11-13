@@ -1352,8 +1352,6 @@
 
     /**
      * UI_CHART_VIEW 第 i 槽（0=纵轴下限、1=重算标记）：按空格显式取段，不做跨段 parseInt 容错。
-     * 新键没有该段时回退旧键原始值（第 1 槽 UI_RPM_AXIS_MIN、第 2 槽 UI_PID_MARK），再回退 fallback。
-     * 注：快照对已定义键总补默认值，旧键已从定义删除、其原始值不经桥暴露，回退分支仅在能取到时生效。
      */
     function chartViewSlot(i, fallback) {
         var parts = textOf(valueOf('UI_CHART_VIEW')).split(/\s+/);
@@ -1361,14 +1359,6 @@
             var n = parseIntStrict(parts[i]);
             if (n !== null) {
                 return n;
-            }
-        }
-        var legacyKey = i === 0 ? 'UI_RPM_AXIS_MIN' : 'UI_PID_MARK';
-        var legacy = state.values[legacyKey];
-        if (legacy !== undefined && legacy !== null && textOf(legacy) !== '') {
-            var lv = parseIntStrict(textOf(legacy).split(/\s+/)[0]);
-            if (lv !== null) {
-                return lv;
             }
         }
         return fallback;

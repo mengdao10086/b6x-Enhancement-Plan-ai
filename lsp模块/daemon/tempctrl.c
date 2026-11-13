@@ -3813,14 +3813,20 @@ static int write_boot_marker(const char *boot_id) {
  * 与 app 侧 ConfigStore 的 FileChannel.lock() 是同一套 fcntl 锁——不要换成 flock()：
  * Linux 上 flock 与 fcntl 记录锁互不可见，混用等于没锁。锁文件必须独立于配置文件：
  * 提交走 rename 会换掉 profile.conf 的 inode，锁配置本身挡不住后来打开新 inode 的写者。
- * 拿到后覆盖「读 → 写 tmp → rename」整个区间；失败不写（返回 -1，调用方记日志/跳过）。
+ * 拿到后覆盖「读 → 写 tmp → rename」整个区间；失败不写（返回 -1，调用方跳过）。
  * 用 F_SETLK 轮询而非 F_SETLKW：后者无超时，锁被对端长时间持有时会拖住 5s 控制节拍。
- * @return 锁 fd（>=0）；-1=打不开锁文件 / 加锁出错 / 等锁超时
+ * **配置文件不存在时不创建锁文件**：全新设备上若留下 root:0600 的 .lock，app 之后所有配置
+ * 写入都会打不开（R01），故先 stat 配置、不存在直接返回「无配置」。
+ * @return 锁 fd（>=0）；-1=配置文件不存在 / 打不开锁文件 / 加锁出错 / 等锁超时
  */
 #define CONFIG_LOCK_TIMEOUT_MS 2000
 #define CONFIG_LOCK_POLL_US    50000
 
 static int config_write_lock(const char *path) {
+    // 没有配置文件就没有可写回的对象：静默返回，调用方照常早退（全新设备/尚未部署属正常路径）
+    struct stat cst;
+    if (stat(path, &cst) != 0) return -1;
+
     char lock_path[576];
     int n = snprintf(lock_path, sizeof(lock_path), "%s.lock", path);
     if (n < 0 || n >= (int)sizeof(lock_path)) return -1;
@@ -3829,12 +3835,11 @@ static int config_write_lock(const char *path) {
         write_log("配置写回 打不开锁文件 %s（errno=%d），本次不写", lock_path, errno);
         return -1;
     }
-    // 锁文件由 root 首次创建时 app 打不开：属主/权限对齐配置文件（app uid 的 profile.conf）
-    struct stat cst;
-    if (stat(path, &cst) == 0) {
-        fchown(fd, cst.st_uid, cst.st_gid);
-        fchmod(fd, 0600);
-    }
+    // 锁文件由 root 首次创建时 app 打不开：属主/权限对齐配置文件（app uid 的 profile.conf）。
+    // 失败时也不删锁文件——它已是 app 可读写的属主/权限；删除别人可能正在持锁的 .lock
+    // 反而会形成两个 inode 的分裂锁。
+    fchown(fd, cst.st_uid, cst.st_gid);
+    fchmod(fd, 0600);
     struct flock fl;
     memset(&fl, 0, sizeof(fl));
     fl.l_type   = F_WRLCK;

@@ -248,10 +248,6 @@ public class ChartView extends View {
         return series[index];
     }
 
-    int seriesCount() {
-        return series.length;
-    }
-
     /** 当前配置下的图例/按住查看显示顺序（存的是系列数组下标；交换开关只换成对两条的槽位）。 */
     int[] seriesOrder(@Nullable ChartConfig cfg) {
         return ChartSeries.displayOrder(series, cfg);

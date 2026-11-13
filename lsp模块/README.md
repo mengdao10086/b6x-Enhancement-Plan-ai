@@ -115,7 +115,6 @@ am broadcast -a com.flydigi.SET_TEMPERATURE_B7 \
 | `RPM_RUN=` | 设备实际风扇转速原始值（0x13 `value[0x0b]<<8 \| value[0x0a]`，与 `RPM_REAL` 的设定回显不同） | `getSpeed()` | int |
 | `COLD_REAL=` | 制冷设定回显（经超频逻辑折算） | `getRealColdLevel()` | int |
 | `COLD_RUN=` | 实际制冷运行档（设备 0x13 包 byte[0x0f]，与 `COLD_REAL` 的设定回显不同） | `getColdRunLevel()` | int |
-| `TARGET_TEMP=` | 散热器目标温度 | `getTargetTemperature()` int ×10 | 0.1°C |
 
 ### 解析端（tempctrl `read_status_ble_both` → `select_active_device`）
 
@@ -128,7 +127,6 @@ COLD_TEMP=58         ← 5.8°C
 RPM_REAL=77
 RPM_RUN=1850        ← 设备实际转速原始值
 COLD_REAL=115
-TARGET_TEMP=180     ← 18.0°C
 ```
 
 > `RPM_RUN` 由独立 try/catch 写入：B7X 或旧版本无 `getSpeed()` 时该行缺失，其余字段不受影响；daemon 缺该行时按 -1（无效）处理。

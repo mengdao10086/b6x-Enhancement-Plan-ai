@@ -5,6 +5,7 @@ import android.system.ErrnoException;
 import android.system.Os;
 import android.system.OsConstants;
 import android.system.StructStat;
+import android.util.Log;
 
 import org.json.JSONArray;
 import org.json.JSONObject;
@@ -79,6 +80,12 @@ public final class ConfigStore {
     /** 「读—改—写」被其他写者打断时的重试次数。 */
     private static final int WRITE_ATTEMPTS = 3;
 
+    /** 落盘校验失败时，失败信息里最多列出的问题条数（其余只报总数，避免 Toast 过长）。 */
+    private static final int VALIDATION_MESSAGE_MAX = 5;
+
+    /** 日志标签：落盘校验拒绝等事实留痕（不静默）。 */
+    private static final String TAG = "ConfigStore";
+
     /** 跨进程配置写锁：独立锁文件后缀，路径与 daemon 侧 {@code <config>.lock} 一致。 */
     private static final String LOCK_FILE_SUFFIX = ".lock";
     /** 等锁上限（毫秒）：超时不写并报错，不静默跳过。 */
@@ -144,6 +151,38 @@ public final class ConfigStore {
         m.put("APP_WATCHDOG", "APP_LAUNCH_TIMING");
         CLEANUP_EXACT_REQUIRES = Collections.unmodifiableMap(m);
     }
+
+    /**
+     * 旧单值键 → 现多值键的槽位（R04 / X7）：旧键仍可写，但按现键对应槽的 min/max 校验。
+     * {@link #CLEANUP_EXACT_REQUIRES} 只表达「并入了哪个键」，这里补「哪个槽」；改定义里这两处时必须同步本表。
+     */
+    private static final Map<String, LegacySlot> LEGACY_SLOTS;
+
+    static {
+        Map<String, LegacySlot> m = new LinkedHashMap<>();
+        m.put("UI_RPM_AXIS_MIN", new LegacySlot("UI_CHART_VIEW", 0));
+        m.put("UI_PID_MARK", new LegacySlot("UI_CHART_VIEW", 1));
+        m.put("APP_LAUNCH_COOLDOWN", new LegacySlot("APP_LAUNCH_TIMING", 0));
+        m.put("APP_WATCHDOG", new LegacySlot("APP_LAUNCH_TIMING", 1));
+        LEGACY_SLOTS = Collections.unmodifiableMap(m);
+    }
+
+    /** 旧单值键并入了现键的哪一个槽。 */
+    private static final class LegacySlot {
+        final String currentKey;
+        final int slot;
+
+        LegacySlot(String currentKey, int slot) {
+            this.currentKey = currentKey;
+            this.slot = slot;
+        }
+    }
+
+    /** 旧表键前缀（daemon 侧永久兼容）：值是逗号/空白分隔的三元组。 */
+    private static final String LEGACY_CUT_PREFIX = "KI_CUT_";
+
+    /** 已删除的旧滤波键：daemon 忽略并随迁移删除，写入放行（不校验）。 */
+    private static final String LEGACY_CUT_SMOOTH = "KI_CUT_SMOOTH";
 
     private final String configFileNameFromDef;
     /** 构造时解析出的 params.json 根对象（只读复用，避免各处重复 open + 解析整份资产）；加载失败为 null。 */
@@ -686,6 +725,7 @@ public final class ConfigStore {
      * 批量改键：全部改动合并为<b>一次</b> rename，避免多次 mtime 触发多轮 C 端重载。
      *
      * <p>保留全文只替换目标行的值片段；未知键拒绝写入；值未变化时直接跳过。
+     * 落盘前逐键校验类型 / 槽数 / 范围，任一非法则<b>整批拒绝</b>并记一条日志（见 {@link #validateWrite}）。
      * 详见 app/逻辑说明.md §3.2。
      */
     public WriteResult setAll(Map<String, Value> changes) {
@@ -694,6 +734,13 @@ public final class ConfigStore {
         }
         if (changes == null || changes.isEmpty()) {
             return WriteResult.failure("没有要写入的键");
+        }
+        // R04：本批值先在内存里过一遍校验；任何一条非法就整批拒绝。
+        // setAll 是一次原子 rename，跳过非法键会让调用方误以为整批成功（lite 会把所有值当已落盘）。
+        String invalid = invalidChangesReason(changes);
+        if (invalid != null) {
+            Log.w(TAG, invalid);
+            return WriteResult.failure(invalid);
         }
         LinkedHashMap<String, String> pending = new LinkedHashMap<>();
         LinkedHashMap<String, String> appendComments = new LinkedHashMap<>();
@@ -724,6 +771,252 @@ public final class ConfigStore {
         } finally {
             WRITE_LOCK.unlock();
         }
+    }
+
+    // ==================== 落盘前校验（R04：setAll 的唯一校验入口） ====================
+
+    /**
+     * 校验一批写入：{@code null} = 全部可写；否则返回人话原因（调用方据此整批拒绝并留日志）。
+     *
+     * <p><b>为什么整批拒绝而不是跳过非法键</b>：{@link #setAll} 把一批改动合成一次 rename，
+     * 「部分成功」没有对应的返回值语义——调用方会按 {@code ok=true} 把所有值记成已落盘，
+     * 非法键被静默丢弃。故只要有任意一条非法，整批不写，让调用方看到明确的失败原因。
+     */
+    private String invalidChangesReason(Map<String, Value> changes) {
+        List<String> problems = new ArrayList<>();
+        for (Map.Entry<String, Value> e : changes.entrySet()) {
+            String reason = validateWrite(e.getKey(), e.getValue());
+            if (reason != null) {
+                problems.add(e.getKey() + "：" + reason);
+            }
+        }
+        if (problems.isEmpty()) {
+            return null;
+        }
+        StringBuilder sb = new StringBuilder("配置校验失败，整批未写入：");
+        int shown = Math.min(problems.size(), VALIDATION_MESSAGE_MAX);
+        for (int i = 0; i < shown; i++) {
+            if (i > 0) {
+                sb.append("；");
+            }
+            sb.append(problems.get(i));
+        }
+        if (problems.size() > shown) {
+            sb.append("；另有 ").append(problems.size() - shown).append(" 项");
+        }
+        return sb.toString();
+    }
+
+    /**
+     * 单键落盘校验：{@code null} = 可写，否则为拒绝原因。
+     *
+     * <p>与 {@link #assess} 的分工：assess 是界面侧的「折算」（数值钳制 / enum 回落），会改写值；
+     * 这里是落盘口的「拒绝」，不改值，只保证写进 {@code profile.conf} 的每个值类型正确、槽数与范围合法
+     * （lite 的 {@code WebBridge} 可绕过界面直接调用 {@link #setAll}，不能只依赖 UI 钳制）。
+     * 旧写法（槽数少于当前定义）按历史语义取槽，见 {@link #legacyFieldSlot}。
+     */
+    private String validateWrite(String key, Value raw) {
+        if (raw == null) {
+            return "值为 null";
+        }
+        KeyMeta meta = keys.get(key);
+        if (meta == null) {
+            return validateLegacyWrite(key, raw);
+        }
+        if (meta.isPath()) {
+            return raw.isText() ? null : "类型不符：路径键要求文本值";
+        }
+        if (meta.isEnum()) {
+            if (!raw.isText()) {
+                return "类型不符：枚举键要求文本值";
+            }
+            String text = raw.text().trim();
+            return meta.hasOption(text) ? null : "取值「" + snippet(text) + "」不在可选项内";
+        }
+        if (meta.isTable()) {
+            return raw.isText() ? validateTableWrite(meta, raw.text()) : "类型不符：表键要求多行文本";
+        }
+        return validateNumericWrite(meta, raw);
+    }
+
+    /** 数值键（int / switch / multi）：类型、值个数（槽数）与逐槽范围。 */
+    private String validateNumericWrite(KeyMeta meta, Value raw) {
+        if (raw.isText()) {
+            return "类型不符：数值键要求整数，收到文本「" + snippet(raw.text()) + "」";
+        }
+        int fields = Math.max(1, meta.fieldCount());
+        int count = raw.size();
+        int maxSlots = maxSlotsOf(meta.key, fields);
+        if (count < 1 || count > maxSlots) {
+            return "值个数不符：要求 1~" + maxSlots + " 个，收到 " + count + " 个";
+        }
+        for (int i = 0; i < count; i++) {
+            int slot = legacyFieldSlot(meta.key, count, i);
+            if (slot < 0) {
+                continue;   // 已废弃的槽（旧三值行第 2 段）：不参与校验
+            }
+            Integer min = meta.min(slot);
+            Integer max = meta.max(slot);
+            int v = raw.intAt(i);
+            if ((min != null && v < min) || (max != null && v > max)) {
+                return "第 " + (i + 1) + " 值 " + v + " 超出范围 " + rangeText(min, max);
+            }
+        }
+        return null;
+    }
+
+    /**
+     * 允许的最多槽数：默认 = 现定义字段数。历史三值行 {@code APP_LAUNCH_SCREEN_GATE}
+     * （「开关 读取失败默认值 Dozing」，第 2 段已废弃）放宽到 3，否则老配置原样回写会被判非法（X7）。
+     */
+    private static int maxSlotsOf(String key, int fields) {
+        return "APP_LAUNCH_SCREEN_GATE".equals(key) ? Math.max(fields, 3) : fields;
+    }
+
+    /**
+     * 写入值第 {@code i} 个 token 对应的现定义字段下标。历史写法：
+     * <ul>
+     *   <li>{@code UI_CURVE_FILTER} 两值 = 旧「每遍权重 最小步长」，对应现定义第 2/3 字段
+     *       （第 1 字段是后加的总开关）；单值同属旧写法（只有权重）。</li>
+     *   <li>{@code APP_LAUNCH_SCREEN_GATE} 三值 = 旧「开关 读取失败默认值 Dozing」：
+     *       第 1 段→现第 1 字段、第 2 段已废弃（返回 -1）、第 3 段→现第 2 字段。</li>
+     *   <li>其余键的旧写法只是「少写后面的槽」，token 下标与字段下标一致。</li>
+     * </ul>
+     */
+    private static int legacyFieldSlot(String key, int count, int i) {
+        if ("UI_CURVE_FILTER".equals(key) && count < 3) {
+            return i + 1;
+        }
+        if ("APP_LAUNCH_SCREEN_GATE".equals(key) && count >= 3) {
+            return i == 0 ? 0 : (i == 2 ? 1 : -1);
+        }
+        return i;
+    }
+
+    /**
+     * 表键（{@code PID_CUT}）校验：每行按逗号分成 {@code rowFields} 宽的四元组；字段可留空
+     * （{@code allowEmpty}），空行 / 空值 = 清空哨兵，放行。行内非整数或越界 → 拒绝整批。
+     */
+    private String validateTableWrite(KeyMeta meta, String text) {
+        if (text.isEmpty() || meta.rowFields == null || meta.rowFields.isEmpty()) {
+            return null;
+        }
+        int width = meta.rowFields.size();
+        String[] lines = text.split("\n", -1);
+        for (int li = 0; li < lines.length; li++) {
+            String line = lines[li].trim();
+            if (line.isEmpty()) {
+                continue;
+            }
+            String[] cells = line.split(",", -1);
+            if (cells.length % width != 0) {
+                return "第 " + (li + 1) + " 行值个数 " + cells.length + " 不是 " + width + " 的整数倍";
+            }
+            for (int ci = 0; ci < cells.length; ci++) {
+                FieldMeta field = meta.rowFields.get(ci % width);
+                String cell = cells[ci].trim();
+                if (cell.isEmpty()) {
+                    if (!field.allowEmpty) {
+                        return "第 " + (li + 1) + " 行第 " + (ci + 1) + " 段为空";
+                    }
+                    continue;
+                }
+                int v;
+                try {
+                    v = Integer.parseInt(cell);
+                } catch (NumberFormatException e) {
+                    return "第 " + (li + 1) + " 行第 " + (ci + 1) + " 段「" + snippet(cell) + "」不是整数";
+                }
+                if ((field.min != null && v < field.min) || (field.max != null && v > field.max)) {
+                    return "第 " + (li + 1) + " 行第 " + (ci + 1) + " 段 " + v + " 超出范围 "
+                            + rangeText(field.min, field.max);
+                }
+            }
+        }
+        return null;
+    }
+
+    /**
+     * 参数表外的旧键写入（R04 / X7）：只放行 cdaemon 认得的旧键（{@code compat.daemonAccept}）与本类
+     * 显式登记的旧单值键，并逐类校验——旧单值键按现键对应槽校验；{@code KI_CUT_<簇号>} 校验三元组语法；
+     * {@code KI_CUT_SMOOTH} 已被忽略并随迁移删除，放行任意值。
+     */
+    private String validateLegacyWrite(String key, Value raw) {
+        if (!isCdaemonAccepted(key) && !LEGACY_SLOTS.containsKey(key)) {
+            return "未知键（params.json 未定义）";
+        }
+        LegacySlot legacy = LEGACY_SLOTS.get(key);
+        if (legacy != null) {
+            return validateLegacyNumeric(legacy, raw);
+        }
+        if (LEGACY_CUT_SMOOTH.equals(key)) {
+            return null;
+        }
+        if (key.startsWith(LEGACY_CUT_PREFIX)) {
+            return validateLegacyCut(raw);
+        }
+        return null;   // compat.daemonAccept 里的其它旧键：C 端自行容错，原样放行
+    }
+
+    /** 旧单值键：单值整数，范围取现键对应槽的 min/max。 */
+    private String validateLegacyNumeric(LegacySlot legacy, Value raw) {
+        KeyMeta current = keys.get(legacy.currentKey);
+        if (current == null) {
+            return null;   // 现键不在定义里：没有可依据的范围
+        }
+        if (raw.isText()) {
+            return "类型不符：旧键要求单值整数，收到文本「" + snippet(raw.text()) + "」";
+        }
+        if (raw.size() != 1) {
+            return "值个数不符：旧键要求 1 个值，收到 " + raw.size() + " 个";
+        }
+        Integer min = current.min(legacy.slot);
+        Integer max = current.max(legacy.slot);
+        int v = raw.intAt(0);
+        if ((min != null && v < min) || (max != null && v > max)) {
+            return "值 " + v + " 超出范围 " + rangeText(min, max);
+        }
+        return null;
+    }
+
+    /**
+     * 旧 {@code KI_CUT_<簇号>}：逗号或空白分隔的三元组（冷值,升倍率,降倍率）。空值 = 清空该簇，放行。
+     * 只校验语法与三元组整数倍；范围留给 C 端 clamp（旧契约如此，避免把老配置判非法）。
+     */
+    private static String validateLegacyCut(Value raw) {
+        if (!raw.isText()) {
+            return "类型不符：KI_CUT_ 旧格式要求逗号分隔的文本";
+        }
+        String text = raw.text().trim();
+        if (text.isEmpty()) {
+            return null;
+        }
+        String[] tokens = text.split("[,\\s]+");
+        for (int i = 0; i < tokens.length; i++) {
+            try {
+                Integer.parseInt(tokens[i]);
+            } catch (NumberFormatException e) {
+                return "第 " + (i + 1) + " 段「" + snippet(tokens[i]) + "」不是整数";
+            }
+        }
+        if (tokens.length % 3 != 0) {
+            return "值个数 " + tokens.length + " 不是三元组的整数倍";
+        }
+        return null;
+    }
+
+    /** 范围的人话写法（无界一侧用 ±∞）。 */
+    private static String rangeText(Integer min, Integer max) {
+        return (min == null ? "-∞" : min) + "~" + (max == null ? "+∞" : max);
+    }
+
+    /** 错误信息里引用用户输入时截断，避免把整段路径 / 表格塞进 Toast。 */
+    private static String snippet(String text) {
+        if (text == null) {
+            return "";
+        }
+        String oneLine = text.replace('\n', ' ').replace('\r', ' ').trim();
+        return oneLine.length() <= 24 ? oneLine : oneLine.substring(0, 24) + "…";
     }
 
     /**
@@ -1667,6 +1960,11 @@ public final class ConfigStore {
 
         public static Value ofText(String t) {
             return new Value(null, t == null ? "" : t);
+        }
+
+        /** 文本值（path / enum / table）为 true；数值值为 false（供落盘校验区分类型）。 */
+        public boolean isText() {
+            return text != null;
         }
 
         public int size() {

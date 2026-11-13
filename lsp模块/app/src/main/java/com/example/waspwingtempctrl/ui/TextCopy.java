@@ -524,14 +524,6 @@ final class TextCopy {
             }
         }
 
-        /** 非按住入口（键盘/无障碍）的兜底：系统已有选区时一步扩到整条。 */
-        private void expandOnce() {
-            if (expanded || !view.isAttachedToWindow() || !view.hasSelection()) {
-                return;
-            }
-            applyWholePath();
-        }
-
         /** 把当前选区两端扩到整条路径；选区不在同一条路径上时保持不动。 */
         private void applyWholePath() {
             if (!view.isAttachedToWindow() || !view.hasSelection()) {
