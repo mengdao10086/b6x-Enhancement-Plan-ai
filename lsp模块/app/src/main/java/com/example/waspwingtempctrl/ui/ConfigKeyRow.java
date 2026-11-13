@@ -618,7 +618,7 @@ final class ConfigKeyRow {
         suppressChange = true;
         try {
             for (int i = 0; i < fields.size(); i++) {
-                int filled = i < value.size() ? value.intAt(i) : meta.defaultValue.intAt(i);
+                int filled = fillValueAt(value, i);
                 fields.get(i).setValue(filled);   // 记账在 Field.setValue（值回填槽）
             }
         } finally {
@@ -634,6 +634,20 @@ final class ConfigKeyRow {
             writeWidth(field, width);
             StartupTiming.accEnd(StartupTiming.FORM_SUB_FILL, startedAt);
         }
+    }
+
+    /**
+     * 第 {@code i} 个字段该填的值。
+     *
+     * <p><b>UI_CHART_SWAP 旧单值兼容</b>：该键旧版只写 1 段，运行期按「两槽同值」解析；这里同样展开成
+     * 两槽同值，避免表单显示成「一开一关」、保存后又把另一槽写成 0。只命中这一个键，其余多值键仍按
+     * 字段缺项回填定义默认值。
+     */
+    private int fillValueAt(@NonNull Value value, int i) {
+        if ("UI_CHART_SWAP".equals(meta.key) && value.size() == 1) {
+            return value.intAt(0);
+        }
+        return i < value.size() ? value.intAt(i) : meta.defaultValue.intAt(i);
     }
 
     /**
