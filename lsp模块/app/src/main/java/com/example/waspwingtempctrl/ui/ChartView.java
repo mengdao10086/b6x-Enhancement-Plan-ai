@@ -87,6 +87,7 @@ public class ChartView extends View {
     private final Paint dashPaint = new Paint();     // 重算位置竖虚线（与网格同宽同色）
     private final Paint highlightPaint = new Paint(); // 按住查看的高亮竖虚线（与重算虚线同节奏）
     private final Paint panelPaint = new Paint();     // 按住查看的数值面板底色
+    private final Paint placeholderPaint = new Paint(); // 占位文字（独立画笔，避免改动刻度画笔的字号/对齐）
 
     private final ChartSeries[] series = ChartSeries.createAll();
 
@@ -217,6 +218,10 @@ public class ChartView extends View {
                 new float[]{DASH_ON_DP * density, DASH_OFF_DP * density}, 0f));
         panelPaint.setAntiAlias(true);
         panelPaint.setStyle(Paint.Style.FILL);
+        // 占位文字：字号/对齐在这里一次设好（口径与原先 onDraw 里的临时设置逐字相同）
+        placeholderPaint.setAntiAlias(true);
+        placeholderPaint.setTextAlign(Paint.Align.CENTER);
+        placeholderPaint.setTextSize(EMPTY_TEXT_DP * density);
     }
 
     // ==================== 外部接口 ====================
@@ -1188,10 +1193,8 @@ public class ChartView extends View {
             return;
         }
         if (placeholder != null) {
-            tickPaint.setTextAlign(Paint.Align.CENTER);
-            tickPaint.setColor(colorAxis);
-            tickPaint.setTextSize(EMPTY_TEXT_DP * density);
-            canvas.drawText(placeholder, w / 2f, h / 2f, tickPaint);
+            placeholderPaint.setColor(colorAxis);
+            canvas.drawText(placeholder, w / 2f, h / 2f, placeholderPaint);
             return;
         }
         if (gridY == null) {
@@ -1200,10 +1203,8 @@ public class ChartView extends View {
 
         gridPaint.setColor(colorGrid);
         tickPaint.setColor(colorAxis);
-        tickPaint.setTextSize(TICK_TEXT_DP * density);
         tickPaint.setTextAlign(Paint.Align.RIGHT);
         axisTextPaint.setColor(colorAxis);
-        axisTextPaint.setTextSize(TICK_TEXT_DP * density);
         for (int i = 0; i < gridY.length; i++) {
             canvas.drawLine(fPadL, gridY[i], fPadL + fW, gridY[i], gridPaint);
             canvas.drawText(gridText[i], fPadL - TICK_GAP_DP * density, gridY[i] + 3f * density, tickPaint);
@@ -1264,7 +1265,6 @@ public class ChartView extends View {
                 float radius = TOUCH_PANEL_RADIUS_DP * density;
                 canvas.drawRoundRect(touchPanelL, touchPanelT, touchPanelR, touchPanelB,
                         radius, radius, panelPaint);
-                labelPaint.setTextSize(TICK_TEXT_DP * density);
                 for (int i = 0; i < touchRowCount; i++) {
                     labelPaint.setColor(touchColors[i]);
                     canvas.drawText(touchTexts[i], touchTextX, touchTextY[i], labelPaint);
@@ -1275,8 +1275,6 @@ public class ChartView extends View {
         // 末端数值标签（成对系列的强调方，最多两条）：先描边（halo）再填色，避免曲线穿过字形时同色糊在一起
         if (endLabels != null) {
             haloPaint.setColor(colorBg);
-            labelPaint.setTextSize(TICK_TEXT_DP * density);
-            haloPaint.setTextSize(TICK_TEXT_DP * density);
             for (ChartLabelOp e : endLabels) {
                 labelPaint.setColor(e.color);
                 canvas.drawText(e.text, e.x, e.y, haloPaint);

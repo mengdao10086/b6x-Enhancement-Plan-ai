@@ -343,6 +343,7 @@ static volatile sig_atomic_t alarm_fired = 0;   // SIGALRM 已到（仅 wait_chi
 static int batt_cached_temp = -1;        // 最后一次读取的温度缓存
 static int batt_temp_updated = 0;        // 最近一次 1s 采集：值或 mtime 任一变化即置位（供采样 push 判定）
 static time_t batt_temp_mtime = 0;       // 温度文件上次 mtime（mtime 更新视为温度数据刷新；不可靠内核恒不变则退化为纯值比较）
+static int batt_mtime_stale = 0;         // 值变化那一拍跳过了 stat：下一次 stat 只重建基线、不再重复计刷新（R39）
 static int batt_changed_since_ctrl = 0;  // 自上次 5s 控制以来，1s 层是否检测到过温度变化（累积）
 static int batt_window_changed = 0;      // 当前控制周期快照（main_loop 入口设置，供跳过判定）
 
@@ -2014,6 +2015,21 @@ static void create_status_files(void) {
 
 // ======================== 双文件状态读取 ========================
 
+// —— status 元数据缓存（R40）——
+// read_cooler_params 每秒已把当前 status 文件整行读完；read_status_ble_both 每 5s 又打开同一文件
+// 取 BLE/CONNECTED_AT/BLE_OWNER_LAST。这里缓存那份解析结果，**只允许在同一采集序号（同一 1s 拍）内复用**；
+// 跨拍一律重读，故模块每秒改写的内容不会被旧缓存挡住。
+static unsigned long status_seq = 0;        // 每拍采集序号（sample_webui_inputs 开头 +1）
+static int    status_meta_valid = 0;
+static unsigned long status_meta_seq = 0;   // 该缓存取自哪一拍
+static int    status_meta_is_b6 = 0;        // 缓存来自哪个文件
+static int    meta_connected = 0;
+static time_t meta_connected_at = 0;
+static int    meta_model = 0;               // 仅 B7X 文件：BLE=6/7
+static int    meta_owner_ble = 0;           // 仅 B6X 文件：BLE=1/2
+static int    meta_last_owner = 0;
+static time_t meta_last_at = 0;
+
 /**
  * 读取单个 status 文件的 BLE 状态与连接时间戳（编码语义见 README「status 文件协议」）。
  * is_b6_file=1：B6X 文件（BLE=1/2 即 b6_owner）；=0：B7X 文件（BLE=6/7 即型号）。
@@ -2057,8 +2073,29 @@ static void read_single_status(const char *path, int is_b6_file,
  * 读取双状态文件中的 BLE 连接状态
  */
 static void read_status_ble_both(void) {
-    read_single_status(status_file_path_b6, 1, &b6_connected, &b6_connected_at, &b6_model);
-    read_single_status(status_file_path_b7, 0, &b7_connected, &b7_connected_at, &b7_model);
+    // 同一 1s 拍内 read_cooler_params 已解析过其中一台的文件 → 复用那份结果，只现场读另一台（R40）。
+    // 跨拍缓存失效（序号不等），模块改写后下一次调用必然重读；值/判定语义与两次 read_single_status 完全一致。
+    int b6_fresh = status_meta_valid && status_meta_seq == status_seq && status_meta_is_b6;
+    int b7_fresh = status_meta_valid && status_meta_seq == status_seq && !status_meta_is_b6;
+
+    if (b6_fresh) {
+        b6_connected = meta_connected;
+        b6_connected_at = meta_connected_at;
+        b6_model = 0;                                   // 与 read_single_status 先清 out_model 一致
+        if (meta_owner_ble) b6_owner = meta_owner_ble;  // BLE=1/2 才写；缺失不改全局（同原语义）
+        if (meta_last_owner > 0) { b6_last_owner = meta_last_owner; b6_last_at = meta_last_at; }
+    } else {
+        read_single_status(status_file_path_b6, 1, &b6_connected, &b6_connected_at, &b6_model);
+    }
+
+    if (b7_fresh) {
+        b7_connected = meta_connected;
+        b7_connected_at = meta_connected_at;
+        b7_model = meta_model;                          // BLE=6/7 的型号；其余留 0
+        if (meta_last_owner > 0) { b7_last_owner = meta_last_owner; b7_last_at = meta_last_at; }
+    } else {
+        read_single_status(status_file_path_b7, 0, &b7_connected, &b7_connected_at, &b7_model);
+    }
     // B6X BLE=1/2 型号未知 → 按文件路径兜底（B6X app 默认连 B6X 散热器，型号按 6）
     if (b6_connected && b6_model == 0) b6_model = 6;
     // B7X BLE≠6/7（旧编码 1/2）→ 按文件路径兜底型号 7
@@ -2128,7 +2165,13 @@ static void invalidate_report_ok(void) {
  */
 static void read_cooler_params(void) {
     const char *path = (active_device == DEVICE_B7X) ? status_file_path_b7 : status_file_path_b6;
+    const int is_b6_path = (active_device != DEVICE_B7X);
     active_status_mtime = 0;   // 本拍先置未知；下面成功打开后刷新
+    status_meta_valid = 0;     // 缓存作废；本帧成功读完后重新置有效
+
+    // 元数据缓存字段按 read_single_status 的「先清零」语义初始化（R40）
+    meta_connected = 0; meta_connected_at = 0; meta_model = 0;
+    meta_owner_ble = 0; meta_last_owner = 0; meta_last_at = 0;
 
     cooler_hot_temp = -1; cooler_cold_temp = -1;
     cooler_rpm_real = -1; cooler_rpm_run = -1; cooler_cold_real = -1; cooler_cold_run = -1;
@@ -2148,7 +2191,23 @@ static void read_cooler_params(void) {
     while (fgets(line, sizeof(line), f)) {
         const char *v;
         if ((v = status_field_value(line, STF_BLE)) != NULL) {
-            app_ble_connected = (atoi(v) != 0);
+            int ble = atoi(v);
+            app_ble_connected = (ble != 0);
+            meta_connected = (ble != 0);
+            if (is_b6_path) {
+                if (ble == 1 || ble == 2) meta_owner_ble = ble;
+            } else if (ble == 6 || ble == 7) {
+                meta_model = ble;
+            }
+        } else if ((v = status_field_value(line, STF_CONNECTED_AT)) != NULL) {
+            meta_connected_at = (time_t)atol(v);
+        } else if ((v = status_field_value(line, STF_BLE_OWNER_LAST)) != NULL) {
+            int owner = 0;
+            long at = 0;
+            if (sscanf(v, "%d %ld", &owner, &at) == 2 && owner > 0) {
+                meta_last_owner = owner;
+                meta_last_at = (time_t)at;
+            }
         } else if ((v = status_field_value(line, STF_HOT_TEMP)) != NULL) {
             cooler_hot_temp = atoi(v);
         } else if ((v = status_field_value(line, STF_COLD_TEMP)) != NULL) {
@@ -2175,6 +2234,11 @@ static void read_cooler_params(void) {
         }
     }
     fclose(f);
+
+    // 本帧解析结果可供同一拍的 read_status_ble_both 复用（R40）；跨拍由序号不等自动失效。
+    status_meta_is_b6 = is_b6_path;
+    status_meta_seq = status_seq;
+    status_meta_valid = 1;
 
     // 诊断：模块已在写真实回传（RUN_MODE）却连续 3 帧无 RPM_RUN → 旧模块或 getSpeed 不可用；
     // 只打一条，避免每秒刷日志。实际转速列此时恒为 -1。
@@ -2246,11 +2310,20 @@ static int read_battery_temp(void) {
     int val = raw / BATT_TEMP_DIVISOR;
     debug_log(debug_sensor, "batt_temp 原始 %d 除数 %d = %d (%.1f°C)",
               raw, BATT_TEMP_DIVISOR, val, val / 10.0);
-    struct stat st;
+    // 只在「值未变」时才需要 mtime 判刷新：值变了本拍 updated 必为 1，stat 对结果无影响（R39）。
+    // 值变化那一拍记 stale，下一次成功 stat 只重建基线（旧实现已在值变化拍记录过该 mtime，不重复计）。
     int mtime_changed = 0;
-    if (stat(BATT_TEMP_PATH, &st) == 0 && st.st_mtime != batt_temp_mtime) {
-        mtime_changed = 1;
-        batt_temp_mtime = st.st_mtime;
+    if (val != batt_cached_temp) {
+        batt_mtime_stale = 1;
+    } else {
+        struct stat st;
+        if (stat(BATT_TEMP_PATH, &st) == 0) {
+            if (st.st_mtime != batt_temp_mtime) {
+                if (!batt_mtime_stale) mtime_changed = 1;
+                batt_temp_mtime = st.st_mtime;
+            }
+            batt_mtime_stale = 0;
+        }
     }
     batt_temp_updated = (val != batt_cached_temp) || mtime_changed;
     batt_cached_temp = val;
@@ -2323,6 +2396,54 @@ static int read_kept_zone_raw(int idx) {
     return read_thermal_zone_raw(cpu_zone_cache[idx]);
 }
 
+// —— 有效候选 zone 的常驻 fd（R41）：周期重扫不再逐 zone fopen ——
+static int cpu_zone_valid_fd[CPU_ZONE_MAX_CACHE];
+static int cpu_zone_valid_fd_inited = 0;
+
+/** 关闭全部分量候选 zone 的常驻 fd 并置无效（做法同 close_cpu_zone_fds，避免误关 fd 0） */
+static void close_valid_zone_fds(void) {
+    if (!cpu_zone_valid_fd_inited) {
+        for (int i = 0; i < CPU_ZONE_MAX_CACHE; i++) cpu_zone_valid_fd[i] = CPU_ZONE_FD_INVALID;
+        cpu_zone_valid_fd_inited = 1;
+    }
+    for (int i = 0; i < CPU_ZONE_MAX_CACHE; i++) {
+        if (cpu_zone_valid_fd[i] >= 0) close(cpu_zone_valid_fd[i]);
+        cpu_zone_valid_fd[i] = CPU_ZONE_FD_INVALID;
+    }
+}
+
+/** 按当前有效候选名单重开常驻 fd（名单只在首次/区间变化时重建，故重开频率很低） */
+static void refresh_valid_zone_fds(void) {
+    close_valid_zone_fds();
+    for (int i = 0; i < cpu_zone_valid_count && i < CPU_ZONE_MAX_CACHE; i++) {
+        char path[128];
+        snprintf(path, sizeof(path), CPU_TEMP_PATH_FMT, cpu_zone_valid[i]);
+        cpu_zone_valid_fd[i] = open(path, O_RDONLY | O_CLOEXEC);   // 失败=-1，读取时回落 fopen
+    }
+}
+
+/**
+ * 读有效候选 zone（名单下标）的原始温度（m°C），优先走常驻 fd。
+ * 失败/失效回落 read_thermal_zone_raw，异常值过滤口径与之一致；返回值与逐次 fopen 完全相同。
+ */
+static int read_valid_zone_raw(int idx) {
+    if (idx >= 0 && idx < cpu_zone_valid_count && cpu_zone_valid_fd[idx] >= 0) {
+        char rbuf[32];
+        if (lseek(cpu_zone_valid_fd[idx], 0, SEEK_SET) != (off_t)-1) {
+            ssize_t n = read(cpu_zone_valid_fd[idx], rbuf, sizeof(rbuf) - 1);
+            if (n > 0) {
+                rbuf[n] = '\0';
+                int raw = atoi(rbuf);
+                if (raw <= 0 || raw > 150000) return -1;   // 与 read_thermal_zone_raw 同口径
+                return raw;
+            }
+        }
+        close(cpu_zone_valid_fd[idx]);
+        cpu_zone_valid_fd[idx] = CPU_ZONE_FD_INVALID;
+    }
+    return read_thermal_zone_raw(cpu_zone_valid[idx]);
+}
+
 // 初始扫描时暂存 zone 编号 + 温度（用于排序筛选）
 typedef struct { int id; int raw; } ZoneReading;
 
@@ -2356,11 +2477,12 @@ static void rescan_cpu_zones(void) {
         cpu_zone_valid_count = count;
         for (int i = 0; i < count; i++) cpu_zone_valid[i] = readings[i].id;
         cpu_zone_list_dirty = 0;
+        refresh_valid_zone_fds();   // 名单已重建：按新名单开常驻 fd，后续重扫不再逐 zone fopen（R41）
     } else {
         // 后续重扫：只在有效候选名单内读值重排，不扫描区间外、不发现新 zone；
         // 名单中本轮无效（≤0/读失败）的 zone 不入列。无回退全量兜底。
         for (int i = 0; i < cpu_zone_valid_count; i++) {
-            int raw = read_thermal_zone_raw(cpu_zone_valid[i]);
+            int raw = read_valid_zone_raw(i);
             if (raw < 0) continue;
             if (count < CPU_ZONE_MAX_CACHE) {
                 readings[count].id  = cpu_zone_valid[i];
@@ -2373,10 +2495,17 @@ static void rescan_cpu_zones(void) {
     // 按温度降序排列，保留温度最高的 cpu_zone_keep 个
     qsort(readings, count, sizeof(ZoneReading), cmp_zone_desc);
     int keep = count < cpu_zone_keep ? count : cpu_zone_keep;
+    // 保留列表与上次相同且 fd 均有效 → 不必关/重开（R41）。失效 fd 会在读取时被置无效，
+    // 下一次重扫据此强制重开；列表变化也必然重开。
+    int keep_same = cpu_zone_fd_inited && (keep == cpu_zone_count);
+    for (int i = 0; keep_same && i < keep; i++) {
+        if (readings[i].id != cpu_zone_cache[i] || cpu_zone_fd[i] < 0) keep_same = 0;
+    }
     for (int i = 0; i < keep; i++)
         cpu_zone_cache[i] = readings[i].id;
     cpu_zone_count = keep;
-    refresh_cpu_zone_fds();   // 保留列表已变：关旧 fd、按新列表重开，保证 fd 与列表一致
+    if (!keep_same)
+        refresh_cpu_zone_fds();   // 保留列表变了（或首次/有失效 fd）：关旧 fd、按新列表重开
     cpu_zone_scanned = 1;
     cpu_zone_last_scan = now;
 
@@ -5041,6 +5170,7 @@ static int webui_conn_ok = 0;
  * 断联判定（BLE 未连 或 app 进程失活）一并记进 {@link #webui_conn_ok}，写行时再据此留时间空洞。
  */
 static void sample_webui_inputs(void) {
+    status_seq++;   // 本拍采集序号：read_status_ble_both 只复用同序号的 status 元数据缓存（R40）
     webui_epoch_now = (long)time(NULL);
     webui_batt_now = read_battery_temp();
     webui_cpu_now  = read_cpu_temp_max();
@@ -5156,6 +5286,13 @@ static void write_coldmax_hint(void) {
  * 命令回退链（root 上下文，成功即停）：svc → cmd。
  */
 static void poll_bt_request(void) {
+    // 5s 节流：钩子写入是低频事件，1s 一拍整开文件≈8.6 万次/天没有收益（R38）。
+    // 响应上限由 1s 变为 5s；token/限频/首拍基准等判定完全不变。
+    static time_t bt_poll_at = 0;
+    time_t now_mono = mono_now();
+    if (bt_poll_at != 0 && now_mono - bt_poll_at < 5) return;
+    bt_poll_at = now_mono;
+
     FILE *f = fopen(BT_REQ_PATH, "r");
     if (!f) return;                       // 文件缺失（尚未预建）或不可读：下拍再试
     long long tok = -1;
@@ -5754,7 +5891,8 @@ int main(int argc, char *argv[]) {
     }
 
 exit:
-    close_cpu_zone_fds();   // 释放 thermal zone 常驻 fd（进程退出本会回收，显式关闭便于自查无泄漏）
+    close_cpu_zone_fds();       // 释放保留 zone 的常驻 fd（进程退出本会回收，显式关闭便于自查无泄漏）
+    close_valid_zone_fds();     // 释放有效候选 zone 的常驻 fd（R41）
     if (webui_fp) fclose(webui_fp);   // 释放曲线文件常驻句柄
     if (log_fp) fclose(log_fp);
     return 0;
