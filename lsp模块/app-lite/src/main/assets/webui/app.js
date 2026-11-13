@@ -16,7 +16,7 @@
     var SERIES_SCALE = {rpm: 100, cool: 1};
 
     var MAIN_GROUPS = ['debug', 'perf', 'sysfs', 'launch'];
-    var WEBUI_KEYS = ['UI_GAP_SEC', 'UI_RPM_AXIS_MIN', 'UI_BACK_HIDE', 'UI_AUTO_UPDATE'];
+    var WEBUI_KEYS = ['UI_GAP_SEC', 'UI_CHART_VIEW', 'UI_BACK_HIDE', 'UI_AUTO_UPDATE'];
     var TABS = ['status', 'config', 'chart', 'log'];
     var THEME_KEY = 'lite.theme';
     // 生效主题以控制台消息上报给原生（决定底部导航栏颜色），不新增桥方法；
@@ -947,7 +947,7 @@
             clearTimeout(state.writeTimer);
         }
         state.writeTimer = setTimeout(flushWrites, 300);
-        if (meta.key === 'UI_GAP_SEC' || meta.key === 'UI_RPM_AXIS_MIN') {
+        if (meta.key === 'UI_GAP_SEC' || meta.key === 'UI_CHART_VIEW') {
             refreshChartConfig();
             if (state.tab === 'chart') {
                 drawChart();
@@ -1240,11 +1240,35 @@
 
     // ==================== 曲线 ====================
 
+    /**
+     * UI_CHART_VIEW 第 i 槽（0=纵轴下限、1=重算标记）：按空格显式取段，不做跨段 parseInt 容错。
+     * 新键没有该段时回退旧键原始值（第 1 槽 UI_RPM_AXIS_MIN、第 2 槽 UI_PID_MARK），再回退 fallback。
+     * 注：快照对已定义键总补默认值，旧键已从定义删除、其原始值不经桥暴露，回退分支仅在能取到时生效。
+     */
+    function chartViewSlot(i, fallback) {
+        var parts = textOf(valueOf('UI_CHART_VIEW')).split(/\s+/);
+        if (parts.length > i) {
+            var n = parseIntStrict(parts[i]);
+            if (n !== null) {
+                return n;
+            }
+        }
+        var legacyKey = i === 0 ? 'UI_RPM_AXIS_MIN' : 'UI_PID_MARK';
+        var legacy = state.values[legacyKey];
+        if (legacy !== undefined && legacy !== null && textOf(legacy) !== '') {
+            var lv = parseIntStrict(textOf(legacy).split(/\s+/)[0]);
+            if (lv !== null) {
+                return lv;
+            }
+        }
+        return fallback;
+    }
+
     function refreshChartConfig() {
         var gap = numsOf(valueOf('UI_GAP_SEC'), 2);
         state.chart.detectSec = gap[0] > 0 ? gap[0] : 3;
         state.chart.gapMax = gap[1] > 0 ? gap[1] : 15;
-        state.chart.rpmAxisMin = asInt(valueOf('UI_RPM_AXIS_MIN'));
+        state.chart.rpmAxisMin = chartViewSlot(0, 3000);
         var chartDef = state.defs ? state.defs.chart : null;
         if (chartDef && chartDef.rollingMaxLines) {
             state.chart.maxLines = chartDef.rollingMaxLines;
