@@ -34,6 +34,7 @@ jobs:
       - name: 检测变更范围
         id: check
         run: |
+          set -euo pipefail
           # workflow_dispatch / 标签推送 → 全量构建
           if [[ "${{ github.event_name }}" == "workflow_dispatch" || \
                 "${{ github.ref_type }}" == "tag" ]]; then
@@ -47,8 +48,13 @@ jobs:
             # 首次推送无 before → 全量
             echo "changed=true" >> "$GITHUB_OUTPUT"
           else
-            # core.quotePath=false 防止中文路径被转义为八进制导致 grep 匹配失败
-            CHANGES=$(git -c core.quotePath=false diff --name-only "$BEFORE" "${{ github.sha }}")
+            # core.quotePath=false 防止中文路径被转义为八进制导致 grep 匹配失败。
+            # force-push/rebase 后 before 可能不在本地历史里；git diff 失败必须显式退出，
+            # 否则空输出会一路落到 changed=false，表现为「该建的不建」且无任何报错。
+            if ! CHANGES=$(git -c core.quotePath=false diff --name-only "$BEFORE" "${{ github.sha }}"); then
+              echo "git diff 失败：before=$BEFORE sha=${{ github.sha }}，无法判定变更范围"
+              exit 1
+            fi
             # 排除文档类文件（*.md），改文档不触发构建。
             # 例外：lsp模块/daemon/逻辑说明.md 的参数表段是生成产物，手改它属于产物漂移，
             # 必须让 CI 跑到参数校验步骤（否则漂移会延迟暴露并归因到无关提交）
@@ -288,7 +294,23 @@ jobs:
       - name: 获取版本号
         id: apk-version
         working-directory: ./lsp模块
-        run: echo "VERSION=$(grep "versionName" app/build.gradle.kts | sed 's/.*"\(.*\)".*/\1/')" >> $GITHUB_OUTPUT
+        run: |
+          set -euo pipefail
+          read_vn() { sed -nE 's/^[[:space:]]*versionName[[:space:]]*=[[:space:]]*"([^"]+)".*/\1/p' "$1" | head -1; }
+          read_vc() { sed -nE 's/^[[:space:]]*versionCode[[:space:]]*=[[:space:]]*([0-9]+).*/\1/p' "$1" | head -1; }
+          GUI_VN=$(read_vn app/build.gradle.kts)
+          GUI_VC=$(read_vc app/build.gradle.kts)
+          LITE_VN=$(read_vn app-lite/build.gradle.kts)
+          LITE_VC=$(read_vc app-lite/build.gradle.kts)
+          [ -n "$GUI_VN" ] && [ -n "$GUI_VC" ] && [ -n "$LITE_VN" ] && [ -n "$LITE_VC" ] \
+            || { echo "版本号解析失败: GUI_VN='$GUI_VN' GUI_VC='$GUI_VC' LITE_VN='$LITE_VN' LITE_VC='$LITE_VC'"; exit 1; }
+          [ "$GUI_VC" = "$LITE_VC" ] || { echo "versionCode 不一致: GUI=$GUI_VC lite=$LITE_VC"; exit 1; }
+          [ "$LITE_VN" = "$GUI_VN-lite" ] || { echo "lite versionName 后缀不符: GUI=$GUI_VN lite=$LITE_VN"; exit 1; }
+          echo "VERSION=$GUI_VN" >> "$GITHUB_OUTPUT"
+          echo "VERSION_CODE=$GUI_VC" >> "$GITHUB_OUTPUT"
+          echo "LITE_VERSION=$LITE_VN" >> "$GITHUB_OUTPUT"
+          echo "GUI: versionName=$GUI_VN versionCode=$GUI_VC"
+          echo "lite: versionName=$LITE_VN versionCode=$LITE_VC"
 
       # 两个产物：GUI（b6x-EP-v<ver>.apk）与 lite（b6x-EP-v<ver>-lite.apk）
       - name: 重命名 APK
@@ -430,7 +452,8 @@ jobs:
             echo "资源 ID: $BEFORE_NIDS -> $AFTER_NIDS";
             echo "APK 字节: $BEFORE_SIZE -> $AFTER_SIZE（净减 $((BEFORE_SIZE - AFTER_SIZE))）"; } >> "$GITHUB_STEP_SUMMARY"
 
-          # 基线断言：GUI 资源集合为 5,435 条 / 17 个类型（改动基线时需同步本检查）
+          # 基线断言：GUI 资源集合为 5,436 条 / 17 个类型（改动基线时需同步本检查）
+          # 5,435 → 5,436：快捷方式「临时停止」确认文案迁入 strings.xml（+1 string）
           # 5,380 → 5,386：日志整行跨选新增 1 个 drawable、3 个 id、2 个 string
           # 5,386 → 5,393：停止控制app 新增 6 个 string、1 个 id
           # 5,393 → 5,392：清理旧版遗留键移入诊断行，删除 1 个 id
@@ -445,7 +468,7 @@ jobs:
           # 5,427 → 5,428：路径跳转新增「选择打开方式」对话框标题
           # 5,428 → 5,430：曲线新增「实际rpm」系列（1 个 color + 1 条 string）；类型数不变
           # 5,430 → 5,435：图例自适应缩放新增 4 个 dimen、1 个 TextAppearance 样式；类型数不变
-          [ "$BEFORE_ENTRIES" -eq 5435 ]           || { echo "基线资源条目数不是 5,435（$BEFORE_ENTRIES）"; exit 1; }
+          [ "$BEFORE_ENTRIES" -eq 5436 ]           || { echo "基线资源条目数不是 5,436（$BEFORE_ENTRIES）"; exit 1; }
           [ "$BEFORE_NTYPES" -eq 17 ]              || { echo "基线资源类型数不是 17（$BEFORE_NTYPES）"; exit 1; }
           [ "$REMOVE_N" -eq 19 ]                   || { echo "待移除 layout 数量不是 19（$REMOVE_N）"; exit 1; }
           [ "$AFTER_ENTRIES" -eq $((BEFORE_ENTRIES - REMOVE_N)) ] \
@@ -507,12 +530,16 @@ jobs:
           echo "material/appcompat 类引用=$HITS"
           [ "$HITS" = "0" ] || { echo "lite 含 material/appcompat 类"; exit 1; }
 
-          # 同 applicationId / versionCode
-          for APK in "$GUI" "$LITE"; do
-            "$BT/aapt2" dump badging "$APK" \
-              | grep -q "package: name='com.example.waspwingtempctrl' versionCode='5'" \
-              || { echo "$APK 包名/versionCode 不符"; exit 1; }
-          done
+          # 同 applicationId / versionCode；versionName 由 Gradle 解析，GUI 无后缀、lite 带 -lite
+          GUI_VN="${{ steps.apk-version.outputs.VERSION }}"
+          LITE_VN="${{ steps.apk-version.outputs.LITE_VERSION }}"
+          VC="${{ steps.apk-version.outputs.VERSION_CODE }}"
+          "$BT/aapt2" dump badging "$GUI" \
+            | grep -q "package: name='com.example.waspwingtempctrl' versionCode='$VC' versionName='$GUI_VN'" \
+            || { echo "$GUI 包名/versionCode/versionName 不符"; exit 1; }
+          "$BT/aapt2" dump badging "$LITE" \
+            | grep -q "package: name='com.example.waspwingtempctrl' versionCode='$VC' versionName='$LITE_VN'" \
+            || { echo "$LITE 包名/versionCode/versionName 不符"; exit 1; }
 
           # lite 未在 CI 重签：AGP 直出 v1=false、v2/v3=true
           VERIFY=$("$BT/apksigner" verify --verbose "$LITE")

@@ -5,6 +5,7 @@
     <string name="shortcut_kill_daemon_long">kill daemon</string>
     <string name="shortcut_temp_stop_short">临时停止</string>
     <string name="shortcut_temp_stop_long">临时停止</string>
+    <string name="shortcut_temp_stop_message">将把「临时停止」开关置 1，守护进程停止下发温控；重启手机后自动恢复。是否继续？</string>
 
     <!-- 动作结果 Toast -->
     <string name="shortcut_toast_kill_ok">守护进程已停止</string>

@@ -40,6 +40,8 @@ case "$SELF" in
 esac
 
 log() {
+    # /data/local/tmp 可被 shell uid 预置符号链接：rm -f 只删目录项，避免以 root 追加到任意文件。
+    [ -L "$SVC_LOG" ] && rm -f "$SVC_LOG"
     echo "$(date '+%Y-%m-%d %H:%M:%S')：$1" >> "$SVC_LOG"
 }
 
@@ -92,6 +94,14 @@ stop_old() {
 }
 
 start() {
+    # 拒绝执行符号链接或非 root 所有的文件：/data/local/tmp 可被 shell uid 写。
+    # rm -f 只删目录项。恢复：下一轮 app 部署或本脚本自动更新会把真二进制补回。
+    BIN_UID=$(stat -c %u "$BIN" 2>/dev/null)
+    if [ -L "$BIN" ] || { [ -n "$BIN_UID" ] && [ "$BIN_UID" != "0" ]; }; then
+        log "拒绝执行符号链接/非 root 文件 $BIN；已删除，等待下一次部署/自动更新补回"
+        rm -f "$BIN"
+        return 1
+    fi
     if ! [ -x "$BIN" ]; then
         log "二进制缺失或不可执行：$BIN（需在 app 里重新部署）"
         return 1
@@ -102,6 +112,14 @@ start() {
         log "守护进程已在运行，跳过拉起（存在即不重复拉起）"
         return 0
     fi
+    # 从判据到执行之间仍可能被换成符号链接/别的文件：执行前再查一次；命中则不启动。
+    BIN_UID=$(stat -c %u "$BIN" 2>/dev/null)
+    if [ -L "$BIN" ] || { [ -n "$BIN_UID" ] && [ "$BIN_UID" != "0" ]; }; then
+        log "拒绝执行符号链接/非 root 文件 $BIN；已删除，等待下一次部署/自动更新补回"
+        rm -f "$BIN"
+        return 1
+    fi
+    [ -L "$SVC_LOG" ] && rm -f "$SVC_LOG"
     # 不传 --config：C 端按私有目录自行定位 profile.conf（--config 仅用于覆盖该默认）
     nohup "$BIN" >> "$SVC_LOG" 2>&1 < /dev/null &
     sleep 2
@@ -181,7 +199,11 @@ asset_md5() {
 
 # 把 APK 内某个 asset 解到指定文件；内容为空即算失败并清掉半个文件。
 asset_to_file() {
-    asset_pipe "$1" > "$2" 2>/dev/null
+    # 先删旧文件/预置的符号链接；set -C（noclobber）让重定向以 O_EXCL 打开：
+    # 删除到打开之间再被换成符号链接时直接失败，而不是跟随写穿。
+    # 必须看子 shell 的退出码：重定向因目标已存在而失败时，[ -s ] 会把别人的文件误当成功。
+    rm -f "$2"
+    ( set -C; asset_pipe "$1" > "$2" 2>/dev/null ) || { rm -f "$2"; return 1; }
     if [ -s "$2" ]; then
         return 0
     fi
@@ -276,7 +298,7 @@ auto_update_check() {
     # 时间戳没变 → 短路（"先比时间戳"这一步的全部收益都在这）。
     # 前提是二进制还在且可执行：少了这一条，一个被清掉的二进制会让短路一直成立、
     # 永远不走后面的比对（"被删"不是"内容变了"，但存在性这一眼是免费的）。
-    if [ -x "$BIN" ] && [ "$(cut -d' ' -f1 "$AU_STAMP" 2>/dev/null)" = "$M_APK" ]; then
+    if [ -x "$BIN" ] && [ ! -L "$BIN" ] && [ "$(cut -d' ' -f1 "$AU_STAMP" 2>/dev/null)" = "$M_APK" ]; then
         return 1
     fi
     if ! resolve_expected; then
@@ -284,7 +306,7 @@ auto_update_check() {
         return 1
     fi
     device_md5s
-    if [ "$D_BIN" = "$E_BIN_MD5" ] && { [ -z "$SP" ] || [ "$D_SCRIPT" = "$E_SCRIPT_MD5" ]; }; then
+    if [ ! -L "$BIN" ] && [ "$D_BIN" = "$E_BIN_MD5" ] && { [ -z "$SP" ] || [ "$D_SCRIPT" = "$E_SCRIPT_MD5" ]; }; then
         write_stamp "$M_APK" ok
         log "自动更新：设备上的内容与 APK 内一致，无需重部署"
         return 1
@@ -296,17 +318,30 @@ auto_update_check() {
         log "自动更新：旧实例未退出，本次跳过重部署"
         return 1
     fi
+    # /data/local/tmp 可被 shell uid 预置符号链接：先删旧 .new，再用 set -C（noclobber）
+    # 以 O_EXCL 创建——删除到创建之间再被换成链接时直接失败，不会跟随写穿。
+    # 源是 APK/清单（app 私有或只读），最终文件在 /data/local/tmp 新建，保持该目录的 SELinux 标签。
+    rm -f "$BIN.new"
     if [ "$E_SRC" = apk ]; then
         asset_to_file tempctrl-arm64 "$BIN.new" || { log "自动更新：二进制解包失败，跳过"; return 1; }
     else
-        cp -f "$E_BIN_FILE" "$BIN.new" || { log "自动更新：二进制副本不可用，跳过"; return 1; }
+        ( set -C; cat "$E_BIN_FILE" > "$BIN.new" ) 2>/dev/null \
+            || { log "自动更新：二进制副本不可用，跳过"; return 1; }
+    fi
+    if [ ! -s "$BIN.new" ] || [ -L "$BIN.new" ]; then
+        log "自动更新：二进制中转文件无效（空或符号链接），跳过"
+        rm -f "$BIN.new"
+        return 1
     fi
     chmod 0755 "$BIN.new" 2>/dev/null
+    # 先删目标目录项（符号链接只删链接本身），再做 rename；跨设备回退为 copy 时也不会跟随链接。
     rm -f "$BIN"
     if ! mv -f "$BIN.new" "$BIN"; then
         log "自动更新：二进制就位失败"
+        rm -f "$BIN.new" 2>/dev/null
         return 1
     fi
+    rm -f "$BIN.new" 2>/dev/null
     device_md5s
     if [ "$D_BIN" = "$E_BIN_MD5" ]; then
         log "自动更新：已更新二进制 $BIN（内容与 APK 内一致）"
@@ -316,12 +351,14 @@ auto_update_check() {
     fi
 
     if [ -n "$SP" ]; then
+        rm -f "$SP.new"
         if [ "$E_SRC" = apk ]; then
             asset_to_file "deploy/$SCRIPT_NAME" "$SP.new" || log "自动更新：脚本解包失败（本次只更新二进制）"
         else
-            cp -f "$E_SCRIPT_FILE" "$SP.new" 2>/dev/null || log "自动更新：脚本副本不可用（本次只更新二进制）"
+            ( set -C; cat "$E_SCRIPT_FILE" > "$SP.new" ) 2>/dev/null \
+                || log "自动更新：脚本副本不可用（本次只更新二进制）"
         fi
-        if [ -s "$SP.new" ]; then
+        if [ -s "$SP.new" ] && [ ! -L "$SP.new" ]; then
             chmod 0755 "$SP.new" 2>/dev/null
             if mv -f "$SP.new" "$SP"; then
                 log "自动更新：已更新 service.d 脚本 $SP（新脚本下次开机生效）"
@@ -347,6 +384,7 @@ auto_update_check() {
 cleanup_all() {
     stop_old
     rm -f /data/local/tmp/tempctrl \
+          /data/local/tmp/tempctrl.new \
           /data/local/tmp/tempctrl_b6x.status \
           /data/local/tmp/tempctrl_b7x.status \
           /data/local/tmp/tempctrl_uiprefs \

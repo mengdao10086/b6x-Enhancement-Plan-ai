@@ -25,6 +25,8 @@
 #include <sys/stat.h>
 #include <sys/file.h>
 #include <sys/wait.h>
+#include <sys/time.h>
+#include <sys/select.h>
 #include <fcntl.h>
 #include <dirent.h>
 #include <limits.h>
@@ -99,6 +101,7 @@ static int ensure_private_dir(void) {
 #define AM_BIN      "/system/bin/am"
 #define PM_BIN      "/system/bin/pm"
 #define DUMPSYS_BIN "/system/bin/dumpsys"
+#define SH_BIN      "/system/bin/sh"     // 带管道的复合命令经 sh -c 执行；/data/adb 是 noexec 挂载，脚本也必须走 sh
 
 // ======================== 系统路径与缩放 ========================
 // --- sysfs 路径配置（可由 profile.conf 覆盖）---
@@ -334,6 +337,7 @@ static time_t pending_align_since = 0;     // pending_align 起点（超时兜�
 // ======================== 全局运行状态 ========================
 // --- 信号 ---
 static volatile int running = 1;
+static volatile sig_atomic_t alarm_fired = 0;   // SIGALRM 已到（仅 wait_child_timeout 使用）
 
 // --- 电池温度数值追踪（Scene 式：定时轮询 + 值比较，mtime 变化作为补充刷新信号）---
 static int batt_cached_temp = -1;        // 最后一次读取的温度缓存
@@ -2099,6 +2103,17 @@ static void update_active_limits(void) {
 static time_t active_status_mtime = 0;
 
 /**
+ * 作废「回传就绪」判定：本帧无有效回传（status 读不到 / 缺 RUN_MODE / 冷或转速值非法）。
+ * 长断连重连后必须重新累计 REPORT_OK_N 帧真实回传，否则 try_align_actual 会立即用 -1
+ * 兜底成 冷=下限/rpm=下限 并强制下发，绕开「等真实回传再对齐」。
+ */
+static void invalidate_report_ok(void) {
+    report_ok_streak = 0;
+    if (report_ok) write_log("回传就绪标志回退，需重新累计 %d 帧真实回传", REPORT_OK_N);
+    report_ok = 0;
+}
+
+/**
  * 读取 active_device 对应的状态文件中的散热器回传参数
  * 在仲裁确定 active_device 后调用
  */
@@ -2110,7 +2125,10 @@ static void read_cooler_params(void) {
     cooler_rpm_real = -1; cooler_rpm_run = -1; cooler_cold_real = -1; cooler_cold_run = -1;
 
     FILE *f = fopen(path, "r");
-    if (!f) return;
+    if (!f) {   // 本帧读不到 status：按异常帧处理，不许沿用断连前的「已就绪」
+        invalidate_report_ok();
+        return;
+    }
     {   // 复用已打开的 fd 取 mtime（is_app_alive 同拍紧随其后调用，见其注释）
         struct stat fst;
         if (fstat(fileno(f), &fst) == 0) active_status_mtime = fst.st_mtime;
@@ -2168,7 +2186,7 @@ static void read_cooler_params(void) {
         if (report_ok_streak < REPORT_OK_N) report_ok_streak++;
         if (report_ok_streak >= REPORT_OK_N) report_ok = 1;
     } else {
-        report_ok_streak = 0;
+        invalidate_report_ok();   // 异常帧不只清 streak，还要作废「已就绪」
     }
 }
 
@@ -2476,30 +2494,79 @@ static const char *const BROADCAST_EXTRAS[] = {
 #define BROADCAST_EXTRAS_N  ((int)(sizeof(BROADCAST_EXTRAS) / sizeof(BROADCAST_EXTRAS[0])))
 #define BROADCAST_VAL_MAX   12   // 整型 extra 字符串缓冲（int 最长 11 字符 + NUL）
 
+// 外部命令（dumpsys/am/pm/svc）单次执行上限：正常 100~300ms，5s 已远超；挂死时按此界限回收。
+#define CMD_TIMEOUT_SEC     5
+#define CMD_KILL_GRACE_SEC  1   // SIGTERM 后等子进程自行退出的宽限，仍未退则 SIGKILL
+#define CMD_RESULT_TIMEOUT  (-2)   // run_shell_timeout 专用：命令超时被回收（区别于 -1=fork/exec 失败）
+
+/** 单调毫秒时钟：只用于外部命令的超时预算（墙钟被回拨不影响，见 逻辑说明.md）。 */
+static long long mono_ms(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (long long)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
+}
+
 /**
- * 限时（3 秒）回收子进程：超时则 SIGKILL 强杀并回收，避免僵尸。
- * 抽自 send_am_broadcast 既有的「sigaction + alarm + waitpid」写法，供 am 命令共用
- * （现由 send_am_broadcast 调用）。必须显式 sigaction 且 sa_flags=0——
- * 本文件 signal() 是 BSD 语义带 SA_RESTART，会重启 waitpid 使超时分支成死代码
- * （详见 逻辑说明.md「看门狗反向保活」）。
- * @return 1=已正常回收（*out_status 有效）；0=超时（已强杀回收，*out_status 无意义）
+ * 等 fd 可读，最多等到 deadline_ms（mono_ms 口径）。
+ * @return 1=可读；0=超时；-1=错误或被信号打断（调用方按 errno==EINTR 决定是否重试）
  */
-static int wait_child_timeout(pid_t pid, int *out_status) {
+static int wait_readable(int fd, long long deadline_ms) {
+    long long left = deadline_ms - mono_ms();
+    if (left <= 0) return 0;
+    struct timeval tv;
+    tv.tv_sec  = (time_t)(left / 1000);
+    tv.tv_usec = (suseconds_t)((left % 1000) * 1000);
+    fd_set rf;
+    FD_ZERO(&rf);
+    FD_SET(fd, &rf);
+    return select(fd + 1, &rf, NULL, NULL, &tv);
+}
+
+/**
+ * 限时回收子进程：timeout_sec 内未退出则 SIGTERM，宽限 CMD_KILL_GRACE_SEC 秒后仍未退出则 SIGKILL；
+ * SIGKILL 后轮询回收，绝不无限等待（子进程若卡在 D 状态，kill 也无法立刻生效，阻塞会拖停主循环）。
+ * 必须显式 sigaction 且 sa_flags=0——本文件 signal() 是 BSD 语义带 SA_RESTART，会重启 waitpid
+ * 使超时分支成死代码（详见 逻辑说明.md「看门狗反向保活」）。
+ * @return 1=已正常回收（*out_status 有效）；0=超时（已按 SIGTERM→SIGKILL 回收，*out_status 无意义）
+ */
+static int wait_child_timeout(pid_t pid, int *out_status, int timeout_sec) {
     struct sigaction sa;
     memset(&sa, 0, sizeof(sa));
     sa.sa_handler = alarm_handler;
     sigemptyset(&sa.sa_mask);
     sa.sa_flags = 0;                     // 关键：不置 SA_RESTART，waitpid 才会被闹钟打断
     sigaction(SIGALRM, &sa, NULL);
-    alarm(3);
-    int r = waitpid(pid, out_status, 0);
+
+    alarm_fired = 0;
+    alarm(timeout_sec > 0 ? (unsigned)timeout_sec : 1);
+    int r;
+    do {   // 闹钟可能在下一次 waitpid 之前就已到（窗口极小），此时不能再阻塞等
+        r = alarm_fired ? -1 : waitpid(pid, out_status, 0);
+    } while (r == -1 && errno == EINTR && !alarm_fired);   // 被其它信号打断：继续等，不算超时
+
+    int timed_out = (r == -1 && alarm_fired);   // r>0=已回收，即使闹钟同时到也不算超时
+    if (timed_out) {
+        kill(pid, SIGTERM);
+        write_log("子进程超时（%ds）发送 SIGTERM，pid=%d", timeout_sec, (int)pid);
+        alarm_fired = 0;
+        alarm(CMD_KILL_GRACE_SEC);
+        do {
+            r = alarm_fired ? -1 : waitpid(pid, out_status, 0);
+        } while (r == -1 && errno == EINTR && !alarm_fired);
+        alarm(0);                        // 撤闹钟后再轮询，避免 SIGALRM 打断回收循环
+        signal(SIGALRM, SIG_DFL);
+        if (alarm_fired) {
+            kill(pid, SIGKILL);
+            write_log("子进程 SIGTERM 后 %ds 未退出，已 SIGKILL，pid=%d",
+                      CMD_KILL_GRACE_SEC, (int)pid);
+            // 轮询回收（≤1s）：不阻塞等待，D 状态下也不让主循环停摆
+            for (int i = 0; i < 10 && waitpid(pid, NULL, WNOHANG) == 0; i++)
+                usleep(100000);
+        }
+        return 0;                        // 超时：*out_status 无意义
+    }
     alarm(0);                            // 先撤闹钟：之后不再需要（也不该）被打断
     signal(SIGALRM, SIG_DFL);
-    if (r == -1) {
-        kill(pid, SIGKILL);
-        waitpid(pid, NULL, 0);           // 强杀后回收，避免僵尸
-        return 0;
-    }
     return 1;
 }
 
@@ -2869,8 +2936,13 @@ static int is_screen_awake(void) {
     size_t lineLen = 0;
     int matched = 0;
     char buf[4096];
+    long long deadline = mono_ms() + (long long)CMD_TIMEOUT_SEC * 1000;
     while (!matched) {
+        int sr = wait_readable(fds[0], deadline);   // dumpsys 挂死时不再永久阻塞
+        if (sr < 0) { if (errno == EINTR) continue; break; }
+        if (sr == 0) break;                         // 超时：按"没匹配到"处理，下面限时回收子进程
         ssize_t n = read(fds[0], buf, sizeof(buf));
+        if (n < 0 && errno == EINTR) continue;
         if (n <= 0) break;   // 0=EOF、<0=读失败 → 都按"没匹配到"处理
         for (ssize_t i = 0; i < n; i++) {
             if (buf[i] != '\n') {
@@ -2888,9 +2960,9 @@ static int is_screen_awake(void) {
         matched = wakefulness_value(line, val, sizeof(val));
     }
     close(fds[0]);   // 必须先关：否则子进程可能卡在写端，下面 waitpid 就永不返回
-    // 不处理 EINTR：本文件的 signal() 是 BSD 语义（带 SA_RESTART），waitpid 会被自动重启；
-    // 真要被打断也只多留一个僵尸，不影响功能。
-    waitpid(pid, NULL, 0);   // 回收子进程，避免僵尸（它已退出、或即将因 SIGPIPE 退出）
+    // 限时回收：走到超时分支时子进程已确认挂死，宽限只需 CMD_KILL_GRACE_SEC
+    if (!wait_child_timeout(pid, NULL, CMD_KILL_GRACE_SEC))
+        write_log("dumpsys power 超时（>%ds）已按 SIGTERM→SIGKILL 回收", CMD_TIMEOUT_SEC);
 
     if (!matched) return -1;                    // 没读到目标行 → 失败，调用方按兜底处理
     if (strcmp(val, "Awake") == 0) return 1;
@@ -2907,33 +2979,113 @@ static int is_foreground_pkg(const char *pkg) {
     snprintf(cmd, sizeof(cmd),
              DUMPSYS_BIN " window 2>/dev/null | grep -m1 'mCurrentFocus='; "
              DUMPSYS_BIN " activity activities 2>/dev/null | grep -m1 -E 'topResumedActivity|mResumedActivity'");
-    FILE *fp = popen(cmd, "r");
-    if (!fp) return 0;
-    char line[1024];
-    int fg = 0;
-    while (fgets(line, sizeof(line), fp)) {
-        if (strstr(line, pkg)) { fg = 1; break; }
+
+    // 不用 popen：它拿不到子进程 pid，命令挂死时 pclose 会无限阻塞。改为 fork+exec+限时读。
+    int fds[2];
+    if (pipe(fds) != 0) return 0;
+    pid_t pid = fork();
+    if (pid < 0) {
+        close(fds[0]);
+        close(fds[1]);
+        return 0;
     }
-    pclose(fp);
+    if (pid == 0) {
+        close(fds[0]);
+        dup2(fds[1], STDOUT_FILENO);
+        close(fds[1]);
+        int devnull = open("/dev/null", O_WRONLY);
+        if (devnull >= 0) {
+            dup2(devnull, STDERR_FILENO);
+            close(devnull);
+        }
+        char *argv[] = { (char *)"sh", (char *)"-c", cmd, NULL };
+        execv(SH_BIN, argv);
+        _exit(127);
+    }
+    close(fds[1]);
+
+    char line[1024];
+    size_t lineLen = 0;
+    int fg = 0;
+    char buf[4096];
+    long long deadline = mono_ms() + (long long)CMD_TIMEOUT_SEC * 1000;
+    while (!fg) {
+        int sr = wait_readable(fds[0], deadline);
+        if (sr < 0) { if (errno == EINTR) continue; break; }
+        if (sr == 0) break;                         // 超时：按"未在前台"处理，下面限时回收
+        ssize_t n = read(fds[0], buf, sizeof(buf));
+        if (n < 0 && errno == EINTR) continue;
+        if (n <= 0) break;
+        for (ssize_t i = 0; i < n && !fg; i++) {
+            if (buf[i] != '\n') {
+                if (lineLen < sizeof(line) - 1) line[lineLen++] = buf[i];
+                continue;
+            }
+            line[lineLen] = '\0';
+            if (strstr(line, pkg)) fg = 1;
+            lineLen = 0;
+        }
+    }
+    if (!fg && lineLen > 0) {   // 末尾无换行的残行也判一次
+        line[lineLen] = '\0';
+        if (strstr(line, pkg)) fg = 1;
+    }
+    close(fds[0]);   // 先关读端：子进程若仍在写会收到 SIGPIPE 而退出
+    if (!wait_child_timeout(pid, NULL, CMD_KILL_GRACE_SEC))
+        write_log("dumpsys 前台检测超时（>%ds）已按 SIGTERM→SIGKILL 回收", CMD_TIMEOUT_SEC);
     return fg;
 }
 
-/** 构建命令并静默执行（输出重定向到 /dev/null），返回 system() 退出码 */
+/**
+ * fork + exec sh -c 执行外部命令并限时回收（输出须在命令内重定向）。
+ * 取代 system()：命令挂死（binder 卡住等）时按 SIGTERM→SIGKILL 收回，主循环不停摆。
+ * @return 与 system() 相同的 wait 状态（WIFEXITED/WEXITSTATUS 可用）；
+ *         CMD_RESULT_TIMEOUT=命令超时、-1=fork 失败——两者都无法判定，调用方不得当作命令结果
+ */
+static int run_shell_timeout(const char *cmd) {
+    pid_t pid = fork();
+    if (pid < 0) {
+        write_log("fork 失败，跳过外部命令");
+        return -1;
+    }
+    if (pid == 0) {
+        int devnull = open("/dev/null", O_RDWR);
+        if (devnull >= 0) {
+            dup2(devnull, STDIN_FILENO);
+            dup2(devnull, STDOUT_FILENO);
+            dup2(devnull, STDERR_FILENO);
+            close(devnull);
+        }
+        char *argv[] = { (char *)"sh", (char *)"-c", (char *)cmd, NULL };
+        execv(SH_BIN, argv);
+        _exit(127);
+    }
+    int status = 0;
+    if (!wait_child_timeout(pid, &status, CMD_TIMEOUT_SEC)) {
+        write_log("外部命令超时（>%ds）已按 SIGTERM→SIGKILL 回收：%.80s", CMD_TIMEOUT_SEC, cmd);
+        return CMD_RESULT_TIMEOUT;
+    }
+    return status;
+}
+
+/** 构建命令并静默执行（输出重定向到 /dev/null），返回与 system() 相同的 wait 状态（超时为 CMD_RESULT_TIMEOUT） */
 static int run_cmd_silent(const char *fmt, const char *arg) {
     char cmd[256];
     snprintf(cmd, sizeof(cmd), fmt, arg);
-    return system(cmd);
+    return run_shell_timeout(cmd);
 }
 
 /**
- * 包安装实时探测（pm path）：1=已安装、0=未安装（pm 明确报"包未找到"，退出码 1）、-1=无法判定。
+ * 包安装实时探测（pm path）：1=已安装、0=未安装（pm 明确报"包未找到"，退出码 1）、
+ * -1=无法判定、CMD_RESULT_TIMEOUT=pm 超时（未知，与「未安装」严格区分）。
  * 退出码口径（只有 rc=1 算不存在）见 逻辑说明.md「自动拉起」；每次 fork+exec pm（~100~300ms），
  * 故探测链上走带缓存的 app_installed()，只有宿主卸载探测直接用它。
  */
 static int app_installed_probe(const char *pkg) {
     int st = run_cmd_silent(PM_BIN " path %s > /dev/null 2>&1", pkg);
     if (st == 0) return 1;
-    // system() 返回的是 wait 状态而不是退出码：-1=fork/exec 失败；WIFEXITED 假=进程被信号杀死（pm 没跑完）。
+    if (st == CMD_RESULT_TIMEOUT) return CMD_RESULT_TIMEOUT;   // pm 挂死：未知，绝不可当「未安装」
+    // 返回的是 wait 状态而不是退出码：-1=fork/exec 失败；WIFEXITED 假=进程被信号杀死（pm 没跑完）。
     if (st == -1 || !WIFEXITED(st)) return -1;
     // 只有退出码 1（pm 自己报"包未找到"）才算「确实不存在」，其余非 0（命令跑不起来 / 服务未就绪等）
     // 一律「无法判定」——误判成"不存在"会在开机早期触发不可逆的卸载自清。各退出码含义与后果见
@@ -2950,13 +3102,18 @@ static int install_cache_val[INSTALL_CACHE_SLOTS];           // 缓存值：1=�
 static time_t install_cache_at[INSTALL_CACHE_SLOTS];         // 结论写入时间（唯一用途：表满时挑最旧一条淘汰）
 static int install_cache_used = 0;                           // 已用槽数（0..INSTALL_CACHE_SLOTS）
 
-/** 判断指定包名是否已安装（带缓存：同一包名在一次开机周期内只 fork 一次 pm） */
+/**
+ * 判断指定包名是否已安装（带缓存：同一包名在一次开机周期内只 fork 一次 pm）。
+ * @return 1=已安装；0=未安装（含非超时的「无法判定」，沿用既有语义）；-1=pm 超时（未知，
+ *         调用方不得按 false 处理：不清理、不据此否定，只记日志并跳过本轮判断）
+ */
 static int app_installed(const char *pkg) {
     for (int i = 0; i < install_cache_used; i++)
         if (strcmp(install_cache_pkg[i], pkg) == 0) return install_cache_val[i];
 
     int r = app_installed_probe(pkg);
-    if (r < 0) return 0;   // 无法判定：沿用加缓存前的语义按「未安装」返回（由调用方日志暴露），但不写缓存
+    if (r == CMD_RESULT_TIMEOUT) return -1;   // 超时→未知：不写缓存，调用方按「判不了」处理
+    if (r < 0) return 0;   // 其它无法判定：沿用加缓存前的语义按「未安装」返回（由调用方日志暴露），但不写缓存
 
     int slot = install_cache_used;
     if (slot >= INSTALL_CACHE_SLOTS) {   // 表满：淘汰最旧一条，保证表长有界
@@ -3007,7 +3164,7 @@ static void install_cache_mark(const char *pkg) {
 // —— 启动预热：让「已确认未安装」的结论在默认配置（APP_LAUNCH_ENABLED=0）下也能建立 ——
 // 默认配置下拉起链全程不跑，安装缓存永不填充 → arbitrate_apps 的 /proc 过滤恒为空、不生效。
 // 故在等待设备循环内预热：对三个候选包各探一次；对仍「无法判定」的包有界重试，随后放弃。
-// **绝不周期性重试**——app_installed() 在 unknown 时返回 0 且不写缓存，无界重试＝每轮 fork pm。
+// **绝不周期性重试**——app_installed() 在 unknown 时返回 0/-1 且不写缓存，无界重试＝每轮 fork pm。
 #define INSTALL_WARMUP_MAX_TRIES 3
 static const char *const INSTALL_WARMUP_PKGS[] = { APP_PKG_B6X_OLD, APP_PKG_B6X_NEW, APP_PKG_B7X };
 #define INSTALL_WARMUP_PKGS_N ((int)(sizeof(INSTALL_WARMUP_PKGS) / sizeof(INSTALL_WARMUP_PKGS[0])))
@@ -3038,23 +3195,36 @@ static void install_cache_warmup(void) {
 /**
  * 解析自动拉起的包名：优先 BLE_OWNER_LAST 记录的上次连接者；
  * 目标 B6X app 未安装时回退另一个 B6X app（老 app 未安装→新 app，反之亦然）。
+ * @param out_installed 可空；返回所选包的安装状态（1=已安装、0=确定未安装、-1=pm 超时未知），
+ *                      供调用方免去一次重复 pm 探测（超时时重复探测会再加一个超时周期）
  */
-static const char *resolve_launch_pkg(void) {
+static const char *resolve_launch_pkg(int *out_installed) {
     const char *pkg;
     if      (last_owner == 2)                     pkg = APP_PKG_B6X_NEW;
     else if (last_owner == 6 || last_owner == 7)  pkg = APP_PKG_B7X;
     else                                          pkg = APP_PKG_B6X_OLD;  // 无记录/老 app
-    if (strcmp(pkg, APP_PKG_B6X_OLD) == 0 && !app_installed(pkg) && app_installed(APP_PKG_B6X_NEW)) {
+
+    int installed = app_installed(pkg);
+    if (installed < 0) {   // pm 超时=未知：不据此切换（切换只认确定的「未安装」），由调用方记日志
+        if (out_installed) *out_installed = installed;
+        return pkg;
+    }
+    if (installed == 0
+        && strcmp(pkg, APP_PKG_B6X_OLD) == 0 && app_installed(APP_PKG_B6X_NEW) == 1) {
         debug_log(debug_launch, "自动拉起 老 B6X app 未安装，改用新 app");
         pkg = APP_PKG_B6X_NEW;
-    } else if (strcmp(pkg, APP_PKG_B6X_NEW) == 0 && !app_installed(pkg) && app_installed(APP_PKG_B6X_OLD)) {
+        installed = 1;   // 回退目标已确认为已安装
+    } else if (installed == 0
+        && strcmp(pkg, APP_PKG_B6X_NEW) == 0 && app_installed(APP_PKG_B6X_OLD) == 1) {
         debug_log(debug_launch, "自动拉起 新 B6X app 未安装，改用老 app");
         pkg = APP_PKG_B6X_OLD;
+        installed = 1;
     }
+    if (out_installed) *out_installed = installed;
     return pkg;
 }
 
-/** 构建并执行 am start 拉起指定包名（显式组件优先，未知 launcher 回退 -p），返回 system() 退出码 */
+/** 构建并执行 am start 拉起指定包名（显式组件优先，未知 launcher 回退 -p），返回 wait 状态（超时为 CMD_RESULT_TIMEOUT） */
 static int am_start_app(const char *pkg) {
     // 优先显式组件 -n（这些 app 的 launcher 未导出/非标准 filter，隐式启动解析不到）；未知 launcher 回退 -p
     const char *act = NULL;
@@ -3070,7 +3240,7 @@ static int am_start_app(const char *pkg) {
         snprintf(cmd, sizeof(cmd),
                  AM_BIN " start -a android.intent.action.MAIN -c android.intent.category.LAUNCHER "
                  "-p %s --es b6x_auto_launch 1 > /dev/null 2>&1", pkg);
-    return system(cmd);
+    return run_shell_timeout(cmd);
 }
 
 /**
@@ -3136,12 +3306,15 @@ static void launch_last_app(int pkg_known_dead) {
         last_screen_off = 0;   // 屏检确认亮屏（含 -1 兜底）→ 恢复每轮一次屏检，节奏与改动前完全一致
     }
 
-    const char *pkg = resolve_launch_pkg();
+    int installed = 1;
+    const char *pkg = resolve_launch_pkg(&installed);
     debug_log(debug_launch, "自动拉起 目标 %s（last_owner=%d）", pkg, last_owner);
-    if (!app_installed(pkg)) {
+    if (installed == 0) {
         write_log("自动拉起 目标 app 未安装 %s", pkg);
         return;
     }
+    if (installed < 0)   // pm 超时=未知：不当作「未安装」跳过，仍尝试拉起（失败由 am 的 rc 暴露）
+        write_log("自动拉起 安装状态无法判定（pm 超时），仍尝试拉起 %s", pkg);
     if (!pkg_known_dead) {   // 有已知「已全灭」结论时跳过本次单包扫描
         int pkg_alive = 0;
         app_process_scan(&pkg, &pkg_alive, 1);   // 单包扫描（复用合并遍历逻辑）
@@ -3158,7 +3331,7 @@ static void launch_last_app(int pkg_known_dead) {
 
 /** kill 目标散热器 app 并重新拉起（绕过 APP_LAUNCH_ENABLED 开关：本处主动 kill 必须拉起） */
 static void force_kill_and_relaunch(void) {
-    const char *pkg = resolve_launch_pkg();
+    const char *pkg = resolve_launch_pkg(NULL);
     write_log("锁死自动重启 强制停止 %s 并重新拉起", pkg);
     run_cmd_silent(AM_BIN " force-stop %s > /dev/null 2>&1", pkg);
     // 等进程退出（最多 2s）
@@ -4371,6 +4544,9 @@ static int host_app_uninstalled(void) {
         int probe = app_installed_probe(HOST_PKG);
         host_probe_gone    = (probe == 0);   // 仅"pm 明确报包不存在"才算已不注册
         host_probe_unknown = (probe < 0);    // 无法判定：既不计数也不算"仍注册"
+        if (host_probe_unknown)              // 未知一律跳过清理，并留一条可追溯日志（节流在探测本身）
+            write_log("宿主卸载探测无法判定（%s），本轮跳过清理",
+                      probe == CMD_RESULT_TIMEOUT ? "pm 超时" : "pm 未就绪/失败");
     }
     if (host_probe_unknown) {
         host_miss_hits = 0;   // 判不了就不当证据（开机早期 pm 未就绪即此路）
@@ -4425,9 +4601,10 @@ static void handle_signal(int sig) {
     running = 0;
 }
 
-/** 闹钟处理器：仅用于中断 waitpid，不做实际处理 */
+/** 闹钟处理器：置超时标志，靠 sa_flags=0 中断 waitpid（配合 wait_child_timeout） */
 static void alarm_handler(int sig) {
-    (void)sig;  // 仅用于中断 waitpid，不做事
+    (void)sig;
+    alarm_fired = 1;
 }
 
 /* last_disconnect_time（断联起点）的定义已上移到文件前部「自动拉起」小节的静态区
@@ -4840,7 +5017,7 @@ static void poll_bt_request(void) {
     };
     int hit = 0;
     for (int i = 0; i < (int)(sizeof(cmds) / sizeof(cmds[0])); i++) {
-        int st = system(cmds[i]);
+        int st = run_shell_timeout(cmds[i]);
         if (st != -1 && WIFEXITED(st) && WEXITSTATUS(st) == 0) { hit = i + 1; break; }
     }
     bt_req_handled = tok;
@@ -4861,7 +5038,6 @@ static void poll_bt_request(void) {
 #define WD_REAP_STEP_US         100000 // 回收轮询的间隔（微秒）：用轮询而非阻塞 waitpid，杜绝无限等待
 #define WD_NAME                 "b6x-tempctrl.sh"   // 与 Deployer.SCRIPT_NAME 及脚本内的 SCRIPT_NAME 一致
 #define WD_SPAWN_STAMP_PATH     PRIVATE_DIR "/tempctrl_wd_spawn"   // 冷却时间戳（私有目录，随卸载自清）
-#define SH_BIN                  "/system/bin/sh"     // 脚本必须经 sh 执行（/data/adb 是 noexec 挂载）
 
 // service.d 脚本两个候选路径（KSU 版本分界，见 Deployer）。路径字面量与
 // cleanup_artifacts_on_uninstall() 的 artifacts[] 中两条必须一致（那两份是卸载清理的固定清单，

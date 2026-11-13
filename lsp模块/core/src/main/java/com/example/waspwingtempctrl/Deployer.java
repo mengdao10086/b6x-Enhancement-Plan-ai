@@ -1428,7 +1428,9 @@ public final class Deployer {
      *  脚本自己是常驻看门狗，覆写它在读的文件会读到半截；mv 换目录项，正在跑的 shell 继续持旧 inode。
      *  详见 app/逻辑说明.md §2.2。 */
     private static String scriptInstallSnippet(File stagedScript) {
-        return "cp -f " + quote(stagedScript.getAbsolutePath()) + " \"$svcd/" + SCRIPT_NAME + ".new\" "
+        // .new 先删再建：/data/adb 是 root-only，属纵深防御（不把“目标已被预置”当成信任前提）。
+        return "rm -f \"$svcd/" + SCRIPT_NAME + ".new\"\n"
+                + "cp -f " + quote(stagedScript.getAbsolutePath()) + " \"$svcd/" + SCRIPT_NAME + ".new\" "
                 + "&& chmod 0755 \"$svcd/" + SCRIPT_NAME + ".new\" "
                 + "&& mv -f \"$svcd/" + SCRIPT_NAME + ".new\" \"$svcd/" + SCRIPT_NAME + "\" "
                 + "&& echo SCRIPT_OK=1 || echo SCRIPT_OK=0\n"
@@ -1455,7 +1457,14 @@ public final class Deployer {
                 + "rm -f /data/local/tmp/tempctrl_last_dev\n"
                 // 原子替换：先写 $BIN.new 再 mv。既避开"覆写正在运行的二进制 ETXTBSY"，也避开
                 // "先删后落"被打断留下"二进制不存在"的半成品；在跑的旧进程继续持旧 inode 跑完自己那一轮。
-                + "cp -f " + quote(stagedBin.getAbsolutePath()) + " \"$BIN.new\" && chmod 0755 \"$BIN.new\" "
+                // /data/local/tmp 可被 shell uid 预置符号链接：先删旧 .new，再用 set -C（noclobber）
+                // 让重定向以 O_EXCL 创建——删除到创建之间再被换成链接时直接失败，不会跟随写穿。
+                // 源是 app 私有 staging（不经过 shell 可写目录），最终文件在 /data/local/tmp 新建，
+                // 保持该目录原有的 SELinux 标签（不能从 /data/adb rename 过来）。
+                + "rm -f \"$BIN.new\"\n"
+                + "( set -C; cat " + quote(stagedBin.getAbsolutePath()) + " > \"$BIN.new\" ) "
+                + "&& [ ! -L \"$BIN.new\" ] "
+                + "&& chmod 0755 \"$BIN.new\" "
                 + "&& mv -f \"$BIN.new\" \"$BIN\" && echo BIN_OK=1 || echo BIN_OK=0\n"
                 + "rm -f \"$BIN.new\" 2>/dev/null\n"
                 + scriptInstallSnippet(stagedScript)
@@ -1511,6 +1520,8 @@ public final class Deployer {
                 + "rm -f " + SERVICE_D_MODERN + "/" + SCRIPT_NAME + "\n"
                 + "rm -f " + SERVICE_D_KSU_LEGACY + "/" + SCRIPT_NAME + "\n"
                 + "rm -f \"$BIN\"\n"
+                + "# 攻击面/旧版残留：先删目录项（符号链接只删链接本身，不跟随）\n"
+                + "rm -f \"$BIN.new\"\n"
                 + "# 兜底单实例锁（C 端在私有目录不可用时用的那把，LOCK_FALLBACK_PATH）：只在 c-daemon 确认\n"
                 + "# 已停之后删 —— 它若还在跑就握着这把锁，删掉文件会让新实例锁到新的 inode、单实例保护被绕过。\n"
                 + "if [ \"$DAEMON_STOPPED\" = 1 ]; then rm -f /data/local/tmp/tempctrl.lock; fi\n"
@@ -1542,6 +1553,15 @@ public final class Deployer {
      */
     private static String restartCore() {
         return "WD=\"$svcd/" + SCRIPT_NAME + "\"\n"
+                // /data/local/tmp 可被 shell uid 写：$BIN 可能是预置的符号链接或非 root 文件，
+                // root 的 nohup 会跟随执行。rm -f 只删目录项、不跟随；删后按下面的 NOBIN=1 处理。
+                // 恢复路径：下一轮 deploy()/updateScript() 或 service.d 自动更新会把真二进制补回；
+                // 状态页同时会把“不存在”武装成部署提示，不会静默卡死。
+                + "BIN_UID=$(stat -c %u \"$BIN\" 2>/dev/null)\n"
+                + "if [ -L \"$BIN\" ] || { [ -n \"$BIN_UID\" ] && [ \"$BIN_UID\" != \"0\" ]; }; then\n"
+                + "  rm -f \"$BIN\" 2>/dev/null\n"
+                + "  echo BIN_SYMLINK_REMOVED=1\n"
+                + "fi\n"
                 // 1) 看门狗在不在：用 wd_pids（见 pidsPreamble）
                 + "[ -n \"$(wd_pids)\" ] && WD_ALIVE=1 || WD_ALIVE=0\n"
                 + "echo \"WD_ALIVE=$WD_ALIVE\"\n"
@@ -1575,6 +1595,13 @@ public final class Deployer {
                 + "  NEW_PID=\"\"\n"
                 + "  while [ $attempt -lt 2 ]; do\n"
                 + "    attempt=$((attempt + 1))\n"
+                // 从判据到执行之间仍可能被换成符号链接/别的文件：执行前再查一次；命中则不再尝试本轮。
+                + "    BIN_UID=$(stat -c %u \"$BIN\" 2>/dev/null)\n"
+                + "    if [ -L \"$BIN\" ] || { [ -n \"$BIN_UID\" ] && [ \"$BIN_UID\" != \"0\" ]; }; then\n"
+                + "      rm -f \"$BIN\" 2>/dev/null; break\n"
+                + "    fi\n"
+                // 日志也走 /data/local/tmp：预置符号链接会让 root 追加到任意文件，先删链接再打开。
+                + "    [ -L /data/local/tmp/tempctrl_service.log ] && rm -f /data/local/tmp/tempctrl_service.log\n"
                 + "    nohup \"$BIN\" >> /data/local/tmp/tempctrl_service.log 2>&1 < /dev/null &\n"
                 + "    sleep 2\n"
                 + "    NEW_PID=$(bin_pids | head -1)\n"

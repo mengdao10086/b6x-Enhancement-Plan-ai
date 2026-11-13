@@ -252,6 +252,20 @@
         return out;
     }
 
+    /**
+     * 多值键逐槽取值：已有槽按原文取，缺槽取该字段的定义默认（同 GUI ConfigKeyRow.readFieldValues）。
+     * 不能补 0，否则省略的可选槽会被 clamp 成字段下限后整键写回。
+     */
+    function multiSlotValues(value, fields) {
+        var parts = textOf(value).replace(/^\s+|\s+$/g, '').split(/\s+/);
+        var out = [];
+        for (var i = 0; i < fields.length; i++) {
+            var n = i < parts.length ? parseInt(parts[i], 10) : NaN;
+            out.push(isNaN(n) ? asInt(fields[i] ? fields[i]['default'] : 0) : n);
+        }
+        return out;
+    }
+
     // ==================== 外观（跟随/浅色/深色，存 localStorage） ====================
 
     function themeLoad() {
@@ -550,7 +564,7 @@
             entry.controls.push(sw);
         } else if (type === 'multi') {
             var fields = meta.fields || [];
-            var nums = numsOf(value, fields.length);
+            var nums = multiSlotValues(value, fields);
             var multiInputs = [];
             var multiHint = make('div', 'row-hint');
             for (i = 0; i < fields.length; i++) {

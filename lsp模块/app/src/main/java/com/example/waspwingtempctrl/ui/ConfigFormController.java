@@ -22,6 +22,7 @@ import com.example.waspwingtempctrl.R;
 import com.example.waspwingtempctrl.StartupTiming;
 
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
@@ -363,7 +364,8 @@ final class ConfigFormController implements ConfigKeyRow.Host, ConfigWriteQueue.
      * 按键行两列排的组 id（{@code params.json} 的 {@code groups[].id}）：「日志 &amp; 调试」与「控制」。
      * <b>判据用 id 不用标题</b>——标题是文案、会变；id 是定义里的稳定标识。
      */
-    private static final Set<String> TWO_COLUMN_GROUP_IDS = Set.of("debug", "control");
+    private static final Set<String> TWO_COLUMN_GROUP_IDS =
+            Collections.unmodifiableSet(new LinkedHashSet<>(Arrays.asList("debug", "control")));
 
     /**
      * 把本页的表单建出来（<b>只要求定义就绪与视图在</b>，首份快照可以还没回来；只做一次）。两条路：

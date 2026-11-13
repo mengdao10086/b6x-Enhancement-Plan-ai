@@ -7,6 +7,7 @@ import androidx.annotation.Nullable;
 
 import com.example.waspwingtempctrl.AppFiles;
 import com.example.waspwingtempctrl.ConfigStore;
+import com.example.waspwingtempctrl.ConfigStore.FieldMeta;
 import com.example.waspwingtempctrl.ConfigStore.KeyMeta;
 import com.example.waspwingtempctrl.ConfigStore.Snapshot;
 import com.example.waspwingtempctrl.ConfigStore.Value;
@@ -18,7 +19,7 @@ import com.example.waspwingtempctrl.ConfigStore.Value;
  * <ul>
  *   <li>制冷上限优先取守护进程写在私有目录的 {@code tempctrl_coldmax}（一行 {@code COLD_MAX=<int>}，
  *       由 daemon 按当前设备刷新，B6X/B7X 自动切换）；读不到时回落配置 {@code PID_COLD_RANGE} 的
- *       B6X 值，总开关未开或仍取不到则回落 190。</li>
+ *       B6X 值，总开关未开、仍取不到或超出定义范围则回落 190。</li>
  *   <li>目标冷值取曲线数据文件 {@code tempctrl_webui.data} 最后一行的第 8 列（目标制冷）；
  *       取不到返回 -1，由调用方决定不画红线。</li>
  * </ul>
@@ -33,27 +34,60 @@ final class KiCutData {
     private static final String COLDMAX_FIELD = "COLD_MAX=";
     /** 上限提示文件只有一行，读这点字节足够。 */
     private static final int COLDMAX_PROBE_BYTES = 64;
+    /** 横轴上限的降级值（B6X 出厂上限；定义 PID_COLD_RANGE 第 2 字段 factory=190）。 */
+    private static final int FALLBACK_COLD_MAX = 190;
 
     private KiCutData() {
     }
 
-    /** 横轴上限（制冷档位）；总开关未开、取不到时回落 190。 */
+    /** 横轴上限（制冷档位）；总开关未开、取不到或超出定义范围时回落 {@link #FALLBACK_COLD_MAX}。 */
     static int coldMax(@NonNull Context context) {
         try {
             ConfigStore store = ConfigStore.get(context);
             Snapshot snap = store.read();
             if (!isOn(snap, "PERF_ENABLED")) {
-                return 190;
+                return FALLBACK_COLD_MAX;
             }
-            int fromDaemon = readColdMaxHint(context);
-            if (fromDaemon > 0) {
-                return fromDaemon;
+            int candidate = readColdMaxHint(context);
+            if (candidate <= 0) {
+                candidate = fieldValue(store, snap, "PID_COLD_RANGE", 1, FALLBACK_COLD_MAX);
             }
-            int b6 = fieldValue(store, snap, "PID_COLD_RANGE", 1, 190);
-            return b6 > 0 ? b6 : 190;
+            if (candidate <= 0) {
+                candidate = FALLBACK_COLD_MAX;
+            }
+            // 越界值（外部手改配置 / 损坏的 tempctrl_coldmax）走既有降级值，不静默钳到边界
+            return withinDefinedColdRange(store, candidate) ? candidate : FALLBACK_COLD_MAX;
         } catch (Throwable t) {
-            return 190;
+            return FALLBACK_COLD_MAX;
         }
+    }
+
+    /**
+     * 横轴上限是否落在 {@code PID_COLD_RANGE} 的定义范围内。上限对应两个设备字段：
+     * {@code fields[1]}「制冷B6X」（{@code min=0, max=194}）与 {@code fields[2]}「制冷B7X」
+     * （{@code min=1, max=255}），取二者并集 0~255（调用方已保证 {@code candidate > 0}，故实际为 1~255）。
+     * 定义缺失或字段无范围时没有可信上界，仅接受不超过降级值的正数（不按任意大值分配数组）。
+     */
+    private static boolean withinDefinedColdRange(@NonNull ConfigStore store, int candidate) {
+        KeyMeta meta = store.key("PID_COLD_RANGE");
+        if (meta == null || meta.fields == null || meta.fields.size() < 3) {
+            return candidate > 0 && candidate <= FALLBACK_COLD_MAX;
+        }
+        int lo = Integer.MAX_VALUE;
+        int hi = Integer.MIN_VALUE;
+        for (int i = 1; i <= 2; i++) {
+            FieldMeta field = meta.fields.get(i);
+            if (field.min != null) {
+                lo = Math.min(lo, field.min);
+            }
+            if (field.max != null) {
+                hi = Math.max(hi, field.max);
+            }
+        }
+        if (lo == Integer.MAX_VALUE || hi == Integer.MIN_VALUE) {
+            return candidate > 0 && candidate <= FALLBACK_COLD_MAX;
+        }
+        return candidate >= lo && candidate <= hi;
     }
 
     /** 当前冷值（曲线数据文件最后一行的目标制冷）；取不到、为哨兵值或临时停止生效时返回 -1。 */

@@ -10,7 +10,7 @@
 
 | 组件 | 路径 | 说明 | 状态 |
 |------|------|------|------|
-| **APK（唯一交付物）** | [lsp模块/](lsp模块/) | LSPosed 模块 + 原生配置界面；内置 C 守护程序 | 3.0 ✅ |
+| **APK（GUI + lite）** | [lsp模块/](lsp模块/) | LSPosed 模块 + 原生/WebUI 两版界面；内置 C 守护程序 | 3.0 ✅ |
 | C 守护程序源码 | [lsp模块/daemon/](lsp模块/daemon/) | 智能温控，由 CI 编译后打包入上面的 APK | 已并入 APK |
 ---
 
@@ -48,8 +48,10 @@ C 守护程序（`tempctrl`）与 `service.d` 拉起脚本由 APK 内的部署�
 ## 项目结构
 
 ```
-├── lsp模块/             ← LSPosed 模块 + 原生界面（Android 项目，唯一交付物）
-│   ├── app/             ← Android 源码与资源
+├── lsp模块/             ← LSPosed 模块 + 原生界面（Android 项目，GUI/lite 两个 APK）
+│   ├── app/             ← GUI 原生界面
+│   ├── app-lite/        ← WebUI 极简版
+│   ├── core/            ← 共享代码与资产（MainHook / 配置 / 部署）
 │   └── daemon/          ← C 守护程序源码、编译工具与 profile.conf
 │       └── 逻辑说明.md   ← C 源码设计与逻辑的唯一权威文档
 ├── 参数定义/             ← 配置键的单一来源 + 生成/校验脚本

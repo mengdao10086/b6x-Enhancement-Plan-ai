@@ -285,6 +285,7 @@ public class MainHook implements IXposedHookLoadPackage {
     private static volatile boolean rpmRunFailLogged = false;       // getSpeed 不可用：只打一条
     private static volatile boolean loggedResolveFallback = false;  // resolveWaspWingManager 兜底失败仅记一次（进程内）
     private static volatile boolean nonTargetLogged = false;        // 非目标包跳过日志：每进程最多一条
+    private static volatile boolean nonMainProcessLogged = false;   // 非主进程跳过日志：每进程最多一条
 
     // ========== 智能温控广播接收器 ==========
     // 接收 tempctrl 发送的 am broadcast，调用 setRunMode 控制散热器
@@ -896,8 +897,33 @@ public class MainHook implements IXposedHookLoadPackage {
                 : RECONNECT_INTERVAL_SCREEN_OFF_TICKS;
     }
 
+    /**
+     * 是否为主进程（唯一应装钩子的进程）。
+     *
+     * <p>LSPosed 的包级作用域会注入该包的所有进程：B7X 的 {@code :remote}（FloatingWindow
+     * 服务）没有 BLE 连接，却会注册广播接收器并每秒以 {@code BLE=0} 覆盖主进程写的 status
+     * 文件，daemon 因此间歇判断联。判据：主进程的 {@code processName} 等于包名（旧框架可能
+     * 为 null/空，按主进程放行以保持兼容）；子进程形如 {@code <包名>:remote}，一律跳过。
+     * B6X 老/新两个包各自比较自己的 {@code packageName}，无需硬编码。
+     */
+    private static boolean isMainProcess(XC_LoadPackage.LoadPackageParam lpparam) {
+        String processName = lpparam.processName;
+        return processName == null || processName.isEmpty()
+                || processName.equals(lpparam.packageName);
+    }
+
     @Override
     public void handleLoadPackage(XC_LoadPackage.LoadPackageParam lpparam) {
+        // 只处理主进程：子进程（如 B7X 的 :remote）不注册接收器、不起状态写线程，
+        // 否则会与主进程抢写同一 status 文件（BLE=0 覆盖连接状态）。
+        if (!isMainProcess(lpparam)) {
+            if (!nonMainProcessLogged) {
+                nonMainProcessLogged = true;
+                XposedBridge.log(TAG + " 跳过非主进程: " + lpparam.processName
+                        + "（仅主进程装钩子）");
+            }
+            return;
+        }
         // 判断设备类型
         if (lpparam.packageName.equals(PACKAGE_B6X)
                 || lpparam.packageName.equals(PACKAGE_B6X_NEW)) {

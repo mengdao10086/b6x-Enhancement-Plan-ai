@@ -8,6 +8,11 @@
             <action android:name="android.intent.action.VIEW" />
             <data android:mimeType="vnd.android.document/directory" />
         </intent>
+        <!-- 快捷方式入口校验：解析当前默认桌面（HOME）包名，识别合法调用方 -->
+        <intent>
+            <action android:name="android.intent.action.MAIN" />
+            <category android:name="android.intent.category.HOME" />
+        </intent>
     </queries>
 
     <application
@@ -32,7 +37,9 @@
             </intent-filter>
         </activity>
 
-        <!-- 快捷方式动作入口：透明无界面，执行完立即 finish -->
+        <!-- 快捷方式动作入口：透明无界面；先校验调用方，识别不到时弹一次确认，执行完立即 finish。
+             exported 是静态快捷方式（Launcher 跨进程启动）的硬要求；动作入口在代码里做调用方校验，
+             避免任意应用借同名 action 静默停温控。 -->
         <activity
             android:name=".ShortcutActionActivity"
             android:configChanges="keyboardHidden|orientation|screenSize|smallestScreenSize|uiMode"

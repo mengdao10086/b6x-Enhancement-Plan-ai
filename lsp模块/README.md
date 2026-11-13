@@ -78,7 +78,7 @@ am broadcast -a com.flydigi.SET_TEMPERATURE_B7 \
 ### lite（WebUI 极简版）界面
 
 - **页签与手势**：状态 / 配置 / 曲线 / 日志四页；按手势本身判定——横滑为主（`|dx| > |dy|×1.5` 且 ≥40 px）时抬手切页，纵滑为主交给页面滚动；只有弹层、真能横向滚动的表格、以及内容溢出需横拖的输入框才让出横向手势（溢出用 canvas `measureText` 量文本宽度判定，`input.scrollWidth` 不可靠），普通输入框/按钮/表头不再阻挡翻页。
-- **配置页**：只渲染日志调试、性能参数、接口与外围、拉起应用四组；默认折叠，点组头（总开关以外）展开/收起（组头不显示展开三角）；组头带总开关与「未生效 N」徽标；每组可恢复出厂值（自定义确认弹层，点遮罩取消）；说明收为行内 `?` 按钮（紧跟参数名 4 px，点开才展开）；行内不显示单位后缀列，单位只在输入框 `title` 里；输入框宽度按内容实测自适应（canvas `measureText`，`max(文本宽+内边距, 最小宽)`，数字框最小 44 px、路径框 120 px，长值由行容器压缩、不溢出），只在建行与提交时重算；输入框视觉高约 30 px，点行内空白处聚焦该行首个输入框来补热区。
+- **配置页**：只渲染日志调试、性能参数、接口与外围、拉起应用四组；默认折叠，点组头（总开关以外）展开/收起（组头不显示展开三角）；组头带总开关与「未生效 N」徽标；每组可恢复出厂值（自定义确认弹层，点遮罩取消）；说明收为行内 `?` 按钮（紧跟参数名 4 px，点开才展开）；行内不显示单位后缀列，单位只在输入框 `title` 里；输入框宽度按内容实测自适应（canvas `measureText`，`max(文本宽+内边距, 最小宽)`，数字框最小 44 px、路径框 120 px，长值由行容器压缩、不溢出），只在建行与提交时重算；输入框视觉高约 30 px，点行内空白处聚焦该行首个输入框来补热区；多值键的缺槽按字段定义默认回填（与 GUI 一致），不补 0。
 - **状态页**：进入立即渲染（有缓存先显示缓存，无缓存显示「正在读取状态…」），数据由后台 probe 线程填充，不阻塞页面；驻留时每 5 秒刷新一次（每次 `probe` 会起一趟 root shell，故不按秒轮询），无手动刷新按钮。
 - **分段倍率（PID_CUT）**：按「簇 / 点」格子编辑，一行一簇、每四元组一点；写回保持原始分行与空字段，不重排、不丢数。
 - **曲线**：6 条（电池 / 制冷 / 风扇 / 热端 / 冷端 / CPU），顺序、默认开关与颜色均同原生界面；纵轴定标为精简整档（1/2/5×10^n 步长、floor/ceil 不裁点、右轴下限恒 1、`UI_CHART_VIEW` 第 1 槽只作用左轴范围），不再承诺与原生界面逐档一致；按 `devicePixelRatio` 设置画布，窗口尺寸变化后重建。
@@ -92,7 +92,7 @@ am broadcast -a com.flydigi.SET_TEMPERATURE_B7 \
 
 ## status 文件协议
 
-模块每 1 秒覆写两个 status 文件，按设备类型选路径：
+只有**主进程**写 status：LSPosed 的包级作用域会注入该包的所有进程，`handleLoadPackage` 在 `lpparam.processName` 不是包名时（如 B7X 的 `:remote`）直接跳过，避免子进程每秒以 `BLE=0` 覆盖主进程写的连接状态。模块每 1 秒覆写两个 status 文件，按设备类型选路径：
 
 | 设备 | 路径 |
 |------|------|
@@ -143,6 +143,12 @@ TARGET_TEMP=180     ← 18.0°C
 | 读取方 | `MainHook.checkCommandStall()` 每秒读取；内容为 `1` 且 mtime ≤15s 时跳过「回传停滞 → forceReconnect」分支 |
 | 过期/缺失 | 按 `0` 处理（daemon 被杀或断联停止刷新后，模块恢复既有自愈逻辑） |
 
+### 快捷方式动作入口（exported + 调用方校验）
+
+- 静态快捷方式由 Launcher 跨进程启动，`ShortcutActionActivity` 必须 `exported`；因此任意前台应用都能用显式 Intent 带上 `KILL_DAEMON` / `TEMP_STOP` action 拉起本页。
+- 动作前先校验调用方：`getLaunchedFromPackage()`（API 34+，仅在显式共享身份、同 uid 或平台签名等条件下有值）与 `getCallingPackage()`（只覆盖 `startActivityForResult`）由系统填写；`getReferrer()` 可由调用方伪造，不作信任依据。调用方是本应用或当前默认桌面才直接执行。
+- 识别不到调用方时弹一次确认框，用户确认后才执行；取消/返回/点外部均不执行。manifest 的 `<queries>` 新增 `ACTION_MAIN` + `CATEGORY_HOME`，**仅用于包可见性，不是权限**；桌面长按的正常路径可能因此多一次确认。
+
 ### 注意
 - 温度字段全部使用 0.1°C 内部单位（C 端 `atoi()` 直接解析，无需浮点）
 - `lastWaspWingInfo` 为 `null` 时只输出 `BLE=` + `CONNECTED_AT=` + `BLE_OWNER_LAST=` 行（模块启动初期或 WaspWingInfo 未就绪）
@@ -153,7 +159,7 @@ TARGET_TEMP=180     ← 18.0°C
 | 项 | 说明 |
 |----|------|
 | 创建者 | tempctrl 启动时 `fopen("a")` 预创建两个文件 + `chmod 0666`（路径与预创建逻辑硬编码在 C 端与 `MainHook` 两侧） |
-| 写入节奏 | LSPosed 模块每 1 秒覆写 + 连接/断连事件即时覆写（`BOOT_AT` 已删除） |
+| 写入节奏 | LSPosed 模块主进程每 1 秒覆写 + 连接/断连事件即时覆写（`BOOT_AT` 已删除；子进程不写） |
 | 心跳判死 | daemon 侧 `STATUS_TIMEOUT` **硬编码 3 秒**（LSP 每 1s 写，mtime 超 3s 判死），与 `BLE≠0` 组成双重检查，任一不过即算断联 |
 | 读取端 | daemon 主循环开头 `read_status_ble_both()` 逐行解析双文件；`select_active_device()` 按 `CONNECTED_AT` 做「先连者优先」的设备仲裁；`update_active_limits()` 按回传型号切制冷/风扇上限，非按包名猜测 |
 
