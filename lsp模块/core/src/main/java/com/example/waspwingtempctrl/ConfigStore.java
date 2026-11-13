@@ -248,15 +248,18 @@ public final class ConfigStore {
         public final List<String> unknownKeys;
         /** 文件里实际出现的键（GUI 的遗留键清理按需计算候选，lite 不触发）。 */
         private final Set<String> presentKeys;
+        /** 文件里每个键的原始值片段（含未定义键；只读，供旧键兼容按需取值）。 */
+        private final Map<String, String> rawValues;
         public final boolean exists;
         public final long mtimeMs;
         public final List<String> notes;
 
         Snapshot(Map<String, Value> values, List<String> unknownKeys, Set<String> presentKeys,
-                 boolean exists, long mtimeMs, List<String> notes) {
+                 Map<String, String> rawValues, boolean exists, long mtimeMs, List<String> notes) {
             this.values = Collections.unmodifiableMap(values);
             this.unknownKeys = Collections.unmodifiableList(unknownKeys);
             this.presentKeys = Collections.unmodifiableSet(presentKeys);
+            this.rawValues = Collections.unmodifiableMap(rawValues);
             this.exists = exists;
             this.mtimeMs = mtimeMs;
             this.notes = Collections.unmodifiableList(notes);
@@ -264,6 +267,24 @@ public final class ConfigStore {
 
         public Value get(String key) {
             return values.get(key);
+        }
+
+        /** 该键是否真的写在文件里（**不含**「缺失键补默认」）。 */
+        public boolean present(String key) {
+            return presentKeys.contains(key);
+        }
+
+        /**
+         * 文件里该键的第一个整数（token 口径同 {@link #parseValue}）；文件未写该键或没有数值 → {@code null}。
+         * 供旧键兼容读取已从定义里删除的键（它们的值不在 {@link #values} 里）。
+         */
+        public Integer rawInt(String key) {
+            String raw = rawValues.get(key);
+            if (raw == null) {
+                return null;
+            }
+            int[] nums = scanInts(raw, 1);
+            return nums.length == 0 ? null : nums[0];
         }
     }
 
@@ -339,8 +360,8 @@ public final class ConfigStore {
         for (KeyMeta meta : keys.values()) {
             values.put(meta.key, meta.defaultValue);
         }
-        return new Snapshot(values, new ArrayList<>(), Collections.emptySet(), exists, mtimeMs,
-                new ArrayList<>(Collections.singletonList(note)));
+        return new Snapshot(values, new ArrayList<>(), Collections.emptySet(), Collections.emptyMap(),
+                exists, mtimeMs, new ArrayList<>(Collections.singletonList(note)));
     }
 
     /**
@@ -357,6 +378,8 @@ public final class ConfigStore {
         LinkedHashMap<String, Value> fromFile = new LinkedHashMap<>();
         // 文件里出现过的全部键（含未定义的）：清理动作要拿它判「现表同号行是否已存在」与「谁是死键」
         Set<String> present = new LinkedHashSet<>();
+        // 原始值片段：未定义键解析后会被丢弃，这里留档供旧键兼容取用（同键多行时后写覆盖，与解析一致）
+        LinkedHashMap<String, String> rawValues = new LinkedHashMap<>();
         // 表型键的行：逻辑键 → （行号 → 值片段），行号升序即簇号；同行号重复时后写覆盖（与 C 端按行顺序覆盖一致）
         LinkedHashMap<String, TreeMap<Integer, String>> tableRows = new LinkedHashMap<>();
         for (String line : ConfText.splitLines(text)) {
@@ -367,6 +390,7 @@ public final class ConfigStore {
             String rawKey = ConfText.trimRight(line.substring(ConfText.lineStartOf(line), eq));
             present.add(rawKey);
             String rawVal = line.substring(eq + 1);
+            rawValues.put(rawKey, rawVal);
             KeyMeta meta = keys.get(rawKey);
             if (meta == null) {
                 String tableKey = tableKeyOfRowKey(rawKey);
@@ -399,7 +423,7 @@ public final class ConfigStore {
             Value v = fromFile.get(meta.key);
             values.put(meta.key, v != null ? v : meta.defaultValue);
         }
-        return new Snapshot(values, unknown, present, true, mtimeMs, notes);
+        return new Snapshot(values, unknown, present, rawValues, true, mtimeMs, notes);
     }
 
     /**
@@ -1740,7 +1764,20 @@ public final class ConfigStore {
         if (meta.isText() || meta.isTable()) {
             return Value.ofText(trimValue(raw));
         }
-        int n = Math.max(1, meta.fieldCount());
+        int[] nums = scanInts(raw, Math.max(1, meta.fieldCount()));
+        if (nums.length == 0) {
+            return Value.ofInt(0);
+        }
+        return nums.length == 1 ? Value.ofInt(nums[0]) : Value.ofNumbers(nums);
+    }
+
+    /**
+     * 取前 {@code max} 个整数 token（跳过非数字；超出 int 范围的 token 跳过）。
+     *
+     * @return 实际解析到的 token；没有 token 时长度为 0
+     */
+    private static int[] scanInts(String raw, int max) {
+        int n = Math.max(1, max);
         int[] nums = new int[n];
         int idx = 0;
         int i = 0;
@@ -1766,8 +1803,7 @@ public final class ConfigStore {
                 // 超出 int 范围的 token 按 C 端 atoi 的未定义行为处理：跳过
             }
         }
-        int[] trimmed = Arrays.copyOf(nums, Math.max(1, idx));
-        return trimmed.length == 1 ? Value.ofInt(trimmed[0]) : Value.ofNumbers(trimmed);
+        return Arrays.copyOf(nums, idx);
     }
 
     private static Value parseValue(KeyMeta meta, Object jsonValue) {

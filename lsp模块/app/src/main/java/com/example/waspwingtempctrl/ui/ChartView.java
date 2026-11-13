@@ -527,7 +527,7 @@ public class ChartView extends View {
     }
 
     /**
-     * PID 重算标记（{@code UI_PID_MARK}）：每个重算位置画一条竖虚线，与网格同宽同色（含透明度）。
+     * PID 重算标记（{@code UI_CHART_VIEW} 第 2 槽）：每个重算位置画一条竖虚线，与网格同宽同色（含透明度）。
      * 重算位置与系列开关无关——它是「控制层在这一秒算过一次」的事实。
      */
     private void buildRecomputeMarks(ChartWindow win) {

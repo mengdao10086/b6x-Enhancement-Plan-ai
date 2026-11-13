@@ -647,7 +647,34 @@ final class ConfigKeyRow {
         if ("UI_CHART_SWAP".equals(meta.key) && value.size() == 1) {
             return value.intAt(0);
         }
+        if ("UI_CHART_VIEW".equals(meta.key)) {
+            return chartViewFillValue(value, i);
+        }
         return i < value.size() ? value.intAt(i) : meta.defaultValue.intAt(i);
+    }
+
+    /**
+     * {@code UI_CHART_VIEW} 的填值：只有传入值就是磁盘快照值时才做旧键回退——用户刚输入/钳制回写的
+     * 新 {@link Value}（待写、失焦回写）优先，避免被旧值覆盖。磁盘值里新键缺失时，按槽回退旧键原始值
+     * （第 1 槽 UI_RPM_AXIS_MIN、第 2 槽 UI_PID_MARK；两键已从定义删除，值只能取快照原始值），
+     * 再回退定义默认值。只命中该键，其它多值键仍走通用回填。
+     */
+    private int chartViewFillValue(@NonNull Value value, int i) {
+        if (value != host.diskValue(meta.key)) {
+            return i < value.size() ? value.intAt(i) : meta.defaultValue.intAt(i);
+        }
+        ConfigStore.Snapshot snap;
+        try {
+            snap = host.store().read();   // 命中 memo 时不读盘；首份快照已由表单加载
+        } catch (Throwable t) {
+            snap = null;
+        }
+        if (snap != null && snap.present(meta.key) && value.size() > i) {
+            return value.intAt(i);
+        }
+        String legacyKey = i == 0 ? "UI_RPM_AXIS_MIN" : "UI_PID_MARK";
+        Integer legacy = snap == null ? null : snap.rawInt(legacyKey);
+        return legacy != null ? legacy : meta.defaultValue.intAt(i);
     }
 
     /**

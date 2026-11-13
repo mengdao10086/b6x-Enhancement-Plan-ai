@@ -17,8 +17,7 @@ import java.util.List;
  *
  * <p>两类来源（口径见 app/逻辑说明.md §7.1）：
  * <ol>
- *   <li>{@code UI_GAP_SEC} / {@code UI_RPM_AXIS_MIN} / {@code UI_CURVE_FILTER} /
- *       {@code UI_PID_MARK}，
+ *   <li>{@code UI_GAP_SEC} / {@code UI_CHART_VIEW} / {@code UI_CURVE_FILTER}，
  *       以及右轴上限口径所需的 {@code COLD_RPM_MAP} /
  *       {@code PID_COLD_RANGE} / {@code PERF_ENABLED} —— 一律经 {@link ConfigStore} 读。
  *       字段缺项（如只写 {@code UI_CURVE_FILTER=15}）回落该字段在
@@ -43,7 +42,7 @@ final class ChartConfig {
     int gapDetectSec = 3;
     /** 空白封顶（秒）——{@code UI_GAP_SEC} 第 2 值。 */
     int gapMaxSec = 15;
-    /** 左轴转速下限（RPM）——{@code UI_RPM_AXIS_MIN}；0 = 关闭。 */
+    /** 左轴转速下限（RPM）——{@code UI_CHART_VIEW} 第 1 槽；0 = 关闭。 */
     int rpmAxisMin = 3000;
     /** 双向 EMA 每遍权重 α = {@code UI_CURVE_FILTER} 第 2 值/100；总开关关时为 0。 */
     float alpha = 0.15f;
@@ -53,7 +52,7 @@ final class ChartConfig {
     int coldMapStart = 40;
     /** 右轴上限浮动区间上沿 = {@code PID_COLD_RANGE} 第 2 值（B6X 制冷上限）。 */
     int coldMax = 190;
-    /** 曲线上的 PID 重算标记（{@code UI_PID_MARK}）：在重算位置画竖虚线，默认开。 */
+    /** 曲线上的 PID 重算标记（{@code UI_CHART_VIEW} 第 2 槽）：在重算位置画竖虚线，默认开。 */
     boolean markDash = true;
     /** 制冷对的目标/实际强调方交换（{@code UI_CHART_SWAP} 第 1 值）：false = 强调实际（默认）。 */
     boolean swapCool;
@@ -116,10 +115,14 @@ final class ChartConfig {
         int maxSec = field(store, snap, "UI_GAP_SEC", 1, 15);
         gapDetectSec = detect > 0 ? detect : 3;
         gapMaxSec = maxSec > 0 ? maxSec : 15;
+        // 曲线图（两槽）：第 1 槽纵轴下限、第 2 槽重算标记。新键未写或槽数不足时按槽回退旧键
+        // （UI_RPM_AXIS_MIN / UI_PID_MARK），再回退默认；旧键值取自快照保留的原始值（定义里已删除）。
+        ConfigStore.Value view = snap == null ? null : snap.get("UI_CHART_VIEW");
+        boolean viewPresent = snap != null && snap.present("UI_CHART_VIEW");
         // 转速下限：负值一律归 0 = 关闭（口径见 app/逻辑说明.md §7.3〈双纵轴〉）
-        rpmAxisMin = Math.max(0, field(store, snap, "UI_RPM_AXIS_MIN", 0, 3000));
-        // 重算标记：缺键按 schema 默认（开）
-        markDash = field(store, snap, "UI_PID_MARK", 0, 1) != 0;
+        rpmAxisMin = Math.max(0, chartViewSlot(snap, view, viewPresent, 0, 3000));
+        // 重算标记：缺槽回退旧键，再回退默认（开）
+        markDash = chartViewSlot(snap, view, viewPresent, 1, 1) != 0;
         // 目标/实际强调方交换（两槽）：第 1 槽管制冷对、第 2 槽管风扇对；缺键按 schema 默认（均 0 = 强调实际）。
         // 兼容旧单值配置：值只有 1 段时两对同时取该值，不回写配置文件。
         ConfigStore.Value sv = snap == null ? null : snap.get("UI_CHART_SWAP");
@@ -155,6 +158,20 @@ final class ChartConfig {
         coldMapStart = perfOn ? clamp(single(store, snap, "COLD_RPM_MAP", 0, 40), 0, 194) : 40;
         int coldHigh = perfOn ? single(store, snap, "PID_COLD_RANGE", 1, 190) : 190;
         coldMax = coldHigh > 0 ? coldHigh : 190;
+    }
+
+    /**
+     * 曲线图第 {@code i} 槽的值：新键写了该槽就取新键；否则按槽回退旧键
+     * （第 1 槽 UI_RPM_AXIS_MIN、第 2 槽 UI_PID_MARK）的原始值，再回退 {@code fallback}。
+     */
+    private static int chartViewSlot(ConfigStore.Snapshot snap, ConfigStore.Value view,
+                                     boolean viewPresent, int i, int fallback) {
+        if (viewPresent && view != null && view.size() > i) {
+            return view.intAt(i);
+        }
+        String legacyKey = i == 0 ? "UI_RPM_AXIS_MIN" : "UI_PID_MARK";
+        Integer legacy = snap == null ? null : snap.rawInt(legacyKey);
+        return legacy != null ? legacy : fallback;
     }
 
     private static boolean isOn(ConfigStore.Snapshot snap, String key) {

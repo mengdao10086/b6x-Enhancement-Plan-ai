@@ -360,10 +360,10 @@ final class ConfigFormController implements ConfigKeyRow.Host, ConfigWriteQueue.
     private static final long ROWS_PHASE_FALLBACK_MS = 1500L;
 
     /**
-     * 按键行两列排的组 id（{@code params.json} 的 {@code groups[].id}）：目前只有「日志 &amp; 调试」。
+     * 按键行两列排的组 id（{@code params.json} 的 {@code groups[].id}）：「日志 &amp; 调试」与「控制」。
      * <b>判据用 id 不用标题</b>——标题是文案、会变；id 是定义里的稳定标识。
      */
-    private static final String TWO_COLUMN_GROUP_ID = "debug";
+    private static final Set<String> TWO_COLUMN_GROUP_IDS = Set.of("debug", "control");
 
     /**
      * 把本页的表单建出来（<b>只要求定义就绪与视图在</b>，首份快照可以还没回来；只做一次）。两条路：
@@ -653,7 +653,7 @@ final class ConfigFormController implements ConfigKeyRow.Host, ConfigWriteQueue.
             return;
         }
         // 组样式按 id 判定：取不到（未分组兜底）或 id 不匹配 → 常规整行
-        boolean twoColumn = definition != null && TWO_COLUMN_GROUP_ID.equals(definition.id);
+        boolean twoColumn = definition != null && TWO_COLUMN_GROUP_IDS.contains(definition.id);
         ConfigGroupBinder binder = ConfigGroupBinder.create(container, title, master,
                 keyMetas, this, views, twoColumn);
         long startedAt = StartupTiming.accBegin(StartupTiming.FORM_SUB_ATTACH);

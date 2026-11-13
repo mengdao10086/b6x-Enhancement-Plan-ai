@@ -64,7 +64,7 @@
       "PID_KI_DYN_WIN": "（已删除）",
       "WEBUI_GAP_SEC": "→ UI_GAP_SEC",
       "WEBUI_LABEL_MERGE_PX": "已废弃（原功能已取消）",
-      "WEBUI_RPM_AXIS_MIN": "→ UI_RPM_AXIS_MIN",
+      "WEBUI_RPM_AXIS_MIN": "已并入 UI_CHART_VIEW（现为第 1 字段「纵轴下限」，单位 RPM）",
       "WEBUI_CURVE_FILTER": "→ UI_CURVE_FILTER",
       "WEBUI_AUTOSAVE": "已删除（无现键）",
       "UI_LABEL_MERGE_PX": "（已删除）",
@@ -80,7 +80,9 @@
       "KI_CUT_1": "→ PID_CUT_1",
       "KI_CUT_SMOOTH": "（已删除）",
       "APP_LAUNCH_COOLDOWN": "已并入 APP_LAUNCH_TIMING（现为第 1 字段「拉起冷却」，单位秒）",
-      "APP_WATCHDOG": "已并入 APP_LAUNCH_TIMING（现为第 2 字段「停滞重启」，连续下发周期数）"
+      "APP_WATCHDOG": "已并入 APP_LAUNCH_TIMING（现为第 2 字段「停滞重启」，连续下发周期数）",
+      "UI_RPM_AXIS_MIN": "已并入 UI_CHART_VIEW（现为第 1 字段「纵轴下限」，单位 RPM）",
+      "UI_PID_MARK": "已并入 UI_CHART_VIEW（现为第 2 字段「重算标记」）"
     }
   },
   "groups": [
@@ -1951,44 +1953,49 @@
       ]
     },
     {
-      "key": "UI_RPM_AXIS_MIN",
+      "key": "UI_CHART_VIEW",
       "group": "webui",
       "role": "setting",
-      "type": "int",
-      "label": "纵轴下限",
-      "desc": "风扇转速低于此值的样本不参与左轴上下限计算，该段画到图外；0=关闭",
+      "type": "multi",
+      "label": "曲线图",
+      "desc": "两值：第 1 值 = 纵轴下限（RPM，0~8000，默认 3000；风扇转速低于此值的样本不参与左轴上下限计算，该段画到图外，0=关闭）；第 2 值 = 重算标记（0/1，默认 1；在制冷、电池℃、pid℃ 三条曲线上用竖虚线标出 PID 重算位置，0=不画）。仅影响界面显示。",
       "docOrder": 54,
-      "docDesc": "左轴风扇转速下限（RPM，0~8000）：低于此值的 rpm 样本不参与左轴上下限计算，该段画到图外；过滤后左轴无有效数据时退回不过滤；0=关闭。**仅界面读取，守护进程忽略**",
-      "confNote": ["纵轴风扇转速下限（RPM，0~8000，默认 3000）：风扇转速低于此值的样本不参与左轴上下限计算，该段画到图外；过滤后左轴无有效数据时退回不过滤；0=关闭过滤"],
-      "unit": "RPM",
-      "unitNote": "",
-      "default": 3000,
-      "factory": 3000,
-      "min": 0,
-      "max": 8000,
-      "requires": [],
-      "daemonConsumes": false,
-      "fields": null
-    },
-    {
-      "key": "UI_PID_MARK",
-      "group": "webui",
-      "role": "setting",
-      "type": "switch",
-      "label": "重算标记",
-      "desc": "在制冷、电池℃、pid℃ 三条曲线上，用竖虚线标出守护进程触发 PID 重算的位置",
-      "docOrder": 54.5,
-      "docDesc": "曲线上的 PID 重算标记（0/1，默认 1）：开启后在制冷、电池℃、pid℃ 三条曲线的重算位置画竖虚线（与坐标轴同宽同色同透明度）；0=不画。**仅界面读取，守护进程忽略**",
-      "confNote": ["曲线 PID 重算标记（0/1，默认 1）：在重算位置画竖虚线；0=不画"],
+      "docDesc": "曲线图（二值，默认 3000 1）：第 1 值 = 纵轴下限（RPM，0~8000，默认 3000；低于此值的 rpm 样本不参与左轴上下限计算，该段画到图外；过滤后左轴无有效数据时退回不过滤；0=关闭）；第 2 值 = 重算标记（0/1，默认 1；在制冷、电池℃、pid℃ 三条曲线的重算位置画竖虚线，与坐标轴同宽同色同透明度；0=不画）。**仅界面读取，守护进程忽略**",
+      "confNote": [
+        "曲线图（二值，默认 3000 1）：第 1 值 = 纵轴下限（RPM，0~8000，默认 3000，0=关闭），第 2 值 = 重算标记（0/1，默认 1，0=不画）",
+        "  纵轴下限：风扇转速低于此值的样本不参与左轴上下限计算，该段画到图外；过滤后左轴无有效数据时退回不过滤",
+        "  重算标记：在制冷、电池℃、pid℃ 三条曲线的重算位置画竖虚线（与坐标轴同宽同色同透明度）"
+      ],
       "unit": "",
-      "unitNote": "开关，取值 0/1，无单位",
-      "default": 1,
-      "factory": 1,
-      "min": 0,
-      "max": 1,
+      "unitNote": "第 1 值为 RPM；第 2 值为开关（0/1）",
+      "default": [3000, 1],
+      "factory": [3000, 1],
+      "min": null,
+      "max": null,
+      "rangeNote": "第 1 值 0~8000 RPM；第 2 值 0/1；本组为界面专用参数（守护进程不读取），范围取自界面实现",
       "requires": [],
       "daemonConsumes": false,
-      "fields": null
+      "fields": [
+        {
+          "label": "纵轴下限",
+          "unit": "RPM",
+          "unitNote": "0=关闭",
+          "min": 0,
+          "max": 8000,
+          "default": 3000,
+          "cVar": null
+        },
+        {
+          "bool": true,
+          "label": "重算标记",
+          "unit": "",
+          "unitNote": "0=不画",
+          "min": 0,
+          "max": 1,
+          "default": 1,
+          "cVar": null
+        }
+      ]
     },
     {
       "key": "UI_HINT_AUTO",
@@ -2445,7 +2452,7 @@
       "APP_LAUNCH_SCREEN_GATE": ["app_launch_screen_gate_enabled", "app_launch_screen_dozing_on"],
       "UI_GAP_SEC": [],
       "UI_ANIM_TUNING": [],
-      "UI_RPM_AXIS_MIN": [],
+      "UI_CHART_VIEW": [],
       "UI_CURVE_FILTER": [],
       "UI_CHART_SWAP": [],
       "UI_HINT_AUTO": [],
