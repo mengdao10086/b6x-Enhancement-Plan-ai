@@ -34,11 +34,11 @@ public final class Deployer {
     /** APK 内的 C 二进制（CI 注入，名字由 CI 决定，此处为接口约定）。 */
     public static final String BIN_ASSET = "tempctrl-arm64";
     /** 二进制最终落点（沿用 noexec 规避：模块目录挂载了 noexec，不能直接执行）。 */
-    public static final String BIN_DEST = "/data/local/tmp/tempctrl";
+    public static final String BIN_DEST = Protocol.PATH_BIN;
     /** APK 内的 service.d 脚本模板（逐字节部署）。 */
-    public static final String SCRIPT_ASSET = "deploy/b6x-tempctrl.sh";
+    public static final String SCRIPT_ASSET = "deploy/" + Protocol.SCRIPT_NAME;
     /** service.d 里的脚本名。 */
-    public static final String SCRIPT_NAME = "b6x-tempctrl.sh";
+    public static final String SCRIPT_NAME = Protocol.SCRIPT_NAME;
     /** Magisk / APatch / KernelSU ≥10683 的 service.d 目录。 */
     public static final String SERVICE_D_MODERN = "/data/adb/service.d";
     /** KernelSU <10683 的旧 service.d 目录。 */
@@ -54,7 +54,7 @@ public final class Deployer {
     private static final String WD_COMM_WHITELIST = "sh|ash|busybox|mksh|dash|toybox";
 
     /** 同步清单文件名（放私有目录，随卸载连目录一起删）。 */
-    public static final String MANIFEST_NAME = "tempctrl_sync_manifest";
+    public static final String MANIFEST_NAME = Protocol.NAME_MANIFEST;
     /** 清单里的 APK 时间戳键（app 写、脚本读；两边字面量必须一致）。 */
     private static final String MANIFEST_KEY_APK_MTIME = "APK_MTIME";
 
@@ -1115,7 +1115,8 @@ public final class Deployer {
         List<String> created = new ArrayList<>();
         List<String> kept = new ArrayList<>();
         List<String> failed = new ArrayList<>();
-        for (String name : new String[]{"tempctrl.log", "tempctrl_webui.data", "tempctrl_coldmax"}) {
+        for (String name : new String[]{Protocol.NAME_LOG, Protocol.NAME_DATA,
+                Protocol.NAME_COLDMAX}) {
             File f = new File(configStore.getPrivateDir(), name);
             if (f.exists()) {
                 kept.add(name);
@@ -1259,8 +1260,7 @@ public final class Deployer {
 
     private RuntimeCleanup cleanPrivateRuntime() {
         RuntimeCleanup result = new RuntimeCleanup();
-        String[] names = {"tempctrl.lock", "tempctrl.log", "tempctrl_webui.data",
-                MANIFEST_NAME, "tempctrl_deploy_stamp", "tempctrl_wd_spawn"};
+        String[] names = Protocol.CLEANUP_APP_PRIVATE;
         for (String name : names) {
             File f = new File(configStore.getPrivateDir(), name);
             if (!f.exists()) {
@@ -1527,7 +1527,7 @@ public final class Deployer {
                 + serviceDirPreamble()
                 + "mkdir -p \"$svcd\" 2>&1\n"
                 // 旧版迁移残留（daemon 侧预创建已删、无人读写）：部署顺手清掉，免得只在卸载时才清
-                + "rm -f /data/local/tmp/tempctrl_last_dev\n"
+                + "rm -f " + Protocol.PATH_LAST_DEV + "\n"
                 // 换盘前留一份上一版：CI 产物本身不可运行时（架构/依赖错误），拉起失败还能退回它
                 // （回退由 restartCore 的启动失败分支做）。同样先删再用 set -C 新建，不跟随预置的符号链接。
                 + "if [ -f \"$BIN\" ] && [ ! -L \"$BIN\" ]"
@@ -1598,27 +1598,24 @@ public final class Deployer {
         return pidsPreamble()
                 + killAndWaitSnippet("wd_pids", "wd_match", "WATCHDOG")
                 + killAndWaitSnippet("bin_pids", "bin_pid_ok", "DAEMON")
-                // 3) 两个进程都停稳后再删文件
-                + "rm -f " + SERVICE_D_MODERN + "/" + SCRIPT_NAME + "\n"
-                + "rm -f " + SERVICE_D_KSU_LEGACY + "/" + SCRIPT_NAME + "\n"
-                + "rm -f \"$BIN\"\n"
+                // 3) 两个进程都停稳后再删文件；清单来自 Protocol.CLEANUP_APP（protocol.def.json）
                 + "# 攻击面/旧版残留：先删目录项（符号链接只删链接本身，不跟随）\n"
-                + "rm -f \"$BIN.new\"\n"
-                + "rm -f \"$BIN.new.app\"\n"
-                + "rm -f \"$BIN.prev\"\n"
-                + "# 兜底单实例锁（C 端在私有目录不可用时用的那把，LOCK_FALLBACK_PATH）：只在 c-daemon 确认\n"
-                + "# 已停之后删 —— 它若还在跑就握着这把锁，删掉文件会让新实例锁到新的 inode、单实例保护被绕过。\n"
-                + "if [ \"$DAEMON_STOPPED\" = 1 ]; then rm -f /data/local/tmp/tempctrl.lock; fi\n"
-                + "rm -f /data/local/tmp/tempctrl_b6x.status\n"
-                + "rm -f /data/local/tmp/tempctrl_b7x.status\n"
-                + "# c-daemon 转写给钩子的界面开关快照（钩子每次返回键读一次；删掉后钩子回退默认值）\n"
-                + "rm -f /data/local/tmp/tempctrl_uiprefs\n"
-                + "rm -f /data/local/tmp/tempctrl_service.log\n"
-                + "# 旧版迁移残留 tempctrl_last_dev（daemon 侧预创建已删、无人读写）：顺手清掉。见 app/逻辑说明.md §2.4\n"
-                + "rm -f /data/local/tmp/tempctrl_last_dev\n"
-                + "# 私有目录不可用时 c-daemon 的兜底日志落点（/cache/<二进制名>.log），可能残留\n"
-                + "rm -f /cache/tempctrl.log\n"
+                + uninstallCleanupScript()
                 + probeTail();
+    }
+
+    /** 卸载清理执行面：按 Protocol.CLEANUP_APP 生成 rm 行；兜底锁保留「daemon 已停才删」的条件。 */
+    private static String uninstallCleanupScript() {
+        StringBuilder sb = new StringBuilder();
+        for (String path : Protocol.CLEANUP_APP) {
+            if (Protocol.PATH_LOCK_FALLBACK.equals(path)) {
+                // 它若还在跑就握着这把锁，删掉文件会让新实例锁到新的 inode、单实例保护被绕过。
+                sb.append("if [ \"$DAEMON_STOPPED\" = 1 ]; then rm -f ").append(path).append("; fi\n");
+            } else {
+                sb.append("rm -f ").append(path).append('\n');
+            }
+        }
+        return sb.toString();
     }
 
     /**
@@ -1685,8 +1682,9 @@ public final class Deployer {
                 + "      rm -f \"$BIN\" 2>/dev/null; break\n"
                 + "    fi\n"
                 // 日志也走 /data/local/tmp：预置符号链接会让 root 追加到任意文件，先删链接再打开。
-                + "    [ -L /data/local/tmp/tempctrl_service.log ] && rm -f /data/local/tmp/tempctrl_service.log\n"
-                + "    nohup \"$BIN\" >> /data/local/tmp/tempctrl_service.log 2>&1 < /dev/null &\n"
+                + "    [ -L " + Protocol.PATH_SERVICE_LOG + " ] && rm -f "
+                + Protocol.PATH_SERVICE_LOG + "\n"
+                + "    nohup \"$BIN\" >> " + Protocol.PATH_SERVICE_LOG + " 2>&1 < /dev/null &\n"
                 + "    sleep 2\n"
                 + "    NEW_PID=$(bin_pids | head -1)\n"
                 + "    [ -n \"$NEW_PID\" ] && break\n"
@@ -1697,8 +1695,9 @@ public final class Deployer {
                 + "    rm -f \"$BIN\"\n"
                 + "    if ( set -C; cat \"$BIN.prev\" > \"$BIN\" ) && chmod 0755 \"$BIN\"; then\n"
                 + "      echo BIN_ROLLED_BACK=1\n"
-                + "      [ -L /data/local/tmp/tempctrl_service.log ] && rm -f /data/local/tmp/tempctrl_service.log\n"
-                + "      nohup \"$BIN\" >> /data/local/tmp/tempctrl_service.log 2>&1 < /dev/null &\n"
+                + "      [ -L " + Protocol.PATH_SERVICE_LOG + " ] && rm -f "
+                + Protocol.PATH_SERVICE_LOG + "\n"
+                + "      nohup \"$BIN\" >> " + Protocol.PATH_SERVICE_LOG + " 2>&1 < /dev/null &\n"
                 + "      sleep 2\n"
                 + "      NEW_PID=$(bin_pids | head -1)\n"
                 + "    fi\n"

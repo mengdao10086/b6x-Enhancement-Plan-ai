@@ -10,11 +10,8 @@ import com.example.waspwingtempctrl.Deployer;
 import org.json.JSONArray;
 import org.json.JSONObject;
 
-import java.io.ByteArrayOutputStream;
 import java.io.File;
 import java.io.IOException;
-import java.io.InputStream;
-import java.nio.charset.StandardCharsets;
 import java.util.Iterator;
 import java.util.LinkedHashMap;
 import java.util.Map;
@@ -35,9 +32,8 @@ public final class WebBridge {
     /** 前端通过 {@code window.WaspBridge} 访问。 */
     public static final String JS_NAME = "WaspBridge";
 
-    /** 日志/曲线 tail 上限：日志 200KB 与守护进程、GUI 同口径；曲线文件仅 720 行，不受影响。 */
-    private static final int TAIL_BYTES = 204800;
-    private static final String PARAMS_ASSET = "params.json";
+    /** 日志/曲线 tail 上限：与 GUI 日志页共用 {@link AppFiles#LOG_TAIL_BYTES}（200KB）。 */
+    private static final int TAIL_BYTES = AppFiles.LOG_TAIL_BYTES;
 
     private final Context appContext;
     /** defs 原始串：首次调用读一次，之后直接复用（不随每次调用 open）。 */
@@ -58,7 +54,7 @@ public final class WebBridge {
 
     // ==================== 只读 ====================
 
-    /** params.json 原始串（唯一一份，来自 core 资产）。 */
+    /** params.json 原始串（唯一一份，复用 core 已解析的 {@link ConfigStore#paramsRoot()}）。 */
     @JavascriptInterface
     public String defs() {
         String cached = defsCache;
@@ -67,11 +63,13 @@ public final class WebBridge {
         }
         synchronized (this) {
             if (defsCache == null) {
-                try {
-                    defsCache = readAsset(appContext, PARAMS_ASSET);
-                } catch (IOException e) {
-                    return error("读取 assets/" + PARAMS_ASSET + " 失败：" + e.getMessage());
+                ConfigStore store = ConfigStore.get(appContext);
+                JSONObject root = store.paramsRoot();
+                if (root == null) {
+                    return error("读取 assets/" + ConfigStore.PARAMS_ASSET + " 失败："
+                            + store.paramsLoadError());
                 }
+                defsCache = root.toString();
             }
             return defsCache;
         }
@@ -328,15 +326,4 @@ public final class WebBridge {
         }
     }
 
-    private static String readAsset(Context context, String name) throws IOException {
-        try (InputStream in = context.getAssets().open(name);
-             ByteArrayOutputStream out = new ByteArrayOutputStream()) {
-            byte[] buffer = new byte[8192];
-            int read;
-            while ((read = in.read(buffer)) != -1) {
-                out.write(buffer, 0, read);
-            }
-            return new String(out.toByteArray(), StandardCharsets.UTF_8);
-        }
-    }
 }

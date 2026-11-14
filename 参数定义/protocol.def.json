@@ -1,0 +1,93 @@
+{
+  "formatVersion": 1,
+  "notes": "跨端协议契约的唯一手写处（曲线 CSV 列 / status 字段 / 广播 action 与 extra / 路径与文件名 / 卸载清理清单）。参数键仍只在 params.def.json；本文件不重复参数定义。产物由 gen_params.py 生成，check_params.py 断言三端一致。",
+  "app": {
+    "hostPackage": "com.example.waspwingtempctrl",
+    "scriptName": "b6x-tempctrl.sh"
+  },
+  "webui": {
+    "count": 12,
+    "legacyMinCols": 8,
+    "sourceNote": "tempctrl_webui.data 每行 12 列，逗号分隔。index 为写端 fprintf 的实参序，三端常量名由 name 派生。",
+    "cols": [
+      {"index": 0, "name": "ts", "label": "时间戳", "cType": "long", "unit": "s", "desc": "Unix epoch 秒"},
+      {"index": 1, "name": "batt", "label": "电池温度", "cType": "int", "unit": "0.1°C", "desc": "-1=无效"},
+      {"index": 2, "name": "cpu", "label": "CPU温度", "cType": "int", "unit": "0.1°C", "desc": "-1=无效"},
+      {"index": 3, "name": "hot", "label": "热端温度", "cType": "int", "unit": "0.1°C", "desc": "0=未就绪，按无效处理"},
+      {"index": 4, "name": "cold", "label": "冷端温度", "cType": "int", "unit": "0.1°C", "desc": "0℃ 合法"},
+      {"index": 5, "name": "rpm_set", "label": "目标风速", "cType": "int", "unit": "档位", "desc": "getRealWindLevel 设定回显"},
+      {"index": 6, "name": "cold_set", "label": "目标制冷", "cType": "int", "unit": "档位", "desc": "getRealColdLevel 设定回显"},
+      {"index": 7, "name": "cold_cmd", "label": "下发目标制冷", "cType": "int", "unit": "0.1°C", "desc": "PID 下发的目标制冷，-1=未就绪；KI 曲线取此列"},
+      {"index": 8, "name": "pid_input", "label": "PID输入", "cType": "int", "unit": "0.01°C", "desc": "仅重算行有值，其余 -1"},
+      {"index": 9, "name": "recompute", "label": "重算标记", "cType": "int", "unit": "0/1", "desc": "本行是否触发 PID 重算"},
+      {"index": 10, "name": "cold_run", "label": "实际制冷", "cType": "int", "unit": "档位", "desc": "getColdRunLevel 运行档，-1=未就绪"},
+      {"index": 11, "name": "rpm_run", "label": "实际转速", "cType": "int", "unit": "RPM", "desc": "getSpeed 原始值，-1=未就绪"}
+    ]
+  },
+  "status": {
+    "sourceNote": "status 文件为「字段名=值」逐行；字段名含 '='。C 端宏 STF_* 与 Java 常量同名同值。",
+    "fields": [
+      {"name": "BLE", "const": "STF_BLE", "desc": "连接状态：0=未连，1/2=B6X owner，6/7=设备型号"},
+      {"name": "CONNECTED_AT", "const": "STF_CONNECTED_AT", "desc": "连接 Unix 时间戳"},
+      {"name": "BLE_OWNER_LAST", "const": "STF_BLE_OWNER_LAST", "desc": "上次连接者与时刻"},
+      {"name": "HOT_TEMP", "const": "STF_HOT_TEMP", "desc": "热端温度 0.1°C"},
+      {"name": "COLD_TEMP", "const": "STF_COLD_TEMP", "desc": "冷端温度 0.1°C（两个 getter 组合）"},
+      {"name": "RUN_MODE", "const": "STF_RUN_MODE", "desc": "运行模式"},
+      {"name": "RPM_REAL", "const": "STF_RPM_REAL", "desc": "设定风速回显"},
+      {"name": "RPM_RUN", "const": "STF_RPM_RUN", "desc": "设备实际转速原始值"},
+      {"name": "COLD_REAL", "const": "STF_COLD_REAL", "desc": "设定制冷回显"},
+      {"name": "COLD_RUN", "const": "STF_COLD_RUN", "desc": "实际运行档"}
+    ]
+  },
+  "broadcast": {
+    "sourceNote": "am broadcast 下发协议。action 两端同名；extra 名与顺序必须一致（顺序也是 send_am_broadcast 的取值顺序）。",
+    "actions": [
+      {"id": "b6", "value": "com.flydigi.SET_TEMPERATURE", "cConst": "BROADCAST_ACTION_B6X", "javaConst": "ACTION_TEMP_B6"},
+      {"id": "b7", "value": "com.flydigi.SET_TEMPERATURE_B7", "cConst": "BROADCAST_ACTION_B7X", "javaConst": "ACTION_TEMP_B7"}
+    ],
+    "extras": ["mode", "temperature", "windOC", "coldOC", "windLevel", "modeCustom", "extra"]
+  },
+  "coldmax": {
+    "field": "COLD_MAX=",
+    "sourceNote": "tempctrl_coldmax 单行字段前缀；daemon 写、app 读。"
+  },
+  "btRequest": {
+    "field": "REQ=",
+    "sourceNote": "tempctrl_bt_req 单行字段前缀；钩子写、daemon 读。"
+  },
+  "paths": [
+    {"id": "status_b6", "const": "STATUS_B6", "kind": "absolute", "value": "/data/local/tmp/tempctrl_b6x.status", "category": "status", "desc": "B6X status 文件"},
+    {"id": "status_b7", "const": "STATUS_B7", "kind": "absolute", "value": "/data/local/tmp/tempctrl_b7x.status", "category": "status", "desc": "B7X status 文件"},
+    {"id": "uiprefs", "const": "UIPREFS", "kind": "absolute", "value": "/data/local/tmp/tempctrl_uiprefs", "category": "uiprefs", "desc": "界面开关快照（daemon 写 / 钩子读）"},
+    {"id": "bt_req", "const": "BT_REQ", "kind": "absolute", "value": "/data/local/tmp/tempctrl_bt_req", "category": "bt_req", "desc": "自动开蓝牙请求（钩子写 / daemon 读）"},
+    {"id": "temp_stop", "const": "TEMP_STOP", "kind": "absolute", "value": "/data/local/tmp/tempctrl_temp_stop", "category": "temp_stop", "desc": "临时停止状态（daemon 写 / 钩子读）"},
+    {"id": "temp_stop_boot", "const": "TEMP_STOP_BOOT", "kind": "private_name", "name": "tempctrl_temp_stop_boot", "category": "temp_stop", "desc": "临时停止的 boot_id 标记"},
+    {"id": "log", "const": "LOG", "kind": "private_name", "name": "tempctrl.log", "category": "log", "desc": "守护进程日志"},
+    {"id": "log_fallback", "const": "LOG_FALLBACK", "kind": "absolute", "value": "/cache/tempctrl.log", "category": "log", "desc": "私有目录不可用时的兜底日志"},
+    {"id": "cache_dir", "const": "CACHE_DIR", "kind": "absolute", "value": "/cache", "category": "log", "desc": "兜底日志目录"},
+    {"id": "log_ext", "const": "LOG_EXT", "kind": "literal", "value": ".log", "category": "log", "desc": "日志扩展名（默认路径 = 二进制名 + 此后缀）"},
+    {"id": "data", "const": "DATA", "kind": "private_name", "name": "tempctrl_webui.data", "category": "data", "desc": "WebUI 曲线数据"},
+    {"id": "coldmax", "const": "COLDMAX", "kind": "private_name", "name": "tempctrl_coldmax", "category": "coldmax", "desc": "生效制冷上限提示"},
+    {"id": "bin", "const": "BIN", "kind": "absolute", "value": "/data/local/tmp/tempctrl", "category": "bin", "desc": "守护进程二进制落点"},
+    {"id": "bin_new", "const": "BIN_NEW", "kind": "absolute", "value": "/data/local/tmp/tempctrl.new", "category": "bin", "desc": "脚本自动更新的临时二进制"},
+    {"id": "bin_new_app", "const": "BIN_NEW_APP", "kind": "absolute", "value": "/data/local/tmp/tempctrl.new.app", "category": "bin", "desc": "app 部署的临时二进制"},
+    {"id": "bin_prev", "const": "BIN_PREV", "kind": "absolute", "value": "/data/local/tmp/tempctrl.prev", "category": "bin", "desc": "上一版二进制（回退用）"},
+    {"id": "service_log", "const": "SERVICE_LOG", "kind": "absolute", "value": "/data/local/tmp/tempctrl_service.log", "category": "log", "desc": "service.d 脚本日志"},
+    {"id": "last_dev", "const": "LAST_DEV", "kind": "absolute", "value": "/data/local/tmp/tempctrl_last_dev", "category": "aux", "desc": "旧版迁移残留"},
+    {"id": "lock_fallback", "const": "LOCK_FALLBACK", "kind": "absolute", "value": "/data/local/tmp/tempctrl.lock", "category": "bin", "desc": "私有目录不可用时的单实例锁"},
+    {"id": "lock_private", "const": "LOCK_PRIVATE", "kind": "private_name", "name": "tempctrl.lock", "category": "bin", "desc": "私有目录单实例锁"},
+    {"id": "script_modern", "const": "SCRIPT_MODERN", "kind": "absolute", "value": "/data/adb/service.d/b6x-tempctrl.sh", "category": "bin", "desc": "service.d 脚本（现代目录）"},
+    {"id": "script_ksu", "const": "SCRIPT_KSU", "kind": "absolute", "value": "/data/adb/ksu/service.d/b6x-tempctrl.sh", "category": "bin", "desc": "service.d 脚本（KSU 旧目录）"},
+    {"id": "manifest", "const": "MANIFEST", "kind": "private_name", "name": "tempctrl_sync_manifest", "category": "aux", "desc": "部署同步清单"},
+    {"id": "deploy_stamp", "const": "DEPLOY_STAMP", "kind": "private_name", "name": "tempctrl_deploy_stamp", "category": "aux", "desc": "自动更新时间戳"},
+    {"id": "wd_spawn", "const": "WD_SPAWN", "kind": "private_name", "name": "tempctrl_wd_spawn", "category": "aux", "desc": "看门狗拉起冷却时间戳"},
+    {"id": "config", "const": "CONFIG", "kind": "private_name", "name": "profile.conf", "category": "config", "desc": "配置文件（R20 由 check_params 断言与 params 定义同名）"}
+  ],
+  "cleanup": {
+    "sourceNote": "卸载清理清单按执行面拆分，全部由本文件生成；各面集合不同是既有行为（C 端不删私有目录、脚本补三类、app 另清私有目录），不要为求一致而合并。",
+    "daemon": ["status_b6", "status_b7", "uiprefs", "service_log", "lock_fallback", "script_modern", "script_ksu", "log_fallback"],
+    "service_script": ["bin", "bin_new", "status_b6", "status_b7", "uiprefs", "service_log", "lock_fallback", "last_dev", "script_modern", "script_ksu", "log_fallback"],
+    "app": ["script_modern", "script_ksu", "bin", "bin_new", "bin_new_app", "bin_prev", "lock_fallback", "status_b6", "status_b7", "uiprefs", "service_log", "last_dev", "log_fallback"],
+    "app_private": ["lock_private", "log", "data", "manifest", "deploy_stamp", "wd_spawn"]
+  }
+}

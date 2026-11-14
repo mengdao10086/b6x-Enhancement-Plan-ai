@@ -35,9 +35,8 @@
 
 ## 5. 编译须知
 
-- C 守护程序用 GitHub Actions（NDK r27c）编译，**不得建议 Termux 编译**
-- 编译命令见 `lsp模块/daemon/build_tempctrl.sh`（编译参数的唯一来源，勿在此处复制副本）
-- CI 只有一条构建链（`.github/workflows/build.yml` 的单一 `build` job）：编译 C → 注入 `core/src/main/assets/tempctrl-arm64` → 一次构建出**两个交付物**（`:app` = GUI 原生界面，`:app-lite` = WebUI 极简版）；两者同 applicationId、同 versionCode，**互斥安装**。不再有 Magisk 模块产物
+- C 守护程序只在 GitHub Actions 编译（工具链、编译命令与参数见 `lsp模块/daemon/build_tempctrl.sh`，编译参数的唯一来源，勿在此处复制副本）；**不得建议 Termux 编译**
+- CI 只有一条构建链（`.github/workflows/build.yml` 的单一 `build` job）：交付**两个 APK**（`:app` = GUI 原生界面，`:app-lite` = WebUI 极简版）；两者同 applicationId、同 versionCode，**互斥安装**，无 Magisk 模块产物。C 二进制的编译与注入细节以该 workflow 为准
 - 每轮新对话和压缩上下文后的**首次 push** → 跟踪 CI 检查是否报错
 - **CI 产物下载与留存**：工件统一下载到 `D:\下载\Edge`，不要放别处；同一版本**只保留最后一个**，其余**放回收站**（不永久删除，留一条后悔的退路）。仓库**不提交**编译产物二进制——CI 只把它作为工件上传，不回写仓库
 

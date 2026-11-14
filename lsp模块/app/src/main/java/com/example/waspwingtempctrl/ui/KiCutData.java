@@ -11,6 +11,7 @@ import com.example.waspwingtempctrl.ConfigStore.FieldMeta;
 import com.example.waspwingtempctrl.ConfigStore.KeyMeta;
 import com.example.waspwingtempctrl.ConfigStore.Snapshot;
 import com.example.waspwingtempctrl.ConfigStore.Value;
+import com.example.waspwingtempctrl.Protocol;
 
 /**
  * KI 分段倍率曲线图的取数：<b>横轴上限</b>（当前设备的制冷上限）与<b>当前冷值</b>（红虚线位置）。
@@ -28,10 +29,10 @@ import com.example.waspwingtempctrl.ConfigStore.Value;
  */
 final class KiCutData {
 
-    /** 曲线数据文件里「目标制冷」的列下标（行格式权威见 daemon/逻辑说明.md〈状态页数据源〉）。 */
-    private static final int COL_TARGET_COLD = 7;
+    /** 曲线数据文件里「下发目标制冷」的列下标（行格式权威见 protocol.def.json 的 webui.cols）。 */
+    private static final int COL_TARGET_COLD = Protocol.WEBUI_COL_COLD_CMD;
     /** 制冷上限提示文件里 {@code COLD_MAX=} 的字段名前缀（格式权威见 app/逻辑说明.md §6.6）。 */
-    private static final String COLDMAX_FIELD = "COLD_MAX=";
+    private static final String COLDMAX_FIELD = Protocol.COLDMAX_FIELD;
     /** 上限提示文件只有一行，读这点字节足够。 */
     private static final int COLDMAX_PROBE_BYTES = 64;
     /** 横轴上限的降级值（B6X 出厂上限；定义 PID_COLD_RANGE 第 2 字段 factory=190）。 */

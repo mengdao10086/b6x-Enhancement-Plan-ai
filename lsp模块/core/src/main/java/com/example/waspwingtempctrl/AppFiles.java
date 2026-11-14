@@ -22,11 +22,13 @@ import java.nio.charset.StandardCharsets;
 public final class AppFiles {
 
     /** 守护进程日志文件名（C 端私有目录内固定名）。 */
-    public static final String LOG_NAME = "tempctrl.log";
+    public static final String LOG_NAME = Protocol.NAME_LOG;
     /** 曲线时序数据文件名（C 端 write_webui_data 落盘）。 */
-    public static final String DATA_NAME = "tempctrl_webui.data";
+    public static final String DATA_NAME = Protocol.NAME_DATA;
     /** 生效制冷上限文件名（C 端 write_coldmax_hint 落盘，一行 {@code COLD_MAX=<int>}）。 */
-    public static final String COLDMAX_NAME = "tempctrl_coldmax";
+    public static final String COLDMAX_NAME = Protocol.NAME_COLDMAX;
+    /** 日志尾读上限：GUI 日志页与 lite WebBridge 共用（同一份 200KB 口径）。 */
+    public static final int LOG_TAIL_BYTES = 200 * 1024;
 
     private AppFiles() {
     }

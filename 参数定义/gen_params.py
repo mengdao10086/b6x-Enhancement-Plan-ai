@@ -3,7 +3,7 @@
 """B6X 温控参数定义 —— 生成脚本（R1 单一来源）
 
 定位（本文件是唯一实现处）：
-  · 唯一手写处是 参数定义/params.def.json。
+  · 唯一手写处是 参数定义/params.def.json（参数键）与 参数定义/protocol.def.json（跨端协议）。
   · 全部产物由本文件生成；**来源清单（SOURCES）与产物清单（PRODUCTS）也只在本文件声明**。
   · check_params.py 只做校验，一律 import 本文件的常量与函数，不另行声明来源/产物。
 
@@ -28,6 +28,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.dirname(HERE)
 
 DEF_PATH = os.path.join(HERE, "params.def.json")
+PROTO_DEF_PATH = os.path.join(HERE, "protocol.def.json")
 
 # --------------------------------------------------------------------------
 # 来源清单（三源）：check_params.py 直接引用此处，不得在别处重复声明
@@ -66,10 +67,42 @@ PRODUCTS = (
             "逻辑说明.md 的参数表段（标记区间内）"),
     Product("c-header", "lsp模块/daemon/params_generated.h", "full",
             "C 端键表与 clamp 边界（供 tempctrl.c 包含）"),
+    Product("protocol-c-header", "lsp模块/daemon/protocol_generated.h", "full",
+            "协议常量 C 头（status/广播 action/路径/列枚举/清理清单）"),
+    Product("protocol-java", "lsp模块/core/src/main/java/com/example/waspwingtempctrl/Protocol.java",
+            "full", "协议常量 Java 类（与 C/JS 同源同值）"),
+    Product("tempctrl-region", "lsp模块/daemon/tempctrl.c", "region",
+            "tempctrl.c 内的 WebUI 列/广播区块（生成）"),
+    Product("webui-js", "lsp模块/app-lite/src/main/assets/webui/app.js", "region",
+            "WebUI 曲线列常量区块（生成）"),
+    Product("deploy-sh", "lsp模块/core/src/main/assets/deploy/b6x-tempctrl.sh", "region",
+            "部署脚本路径常量与清理清单区块（生成）"),
+    Product("mainhook-mirror", "lsp模块/core/src/main/java/com/example/waspwingtempctrl/MainHook.java",
+            "region", "广播 extra 镜像注释（CI R2 文本断言用，实际调用引用 Protocol 常量）"),
 )
 
 DOC_START = "<!-- params-table:start （本节由 参数定义/gen_params.py 生成，勿手改） -->"
 DOC_END = "<!-- params-table:end -->"
+
+C_PROTO_START = "/* protocol-const:start （本节由 参数定义/gen_params.py 从 protocol.def.json 生成，勿手改） */"
+C_PROTO_END = "/* protocol-const:end */"
+JS_PROTO_START = "    /* protocol-webui:start （本节由 参数定义/gen_params.py 生成，勿手改） */"
+JS_PROTO_END = "    /* protocol-webui:end */"
+SH_PROTO_START = "# protocol-const:start （本节由 参数定义/gen_params.py 从 protocol.def.json 生成，勿手改）"
+SH_PROTO_END = "# protocol-const:end"
+MH_PROTO_START = ("    /* protocol-extras-mirror:start （本节由 参数定义/gen_params.py 生成，勿手改；"
+                  "实际调用使用 Protocol 的 EXTRA_* 常量） */")
+MH_PROTO_END = "    /* protocol-extras-mirror:end */"
+
+REGION_MARKERS = {
+    "doc-table": (DOC_START, DOC_END),
+    "tempctrl-region": (C_PROTO_START, C_PROTO_END),
+    "webui-js": (JS_PROTO_START, JS_PROTO_END),
+    "deploy-sh": (SH_PROTO_START, SH_PROTO_END),
+    "mainhook-mirror": (MH_PROTO_START, MH_PROTO_END),
+}
+
+PROTO_DEF_REL = "参数定义/protocol.def.json"
 
 DEF_REL = "参数定义/params.def.json"
 
@@ -87,6 +120,128 @@ def read_text(path):
 
 def load_def():
     return json.loads(read_text(DEF_PATH))
+
+
+def load_protocol():
+    protocol = json.loads(read_text(PROTO_DEF_PATH))
+    problems = validate_protocol(protocol)
+    if problems:
+        raise ValueError("protocol.def.json 非法：\n  - " + "\n  - ".join(problems))
+    return protocol
+
+
+_IDENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+
+def validate_protocol(protocol):
+    """协议定义的独立自检（生成与校验共用同一份规则）。"""
+    problems = []
+
+    def ident(value, where):
+        if not isinstance(value, str) or not _IDENT_RE.match(value):
+            problems.append("%s 不是合法标识符：%r" % (where, value))
+
+    app = protocol.get("app") or {}
+    host = app.get("hostPackage")
+    if not isinstance(host, str) or not re.fullmatch(r"[a-z][a-z0-9_]*(\.[a-z][a-z0-9_]*)+", host):
+        problems.append("app.hostPackage 不是合法包名：%r" % (host,))
+    if not isinstance(app.get("scriptName"), str) or not app.get("scriptName"):
+        problems.append("app.scriptName 为空")
+
+    webui = protocol.get("webui") or {}
+    cols = webui.get("cols") or []
+    if webui.get("count") != len(cols):
+        problems.append("webui.count=%r ≠ cols 条数 %d" % (webui.get("count"), len(cols)))
+    seen_idx, seen_name = set(), set()
+    for i, col in enumerate(cols):
+        ident(col.get("name"), "webui.cols[%d].name" % i)
+        if col.get("name") in seen_name:
+            problems.append("webui 列名重复：%r" % col.get("name"))
+        seen_name.add(col.get("name"))
+        if col.get("index") in seen_idx:
+            problems.append("webui 列下标重复：%r" % col.get("index"))
+        seen_idx.add(col.get("index"))
+        if col.get("cType") not in ("int", "long"):
+            problems.append("webui.cols[%d].cType 非法：%r" % (i, col.get("cType")))
+        if not col.get("label"):
+            problems.append("webui.cols[%d].label 为空" % i)
+    if seen_idx != set(range(len(cols))):
+        problems.append("webui 列下标必须是 0..%d 连续：%s"
+                        % (len(cols) - 1, sorted(seen_idx)))
+    legacy = webui.get("legacyMinCols")
+    if not isinstance(legacy, int) or legacy < 1 or legacy > len(cols):
+        problems.append("webui.legacyMinCols 非法：%r" % (legacy,))
+
+    status = protocol.get("status") or {}
+    fields = status.get("fields") or []
+    if not fields:
+        problems.append("status.fields 为空")
+    seen_stf = set()
+    for i, f in enumerate(fields):
+        ident(f.get("const"), "status.fields[%d].const" % i)
+        if f.get("const") in seen_stf:
+            problems.append("status 常量名重复：%r" % f.get("const"))
+        seen_stf.add(f.get("const"))
+        if not isinstance(f.get("name"), str) or not f.get("name"):
+            problems.append("status.fields[%d].name 为空" % i)
+
+    broadcast = protocol.get("broadcast") or {}
+    actions = broadcast.get("actions") or []
+    if len(actions) != 2:
+        problems.append("broadcast.actions 应为 2 条（B6X/B7X），实际 %d" % len(actions))
+    for a in actions:
+        ident(a.get("cConst"), "broadcast.actions.cConst")
+        ident(a.get("javaConst"), "broadcast.actions.javaConst")
+        if not isinstance(a.get("value"), str) or not a.get("value"):
+            problems.append("broadcast action 值为空：%r" % (a,))
+    extras = broadcast.get("extras") or []
+    if not extras:
+        problems.append("broadcast.extras 为空")
+    if len(set(extras)) != len(extras):
+        problems.append("broadcast.extras 有重复：%s" % extras)
+
+    paths = protocol.get("paths") or []
+    by_id = {}
+    for i, p in enumerate(paths):
+        ident(p.get("const"), "paths[%d].const" % i)
+        if not p.get("id") or p.get("id") in by_id:
+            problems.append("paths[%d].id 为空或重复：%r" % (i, p.get("id")))
+        by_id[p.get("id")] = p
+        kind = p.get("kind")
+        if kind == "absolute":
+            if not isinstance(p.get("value"), str) or not p.get("value").startswith("/"):
+                problems.append("路径 %r 的 value 必须是绝对路径" % p.get("id"))
+        elif kind == "private_name":
+            if not isinstance(p.get("name"), str) or not p.get("name") or "/" in p["name"]:
+                problems.append("路径 %r 的 name 必须是非空纯文件名" % p.get("id"))
+        elif kind == "literal":
+            if not isinstance(p.get("value"), str):
+                problems.append("路径 %r 的 value 必须是字符串" % p.get("id"))
+        else:
+            problems.append("路径 %r 的 kind 非法：%r" % (p.get("id"), kind))
+
+    cleanup = protocol.get("cleanup") or {}
+    for surface in ("daemon", "service_script", "app", "app_private"):
+        ids = cleanup.get(surface)
+        if not isinstance(ids, list) or not ids:
+            problems.append("cleanup.%s 为空" % surface)
+            continue
+        if len(set(ids)) != len(ids):
+            problems.append("cleanup.%s 有重复项" % surface)
+        for pid in ids:
+            p = by_id.get(pid)
+            if p is None:
+                problems.append("cleanup.%s 引用了不存在的路径 %r" % (surface, pid))
+            elif surface in ("daemon", "service_script", "app") and p.get("kind") != "absolute":
+                problems.append("cleanup.%s 的 %r 必须是绝对路径（shell unlink 口径）"
+                                % (surface, pid))
+            elif surface == "app_private" and p.get("kind") != "private_name":
+                problems.append("cleanup.app_private 的 %r 必须是私有目录文件名" % pid)
+
+    for plain in ("coldmax", "btRequest"):
+        if not (protocol.get(plain) or {}).get("field"):
+            problems.append("%s.field 为空" % plain)
+    return problems
 
 
 def product_path(product):
@@ -425,6 +580,17 @@ def find_doc_region(text):
 #   2026-11-13 删除（唯一例外是 PID_CUT 的表键宏，解析代码直接引用）。
 # --------------------------------------------------------------------------
 
+# 配置项在 tempctrl.c 内的结构体实例名：生成头里的变量引用一律写成 <实例>.<字段>，
+# 展开点（&var / var = def / &ivar / svar）因此无需感知结构体；审计侧剥掉该前缀后
+# 与 params.def.json 的 audit.cVars 比对。
+C_CFG_INSTANCE = "g_cfg"
+
+
+def c_var_ref(name):
+    """C 变量名 → 生成头内的结构体字段引用（g_cfg.<name>）。"""
+    return "%s.%s" % (C_CFG_INSTANCE, name)
+
+
 def first_cvar(definition, key):
     """键在 tempctrl.c 内的首个 C 变量名（无则 None）。"""
     vars_ = definition["audit"]["cVars"].get(key) or []
@@ -476,8 +642,8 @@ def build_c_header(definition):
     lines = []
     lines.append("/* 本文件由 python 参数定义/gen_params.py 生成，勿手改。")
     lines.append(" * 唯一手写处：%s；改动后重跑生成脚本。" % DEF_REL)
-    lines.append(" * 只定义宏。X 宏的展开点必须在 struct SysfsCfgKey / enum SK_* 与所有被取地址的")
-    lines.append(" * static 变量（BATT_TEMP_PATH、log_file_path、LOG_MAX 等）声明之后。 */")
+    lines.append(" * 只定义宏。X 宏的展开点必须在 struct SysfsCfgKey / enum SK_* 与配置结构体")
+    lines.append(" * 实例（%s，见 tempctrl.c）声明之后。 */" % C_CFG_INSTANCE)
     lines.append("#ifndef PARAMS_GENERATED_H")
     lines.append("#define PARAMS_GENERATED_H")
     lines.append("")
@@ -487,7 +653,7 @@ def build_c_header(definition):
     rows = []
     for e in perf_int:
         rows.append('    X("%s", %s, %d, %d)'
-                    % (e["key"], first_cvar(definition, e["key"]), e["min"], e["max"]))
+                    % (e["key"], c_var_ref(first_cvar(definition, e["key"])), e["min"], e["max"]))
     lines.append(" \\\n".join(rows))
     lines.append("")
 
@@ -500,10 +666,10 @@ def build_c_header(definition):
         cvar = first_cvar(definition, e["key"])
         if e.get("cKind") == "SK_INT":
             rows.append('    X("%s", SK_INT, &%s, %d, %d, NULL, 0)'
-                        % (e["key"], cvar, e["min"], e["max"]))
+                        % (e["key"], c_var_ref(cvar), e["min"], e["max"]))
         elif e.get("cKind") == "SK_PATH":
             rows.append('    X("%s", SK_PATH, NULL, 0, 0, %s, sizeof(%s))'
-                        % (e["key"], cvar, cvar))
+                        % (e["key"], c_var_ref(cvar), c_var_ref(cvar)))
         else:
             rows.append('    X("%s", %s, NULL, 0, 0, NULL, 0)'
                         % (e["key"], e.get("cKind")))
@@ -540,7 +706,7 @@ def build_c_header(definition):
     lines.append(" * 各层总开关自身同样不入表（PERF_ENABLED 默认 1，复位它会立刻自我重开）。 */")
     for group, macro in (("perf", "CFG_PERF_DEFAULTS"), ("sysfs", "CFG_SYSFS_DEFAULTS")):
         lines.append("#define %s(X) \\" % macro)
-        rows = ['    X(%s, %d)' % (var, val)
+        rows = ['    X(%s, %d)' % (c_var_ref(var), val)
                 for var, val in c_layer_defaults(definition, group)]
         lines.append(" \\\n".join(rows))
         lines.append("")
@@ -550,10 +716,266 @@ def build_c_header(definition):
 
 
 # --------------------------------------------------------------------------
+# 协议产物构建（protocol.def.json → C 头 / Java 常量 / C·JS·脚本区间）
+# --------------------------------------------------------------------------
+
+def _c_str(s):
+    """C/Java/JS 通用双引号字符串字面量（本文件的取值均为 ASCII 路径/标识，无转义歧义）。"""
+    return json.dumps(s, ensure_ascii=False)
+
+
+def _upper_ident(name):
+    return re.sub(r"[^A-Za-z0-9]+", "_", name).upper()
+
+
+def _java_extra_const(name):
+    """camelCase extra → Java 常量名：windOC → EXTRA_WIND_OC。"""
+    s = re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", name)
+    return "EXTRA_" + _upper_ident(s)
+
+
+def _protocol_paths(protocol):
+    return {p["id"]: p for p in protocol["paths"]}
+
+
+def build_protocol_c_header(protocol):
+    """协议常量 C 头：status 字段、广播 action、路径/文件名、列枚举、清理清单。"""
+    lines = []
+    lines.append("/* 本文件由 python 参数定义/gen_params.py 生成，勿手改。")
+    lines.append(" * 唯一手写处：%s；改动后重跑生成脚本。" % PROTO_DEF_REL)
+    lines.append(" * 私有目录路径依赖 PRIVATE_DIR，故本头须在 PRIVATE_DIR 定义之后包含。 */")
+    lines.append("#ifndef PROTOCOL_GENERATED_H")
+    lines.append("#define PROTOCOL_GENERATED_H")
+    lines.append("")
+
+    lines.append("/* status 文件字段名（行格式「字段名=值」，字段名含 '='） */")
+    for f in protocol["status"]["fields"]:
+        lines.append('#define %-20s %s' % (f["const"], _c_str(f["name"] + "=")))
+    lines.append("")
+
+    lines.append("/* 广播 action（与 Java Protocol.ACTION_* 同值） */")
+    for a in protocol["broadcast"]["actions"]:
+        lines.append('#define %-20s %s' % (a["cConst"], _c_str(a["value"])))
+    lines.append("")
+
+    lines.append("/* 路径与文件名（R10：core/daemon/脚本三方同源） */")
+    for p in protocol["paths"]:
+        const, kind = p["const"], p["kind"]
+        if kind == "absolute":
+            lines.append('#define PROTO_PATH_%-16s %s' % (const, _c_str(p["value"])))
+        elif kind == "private_name":
+            lines.append('#define PROTO_NAME_%-16s %s' % (const, _c_str(p["name"])))
+            lines.append('#define PROTO_PATH_%-16s PRIVATE_DIR "/%s"' % (const, p["name"]))
+        else:
+            lines.append('#define PROTO_%-21s %s' % (const, _c_str(p["value"])))
+    lines.append("")
+
+    lines.append("/* 宿主包名与脚本名（R22：与 params.def.json appPackage 一致，CI 断言） */")
+    lines.append('#define PROTO_HOST_PKG       %s' % _c_str(protocol["app"]["hostPackage"]))
+    lines.append('#define PROTO_HOST_DATA_DIR  "/data/data/" PROTO_HOST_PKG')
+    lines.append('#define PROTO_SCRIPT_NAME    %s' % _c_str(protocol["app"]["scriptName"]))
+    lines.append("")
+    lines.append('#define PROTO_COLDMAX_FIELD  %s' % _c_str(protocol["coldmax"]["field"]))
+    lines.append('#define PROTO_BT_REQ_FIELD   %s' % _c_str(protocol["btRequest"]["field"]))
+    lines.append("")
+
+    lines.append("/* WebUI 曲线列下标（写端用位置实参，读端按这些常量取列） */")
+    lines.append("enum WebuiDataCol {")
+    for col in protocol["webui"]["cols"]:
+        lines.append("    WEBUI_COL_%s = %d,   /* %s（%s） */"
+                     % (_upper_ident(col["name"]), col["index"],
+                        col["label"], col.get("unit", "")))
+    lines.append("    WEBUI_COL_COUNT = %d" % protocol["webui"]["count"])
+    lines.append("};")
+    lines.append("#define WEBUI_COLS_LEGACY_MIN %d" % protocol["webui"]["legacyMinCols"])
+    lines.append("")
+
+    by_id = _protocol_paths(protocol)
+    ids = protocol["cleanup"]["daemon"]
+    lines.append("/* 卸载清理清单（daemon 执行面）：X(绝对路径宏) */")
+    lines.append("#define PROTO_CLEANUP_DAEMON(X) \\")
+    rows = ["    X(PROTO_PATH_%s)" % by_id[pid]["const"] for pid in ids]
+    lines.append(" \\\n".join(rows))
+    lines.append("")
+    lines.append("#endif  /* PROTOCOL_GENERATED_H */")
+    return "\n".join(lines) + "\n"
+
+
+def build_protocol_java(protocol):
+    """协议常量 Java 类：列下标、status 字段、广播 action/extra、路径与清理清单。"""
+    lines = []
+    lines.append("package com.example.waspwingtempctrl;")
+    lines.append("")
+    lines.append("/**")
+    lines.append(" * 跨端协议常量。由 {@code python 参数定义/gen_params.py} 从")
+    lines.append(" * {@code %s} 生成，勿手改。" % PROTO_DEF_REL)
+    lines.append(" *")
+    lines.append(" * <p>C 端对应 {@code lsp模块/daemon/protocol_generated.h}；WebUI 对应 app.js 的生成区块。")
+    lines.append(" */")
+    lines.append("public final class Protocol {")
+    lines.append("")
+    lines.append("    private Protocol() {")
+    lines.append("    }")
+    lines.append("")
+
+    lines.append("    // ==================== WebUI 曲线列（tempctrl_webui.data） ====================")
+    for col in protocol["webui"]["cols"]:
+        lines.append("    public static final int WEBUI_COL_%s = %d;"
+                     % (_upper_ident(col["name"]), col["index"]))
+    lines.append("    public static final int WEBUI_COL_COUNT = %d;" % protocol["webui"]["count"])
+    lines.append("    public static final int WEBUI_COLS_LEGACY_MIN = %d;"
+                 % protocol["webui"]["legacyMinCols"])
+    lines.append("")
+
+    lines.append("    // ==================== status 文件字段名 ====================")
+    for f in protocol["status"]["fields"]:
+        lines.append("    public static final String %s = %s;"
+                     % (f["const"], _c_str(f["name"] + "=")))
+    lines.append("")
+
+    lines.append("    // ==================== 广播 action 与 extra ====================")
+    for a in protocol["broadcast"]["actions"]:
+        lines.append("    public static final String %s = %s;"
+                     % (a["javaConst"], _c_str(a["value"])))
+    for e in protocol["broadcast"]["extras"]:
+        lines.append("    public static final String %s = %s;"
+                     % (_java_extra_const(e), _c_str(e)))
+    lines.append("")
+
+    lines.append("    // ==================== 路径与文件名 ====================")
+    for p in protocol["paths"]:
+        const, kind = p["const"], p["kind"]
+        if kind == "absolute":
+            lines.append("    public static final String PATH_%s = %s;"
+                         % (const, _c_str(p["value"])))
+        elif kind == "private_name":
+            lines.append("    public static final String NAME_%s = %s;"
+                         % (const, _c_str(p["name"])))
+        else:
+            lines.append("    public static final String %s = %s;"
+                         % (const, _c_str(p["value"])))
+    lines.append("    public static final String HOST_PKG = %s;"
+                 % _c_str(protocol["app"]["hostPackage"]))
+    lines.append("    public static final String SCRIPT_NAME = %s;"
+                 % _c_str(protocol["app"]["scriptName"]))
+    lines.append("    public static final String COLDMAX_FIELD = %s;"
+                 % _c_str(protocol["coldmax"]["field"]))
+    lines.append("    public static final String BT_REQ_FIELD = %s;"
+                 % _c_str(protocol["btRequest"]["field"]))
+    lines.append("")
+
+    by_id = _protocol_paths(protocol)
+    for surface, const in (("app", "CLEANUP_APP"), ("app_private", "CLEANUP_APP_PRIVATE")):
+        lines.append("    /** 卸载清理清单（%s 执行面）。 */" % surface)
+        lines.append("    public static final String[] %s = {" % const)
+        for pid in protocol["cleanup"][surface]:
+            p = by_id[pid]
+            value = p["value"] if p["kind"] == "absolute" else p["name"]
+            lines.append("        %s," % _c_str(value))
+        lines.append("    };")
+        lines.append("")
+    if lines[-1] == "":
+        lines.pop()
+    lines.append("}")
+    return "\n".join(lines) + "\n"
+
+
+def render_tempctrl_protocol_region(definition, protocol):
+    """tempctrl.c 内的生成区块。
+
+    这里保留字面量是为了 CI 既有的文本断言（`#define WEBUI_DATA_COLS 数字` /
+    `BROADCAST_EXTRAS[] = { "..." }` 的 sed/grep）继续生效；字面量本身由
+    protocol.def.json 生成，手改会被断言 A 判为漂移。
+    """
+    cols = protocol["webui"]["cols"]
+    specs = {"int": "%d", "long": "%ld"}
+    fmt = ",".join(specs[c["cType"]] for c in cols) + "\n"
+    order = "，".join("%d=%s" % (c["index"], c["label"]) for c in cols)
+    lines = [C_PROTO_START]
+    lines.append('#include "protocol_generated.h"')
+    lines.append("")
+    lines.append("/* WebUI 曲线列契约：列数唯一声明（CI R7 断言本行数字 = WEBUI_ROW_FMT 的转换符个数）")
+    lines.append(" * 列序：%s" % order)
+    lines.append(" * 列序与语义的权威声明是 %s 的 webui.cols。" % PROTO_DEF_REL)
+    lines.append(" */")
+    lines.append("#define WEBUI_DATA_PATH       PROTO_PATH_DATA")
+    lines.append("#define WEBUI_DATA_MAX_LINES  %d" % definition["chart"]["rollingMaxLines"])
+    lines.append("#define WEBUI_DATA_COLS       %d" % len(cols))
+    lines.append("#define WEBUI_ROW_FMT         %s" % _c_str(fmt))
+    lines.append("")
+    lines.append("/* 广播 extra 名单（action 宏在 protocol_generated.h）；须与 Java Protocol.java 一致 */")
+    lines.append("static const char *const BROADCAST_EXTRAS[] = {")
+    for e in protocol["broadcast"]["extras"]:
+        lines.append("    %s," % _c_str(e))
+    lines.append("};")
+    lines.append("#define BROADCAST_EXTRAS_N  ((int)(sizeof(BROADCAST_EXTRAS) / sizeof(BROADCAST_EXTRAS[0])))")
+    lines.append(C_PROTO_END)
+    return "\n".join(lines) + "\n"
+
+
+def render_webui_js_region(protocol):
+    lines = [JS_PROTO_START]
+    for col in protocol["webui"]["cols"]:
+        lines.append("    var WEBUI_COL_%s = %d;"
+                     % (_upper_ident(col["name"]), col["index"]))
+    lines.append("    var WEBUI_COL_COUNT = %d;" % protocol["webui"]["count"])
+    lines.append("    var WEBUI_COLS_LEGACY_MIN = %d;" % protocol["webui"]["legacyMinCols"])
+    lines.append(JS_PROTO_END)
+    return "\n".join(lines) + "\n"
+
+
+def render_deploy_sh_region(protocol):
+    by_id = _protocol_paths(protocol)
+    lines = [SH_PROTO_START]
+    lines.append("HOST_PKG=%s" % protocol["app"]["hostPackage"])
+    lines.append("HOST_DIR=/data/data/$HOST_PKG")
+    lines.append("HOST_FILES=$HOST_DIR/files")
+    lines.append("SCRIPT_NAME=%s" % protocol["app"]["scriptName"])
+    for p in protocol["paths"]:
+        const, kind = p["const"], p["kind"]
+        if kind == "absolute":
+            lines.append("PROTO_PATH_%s=%s" % (const, p["value"]))
+        elif kind == "private_name":
+            lines.append("PROTO_NAME_%s=%s" % (const, p["name"]))
+        else:
+            lines.append("PROTO_%s=%s" % (const, p["value"]))
+    lines.append("BIN=$PROTO_PATH_BIN")
+    lines.append("SVC_LOG=$PROTO_PATH_SERVICE_LOG")
+    lines.append("AU_CONF=$HOST_FILES/$PROTO_NAME_CONFIG")
+    lines.append("AU_STAMP=$HOST_FILES/$PROTO_NAME_DEPLOY_STAMP")
+    lines.append("AU_MANIFEST=$HOST_FILES/$PROTO_NAME_MANIFEST")
+    special = {"bin": "$BIN", "bin_new": "$BIN.new", "service_log": "$SVC_LOG"}
+    tokens = []
+    for pid in protocol["cleanup"]["service_script"]:
+        tokens.append(special.get(pid, "$PROTO_PATH_%s" % by_id[pid]["const"]))
+    lines.append('PROTO_CLEANUP_PATHS="%s"' % " ".join(tokens))
+    lines.append(SH_PROTO_END)
+    return "\n".join(lines) + "\n"
+
+
+def render_mainhook_mirror(protocol):
+    """MainHook 的广播 extra 文本镜像。
+
+    CI 的 R2 步骤按 `getIntExtra("...")` 文本 grep 两端 extra 名；实际调用已改为
+    Protocol.EXTRA_*，故由生成器写一段只含注释的镜像供该断言读取。
+    check_params 会核对镜像与 protocol.def.json 的 extra 顺序一致。
+    """
+    lines = [MH_PROTO_START]
+    for e in protocol["broadcast"]["extras"]:
+        lines.append('    // getIntExtra("%s", 0)' % e)
+    lines.append(MH_PROTO_END)
+    return "\n".join(lines) + "\n"
+
+
+# --------------------------------------------------------------------------
 # 产物写入
 # --------------------------------------------------------------------------
 
-def render_product(pid, definition):
+PROTOCOL_PRODUCTS = ("protocol-c-header", "protocol-java", "tempctrl-region",
+                     "webui-js", "deploy-sh", "mainhook-mirror")
+
+
+def render_product(pid, definition, protocol=None):
     if pid == "params.json":
         return render_params_json(definition)
     if pid == "profile.conf":
@@ -562,7 +984,36 @@ def render_product(pid, definition):
         return build_c_header(definition)
     if pid == "doc-table":
         return render_doc_region(definition)
+    if pid in PROTOCOL_PRODUCTS:
+        protocol = protocol or load_protocol()
+        if pid == "protocol-c-header":
+            return build_protocol_c_header(protocol)
+        if pid == "protocol-java":
+            return build_protocol_java(protocol)
+        if pid == "tempctrl-region":
+            return render_tempctrl_protocol_region(definition, protocol)
+        if pid == "webui-js":
+            return render_webui_js_region(protocol)
+        if pid == "deploy-sh":
+            return render_deploy_sh_region(protocol)
+        return render_mainhook_mirror(protocol)
     raise KeyError(pid)
+
+
+def find_region(text, pid):
+    """返回产物 pid 的生成区间 (起点, 终点)；终点 = 结束标记行尾（不含换行）。"""
+    if pid not in REGION_MARKERS:
+        raise KeyError(pid)
+    start, end = REGION_MARKERS[pid]
+    i = text.find(start)
+    j = text.find(end)
+    if i < 0 or j < 0:
+        raise ValueError("%s 缺少生成区间标记（%s ... %s）" % (pid, start, end))
+    return i, j + len(end)
+
+
+def find_doc_region(text):
+    return find_region(text, "doc-table")
 
 
 def expected_product(pid, definition):
@@ -575,7 +1026,7 @@ def expected_product(pid, definition):
     if not os.path.exists(path):
         raise IOError("产物不存在：%s" % path)
     current = read_text(path)
-    i, j = find_doc_region(current)
+    i, j = find_region(current, pid)
     return current[:i] + text.rstrip("\n") + current[j:]
 
 
@@ -587,7 +1038,7 @@ def write_product(pid, definition):
         new_text = text
     else:
         current = read_text(path) if os.path.exists(path) else ""
-        i, j = find_doc_region(current)
+        i, j = find_region(current, pid)
         new_text = current[:i] + text.rstrip("\n") + current[j:]
     old_text = read_text(path) if os.path.exists(path) else None
     changed = old_text != new_text
@@ -726,7 +1177,11 @@ def parse_c_keys(c_text):
 
 
 def parse_c_defaults(c_text):
-    """static/局部 int 与 char[] 初值 → {var: 初值文本}。"""
+    """static/局部 int 与 char[] 初值 → {var: 初值文本}。
+
+    配置项已收进配置结构体，不再有独立 static 初值；同时解析该实例的指定初始化器
+    （.FIELD = value），字段名按原变量名登记，供默认值审计继续逐位核对。
+    """
     defaults = {}
     pat = re.compile(r"(?m)^\s*(?:static\s+)?(?:const\s+)?(?:int|char)\s+(\w+)\s*"
                      r"(?:\[[^\]]*\])?\s*=\s*([^;]+);")
@@ -739,6 +1194,22 @@ def parse_c_defaults(c_text):
             num = re.match(r"^-?\d+$", raw)
             if num:
                 defaults.setdefault(var, raw)
+    # 配置结构体实例的指定初始化器（行内可带 // 注释；字符串内的 // 不切分）
+    m = re.search(r"struct\s+TempCfg\s*\{.*?\}\s*;\s*(?:static\s+)?struct\s+TempCfg\s+%s\s*=\s*\{(.*?)\n\};"
+                  % re.escape(C_CFG_INSTANCE), c_text, re.S)
+    if m:
+        for line in m.group(1).splitlines():
+            mm = re.match(r"\s*\.(\w+)\s*=\s*(.+)$", line)
+            if not mm:
+                continue
+            var, raw = mm.group(1), mm.group(2)
+            if '"' in raw:
+                q = re.search(r'"([^"]*)"', raw)
+                defaults.setdefault(var, q.group(1) if q else "")
+            else:
+                raw = raw.split("//", 1)[0].strip().rstrip(",").strip()
+                if re.match(r"^-?\d+$", raw):
+                    defaults.setdefault(var, raw)
     return defaults
 
 
@@ -760,20 +1231,22 @@ def parse_generated_ranges(gen_text):
         return None
 
     body = _block(gen_text, r"#define\s+%s\(X\)" % C_TABLE_MACRO["perf-int"], r"\n\n")
-    for m in re.finditer(r'X\(\s*"([A-Z0-9_]+)"\s*,\s*(\w+)\s*,\s*'
-                         r'([A-Za-z_0-9]+)\s*,\s*([A-Za-z_0-9]+)\s*\)', body):
+    for m in re.finditer(r'X\(\s*"([A-Z0-9_]+)"\s*,\s*(?:%s\.)?(\w+)\s*,\s*'
+                         r'([A-Za-z_0-9]+)\s*,\s*([A-Za-z_0-9]+)\s*\)'
+                         % re.escape(C_CFG_INSTANCE), body):
         lo, hi = resolve(m.group(3)), resolve(m.group(4))
         if lo is not None and hi is not None:
             ranges.setdefault(m.group(2), set()).add((lo, hi))
 
     body = _block(gen_text, r"#define\s+%s\(X\)" % C_TABLE_MACRO["sysfs"], r"\n\n")
-    for m in re.finditer(r'X\(\s*"([A-Z0-9_]+)"\s*,\s*(SK_\w+)\s*,\s*([^,]+?)\s*,\s*'
-                         r'([A-Za-z_0-9]+)\s*,\s*([A-Za-z_0-9]+)\s*,', body):
+    for m in re.finditer(r'X\(\s*"([A-Z0-9_]+)"\s*,\s*(SK_\w+)\s*,\s*&?(?:%s\.)?(\w+)\s*,\s*'
+                         r'([A-Za-z_0-9]+)\s*,\s*([A-Za-z_0-9]+)\s*,'
+                         % re.escape(C_CFG_INSTANCE), body):
         if m.group(2) != "SK_INT":
             continue          # SK_PATH 无范围；SK_ZONE / SK_RESCAN 的 clamp 在调用点收
         lo, hi = resolve(m.group(4)), resolve(m.group(5))
         if lo is not None and hi is not None:
-            ranges.setdefault(m.group(3).strip("& "), set()).add((lo, hi))
+            ranges.setdefault(m.group(3), set()).add((lo, hi))
     return ranges
 
 

@@ -204,9 +204,8 @@ COLD_REAL=115
 ## 反向保活（daemon → service.d 脚本）
 
 既有链路是「`service.d` 脚本（看门狗）守护守护进程」；本节是其**反方向**：守护进程反过来探测看门狗是否存活，不在就把它拉起来。
-开关是 `profile.conf` 的 `WD_KEEPALIVE`（0/1，**默认 1**，界面「[5] 控制」组可改，热重载生效）。**注意**：`profile.conf` 里已写入的旧值**优先于**默认值——设备上若曾被写过 `WD_KEEPALIVE=0`，改默认值不会自动把它打开，要在界面里开启（或删掉该行）才生效。拉起冷却的时间戳落 APK 私有目录 `tempctrl_wd_spawn`（落点见〈文件落点〉）。
 
-探测节奏、拉起条件与形态、三重节流、与脚本侧「先查后拉」的对称约定等**机制细节见 [daemon/逻辑说明.md](daemon/逻辑说明.md)「看门狗反向保活（WD_KEEPALIVE）」**（此处不重复）。
+开关名、默认值、`profile.conf` 旧值优先的口径、探测节奏、拉起条件与形态、三重节流、与脚本侧「先查后拉」的对称约定等**全部机制细节见 [daemon/逻辑说明.md](daemon/逻辑说明.md)「看门狗反向保活（WD_KEEPALIVE）」**（唯一权威，此处不重复）。拉起冷却的时间戳落 APK 私有目录 `tempctrl_wd_spawn`（落点见〈文件落点〉）。
 
 > **称谓**：界面上这两个组件叫 `c-daemon`（守护进程本体）与 `sh-watchdog`（`service.d` 看门狗 shell，状态区与操作结果文案都已改用这两个名字）；本文档与技术文档仍沿用「守护进程 / 看门狗 shell」的技术叫法，两者指的是同一样东西。
 >
@@ -222,6 +221,7 @@ COLD_REAL=115
 |---|---|---|
 | `profile.conf` | `/data/data/com.example.waspwingtempctrl/files/` | 界面（部署时**仅当不存在**才按 `params.json` 的 `factory` 写入，已存在一律不覆盖） |
 | `tempctrl.log` | 同上（`LOG_FILE`） | daemon（root）；部署时由 app 以自身 uid 预创建空文件，**仅不存在时建** |
+| `/cache/tempctrl.log` | `/cache/` | daemon（私有目录不可用时的兜底日志）；卸载时删除 |
 | `tempctrl_webui.data` | 同上（曲线时序数据） | daemon（root）；同上预创建 |
 | `tempctrl_coldmax` | 同上（生效制冷上限，一行 `COLD_MAX=<int>`，供 KI 曲线横轴） | daemon（root）；同上预创建 |
 | `tempctrl.lock` | 同上（daemon 单实例锁） | daemon（`flock` 非阻塞；第二个实例以**退出码 2** 自行退出） |
@@ -233,14 +233,29 @@ COLD_REAL=115
 | `tempctrl_bt_on_at` | `/data/data/<飞智包名>/files/`（**各包各记**） | LSPosed 侧（`MainHook`）自建自用（断连自动开蓝牙限频时间戳），daemon 不参与 |
 | `tempctrl_last_dev` | `/data/data/<飞智包名>/files/`（**各包各记**） | LSPosed 侧（`MainHook`）自建自用，daemon 不参与 |
 | `tempctrl`（二进制） | `/data/local/tmp/tempctrl`（沿用 noexec 规避） | 部署时由 root 从 APK assets 落盘 + `chmod 0755` |
+| `$BIN.new` / `$BIN.new.app` / `$BIN.prev` | `/data/local/tmp/`（`$BIN` = `/data/local/tmp/tempctrl`） | app（写 `$BIN.new.app`）/ service.d 脚本（写 `$BIN.new`）；`$BIN.prev` 为上一版备份。部署前 `rm -f`、卸载时删除 |
+| `tempctrl_service.log` | `/data/local/tmp/` | service.d 脚本 / app 启动路径（启动日志）；卸载时删除 |
 | `b6x-tempctrl.sh` | `/data/adb/service.d/`（KSU <10683 为 `/data/adb/ksu/service.d/`） | 同上 |
 | `tempctrl_sync_manifest` | `/data/data/com.example.waspwingtempctrl/files/` | 界面（APK 变化时刷新，详见上文部署自校验文件协议） |
 | `tempctrl_deploy_stamp` | 同上 | service.d 脚本（核对通过后写）；界面卸载时清理 |
 | `tempctrl_wd_spawn` | 同上 | daemon（每次拉起看门狗时写一行时间戳，作拉起冷却用，详见上文反向保活） |
 
-> 卸载自清的清理清单与「清除数据」的已知代价见 [app/逻辑说明.md](app/逻辑说明.md) §2.5。
->
 > **跨进程协议文件原样未迁移**：`tempctrl_b6x.status` / `tempctrl_b7x.status`、`tempctrl_uiprefs`、`tempctrl_bt_req`、`tempctrl_temp_stop` 仍落 `/data/local/tmp/`（涉及 3 个宿主包寻址 + SELinux 未验证），列为后续待真机验证项。
+
+### 卸载清理清单（三份实现同源）
+
+卸载自清的清理清单有三份实现——C 端 `cleanup_artifacts_on_uninstall()`、`service.d` 脚本的 `cleanup_all()`、app 的 `Deployer.uninstallScript()`，各存一份，改一处须同步另两处。清单固定为：
+
+- `/data/local/tmp` 下的二进制 `tempctrl` 与运行文件：status 双文件、`tempctrl_uiprefs`、`tempctrl_service.log`；
+- 两个候选路径的 `service.d` 脚本：`/data/adb/service.d/` 与 `/data/adb/ksu/service.d/`；
+- `/cache/tempctrl.log`（私有目录不可用时的兜底日志）；
+- `$BIN.new` / `$BIN.new.app` / `$BIN.prev` 中间文件（部署/自动更新中断的残留、上一版备份）：部署前 `rm -f`、卸载时删除，避免被预置成符号链接后被后续 root 写入跟随。
+
+**不显式删 `profile.conf`**：系统卸载会连带删掉整个 `/data/data/<包名>`，与「卸载部署 ≠ 删配置」的既有口径一致。
+
+旧版迁移残留 `/data/local/tmp/tempctrl_last_dev` 由 `Deployer.deployScript()` 在部署时主动清一次，卸载时从 `Deployer.uninstallScript()` 与脚本 `cleanup_all()` 两侧各兜底清一次（见 [app/逻辑说明.md](app/逻辑说明.md) §2.4）。**已知局限**：`tempctrl_b6x/b7x.status` 只要飞智 app 进程还活着就被其 LSPosed 钩子每秒重写，unlink 后可能被立刻重建、删不干净（须重启 app 或设备才彻底消失）；脚本那一侧全程静默——那一路的任何写盘都会把刚删掉的日志文件重新建出来。
+
+> 「清除数据」的已知代价见 [app/逻辑说明.md](app/逻辑说明.md) §2.5。
 
 ---
 
@@ -256,9 +271,9 @@ export ANDROID_HOME=/path/to/Android/Sdk
 ```
 
 > 本地构建出的 APK 内**不含** `assets/tempctrl-arm64`（C 二进制由 CI 编译后注入），
-> 部署时 `Deployer.probe()` 会如实报「APK 内资源不完整」。
+> 部署时 `Deployer.probe()` 会如实报「APK 内资源不完整」。C 编译参数见 [`daemon/build_tempctrl.sh`](daemon/build_tempctrl.sh)。
 
-**GitHub Actions**：推送 `v*` 标签或手动触发 workflow_dispatch。产物名 `b6x-EP-v<versionName>.apk`。
+**GitHub Actions**：构建链、触发条件、两个产物（GUI / lite）与产物命名以 [`.github/workflows/build.yml`](../.github/workflows/build.yml) 为准；C 编译参数以 [`daemon/build_tempctrl.sh`](daemon/build_tempctrl.sh) 为准。
 
 ---
 

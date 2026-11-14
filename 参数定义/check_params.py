@@ -6,7 +6,7 @@
 （gen_params.PRODUCTS）一律从 gen_params 取，不在此重复声明第二份。
 
 断言（任一不过即非 0 退出）：
-  A 产物可复现：重跑生成逻辑，与落盘的 4 个产物必须一致（比较按换行归一化） → 退出 1
+  A 产物可复现：重跑生成逻辑，与落盘的全部产物必须一致（比较按换行归一化） → 退出 1
   B 产物自洽：键数 = EXPECTED_KEY_COUNT、必需字段完整、min ≤ default/factory ≤ max、
     分组可解析 → 退出 1
   C 三源无漂移：与 profile.conf / 逻辑说明.md 参数表 / tempctrl.c 对账（含包名） → 退出 2
@@ -18,6 +18,8 @@
     → 不一致退出 1；本机无 C 编译器时跳过（CI 的 ubuntu 有 gcc，必跑）
   F 配置行缓冲护栏：load_config 的配置读行缓冲字节数 ≥ 「KI_CUT 满点数、最大字段宽」的单行
     长度（含行尾换行）→ 不足退出 1。**静态字面比对，不执行 C、不验运行时行为**
+  G 跨端协议契约：protocol.def.json 与 C 头/生成区块、Java Protocol、WebUI JS、部署脚本逐值对账；
+    消费点必须引用生成常量；R20 配置文件名、R21 WebBridge 复用、R22 HOST_PKG → 不一致退出 1
 
 用法：
     python 参数定义/check_params.py
@@ -47,7 +49,7 @@ sys.dont_write_bytecode = True   # 不在 参数定义/ 里留 __pycache__（.gi
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import gen_params  # noqa: E402  同目录模块，标准库路径规则即可导入
 
-EXPECTED_KEY_COUNT = 59
+EXPECTED_KEY_COUNT = 60
 VALID_TYPES = ("switch", "int", "multi", "path", "enum", "table")
 
 
@@ -438,6 +440,12 @@ def _fmt_default(val):
     return str(val)
 
 
+def _strip_cfg_ref(name):
+    """生成头里的 g_cfg.<字段> → 裸字段名（审计按 params.def.json 的 cVars 口径比对）。"""
+    prefix = gen_params.C_CFG_INSTANCE + "."
+    return name[len(prefix):] if name.startswith(prefix) else name
+
+
 def _default_table_rows(h_text, macro):
     """生成头里某张默认值表的行 → [(C 变量, 默认值文本)]。"""
     body = gen_params._block(h_text, r"#define\s+%s\(X\)" % macro, r"(?m)^#define\s")
@@ -446,7 +454,7 @@ def _default_table_rows(h_text, macro):
         args = _split_args(m.group(1))
         if len(args) != 2:
             raise Failure("D3 %s 的行不是 X(C 变量, 默认值)：X(%s)" % (macro, m.group(1)))
-        rows.append((args[0], args[1]))
+        rows.append((_strip_cfg_ref(args[0]), args[1]))
     return rows
 
 
@@ -584,6 +592,342 @@ def fail_check_d3(definition, h_text, c_text):
     return ("D3 默认值表覆盖面（%s；路径键 %s 单独处理、其余路径键逐键核对"
             "「本层复位函数内有 CFG_DEFAULT_* 复位行」，各层总开关均不在表内）"
             % (" / ".join(counts), "、".join(DEFAULT_TABLE_EXEMPT)))
+
+
+# --------------------------------------------------------------------------
+# G 跨端协议契约：protocol.def.json → C / Java / JS / 部署脚本 四方对账
+# --------------------------------------------------------------------------
+
+def _read_text(path):
+    with io.open(path, "r", encoding="utf-8") as fh:
+        return fh.read()
+
+
+def _region_text(path, pid):
+    text = _read_text(path)
+    i, j = gen_params.find_region(text, pid)
+    return text, text[i:j]
+
+
+def _c_defines(text):
+    """单行 #define → {名字: 原始值}（去行尾注释）。对象宏只取宏名。"""
+    out = {}
+    for m in re.finditer(r"(?m)^#define\s+(\w+)(?:\([^)]*\))?\s+(.+?)\s*$", text):
+        out[m.group(1)] = m.group(2).split("//", 1)[0].strip()
+    return out
+
+
+def _c_value(raw, defs, depth=0):
+    """展开 `"..."` / IDENT / `IDENT "..."` / `"..." IDENT` 形式的宏值。"""
+    if depth > 8:
+        return None
+    raw = (raw or "").strip()
+    if re.fullmatch(r"-?\d+", raw):
+        return raw
+    m = re.fullmatch(r'"([^"\\]*)"', raw)
+    if m:
+        return m.group(1)
+    m = re.fullmatch(r"([A-Za-z_]\w*)", raw)
+    if m and m.group(1) in defs:
+        return _c_value(defs[m.group(1)], defs, depth + 1)
+    m = re.fullmatch(r'([A-Za-z_]\w*)\s+"([^"\\]*)"', raw)
+    if m and m.group(1) in defs:
+        base = _c_value(defs[m.group(1)], defs, depth + 1)
+        return None if base is None else base + m.group(2)
+    m = re.fullmatch(r'"([^"\\]*)"\s+([A-Za-z_]\w*)', raw)
+    if m and m.group(2) in defs:
+        tail = _c_value(defs[m.group(2)], defs, depth + 1)
+        return None if tail is None else m.group(1) + tail
+    return None
+
+
+def _c_enum(text, prefix):
+    return {m.group(1): int(m.group(2))
+            for m in re.finditer(r"%s(\w+)\s*=\s*(\d+)" % re.escape(prefix), text)}
+
+
+def _quoted_block(text, start_pat, stop_pat="};"):
+    body = gen_params._block(text, start_pat, stop_pat)
+    return re.findall(r'"([^"\\]*)"', body)
+
+
+def _java_int_consts(text, prefix):
+    return {m.group(1): int(m.group(2))
+            for m in re.finditer(r"public static final int %s(\w+) = (\d+);"
+                                 % re.escape(prefix), text)}
+
+
+def _java_str_consts(text):
+    return dict(re.findall(r'public static final String (\w+) = "([^"]*)";', text))
+
+
+def _java_array(text, name):
+    m = re.search(r"public static final String\[\] %s = \{(.*?)\};" % re.escape(name),
+                  text, re.S)
+    return re.findall(r'"([^"\\]*)"', m.group(1)) if m else None
+
+
+def _shell_vars(text):
+    out = {}
+    for line in text.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        k, v = line.split("=", 1)
+        out[k.strip()] = v.strip().strip('"')
+    return out
+
+
+def fail_check_g(definition):
+    """G 协议单一源：protocol.def.json 与 C / Java / JS / 部署脚本逐值对账，并核对消费点已引用生成常量。"""
+    try:
+        protocol = gen_params.load_protocol()
+    except ValueError as exc:
+        raise Failure("G protocol.def.json 非法：%s" % exc)
+    problems = list(gen_params.validate_protocol(protocol))
+
+    def expect(actual, wanted, what):
+        if actual != wanted:
+            problems.append("%s：实际 %r ≠ 定义 %r" % (what, actual, wanted))
+
+    by_id = {p["id"]: p for p in protocol["paths"]}
+    cols = protocol["webui"]["cols"]
+    col_count = protocol["webui"]["count"]
+    legacy = protocol["webui"]["legacyMinCols"]
+
+    # ---- G1 C 头 ----
+    h_path = gen_params.product_path(gen_params.product_by_id("protocol-c-header"))
+    h_text = _read_text(h_path)
+    h_defs = _c_defines(h_text)
+    for f in protocol["status"]["fields"]:
+        expect(_c_value(h_defs.get(f["const"], ""), h_defs), f["name"] + "=",
+               "G1 C 头 %s" % f["const"])
+    for a in protocol["broadcast"]["actions"]:
+        expect(_c_value(h_defs.get(a["cConst"], ""), h_defs), a["value"],
+               "G1 C 头 %s" % a["cConst"])
+    for p in protocol["paths"]:
+        if p["kind"] == "absolute":
+            expect(_c_value(h_defs.get("PROTO_PATH_" + p["const"], ""), h_defs), p["value"],
+                   "G1 C 头 PROTO_PATH_%s" % p["const"])
+        elif p["kind"] == "private_name":
+            expect(h_defs.get("PROTO_PATH_" + p["const"]), 'PRIVATE_DIR "/%s"' % p["name"],
+                   "G1 C 头 PROTO_PATH_%s" % p["const"])
+            expect(_c_value(h_defs.get("PROTO_NAME_" + p["const"], ""), h_defs), p["name"],
+                   "G1 C 头 PROTO_NAME_%s" % p["const"])
+        else:
+            expect(_c_value(h_defs.get("PROTO_" + p["const"], ""), h_defs), p["value"],
+                   "G1 C 头 PROTO_%s" % p["const"])
+    expect(_c_value(h_defs.get("PROTO_HOST_PKG", ""), h_defs),
+           protocol["app"]["hostPackage"], "G1 C 头 PROTO_HOST_PKG")
+    expect(_c_value(h_defs.get("PROTO_SCRIPT_NAME", ""), h_defs),
+           protocol["app"]["scriptName"], "G1 C 头 PROTO_SCRIPT_NAME")
+    expect(_c_value(h_defs.get("PROTO_COLDMAX_FIELD", ""), h_defs),
+           protocol["coldmax"]["field"], "G1 C 头 PROTO_COLDMAX_FIELD")
+    expect(_c_value(h_defs.get("PROTO_BT_REQ_FIELD", ""), h_defs),
+           protocol["btRequest"]["field"], "G1 C 头 PROTO_BT_REQ_FIELD")
+    c_enum = _c_enum(h_text, "WEBUI_COL_")
+    expect(c_enum.get("COUNT"), col_count, "G1 C 头 WEBUI_COL_COUNT")
+    for col in cols:
+        expect(c_enum.get(gen_params._upper_ident(col["name"])), col["index"],
+               "G1 C 头 WEBUI_COL_%s" % gen_params._upper_ident(col["name"]))
+    expect(_c_value(h_defs.get("WEBUI_COLS_LEGACY_MIN", ""), h_defs), str(legacy),
+           "G1 C 头 WEBUI_COLS_LEGACY_MIN")
+    cleanup_ids = re.findall(r"X\(PROTO_PATH_(\w+)\)", gen_params._block(
+        h_text, r"#define\s+PROTO_CLEANUP_DAEMON\(X\)", r"\n\n"))
+    expect(cleanup_ids, [by_id[pid]["const"] for pid in protocol["cleanup"]["daemon"]],
+           "G1 C 头 PROTO_CLEANUP_DAEMON 清单")
+
+    # ---- G2 tempctrl.c 生成区块（CI R7/门4 依赖的字面量） ----
+    c_path = gen_params.source_path(next(s for s in gen_params.SOURCES if s.id == "c"))
+    c_text, c_region = _region_text(c_path, "tempctrl-region")
+    m = re.search(r"#define\s+WEBUI_DATA_COLS\s+(\d+)", c_region)
+    expect(int(m.group(1)) if m else None, col_count, "G2 WEBUI_DATA_COLS")
+    m = re.search(r'#define\s+WEBUI_ROW_FMT\s+"([^"]*)"', c_region)
+    fmt = m.group(1) if m else ""
+    specs = fmt.split("\\n")[0].split(",") if fmt else []
+    expect(len(specs), col_count, "G2 WEBUI_ROW_FMT 列数")
+    expect(specs, ["%ld" if c["cType"] == "long" else "%d" for c in cols],
+           "G2 WEBUI_ROW_FMT 转换符")
+    m = re.search(r"#define\s+WEBUI_DATA_MAX_LINES\s+(\d+)", c_region)
+    expect(int(m.group(1)) if m else None, definition["chart"]["rollingMaxLines"],
+           "G2 WEBUI_DATA_MAX_LINES")
+    expect(_quoted_block(c_region, r"BROADCAST_EXTRAS\[\]\s*=\s*\{"),
+           protocol["broadcast"]["extras"], "G2 BROADCAST_EXTRAS")
+    if '#include "protocol_generated.h"' not in c_region:
+        problems.append("G2 tempctrl.c 生成区块未包含 protocol_generated.h")
+    for token in ("PROTO_CLEANUP_DAEMON(CLEANUP_ENTRY)", "STF_BLE", "PROTO_PATH_STATUS_B6"):
+        if token not in c_text:
+            problems.append("G2 tempctrl.c 未引用生成常量 %s" % token)
+    c_code = _strip_c_comments(c_text)
+    for p in protocol["paths"]:
+        if p["kind"] == "absolute" and p["value"] in c_code:
+            problems.append("G2 tempctrl.c 仍含裸路径字面量 %r（应引用 PROTO_PATH_*）" % p["value"])
+
+    # ---- G3 Java Protocol ----
+    j_path = gen_params.product_path(gen_params.product_by_id("protocol-java"))
+    j_text = _read_text(j_path)
+    j_int = _java_int_consts(j_text, "WEBUI_COL_")
+    expect(j_int.get("COUNT"), col_count, "G3 Java WEBUI_COL_COUNT")
+    for col in cols:
+        expect(j_int.get(gen_params._upper_ident(col["name"])), col["index"],
+               "G3 Java WEBUI_COL_%s" % gen_params._upper_ident(col["name"]))
+    m = re.search(r"WEBUI_COLS_LEGACY_MIN = (\d+);", j_text)
+    expect(int(m.group(1)) if m else None, legacy, "G3 Java WEBUI_COLS_LEGACY_MIN")
+    j_str = _java_str_consts(j_text)
+    for f in protocol["status"]["fields"]:
+        expect(j_str.get(f["const"]), f["name"] + "=", "G3 Java %s" % f["const"])
+    for a in protocol["broadcast"]["actions"]:
+        expect(j_str.get(a["javaConst"]), a["value"], "G3 Java %s" % a["javaConst"])
+    for e in protocol["broadcast"]["extras"]:
+        expect(j_str.get(gen_params._java_extra_const(e)), e,
+               "G3 Java %s" % gen_params._java_extra_const(e))
+    for p in protocol["paths"]:
+        if p["kind"] == "absolute":
+            expect(j_str.get("PATH_" + p["const"]), p["value"], "G3 Java PATH_%s" % p["const"])
+        elif p["kind"] == "private_name":
+            expect(j_str.get("NAME_" + p["const"]), p["name"], "G3 Java NAME_%s" % p["const"])
+        else:
+            expect(j_str.get(p["const"]), p["value"], "G3 Java %s" % p["const"])
+    expect(j_str.get("HOST_PKG"), protocol["app"]["hostPackage"], "G3 Java HOST_PKG")
+    expect(j_str.get("SCRIPT_NAME"), protocol["app"]["scriptName"], "G3 Java SCRIPT_NAME")
+    expect(j_str.get("COLDMAX_FIELD"), protocol["coldmax"]["field"], "G3 Java COLDMAX_FIELD")
+    expect(j_str.get("BT_REQ_FIELD"), protocol["btRequest"]["field"], "G3 Java BT_REQ_FIELD")
+    expect(_java_array(j_text, "CLEANUP_APP"),
+           [by_id[pid]["value"] for pid in protocol["cleanup"]["app"]], "G3 Java CLEANUP_APP")
+    expect(_java_array(j_text, "CLEANUP_APP_PRIVATE"),
+           [by_id[pid]["name"] for pid in protocol["cleanup"]["app_private"]],
+           "G3 Java CLEANUP_APP_PRIVATE")
+
+    # ---- G4 WebUI JS 生成区块 ----
+    js_path = gen_params.product_path(gen_params.product_by_id("webui-js"))
+    js_text, js_region = _region_text(js_path, "webui-js")
+    js_int = {m.group(1): int(m.group(2)) for m in re.finditer(
+        r"var WEBUI_COL_(\w+) = (\d+);", js_region)}
+    expect(js_int.get("COUNT"), col_count, "G4 JS WEBUI_COL_COUNT")
+    for col in cols:
+        expect(js_int.get(gen_params._upper_ident(col["name"])), col["index"],
+               "G4 JS WEBUI_COL_%s" % gen_params._upper_ident(col["name"]))
+    m = re.search(r"var WEBUI_COLS_LEGACY_MIN = (\d+);", js_region)
+    expect(int(m.group(1)) if m else None, legacy, "G4 JS WEBUI_COLS_LEGACY_MIN")
+    m = re.search(r"function parseChartLine\(line\) \{(.*?)\n    \}", js_text, re.S)
+    body = m.group(1) if m else ""
+    for token in ("WEBUI_COLS_LEGACY_MIN", "nums[WEBUI_COL_TS]", "nums[WEBUI_COL_COLD_SET]"):
+        if token not in body:
+            problems.append("G4 app.js parseChartLine 未引用 %s" % token)
+    if re.search(r"nums\[\d+\]", body):
+        problems.append("G4 app.js parseChartLine 仍有裸下标 nums[N]")
+
+    # ---- G5 部署脚本生成区块 ----
+    sh_path = gen_params.product_path(gen_params.product_by_id("deploy-sh"))
+    sh_text, sh_region = _region_text(sh_path, "deploy-sh")
+    sh = _shell_vars(sh_region)
+    expect(sh.get("HOST_PKG"), protocol["app"]["hostPackage"], "G5 脚本 HOST_PKG")
+    expect(sh.get("SCRIPT_NAME"), protocol["app"]["scriptName"], "G5 脚本 SCRIPT_NAME")
+    for p in protocol["paths"]:
+        if p["kind"] == "absolute":
+            expect(sh.get("PROTO_PATH_" + p["const"]), p["value"],
+                   "G5 脚本 PROTO_PATH_%s" % p["const"])
+        elif p["kind"] == "private_name":
+            expect(sh.get("PROTO_NAME_" + p["const"]), p["name"],
+                   "G5 脚本 PROTO_NAME_%s" % p["const"])
+        else:
+            expect(sh.get("PROTO_" + p["const"]), p["value"], "G5 脚本 PROTO_%s" % p["const"])
+    special = {"bin": "$BIN", "bin_new": "$BIN.new", "service_log": "$SVC_LOG"}
+    want_cleanup = " ".join(special.get(pid, "$PROTO_PATH_%s" % by_id[pid]["const"])
+                            for pid in protocol["cleanup"]["service_script"])
+    expect(sh.get("PROTO_CLEANUP_PATHS"), want_cleanup, "G5 脚本 PROTO_CLEANUP_PATHS")
+    if "rm -f $PROTO_CLEANUP_PATHS" not in sh_text:
+        problems.append("G5 cleanup_all 未引用 PROTO_CLEANUP_PATHS")
+
+    # ---- G6 MainHook 镜像与消费点 ----
+    mh_path = os.path.join(gen_params.REPO, "lsp模块", "core", "src", "main", "java",
+                           "com", "example", "waspwingtempctrl", "MainHook.java")
+    mh_text, mh_region = _region_text(mh_path, "mainhook-mirror")
+    mirror = re.findall(r'getIntExtra\("([^"]+)"', mh_region)
+    expect(mirror, protocol["broadcast"]["extras"], "G6 MainHook extra 镜像")
+    for token in ("Protocol.STF_", "Protocol.ACTION_TEMP_", "Protocol.EXTRA_",
+                  "Protocol.PATH_", "Protocol.BT_REQ_FIELD"):
+        if token not in mh_text:
+            problems.append("G6 MainHook 未引用 %s" % token)
+
+    # ---- G7 消费端引用（列常量 / 路径 / 清理清单） ----
+    chart_path = os.path.join(gen_params.REPO, "lsp模块", "app", "src", "main", "java",
+                              "com", "example", "waspwingtempctrl", "ui", "ChartDataset.java")
+    chart = _read_text(chart_path)
+    for col in cols:
+        if col["name"] == "cold_cmd":
+            continue     # 下发目标制冷：写端有、ChartDataset 有意不消费（见类注释）
+        const = "Protocol.WEBUI_COL_" + gen_params._upper_ident(col["name"])
+        if const not in chart:
+            problems.append("G7 ChartDataset 未引用 %s" % const)
+    if "COL_COUNT = Protocol.WEBUI_COLS_LEGACY_MIN" not in chart:
+        problems.append("G7 ChartDataset 的列数下限未引用 Protocol.WEBUI_COLS_LEGACY_MIN")
+    if re.search(r"private static final int COL_\w+ = \d+;", chart):
+        problems.append("G7 ChartDataset 仍有裸下标常量（应引用 Protocol.WEBUI_COL_*）")
+
+    kicut_path = os.path.join(gen_params.REPO, "lsp模块", "app", "src", "main", "java",
+                              "com", "example", "waspwingtempctrl", "ui", "KiCutData.java")
+    kicut = _read_text(kicut_path)
+    if "COL_TARGET_COLD = Protocol.WEBUI_COL_COLD_CMD" not in kicut:
+        problems.append("G7 KiCutData 的 COL_TARGET_COLD 未引用 Protocol.WEBUI_COL_COLD_CMD")
+    if "COLDMAX_FIELD = Protocol.COLDMAX_FIELD" not in kicut:
+        problems.append("G7 KiCutData 的 COLDMAX_FIELD 未引用 Protocol.COLDMAX_FIELD")
+
+    deployer_path = os.path.join(gen_params.REPO, "lsp模块", "core", "src", "main", "java",
+                                 "com", "example", "waspwingtempctrl", "Deployer.java")
+    deployer = _read_text(deployer_path)
+    for token in ("Protocol.CLEANUP_APP", "Protocol.CLEANUP_APP_PRIVATE",
+                  "Protocol.PATH_LAST_DEV", "Protocol.PATH_SERVICE_LOG",
+                  "Protocol.NAME_LOG", "Protocol.PATH_BIN"):
+        if token not in deployer:
+            problems.append("G7 Deployer 未引用 %s" % token)
+
+    appfiles_path = os.path.join(gen_params.REPO, "lsp模块", "core", "src", "main", "java",
+                                 "com", "example", "waspwingtempctrl", "AppFiles.java")
+    appfiles = _read_text(appfiles_path)
+    for token in ("Protocol.NAME_LOG", "Protocol.NAME_DATA", "Protocol.NAME_COLDMAX",
+                  "LOG_TAIL_BYTES"):
+        if token not in appfiles:
+            problems.append("G7 AppFiles 未引用 %s" % token)
+
+    # ---- G8 R20 配置文件名：definition meta 与 core 常量一致 ----
+    config_name = definition["meta"]["configFileName"]
+    expect(by_id["config"]["name"], config_name, "G8 protocol 的配置文件名")
+    cs_path = os.path.join(gen_params.REPO, "lsp模块", "core", "src", "main", "java",
+                           "com", "example", "waspwingtempctrl", "ConfigStore.java")
+    cs_text = _read_text(cs_path)
+    m = re.search(r'CONFIG_FILE_NAME\s*=\s*"([^"]+)"', cs_text)
+    expect(m.group(1) if m else None, config_name, "G8 ConfigStore.CONFIG_FILE_NAME")
+    if "new File(filesDir, CONFIG_FILE_NAME)" not in cs_text:
+        problems.append("G8 ConfigStore.configFile 未使用 CONFIG_FILE_NAME")
+
+    # ---- G9 R21 lite WebBridge：复用 core 的资产与尾读上限 ----
+    wb_path = os.path.join(gen_params.REPO, "lsp模块", "app-lite", "src", "main", "java",
+                           "com", "example", "waspwingtempctrl", "lite", "WebBridge.java")
+    wb = _read_text(wb_path)
+    for token in ("paramsRoot()", "ConfigStore.PARAMS_ASSET",
+                  "AppFiles.LOG_TAIL_BYTES"):
+        if token not in wb:
+            problems.append("G9 WebBridge 未引用 %s" % token)
+    if re.search(r'private static final String PARAMS_ASSET\s*=', wb):
+        problems.append("G9 WebBridge 仍自定义 PARAMS_ASSET")
+    if "204800" in wb:
+        problems.append("G9 WebBridge 仍写死 204800（应引用 AppFiles.LOG_TAIL_BYTES）")
+
+    # ---- G10 R22 HOST_PKG：C / 脚本 / params.def appPackage 三处一致 ----
+    app_pkg = (definition.get("appPackage") or {}).get("value")
+    expect(protocol["app"]["hostPackage"], app_pkg, "G10 protocol.app.hostPackage")
+    expect(_c_value(h_defs.get("PROTO_HOST_PKG", ""), h_defs), app_pkg,
+           "G10 C 头 PROTO_HOST_PKG")
+    expect(sh.get("HOST_PKG"), app_pkg, "G10 部署脚本 HOST_PKG")
+
+    if problems:
+        raise Failure("G 协议契约对账失败 %d 条：\n  - %s"
+                      % (len(problems), "\n  - ".join(problems)))
+    return ("G 协议单一源：%d 列 / %d status 字段 / %d extra / %d 路径，"
+            "C·Java·JS·脚本四方与 protocol.def.json 一致（含 R20 配置名、R21 WebBridge、R22 HOST_PKG）"
+            % (col_count, len(protocol["status"]["fields"]),
+               len(protocol["broadcast"]["extras"]), len(protocol["paths"])))
 
 
 # --------------------------------------------------------------------------
@@ -773,6 +1117,7 @@ def main(argv=None):
         print("[PASS] " + fail_check_d(definition))
         print("[PASS] " + fail_check_e(definition))
         print("[PASS] " + fail_check_f(definition))
+        print("[PASS] " + fail_check_g(definition))
     except Failure as exc:
         print("[FAIL] " + str(exc))
         return 1

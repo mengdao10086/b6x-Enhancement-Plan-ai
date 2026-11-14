@@ -654,6 +654,35 @@
       "fields": null
     },
     {
+      "key": "RAMP_SLOTS",
+      "group": "perf",
+      "role": "setting",
+      "type": "int",
+      "label": "下发份数",
+      "desc": "每 5 秒控制周期的下发份数（1~5，默认 5）；1 = 每周期一次。下发间隔 = 5000 ÷ 份数 毫秒，仅在平滑下发开启时生效。",
+      "cTable": "perf-int",
+      "docOrder": 33.1,
+      "docDesc": "每 5 秒控制周期的下发份数（范围 1~5，默认 5；1 = 每周期一次）。下发间隔 = 5000 ÷ 份数 毫秒（5 → 1000 ms，3 → 1667 ms）；仅在平滑下发开启时生效。份数超过风扇每周期限速步长时步长按 1 取整，本轮会提前结束。",
+      "confSection": "通用参数",
+      "confNote": [
+        "每 5 秒控制周期的下发份数（1~5，默认 5；1 = 每周期一次）",
+        "下发间隔 = 5000 ÷ 份数 毫秒（5→1000ms，3→1667ms），仅平滑下发开启时生效"
+      ],
+      "unit": "份",
+      "unitNote": "",
+      "default": 5,
+      "defaultNote": "代码默认值。配置文件缺失或未写入时守护进程按 5（1000 ms 一拍，与改造前一致）",
+      "factory": 5,
+      "factoryNote": "出厂值",
+      "min": 1,
+      "max": 5,
+      "requires": [
+        "PERF_ENABLED"
+      ],
+      "daemonConsumes": true,
+      "fields": null
+    },
+    {
       "key": "RECONNECT_KEEP_CYCLES",
       "group": "perf",
       "role": "setting",
@@ -2421,6 +2450,7 @@
       "RATE_LIMIT_FAN": ["RATE_LIMIT_FAN", "RATE_LIMIT_FAN_DEBOUNCE", "fan_rpm_round_unit"],
       "RATE_LIMIT_COLD": ["RATE_LIMIT_COLD", "RATE_LIMIT_COLD_MULT", "COLD_DEADZONE"],
       "RAMP_DISPATCH": ["ramp_dispatch"],
+      "RAMP_SLOTS": ["ramp_slots"],
       "RECONNECT_KEEP_CYCLES": ["reconnect_keep_cycles"],
       "BATT_BASELINE": ["BATT_BASELINE"],
       "CPU_FILTER_ALPHA": ["CPU_FILTER_ALPHA"],

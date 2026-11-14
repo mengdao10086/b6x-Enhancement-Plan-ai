@@ -1,5 +1,7 @@
 package com.example.waspwingtempctrl.ui;
 
+import com.example.waspwingtempctrl.Protocol;
+
 /**
  * 数据文件解析结果 + 曲线滤波。
  *
@@ -45,28 +47,28 @@ final class ChartDataset {
      * <p><b>[8] PID 输入 / [9] 重算标记 / [10] 实际制冷 / [11] 实际风扇转速：后加的可选列。</b>
      * 旧行缺列时对应项取无效/false，不会整行丢弃。
      */
-    static final int COL_COUNT = 8;
+    static final int COL_COUNT = Protocol.WEBUI_COLS_LEGACY_MIN;
 
     /** 冷端连续 0 的判定门槛：连续达到该点数才整段判无效（0℃ 对制冷片是合法读数）。 */
     static final int COLD_ZERO_RUN = 6;
 
-    private static final int COL_TS = 0;
-    private static final int COL_BATT = 1;
-    private static final int COL_CPU = 2;
-    private static final int COL_HOT = 3;
-    private static final int COL_COLD = 4;
+    private static final int COL_TS = Protocol.WEBUI_COL_TS;
+    private static final int COL_BATT = Protocol.WEBUI_COL_BATT;
+    private static final int COL_CPU = Protocol.WEBUI_COL_CPU;
+    private static final int COL_HOT = Protocol.WEBUI_COL_HOT;
+    private static final int COL_COLD = Protocol.WEBUI_COL_COLD;
     /** 目标风速：设备回显的设定档（getRealWindLevel）。 */
-    private static final int COL_RPM = 5;
+    private static final int COL_RPM = Protocol.WEBUI_COL_RPM_SET;
     /** 目标制冷：设备回显的设定档。 */
-    private static final int COL_COOL = 6;
+    private static final int COL_COOL = Protocol.WEBUI_COL_COLD_SET;
     /** 实际制冷（设备运行档）：后加列，旧行没有 → 无效。 */
-    private static final int COL_COOL_ACTUAL = 10;
+    private static final int COL_COOL_ACTUAL = Protocol.WEBUI_COL_COLD_RUN;
     /** 实际风扇转速（设备 getSpeed）：后加列，旧行（≤11 列）没有 → 无效。 */
-    private static final int COL_RPM_ACTUAL = 11;
+    private static final int COL_RPM_ACTUAL = Protocol.WEBUI_COL_RPM_RUN;
     /** PID 输入（0.01°C）：后加列，旧行没有 → 无效。 */
-    private static final int COL_PID = 8;
+    private static final int COL_PID = Protocol.WEBUI_COL_PID_INPUT;
     /** PID 重算标记（0/1）：后加列，旧行没有 → false。 */
-    private static final int COL_RECOMP = 9;
+    private static final int COL_RECOMP = Protocol.WEBUI_COL_RECOMPUTE;
 
     /** 全量样本（已滤波）。 */
     final ChartSample[] all;

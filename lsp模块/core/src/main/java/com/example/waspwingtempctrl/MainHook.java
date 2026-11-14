@@ -50,15 +50,15 @@ public class MainHook implements IXposedHookLoadPackage {
     private static final String PACKAGE_B7X = "com.fdg.flashplay.farsef";
     private static final String TAG = "[WaspWingTempCtrl]";
     // 双文件路径
-    private static final String STATUS_FILE_B6 = "/data/local/tmp/tempctrl_b6x.status";
-    private static final String STATUS_FILE_B7 = "/data/local/tmp/tempctrl_b7x.status";
+    private static final String STATUS_FILE_B6 = Protocol.PATH_STATUS_B6;
+    private static final String STATUS_FILE_B7 = Protocol.PATH_STATUS_B7;
     // 临时停止标记（daemon 每 5s 重写、模块按需读且 5s 缓存）：内容 "1\n"/"0\n"，mtime 超 15s 视为失效。
-    private static final String TEMP_STOP_FILE = "/data/local/tmp/tempctrl_temp_stop";
+    private static final String TEMP_STOP_FILE = Protocol.PATH_TEMP_STOP;
     private static final long TEMP_STOP_FRESH_MS = 15000;
     private static final long TEMP_STOP_POLL_MS = 5000;   // 标记复读间隔；＜15s 新鲜度窗口，最坏生效延迟 5s
     // 界面开关标志文件（守护进程写、本进程读）；界面 → 钩子的唯一通道。
     // 跨进程通道说明见 app/逻辑说明.md §1.4，写入端见 tempctrl.c 的 UIPREFS_PATH。
-    private static final String UIPREFS_FILE = "/data/local/tmp/tempctrl_uiprefs";
+    private static final String UIPREFS_FILE = Protocol.PATH_UIPREFS;
     // ===== 修复 #5：SDK 类型门禁放行（仅目标包、仅 connect() 执行期、仅目标地址）=====
     // 动机：冷启动只能凭地址重建设备对象，getType() 恒为 UNKNOWN，SDK 的 connect() 因此在
     //   发令前直接拒绝（日志 "current device is not a valid BLE device"），后台重连永不生效。
@@ -73,8 +73,17 @@ public class MainHook implements IXposedHookLoadPackage {
     // 落点选择与冷启动自动连接的说明见 app/逻辑说明.md §1.6；在 handleLoadPackage 里赋值。
     private static String lastDevFile = null;
     private static final String AUTO_LAUNCH_EXTRA = "b6x_auto_launch";               // tempctrl 拉起 app 时携带的标志
-    private static final String ACTION_TEMP_B6 = "com.flydigi.SET_TEMPERATURE";      // B6X 温控广播
-    private static final String ACTION_TEMP_B7 = "com.flydigi.SET_TEMPERATURE_B7";   // B7X 温控广播
+    private static final String ACTION_TEMP_B6 = Protocol.ACTION_TEMP_B6;   // B6X 温控广播
+    private static final String ACTION_TEMP_B7 = Protocol.ACTION_TEMP_B7;   // B7X 温控广播
+    /* protocol-extras-mirror:start （本节由 参数定义/gen_params.py 生成，勿手改；实际调用使用 Protocol 的 EXTRA_* 常量） */
+    // getIntExtra("mode", 0)
+    // getIntExtra("temperature", 0)
+    // getIntExtra("windOC", 0)
+    // getIntExtra("coldOC", 0)
+    // getIntExtra("windLevel", 0)
+    // getIntExtra("modeCustom", 0)
+    // getIntExtra("extra", 0)
+    /* protocol-extras-mirror:end */
     // setRunMode 方法名候选（按 app 类型选；B7X 混淆为 W）
     private static final String[] SET_RUN_MODE_NAMES_B6 = {"setRunMode"};
     private static final String[] SET_RUN_MODE_NAMES_B7 = {"setRunMode", "W"};
@@ -259,7 +268,7 @@ public class MainHook implements IXposedHookLoadPackage {
     // 触发点：tryReconnectOnce 的「蓝牙未开启」分支（tick 线程）。一律交守护进程（root）执行，
     // 钩子只写请求；限频＝两次之间至少间隔 N 秒（0=关闭），时间戳落盘以跨宿主进程重启有效。
     // 仅在 tick 线程读写，无跨线程共享，故缓存字段无需 volatile。
-    private static final String BT_REQ_FILE = "/data/local/tmp/tempctrl_bt_req";
+    private static final String BT_REQ_FILE = Protocol.PATH_BT_REQ;
     private static String btOnAtFile = null;      // 限频时间戳落点（宿主私有目录，各包各记）
     private static int btSecCache = -1;           // BT_ON_SEC 缓存值（-1=未读）
     private static long btSecReadAt = 0;          // 上次读 uiprefs 的时刻
@@ -314,13 +323,13 @@ public class MainHook implements IXposedHookLoadPackage {
                 @Override
                 public void onReceive(Context context, Intent intent) {
                     try {
-                        int mode        = intent.getIntExtra("mode", 0);
-                        int temperature = intent.getIntExtra("temperature", 20);
-                        int windOC      = intent.getIntExtra("windOC", 0);
-                        int coldOC      = intent.getIntExtra("coldOC", 0);
-                        int windLevel   = intent.getIntExtra("windLevel", 0);
-                        int modeCustom  = intent.getIntExtra("modeCustom", 0);
-                        int extra       = intent.getIntExtra("extra", 0);
+                        int mode        = intent.getIntExtra(Protocol.EXTRA_MODE, 0);
+                        int temperature = intent.getIntExtra(Protocol.EXTRA_TEMPERATURE, 20);
+                        int windOC      = intent.getIntExtra(Protocol.EXTRA_WIND_OC, 0);
+                        int coldOC      = intent.getIntExtra(Protocol.EXTRA_COLD_OC, 0);
+                        int windLevel   = intent.getIntExtra(Protocol.EXTRA_WIND_LEVEL, 0);
+                        int modeCustom  = intent.getIntExtra(Protocol.EXTRA_MODE_CUSTOM, 0);
+                        int extra       = intent.getIntExtra(Protocol.EXTRA_EXTRA, 0);
 
                         // 来源留痕（API 34+ 尽力）：未知 UID 放行并记日志，不拦截正常指令。
                         noteBroadcastSender(this);
@@ -481,20 +490,25 @@ public class MainHook implements IXposedHookLoadPackage {
             StringBuilder sb = new StringBuilder();
             // status 文件各字段的语义与量纲见 ../README.md 的 status 协议表
             int bleVal = bleConnected ? bleOwnerCode() : 0;
-            sb.append("BLE=").append(bleVal).append("\n");
-            sb.append("CONNECTED_AT=").append(bleConnectedTimestamp).append("\n");
-            sb.append("BLE_OWNER_LAST=").append(bleLastOwner).append(" ").append(bleLastOwnerAt).append("\n");
+            sb.append(Protocol.STF_BLE).append(bleVal).append("\n");
+            sb.append(Protocol.STF_CONNECTED_AT).append(bleConnectedTimestamp).append("\n");
+            sb.append(Protocol.STF_BLE_OWNER_LAST).append(bleLastOwner)
+                    .append(" ").append(bleLastOwnerAt).append("\n");
 
             // 散热器全参数回传：每个字段独立 try/catch——任一 getter 不可用只丢该行，
             // 不影响其它字段（历史 RPM_RUN 整列缺失即同源问题）。
             if (lastWaspWingInfo != null) {
-                appendGetterValueGuarded(sb, lastWaspWingInfo, "getRunMode", "RUN_MODE");
-                appendTenthValueGuarded(sb, lastWaspWingInfo, "getHotSurfaceTemperature", "HOT_TEMP");
+                appendGetterValueGuarded(sb, lastWaspWingInfo, "getRunMode", Protocol.STF_RUN_MODE);
+                appendTenthValueGuarded(sb, lastWaspWingInfo, "getHotSurfaceTemperature",
+                        Protocol.STF_HOT_TEMP);
                 appendColdTemp(sb, lastWaspWingInfo);
-                appendGetterValueGuarded(sb, lastWaspWingInfo, "getRealWindLevel", "RPM_REAL");
-                appendGetterValueGuarded(sb, lastWaspWingInfo, "getRealColdLevel", "COLD_REAL");
+                appendGetterValueGuarded(sb, lastWaspWingInfo, "getRealWindLevel",
+                        Protocol.STF_RPM_REAL);
+                appendGetterValueGuarded(sb, lastWaspWingInfo, "getRealColdLevel",
+                        Protocol.STF_COLD_REAL);
                 // 实际运行档（0x13 byte[0x0f]）：与 COLD_REAL 的回显设定档不同，见 制冷值语义取证.md
-                appendGetterValueGuarded(sb, lastWaspWingInfo, "getColdRunLevel", "COLD_RUN");
+                appendGetterValueGuarded(sb, lastWaspWingInfo, "getColdRunLevel",
+                        Protocol.STF_COLD_RUN);
                 // 回传恢复：此前缺失则补一条（状态翻转才打）
                 if (paramMissingLogged) {
                     paramMissingLogged = false;
@@ -512,7 +526,7 @@ public class MainHook implements IXposedHookLoadPackage {
             // 独立于上方整段 getter：任一既有 getter 抛异常也不跳过本行（status 按行解析，行序无关）。
             try {
                 if (lastWaspWingInfo != null) {
-                    appendGetterValue(sb, lastWaspWingInfo, "getSpeed", "RPM_RUN");
+                    appendGetterValue(sb, lastWaspWingInfo, "getSpeed", Protocol.STF_RPM_RUN);
                 }
             } catch (Throwable tRpmRun) {
                 if (!rpmRunFailLogged) {
@@ -946,14 +960,42 @@ public class MainHook implements IXposedHookLoadPackage {
      *
      * <p>LSPosed 的包级作用域会注入该包的所有进程：B7X 的 {@code :remote}（FloatingWindow
      * 服务）没有 BLE 连接，却会注册广播接收器并每秒以 {@code BLE=0} 覆盖主进程写的 status
-     * 文件，daemon 因此间歇判断联。判据：主进程的 {@code processName} 等于包名（旧框架可能
-     * 为 null/空，按主进程放行以保持兼容）；子进程形如 {@code <包名>:remote}，一律跳过。
-     * B6X 老/新两个包各自比较自己的 {@code packageName}，无需硬编码。
+     * 文件，daemon 因此间歇判断联。判据以 {@code lpparam.isFirstApplication} 为准；
+     * 旧框架无 processName 时兼容放行。注意 {@code lpparam.packageName} 在 fork 子进程里是
+     * 父进程包名（实测 WebView 沙箱会把它写成 {@code com.google.android.webview} 等），
+     * <b>不能用于判断"这是哪个进程"</b>，仅作为兜底分支的辅助条件。
      */
     private static boolean isMainProcess(XC_LoadPackage.LoadPackageParam lpparam) {
+        // Xposed 的 lpparam.packageName 在 fork 子进程里是父进程包名，不能用于进程归属判断。
+        // isFirstApplication 是 LSPosed 提供的「本应用第一个进程」标志，fork 子进程为 false。
+        if (lpparam.isFirstApplication) {
+            return true;
+        }
         String processName = lpparam.processName;
-        return processName == null || processName.isEmpty()
-                || processName.equals(lpparam.packageName);
+        if (processName == null || processName.isEmpty()) {
+            return true;   // 旧框架无进程名：沿用兼容放行
+        }
+        // 兜底：仅当 isFirstApplication 对真正主进程也返回 false 时才走到这里。
+        // 进程名等于 packageName、无冒号子进程后缀、且不是 fork 出来的，才按主进程放行。
+        return processName.equals(lpparam.packageName) && !isForkedProcess(lpparam);
+    }
+
+    /**
+     * fork 子进程判定（仅 isMainProcess 兜底分支使用）。
+     *
+     * <p>已知特征：{@code isFirstApplication=false}，且 fork 后 {@code packageName} 仍是父进程包名
+     * （WebView 沙箱/系统组件场景与 processName 不一致）；进程名带 {@code :} 也是子进程。
+     */
+    private static boolean isForkedProcess(XC_LoadPackage.LoadPackageParam lpparam) {
+        if (lpparam.isFirstApplication) {
+            return false;
+        }
+        String processName = lpparam.processName;
+        if (processName != null && processName.indexOf(':') >= 0) {
+            return true;
+        }
+        return processName != null && lpparam.packageName != null
+                && !processName.equals(lpparam.packageName);
     }
 
     @Override
@@ -968,15 +1010,30 @@ public class MainHook implements IXposedHookLoadPackage {
             }
             return;
         }
+        // lpparam.packageName 在 fork 子进程里不可靠：目标包一律从 processName 提取（去掉 :suffix）。
+        // 仅当旧框架没有 processName 时，才退回 packageName 以保持兼容。
+        String processName = lpparam.processName;
+        String pkg = processName;
+        if (pkg != null) {
+            int colon = pkg.indexOf(':');
+            if (colon >= 0) {
+                pkg = pkg.substring(0, colon);
+            }
+        }
+        if (pkg == null || pkg.isEmpty()) {
+            pkg = lpparam.packageName;
+        }
+
         // 判断设备类型
-        if (lpparam.packageName.equals(PACKAGE_B6X)
-                || lpparam.packageName.equals(PACKAGE_B6X_NEW)) {
+        boolean isB6X = PACKAGE_B6X.equals(pkg);
+        boolean isB6XNew = PACKAGE_B6X_NEW.equals(pkg);
+        if (isB6X || isB6XNew) {
             appKind = 6;
             currentStatusFile = STATUS_FILE_B6;
-            isNewB6App = lpparam.packageName.equals(PACKAGE_B6X_NEW);
+            isNewB6App = isB6XNew;
             lastDevFile = lastDevFileFor(isNewB6App ? PACKAGE_B6X_NEW : PACKAGE_B6X);
             btOnAtFile = btOnAtFileFor(isNewB6App ? PACKAGE_B6X_NEW : PACKAGE_B6X);
-        } else if (lpparam.packageName.equals(PACKAGE_B7X)) {
+        } else if (PACKAGE_B7X.equals(pkg)) {
             appKind = 7;
             currentStatusFile = STATUS_FILE_B7;
             lastDevFile = lastDevFileFor(PACKAGE_B7X);
@@ -986,28 +1043,31 @@ public class MainHook implements IXposedHookLoadPackage {
             // 非目标包：每进程最多留一条，避免作用域内其它进程反复注入刷屏
             if (!nonTargetLogged) {
                 nonTargetLogged = true;
-                XposedBridge.log(TAG + " 跳过非目标包: " + lpparam.packageName);
+                XposedBridge.log(TAG + " 跳过非目标包: pkg=" + pkg
+                        + " processName=" + processName
+                        + " packageName=" + lpparam.packageName);
             }
             return;
         }
 
-        XposedBridge.log(TAG + " LoadPackage: " + lpparam.packageName);
-        XposedBridge.log(TAG + " 模块已加载到 " + lpparam.packageName
+        XposedBridge.log(TAG + " LoadPackage: " + pkg);
+        XposedBridge.log(TAG + " 模块已加载到 " + pkg
                 + " (appKind=" + appKind + ")");
         appClassLoader = lpparam.classLoader;  // 保存类加载器供后台重连线程使用
 
-        // 各修复分区按固定顺序注册（顺序影响 Xposed 回调执行次序，不可随意调整）
+        // 注册顺序：两个构造/实例捕获 hook 必须抢在宿主 SDK 建实例之前，放最前；
+        // 其余分区保持原相对顺序（回调目标不同，注册先后不影响执行次序，仅影响加载窗口）。
+        hookRunFetchLoopCpuFix(lpparam);              // 第 1：AbstractDataInteractionController 构造（最急）
+        hookWaspWingManagerCapture(lpparam);          // 第 2：WaspWingManager 实例捕获（最急）
         hookControllerStopScan(lpparam);              // 修复 #1：控制器层停扫描（双设备）
         hookControllerScanEntry(lpparam);             // M2：扫描入口解 SDK 扫描自锁（双设备）
         if (appKind == 6) hookB6ViewModelFix(lpparam);   // 修复 #2：ViewModel LiveData（仅 B6X）
         if (appKind == 6) hookB6Diagnostics(lpparam);    // 修复 #3/#4 + 诊断钩子（仅 B6X）
         hookCommonDisconnect(lpparam);                // 公共 BLE 断联（双设备）
         // 修复 #5：SDK 类型门禁放行（仅老 B6X app；新包/B7X 未验证同门禁，暂不装）
-        if (PACKAGE_B6X.equals(lpparam.packageName)) hookDeviceTypeGate(lpparam);
-        hookRunFetchLoopCpuFix(lpparam);              // runFetchLoop CPU 满载修复（双设备）
+        if (isB6X) hookDeviceTypeGate(lpparam);
         if (appKind == 6) hookB6Activity(lpparam);       // 自动进入设置界面（仅 B6X）
         if (appKind == 7) hookB7Activity(lpparam);       // 自动进入控制页（仅 B7X）
-        hookWaspWingManagerCapture(lpparam);          // 捕获 WaspWingManager 实例（双设备）
         hookSyncConnectedController(lpparam);         // static controller 同步到已连接实例（仅 B6X）
         hookGattConnectTimeoutClose(lpparam);         // 加固一：连接超时补 gatt.close（双设备）
         if (appKind == 7) hookB7Obfuscated(lpparam);     // c0.s1 + 混淆适配（仅 B7X）
@@ -1534,6 +1594,56 @@ public class MainHook implements IXposedHookLoadPackage {
         return true;
     }
 
+    private static final Object FETCH_LOOP_WRAP_LOCK = new Object();
+
+    /** 命令队列包装体：peek 空时 sleep 50ms；instanceof 即「已包装」判据。 */
+    private static final class WrappedFetchQueue extends ConcurrentLinkedQueue<Object> {
+        @Override
+        public Object peek() {
+            Object result = super.peek();
+            if (result == null) {
+                try {
+                    Thread.sleep(50);
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                }
+            }
+            return result;
+        }
+    }
+
+    /**
+     * 幂等替换 fetchLoop 命令队列：构造函数窗口错过时，运行时从已捕获的 controller 兜底。
+     * 已包装判据：字段值 {@code instanceof WrappedFetchQueue}；同一实例重复调用直接返回。
+     */
+    private static void ensureFetchLoopQueueWrapped(Object ctrl, String trigger) {
+        if (ctrl == null) {
+            return;
+        }
+        synchronized (FETCH_LOOP_WRAP_LOCK) {
+            try {
+                Object current = XposedHelpers.getObjectField(ctrl, queueFieldName());
+                if (current instanceof WrappedFetchQueue) {
+                    return;
+                }
+                WrappedFetchQueue wrapped = new WrappedFetchQueue();
+                if (current instanceof ConcurrentLinkedQueue) {
+                    ConcurrentLinkedQueue<?> src = (ConcurrentLinkedQueue<?>) current;
+                    while (true) {
+                        Object item = src.poll();
+                        if (item == null) break;
+                        wrapped.add(item);
+                    }
+                }
+                // volatile 字段，替换后运行中的协程线程立即可见
+                XposedHelpers.setObjectField(ctrl, queueFieldName(), wrapped);
+                XposedBridge.log(TAG + " runFetchLoop 队列已替换（空待 sleep 50ms）");
+            } catch (Throwable t) {
+                XposedBridge.log(TAG + " runFetchLoop 队列替换失败: " + t.getMessage());
+            }
+        }
+    }
+
     /** 修复 DefaultDispatcher 线程 100% CPU */
     private static void hookRunFetchLoopCpuFix(XC_LoadPackage.LoadPackageParam lpparam) {
         // runFetchLoop 在命令队列为空时无限循环 peek()，无协程挂起点，占满一个核心。
@@ -1545,46 +1655,7 @@ public class MainHook implements IXposedHookLoadPackage {
             XposedBridge.hookAllConstructors(absCtrl, new XC_MethodHook() {
                 @Override
                 protected void afterHookedMethod(MethodHookParam param) {
-                    try {
-                        Object ctrl = param.thisObject;
-                        Object originalQueue = XposedHelpers.getObjectField(
-                                ctrl, queueFieldName());
-
-                        // 包装 ConcurrentLinkedQueue：peek 空时 sleep 50ms
-                        ConcurrentLinkedQueue<Object> wrapped =
-                                new ConcurrentLinkedQueue<Object>() {
-                                    @Override
-                                    public Object peek() {
-                                        Object result = super.peek();
-                                        if (result == null) {
-                                            try {
-                                                Thread.sleep(50);
-                                            } catch (InterruptedException e) {
-                                                Thread.currentThread().interrupt();
-                                            }
-                                        }
-                                        return result;
-                                    }
-                                };
-
-                        if (originalQueue instanceof ConcurrentLinkedQueue) {
-                            ConcurrentLinkedQueue<?> src =
-                                    (ConcurrentLinkedQueue<?>) originalQueue;
-                            while (true) {
-                                Object item = src.poll();
-                                if (item == null) break;
-                                wrapped.add(item);
-                            }
-                        }
-
-                        // volatile 字段，替换后运行中的协程线程立即可见
-                        XposedHelpers.setObjectField(ctrl,
-                                queueFieldName(), wrapped);
-
-                        XposedBridge.log(TAG + " runFetchLoop 队列已替换（空待 sleep 50ms）");
-                    } catch (Throwable t) {
-                        XposedBridge.log(TAG + " runFetchLoop 队列替换失败: " + t.getMessage());
-                    }
+                    ensureFetchLoopQueueWrapped(param.thisObject, "ctor");
                 }
             });
             hooked("AbstractDataInteractionController 构造（修复 runFetchLoop CPU 满载）");
@@ -1951,6 +2022,7 @@ public class MainHook implements IXposedHookLoadPackage {
                 protected void afterHookedMethod(MethodHookParam param) {
                     capturedWaspWingMgr = param.thisObject;
                     XposedBridge.log(TAG + " 已捕获 WaspWingManager 实例");
+                    ensureFetchLoopQueueWrapped(getStaticController(), "mgrCapture");
                 }
             });
             hooked("WaspWingManager 构造函数");
@@ -1982,6 +2054,7 @@ public class MainHook implements IXposedHookLoadPackage {
                         protected void afterHookedMethod(MethodHookParam param) {
                             capturedWaspWingMgr = param.thisObject;
                             XposedBridge.log(TAG + " 已捕获 WaspWingManager(t9.j) 实例");
+                            ensureFetchLoopQueueWrapped(getStaticController(), "mgrCapture7");
                         }
                     });
                     hooked("WaspWingManager(t9.j) 构造函数");
@@ -2013,6 +2086,7 @@ public class MainHook implements IXposedHookLoadPackage {
                                 // thisObject = 刚完成 GATT 连接的 controller（state=2）
                                 XposedHelpers.setStaticObjectField(mgrCls,
                                         "dataInteractionController", param.thisObject);
+                                ensureFetchLoopQueueWrapped(param.thisObject, "onGattConnected");
                                 // 记录连接实例 + 有效 gatt，供下发前校验 static 指向（防锁死）
                                 BluetoothGatt gatt = (BluetoothGatt) param.args[0];
                                 currentValidGatt = gatt;
@@ -2137,6 +2211,7 @@ public class MainHook implements IXposedHookLoadPackage {
                             try {
                                 Class<?> mgrCls7 = lpparam.classLoader.loadClass("t9.j");
                                 XposedHelpers.setStaticObjectField(mgrCls7, "f50991b", param.thisObject);
+                                ensureFetchLoopQueueWrapped(param.thisObject, "b7.S1");
                                 // 记录连接实例 + 有效 gatt（B7X 字段 I），供下发前校验防锁死
                                 currentValidGatt = (BluetoothGatt) param.args[0];
                                 connectedControllers.put(param.thisObject, (BluetoothGatt) param.args[0]);
@@ -2418,7 +2493,8 @@ public class MainHook implements IXposedHookLoadPackage {
             if (!btCooldownPassed(sec)) return;
             try {
                 FileOutputStream fos = new FileOutputStream(BT_REQ_FILE);
-                fos.write(("REQ=" + (System.currentTimeMillis() / 1000L) + "\n").getBytes());
+                fos.write((Protocol.BT_REQ_FIELD + (System.currentTimeMillis() / 1000L)
+                        + "\n").getBytes());
                 fos.close();
                 XposedBridge.log(TAG + " 自动开蓝牙: 已请求守护进程开启（间隔 " + sec + "s）");
             } catch (Throwable t) {
@@ -3007,6 +3083,7 @@ public class MainHook implements IXposedHookLoadPackage {
         try {
             Object ctrl = getStaticController();
             if (ctrl == null) return;
+            ensureFetchLoopQueueWrapped(ctrl, "clearQueue");
             ConcurrentLinkedQueue<?> q = (ConcurrentLinkedQueue<?>) XposedHelpers.getObjectField(
                     ctrl, queueFieldName());
             if (q != null) q.clear();
@@ -3117,7 +3194,15 @@ public class MainHook implements IXposedHookLoadPackage {
      * onResume 与 onGattConnected 共用，runOnUiThread 保跳转。
      */
     private static void autoEnterSetup() {
-        if (!bleConnected || enteredSetup || currentGuideActivity == null) return;
+        if (!bleConnected) {
+            return;
+        }
+        if (enteredSetup) {
+            return;
+        }
+        if (currentGuideActivity == null) {
+            return;
+        }
         final Activity act = currentGuideActivity;
         currentGuideActivity = null;  // 先清空去重
         enterSetupActivity(act, true, "自动进入设置界面", null);
@@ -3128,7 +3213,15 @@ public class MainHook implements IXposedHookLoadPackage {
      * enteredSetup 防重入：已进入过 / 从设置返回时不触发。
      */
     private static void autoStartSetup() {
-        if (enteredSetup || bleConnected || currentGuideActivity == null) return;
+        if (enteredSetup) {
+            return;
+        }
+        if (bleConnected) {
+            return;
+        }
+        if (currentGuideActivity == null) {
+            return;
+        }
         final Activity act = currentGuideActivity;
         // 全新安装：宿主尚未授予「附近的设备」权限。此时不自动跳设置页——设置页内的扫描只申请
         // BLUETOOTH_SCAN，连接时会因缺 BLUETOOTH_CONNECT 失败/崩溃；留在引导页让用户点按钮一次性申请两项。
@@ -3349,19 +3442,19 @@ public class MainHook implements IXposedHookLoadPackage {
         } catch (Throwable t) { /* X 字段不可用则保持包名兜底 */ }
     }
 
-    /** 调用 getter，结果非 null 时追加 "KEY=value" 行 */
+    /** 调用 getter，结果非 null 时追加 "KEY=value" 行（key 为含 '=' 的协议前缀）。 */
     private static void appendGetterValue(StringBuilder sb, Object info, String getter, String key) {
         Object value = XposedHelpers.callMethod(info, getter);
         if (value != null) {
-            sb.append(key).append("=").append(value).append("\n");
+            sb.append(key).append(value).append("\n");
         }
     }
 
-    /** 调用 getter，结果非 null 时按 ×10 追加 "KEY=value" 行 */
+    /** 调用 getter，结果非 null 时按 ×10 追加 "KEY=value" 行（key 为含 '=' 的协议前缀）。 */
     private static void appendTenthValue(StringBuilder sb, Object info, String getter, String key) {
         Object value = XposedHelpers.callMethod(info, getter);
         if (value != null) {
-            sb.append(key).append("=").append(((Number) value).intValue() * 10).append("\n");
+            sb.append(key).append(((Number) value).intValue() * 10).append("\n");
         }
     }
 
@@ -3394,7 +3487,8 @@ public class MainHook implements IXposedHookLoadPackage {
             int d = ((Number) coldDec).intValue();
             if (d >= 10) d = (d + 5) / 10;  // 多位小数 → 四舍五入到 0.1°C
             // 负温度换算：c 为带符号整数°C，d 恒为正小数位，负温结果为 c*10 - d
-            sb.append("COLD_TEMP=").append((c < 0) ? c * 10 - d : c * 10 + d).append("\n");
+            sb.append(Protocol.STF_COLD_TEMP).append((c < 0) ? c * 10 - d : c * 10 + d)
+                    .append("\n");
         } catch (Throwable t) {
             logGetterFailure("COLD_TEMP", "getTemperature/getTemperatureDecimal", t);
         }

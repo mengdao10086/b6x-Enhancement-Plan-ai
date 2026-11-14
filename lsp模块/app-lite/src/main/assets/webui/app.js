@@ -4,10 +4,27 @@
 (function () {
     'use strict';
 
+    /* protocol-webui:start （本节由 参数定义/gen_params.py 生成，勿手改） */
+    var WEBUI_COL_TS = 0;
+    var WEBUI_COL_BATT = 1;
+    var WEBUI_COL_CPU = 2;
+    var WEBUI_COL_HOT = 3;
+    var WEBUI_COL_COLD = 4;
+    var WEBUI_COL_RPM_SET = 5;
+    var WEBUI_COL_COLD_SET = 6;
+    var WEBUI_COL_COLD_CMD = 7;
+    var WEBUI_COL_PID_INPUT = 8;
+    var WEBUI_COL_RECOMPUTE = 9;
+    var WEBUI_COL_COLD_RUN = 10;
+    var WEBUI_COL_RPM_RUN = 11;
+    var WEBUI_COL_COUNT = 12;
+    var WEBUI_COLS_LEGACY_MIN = 8;
+    /* protocol-webui:end */
+
     var SERIES = [
         {id: 'batt', label: '电池温度', color: '#F44336', axis: 'left'},
-        {id: 'cool', label: '制冷', color: '#4CAF50', axis: 'right'},
-        {id: 'rpm', label: '风扇(百rpm)', color: '#9C27B0', axis: 'left'},
+        {id: 'cool', label: '制冷(实际)', color: '#4CAF50', axis: 'right'},
+        {id: 'rpm', label: '风扇(实际,百rpm)', color: '#9C27B0', axis: 'left'},
         {id: 'hot', label: '热端温度', color: '#E91E63', axis: 'left'},
         {id: 'cold', label: '冷端温度', color: '#2196F3', axis: 'left'},
         {id: 'cpu', label: 'CPU温度', color: '#FF9800', axis: 'left'}
@@ -1442,25 +1459,36 @@
 
     function parseChartLine(line) {
         var parts = String(line).split(',');
-        if (parts.length < 8) {
+        if (parts.length < WEBUI_COLS_LEGACY_MIN) {
             return null;
         }
         var nums = [];
-        for (var i = 0; i < 8; i++) {
+        for (var i = 0; i < WEBUI_COLS_LEGACY_MIN; i++) {
             var n = parseInt(parts[i], 10);
             if (isNaN(n)) {
                 return null;
             }
             nums.push(n);
         }
+        // 新格式 12 列：曲线画实际回传值；旧格式 8 列没有 RUN 列，回落设定值。
+        // RUN 值为 -1（未就绪）或非数字时返回 null：drawSeries 遇 null 断线跳过。
+        // 0 是合法值（风扇停转 / 制冷关闭），照常画，不当缺失。
+        var rpm = nums[WEBUI_COL_RPM_SET];
+        var cool = nums[WEBUI_COL_COLD_SET];
+        if (parts.length >= WEBUI_COL_COUNT) {
+            var rpmRun = parseInt(parts[WEBUI_COL_RPM_RUN], 10);
+            var coolRun = parseInt(parts[WEBUI_COL_COLD_RUN], 10);
+            rpm = (!isNaN(rpmRun) && rpmRun >= 0) ? rpmRun : null;
+            cool = (!isNaN(coolRun) && coolRun >= 0) ? coolRun : null;
+        }
         return {
-            t: nums[0],
-            batt: nums[1],
-            cpu: nums[2],
-            hot: nums[3],
-            cold: nums[4],
-            rpm: nums[5],
-            cool: nums[6]
+            t: nums[WEBUI_COL_TS],
+            batt: nums[WEBUI_COL_BATT],
+            cpu: nums[WEBUI_COL_CPU],
+            hot: nums[WEBUI_COL_HOT],
+            cold: nums[WEBUI_COL_COLD],
+            rpm: rpm,
+            cool: cool
         };
     }
 

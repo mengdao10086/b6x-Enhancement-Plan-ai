@@ -5,26 +5,52 @@
 # 为什么必须 service.d 拉起（三条硬阻断）、幂等由谁兜底、"不再先杀"、以及自动更新概述，
 # 见 逻辑说明.md「部署与 Root 调用」与「看门狗反向保活」。开关值来自 profile.conf（UI_AUTO_UPDATE，缺省=开）。
 
-BIN=/data/local/tmp/tempctrl
-SVC_LOG=/data/local/tmp/tempctrl_service.log
-WAIT_LOOPS=30           # 等旧进程退出：30 × 1s（C 端最长 sleep 5s 一轮）
-RESTART_INTERVAL=300    # 看门狗周期（秒）
-
-# 宿主 APK 包名与数据目录。判据用【父目录】而非 files/：app「清除数据」只清 files/ 内容，
-# 父目录由系统保留 → 可抗"清除数据"误判（代价见 app/逻辑说明.md §2.4）。
+# protocol-const:start （本节由 参数定义/gen_params.py 从 protocol.def.json 生成，勿手改）
 HOST_PKG=com.example.waspwingtempctrl
 HOST_DIR=/data/data/$HOST_PKG
 HOST_FILES=$HOST_DIR/files
-PM_BIN=/system/bin/pm
 SCRIPT_NAME=b6x-tempctrl.sh
+PROTO_PATH_STATUS_B6=/data/local/tmp/tempctrl_b6x.status
+PROTO_PATH_STATUS_B7=/data/local/tmp/tempctrl_b7x.status
+PROTO_PATH_UIPREFS=/data/local/tmp/tempctrl_uiprefs
+PROTO_PATH_BT_REQ=/data/local/tmp/tempctrl_bt_req
+PROTO_PATH_TEMP_STOP=/data/local/tmp/tempctrl_temp_stop
+PROTO_NAME_TEMP_STOP_BOOT=tempctrl_temp_stop_boot
+PROTO_NAME_LOG=tempctrl.log
+PROTO_PATH_LOG_FALLBACK=/cache/tempctrl.log
+PROTO_PATH_CACHE_DIR=/cache
+PROTO_LOG_EXT=.log
+PROTO_NAME_DATA=tempctrl_webui.data
+PROTO_NAME_COLDMAX=tempctrl_coldmax
+PROTO_PATH_BIN=/data/local/tmp/tempctrl
+PROTO_PATH_BIN_NEW=/data/local/tmp/tempctrl.new
+PROTO_PATH_BIN_NEW_APP=/data/local/tmp/tempctrl.new.app
+PROTO_PATH_BIN_PREV=/data/local/tmp/tempctrl.prev
+PROTO_PATH_SERVICE_LOG=/data/local/tmp/tempctrl_service.log
+PROTO_PATH_LAST_DEV=/data/local/tmp/tempctrl_last_dev
+PROTO_PATH_LOCK_FALLBACK=/data/local/tmp/tempctrl.lock
+PROTO_NAME_LOCK_PRIVATE=tempctrl.lock
+PROTO_PATH_SCRIPT_MODERN=/data/adb/service.d/b6x-tempctrl.sh
+PROTO_PATH_SCRIPT_KSU=/data/adb/ksu/service.d/b6x-tempctrl.sh
+PROTO_NAME_MANIFEST=tempctrl_sync_manifest
+PROTO_NAME_DEPLOY_STAMP=tempctrl_deploy_stamp
+PROTO_NAME_WD_SPAWN=tempctrl_wd_spawn
+PROTO_NAME_CONFIG=profile.conf
+BIN=$PROTO_PATH_BIN
+SVC_LOG=$PROTO_PATH_SERVICE_LOG
+AU_CONF=$HOST_FILES/$PROTO_NAME_CONFIG
+AU_STAMP=$HOST_FILES/$PROTO_NAME_DEPLOY_STAMP
+AU_MANIFEST=$HOST_FILES/$PROTO_NAME_MANIFEST
+PROTO_CLEANUP_PATHS="$BIN $BIN.new $PROTO_PATH_STATUS_B6 $PROTO_PATH_STATUS_B7 $PROTO_PATH_UIPREFS $SVC_LOG $PROTO_PATH_LOCK_FALLBACK $PROTO_PATH_LAST_DEV $PROTO_PATH_SCRIPT_MODERN $PROTO_PATH_SCRIPT_KSU $PROTO_PATH_LOG_FALLBACK"
+# protocol-const:end
+WAIT_LOOPS=30           # 等旧进程退出：30 × 1s（C 端最长 sleep 5s 一轮）
+RESTART_INTERVAL=300    # 看门狗周期（秒）
+PM_BIN=/system/bin/pm
 
 # ==================== 自动更新（开机自校验 / 自重部署）====================
 # 判据顺序固定【先比时间戳、有变化再验哈希】；三份中间状态放 app 私有目录（为什么不落
 # /data/local/tmp、各文件语义见 README「部署自校验文件协议」，清理清单三份同步见 app/逻辑说明.md §2.5）。
 AU_KEY=UI_AUTO_UPDATE
-AU_CONF=$HOST_FILES/profile.conf
-AU_STAMP=$HOST_FILES/tempctrl_deploy_stamp
-AU_MANIFEST=$HOST_FILES/tempctrl_sync_manifest
 AU_TRIES=0              # 本次开机已尝试次数（pm / 解压工具可能晚一步就绪，失败不每 5 分钟刷一次）
 AU_MAX_TRIES=3
 # md5sum 对空输入的结果：用来判「解压没取到东西」。不能只看命令退出码——
@@ -383,17 +409,8 @@ auto_update_check() {
 # 覆盖 C 端做不到的三类见 app/逻辑说明.md §2.5。私有目录产物交给系统卸载，不显式删。
 cleanup_all() {
     stop_old
-    rm -f /data/local/tmp/tempctrl \
-          /data/local/tmp/tempctrl.new \
-          /data/local/tmp/tempctrl_b6x.status \
-          /data/local/tmp/tempctrl_b7x.status \
-          /data/local/tmp/tempctrl_uiprefs \
-          /data/local/tmp/tempctrl_service.log \
-          /data/local/tmp/tempctrl.lock \
-          /data/local/tmp/tempctrl_last_dev \
-          /data/adb/service.d/b6x-tempctrl.sh \
-          /data/adb/ksu/service.d/b6x-tempctrl.sh \
-          /cache/tempctrl.log
+    # 清单由 protocol.def.json 的 cleanup.service_script 生成（service.d 脚本执行面）
+    rm -f $PROTO_CLEANUP_PATHS
     if [ -n "$SELF" ]; then
         rm -f "$SELF"
     fi
