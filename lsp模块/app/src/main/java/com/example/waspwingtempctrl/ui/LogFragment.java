@@ -65,6 +65,7 @@ public class LogFragment extends Fragment
     private RecyclerView listView;
     private LogListAdapter adapter;
     private TextView infoView;
+    private TextView timeView;
     private TextView countView;
     private TextView statView;
     private TextView emptyView;
@@ -140,6 +141,7 @@ public class LogFragment extends Fragment
 
         listView = view.findViewById(R.id.log_list);
         infoView = view.findViewById(R.id.log_info_text);
+        timeView = view.findViewById(R.id.log_time_text);
         countView = view.findViewById(R.id.log_count_text);
         statView = view.findViewById(R.id.log_stat_text);
         emptyView = view.findViewById(R.id.log_empty_text);
@@ -207,6 +209,7 @@ public class LogFragment extends Fragment
         });
 
         infoView.setText(R.string.log_loading);
+        timeView.setText("");
         statView.setText(R.string.log_loading);
         countView.setText("");
         lastFollowCount = -1;
@@ -264,6 +267,7 @@ public class LogFragment extends Fragment
         listView = null;
         adapter = null;
         infoView = null;
+        timeView = null;
         countView = null;
         statView = null;
         emptyView = null;
@@ -363,6 +367,9 @@ public class LogFragment extends Fragment
         // 正在选中的控件本轮不重写：setText 会清掉选择与手柄。其余控件照常刷新，选择结束后下一轮自动补上
         if (!TextCopy.isSelecting(infoView)) {
             infoView.setText(buildInfoText(snap));
+        }
+        if (!TextCopy.isSelecting(timeView)) {
+            timeView.setText(buildTimeText(snap));
         }
         if (!TextCopy.isSelecting(statView)) {
             statView.setText(buildStatText(snap));
@@ -645,21 +652,28 @@ public class LogFragment extends Fragment
         followButton.setVisibility(show ? View.VISIBLE : View.GONE);
     }
 
-    /** 信息条首行：路径 / 修改时间（诊断的一部分）。 */
+    /** 信息条首行：只有路径本身，不带标签字样。 */
     private String buildInfoText(LogTailReader.Snapshot snap) {
         AppFiles.Probe p = snap.probe;
         if (p == null) {
             return getString(R.string.log_loading);
         }
-        String time = (p.statOk && p.mtimeMs > 0L)
+        return getString(R.string.log_info_fmt, p.path);
+    }
+
+    /** 次行左半：修改时间（同一行的右半是 {@link #buildStatText} 的行数统计）。 */
+    private String buildTimeText(LogTailReader.Snapshot snap) {
+        AppFiles.Probe p = snap.probe;
+        if (p == null) {
+            return "";
+        }
+        return (p.statOk && p.mtimeMs > 0L)
                 ? TIME_FMT.format(new Date(p.mtimeMs))
                 : getString(R.string.log_value_unknown);
-        return getString(R.string.log_info_fmt, p.path, time);
     }
 
     /**
-     * 统计行（同在「日志文件」卡里，紧跟路径/修改时间）：已读取行数 / 渲染上限行数，
-     * 文件大小 / 尾读上限。
+     * 统计行（与修改时间同一行、右对齐）：行数 / 渲染上限行数，文件大小 / 尾读上限。
      * 行数取参与匹配的最近 N 行（{@link LogTailReader.Snapshot#candidateLines}），
      * 大小取文件字节数（超过上限即说明尾读被截断）。
      */

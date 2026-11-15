@@ -30,10 +30,10 @@ final class ConfigDiagnosticsText {
     static String describePaths(ConfigStore store) {
         File configFile = store.getConfigFile();
         return "配置文件: " + configFile.getAbsolutePath()
-                + (store.exists() ? "（存在，" + configFile.length() + " B）" : "（不存在）")
                 + '\n'
                 + "C 端路径: " + store.daemonConfigPath()
-                + (store.isPathAlignedWithDaemon() ? "（一致）" : "（不一致！守护进程读不到 app 写的配置）");
+                // 仅不一致时原位跟一句告警（同一行，不另起行、不新增 View）
+                + (store.isPathAlignedWithDaemon() ? "" : "（不一致！守护进程读不到 app 写的配置）");
     }
 
     static String describeDefinitions(ConfigStore store) {

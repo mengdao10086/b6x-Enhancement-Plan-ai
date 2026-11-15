@@ -53,7 +53,7 @@ final class ConfigDiagnostics {
     private final View timingRow;
     private final ImageView timingArrow;
     private final TextView timingView;
-    /** 同体上方的「数据文件信息」行（曲线区经 ChartFragment.Host 写）：只读来判它此刻是不是还停在占位。 */
+    /** 同体上方的「数据文件」行（曲线区经 ChartFragment.Host 写）：只读来判它此刻是不是还停在占位。 */
     private final TextView datafileView;
 
     private boolean expanded;
@@ -141,7 +141,7 @@ final class ConfigDiagnostics {
     }
 
     /**
-     * 正文位该放的占位文本：同体上方的「数据文件信息」行此刻若仍停在「读取中…」（曲线区首份数据还没
+     * 正文位该放的占位文本：同体上方的「数据文件」行此刻若仍停在「读取中…」（曲线区首份数据还没
      * 回来，它的 XML 初值就是这个），就让它当这一屏<b>唯一</b>的占位、正文位留空——否则一屏会同时出现
      * 两行一模一样的「读取中…」。两行都回来后各自照常上屏，故只在占位这一步去重。
      */

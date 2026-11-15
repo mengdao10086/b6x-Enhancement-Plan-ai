@@ -5,13 +5,9 @@
 -->
 <resources>
 
-    <!-- ===== 区块标题 ===== -->
-    <!-- 「数据文件」这行标题现在出现在配置页「诊断信息」头部（信息条已并入那里） -->
-    <string name="chart_section_file">数据文件</string>
-
     <!-- ===== 信息条 ===== -->
     <string name="chart_loading">读取中…</string>
-    <string name="chart_info_path_fmt">路径：%1$s</string>
+    <string name="chart_info_path_fmt">数据文件：%1$s</string>
     <string name="chart_info_meta_fmt">大小：%1$s ｜ 修改时间：%2$s</string>
     <!-- 「行数目标」= 环形覆盖保留的滚动行数 rollingMaxLines（同 ChartConfig 的回落提示口径）。
          界面口径作「目标」，代码里它仍是硬上限（超出即丢行），两者只是说法不同。 -->

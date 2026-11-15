@@ -1926,7 +1926,7 @@ final class ConfigKeyRow {
         }
 
         /**
-         * 「输入状态自动显示说明」开关 {@code UI_HINT_AUTO}（group webui，出厂 1）：只在输入框获焦时
+         * 「输入状态自动显示说明」开关 {@code UI_HINT_AUTO}（group webui，出厂 0）：只在输入框获焦时
          * 决定要不要自动弹；「?」点击不走这个判据。每个焦点事件现读一次，改设置后无需重启。
          */
         static boolean autoShowOnFocus(@NonNull Context context) {
@@ -1934,7 +1934,7 @@ final class ConfigKeyRow {
                 Value value = ConfigStore.get(context).get("UI_HINT_AUTO");
                 return value == null || value.intAt(0) != 0;
             } catch (Throwable t) {
-                return true;   // 读盘异常时退回出厂行为（自动显示）
+                return false;   // 读盘异常（配置损坏 / IO 失败）时按不自动显示处理，与该键出厂默认（0）保持语义一致
             }
         }
 
