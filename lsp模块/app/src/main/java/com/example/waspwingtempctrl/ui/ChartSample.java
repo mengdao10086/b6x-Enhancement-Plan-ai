@@ -47,10 +47,15 @@ final class ChartSample {
     float battF = INVALID;
     /** 热端滤波后的曲线值（{@code app/逻辑说明.md} §7.2〈热端与电池曲线滤波〉）。 */
     float hotF = INVALID;
+    /** CPU 平滑曲线（「C平滑」）：复刻 daemon 的 {@code cpu_filtered_temp}，见 {@link ChartDataset}。 */
+    float cpuSmooth = INVALID;
+    /** 第 2 列原始整数（0.1°C；无效为 -1）：滤波必须按整数口径逐位复刻 daemon，不走 float 往返。 */
+    final int cpuRaw;
 
-    ChartSample(long t, float batt, float cpu, float hot, float cold, float rpmTarget,
+    ChartSample(long t, int cpuRaw, float batt, float cpu, float hot, float cold, float rpmTarget,
                 float cool, float coolActual, float rpmActual, float pid, boolean recomp) {
         this.t = t;
+        this.cpuRaw = cpuRaw;
         this.batt = batt;
         this.cpu = cpu;
         this.hot = hot;

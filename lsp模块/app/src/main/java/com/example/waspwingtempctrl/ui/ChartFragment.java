@@ -40,7 +40,7 @@ import java.util.Locale;
 /**
  * 曲线区：档位选择 + 图例 + 自绘画布 + 失败可诊断。
  *
- * <p><b>布局</b>：档位行、图例（5+4 两行、同列等宽对齐，窄屏整体等比缩小）与画布同处一张卡内，全部按自然尺寸排布
+ * <p><b>布局</b>：档位行、图例（5+5 两行、同列等宽对齐，窄屏整体等比缩小）与画布同处一张卡内，全部按自然尺寸排布
  * ——不整体缩放、也不改写容器高度。画布高度初值由 {@code fragment_chart.xml} 给出，运行时可用画布
  * 下沿的拖柄在 {@code chart_canvas_min_height}～{@code chart_canvas_max_height} 之间改（改的是运行时
  * {@code LayoutParams}，不落盘）。见 app/逻辑说明.md §7.6。
@@ -426,10 +426,10 @@ public class ChartFragment extends Fragment {
     // ==================== 控件构建 ====================
 
     /**
-     * 图例：9 条曲线，默认开关照 {@code app/逻辑说明.md} §7.6〈系列开关〉；勾选框着色 = 该曲线
+     * 图例：10 条曲线，默认开关照 {@code app/逻辑说明.md} §7.6〈系列开关〉；勾选框着色 = 该曲线
      * 当前角色对应的 chart_series_* 色（着色统一交给 {@link #applyLegendTints()}）。容器是可换行的
      * WrapRowLayout：显示顺序由 {@link ChartView#seriesOrder} 给出（交换开关只换成对两条的槽位），
-     * 行首由 {@link ChartSeries#startsLegendRow} 决定（pid ℃ 另起第二行，两行 5+4）；首次布局后
+     * 行首由 {@link ChartSeries#startsLegendRow} 决定（pid ℃ 另起第二行，两行 5+5）；首次布局后
      * 按统一比例 k 缩放字号/勾选框/间距/行高并重算列宽，两行各列的勾选框与文字起点仍竖直对齐
      * （见 {@link #alignLegendColumns}）。
      */
@@ -486,7 +486,7 @@ public class ChartFragment extends Fragment {
             }
         }
         if (cols <= 0 || boxes.length <= cols || boxes.length > cols * 2) {
-            return;   // 只按 5+4（第二行末列留空）排；行结构变了就保持自然宽
+            return;   // 只按 5+5 两行排；行结构变了就保持自然宽
         }
         int rowLimit = legendRow.getWidth() - legendRow.getPaddingLeft() - legendRow.getPaddingRight();
         if (rowLimit <= 0) {

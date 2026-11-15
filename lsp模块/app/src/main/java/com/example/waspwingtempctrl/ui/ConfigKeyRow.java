@@ -176,7 +176,6 @@ final class ConfigKeyRow {
     private final WrapRowLayout root;
     private final TextView labelView;
     private final TextView descView;
-    private final TextView noteView;
     private final TextView statusView;
     /**
      * 整键开关（switch 型键用）：由 {@link SwitchRenderer#build} 建出后挂上尾段
@@ -217,20 +216,16 @@ final class ConfigKeyRow {
     /** true 时忽略控件回调：程序化回填值不该被当成用户改动作业。 */
     private boolean suppressChange;
 
-    /**
-     * @param groupShowsUiOnly 本组卡头已经挂出「界面自用，守护进程不读取」时传 true：
-     *                         该标注整组只出现一次，行内不再重复
-     */
     static ConfigKeyRow create(@NonNull ViewGroup parent, @NonNull KeyMeta meta,
-                               @NonNull ConfigKeyRow.Host host, boolean groupShowsUiOnly,
+                               @NonNull ConfigKeyRow.Host host,
                                @NonNull ViewSource views, boolean compact) {
         // 行"整行独占"由 item_config_row.xml 根标签上的 app:wrapFullLine 声明（父容器读它当标记），
         // 键内换行交给同一个容器，本类不再向容器声明任何几何。
         WrapRowLayout root = (WrapRowLayout) inflateTimed(views, R.layout.item_config_row, parent);
-        return new ConfigKeyRow(root, meta, host, groupShowsUiOnly, views, compact);
+        return new ConfigKeyRow(root, meta, host, views, compact);
     }
 
-    private ConfigKeyRow(WrapRowLayout root, KeyMeta meta, Host host, boolean groupShowsUiOnly,
+    private ConfigKeyRow(WrapRowLayout root, KeyMeta meta, Host host,
                          ViewSource views, boolean compact) {
         this.root = root;
         this.meta = meta;
@@ -244,13 +239,11 @@ final class ConfigKeyRow {
 
         labelView = root.findViewById(R.id.config_key_label);
         descView = root.findViewById(R.id.config_key_desc);
-        noteView = root.findViewById(R.id.config_key_note);
         statusView = root.findViewById(R.id.config_key_status);
         // 配置页文字只做长按整段复制，不开系统选择：这些控件紧邻输入框，开选择会把它们拉进焦点体系，
         // 干扰键盘避让；点标题/开关的既有手势也不会被长按复制影响
         TextCopy.copyOnLongPress(labelView);
         TextCopy.copyOnLongPress(descView);
-        TextCopy.copyOnLongPress(noteView);
         TextCopy.copyOnLongPress(statusView);
         // switchView 不在这里取：它由 SwitchRenderer 按需建出（见该类 build）
 
@@ -259,16 +252,6 @@ final class ConfigKeyRow {
             descView.setVisibility(View.GONE);
         } else {
             descView.setText(meta.desc);
-        }
-
-        List<String> rowNotes = new ArrayList<>();
-        if (!meta.daemonConsumes && !groupShowsUiOnly) {
-            // 组内所有键都不被守护进程读取时，这句在卡头标一次（见 ConfigGroupBinder），行内不再重复
-            rowNotes.add(root.getContext().getString(R.string.config_ui_only));
-        }
-        if (!rowNotes.isEmpty()) {
-            noteView.setText(TextUtils.join(" ｜ ", rowNotes));
-            noteView.setVisibility(View.VISIBLE);
         }
 
         if (compact) {
@@ -1593,7 +1576,6 @@ final class ConfigKeyRow {
         float alpha = unsatisfied ? dimAlpha : 1f;
         labelView.setAlpha(alpha);
         descView.setAlpha(alpha);
-        noteView.setAlpha(alpha);
         if (hintIcon != null) {
             hintIcon.setAlpha(alpha);   // 「?」不在尾段也不在行级文本里，压暗要单独来一遍
         }

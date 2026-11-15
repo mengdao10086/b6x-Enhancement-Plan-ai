@@ -58,6 +58,8 @@ final class ChartConfig {
     boolean swapCool;
     /** 风扇对的目标/实际强调方交换（{@code UI_CHART_SWAP} 第 2 值）：false = 强调实际（默认）。 */
     boolean swapRpm;
+    /** CPU 温度平滑系数 {@code CPU_FILTER_ALPHA}（1~100，新值权重百分比）；只供「C平滑」曲线复刻 daemon。 */
+    int cpuFilterAlpha = 25;
 
     int[] windowOptions = FALLBACK_WINDOW_OPTIONS.clone();
     int windowDefaultSec = FALLBACK_WINDOW_DEFAULT;
@@ -165,6 +167,8 @@ final class ChartConfig {
         coldMapStart = perfOn ? clamp(single(store, snap, "COLD_RPM_MAP", 0, 40), 0, 194) : 40;
         int coldHigh = perfOn ? single(store, snap, "PID_COLD_RANGE", 1, 190) : 190;
         coldMax = coldHigh > 0 ? coldHigh : 190;
+        // CPU 温度平滑系数：只影响「C平滑」那条曲线的复刻结果，与曲线滤波 UI_CURVE_FILTER 无关
+        cpuFilterAlpha = single(store, snap, "CPU_FILTER_ALPHA", 0, 25);
     }
 
     /**

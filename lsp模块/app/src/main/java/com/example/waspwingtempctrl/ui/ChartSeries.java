@@ -7,10 +7,10 @@ import java.util.Locale;
 /**
  * 一条曲线的静态定义与会话内开关状态。
  *
- * <p>图例顺序与默认开关（口径见 {@code app/逻辑说明.md} §7.6〈系列开关〉）：9 条曲线，
- * 默认除「冷端℃」「CPU℃」外全开；左轴 7 条（温度 ℃ 与风扇百 rpm 共轴），右轴 2 条
- * （目标制冷 / 实际制冷）。图例两行 5+4：第一行 电池℃ / 实际制冷 / 实际rpm / 热端℃ / 冷端℃，
- * 第二行 pid ℃ / 目标制冷 / 目标rpm / CPU℃。
+ * <p>图例顺序与默认开关（口径见 {@code app/逻辑说明.md} §7.6〈系列开关〉）：10 条曲线，
+ * 默认除「冷端℃」「CPU℃」外全开；左轴 8 条（温度 ℃ 与风扇百 rpm 共轴），右轴 2 条
+ * （目标制冷 / 实际制冷）。图例两行 5+5：第一行 电池℃ / 实际制冷 / 实际rpm / 热端℃ / 冷端℃，
+ * 第二行 pid ℃ / 目标制冷 / 目标rpm / CPU℃ / C平滑。
  *
  * <p>取值分两种口径，<b>不可混用</b>：
  * <ul>
@@ -79,6 +79,9 @@ final class ChartSeries {
                         AXIS_LEFT, FMT_RPM, true),
                 new ChartSeries("cpu", R.string.chart_series_cpu, R.color.chart_series_cpu,
                         AXIS_LEFT, FMT_TEMP, false),
+                // C平滑：CPU 温度经 daemon 同款 EMA 滤波后的值，参考方样式（半透明实线、无末端圆点/数值）
+                new ChartSeries("cpuSmooth", R.string.chart_series_cpu_smooth,
+                        R.color.chart_series_cpu_smooth, AXIS_LEFT, FMT_TEMP, true),
         };
     }
 
@@ -126,8 +129,14 @@ final class ChartSeries {
         return s.colorRes;
     }
 
-    /** 是否绘制末端圆点：成对系列只有强调方画；其余系列保持原样（pid 的稀疏圆点另有来源）。 */
+    /**
+     * 是否绘制末端圆点：成对系列只有强调方画；「C平滑」按参考方样式不画；
+     * 其余系列保持原样（pid 的稀疏圆点另有来源）。
+     */
     static boolean drawsEndDot(ChartSeries s, ChartConfig cfg) {
+        if ("cpuSmooth".equals(s.id)) {
+            return false;
+        }
         return !isPair(s) || emphasized(s, cfg);
     }
 
@@ -139,8 +148,8 @@ final class ChartSeries {
     /**
      * 图例是否在该条之前另起一行（经 {@link WrapRowLayout#setBreakBefore} 施加）。
      *
-     * <p>{@code true} 的是「pid ℃ / 目标制冷 / 目标rpm / CPU℃」这一行：pid ℃ 作为第二行行首；
-     * 第一行是 电池℃ / 实际制冷 / 实际rpm / 热端℃ / 冷端℃。两行 5+4，图例顺序即
+     * <p>{@code true} 的是「pid ℃ / 目标制冷 / 目标rpm / CPU℃ / C平滑」这一行：pid ℃ 作为第二行行首；
+     * 第一行是 电池℃ / 实际制冷 / 实际rpm / 热端℃ / 冷端℃。两行 5+5，图例顺序即
      * {@link #displayOrder} 的显示顺序。
      */
     static boolean startsLegendRow(ChartSeries s) {
@@ -219,6 +228,8 @@ final class ChartSeries {
                 return d.cold;
             case "cpu":
                 return d.cpu;
+            case "cpuSmooth":
+                return d.cpuSmooth;
             case "rpm":
             case "rpmActual": {
                 float raw = rawRpm(s, d);

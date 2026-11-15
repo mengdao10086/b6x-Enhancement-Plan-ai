@@ -100,10 +100,12 @@ final class ChartDataset {
                 continue;
             }
             Long ts = parseLong(p[COL_TS]);
+            Integer cpuRaw = parseInt(p[COL_CPU]);
             ring[total % cap] = new ChartSample(
                     ts != null ? ts : 0L,
+                    cpuRaw != null ? cpuRaw : -1,
                     temp(parseInt(p[COL_BATT])),
-                    temp(parseInt(p[COL_CPU])),
+                    temp(cpuRaw),
                     tempNonZero(parseInt(p[COL_HOT])),
                     temp(parseInt(p[COL_COLD])),
                     rawNonZero(parseInt(p[COL_RPM])),
@@ -124,6 +126,7 @@ final class ChartDataset {
         if (cfg != null) {
             applyOne(out, true, cfg.alpha, cfg.quantStep);
             applyOne(out, false, cfg.alpha, cfg.quantStep);
+            applyCpuSmooth(out, cfg.cpuFilterAlpha, cfg.gapDetectSec);
         }
         return new ChartDataset(out, total, skipped);
     }
@@ -268,6 +271,89 @@ final class ChartDataset {
             }
             setOut(s[idx[j]], hot, q);
         }
+    }
+
+    // ==================== 「C平滑」：CPU 温度复刻 daemon 滤波 ====================
+
+    /**
+     * C 端控制周期（秒）：{@code update_cpu_filtered()} 只在主循环的 5 秒控制块里被调用
+     * （{@code tempctrl.c} 的 {@code main_loop()} 由 {@code mono_now() - last_ctrl >= 5} 触发），
+     * 而曲线数据行是每 1 秒写一行。故「每行都滤波」与 daemon 实际值不同，必须按 5 秒节奏推进状态。
+     */
+    static final int CPU_SMOOTH_PERIOD_SEC = 5;
+
+    /**
+     * 复刻 daemon 的 {@code cpu_filtered_temp}（{@code tempctrl.c:2188 update_cpu_filtered}）：
+     * <ul>
+     *   <li>输入取第 2 列<b>原始整数</b>（0.1℃，滤波前）；</li>
+     *   <li>首次直接取原始值（{@code first_run} 分支），不从 0 爬；</li>
+     *   <li>此后每个控制周期按 {@link #emaDir} 推进一次；</li>
+     *   <li>CPU 无效（{@code cpu_now < 0}）或电池无效（{@code pid_collect_inputs} 早退）时不推进状态；</li>
+     *   <li>时间戳缺口视同 daemon 重启后的 {@code first_run=1}：下一个控制周期重新直取。</li>
+     * </ul>
+     *
+     * <p><b>控制周期相位</b>：daemon 的 5 秒节拍以自身启动时刻为相位，界面无从得知。段内行是逐秒
+     * 连续的，故用「重算行」（第 10 列 = 1，只在控制周期里置位）反推段内相位；段内没有重算行时按
+     * 「段首即相位 0」处理。两种情况推进次数都对，差别只在本轮取到哪一行的 CPU 值（最多偏 4 秒）。
+     */
+    private static void applyCpuSmooth(ChartSample[] s, int alphaPct, int gapDetectSec) {
+        int alpha = alphaPct < 1 ? 1 : Math.min(alphaPct, 100);   // 与 C 端 clamp(1,100) 同口径
+        int start = 0;
+        while (start < s.length) {
+            // 段 = 时间戳连续的一段（缺口/回退即切段；daemon 重启后 first_run=1，与切段同构）
+            int end = start + 1;
+            long prevT = s[start].t;
+            while (end < s.length) {
+                long t = s[end].t;
+                if (prevT > 0L && t > 0L && (t - prevT > gapDetectSec || t < prevT)) {
+                    break;
+                }
+                prevT = t;
+                end++;
+            }
+            applyCpuSmoothSegment(s, start, end, alpha);
+            start = end;
+        }
+    }
+
+    /** 一段连续行内的滤波推进：段首相位由该段首个重算行反推（无则 0）。 */
+    private static void applyCpuSmoothSegment(ChartSample[] s, int from, int to, int alpha) {
+        int phase = 0;
+        for (int k = from; k < to; k++) {
+            if (s[k].recomp) {
+                phase = (k - from) % CPU_SMOOTH_PERIOD_SEC;
+                break;
+            }
+        }
+        int state = 0;            // 0.1℃ 整数状态（同 cpu_filtered_temp）
+        boolean seeded = false;
+        for (int k = from; k < to; k++) {
+            ChartSample d = s[k];
+            boolean tick = Math.floorMod(k - from - phase, CPU_SMOOTH_PERIOD_SEC) == 0;
+            if (tick && d.cpuRaw >= 0 && ChartSample.valid(d.batt)) {
+                if (!seeded) {
+                    state = d.cpuRaw;
+                    seeded = true;
+                } else {
+                    state = emaDir(d.cpuRaw, state, alpha);
+                }
+            }
+            d.cpuSmooth = seeded ? state / 10f : ChartSample.INVALID;
+        }
+    }
+
+    /**
+     * C 端 {@code EMA_DIR}（{@code tempctrl.c:51}）的逐位复刻：{@code alphaPct} 是<b>新值权重</b>
+     * （越大越接近原始值），整数除法向 0 截断；新值更大且除不尽时再进一格，
+     * 解决「渐进但永远差一格」的问题。
+     */
+    static int emaDir(int newVal, int oldVal, int alphaPct) {
+        int num = newVal * alphaPct + oldVal * (100 - alphaPct);
+        int r = num / 100;                       // Java 与 C 同为向 0 截断
+        if (newVal > oldVal && num % 100 > 0) {
+            r++;
+        }
+        return r;
     }
 
     private static float src(ChartSample d, boolean hot) {

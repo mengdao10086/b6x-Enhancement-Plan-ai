@@ -24,7 +24,7 @@ import java.util.List;
  * <p>组头开关即 {@code role=master} 的键（<b>也是普通键</b>，改它同样走"改即存"），走
  * {@link ConfigKeyRow#commitSwitch}；master 为 null 的组（"未分组"兜底组、设置页的 {@code webui} 组）
  * 卡头不放开关键。**总开关也有「?」**（紧贴卡头标题右侧，复用 {@link ConfigKeyRow#attachHintIcon}）。
- * 两个"整组一句话"的标注（未生效 / 界面自用）都只在卡头出现一次。
+ * 组级标注只有"未生效"一项，且只在卡头出现一次。
  * <b>键行全建、展开只切可见性</b>：正常时行由 {@link #buildRows()} 一次建满，{@link #setExpanded} 只切可见性；
  * 若展开时全量建行还没跑到，则先补建一次再展开（{@link #ensureRowsBuilt()}），绝不展开空 body。
  * 设计理由见 app 逻辑说明.md §6.1。
@@ -40,7 +40,6 @@ final class ConfigGroupBinder {
     private final WrapRowLayout body;
     private final TextView titleView;
     private final TextView badgeView;
-    private final TextView uiBadgeView;
     private final ImageView arrowView;
     private final View divider;
     private final MaterialSwitch masterSwitch;
@@ -51,8 +50,6 @@ final class ConfigGroupBinder {
     private final List<KeyMeta> keyMetas;
     /** 本组的键行，与 {@link #keyMetas} 一一对应（构造时建满）。 */
     private final List<ConfigKeyRow> rows = new ArrayList<>();
-    /** 组内有键「界面自用」（daemonConsumes=false）：卡头标一次，行内不再逐条重复。 */
-    private final boolean uiOnly;
     /** 本组按键行两列排（组样式由控制器按组 id 决定；键数不足 2 时不生效）。 */
     private final boolean twoColumn;
 
@@ -85,7 +82,6 @@ final class ConfigGroupBinder {
         body = card.findViewById(R.id.config_group_body);
         titleView = card.findViewById(R.id.config_group_title);
         badgeView = card.findViewById(R.id.config_group_badge);
-        uiBadgeView = card.findViewById(R.id.config_group_ui_badge);
         arrowView = card.findViewById(R.id.config_group_arrow);
         divider = card.findViewById(R.id.config_group_divider);
         masterSwitch = card.findViewById(R.id.config_group_master);
@@ -109,18 +105,6 @@ final class ConfigGroupBinder {
                 ConfigKeyRow.attachHintIcon((ViewGroup) header, 1, masterMeta, false, true);
             }
         }
-
-        // "有任一"键界面自用（daemonConsumes=false）就在卡头标一次，行内不再重复；
-        // 判据是"有任一"而非"全部"——界面组里 UI_BACK_HIDE 是要被 C 端读的（见 app 逻辑说明.md §6.1）
-        boolean hasUiOnly = false;
-        for (KeyMeta keyMeta : keyMetas) {
-            if (!keyMeta.daemonConsumes) {
-                hasUiOnly = true;
-                break;
-            }
-        }
-        uiOnly = hasUiOnly;
-        uiBadgeView.setVisibility(hasUiOnly ? View.VISIBLE : View.GONE);
 
         View groupHeader = card.findViewById(R.id.config_group_header);
         groupHeader.setOnClickListener(v -> setExpanded(!expanded));
@@ -291,7 +275,7 @@ final class ConfigGroupBinder {
         // 一键的组不排两列：半格左对齐只剩一个孤项，观感不如整行
         final boolean twoColumnRows = twoColumn && keyMetas.size() >= 2;
         for (KeyMeta meta : keyMetas) {
-            ConfigKeyRow row = ConfigKeyRow.create(body, meta, host, uiOnly, views, twoColumnRows);
+            ConfigKeyRow row = ConfigKeyRow.create(body, meta, host, views, twoColumnRows);
             long startedAt = StartupTiming.accBegin(StartupTiming.FORM_SUB_ATTACH);
             body.addView(row.view());
             StartupTiming.accEnd(StartupTiming.FORM_SUB_ATTACH, startedAt);

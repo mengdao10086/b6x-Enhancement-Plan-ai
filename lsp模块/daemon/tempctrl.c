@@ -102,10 +102,8 @@ struct TempCfg {
     int RATE_LIMIT_COLD_MULT;    // 制冷强度倍率：升速/降速 = base ± dev(0.1°C) × mult / 10
     // 制冷最小变化幅度（RATE_LIMIT_COLD 第三值）：与散热器实际 |差值| < 该值时不升不降；豁免有方向（升只看距上限、降只看距下限，余量 < ceil(死区×1.5) 才豁免）
     int COLD_DEADZONE;
-    // RAMP_DISPATCH：1=拆 N 次下发，0=每周期一次
+    // RAMP_DISPATCH：0=关闭（每周期一次）；1~5=每 5 秒控制周期拆 N 份下发，间隔 = 5000/N ms
     int ramp_dispatch;
-    // RAMP_SLOTS：每 5 秒控制周期的下发份数（1~5）；间隔 = 5000/N ms，仅平滑下发开启时生效
-    int ramp_slots;
     // RECONNECT_KEEP_CYCLES：断联< N 控制周期(×5s) 不重置 PID 状态
     int reconnect_keep_cycles;
     // --- 基准温度 ---
@@ -240,8 +238,7 @@ static struct TempCfg g_cfg = {
     .RATE_LIMIT_COLD = 15,
     .RATE_LIMIT_COLD_MULT = 10,
     .COLD_DEADZONE = 3,
-    .ramp_dispatch = 1,
-    .ramp_slots = 5,
+    .ramp_dispatch = 3,
     .reconnect_keep_cycles = 3,
     .BATT_BASELINE = 350,
     .CPU_FILTER_ALPHA = 25,
@@ -377,10 +374,12 @@ static int cached_cpu_now  = -1;   // CPU 最高温度（0.1°C），保留上�
 static int actual_rpm = -1;            // 当前实际风扇转速（RPM）
 static int actual_cold = -1;           // 当前实际制冷片强度
 
-// ======================== 平滑下发（RAMP_DISPATCH / RAMP_SLOTS） ========================
+// ======================== 平滑下发（RAMP_DISPATCH） ========================
 // 判定层（防抖/限速/去重/回传比对）仍是每 5s 一次；通过后只登记本轮目标，
-// 由独立的 dispatch 定时器按 5000/N ms 送出一份。关闭时等价于每个控制周期一次下发。
-#define RAMP_SLOTS_MAX 5               // 份数硬上限；运行时份数来自 RAMP_SLOTS（1~5）
+// 由独立的 dispatch 定时器按 5000/N ms 送出一份。0 = 关闭，等价于每个控制周期一次下发。
+#define RAMP_MAX_SLOTS 5               // 份数硬上限；运行时份数来自 RAMP_DISPATCH（1~5，0=关闭）
+#define CFG_LEGACY_RAMP_SLOTS "RAMP_SLOTS"   // 旧键：下发份数（1~5），已并入 RAMP_DISPATCH（永久读兼容 + 一次性迁移）
+static int legacy_ramp_slots_value = -1;     // 本轮读到的旧份数（-1=无）；解析结束后合并（RAMP_DISPATCH=0 保持关闭）
 #define RAMP_PERIOD_MS 5000            // 控制周期；下发间隔 = 该值 ÷ 生效份数
 static int ramp_slots_left = 0;        // 本轮剩余份数（0=无待发）
 static int ramp_slots_total = 0;       // 本轮总份数（仅日志用；配置中途变更不影响本轮）
@@ -394,18 +393,19 @@ static int sent_rpm  = -1;             // 最近一次实际广播的风扇值�
 static int sent_cold = -1;             // 最近一次实际广播的制冷值（拆分起点；-1=未知）
 
 /**
- * 平滑下发的生效份数：配置钳制到 1~RAMP_SLOTS_MAX，且不超过风扇每周期限速步长
+ * 平滑下发的生效份数：RAMP_DISPATCH 钳制到 1~RAMP_MAX_SLOTS（0=关闭时按 1 处理，定时器仍按
+ * 5000ms 触发、ramp_tick 无待发即返回），且不超过风扇每周期限速步长
  * （否则步长会被抬到 1，实际份数变少）。配置合法时（RATE_LIMIT_FAN ≥ 50）第二项恒不触发。
  */
 static int effective_ramp_slots(void) {
-    int n = g_cfg.ramp_slots;
+    int n = g_cfg.ramp_dispatch;
     if (n < 1) n = 1;
-    if (n > RAMP_SLOTS_MAX) n = RAMP_SLOTS_MAX;
+    if (n > RAMP_MAX_SLOTS) n = RAMP_MAX_SLOTS;
     if (g_cfg.RATE_LIMIT_FAN > 0 && n > g_cfg.RATE_LIMIT_FAN) n = g_cfg.RATE_LIMIT_FAN;
     return n < 1 ? 1 : n;
 }
 
-/** 下发间隔（ms）：5000/N 四舍五入（N=5→1000，N=3→1667，N=1→5000）。 */
+/** 下发间隔（ms）：5000/N 四舍五入（N=5→1000，N=3→1667，N=1→5000；关闭=5000）。 */
 static int ramp_dispatch_interval_ms(void) {
     int n = effective_ramp_slots();
     return (RAMP_PERIOD_MS + n / 2) / n;
@@ -678,8 +678,26 @@ static void apply_legacy_pidcut(void);     // load_config 调用（旧键按新�
 static int  migrate_pid_cut_config(const char *path);   // load_config 调用（旧键一次性迁移写回），定义在 KI 削减区
 static int  migrate_rescan_unit_config(const char *path, int cycles);  // load_config 调用（旧秒值一次性迁移写回），定义在 KI 削减区
 static int  migrate_launch_timing_config(const char *path, int cooldown, int watchdog);  // 旧两键合并写回
+static int  migrate_ramp_config(const char *path);  // load_config 调用（旧 RAMP_SLOTS 并入 RAMP_DISPATCH）
 static void reset_ki_cut_defaults(void);   // reset_perf_layer_defaults 与 main 调用，定义在 KI 削减区
 static void install_cache_mark(const char *pkg);   // /proc 命中正向标记（定义在安装缓存区，供 app_process_scan 调用）
+
+/**
+ * 旧键读兼容（永久）：RAMP_SLOTS 只暂存，第二遍解析结束后由 apply_legacy_ramp_slots 合并，
+ * 与两行在文件里的先后顺序无关。迁移写回失败时也能保证本轮行为正确。
+ */
+static int parse_legacy_ramp_slots(const char *key, const char *val_str) {
+    if (strcmp(key, CFG_LEGACY_RAMP_SLOTS) != 0) return 0;
+    legacy_ramp_slots_value = clamp(atoi(val_str), 1, RAMP_MAX_SLOTS);
+    return 1;
+}
+
+/** 旧份数并入新键：关闭（0）优先保持关闭，否则开启状态沿用旧份数。 */
+static void apply_legacy_ramp_slots(void) {
+    if (legacy_ramp_slots_value >= 0 && g_cfg.ramp_dispatch != 0)
+        g_cfg.ramp_dispatch = legacy_ramp_slots_value;
+    legacy_ramp_slots_value = -1;
+}
 
 // ======================== 调试日志宏 ========================
 /* 调试日志宏：总开关 debug_mode=1 且对应分区开关=1 时才输出。
@@ -958,8 +976,6 @@ static int parse_pid_cfg(const char *key, int val, const char *val_str) {
 
 /** 通用配置（PERF 层）：多值键与单值开关 */
 static int parse_common_cfg(const char *key, int val, const char *val_str) {
-    // 平滑下发开关（switch 型，不进 int 表）
-    if (strcmp(key, "RAMP_DISPATCH") == 0) { g_cfg.ramp_dispatch = clamp(atoi(val_str), 0, 1); return 1; }
     if (strcmp(key, "HOT_RPM_MAP") == 0) {
         int a = g_cfg.hot_map_min, b = g_cfg.hot_map_max;
         if (sscanf(val_str, "%d %d", &a, &b) >= 2) { g_cfg.hot_map_min = clamp(a,200,500); g_cfg.hot_map_max = clamp(b,200,500); }
@@ -1239,6 +1255,12 @@ static void config_scan_apply(FILE *f, const struct PrepassState *pre);
  * 返回值：0 = 文件打不开（调用方保留"待重试"状态）；1 = 已读到文件（含"三层全关"与空文件）。
  */
 static int load_config(const char *path) {
+    // 平滑下发旧双键一次性合并（幂等，靠 cfg-schema 标记）：须在 fopen 前完成，否则本次仍按旧文件
+    // 解析出旧语义、下一轮才生效。写回后刷新 mtime，避免自身改写触发下一轮热重载。
+    if (migrate_ramp_config(path)) {
+        struct stat mst;
+        if (stat(path, &mst) == 0) config_mtime = mst.st_mtime;
+    }
     FILE *f = fopen(path, "r");
     if (!f) {
         write_log("配置 无法打开 %s", path);
@@ -1369,6 +1391,7 @@ static void config_scan_apply(FILE *f, const struct PrepassState *pre) {
 
     // --- 第二遍：全量单次扫描，仅按层分发（DEBUG/sysfs/PERF），无子守卫 ---
     affinity_cfg_seen = 0;
+    legacy_ramp_slots_value = -1;                         // 旧份数暂存清零；本遍末尾合并
     memset(legacy_cnt, 0, sizeof(legacy_cnt));            // 旧键暂存清零；本遍末尾按「新键优先」合并
     memset(pidcut_new_seen, 0, sizeof(pidcut_new_seen));
     rewind(f);
@@ -1397,6 +1420,8 @@ static void config_scan_apply(FILE *f, const struct PrepassState *pre) {
 
         // 旧键兼容（永久）：KI_CUT_<簇号>（三元组）与已废弃的 KI_CUT_SMOOTH，见 parse_legacy_pidcut_cfg
         if (parse_legacy_pidcut_cfg(key, val_str)) continue;
+        // 旧键兼容（永久）：RAMP_SLOTS 已并入 RAMP_DISPATCH，见 apply_legacy_ramp_slots
+        if (parse_legacy_ramp_slots(key, val_str)) continue;
 
         // 表驱动单值 → 分段函数（PID/通用），键互不重叠、唯一命中
         if (parse_int_cfg(key, val)) continue;
@@ -1410,6 +1435,7 @@ static void config_scan_apply(FILE *f, const struct PrepassState *pre) {
     if (pre->pre.sysfs_enabled && !affinity_cfg_seen) reset_cpu_affinity_defaults();
 
     apply_legacy_pidcut();   // 旧键生效：仅填充本轮未被新键 PID_CUT_ 占用的簇（新键优先）
+    apply_legacy_ramp_slots();   // 旧 RAMP_SLOTS 生效：关闭优先，否则开启状态沿用旧份数
 
     fclose(f);   // 读毕即关；以下迁移写回只重写文件、不再读源内容
 
@@ -4565,6 +4591,102 @@ static int migrate_rescan_unit_config(const char *path, int cycles) {
     return 1;
 }
 
+// ======================== 配置迁移（平滑下发双键合并） ========================
+#define CFG_SCHEMA_RAMP_MARK    "cfg-schema: ramp-merged"
+#define RAMP_DISPATCH_DEFAULT   3
+
+/**
+ * 一次性迁移：旧双键 RAMP_DISPATCH(0/1) + RAMP_SLOTS(1~5) → 新单键 RAMP_DISPATCH(0~5)。
+ *   取值规则：
+ *     - 读到旧 RAMP_SLOTS 且旧 RAMP_DISPATCH≠0：取 RAMP_SLOTS（开启状态沿用旧份数）；
+ *     - 旧 RAMP_DISPATCH=0：保持 0——关闭状态不因残留份数被重新打开；
+ *     - 只有 RAMP_DISPATCH=1 而无 RAMP_SLOTS：旧「1」只表示开启、不承载份数，按新默认 3；
+ *       若按 1 份处理，老用户会从 5 份骤降到 1 份，体验突变；写成 1 又会被误认成新语义。
+ *     - 两键都缺：按新默认 3。
+ * 幂等：迁移后写回并在文件末尾补 CFG_SCHEMA_RAMP_MARK 标记；新生成的 profile.conf 自带该标记，
+ *   读到标记直接返回。标记同时用来区分「旧开关的 1」与「新语义的 1 份」——只有无标记的文件才迁移，
+ *   用户显式改成 1 份后不会被下一轮翻回 3。
+ * 原子性/属主对齐与其它迁移一致（commit_config_rewrite）；失败保留原文件，由调用方按旧文件继续读
+ *   （旧 RAMP_SLOTS 已不在定义里，本轮按 RAMP_DISPATCH 原值生效，下轮重试迁移）。
+ * @return 1=已改写；0=无需改写或失败
+ */
+static int migrate_ramp_config(const char *path) {
+    int lock_fd = config_write_lock(path);   // 跨进程写锁：覆盖读→写 tmp→rename
+    if (lock_fd < 0) return 0;
+    FILE *f = fopen(path, "r");
+    if (!f) { config_write_unlock(lock_fd); return 0; }
+    struct stat st;
+    if (stat(path, &st) != 0) { fclose(f); config_write_unlock(lock_fd); return 0; }
+
+    // 首遍：标记 + 两个旧键的当前值（后者按行序，后写覆盖先写，与解析器一致）
+    char line[640];
+    int marker = 0, slots = -1, dispatch = -1;
+    while (fgets(line, sizeof(line), f)) {
+        if (strstr(line, CFG_SCHEMA_RAMP_MARK) != NULL) marker = 1;
+        char *key;
+        char *val_str = config_parse_line(line, &key);
+        if (!val_str) continue;
+        if (strcmp(key, CFG_LEGACY_RAMP_SLOTS) == 0)
+            slots = clamp(atoi(val_str), 1, RAMP_MAX_SLOTS);
+        else if (strcmp(key, "RAMP_DISPATCH") == 0)
+            dispatch = clamp(atoi(val_str), 0, 1);
+    }
+    if (marker) { fclose(f); config_write_unlock(lock_fd); return 0; }
+
+    int newv;
+    if (slots >= 0)         newv = (dispatch == 0) ? 0 : slots;
+    else if (dispatch == 0) newv = 0;
+    else                    newv = RAMP_DISPATCH_DEFAULT;
+
+    rewind(f);
+    char tmp[300];
+    snprintf(tmp, sizeof(tmp), "%s.mig", path);
+    FILE *g = fopen(tmp, "w");
+    if (!g) { fclose(f); config_write_unlock(lock_fd); return 0; }
+
+    int wrote_dispatch = 0;
+    int last_nl = 1;   // 已写内容的末字节是否为换行（末行无换行时补一个，避免标记粘在上一行）
+    while (fgets(line, sizeof(line), f)) {
+        size_t line_len = strlen(line);
+        char *p = line;
+        while (*p == ' ' || *p == '\t') p++;
+        if (*p != '#') {
+            // 旧份数键整行删除（其值已并入 RAMP_DISPATCH）
+            if (strncmp(p, CFG_LEGACY_RAMP_SLOTS, sizeof(CFG_LEGACY_RAMP_SLOTS) - 1) == 0) {
+                const char *q = p + sizeof(CFG_LEGACY_RAMP_SLOTS) - 1;
+                while (*q == ' ' || *q == '\t') q++;
+                if (*q == '=') continue;
+            }
+            if (strncmp(p, "RAMP_DISPATCH", 13) == 0) {
+                const char *q = p + 13;
+                while (*q == ' ' || *q == '\t') q++;
+                if (*q == '=') {
+                    snprintf(line, sizeof(line), "RAMP_DISPATCH=%d\n", newv);
+                    wrote_dispatch = 1;
+                    fputs(line, g);
+                    last_nl = 1;
+                    continue;
+                }
+            }
+        }
+        fputs(line, g);
+        last_nl = (line_len > 0 && line[line_len - 1] == '\n');
+    }
+    if (!wrote_dispatch) fprintf(g, "RAMP_DISPATCH=%d\n", newv);
+    else if (!last_nl) fputc('\n', g);
+    fprintf(g, "# 配置迁移标记（勿删）：%s\n", CFG_SCHEMA_RAMP_MARK);
+    fclose(f);
+
+    if (!commit_config_rewrite(path, tmp, g, &st, "平滑下发参数合并")) {
+        config_write_unlock(lock_fd);
+        return 0;
+    }
+    write_log("配置 平滑下发旧键已合并：RAMP_DISPATCH=%d（旧 %s=%d）",
+              newv, CFG_LEGACY_RAMP_SLOTS, slots);
+    config_write_unlock(lock_fd);
+    return 1;
+}
+
 /**
  * 旧两键 APP_LAUNCH_COOLDOWN（秒）/ APP_WATCHDOG（周期数）→ APP_LAUNCH_TIMING 的一次性写回：
  *   合并为一行「拉起冷却 停滞重启」，并删除旧行；文件已有完整新键（两值）时只删旧行。
@@ -4934,7 +5056,7 @@ static int apply_gear_direct(int mode, int target,
     // 平滑下发：判定通过后只登记本轮目标，由 dispatch 定时器按 5000/N ms 送出。
     // 不拆分的三种情况：开关关闭、起点未知（首次 / 长断连后）、本轮无变化；
     // 热端过温下压是最高优先级保护，也不拆分，保持原来一步到位。
-    int ramp_able = g_cfg.ramp_dispatch && !hot_forced_down && sent_rpm >= 0 && sent_cold >= 0
+    int ramp_able = g_cfg.ramp_dispatch > 0 && !hot_forced_down && sent_rpm >= 0 && sent_cold >= 0
                     && (send_rpm != sent_rpm || cold != sent_cold);
     if (ramp_able) {
         int slots = effective_ramp_slots();
@@ -4993,7 +5115,7 @@ static void ramp_tick(void) {
     // 份数走完时：若残量只是 floor 取整误差（每维度 ≤ 份数-1），末份直接落目标；
     // 若残量更大，说明目标差本身超过本轮限速（如取整单位造成的积压），不硬落目标，
     // 留给下一控制周期按限速继续收敛，避免末份单拍突破速率上限。
-    int residue_max = (ramp_slots_total > 0) ? ramp_slots_total - 1 : RAMP_SLOTS_MAX - 1;
+    int residue_max = (ramp_slots_total > 0) ? ramp_slots_total - 1 : RAMP_MAX_SLOTS - 1;
     int residue_ok = abs(ramp_remain_rpm) <= residue_max
                   && abs(ramp_remain_cold) <= residue_max;
     int done = (ramp_remain_rpm == 0 && ramp_remain_cold == 0)
@@ -6116,7 +6238,7 @@ static int timerfd_drain(int fd) {
     return n == (ssize_t)sizeof(exp);
 }
 
-/** 按当前 RAMP_SLOTS/RATE_LIMIT_FAN 重装下发定时器；间隔未变则不重装（保持节拍相位）。 */
+/** 按当前 RAMP_DISPATCH/RATE_LIMIT_FAN 重装下发定时器；间隔未变则不重装（保持节拍相位）。 */
 static int sync_dispatch_timer(int fd, int *cur_ms) {
     int ms = ramp_dispatch_interval_ms();
     if (ms == *cur_ms) return 0;
@@ -6269,7 +6391,7 @@ static void run_main_loop(struct MainCtx *ctx) {
             if (disp_due) ramp_tick();
             continue;
         }
-        // 配置热重载可能改了 RAMP_SLOTS / RATE_LIMIT_FAN：每拍核对下发间隔。
+        // 配置热重载可能改了 RAMP_DISPATCH / RATE_LIMIT_FAN：每拍核对下发间隔。
         // 间隔真的变了就丢弃未走完的本轮——份数/步长在登记时已冻结，继续按新间隔发
         // 会把本轮拖到 5s 窗口之外；下一控制周期会按新值重新登记。
         if (use_timerfd) {

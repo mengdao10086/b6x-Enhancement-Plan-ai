@@ -9,7 +9,7 @@
 #define CFG_PERF_INT_KEYS(X) \
     X("BATT_BASELINE", g_cfg.BATT_BASELINE, 300, 500) \
     X("PID_KDP", g_cfg.pid_kdp_coef, 1, 1000) \
-    X("RAMP_SLOTS", g_cfg.ramp_slots, 1, 5) \
+    X("RAMP_DISPATCH", g_cfg.ramp_dispatch, 0, 5) \
     X("RECONNECT_KEEP_CYCLES", g_cfg.reconnect_keep_cycles, 0, 30) \
     X("CPU_FILTER_ALPHA", g_cfg.CPU_FILTER_ALPHA, 1, 100) \
     X("MAP_INPUT_SMOOTH_ALPHA", g_cfg.rpm_smooth_alpha, 1, 99) \
@@ -69,8 +69,7 @@
     X(g_cfg.RATE_LIMIT_COLD, 15) \
     X(g_cfg.RATE_LIMIT_COLD_MULT, 10) \
     X(g_cfg.COLD_DEADZONE, 3) \
-    X(g_cfg.ramp_dispatch, 1) \
-    X(g_cfg.ramp_slots, 5) \
+    X(g_cfg.ramp_dispatch, 3) \
     X(g_cfg.reconnect_keep_cycles, 3) \
     X(g_cfg.CPU_FILTER_ALPHA, 25) \
     X(g_cfg.cold_map_start, 40) \
