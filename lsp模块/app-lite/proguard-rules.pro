@@ -13,5 +13,9 @@
 
 # Xposed API 是 compileOnly：R8 full mode 会把匿名 XC_MethodHook 子类的
 # afterHookedMethod/beforeHookedMethod 当死代码全部删除——hook 装得上但永不回调。
-# 实测：不加本行时 lite 包内回调方法数量为 0（GUI 版类图下未触发，不可依赖）。
--keep class com.example.waspwingtempctrl.MainHook$* { *; }
+# 收窄为 keepclassmembers：实测回调定义 28/12 全保留，dex 比 { *; } 少 4,128 B。
+# GUI 类图下 R8 会合并成带 int 标签的少数类，不能按方法数判断，勿照搬。
+-keepclassmembers class com.example.waspwingtempctrl.MainHook$* {
+    protected void afterHookedMethod(de.robv.android.xposed.XC_MethodHook$MethodHookParam);
+    protected void beforeHookedMethod(de.robv.android.xposed.XC_MethodHook$MethodHookParam);
+}
