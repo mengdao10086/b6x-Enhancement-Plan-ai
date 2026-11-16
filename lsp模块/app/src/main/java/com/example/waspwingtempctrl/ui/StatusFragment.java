@@ -171,8 +171,6 @@ public class StatusFragment extends Fragment implements SetupActivity.PageAware 
     private long lastSilentFailureLogMs;
     /** 上次探测的开始时刻（手动与静默共用）；静默刷新据此节流。内存态，进程重启即失效。 */
     private long lastProbeAtMs;
-    /** 已上屏的那份缓存的时刻（{@link DeployStatusCache#atMs()}）：同一份不重复 setText。 */
-    private long appliedCacheAtMs;
     /** 部署/拉起结果上屏后的保留截止时刻（ms）：在此之前周期扫描不覆盖状态文本。 */
     private long statusHoldUntilMs;
     /** 上次写入 prefs 的 root 可用性；配合 {@link #rootOkSeen} 做到"值没变就不重复落盘"。 */
@@ -241,13 +239,17 @@ public class StatusFragment extends Fragment implements SetupActivity.PageAware 
     public void onViewCreated(@NonNull View view, @Nullable Bundle savedInstanceState) {
         super.onViewCreated(view, savedInstanceState);
         statusView = view.findViewById(R.id.status_text);
-        // 首帧骨架：只在「还没有任何缓存」的极短窗口可见，缓存一到就被预渲染结果顶掉
-        statusView.setText(prefillText());
-        // 启动预取：本页随 ViewPager2 一起在冷启动建页，这里只提交后台任务（进程级一次、失败静默）
+        // 启动预取：本页随 ViewPager2 一起在冷启动建页，这里只提交后台任务（进程级一次、失败静默）。
         DeployStatusCache.prefetch(requireContext());
-        // 预取/回写晚于建页时也要上屏：页面此刻通常还在屏外，先把文本布好，切页时只剩一次现成的布局
-        DeployStatusCache.setListener(this::applyCachedStatus);
-        applyCachedStatus();
+        // 有缓存就先上内容（同一帧内替换，用户看不到骨架）；从未成功过才用预填充骨架。
+        // 缓存陈旧也照常先显示，紧随其后的首探/周期刷新会交叉淡入覆盖。
+        final String cachedStatus = DeployStatusCache.text();
+        statusView.setText(cachedStatus != null
+                ? PathDisplay.format(view.getContext(), cachedStatus) : prefillText());
+        if (cachedStatus != null && !DeployStatusCache.isStale()) {
+            // 缓存还新鲜：与静默刷新同一个 30 秒节流口径，避免紧接着再跑一趟 su
+            lastProbeAtMs = DeployStatusCache.atMs();
+        }
         statusOutgoingView = view.findViewById(R.id.status_text_outgoing);
         statusStack = view.findViewById(R.id.status_text_stack);
         infoView = view.findViewById(R.id.info_text);
@@ -330,37 +332,6 @@ public class StatusFragment extends Fragment implements SetupActivity.PageAware 
         startPeriodicRefresh();
     }
 
-    /**
-     * 用缓存上屏：缓存里已是预渲染好的 {@code CharSequence}（路径 span 齐备），这里只 {@code setText}，
-     * <b>不做格式化、不建 span、不 measure</b>——省掉切页那一刻的现场渲染。
-     *
-     * <p>触发点两个：建页时一次；预取在后台完成后由 {@link DeployStatusCache} 的主线程回调一次
-     * （那时页面通常还在屏外，布局在切页前就已完成）。同一份缓存不重复上屏。
-     */
-    private void applyCachedStatus() {
-        final TextView view = statusView;
-        if (view == null || !isAdded()) {
-            return;
-        }
-        final long atMs = DeployStatusCache.atMs();
-        if (atMs == 0L || atMs == appliedCacheAtMs) {
-            return;   // 还没有缓存，或这份已经上过屏
-        }
-        final CharSequence rendered = DeployStatusCache.rendered(requireContext());
-        if (rendered == null) {
-            return;   // 「展示完整路径」开关已变：旧渲染作废，等后台重渲/下一次探测
-        }
-        if (TextCopy.isSelecting(view)) {
-            return;   // 选中期间不 setText（会清掉选区）；结果由探测路径的选择结束后补
-        }
-        appliedCacheAtMs = atMs;
-        view.setText(rendered);
-        if (!DeployStatusCache.isStale()) {
-            // 缓存新鲜：与静默刷新同一个 30 秒节流口径，避免紧接着再跑一趟 su
-            lastProbeAtMs = Math.max(lastProbeAtMs, atMs);
-        }
-    }
-
     /** 首次探测前的骨架文本：完整路径开关打开用长骨架，关闭用只含文件名的短骨架。 */
     private String prefillText() {
         return getString(PathDisplay.showFull(requireContext())
@@ -399,7 +370,6 @@ public class StatusFragment extends Fragment implements SetupActivity.PageAware 
     @Override
     public void onDestroyView() {
         stopPeriodicRefresh();
-        DeployStatusCache.clearListener();   // 视图没了就别再回调（回调里只用 statusView 判空）
         // 作废在跑的扫描；旧回调按代号直接丢弃
         invalidateScan();
         actionBusy = false;
@@ -827,9 +797,8 @@ public class StatusFragment extends Fragment implements SetupActivity.PageAware 
         // 「先比后写」的 contentEquals 与写入都用这一份，否则每 5 秒静默复探都会被判成变化。
         final String result = (head + (manifestNote == null ? "" : manifestNote + "\n")
                 + status.describe()).trim();
-        // 回写进程内缓存（预渲染也在这一句里于本后台线程完成）：
-        // 下次建页（含旋转/返回本页）直接拿它上屏，再后台刷新
-        DeployStatusCache.store(app, result);
+        // 回写进程内缓存：下次建页（含旋转/返回本页）直接拿它上屏，再后台刷新
+        DeployStatusCache.store(result);
         return result;
     }
 

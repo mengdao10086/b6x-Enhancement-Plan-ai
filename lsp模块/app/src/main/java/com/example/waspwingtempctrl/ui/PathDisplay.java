@@ -46,18 +46,10 @@ final class PathDisplay {
      */
     @NonNull
     static CharSequence format(@NonNull Context context, @Nullable CharSequence text) {
-        return format(text, showFull(context));
-    }
-
-    /**
-     * 同上，开关值由调用方给定：后台预渲染时与缓存键取同一份值，避免两次读开关得到不同结果。
-     */
-    @NonNull
-    static CharSequence format(@Nullable CharSequence text, boolean showFull) {
         if (text == null) {
             return "";
         }
-        if (showFull) {
+        if (showFull(context)) {
             return text;
         }
         String plain = text.toString();
