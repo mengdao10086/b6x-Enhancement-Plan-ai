@@ -20,12 +20,14 @@ import android.view.ViewGroup;
 import android.widget.CheckBox;
 import android.widget.ScrollView;
 import android.widget.TextView;
+import android.widget.Toast;
 
 import androidx.annotation.NonNull;
 import androidx.annotation.Nullable;
 import androidx.fragment.app.Fragment;
 
 import com.example.waspwingtempctrl.AppFiles;
+import com.example.waspwingtempctrl.ConfigStore;
 import com.example.waspwingtempctrl.R;
 import com.example.waspwingtempctrl.StartupTiming;
 import com.google.android.material.button.MaterialButton;
@@ -34,8 +36,10 @@ import com.google.android.material.button.MaterialButtonToggleGroup;
 import java.io.File;
 import java.text.SimpleDateFormat;
 import java.util.Arrays;
+import java.util.HashMap;
 import java.util.Date;
 import java.util.Locale;
+import java.util.Map;
 
 /**
  * 曲线区：档位选择 + 图例 + 自绘画布 + 失败可诊断。
@@ -81,6 +85,12 @@ public class ChartFragment extends Fragment {
     /** 图例宽度变化监听：图例可能因交换开关重建，复用同一个 listener 避免重复挂载。 */
     private View.OnLayoutChangeListener legendLayoutListener;
     private MaterialButtonToggleGroup windowGroup;
+    /** 「修改默认」绿色文字开关与编辑态：编辑时图例显示默认打开项，退出时保存为新的默认。 */
+    private TextView defaultsToggle;
+    private boolean editingDefaults;
+    private boolean[] pendingDefaults;
+    /** 首次拿到配置时已按默认打开项初始化过（只做一次，之后用户的图例勾选不被刷新覆盖）。 */
+    private boolean seriesDefaultsApplied;
     /** 画布容器：拖柄改的只是它的 LayoutParams.height（画布自身 match_parent 跟随）。 */
     private View canvasContainer;
     private View resizeHandle;
@@ -157,6 +167,8 @@ public class ChartFragment extends Fragment {
         failureText = view.findViewById(R.id.chart_failure_text);
         legendRow = view.findViewById(R.id.chart_legend_row);
         windowGroup = view.findViewById(R.id.chart_window_group);
+        defaultsToggle = view.findViewById(R.id.chart_defaults_toggle);
+        defaultsToggle.setOnClickListener(v -> toggleDefaultsEditing());
         canvasContainer = view.findViewById(R.id.chart_canvas_container);
         resizeHandle = view.findViewById(R.id.chart_resize_handle);
 
@@ -254,6 +266,10 @@ public class ChartFragment extends Fragment {
         legendRow = null;
         legendLayoutListener = null;
         windowGroup = null;
+        defaultsToggle = null;
+        editingDefaults = false;
+        pendingDefaults = null;
+        seriesDefaultsApplied = false;
         canvasContainer = null;
         resizeHandle = null;
         resizingCanvas = false;
@@ -328,6 +344,16 @@ public class ChartFragment extends Fragment {
         // 当前档位不在新档位集合里才回落默认，避免每次切页都把用户选的档位冲掉
         boolean configChanged = config != cfg;
         config = cfg;
+        boolean applyDefaults = !seriesDefaultsApplied && cfg != null;
+        if (applyDefaults) {
+            seriesDefaultsApplied = true;
+            chartView.applySeriesStates(cfg.seriesDefaults);
+            if (editingDefaults) {
+                // 编辑态先点了、配置才到：待保存的默认换成刚读到的这份（与图例一致）
+                pendingDefaults = cfg.seriesDefaults.clone();
+            }
+            buildLegend();
+        }
         if (legendSwapCool != cfg.swapCool || legendSwapRpm != cfg.swapRpm) {
             buildLegend();   // 任一对的交换值变化 → 图例槽位/颜色随之换位
         }
@@ -358,7 +384,8 @@ public class ChartFragment extends Fragment {
             dataset = null;
             chartView.setVisibility(View.GONE);
             chartView.setData(null, cfg);
-            failureText.setText(getString(R.string.chart_failure_title) + "\n\n" + snap.failureText);
+            failureText.setText(PathDisplay.format(requireContext(),
+                    getString(R.string.chart_failure_title) + "\n\n" + snap.failureText));
             failureScroll.setVisibility(View.VISIBLE);
             updateInfoText();
             return;
@@ -434,6 +461,14 @@ public class ChartFragment extends Fragment {
      * （见 {@link #alignLegendColumns}）。
      */
     private void buildLegend() {
+        // 编辑默认态：图例显示「默认打开项」而不是当前实际勾选；其余时候按各系列实际开关
+        buildLegend(editingDefaults ? pendingDefaults : null);
+    }
+
+    /**
+     * @param states 非空 = 用这份数组（默认打开项）渲染勾选态；null = 用各系列当前实际开关
+     */
+    private void buildLegend(@Nullable boolean[] states) {
         LayoutInflater inflater = LayoutInflater.from(requireContext());
         legendRow.removeAllViews();
         // 横向间距只走项的 marginEnd（4dp × k），容器列距归零；否则会变成 12 + 4 = 16dp
@@ -445,9 +480,18 @@ public class ChartFragment extends Fragment {
             ChartSeries s = chartView.seriesAt(seriesIndex);
             CheckBox box = (CheckBox) inflater.inflate(R.layout.item_chart_legend, legendRow, false);
             box.setText(s.labelRes);
-            box.setChecked(s.on);
-            box.setOnCheckedChangeListener(
-                    (button, checked) -> chartView.setSeriesEnabled(seriesIndex, checked));
+            box.setChecked(states != null && seriesIndex < states.length
+                    ? states[seriesIndex] : s.on);
+            box.setOnCheckedChangeListener((button, checked) -> {
+                if (editingDefaults) {
+                    // 编辑态只改「待保存的默认」，不动当前曲线显示
+                    if (pendingDefaults != null && seriesIndex < pendingDefaults.length) {
+                        pendingDefaults[seriesIndex] = checked;
+                    }
+                } else {
+                    chartView.setSeriesEnabled(seriesIndex, checked);
+                }
+            });
             legendRow.setBreakBefore(box, ChartSeries.startsLegendRow(s));
             legendRow.addView(box);
             boxes[i] = box;
@@ -740,6 +784,77 @@ public class ChartFragment extends Fragment {
         }
     }
 
+    // ==================== 「修改默认」编辑态 ====================
+
+    /**
+     * 文字开关：进入时把图例切成「默认打开项」的编辑态；再点一次把当前图例勾选保存为新默认。
+     * 文字与图例同一次淡出→换内容→淡入（复用状态页换字那套 Motion.fadeSwap）。
+     */
+    private void toggleDefaultsEditing() {
+        if (chartView == null || legendRow == null) {
+            return;
+        }
+        if (!editingDefaults) {
+            editingDefaults = true;
+            pendingDefaults = chartView.defaultStates();
+            Motion.fadeSwap(() -> {
+                if (!isAdded() || chartView == null || legendRow == null) {
+                    return;   // 淡变期间页面已销毁：不再碰视图
+                }
+                if (defaultsToggle != null) {
+                    defaultsToggle.setText(R.string.chart_defaults_done);
+                }
+                buildLegend();
+            }, defaultsToggle, legendRow);
+            return;
+        }
+        final boolean[] saved = pendingDefaults != null
+                ? pendingDefaults.clone() : chartView.defaultStates();
+        editingDefaults = false;
+        pendingDefaults = null;
+        // 落盘不依赖视图存活：先排写，再播淡变；淡变期间退出页面也不丢这次保存
+        persistSeriesDefaults(saved);
+        Motion.fadeSwap(() -> {
+            if (!isAdded() || chartView == null || legendRow == null) {
+                return;
+            }
+            if (defaultsToggle != null) {
+                defaultsToggle.setText(R.string.chart_defaults_edit);
+            }
+            chartView.applySeriesStates(saved);   // 当前显示同步成新默认，图例与曲线一致
+            buildLegend();
+        }, defaultsToggle, legendRow);
+    }
+
+    /** 把 10 个开关写成 {@code UI_CHART_SERIES}；后台一次原子写，失败只提示不阻断界面。 */
+    private void persistSeriesDefaults(@NonNull boolean[] states) {
+        if (!isAdded()) {
+            return;
+        }
+        final Context app = requireContext().getApplicationContext();
+        final int[] values = new int[states.length];
+        for (int i = 0; i < states.length; i++) {
+            values[i] = states[i] ? 1 : 0;
+        }
+        Thread thread = new Thread(() -> {
+            Map<String, ConfigStore.Value> changes = new HashMap<>();
+            changes.put("UI_CHART_SERIES", ConfigStore.Value.ofNumbers(values));
+            ConfigStore.WriteResult result = ConfigStore.get(app).setAll(changes);
+            mainHandler.post(() -> {
+                if (!isAdded()) {
+                    return;
+                }
+                if (result.ok) {
+                    configStale = true;   // 下一拍重读配置，默认值从此以新写入的为准
+                } else {
+                    Toast.makeText(requireContext(), result.describe(), Toast.LENGTH_LONG).show();
+                }
+            });
+        }, "ww-chart-defaults");
+        thread.setDaemon(true);
+        thread.start();
+    }
+
     /**
      * 档位按钮：首帧用回落档位、真配置到达后换成 {@code chart.windowOptionsSec}（读不到时同样回落常量）。
      * 选中值优先保留 {@code selectedSec}（用户已选档），不在新集合里才回落默认档，再不行取第一档。
@@ -755,6 +870,10 @@ public class ChartFragment extends Fragment {
                     R.layout.item_chart_window_button, windowGroup, false);
             b.setId(View.generateViewId());
             b.setText(getString(R.string.chart_window_btn_fmt, sec));
+            // 同一行还要放右侧「修改默认」：把档位按钮左右内边距从 space_s 收到 space_xs，
+            // 6 个按钮 + 文字开关才能在 360dp 屏的卡片内容宽内排下（不缩字、不改共用布局）
+            int pad = getResources().getDimensionPixelSize(R.dimen.space_xs);
+            b.setPadding(pad, b.getPaddingTop(), pad, b.getPaddingBottom());
             b.setTag(sec);
             windowGroup.addView(b);
         }

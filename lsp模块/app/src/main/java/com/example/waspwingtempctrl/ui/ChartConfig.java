@@ -60,6 +60,11 @@ final class ChartConfig {
     boolean swapRpm;
     /** CPU 温度平滑系数 {@code CPU_FILTER_ALPHA}（1~100，新值权重百分比）；只供「C平滑」曲线复刻 daemon。 */
     int cpuFilterAlpha = 25;
+    /**
+     * 图例的默认打开项（{@code UI_CHART_SERIES} 的 10 个 0/1），顺序与 {@link ChartSeries#createAll()} 一致。
+     * 图例「修改默认」把它写成新默认；页面首次拿到配置时按它初始化各系列开关。
+     */
+    boolean[] seriesDefaults = ChartSeries.copyDefaults();
 
     int[] windowOptions = FALLBACK_WINDOW_OPTIONS.clone();
     int windowDefaultSec = FALLBACK_WINDOW_DEFAULT;
@@ -169,6 +174,11 @@ final class ChartConfig {
         coldMax = coldHigh > 0 ? coldHigh : 190;
         // CPU 温度平滑系数：只影响「C平滑」那条曲线的复刻结果，与曲线滤波 UI_CURVE_FILTER 无关
         cpuFilterAlpha = single(store, snap, "CPU_FILTER_ALPHA", 0, 25);
+        // 图例默认开关（10 值）：缺项按出厂默认（C平滑为 0），已写入的用户值原样保留
+        boolean[] defaults = ChartSeries.copyDefaults();
+        for (int i = 0; i < seriesDefaults.length; i++) {
+            seriesDefaults[i] = field(store, snap, "UI_CHART_SERIES", i, defaults[i] ? 1 : 0) != 0;
+        }
     }
 
     /**

@@ -67,6 +67,11 @@
 
     <!-- 日志页 -->
     <dimen name="log_line_spacing">2dp</dimen>
+    <!--
+        来源选择器（daemon / LSPosed）的圆角：比 chip_radius(8dp) 小一档取 4dp。
+        只给这一个选择器用（LogFragment 运行时 setCornerRadius），曲线页档位按钮仍用 chip_radius。
+    -->
+    <dimen name="log_source_corner_radius">4dp</dimen>
 
     <!--
         输入框高度：日志关键词搜索框与配置页各输入框共用同一个值（要求两者等高）。

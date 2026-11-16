@@ -21,6 +21,10 @@
     <!-- ===== 档位按钮 ===== -->
     <string name="chart_window_btn_fmt">%1$ds</string>
 
+    <!-- 「修改默认」文字开关：常态编辑默认打开项，编辑态结束并保存 -->
+    <string name="chart_defaults_edit">修改默认</string>
+    <string name="chart_defaults_done">修改结束</string>
+
     <!-- ===== 曲线系列（图例） ===== -->
     <string name="chart_series_batt">电池℃</string>
     <string name="chart_series_hot">热端℃</string>

@@ -150,7 +150,9 @@ final class ConfigGroupBinder {
         }
         suppressMaster = true;
         try {
+            // 程序化回填不播开关动画（与键行/字段开关同一口径）
             masterSwitch.setChecked(value.intAt(0) != 0);
+            masterSwitch.jumpDrawablesToCurrentState();
         } finally {
             suppressMaster = false;
         }

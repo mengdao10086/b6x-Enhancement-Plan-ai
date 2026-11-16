@@ -29,24 +29,41 @@
             android:orientation="vertical"
             android:padding="@dimen/card_padding">
 
-            <TextView
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:text="@string/log_section_file"
-                android:textAppearance="@style/TextAppearance.B6XTempCtrl.SectionTitle" />
-
             <!--
-                来源选择器：与配置页 enum 键、曲线页窗口档位同源的 MaterialButtonToggleGroup
-                （单选 + 必选）。按钮由 LogFragment 复用 item_chart_window_button.xml 逐个加进来，
-                不另造一套控件；选项顺序与 SOURCE_DAEMON / SOURCE_LSPOSED 一致。
+                标题与来源选择器同一行：标题靠左、按钮组靠右（中间用 weight=1 的空 View 吃掉余宽）。
+                不另起一行，路径行因此紧贴标题行下方。
             -->
-            <com.google.android.material.button.MaterialButtonToggleGroup
-                android:id="@+id/log_source_group"
-                android:layout_width="wrap_content"
+            <LinearLayout
+                android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:layout_marginTop="@dimen/space_s"
-                app:selectionRequired="true"
-                app:singleSelection="true" />
+                android:gravity="center_vertical"
+                android:orientation="horizontal">
+
+                <TextView
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="@string/log_section_file"
+                    android:textAppearance="@style/TextAppearance.B6XTempCtrl.SectionTitle" />
+
+                <View
+                    android:layout_width="0dp"
+                    android:layout_height="0dp"
+                    android:layout_weight="1" />
+
+                <!--
+                    来源选择器：与配置页 enum 键、曲线页窗口档位同源的 MaterialButtonToggleGroup
+                    （单选 + 必选）。按钮由 LogFragment 复用 item_chart_window_button.xml 逐个加进来，
+                    不另造一套控件；选项顺序与 SOURCE_DAEMON / SOURCE_LSPOSED 一致。
+                    圆角用 @dimen/log_source_corner_radius（比档位按钮小一档），只改本选择器。
+                -->
+                <com.google.android.material.button.MaterialButtonToggleGroup
+                    android:id="@+id/log_source_group"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_marginStart="@dimen/space_s"
+                    app:selectionRequired="true"
+                    app:singleSelection="true" />
+            </LinearLayout>
 
             <!-- 路径单独一行、不加标签：长路径可折行，不与时间抢宽度 -->
             <TextView
@@ -54,6 +71,8 @@
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
                 android:layout_marginTop="@dimen/space_s"
+                android:autoLink="none"
+                android:linksClickable="false"
                 android:text="@string/log_loading"
                 android:textAppearance="@style/TextAppearance.B6XTempCtrl.Mono"
                 android:textIsSelectable="true" />

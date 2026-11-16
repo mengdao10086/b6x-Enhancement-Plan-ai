@@ -7,6 +7,9 @@ import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
+import android.text.Spannable;
+import android.text.SpannableStringBuilder;
+import android.text.TextUtils;
 import android.view.LayoutInflater;
 import android.view.View;
 import android.view.ViewGroup;
@@ -73,11 +76,11 @@ public class StatusFragment extends Fragment implements SetupActivity.PageAware 
     /** 页面可见期间的周期静默复探间隔：及时反映控制 app 被杀等外部状态变化。 */
     private static final long PERIODIC_REFRESH_MS = 5_000L;
     /** 手动刷新时文本淡出时长（旧层缩短，见 {@link #swapStatusTextAnimated}）。 */
-    private static final long FADE_OUT_MS = 180L;
+    private static final long FADE_OUT_MS = Motion.FADE_OUT_MS;
     /** 手动刷新时文本淡入时长。 */
-    private static final long FADE_IN_MS = 270L;
+    private static final long FADE_IN_MS = Motion.FADE_IN_MS;
     /** 旧层延后起播：等新层接近不透明再退，避免两层同时过淡的空档。 */
-    private static final long FADE_OUT_DELAY_MS = 105L;
+    private static final long FADE_OUT_DELAY_MS = Motion.FADE_OUT_DELAY_MS;
     /** 换字高度动画时长：与旧层淡出终点对齐（105 + 180 = 285ms），高度与淡变同起同止。 */
     private static final long HEIGHT_SYNC_MS = FADE_OUT_DELAY_MS + FADE_OUT_MS;
     /** 部署/拉起结果在状态区的最短保留时长：在此期间周期扫描不覆盖状态文本。 */
@@ -236,6 +239,7 @@ public class StatusFragment extends Fragment implements SetupActivity.PageAware 
     public void onViewCreated(@NonNull View view, @Nullable Bundle savedInstanceState) {
         super.onViewCreated(view, savedInstanceState);
         statusView = view.findViewById(R.id.status_text);
+        statusView.setText(prefillText());   // 首帧骨架的长短由「展示完整路径」决定
         statusOutgoingView = view.findViewById(R.id.status_text_outgoing);
         statusStack = view.findViewById(R.id.status_text_stack);
         infoView = view.findViewById(R.id.info_text);
@@ -308,12 +312,41 @@ public class StatusFragment extends Fragment implements SetupActivity.PageAware 
     @Override
     public void onResume() {
         super.onResume();
+        // 从设置页返回时「展示完整路径」可能已变：骨架还在（尚未被探测结果替换）就换成长/短版本
+        syncPrefillVariant();
         // 首次可见时先起首探（见 firstProbeIfNeeded），否则走静默刷新（不写记录、不播忙文本；
         // 结果到达仍走交叉淡入 + 高度补间）；手动路径的动画/记录不该被切页触发；静默刷新被 30 秒节流挡下。
         if (!firstProbeIfNeeded()) {
             refreshStatus(false);
         }
         startPeriodicRefresh();
+    }
+
+    /** 首次探测前的骨架文本：完整路径开关打开用长骨架，关闭用只含文件名的短骨架。 */
+    private String prefillText() {
+        return getString(PathDisplay.showFull(requireContext())
+                ? R.string.status_deploy_prefill : R.string.status_deploy_prefill_short);
+    }
+
+    /**
+     * 骨架还在屏幕上时按当前开关重选长短版本。探测结果到达后文本不再是任一骨架，这里就不动，
+     * 避免覆盖真实状态；开关变化因此在「首次探测前 / 下次进页」都能生效。
+     */
+    private void syncPrefillVariant() {
+        TextView view = statusView;
+        if (view == null || !isAdded()) {
+            return;
+        }
+        String current = view.getText().toString();
+        String longText = getString(R.string.status_deploy_prefill);
+        String shortText = getString(R.string.status_deploy_prefill_short);
+        if (!current.equals(longText) && !current.equals(shortText)) {
+            return;
+        }
+        String want = PathDisplay.showFull(requireContext()) ? longText : shortText;
+        if (!current.equals(want)) {
+            view.setText(want);
+        }
     }
 
     @Override
@@ -484,7 +517,7 @@ public class StatusFragment extends Fragment implements SetupActivity.PageAware 
             TextCopy.runWhenSelectionEnds(view, this::flushPendingStatus);
         } else {
             cancelFade();   // 中断可能还在跑的上一次淡变，避免新文本半透明叠在旧层上
-            view.setText(replaced);
+            replaceFirstLine(view, end, placeholder);
         }
         return true;
     }
@@ -524,7 +557,7 @@ public class StatusFragment extends Fragment implements SetupActivity.PageAware 
             TextCopy.runWhenSelectionEnds(view, this::flushPendingStatus);
         } else {
             cancelFade();
-            view.setText(restored);
+            replaceFirstLine(view, end, backup);
         }
     }
 
@@ -532,6 +565,22 @@ public class StatusFragment extends Fragment implements SetupActivity.PageAware 
     private void clearDeployFirstLineBackup() {
         deployFirstLineBackup = null;
         deployFirstLinePlaceholder = null;
+    }
+
+    /**
+     * 只替换首行、保留其余行的 span：状态文本里的路径区间（短名显示时由 PathDisplay 标记）
+     * 与着色都在后续行，字符串拼接会整体丢 span，导致路径小卡失效。
+     */
+    private static void replaceFirstLine(TextView view, int end, String replacement) {
+        CharSequence current = view.getText();
+        if (current instanceof Spannable) {
+            SpannableStringBuilder span = new SpannableStringBuilder(current);
+            span.replace(0, Math.min(end, span.length()), replacement);
+            view.setText(span);
+            return;
+        }
+        String text = current == null ? "" : current.toString();
+        view.setText(replacement + text.substring(Math.min(end, text.length())));
     }
 
     /** 第一行结束位置（不含换行符）；无换行时返回整串长度。 */
@@ -621,7 +670,7 @@ public class StatusFragment extends Fragment implements SetupActivity.PageAware 
                 restoreDeployFirstLineIfNeeded();
                 showDismissOnOutside(new AlertDialog.Builder(requireContext())
                         .setTitle(R.string.status_dialog_failed)
-                        .setMessage(result)
+                        .setMessage(PathDisplay.format(requireContext(), result))
                         .setPositiveButton(R.string.status_dialog_close, null)
                         .create());
                 return;
@@ -1042,7 +1091,7 @@ public class StatusFragment extends Fragment implements SetupActivity.PageAware 
                     showDismissOnOutside(new AlertDialog.Builder(requireContext())
                             .setTitle(isFailure ? R.string.status_dialog_failed
                                     : R.string.status_dialog_diag)
-                            .setMessage(result)
+                            .setMessage(PathDisplay.format(requireContext(), result))
                             .setPositiveButton(R.string.status_dialog_close, null)
                             .create());
                 } else if (manual) {
@@ -1244,6 +1293,8 @@ public class StatusFragment extends Fragment implements SetupActivity.PageAware 
         if (view == null || !isAdded()) {
             return;
         }
+        // 路径显示口径实时现取：上屏文本按「展示完整路径」开关裁剪，测量也按裁剪后的文本
+        final CharSequence shown = PathDisplay.format(view.getContext(), text);
         // 正选中时推迟上屏：setText 会清掉选择与手柄。结果不丢——存起来，选择一结束就补
         if (TextCopy.isSelecting(view)) {
             pendingStatusText = text;
@@ -1257,7 +1308,7 @@ public class StatusFragment extends Fragment implements SetupActivity.PageAware 
             // 系统关掉动画（或叠放层缺失）：直接换文本，信息先可读
             cancelFade();
             view.setAlpha(1f);
-            view.setText(text);
+            view.setText(shown);
             return;
         }
         final int generation = ++fadeGeneration;
@@ -1277,7 +1328,7 @@ public class StatusFragment extends Fragment implements SetupActivity.PageAware 
                 }
             }
         } else {
-            final int newStackHeight = measureStatusStackHeight(text);
+            final int newStackHeight = measureStatusStackHeight(shown);
             if (newStackHeight > 0) {
                 final int from = currentStatusStackHeight();
                 if (from > 0) {
@@ -1290,7 +1341,7 @@ public class StatusFragment extends Fragment implements SetupActivity.PageAware 
         outgoing.setVisibility(View.VISIBLE);
         // 业务上屏：立即，不等动画；先置透明再写文本，避免新文本以不透明状态先露一帧
         view.setAlpha(0f);
-        view.setText(text);
+        view.setText(shown);
         view.animate().alpha(1f).setDuration(FADE_IN_MS).setInterpolator(Motion.easeOut()).start();
         // 旧层延后起播并缩短：新层接近不透明时旧层才退，任一帧至少一层接近不透明，消除中间空档
         outgoing.animate().alpha(0f).setDuration(FADE_OUT_MS)
@@ -1418,7 +1469,7 @@ public class StatusFragment extends Fragment implements SetupActivity.PageAware 
         if (TextCopy.isSelecting(logView)) {
             TextCopy.runWhenSelectionEnds(logView, this::flushPendingLog);
         } else {
-            logView.setText(logText);
+            logView.setText(PathDisplay.format(requireContext(), logText));
         }
         if (archive != null) {
             archive.append(line);
@@ -1431,7 +1482,7 @@ public class StatusFragment extends Fragment implements SetupActivity.PageAware 
     /** 选中结束后把操作记录的最新全文补进视图。 */
     private void flushPendingLog() {
         if (logView != null && !TextCopy.isSelecting(logView)) {
-            logView.setText(logText);
+            logView.setText(PathDisplay.format(requireContext(), logText));
         }
     }
 
@@ -1453,9 +1504,10 @@ public class StatusFragment extends Fragment implements SetupActivity.PageAware 
             text = getString(R.string.status_archive_hint,
                     info.dir.getAbsolutePath(), info.count, formatBytes(info.bytes));
         }
+        CharSequence shown = PathDisplay.format(requireContext(), text);
         // 文本没变就不动视图：逐条刷新时避免无谓的重排
-        if (!text.contentEquals(archiveHintView.getText())) {
-            archiveHintView.setText(text);
+        if (!TextUtils.equals(shown, archiveHintView.getText())) {
+            archiveHintView.setText(shown);
         }
     }
 

@@ -75,7 +75,7 @@ final class LogTailReader {
         final int tailLines;
         /** 参与匹配的行数 = min(tailLines, lineLimit)，即界面上的「最近 N 行」。 */
         final int candidateLines;
-        /** 本来源的渲染行数上限（daemon 3000 / LSPosed 1500）。 */
+        /** 本来源的渲染行数上限（daemon 3000 / LSPosed 1200）。 */
         final int lineLimit;
         /** 本来源的尾读字节上限（daemon 200k / LSPosed 400k），只用于统计行展示。 */
         final int byteLimit;

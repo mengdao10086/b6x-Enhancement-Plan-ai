@@ -19,6 +19,9 @@
     <string name="status_loading">读取中…</string>
     <!-- 首次探测前的骨架：字段名与固定路径照抄 Deployer.Status#describe()，占位宽度与真实文本一致
          （md5 用 32 个 0、PID 用 00000），使结果到达时卡片高度基本不动；值处只用中性词，不断言探测结果。 -->
+    <!-- 「展示完整路径」关闭时的短骨架：字段与真实 describe() 相同，路径只留文件名，
+         占位宽度按文件名典型长度（tempctrl / b6x-tempctrl.sh / profile.conf）。 -->
+    <string name="status_deploy_prefill_short">"部署状态：正在检测\n  二进制 tempctrl：检测中，哈希尚未比对…\n    apk = 设备 = 00000000000000000000000000000000\n  service.d 脚本：b6x-tempctrl.sh\n    apk = 设备 = 00000000000000000000000000000000\n  配置 profile.conf：检测中\n  c-daemon：检测中（PID 00000）\n  sh-watchdog：检测中（PID 00000）"</string>
     <string name="status_deploy_prefill">"部署状态：正在检测\n  二进制 /data/local/tmp/tempctrl：检测中，哈希尚未比对…\n    apk = 设备 = 00000000000000000000000000000000\n  service.d 脚本：/data/adb/service.d/b6x-tempctrl.sh\n    apk = 设备 = 00000000000000000000000000000000\n  配置 /data/user/0/com.example.waspwingtempctrl/files/profile.conf：检测中\n  c-daemon：检测中（PID 00000）\n  sh-watchdog：检测中（PID 00000）"</string>
     <string name="status_action_refresh">刷新状态</string>
     <string name="status_action_deploy">一键部署</string>

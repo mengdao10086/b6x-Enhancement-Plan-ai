@@ -19,6 +19,8 @@ import android.view.animation.PathInterpolator;
 import android.widget.ImageView;
 import android.widget.TextView;
 
+import androidx.annotation.Nullable;
+
 import com.example.waspwingtempctrl.R;
 
 import java.util.WeakHashMap;
@@ -169,6 +171,83 @@ public final class Motion {
     /** 表单首次露面淡入的时长（ms）与起始下移（dp）。 */
     private static final long REVEAL_MS = 150L;
     private static final float REVEAL_TRANSLATE_DP = 6f;
+
+    /**
+     * 交叉淡入淡出的三段时长（毫秒），与状态页「部署状态」换字同源：新层淡入
+     * {@link #FADE_IN_MS}、旧层延后 {@link #FADE_OUT_DELAY_MS} 起播并用 {@link #FADE_OUT_MS} 退场。
+     * 连续刷新时任一帧至少一层接近不透明，消除中间空档。
+     */
+    static final long FADE_IN_MS = 270L;
+    static final long FADE_OUT_MS = 180L;
+    static final long FADE_OUT_DELAY_MS = 105L;
+
+    /**
+     * 两段式淡入淡出：先把给定视图淡出，再执行 {@code swap}（换来源 / 换图例），最后淡入。
+     *
+     * <p>用于「原地换内容、不能留半屏旧内容」的切换（日志来源、曲线默认项编辑态）。系统关掉动效、
+     * 或没有可淡的视图时直接执行 {@code swap}，不留半透明残影。时长复用状态页那套
+     * {@link #FADE_OUT_MS} / {@link #FADE_IN_MS}，曲线统一用 {@link #EASE_OUT}。
+     */
+    /** 每个锚点视图的淡变代号：取消/重入时旧回调对不上号即作废，不会提前执行 swap。 */
+    private static final java.util.WeakHashMap<View, Integer> FADE_TOKENS =
+            new java.util.WeakHashMap<>();
+
+    static void fadeSwap(@Nullable Runnable swap, @Nullable View... targets) {
+        if (swap == null) {
+            return;
+        }
+        java.util.List<View> views = new java.util.ArrayList<>();
+        if (targets != null) {
+            for (View v : targets) {
+                if (v != null) {
+                    views.add(v);
+                }
+            }
+        }
+        if (views.isEmpty() || !enabled(views.get(0).getContext())) {
+            for (View v : views) {
+                v.setAlpha(1f);
+            }
+            swap.run();
+            return;
+        }
+        View anchor = views.get(0);
+        int token = 1 + (FADE_TOKENS.get(anchor) == null ? 0 : FADE_TOKENS.get(anchor));
+        FADE_TOKENS.put(anchor, token);
+        for (View v : views) {
+            v.animate().cancel();
+        }
+        View last = views.get(views.size() - 1);
+        for (int i = 0; i < views.size() - 1; i++) {
+            views.get(i).animate().alpha(0f).setDuration(FADE_OUT_MS)
+                    .setInterpolator(EASE_OUT).start();
+        }
+        last.animate().alpha(0f).setDuration(FADE_OUT_MS).setInterpolator(EASE_OUT)
+                .withEndAction(() -> {
+                    if (FADE_TOKENS.get(anchor) == null || FADE_TOKENS.get(anchor) != token) {
+                        return;   // 已被新一次淡变接管：这次的内容切换不再执行
+                    }
+                    swap.run();
+                    for (View v : views) {
+                        v.setAlpha(0f);
+                        v.animate().alpha(1f).setDuration(FADE_IN_MS)
+                                .setInterpolator(EASE_OUT).start();
+                    }
+                }).start();
+    }
+
+    /** 选中态切换的过渡：选中项恢复不透明、未选中项压到 55%，时长与曲线同淡变。 */
+    static void animateSelected(@Nullable View view, boolean selected) {
+        if (view == null) {
+            return;
+        }
+        float target = selected ? 1f : 0.55f;
+        if (!enabled(view.getContext())) {
+            view.setAlpha(target);
+            return;
+        }
+        view.animate().alpha(target).setDuration(FADE_IN_MS).setInterpolator(EASE_OUT).start();
+    }
 
     /**
      * 表单首次露面的入场：容器从「透明 + 下移 {@link #REVEAL_TRANSLATE_DP}dp」淡入到位

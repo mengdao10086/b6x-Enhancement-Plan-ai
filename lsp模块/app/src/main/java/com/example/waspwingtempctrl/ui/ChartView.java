@@ -248,6 +248,42 @@ public class ChartView extends View {
         invalidate();
     }
 
+    /** 某系列的当前开关状态。 */
+    boolean isSeriesEnabled(int index) {
+        return index >= 0 && index < series.length && series[index].on;
+    }
+
+    /** 当前各系列开关的副本（顺序同 {@link ChartSeries#createAll()}）。 */
+    boolean[] enabledStates() {
+        boolean[] out = new boolean[series.length];
+        for (int i = 0; i < series.length; i++) {
+            out[i] = series[i].on;
+        }
+        return out;
+    }
+
+    /** 配置里的默认打开项；配置缺失时取出厂默认。 */
+    boolean[] defaultStates() {
+        boolean[] out = ChartSeries.copyDefaults();
+        if (config != null && config.seriesDefaults != null) {
+            System.arraycopy(config.seriesDefaults, 0, out, 0,
+                    Math.min(out.length, config.seriesDefaults.length));
+        }
+        return out;
+    }
+
+    /** 页面首次拿到配置 / 退出「修改默认」时：按给定数组整体切换各系列。 */
+    void applySeriesStates(boolean[] states) {
+        if (states == null) {
+            return;
+        }
+        for (int i = 0; i < series.length && i < states.length; i++) {
+            series[i].on = states[i];
+        }
+        rebuild();
+        invalidate();
+    }
+
     /** 图例项定义（只读）。 */
     ChartSeries seriesAt(int index) {
         return series[index];
@@ -809,8 +845,8 @@ public class ChartView extends View {
      * 单个末端数值标签的落位（沿用原多系列标注的单锚点口径）：
      * 横向放锚点右侧 {@link #LABEL_GAP_DP}，右越界翻到左侧，左界钳到 2dp；
      * 纵向比较锚点上下空隙，优先选放得下且空隙更大的一侧，两侧都放不下时取空隙更大的一侧，
-     * 再钳在绘图区上沿与「画布下沿 − descent」之间。最多两条标签（实际制冷 / 实际rpm）同高时，
-     * 后放的一条上下错开一行，避免两条数字叠在一起。
+     * 再钳在绘图区上沿与「画布下沿 − descent」之间。与已放标签（实际制冷 / 实际rpm）同高且横向相交时，
+     * 后放的一条沿纵向逐行向外找空位（阈值 {@link #LABEL_H_DP}，行距一行 + 1dp），避免两条数字叠在一起。
      */
     private ChartLabelOp placeEndpointLabel(ChartSeries s, float v, float ex, float ey, int color,
                                             List<ChartLabelOp> placed) {
@@ -841,16 +877,30 @@ public class ChartView extends View {
         if (tx < 2f * density) {
             tx = 2f * density;
         }
+        // 与已放标签重叠时逐行向外找空位：只试一行会在「越界 RPM 锚点被钳到画布下沿、
+        // 下方已无空间」时把候选行全部否掉，旧实现随即回落到同一条重叠位置（看起来像没触发避让）。
+        // 阈值沿用既有 LABEL_H_DP（一行字高），行距 = 一行 + 1dp。
         float rowStep = LABEL_H_DP * density + 1f * density;
         if (overlapsLabel(placed, tx, textW, ly)) {
-            float down = ly + rowStep;
-            float up = ly - rowStep;
-            if (down <= labelMaxY && !overlapsLabel(placed, tx, textW, down)) {
-                ly = down;
-            } else if (up >= fPadT && !overlapsLabel(placed, tx, textW, up)) {
-                ly = up;
-            } else {
-                ly = Math.max(fPadT, Math.min(labelMaxY, down));
+            boolean found = false;
+            int maxSteps = placed.size() + 1;
+            for (int k = 1; k <= maxSteps && !found; k++) {
+                float down = ly + k * rowStep;
+                if (down <= labelMaxY && !overlapsLabel(placed, tx, textW, down)) {
+                    ly = down;
+                    found = true;
+                    break;
+                }
+                float up = ly - k * rowStep;
+                if (up >= fPadT && !overlapsLabel(placed, tx, textW, up)) {
+                    ly = up;
+                    found = true;
+                }
+            }
+            if (!found) {
+                // 上下都排满（标签数多于可用行数）：优先向上错开，至少不与最后一条同高
+                float up = Math.max(fPadT, ly - rowStep);
+                ly = up != ly ? up : Math.min(labelMaxY, ly + rowStep);
             }
         }
         return new ChartLabelOp(text, tx, ly, textW, color);

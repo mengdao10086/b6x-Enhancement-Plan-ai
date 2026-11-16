@@ -8,7 +8,8 @@ import java.util.Locale;
  * 一条曲线的静态定义与会话内开关状态。
  *
  * <p>图例顺序与默认开关（口径见 {@code app/逻辑说明.md} §7.6〈系列开关〉）：10 条曲线，
- * 默认除「冷端℃」「CPU℃」外全开；左轴 8 条（温度 ℃ 与风扇百 rpm 共轴），右轴 2 条
+ * 默认开：电池℃ / 实际制冷 / 实际rpm / 热端℃ / pid ℃ / 目标制冷 / 目标rpm；关：冷端℃ / CPU℃ / C平滑。
+ * 左轴 8 条（温度 ℃ 与风扇百 rpm 共轴），右轴 2 条
  * （目标制冷 / 实际制冷）。图例两行 5+5：第一行 电池℃ / 实际制冷 / 实际rpm / 热端℃ / 冷端℃，
  * 第二行 pid ℃ / 目标制冷 / 目标rpm / CPU℃ / C平滑。
  *
@@ -36,6 +37,20 @@ final class ChartSeries {
     /** 标注格式：整数原值（制冷档位）。 */
     static final int FMT_INT = 2;
 
+    /**
+     * 各系列的出厂默认开关，顺序与 {@link #createAll()} 一致：
+     * 电池℃ / 实际制冷 / 实际rpm / 热端℃ / 冷端℃ / pid ℃ / 目标制冷 / 目标rpm / CPU℃ / C平滑。
+     * C平滑默认关（参数 {@code UI_CHART_SERIES} 第 10 位默认 0）。
+     */
+    private static final boolean[] DEFAULTS = {
+            true, true, true, true, false, true, true, true, false, false
+    };
+
+    /** 出厂默认开关的副本（调用方可改）。 */
+    static boolean[] copyDefaults() {
+        return DEFAULTS.clone();
+    }
+
     /** 数据字段标识。 */
     final String id;
     final int labelRes;
@@ -57,31 +72,31 @@ final class ChartSeries {
     static ChartSeries[] createAll() {
         return new ChartSeries[]{
                 new ChartSeries("batt", R.string.chart_series_batt, R.color.chart_series_batt,
-                        AXIS_LEFT, FMT_TEMP, true),
+                        AXIS_LEFT, FMT_TEMP, DEFAULTS[0]),
                 // 实际制冷：强调方，图例第一行第二个
                 new ChartSeries("coolActual", R.string.chart_series_cool_actual,
-                        R.color.chart_series_cool_actual, AXIS_RIGHT, FMT_INT, true),
+                        R.color.chart_series_cool_actual, AXIS_RIGHT, FMT_INT, DEFAULTS[1]),
                 // 实际rpm：强调方，图例第一行第三个
                 new ChartSeries("rpmActual", R.string.chart_series_rpm_actual,
-                        R.color.chart_series_rpm_actual, AXIS_LEFT, FMT_RPM, true),
+                        R.color.chart_series_rpm_actual, AXIS_LEFT, FMT_RPM, DEFAULTS[2]),
                 new ChartSeries("hot", R.string.chart_series_hot, R.color.chart_series_hot,
-                        AXIS_LEFT, FMT_TEMP, true),
+                        AXIS_LEFT, FMT_TEMP, DEFAULTS[3]),
                 new ChartSeries("cold", R.string.chart_series_cold, R.color.chart_series_cold,
-                        AXIS_LEFT, FMT_TEMP, false),
+                        AXIS_LEFT, FMT_TEMP, DEFAULTS[4]),
                 // pid ℃ 是第二行行首
                 new ChartSeries("pid", R.string.chart_series_pid, R.color.chart_series_pid,
-                        AXIS_LEFT, FMT_TEMP, true),
+                        AXIS_LEFT, FMT_TEMP, DEFAULTS[5]),
                 // 目标制冷：参考方（默认），图例第二行第二个
                 new ChartSeries("cool", R.string.chart_series_cool, R.color.chart_series_cool,
-                        AXIS_RIGHT, FMT_INT, true),
+                        AXIS_RIGHT, FMT_INT, DEFAULTS[6]),
                 // 目标rpm：参考方（默认），图例第二行第三个
                 new ChartSeries("rpm", R.string.chart_series_rpm, R.color.chart_series_rpm,
-                        AXIS_LEFT, FMT_RPM, true),
+                        AXIS_LEFT, FMT_RPM, DEFAULTS[7]),
                 new ChartSeries("cpu", R.string.chart_series_cpu, R.color.chart_series_cpu,
-                        AXIS_LEFT, FMT_TEMP, false),
+                        AXIS_LEFT, FMT_TEMP, DEFAULTS[8]),
                 // C平滑：CPU 温度经 daemon 同款 EMA 滤波后的值，参考方样式（半透明实线、无末端圆点/数值）
                 new ChartSeries("cpuSmooth", R.string.chart_series_cpu_smooth,
-                        R.color.chart_series_cpu_smooth, AXIS_LEFT, FMT_TEMP, true),
+                        R.color.chart_series_cpu_smooth, AXIS_LEFT, FMT_TEMP, DEFAULTS[9]),
         };
     }
 

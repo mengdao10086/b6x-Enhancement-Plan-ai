@@ -344,7 +344,7 @@ public class UiSettingsFragment extends Fragment
                 }
                 AlertDialog dialog = new AlertDialog.Builder(requireContext())
                         .setTitle(R.string.config_settings_su_diag_dialog_title)
-                        .setMessage(result)
+                        .setMessage(PathDisplay.format(requireContext(), result))
                         .setPositiveButton(R.string.config_settings_su_diag_close, null)
                         .create();
                 dialog.setCanceledOnTouchOutside(true);

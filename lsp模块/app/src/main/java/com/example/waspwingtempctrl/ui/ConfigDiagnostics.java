@@ -132,7 +132,7 @@ final class ConfigDiagnostics {
         } else {
             // 有现成正文：**先上屏、再量高**——量高发生在正文之上，展开时长与终点才是最终实高（末尾不跳）。
             // 只读几个静态槽位，无 IO、无后台线程
-            stateView.setText(lastState);
+            stateView.setText(PathDisplay.format(stateView.getContext(), lastState));
             duration = Motion.animateHeight(body, true);
         }
         // 一副图标两种状态：展开转 90° 指向下、收起指右；时长来自上面那一次面板计算
@@ -334,9 +334,10 @@ final class ConfigDiagnostics {
         lastState = state;
         // 正选中时跳过本轮：setText 会清掉选择与手柄；选择结束后补上这一版正文
         if (TextCopy.isSelecting(stateView)) {
-            TextCopy.runWhenSelectionEnds(stateView, () -> stateView.setText(lastState));
+            TextCopy.runWhenSelectionEnds(stateView, () -> stateView.setText(
+                    PathDisplay.format(stateView.getContext(), lastState)));
         } else {
-            stateView.setText(state);
+            stateView.setText(PathDisplay.format(stateView.getContext(), state));
         }
         // 记账（旁路）：诊断正文上屏那一刻（首次写入胜出；诊断区在折叠体内，与首屏无关）
         StartupTiming.mark(StartupTiming.MARK_DIAG_APPLY);

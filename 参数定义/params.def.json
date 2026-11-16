@@ -2130,6 +2130,40 @@
       ]
     },
     {
+      "key": "UI_CHART_SERIES",
+      "group": "webui",
+      "role": "setting",
+      "type": "multi",
+      "label": "曲线默认开关",
+      "desc": "图例「修改默认」保存下来的默认打开项：按图例顺序记录 10 条曲线是否默认显示。修改后重启界面仍按这一套打开。仅影响界面显示。",
+      "docOrder": 55.2,
+      "docDesc": "曲线默认开关（10 个 0/1，默认 1 1 1 1 0 1 1 1 0 0）：图例「修改默认」保存的默认打开项，顺序为 电池℃ / 实际制冷 / 实际rpm / 热端℃ / 冷端℃ / pid ℃ / 目标制冷 / 目标rpm / CPU℃ / C平滑；重启界面后按这一套默认值初始化图例。**仅界面读取，守护进程忽略**",
+      "confNote": [
+        "曲线默认开关（10 个 0/1，顺序同图例）：图例「修改默认」保存的默认打开项，重启界面后按这一套初始化"
+      ],
+      "unit": "",
+      "unitNote": "10 个开关，各自取值 0/1，无单位",
+      "default": [1, 1, 1, 1, 0, 1, 1, 1, 0, 0],
+      "factory": [1, 1, 1, 1, 0, 1, 1, 1, 0, 0],
+      "min": null,
+      "max": null,
+      "rangeNote": "10 值均 0/1；顺序与图例一致；本组为界面专用参数（守护进程不读取），范围取自界面实现",
+      "requires": [],
+      "daemonConsumes": false,
+      "fields": [
+        { "bool": true, "label": "电池℃", "unit": "", "unitNote": "0/1", "min": 0, "max": 1, "default": 1, "cVar": null },
+        { "bool": true, "label": "实际制冷", "unit": "", "unitNote": "0/1", "min": 0, "max": 1, "default": 1, "cVar": null },
+        { "bool": true, "label": "实际rpm", "unit": "", "unitNote": "0/1", "min": 0, "max": 1, "default": 1, "cVar": null },
+        { "bool": true, "label": "热端℃", "unit": "", "unitNote": "0/1", "min": 0, "max": 1, "default": 1, "cVar": null },
+        { "bool": true, "label": "冷端℃", "unit": "", "unitNote": "0/1", "min": 0, "max": 1, "default": 0, "cVar": null },
+        { "bool": true, "label": "pid ℃", "unit": "", "unitNote": "0/1", "min": 0, "max": 1, "default": 1, "cVar": null },
+        { "bool": true, "label": "目标制冷", "unit": "", "unitNote": "0/1", "min": 0, "max": 1, "default": 1, "cVar": null },
+        { "bool": true, "label": "目标rpm", "unit": "", "unitNote": "0/1", "min": 0, "max": 1, "default": 1, "cVar": null },
+        { "bool": true, "label": "CPU℃", "unit": "", "unitNote": "0/1", "min": 0, "max": 1, "default": 0, "cVar": null },
+        { "bool": true, "label": "C平滑", "unit": "", "unitNote": "0/1", "min": 0, "max": 1, "default": 0, "cVar": null }
+      ]
+    },
+    {
       "key": "UI_START_PAGE",
       "group": "webui",
       "role": "setting",
@@ -2204,6 +2238,28 @@
           "cVar": null
         }
       ]
+    },
+    {
+      "key": "UI_FULL_PATH",
+      "group": "webui",
+      "role": "setting",
+      "type": "switch",
+      "label": "展示完整路径",
+      "desc": "开启后界面上的文件路径显示完整路径；关闭时只显示最后一段文件名。仅影响界面显示。",
+      "docOrder": 63.1,
+      "docDesc": "展示完整路径（0/1，默认 0）：开启后日志页、状态页、部署信息与曲线诊断里的文件路径显示完整路径；关闭时只显示最后一段文件名（路径仍可点按复制/跳转）。**仅界面读取，守护进程忽略**",
+      "confNote": [
+        "展示完整路径（0/1，默认 0）：开启后文件路径显示完整路径；关闭时只显示最后一段文件名"
+      ],
+      "unit": "",
+      "unitNote": "开关，取值 0/1，无单位",
+      "default": 0,
+      "factory": 0,
+      "min": 0,
+      "max": 1,
+      "requires": [],
+      "daemonConsumes": false,
+      "fields": null
     },
     {
       "key": "UI_TEMP_STOP",

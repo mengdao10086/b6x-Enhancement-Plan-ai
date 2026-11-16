@@ -37,13 +37,45 @@
             android:paddingEnd="@dimen/space_s"
             android:paddingBottom="0dp">
 
-            <!-- ===== ① 时间窗口档位：一行自然宽，不缩放 ===== -->
-            <com.google.android.material.button.MaterialButtonToggleGroup
-                android:id="@+id/chart_window_group"
-                android:layout_width="wrap_content"
+            <!--
+                ===== ① 时间窗口档位 + 「修改默认」=====
+                档位按钮自然宽靠左，绿色文字开关靠右（weight=1 的空 View 吃掉余宽）。
+                文字开关只切换图例的编辑态：常态「修改默认」、编辑态「修改结束」。
+            -->
+            <LinearLayout
+                android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                app:selectionRequired="true"
-                app:singleSelection="true" />
+                android:gravity="center_vertical"
+                android:orientation="horizontal">
+
+                <com.google.android.material.button.MaterialButtonToggleGroup
+                    android:id="@+id/chart_window_group"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    app:selectionRequired="true"
+                    app:singleSelection="true" />
+
+                <View
+                    android:layout_width="0dp"
+                    android:layout_height="0dp"
+                    android:layout_weight="1" />
+
+                <TextView
+                    android:id="@+id/chart_defaults_toggle"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:background="?attr/selectableItemBackgroundBorderless"
+                    android:clickable="true"
+                    android:focusable="true"
+                    android:maxLines="1"
+                    android:paddingStart="@dimen/space_xs"
+                    android:paddingTop="@dimen/space_xs"
+                    android:paddingEnd="@dimen/space_xs"
+                    android:paddingBottom="@dimen/space_xs"
+                    android:text="@string/chart_defaults_edit"
+                    android:textColor="@color/state_ok"
+                    android:textSize="@dimen/text_caption" />
+            </LinearLayout>
 
             <!--
                 ===== ② 图例：固定 5+5 两行，窄屏按统一比例 k 整体等比缩放 =====

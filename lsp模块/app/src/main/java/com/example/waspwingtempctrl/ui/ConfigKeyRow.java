@@ -144,7 +144,7 @@ final class ConfigKeyRow {
         void setValue(int value) {
             long startedAt = StartupTiming.accBegin(StartupTiming.FORM_SUB_FILL);
             if (toggle != null) {
-                toggle.setChecked(value != 0);
+                setCheckedSilently(toggle, value != 0);
             } else {
                 setTextIfChanged(input, String.valueOf(value));
             }
@@ -436,7 +436,7 @@ final class ConfigKeyRow {
         public void applyValue(@NonNull Value value) {
             suppressChange = true;
             try {
-                switchView.setChecked(value.intAt(0) != 0);
+                setCheckedSilently(switchView, value.intAt(0) != 0);
             } finally {
                 suppressChange = false;
             }
@@ -1536,6 +1536,15 @@ final class ConfigKeyRow {
     }
 
     /** 开关的提交：0/1 只有两个完整状态，切换即排入防抖队列。 */
+    /**
+     * 程序化写开关值：写完立即跳到当前帧状态，<b>不播开/关动画</b>。页面首次建表回填「开」时，
+     * 默认动画会把末尾播一遍，看起来像自己闪了一下；只有用户点击才应该看到动画。
+     */
+    private static void setCheckedSilently(@NonNull MaterialSwitch toggle, boolean checked) {
+        toggle.setChecked(checked);
+        toggle.jumpDrawablesToCurrentState();
+    }
+
     static void commitSwitch(@NonNull MaterialSwitch toggle, @NonNull KeyMeta meta,
                              @NonNull Host host) {
         int target = toggle.isChecked() ? 1 : 0;

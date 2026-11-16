@@ -45,13 +45,13 @@ final class LogLsposedReader {
     static final int TAIL_BYTES = 400 * 1024;
 
     /**
-     * 行数上限取 1500 行（超过时只保留尾部）。
+     * 行数上限取 1200 行（超过时只保留尾部）。
      * 尾读字节上限 400k 在实测平均行长 315.9 字节（样本
      * {@code modules_2026-11-14T22_31_24.363893 (7).log} 中本模块 565 条 header 共
-     * 178,506 字节含换行）下约合 1296 行，因此通常先由字节上限截断；
-     * 1500 是行数硬上限，字节不足时仍可显示更多行。
+     * 178,506 字节含换行）下约合 1296 行；1200 是行数硬上限，留出余量避免尾部窗口
+     * 随字节上限截断位置来回跳。
      */
-    static final int MAX_LINES = 1500;
+    static final int MAX_LINES = 1200;
 
     private static final long EXEC_TIMEOUT_MS = 15_000L;
 

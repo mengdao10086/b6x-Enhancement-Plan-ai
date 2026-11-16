@@ -5,6 +5,7 @@ import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
 import android.text.Editable;
+import android.text.TextUtils;
 import android.text.TextWatcher;
 import android.view.LayoutInflater;
 import android.view.MotionEvent;
@@ -45,8 +46,8 @@ import java.util.Locale;
 public class LogFragment extends Fragment
         implements SetupActivity.PageAware, LogListAdapter.LineGestureListener {
 
-    /** 自动刷新间隔。 */
-    private static final long REFRESH_INTERVAL_MS = 2000L;
+    /** 自动刷新间隔：两个来源各自按这个节拍刷新一次（daemon 直读 / LSPosed 走 root）。 */
+    private static final long REFRESH_INTERVAL_MS = 5000L;
     /** 输入关键词后的去抖间隔（过滤本身在后台线程做）。 */
     private static final long FILTER_DEBOUNCE_MS = 250L;
     /** 拖动扩选：离列表上下边界几行以内开始自动滚动（按可见行实测行高换算）。 */
@@ -113,14 +114,36 @@ public class LogFragment extends Fragment
     private boolean refreshing;
     /** 是否跟随底部（由滚动位置驱动，不靠猜）。 */
     private boolean following = true;
-    /** 当前在跑的后台读取线程；存活时不再起新的。 */
-    private Thread worker;
-    private String lastFingerprint;
-    private String lastKeyword;
+    /**
+     * 每个来源各一根后台读取线程与一份缓存：两个来源都持续加载，换源时直接用缓存上屏，
+     * 不现读现等。线程存活时该来源不再起新的（防重入）。
+     */
+    private final Thread[] workers = new Thread[2];
+    private final SourceCache[] caches = new SourceCache[2];
+    /** 当前已上屏列表的渲染指纹（与来源绑定；换源/关键词变化时清空，强制重绘一次）。 */
+    private String onScreenLinesFp;
+    /** 换源淡出淡入进行中：期间到达的新快照只进缓存，等动画把当前来源画出来时再用。 */
+    private boolean sourceSwapPending;
     /** 上次自动跟随滚到的行数；相同且已在底部就不再滚，避免反复唤醒滚动条。 */
     private int lastFollowCount = -1;
-    /** 来源切换代数：换源时自增，用来丢弃换源前那次读取的回包。 */
-    private int loadGeneration;
+    /** 用户正在拖动/惯性滑动：期间到达的快照先挂起，回到 IDLE 再上屏（避免滑动中行数跳变）。 */
+    private boolean scrolling;
+    private LogTailReader.Snapshot pendingSnap;
+    private String pendingKeyword;
+
+    /** 一个来源最近一次读取结果。{@code fileFp} 只用于让读取层跳过「文件没变」的重复解析。 */
+    private static final class SourceCache {
+        final LogTailReader.Snapshot snapshot;
+        final String keyword;
+        @Nullable
+        final String fileFp;
+
+        SourceCache(LogTailReader.Snapshot snapshot, String keyword, @Nullable String fileFp) {
+            this.snapshot = snapshot;
+            this.keyword = keyword;
+            this.fileFp = fileFp;
+        }
+    }
 
     private final Runnable tick = new Runnable() {
         @Override
@@ -128,7 +151,7 @@ public class LogFragment extends Fragment
             if (!refreshing) {
                 return;
             }
-            loadNow();
+            loadBoth();
             mainHandler.postDelayed(this, REFRESH_INTERVAL_MS);
         }
     };
@@ -139,7 +162,13 @@ public class LogFragment extends Fragment
             if (!refreshing) {
                 return;   // 页面已不可见，不为了过滤白跑一次 IO
             }
-            loadNow();
+            // 关键词变了：两份缓存都不再代表当前过滤结果，作废后两个来源一起重读
+            caches[0] = null;
+            caches[1] = null;
+            pendingSnap = null;        // 挂起的旧关键词快照不能在新过滤下上屏
+            pendingKeyword = null;
+            onScreenLinesFp = null;
+            loadBoth();
         }
     };
 
@@ -174,7 +203,11 @@ public class LogFragment extends Fragment
         filterInput = view.findViewById(R.id.log_filter_input);
 
         adapter = new LogListAdapter(context, this);
-        listView.setLayoutManager(new LinearLayoutManager(context));
+        // 关掉平滑滚动条：它按「已排布子项的平均高度」外推总高，日志行高随折行不等，
+        // 滑动时可见子项不断换人 → 外推总高反复变化 → 拇指长度周期性抖动。关掉后按行数算，稳定。
+        LinearLayoutManager layoutManager = new LinearLayoutManager(context);
+        layoutManager.setSmoothScrollbarEnabled(false);
+        listView.setLayoutManager(layoutManager);
         // 日志行不做增删动画：整批替换时动画只会变成闪烁
         listView.setItemAnimator(null);
         listView.setAdapter(adapter);
@@ -188,6 +221,14 @@ public class LogFragment extends Fragment
                 // 滚到底（无法再向下滚）即恢复跟随；离开底部即暂停跟随
                 following = !rv.canScrollVertically(1);
                 updateFollowButton();
+            }
+
+            @Override
+            public void onScrollStateChanged(@NonNull RecyclerView rv, int newState) {
+                scrolling = newState != RecyclerView.SCROLL_STATE_IDLE;
+                if (!scrolling) {
+                    flushPendingSnapshot();
+                }
             }
         });
 
@@ -236,26 +277,34 @@ public class LogFragment extends Fragment
         sourceGroup.addOnButtonCheckedListener((group, checkedId, isChecked) -> {
             if (isChecked) {
                 selectSource(checkedId == sourceLsposedId ? SOURCE_LSPOSED : SOURCE_DAEMON);
+                updateSourceButtonAlpha(true);
             }
         });
+        updateSourceButtonAlpha(false);   // 初始选中态直接落位，页面打开时不播过渡
 
         infoView.setText(R.string.log_loading);
         timeView.setText("");
         statView.setText(R.string.log_loading);
         countView.setText("");
         lastFollowCount = -1;
-        // 视图重建后必须重读一次：指纹是「这次视图已经渲染过」的标记，
-        // 沿用旧值会让第一拍被 unchanged 短路，新视图永远停在「正在读取日志…」。
-        lastFingerprint = null;
-        lastKeyword = null;
+        // 视图重建后必须重画一次：指纹是「这套视图已经渲染过」的标记，沿用旧值会让第一拍被跳过
+        onScreenLinesFp = null;
         TextCopy.installPathSelection(view);
+    }
+
+    @Override
+    public void onStart() {
+        super.onStart();
+        if (pageVisible && isResumed()) {
+            startRefresh();
+        }
     }
 
     @Override
     public void onResume() {
         super.onResume();
         if (pageVisible) {
-            startRefresh();
+            startRefresh();   // startRefresh 立即刷一拍，两个来源同时补最新
         }
     }
 
@@ -263,6 +312,12 @@ public class LogFragment extends Fragment
     public void onPause() {
         stopRefresh();
         super.onPause();
+    }
+
+    @Override
+    public void onStop() {
+        stopRefresh();
+        super.onStop();
     }
 
     @Override
@@ -321,48 +376,67 @@ public class LogFragment extends Fragment
 
     // ==================== 刷新节奏 ====================
 
-    /** 切换来源：清掉上一次的指纹与跟随状态，让下一拍一定重新读。 */
+    /**
+     * 切换来源：<b>不现读现等</b>——两个来源一直在后台刷新，这里直接取那份缓存；内容整体
+     * 淡出→换数据→淡入（与状态页「部署状态」同一套时长/曲线），避免硬切闪屏。
+     */
     private void selectSource(int index) {
         int next = clampSource(index);
         if (next == sourceIndex) {
             return;
         }
         sourceIndex = next;
-        loadGeneration++;
         if (isSelectingLines()) {
             exitSelection();   // 选中区间属于旧来源的行，换源后不能再沿用
         }
-        lastFingerprint = null;
-        lastKeyword = null;
         following = true;   // 换了一份日志，默认仍看最新
         lastFollowCount = -1;
+        onScreenLinesFp = null;
+        sourceSwapPending = true;
+        // 缓存可能还没有（首次进页/刚清过滤关键词）：立刻补一次，不等下一拍 5 秒
+        loadNow(currentSource());
+        Motion.fadeSwap(() -> {
+            sourceSwapPending = false;
+            SourceCache cache = caches[sourceIndex];
+            if (listView == null) {
+                return;
+            }
+            if (cache != null && cache.keyword.equals(currentKeyword())) {
+                render(cache.snapshot, cache.keyword);
+            } else {
+                showLoadingState();
+            }
+        }, infoView, timeView, statView, countView, listView, emptyView, failureScroll);
+    }
+
+    /** 读不到缓存时的占位：与首进页一致，绝不留旧来源的行。 */
+    private void showLoadingState() {
         if (infoView != null) {
-            infoView.setText(R.string.log_loading);
+            setTextIfChanged(infoView, getString(R.string.log_loading));
         }
         if (timeView != null) {
-            timeView.setText("");
+            setTextIfChanged(timeView, "");
         }
         if (statView != null) {
-            statView.setText(R.string.log_loading);
+            setTextIfChanged(statView, getString(R.string.log_loading));
         }
         if (countView != null) {
             countView.setVisibility(View.GONE);
-            countView.setText("");
+            setTextIfChanged(countView, "");
         }
         if (emptyView != null) {
             emptyView.setVisibility(View.GONE);
         }
         if (failureScroll != null) {
-            failureScroll.setVisibility(View.GONE);   // 旧来源的诊断不能盖在新来源上
+            failureScroll.setVisibility(View.GONE);
         }
         if (listView != null) {
             listView.setVisibility(View.VISIBLE);
         }
         if (adapter != null) {
-            adapter.submit(java.util.Collections.emptyList());   // 旧来源的行不能留在新来源标题下
+            adapter.submit(java.util.Collections.emptyList());
         }
         updateFollowButton();
-        loadNow();
     }
 
     /** 复用曲线页档位按钮的布局，加进来源按钮组；返回运行时生成的按钮 id。 */
@@ -372,13 +446,40 @@ public class LogFragment extends Fragment
         button.setId(View.generateViewId());
         button.setText(label);
         button.setAllCaps(false);   // 保留 daemon / LSPosed 原始大小写
+        // 只改来源选择器自己的圆角：曲线页档位按钮仍用 chip_radius
+        button.setCornerRadius(getResources().getDimensionPixelSize(
+                R.dimen.log_source_corner_radius));
         group.addView(button);
         return button.getId();
+    }
+
+    /**
+     * 选中态过渡：选中按钮恢复不透明，另一个压暗；复用 Motion 的时长与曲线。
+     * {@code animate = false} 用于首帧落位——页面打开时不该自己播一段动画。
+     */
+    private void updateSourceButtonAlpha(boolean animate) {
+        if (sourceGroup == null) {
+            return;
+        }
+        int checked = sourceGroup.getCheckedButtonId();
+        for (int i = 0; i < sourceGroup.getChildCount(); i++) {
+            View child = sourceGroup.getChildAt(i);
+            if (animate) {
+                Motion.animateSelected(child, child.getId() == checked);
+            } else {
+                child.setAlpha(child.getId() == checked ? 1f : 0.55f);
+            }
+        }
     }
 
     /** 下标只可能是 0 / 1；越界（旧版本保存值）按 daemon 处理。 */
     private static int clampSource(int index) {
         return index == SOURCE_LSPOSED ? SOURCE_LSPOSED : SOURCE_DAEMON;
+    }
+
+    /** 来源 → 缓存/线程槽位（与 SOURCE_D / SOURCE_L 常量一致）。 */
+    private static int slotOf(LogTailReader.Source source) {
+        return source == LogTailReader.Source.LSPOSED ? SOURCE_LSPOSED : SOURCE_DAEMON;
     }
 
     private LogTailReader.Source currentSource() {
@@ -403,33 +504,41 @@ public class LogFragment extends Fragment
         mainHandler.removeCallbacks(tick);
     }
 
-    /** 起一次后台读取（已有读取在跑就跳过，靠 2 秒定时补上）。 */
-    private void loadNow() {
+    /** 两个来源各刷一次：页面可见时每 5 秒都跑，切换来源因此不必现读。 */
+    private void loadBoth() {
+        loadNow(LogTailReader.Source.DAEMON);
+        loadNow(LogTailReader.Source.LSPOSED);
+    }
+
+    /** 起一次指定来源的后台读取（该来源已有读取在跑就跳过，靠 5 秒定时补上）。 */
+    private void loadNow(LogTailReader.Source source) {
         if (listView == null || !isAdded()) {
             return;
         }
-        if (worker != null && worker.isAlive()) {
-            return;
+        int slot = slotOf(source);
+        Thread running = workers[slot];
+        if (running != null && running.isAlive()) {
+            return;   // 防重入：同一来源同时只跑一根读取线程
         }
         final Context appContext = requireContext().getApplicationContext();
-        final LogTailReader.Source source = currentSource();
         final String keyword = currentKeyword();
-        final String fingerprint = lastFingerprint;
-        final String lastKw = lastKeyword;
-        final int generation = loadGeneration;
+        SourceCache cache = caches[slot];
+        boolean sameKeyword = cache != null && keyword.equals(cache.keyword);
+        final String fileFp = sameKeyword ? cache.fileFp : null;
+        final String lastKw = sameKeyword ? cache.keyword : null;
 
         Thread thread = new Thread(() -> {
             final LogTailReader.Snapshot snap =
-                    LogTailReader.read(appContext, source, keyword, fingerprint, lastKw);
+                    LogTailReader.read(appContext, source, keyword, fileFp, lastKw);
             mainHandler.post(() -> {
-                if (listView == null || generation != loadGeneration) {
-                    return;   // 视图已销毁，或这次读取属于换源前的那一代
+                if (listView == null) {
+                    return;   // 视图已销毁
                 }
-                applySnapshot(snap, keyword);
+                applySnapshot(source, snap, keyword);
             });
-        }, "ww-log");
+        }, "ww-log-" + slot);
         thread.setDaemon(true);
-        worker = thread;
+        workers[slot] = thread;
         thread.start();
     }
 
@@ -440,30 +549,68 @@ public class LogFragment extends Fragment
         return filterInput.getText().toString().trim();
     }
 
-    private void applySnapshot(LogTailReader.Snapshot snap, String keyword) {
+    /** 一次读取的结果先入缓存（两个来源各自独立），只有当前来源才上屏。 */
+    private void applySnapshot(LogTailReader.Source source, LogTailReader.Snapshot snap,
+                               String keyword) {
         if (snap.unchanged) {
+            return;   // 文件与关键词都没变：缓存与视图都保持原样
+        }
+        int slot = slotOf(source);
+        // 非当前来源 / 换源动画中 / 滑动挂起：先把结果入缓存，上屏时再用
+        if (source != currentSource() || sourceSwapPending) {
+            caches[slot] = new SourceCache(snap, keyword, snap.ok ? snap.fingerprint : null);
+            return;
+        }
+        if (scrolling) {
+            pendingSnap = snap;          // 滑动中不重绑列表：回到 IDLE 再套用最新这份
+            pendingKeyword = keyword;
+            caches[slot] = new SourceCache(snap, keyword, snap.ok ? snap.fingerprint : null);
             return;
         }
         boolean applied = render(snap, keyword);
-        // 只有「成功读取且确实落到视图」才记指纹；选择中跳过、读取失败都清空。
-        // 否则下一拍会被 unchanged 短路：失败态留在屏幕上不恢复，选择结束后列表也不再更新。
-        if (applied && snap.ok) {
-            lastFingerprint = snap.fingerprint;
-            lastKeyword = keyword;
-        } else {
-            lastFingerprint = null;
-            lastKeyword = null;
+        if (!applied) {
+            onScreenLinesFp = null;   // 选中中跳过：下一拍必须重绘，不能被指纹短路
         }
-        // 读的这段时间里关键词又变了 → 立刻按新关键词补一次
+        // 失败快照、或本次因选中跳过 → 不记 fileFp，下一拍整读重绘（选择结束后内容能补上）
+        caches[slot] = new SourceCache(snap, keyword,
+                snap.ok && applied ? snap.fingerprint : null);
+        // 读的这段时间里关键词又变了 → 立刻按新关键词两个来源补一次
         if (!keyword.equals(currentKeyword())) {
-            loadNow();
+            caches[0] = null;
+            caches[1] = null;
+            pendingSnap = null;        // 挂起的旧关键词快照不能在新过滤下上屏
+            pendingKeyword = null;
+            onScreenLinesFp = null;
+            loadBoth();
+        }
+    }
+
+    /** 滑动停止：把挂起的最新快照画出来（内容照常跟随，不为了稳定而停止刷新）。 */
+    private void flushPendingSnapshot() {
+        if (pendingSnap == null || listView == null) {
+            return;
+        }
+        LogTailReader.Snapshot snap = pendingSnap;
+        String keyword = pendingKeyword;
+        pendingSnap = null;
+        pendingKeyword = null;
+        if (!keyword.equals(currentKeyword())) {
+            loadBoth();   // 滑动期间关键词变了：这份快照作废，按新关键词重读
+            return;
+        }
+        if (snap.source == currentSource()) {
+            render(snap, keyword);
         }
     }
 
     // ==================== 渲染（主线程） ====================
 
     /**
-     * @return true = 本次快照已落到视图（列表 / 失败态 / 空态）；false = 因整行选择中或视图已销毁而跳过
+     * 上屏。文本行只在内容变化时 setText；列表只在<b>渲染指纹变化</b>时重绑——
+     * 文件 mtime/size 变了但可见行没变（例如只追加了被过滤掉的行）时，不触发列表重新布局，
+     * 滚动条拇指长度因此不会跟着刷新抖动。
+     *
+     * @return true = 已处理；false = 因整行选择中或视图已销毁而跳过
      */
     private boolean render(LogTailReader.Snapshot snap, String keyword) {
         if (infoView == null) {
@@ -471,13 +618,13 @@ public class LogFragment extends Fragment
         }
         // 正在选中的控件本轮不重写：setText 会清掉选择与手柄。其余控件照常刷新，选择结束后下一轮自动补上
         if (!TextCopy.isSelecting(infoView)) {
-            infoView.setText(buildInfoText(snap));
+            setTextIfChanged(infoView, buildInfoText(snap));
         }
         if (!TextCopy.isSelecting(timeView)) {
-            timeView.setText(buildTimeText(snap));
+            setTextIfChanged(timeView, buildTimeText(snap));
         }
         if (!TextCopy.isSelecting(statView)) {
-            statView.setText(buildStatText(snap));
+            setTextIfChanged(statView, buildStatText(snap));
         }
         updateCountView(snap, keyword);
 
@@ -486,13 +633,19 @@ public class LogFragment extends Fragment
             if (isSelectingLines()) {
                 return false;
             }
-            // 失败：原样展示诊断，列表与跟随入口全部让位
-            adapter.submit(java.util.Collections.emptyList());
-            failureView.setText(getString(R.string.log_failure_title) + "\n\n" + snap.failureText);
-            failureScroll.setVisibility(View.VISIBLE);
-            listView.setVisibility(View.GONE);
-            emptyView.setVisibility(View.GONE);
-            followButton.setVisibility(View.GONE);
+            String fp = "F:" + snap.source + ":" + snap.path + ":" + snap.failureText;
+            // 诊断文本每次按当前「展示完整路径」口径重算：开关切换后同一条失败也能换显示
+            setTextIfChanged(failureView, PathDisplay.format(requireContext(),
+                    getString(R.string.log_failure_title) + "\n\n" + snap.failureText));
+            if (!fp.equals(onScreenLinesFp)) {
+                // 失败：原样展示诊断，列表与跟随入口全部让位
+                adapter.submit(java.util.Collections.emptyList());
+                failureScroll.setVisibility(View.VISIBLE);
+                listView.setVisibility(View.GONE);
+                emptyView.setVisibility(View.GONE);
+                followButton.setVisibility(View.GONE);
+                onScreenLinesFp = fp;
+            }
             return true;
         }
 
@@ -501,20 +654,24 @@ public class LogFragment extends Fragment
         if (isSelectingLines()) {
             return false;
         }
-        failureScroll.setVisibility(View.GONE);
-        listView.setVisibility(View.VISIBLE);
-        adapter.submit(snap.lines);
+        String fp = linesFingerprint(snap, keyword);
+        if (!fp.equals(onScreenLinesFp)) {
+            failureScroll.setVisibility(View.GONE);
+            listView.setVisibility(View.VISIBLE);
+            adapter.submit(snap.lines);
 
-        boolean empty = snap.lines.isEmpty();
-        emptyView.setVisibility(empty ? View.VISIBLE : View.GONE);
-        if (empty) {
-            if (keyword.isEmpty()) {
-                emptyView.setText(snap.source == LogTailReader.Source.LSPOSED
-                        ? getString(R.string.log_empty_no_b6x)
-                        : getString(R.string.log_empty_no_lines));
-            } else {
-                emptyView.setText(getString(R.string.log_empty_no_hit, keyword, snap.candidateLines));
+            boolean empty = snap.lines.isEmpty();
+            emptyView.setVisibility(empty ? View.VISIBLE : View.GONE);
+            if (empty) {
+                if (keyword.isEmpty()) {
+                    emptyView.setText(snap.source == LogTailReader.Source.LSPOSED
+                            ? getString(R.string.log_empty_no_b6x)
+                            : getString(R.string.log_empty_no_lines));
+                } else {
+                    emptyView.setText(getString(R.string.log_empty_no_hit, keyword, snap.candidateLines));
+                }
             }
+            onScreenLinesFp = fp;
         }
 
         if (following) {
@@ -527,6 +684,29 @@ public class LogFragment extends Fragment
         }
         updateFollowButton();
         return true;
+    }
+
+    /** 列表可见内容的指纹：关键词 + 来源 + 参与匹配的行数 + 每行文本与级别。 */
+    private static String linesFingerprint(LogTailReader.Snapshot snap, String keyword) {
+        int h = keyword.hashCode();
+        h = 31 * h + snap.source.ordinal();
+        h = 31 * h + snap.candidateLines;
+        for (LogLine line : snap.lines) {
+            h = 31 * h + line.text.hashCode();
+            h = 31 * h + line.level.ordinal();
+        }
+        return "L:" + snap.lines.size() + ":" + h;
+    }
+
+    /** 文本没变就不碰控件：避免无谓的重排（滚动条长度依赖列表，不依赖这些行，但少一次算一次）。 */
+    private static void setTextIfChanged(@Nullable TextView view, @Nullable CharSequence text) {
+        if (view == null) {
+            return;
+        }
+        CharSequence now = view.getText();
+        if (!TextUtils.equals(now, text == null ? "" : text)) {
+            view.setText(text);
+        }
     }
 
     // ==================== 整行选择 ====================
@@ -761,12 +941,13 @@ public class LogFragment extends Fragment
         followButton.setVisibility(show ? View.VISIBLE : View.GONE);
     }
 
-    /** 信息条首行：只有路径本身，不带标签字样。 */
-    private String buildInfoText(LogTailReader.Snapshot snap) {
+    /** 信息条首行：只有路径本身，不带标签字样；显示长短随「展示完整路径」开关。 */
+    private CharSequence buildInfoText(LogTailReader.Snapshot snap) {
         if (snap.path == null) {
             return getString(R.string.log_loading);
         }
-        return getString(R.string.log_info_fmt, snap.path);
+        // 信息行整条就是一条路径：用显式区间，glob / 含空格的文件名也能整条可点
+        return PathDisplay.forSinglePath(requireContext(), getString(R.string.log_info_fmt, snap.path));
     }
 
     /** 次行左半：修改时间（同一行的右半是 {@link #buildStatText} 的行数统计）。 */
@@ -799,7 +980,8 @@ public class LogFragment extends Fragment
         }
         boolean filtered = snap.ok && !keyword.isEmpty();
         countView.setVisibility(filtered ? View.VISIBLE : View.GONE);
-        countView.setText(filtered ? getString(R.string.log_count_hit_fmt, snap.lines.size()) : "");
+        setTextIfChanged(countView,
+                filtered ? getString(R.string.log_count_hit_fmt, snap.lines.size()) : "");
     }
 
     /** 字节 → k（1024 进制）文本，最多 1 位小数且整数不补 {@code .0}：1843 → "1.8"、204800 → "200"。 */

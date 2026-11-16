@@ -134,13 +134,16 @@ final class TextCopy {
 
     /**
      * 绝对路径识别：以 {@code /} 开头的连续路径字符段。前面紧邻 ASCII 单词字符或 {@code /} 时不算，
-     * 避免把 {@code //} 与 URL 尾巴当成路径；字符集与 {@link #isPathChar} 的路径部分保持一致
-     * （不含 {@code :}，避免把「路径:/data/x」的冒号吃进路径）。
+     * 避免把 {@code //} 与 URL 尾巴当成路径。冒号只允许出现在路径段内部
+     * （{@code modules_2026-11-14T22:31:24.363893.log} 这类带时间戳的文件名必须整条识别），
+     * 不会把「路径:/data/x」的前导冒号吃进路径。
      */
-    private static final Pattern ABSOLUTE_PATH = Pattern.compile(
-            "(?<![A-Za-z0-9._+%~@/-])/[A-Za-z0-9._+%~@-]+(?:/[A-Za-z0-9._+%~@-]+)*/?");
+    static final Pattern ABSOLUTE_PATH = Pattern.compile(
+            "(?<![A-Za-z0-9._+%~@/-])/[A-Za-z0-9._+%~@*-]+"
+                    + "(?::[A-Za-z0-9._+%~@*-]+)*"
+                    + "(?:/[A-Za-z0-9._+%~@*-]+(?::[A-Za-z0-9._+%~@*-]+)*)*/?");
     /** 空路径表：没有命中时直接共用，避免每次点按新建数组。 */
-    private static final int[][] NO_PATH_SPANS = new int[0][];
+    private static final PathSpan[] NO_PATH_SPANS = new PathSpan[0];
 
     /**
      * 本进程里装过选区回调的控件：点背景时按它找"当前有选区的控件"。
@@ -225,7 +228,7 @@ final class TextCopy {
         private int indexedLength = -1;
         /** 上次索引时开关是否开启：关闭时保留空表，重新开启后由点按补索引。 */
         private boolean indexedEnabled;
-        private int[][] pathSpans = NO_PATH_SPANS;
+        private PathSpan[] pathSpans = NO_PATH_SPANS;
         /** 当前挂着 pre-draw 的观察者：换窗口/重新附着时用它去重。 */
         @Nullable
         private ViewTreeObserver styledObserver;
@@ -339,8 +342,8 @@ final class TextCopy {
             if (offset < 0 || offset >= text.length()) {
                 return null;
             }
-            for (int[] span : ensurePathIndex()) {
-                if (offset >= span[0] && offset < span[1]) {
+            for (PathSpan span : ensurePathIndex()) {
+                if (offset >= span.start && offset < span.end) {
                     return hitFor(layout, line, span);
                 }
             }
@@ -352,11 +355,11 @@ final class TextCopy {
          * 路径可能跨行，这里只取被点那一行，保证小卡贴着手指附近。
          */
         @Nullable
-        private PathHit hitFor(@NonNull Layout layout, int line, @NonNull int[] span) {
+        private PathHit hitFor(@NonNull Layout layout, int line, @NonNull PathSpan span) {
             int lineStart = layout.getLineStart(line);
             int lineEnd = layout.getLineEnd(line);
-            int segStart = Math.max(span[0], lineStart);
-            int segEnd = Math.min(span[1], lineEnd);
+            int segStart = Math.max(span.start, lineStart);
+            int segEnd = Math.min(span.end, lineEnd);
             if (segStart >= segEnd) {
                 return null;
             }
@@ -375,8 +378,12 @@ final class TextCopy {
             float originX = location[0] + view.getTotalPaddingLeft() - view.getScrollX();
             float originY = location[1] + view.getTotalPaddingTop() - view.getScrollY();
             CharSequence text = view.getText();
+            // 显示文本可能只是文件名（完整路径开关关闭）：Span 上记着原路径时以它为准，
+            // 复制/跳转仍拿到能定位的完整路径。
+            String path = span.target != null
+                    ? span.target : text.subSequence(span.start, span.end).toString();
             return new PathHit(
-                    text.subSequence(span[0], span[1]).toString(),
+                    path,
                     Math.round(originX + (left + right) / 2f),
                     Math.round(originY + layout.getLineTop(line)),
                     Math.round(originY + layout.getLineBottom(line)));
@@ -441,7 +448,7 @@ final class TextCopy {
         }
 
         /** 点按时兜底：开关刚打开、文本没变时补一次索引与着色。 */
-        private int[][] ensurePathIndex() {
+        private PathSpan[] ensurePathIndex() {
             syncPathStyles();
             if (!indexedEnabled && isPathCopyEnabled(view.getContext())) {
                 indexedEnabled = true;
@@ -471,8 +478,8 @@ final class TextCopy {
             } catch (RuntimeException e) {
                 return;   // 主题异常时不着色，不影响文本其余功能
             }
-            for (int[] span : pathSpans) {
-                spannable.setSpan(new PathColorSpan(color), span[0], span[1],
+            for (PathSpan span : pathSpans) {
+                spannable.setSpan(new PathColorSpan(color), span.start, span.end,
                         Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
             }
         }
@@ -1184,7 +1191,19 @@ final class TextCopy {
         int length = text.length();
         int start = Math.min(selStart, selEnd);
         int end = Math.max(selStart, selEnd);
-        if (start < 0 || start >= length || !isPathChar(text.charAt(start))) {
+        if (start < 0 || start >= length) {
+            return null;
+        }
+        // 显式路径区间（短名显示时由 PathDisplay 标记）：直接扩到该区间，不依赖前导 '/'
+        for (PathSpan span : findPathSpans(text)) {
+            if (start >= span.start && end <= span.end) {
+                if (start == span.start && end == span.end) {
+                    return null;   // 已经是整条
+                }
+                return new int[]{span.start, span.end};
+            }
+        }
+        if (!isPathChar(text.charAt(start))) {
             return null;   // 选区起点不在路径字符上
         }
         int left = start;
@@ -1212,18 +1231,90 @@ final class TextCopy {
                 || (c >= '0' && c <= '9') || "._-+%~@/:".indexOf(c) >= 0;
     }
 
-    /** 一次扫描出文本里所有绝对路径的 {@code [start, end)} 区间；结果由调用方缓存。 */
-    private static int[][] findPathSpans(@Nullable CharSequence text) {
+    /**
+     * 一次扫描出文本里所有绝对路径的 {@code [start, end)} 区间；结果由调用方缓存。
+     *
+     * <p>先取调用方显式标记的区间（{@link PathTargetSpan}，显示文本可能只是文件名，
+     * 但复制/跳转要用它带着的完整路径），再用正则扫描其余绝对路径、跳过与显式区间重叠的命中，
+     * 避免同一段文字被切成两个可点区间。
+     */
+    private static PathSpan[] findPathSpans(@Nullable CharSequence text) {
         if (text == null || text.length() == 0) {
             return NO_PATH_SPANS;
         }
         String plain = text.toString();
-        List<int[]> spans = new ArrayList<>();
+        List<PathSpan> spans = new ArrayList<>();
+        if (text instanceof Spanned) {
+            Spanned spanned = (Spanned) text;
+            for (PathTargetSpan target : spanned.getSpans(0, spanned.length(), PathTargetSpan.class)) {
+                int start = spanned.getSpanStart(target);
+                int end = spanned.getSpanEnd(target);
+                if (start >= 0 && end > start) {
+                    spans.add(new PathSpan(start, end, target.path));
+                }
+            }
+        }
         Matcher matcher = ABSOLUTE_PATH.matcher(plain);
         while (matcher.find()) {
-            spans.add(new int[]{matcher.start(), matcher.end()});
+            int start = matcher.start();
+            int end = trimLineSuffix(plain, matcher.start(), matcher.end());
+            boolean covered = false;
+            for (PathSpan existing : spans) {
+                if (start < existing.end && existing.start < end) {
+                    covered = true;
+                    break;
+                }
+            }
+            if (!covered) {
+                spans.add(new PathSpan(start, end, null));
+            }
         }
-        return spans.toArray(new int[0][]);
+        spans.sort((a, b) -> Integer.compare(a.start, b.start));
+        return spans.toArray(new PathSpan[0]);
+    }
+
+    /**
+     * 去掉路径末尾的 {@code :行号}（如 {@code /data/x:12}）：那是日志里的「文件:行」写法，
+     * 不属于路径本身；时间戳里的冒号不在末尾，不会被误删。返回裁剪后的结束下标。
+     */
+    static int trimLineSuffix(String text, int start, int end) {
+        int colon = text.lastIndexOf(':', end - 1);
+        if (colon <= start || colon >= end - 1) {
+            return end;
+        }
+        for (int i = colon + 1; i < end; i++) {
+            char c = text.charAt(i);
+            if (c < '0' || c > '9') {
+                return end;
+            }
+        }
+        return colon;
+    }
+
+    /**
+     * 一条可点路径区间。{@code target} 非空 = 显示文本是简化后的文件名，
+     * 复制/跳转仍用 {@code target} 里的完整路径。
+     */
+    private static final class PathSpan {
+        final int start;
+        final int end;
+        @Nullable
+        final String target;
+
+        PathSpan(int start, int end, @Nullable String target) {
+            this.start = start;
+            this.end = end;
+            this.target = target;
+        }
+    }
+
+    /** 调用方（{@link PathDisplay}）标在显示文本上的「完整路径」载体；不参与绘制，只供命中和着色。 */
+    static final class PathTargetSpan {
+        final String path;
+
+        PathTargetSpan(String path) {
+            this.path = path;
+        }
     }
 
     /** 控件是否正处在选择态（含未拖动的选中）。刷新路径用它决定本次是否跳过 UI 更新。 */

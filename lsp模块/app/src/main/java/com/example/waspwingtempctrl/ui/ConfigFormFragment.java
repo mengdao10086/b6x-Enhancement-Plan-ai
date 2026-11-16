@@ -233,7 +233,7 @@ public class ConfigFormFragment extends Fragment
     @Override
     public void showDefinitionError(@NonNull String message) {
         errorCard.setVisibility(View.VISIBLE);
-        errorText.setText(message);
+        errorText.setText(PathDisplay.format(requireContext(), message));
         // 概要行保留并显示失败原因（定义没加载起来时诊断区可能根本没建）
         if (defsView != null) {
             defsView.setText(message);
@@ -275,7 +275,7 @@ public class ConfigFormFragment extends Fragment
             return;   // 视图已销毁：无处可放，也不该再碰视图
         }
         errorCard.setVisibility(View.VISIBLE);
-        errorText.setText(message);
+        errorText.setText(PathDisplay.format(requireContext(), message));
     }
 
     @Override
@@ -413,12 +413,12 @@ public class ConfigFormFragment extends Fragment
         if (TextCopy.isSelecting(dataFileView)) {
             TextCopy.runWhenSelectionEnds(dataFileView, () -> {
                 if (dataFileView != null) {
-                    dataFileView.setText(text);
+                    dataFileView.setText(PathDisplay.format(requireContext(), text));
                 }
             });
             return;
         }
-        dataFileView.setText(text);
+        dataFileView.setText(PathDisplay.format(requireContext(), text));
     }
 
     // ==================== 生命周期：不丢改动 ====================
