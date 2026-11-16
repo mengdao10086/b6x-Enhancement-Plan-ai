@@ -239,7 +239,17 @@ public class StatusFragment extends Fragment implements SetupActivity.PageAware 
     public void onViewCreated(@NonNull View view, @Nullable Bundle savedInstanceState) {
         super.onViewCreated(view, savedInstanceState);
         statusView = view.findViewById(R.id.status_text);
-        statusView.setText(prefillText());   // 首帧骨架的长短由「展示完整路径」决定
+        // 启动预取：本页随 ViewPager2 一起在冷启动建页，这里只提交后台任务（进程级一次、失败静默）。
+        DeployStatusCache.prefetch(requireContext());
+        // 有缓存就先上内容（同一帧内替换，用户看不到骨架）；从未成功过才用预填充骨架。
+        // 缓存陈旧也照常先显示，紧随其后的首探/周期刷新会交叉淡入覆盖。
+        final String cachedStatus = DeployStatusCache.text();
+        statusView.setText(cachedStatus != null
+                ? PathDisplay.format(view.getContext(), cachedStatus) : prefillText());
+        if (cachedStatus != null && !DeployStatusCache.isStale()) {
+            // 缓存还新鲜：与静默刷新同一个 30 秒节流口径，避免紧接着再跑一趟 su
+            lastProbeAtMs = DeployStatusCache.atMs();
+        }
         statusOutgoingView = view.findViewById(R.id.status_text_outgoing);
         statusStack = view.findViewById(R.id.status_text_stack);
         infoView = view.findViewById(R.id.info_text);
@@ -785,7 +795,11 @@ public class StatusFragment extends Fragment implements SetupActivity.PageAware 
         }
         // 兜底归一：源侧已保证 describe() 不产出末尾换行（见 app/逻辑说明.md §8.1），这里仍 trim 一次。
         // 「先比后写」的 contentEquals 与写入都用这一份，否则每 5 秒静默复探都会被判成变化。
-        return (head + (manifestNote == null ? "" : manifestNote + "\n") + status.describe()).trim();
+        final String result = (head + (manifestNote == null ? "" : manifestNote + "\n")
+                + status.describe()).trim();
+        // 回写进程内缓存：下次建页（含旋转/返回本页）直接拿它上屏，再后台刷新
+        DeployStatusCache.store(result);
+        return result;
     }
 
     /**
