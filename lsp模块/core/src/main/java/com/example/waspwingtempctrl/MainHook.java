@@ -388,8 +388,7 @@ public class MainHook implements IXposedHookLoadPackage {
     private static volatile boolean statusWriteFailLogged = false;  // 状态文件写入失败：状态翻转才打（进入一条/恢复一条）
     private static volatile boolean rpmRunFailLogged = false;       // getSpeed 不可用：只打一条
     private static volatile boolean loggedResolveFallback = false;  // resolveWaspWingManager 兜底失败仅记一次（进程内）
-    private static volatile boolean nonTargetLogged = false;        // 非目标包跳过日志：每进程最多一条
-    private static volatile boolean nonMainProcessLogged = false;   // 非主进程跳过日志：每进程最多一条
+    private static volatile boolean skipLogged = false;             // 跳过加载日志：每进程最多一条（原因是合并输出的一条）
     private static volatile boolean bcastRejectLogged = false;      // 非法广播参数被拒日志：每进程最多一条
     private static volatile boolean bcastUnknownUidLogged = false;  // 非白名单广播来源留痕：每进程最多一条
     /** 已记录过的 getter 失败键（每键只记一次，避免每秒刷屏）。 */
@@ -1088,30 +1087,59 @@ public class MainHook implements IXposedHookLoadPackage {
                 && !processName.equals(lpparam.packageName);
     }
 
-    @Override
-    public void handleLoadPackage(XC_LoadPackage.LoadPackageParam lpparam) {
-        // 只处理主进程：子进程（如 B7X 的 :remote）不注册接收器、不起状态写线程，
-        // 否则会与主进程抢写同一 status 文件（BLE=0 覆盖连接状态）。
-        if (!isMainProcess(lpparam)) {
-            if (!nonMainProcessLogged) {
-                nonMainProcessLogged = true;
-                XposedBridge.log(TAG + " 跳过非主进程: " + lpparam.processName
-                        + "（仅主进程装钩子）");
-            }
-            return;
-        }
-        // lpparam.packageName 在 fork 子进程里不可靠：目标包一律从 processName 提取（去掉 :suffix）。
-        // 仅当旧框架没有 processName 时，才退回 packageName 以保持兼容。
-        String processName = lpparam.processName;
+    /** 从进程名取包名（去掉 {@code :suffix}）；旧框架无进程名时退回 packageName。 */
+    private static String packageOf(String processName, String packageName) {
         String pkg = processName;
         if (pkg != null) {
             int colon = pkg.indexOf(':');
-            if (colon >= 0) {
-                pkg = pkg.substring(0, colon);
-            }
+            if (colon >= 0) pkg = pkg.substring(0, colon);
         }
-        if (pkg == null || pkg.isEmpty()) {
-            pkg = lpparam.packageName;
+        return (pkg == null || pkg.isEmpty()) ? packageName : pkg;
+    }
+
+    /** 是否为本模块处理的目标包（B6X 新旧包名 / B7X）。 */
+    private static boolean isTargetPackage(String pkg) {
+        return PACKAGE_B6X.equals(pkg) || PACKAGE_B6X_NEW.equals(pkg) || PACKAGE_B7X.equals(pkg);
+    }
+
+    /**
+     * 跳过加载的结论：一次 loadPackage 只输出一条，原因可区分、可叠加。
+     * 同值字段不重复：{@code pkg=} 必出，{@code processName=} / {@code packageName=}
+     * 仅在与前者不同时才补出，便于看出差异（fork 子进程里 packageName 常是父进程包名）。
+     * 每进程最多一条（{@link #skipLogged}）；热路径只读一个 volatile，无锁无 IO。
+     */
+    private static void logSkipOnce(String pkg, String processName, String packageName,
+                                    boolean mainProcess, boolean target) {
+        if (skipLogged) return;
+        skipLogged = true;
+        StringBuilder sb = new StringBuilder(TAG).append(" 跳过: ");
+        if (!target) sb.append("非目标包");
+        if (!mainProcess) sb.append(target ? "非主进程" : " + 非主进程");
+        sb.append(" (pkg=").append(pkg);
+        if (processName != null && !processName.equals(pkg)) {
+            sb.append(" processName=").append(processName);
+        }
+        if (packageName != null && !packageName.equals(pkg) && !packageName.equals(processName)) {
+            sb.append(" packageName=").append(packageName);
+        }
+        XposedBridge.log(sb.append(')').toString());
+    }
+
+    @Override
+    public void handleLoadPackage(XC_LoadPackage.LoadPackageParam lpparam) {
+        // lpparam.packageName 在 fork 子进程里不可靠：目标包一律从 processName 提取（去掉 :suffix）。
+        // 仅当旧框架没有 processName 时，才退回 packageName 以保持兼容。
+        String processName = lpparam.processName;
+        String pkg = packageOf(processName, lpparam.packageName);
+
+        // 只处理主进程：子进程（如 B7X 的 :remote）不注册接收器、不起状态写线程，
+        // 否则会与主进程抢写同一 status 文件（BLE=0 覆盖连接状态）。
+        // 两项判定可能同时不成立，合并成一条跳过日志（分开打会得到两条实质相同的结论）。
+        boolean mainProcess = isMainProcess(lpparam);
+        boolean target = isTargetPackage(pkg);
+        if (!mainProcess || !target) {
+            logSkipOnce(pkg, processName, lpparam.packageName, mainProcess, target);
+            return;
         }
 
         // 判断设备类型
@@ -1121,23 +1149,14 @@ public class MainHook implements IXposedHookLoadPackage {
             appKind = 6;
             currentStatusFile = STATUS_FILE_B6;
             isNewB6App = isB6XNew;
-            lastDevFile = lastDevFileFor(isNewB6App ? PACKAGE_B6X_NEW : PACKAGE_B6X);
-            btOnAtFile = btOnAtFileFor(isNewB6App ? PACKAGE_B6X_NEW : PACKAGE_B6X);
-        } else if (PACKAGE_B7X.equals(pkg)) {
+            lastDevFile = lastDevFileFor(isB6XNew ? PACKAGE_B6X_NEW : PACKAGE_B6X);
+            btOnAtFile = btOnAtFileFor(isB6XNew ? PACKAGE_B6X_NEW : PACKAGE_B6X);
+        } else {
             appKind = 7;
             currentStatusFile = STATUS_FILE_B7;
             lastDevFile = lastDevFileFor(PACKAGE_B7X);
             btOnAtFile = btOnAtFileFor(PACKAGE_B7X);
             lastDevCodeFile = lastDevCodeFileFor(PACKAGE_B7X);
-        } else {
-            // 非目标包：每进程最多留一条，避免作用域内其它进程反复注入刷屏
-            if (!nonTargetLogged) {
-                nonTargetLogged = true;
-                XposedBridge.log(TAG + " 跳过非目标包: pkg=" + pkg
-                        + " processName=" + processName
-                        + " packageName=" + lpparam.packageName);
-            }
-            return;
         }
 
         sHostPkg = pkg;   // 「已钩住」记录的落点按宿主包分开
