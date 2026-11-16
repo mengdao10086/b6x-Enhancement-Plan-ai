@@ -54,7 +54,7 @@
                     来源选择器：与配置页 enum 键、曲线页窗口档位同源的 MaterialButtonToggleGroup
                     （单选 + 必选）。按钮由 LogFragment 复用 item_chart_window_button.xml 逐个加进来，
                     不另造一套控件；选项顺序与 SOURCE_DAEMON / SOURCE_LSPOSED 一致。
-                    圆角用 @dimen/log_source_corner_radius（比档位按钮小一档），只改本选择器。
+                    圆角与选中过渡由共用按钮布局与 Motion.syncSelectedAlpha 统一，三处完全同款。
                 -->
                 <com.google.android.material.button.MaterialButtonToggleGroup
                     android:id="@+id/log_source_group"

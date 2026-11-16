@@ -155,9 +155,13 @@ final class ChartSeries {
         return !isPair(s) || emphasized(s, cfg);
     }
 
-    /** 是否绘制末端数值标签：成对系列的强调方画，其余系列都不标。 */
+    /**
+     * 是否绘制末端数值标签：<b>所有系列都标</b>（含成对的参考方与温度系列）。数值接近的标签由
+     * {@link ChartView} 按 {@code LABEL_H_DP} 那一套逐行错位或合并，不允许整条消失。
+     * pid 是稀疏样本、没有「窗口末端」这个锚点，不走本路径（其数值见按住查看面板）。
+     */
     static boolean drawsEndLabel(ChartSeries s, ChartConfig cfg) {
-        return isPair(s) && emphasized(s, cfg);
+        return true;
     }
 
     /**

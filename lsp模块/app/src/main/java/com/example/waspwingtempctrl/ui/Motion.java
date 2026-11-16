@@ -4,7 +4,13 @@ import android.animation.Animator;
 import android.animation.AnimatorListenerAdapter;
 import android.animation.ValueAnimator;
 import android.content.Context;
+import android.graphics.Bitmap;
+import android.graphics.Canvas;
+import android.graphics.drawable.BitmapDrawable;
+import android.graphics.drawable.Drawable;
 import android.os.Build;
+import android.os.Handler;
+import android.os.Looper;
 import android.provider.Settings;
 import android.transition.AutoTransition;
 import android.transition.TransitionManager;
@@ -23,6 +29,8 @@ import androidx.annotation.Nullable;
 
 import com.example.waspwingtempctrl.R;
 
+import java.util.ArrayList;
+import java.util.List;
 import java.util.WeakHashMap;
 
 /**
@@ -182,66 +190,205 @@ public final class Motion {
     static final long FADE_OUT_DELAY_MS = 105L;
 
     /**
-     * 两段式淡入淡出：先把给定视图淡出，再执行 {@code swap}（换来源 / 换图例），最后淡入。
+     * 同时交叉淡化：旧内容先在视图原位置留成一张快照层淡出，新内容在它下方同步淡入。
      *
-     * <p>用于「原地换内容、不能留半屏旧内容」的切换（日志来源、曲线默认项编辑态）。系统关掉动效、
-     * 或没有可淡的视图时直接执行 {@code swap}，不留半透明残影。时长复用状态页那套
-     * {@link #FADE_OUT_MS} / {@link #FADE_IN_MS}，曲线统一用 {@link #EASE_OUT}。
+     * <p><b>与状态页「部署状态」同款</b>：新层从 0 淡到 1 用 {@link #FADE_IN_MS}，旧层延后
+     * {@link #FADE_OUT_DELAY_MS} 起播、只用 {@link #FADE_OUT_MS} 退场，两者同用 {@link #EASE_OUT}
+     * 曲线。任一帧至少一层接近不透明，没有「先退完再进」造成的中间空档。
+     *
+     * <p><b>业务内容零延迟</b>：{@code swap} 立即执行，动画只是视觉层；视图容器换内容后按新旧两帧
+     * 同时淡化。旧层用 {@link View#draw(Canvas)} 抓成位图、经父容器的 {@link ViewGroup#getOverlay()}
+     * 叠在原位——不参与触摸命中，不会挡住淡变期间的点击。
+     *
+     * <p>系统关掉动效、或没有可淡的视图时直接执行 {@code swap}，并把 alpha 复位为 1，
+     * 不留半透明残影。重复调用会先收掉上一轮（取消动画、移除快照层），不叠加残影。
+     *
+     * @param swap    换内容（立即执行）
+     * @param targets 参与淡入淡出的视图（旧内容按各自当前外观抓快照；GONE / 未量出尺寸的跳过抓取，
+     *                但仍参与淡入）
      */
-    /** 每个锚点视图的淡变代号：取消/重入时旧回调对不上号即作废，不会提前执行 swap。 */
-    private static final java.util.WeakHashMap<View, Integer> FADE_TOKENS =
-            new java.util.WeakHashMap<>();
-
-    static void fadeSwap(@Nullable Runnable swap, @Nullable View... targets) {
+    static void crossFade(@Nullable Runnable swap, @Nullable View... targets) {
         if (swap == null) {
             return;
         }
-        java.util.List<View> views = new java.util.ArrayList<>();
+        List<View> views = new ArrayList<>();
         if (targets != null) {
             for (View v : targets) {
-                if (v != null) {
+                if (v != null && !views.contains(v)) {
                     views.add(v);
                 }
             }
         }
-        if (views.isEmpty() || !enabled(views.get(0).getContext())) {
+        if (views.isEmpty()) {
+            swap.run();
+            return;
+        }
+        for (View v : views) {
+            CrossFadeRun running = CROSS_FADES.remove(v);
+            if (running != null) {
+                running.finish();
+            }
+            v.animate().cancel();
+        }
+        if (!enabled(views.get(0).getContext())) {
             for (View v : views) {
                 v.setAlpha(1f);
             }
             swap.run();
             return;
         }
-        View anchor = views.get(0);
-        int token = 1 + (FADE_TOKENS.get(anchor) == null ? 0 : FADE_TOKENS.get(anchor));
-        FADE_TOKENS.put(anchor, token);
+        CrossFadeRun run = new CrossFadeRun();
+        run.views.addAll(views);
         for (View v : views) {
-            v.animate().cancel();
+            CROSS_FADES.put(v, run);
+            captureLayer(v, run);
         }
-        View last = views.get(views.size() - 1);
-        for (int i = 0; i < views.size() - 1; i++) {
-            views.get(i).animate().alpha(0f).setDuration(FADE_OUT_MS)
-                    .setInterpolator(EASE_OUT).start();
+        for (View v : views) {
+            v.setAlpha(0f);   // 新内容先透明，避免换内容的瞬间以不透明状态闪一帧
         }
-        last.animate().alpha(0f).setDuration(FADE_OUT_MS).setInterpolator(EASE_OUT)
-                .withEndAction(() -> {
-                    if (FADE_TOKENS.get(anchor) == null || FADE_TOKENS.get(anchor) != token) {
-                        return;   // 已被新一次淡变接管：这次的内容切换不再执行
-                    }
-                    swap.run();
-                    for (View v : views) {
-                        v.setAlpha(0f);
-                        v.animate().alpha(1f).setDuration(FADE_IN_MS)
-                                .setInterpolator(EASE_OUT).start();
-                    }
-                }).start();
+        try {
+            swap.run();
+        } finally {
+            for (View v : views) {
+                v.animate().alpha(1f).setDuration(FADE_IN_MS).setInterpolator(EASE_OUT).start();
+            }
+            for (Drawable layer : run.layers) {
+                ValueAnimator fade = ValueAnimator.ofInt(255, 0);
+                fade.setDuration(FADE_OUT_MS);
+                fade.setStartDelay(FADE_OUT_DELAY_MS);
+                fade.setInterpolator(EASE_OUT);
+                fade.addUpdateListener(a -> layer.setAlpha((Integer) a.getAnimatedValue()));
+                run.anims.add(fade);
+                fade.start();
+            }
+            MAIN.postDelayed(run, FADE_OUT_DELAY_MS + FADE_OUT_MS + 16L);
+        }
+    }
+
+    /** 主线程收尾用的 handler：快照层与动画的清理不依赖某个视图是否还挂在窗口上。 */
+    private static final Handler MAIN = new Handler(Looper.getMainLooper());
+
+    /** 每个参与视图 → 本轮交叉淡化的运行态；重复调用据此先收掉上一轮。 */
+    private static final WeakHashMap<View, CrossFadeRun> CROSS_FADES = new WeakHashMap<>();
+
+    /** 一轮同时交叉淡化的运行态：快照层、动画与收尾。 */
+    private static final class CrossFadeRun implements Runnable {
+        final List<View> views = new ArrayList<>();
+        final List<ViewGroup> hosts = new ArrayList<>();
+        final List<Drawable> layers = new ArrayList<>();
+        final List<Bitmap> bitmaps = new ArrayList<>();
+        final List<Animator> anims = new ArrayList<>();
+        boolean done;
+
+        @Override
+        public void run() {
+            finish();
+        }
+
+        /** 收尾：取消动画、把快照层从父容器 overlay 移除并回收位图，视图 alpha 复位为 1。 */
+        void finish() {
+            if (done) {
+                return;
+            }
+            done = true;
+            MAIN.removeCallbacks(this);
+            for (Animator a : anims) {
+                a.cancel();
+            }
+            anims.clear();
+            for (int i = 0; i < layers.size(); i++) {
+                ViewGroup host = i < hosts.size() ? hosts.get(i) : null;
+                if (host != null) {
+                    host.getOverlay().remove(layers.get(i));
+                }
+                Bitmap bmp = i < bitmaps.size() ? bitmaps.get(i) : null;
+                if (bmp != null && !bmp.isRecycled()) {
+                    bmp.recycle();
+                }
+            }
+            layers.clear();
+            hosts.clear();
+            bitmaps.clear();
+            for (View v : views) {
+                if (CROSS_FADES.get(v) == this) {
+                    CROSS_FADES.remove(v);
+                }
+                v.animate().cancel();
+                v.setAlpha(1f);
+            }
+            views.clear();
+        }
+    }
+
+    /** 把一个视图的当前外观抓成位图，作为快照层加到父容器的 overlay（坐标与视图原位一致）。 */
+    private static void captureLayer(View v, CrossFadeRun run) {
+        if (v.getVisibility() != View.VISIBLE || v.getWidth() <= 0 || v.getHeight() <= 0) {
+            return;
+        }
+        ViewParent parent = v.getParent();
+        if (!(parent instanceof ViewGroup)) {
+            return;
+        }
+        Bitmap bitmap = null;
+        try {
+            bitmap = Bitmap.createBitmap(v.getWidth(), v.getHeight(), Bitmap.Config.ARGB_8888);
+            v.draw(new Canvas(bitmap));
+        } catch (Throwable t) {
+            if (bitmap != null && !bitmap.isRecycled()) {
+                bitmap.recycle();
+            }
+            return;   // 抓不到快照（极端视图/内存不足）：本轮退化为「新内容淡入」，不抛给业务
+        }
+        BitmapDrawable layer = new BitmapDrawable(v.getResources(), bitmap);
+        layer.setBounds(v.getLeft(), v.getTop(), v.getRight(), v.getBottom());
+        layer.setAlpha(255);
+        ViewGroup host = (ViewGroup) parent;
+        host.getOverlay().add(layer);
+        run.hosts.add(host);
+        run.layers.add(layer);
+        run.bitmaps.add(bitmap);
+    }
+
+    /** 未选中项的选择器按钮压到该透明度；与日志页来源选择器一致。 */
+    private static final float SELECTED_DIM_ALPHA = 0.55f;
+
+    /**
+     * 选择器（{@link android.widget.RadioButton} 式的单选按钮组、Material 的
+     * {@code MaterialButtonToggleGroup} 等任意 ViewGroup）：选中项不透明、未选中项压到
+     * {@link #SELECTED_DIM_ALPHA}，过渡时长与曲线同 {@link #FADE_IN_MS} / {@link #EASE_OUT}。
+     *
+     * <p>日志页来源选择器（daemon / LSPosed）、曲线页窗口档位与配置页 enum 选择器共用这一处口径，
+     * 不各自写一套。
+     *
+     * @param group     按钮组（子项即选项）
+     * @param checkedId 当前选中项的 id；{@link View#NO_ID} = 无选中项（全部压暗）
+     * @param animate   false = 首帧直接落位（页面打开时不自己播一段动画）
+     */
+    static void syncSelectedAlpha(@Nullable ViewGroup group, int checkedId, boolean animate) {
+        if (group == null) {
+            return;
+        }
+        for (int i = 0; i < group.getChildCount(); i++) {
+            View child = group.getChildAt(i);
+            if (child == null) {
+                continue;
+            }
+            boolean selected = checkedId != View.NO_ID && child.getId() == checkedId;
+            if (animate) {
+                animateSelected(child, selected);
+            } else {
+                child.animate().cancel();
+                child.setAlpha(selected ? 1f : SELECTED_DIM_ALPHA);
+            }
+        }
     }
 
     /** 选中态切换的过渡：选中项恢复不透明、未选中项压到 55%，时长与曲线同淡变。 */
-    static void animateSelected(@Nullable View view, boolean selected) {
+    private static void animateSelected(@Nullable View view, boolean selected) {
         if (view == null) {
             return;
         }
-        float target = selected ? 1f : 0.55f;
+        float target = selected ? 1f : SELECTED_DIM_ALPHA;
         if (!enabled(view.getContext())) {
             view.setAlpha(target);
             return;

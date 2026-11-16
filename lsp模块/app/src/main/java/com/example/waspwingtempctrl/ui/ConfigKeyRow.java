@@ -487,11 +487,15 @@ final class ConfigKeyRow {
                 group.addView(button);
             }
             group.addOnButtonCheckedListener((toggleGroup, checkedId, isChecked) -> {
-                if (suppressChange || !isChecked) {
+                if (!isChecked || suppressChange) {
                     return;
                 }
+                // 选中过渡与日志页来源选择器 / 曲线页档位同源（同一处口径，不另写一套）
+                Motion.syncSelectedAlpha(toggleGroup, checkedId, true);
                 commitOption(valueOfButton.get(checkedId));
             });
+            // 首帧直接落位：页面打开时不自己播一段选中动画
+            Motion.syncSelectedAlpha(group, group.getCheckedButtonId(), false);
         }
 
         @Override
@@ -499,6 +503,7 @@ final class ConfigKeyRow {
             int id = buttonIdOf(value.text());
             if (id == View.NO_ID) {
                 // 取值不在表里：一项都不选中（见类注释），等用户点选
+                Motion.syncSelectedAlpha(group, View.NO_ID, false);
                 return;
             }
             suppressChange = true;
@@ -507,6 +512,7 @@ final class ConfigKeyRow {
             } finally {
                 suppressChange = false;
             }
+            Motion.syncSelectedAlpha(group, group.getCheckedButtonId(), false);
         }
 
         @Override

@@ -85,8 +85,10 @@ public class ChartFragment extends Fragment {
     /** 图例宽度变化监听：图例可能因交换开关重建，复用同一个 listener 避免重复挂载。 */
     private View.OnLayoutChangeListener legendLayoutListener;
     private MaterialButtonToggleGroup windowGroup;
-    /** 「修改默认」绿色文字开关与编辑态：编辑时图例显示默认打开项，退出时保存为新的默认。 */
+    /** 「修改默认」文字开关与编辑态：编辑时图例显示默认打开项，退出时保存为新的默认。 */
     private TextView defaultsToggle;
+    /** 「恢复默认」文字开关：把图例勾选拉回已保存的默认项（不写参数）。 */
+    private TextView defaultsRestore;
     private boolean editingDefaults;
     private boolean[] pendingDefaults;
     /** 首次拿到配置时已按默认打开项初始化过（只做一次，之后用户的图例勾选不被刷新覆盖）。 */
@@ -134,6 +136,8 @@ public class ChartFragment extends Fragment {
 
     /** 当前窗口档位（秒）；-1 表示配置尚未加载。 */
     private int windowSec = -1;
+    /** 正在整组重建档位按钮：期间的选中事件是程序化触发，不播选中过渡动画。 */
+    private boolean buildingWindowButtons;
     private AppFiles.Probe lastProbe;
     private boolean lastOk;
     private int lastBreaks;
@@ -169,6 +173,8 @@ public class ChartFragment extends Fragment {
         windowGroup = view.findViewById(R.id.chart_window_group);
         defaultsToggle = view.findViewById(R.id.chart_defaults_toggle);
         defaultsToggle.setOnClickListener(v -> toggleDefaultsEditing());
+        defaultsRestore = view.findViewById(R.id.chart_defaults_restore);
+        defaultsRestore.setOnClickListener(v -> restoreDefaultSelection());
         canvasContainer = view.findViewById(R.id.chart_canvas_container);
         resizeHandle = view.findViewById(R.id.chart_resize_handle);
 
@@ -192,6 +198,10 @@ public class ChartFragment extends Fragment {
             View child = group.findViewById(checkedId);
             if (child == null || !(child.getTag() instanceof Integer)) {
                 return;
+            }
+            // 选中过渡与日志页来源选择器同源：不重建按钮时按用户点选播一段淡化
+            if (!buildingWindowButtons) {
+                Motion.syncSelectedAlpha(group, checkedId, true);
             }
             int sec = (Integer) child.getTag();
             if (sec == windowSec) {
@@ -267,6 +277,7 @@ public class ChartFragment extends Fragment {
         legendLayoutListener = null;
         windowGroup = null;
         defaultsToggle = null;
+        defaultsRestore = null;
         editingDefaults = false;
         pendingDefaults = null;
         seriesDefaultsApplied = false;
@@ -788,7 +799,12 @@ public class ChartFragment extends Fragment {
 
     /**
      * 文字开关：进入时把图例切成「默认打开项」的编辑态；再点一次把当前图例勾选保存为新默认。
-     * 文字与图例同一次淡出→换内容→淡入（复用状态页换字那套 Motion.fadeSwap）。
+     * 文字与图例同一次交叉淡化（与状态页「部署状态」同款，见 {@link Motion#crossFade}）。
+     *
+     * <p><b>读写路径</b>：进入时只读 {@code config.seriesDefaults} 到 {@link #pendingDefaults}
+     * （图例改为显示它），当前实际的 {@code series[].on} 一个字都不动；编辑期间勾选框只改
+     * {@link #pendingDefaults}；结束时把这份「默认打开项」写参数，<b>不碰实际勾选</b>——
+     * 退出后图例仍按 {@code series[].on} 渲染，用户原先的曲线选择原样保留。
      */
     private void toggleDefaultsEditing() {
         if (chartView == null || legendRow == null) {
@@ -797,7 +813,7 @@ public class ChartFragment extends Fragment {
         if (!editingDefaults) {
             editingDefaults = true;
             pendingDefaults = chartView.defaultStates();
-            Motion.fadeSwap(() -> {
+            Motion.crossFade(() -> {
                 if (!isAdded() || chartView == null || legendRow == null) {
                     return;   // 淡变期间页面已销毁：不再碰视图
                 }
@@ -814,16 +830,40 @@ public class ChartFragment extends Fragment {
         pendingDefaults = null;
         // 落盘不依赖视图存活：先排写，再播淡变；淡变期间退出页面也不丢这次保存
         persistSeriesDefaults(saved);
-        Motion.fadeSwap(() -> {
+        Motion.crossFade(() -> {
             if (!isAdded() || chartView == null || legendRow == null) {
                 return;
             }
             if (defaultsToggle != null) {
                 defaultsToggle.setText(R.string.chart_defaults_edit);
             }
-            chartView.applySeriesStates(saved);   // 当前显示同步成新默认，图例与曲线一致
+            // 只重建图例（按实际 series[].on）：退出编辑不得把实际勾选改写成默认值
             buildLegend();
         }, defaultsToggle, legendRow);
+    }
+
+    /**
+     * 「恢复默认」：把当前图例勾选拉回<b>已保存的默认项</b>，只动界面、不写参数。
+     *
+     * <p>编辑态里改的是 {@link #pendingDefaults}（保存新默认前的那份草稿）；常态下改的是各系列的
+     * 实际开关（曲线随之变化，但不落盘）。两种模式都只做一次交叉淡化，与「修改默认/结束」同款。
+     */
+    private void restoreDefaultSelection() {
+        if (chartView == null || legendRow == null) {
+            return;
+        }
+        final boolean[] defaults = chartView.defaultStates();
+        if (editingDefaults) {
+            pendingDefaults = defaults;
+        } else {
+            chartView.applySeriesStates(defaults);
+        }
+        Motion.crossFade(() -> {
+            if (!isAdded() || chartView == null || legendRow == null) {
+                return;
+            }
+            buildLegend();
+        }, legendRow);
     }
 
     /** 把 10 个开关写成 {@code UI_CHART_SERIES}；后台一次原子写，失败只提示不阻断界面。 */
@@ -864,28 +904,35 @@ public class ChartFragment extends Fragment {
             return;
         }
         LayoutInflater inflater = LayoutInflater.from(requireContext());
+        buildingWindowButtons = true;
         windowGroup.removeAllViews();
-        for (int sec : options) {
-            MaterialButton b = (MaterialButton) inflater.inflate(
-                    R.layout.item_chart_window_button, windowGroup, false);
-            b.setId(View.generateViewId());
-            b.setText(getString(R.string.chart_window_btn_fmt, sec));
-            // 同一行还要放右侧「修改默认」：把档位按钮左右内边距从 space_s 收到 space_xs，
-            // 6 个按钮 + 文字开关才能在 360dp 屏的卡片内容宽内排下（不缩字、不改共用布局）
-            int pad = getResources().getDimensionPixelSize(R.dimen.space_xs);
-            b.setPadding(pad, b.getPaddingTop(), pad, b.getPaddingBottom());
-            b.setTag(sec);
-            windowGroup.addView(b);
-        }
-        // 选中档位（监听已挂在组上，重复 check 同值会被自身的相等判断挡掉）
-        final int checkedSec = resolveWindowSec(options, selectedSec);
-        for (int i = 0; i < windowGroup.getChildCount(); i++) {
-            View child = windowGroup.getChildAt(i);
-            if (child.getTag() instanceof Integer && (Integer) child.getTag() == checkedSec) {
-                windowGroup.check(child.getId());
-                break;
+        try {
+            for (int sec : options) {
+                MaterialButton b = (MaterialButton) inflater.inflate(
+                        R.layout.item_chart_window_button, windowGroup, false);
+                b.setId(View.generateViewId());
+                b.setText(getString(R.string.chart_window_btn_fmt, sec));
+                // 档位行左侧还要放两个文字开关：把档位按钮左右内边距从 space_s 收到 space_xs
+                // （不缩字、不改共用布局；窄屏放不下时由 WrapRowLayout 把文字开关换到下一行）
+                int pad = getResources().getDimensionPixelSize(R.dimen.space_xs);
+                b.setPadding(pad, b.getPaddingTop(), pad, b.getPaddingBottom());
+                b.setTag(sec);
+                windowGroup.addView(b);
             }
+            // 选中档位（监听已挂在组上，重复 check 同值会被自身的相等判断挡掉）
+            final int checkedSec = resolveWindowSec(options, selectedSec);
+            for (int i = 0; i < windowGroup.getChildCount(); i++) {
+                View child = windowGroup.getChildAt(i);
+                if (child.getTag() instanceof Integer && (Integer) child.getTag() == checkedSec) {
+                    windowGroup.check(child.getId());
+                    break;
+                }
+            }
+        } finally {
+            buildingWindowButtons = false;
         }
+        // 首帧/重建直接落位（页面打开不自己播动画）；选中过渡与日志页来源选择器同源
+        Motion.syncSelectedAlpha(windowGroup, windowGroup.getCheckedButtonId(), false);
     }
 
     /** 选中档：新集合含已选值就保留；否则含默认档就用默认；再否则取第一档。 */

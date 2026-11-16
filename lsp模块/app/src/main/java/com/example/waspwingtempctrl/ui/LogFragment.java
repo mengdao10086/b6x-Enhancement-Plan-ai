@@ -395,7 +395,7 @@ public class LogFragment extends Fragment
         sourceSwapPending = true;
         // 缓存可能还没有（首次进页/刚清过滤关键词）：立刻补一次，不等下一拍 5 秒
         loadNow(currentSource());
-        Motion.fadeSwap(() -> {
+        Motion.crossFade(() -> {
             sourceSwapPending = false;
             SourceCache cache = caches[sourceIndex];
             if (listView == null) {
@@ -446,30 +446,19 @@ public class LogFragment extends Fragment
         button.setId(View.generateViewId());
         button.setText(label);
         button.setAllCaps(false);   // 保留 daemon / LSPosed 原始大小写
-        // 只改来源选择器自己的圆角：曲线页档位按钮仍用 chip_radius
-        button.setCornerRadius(getResources().getDimensionPixelSize(
-                R.dimen.log_source_corner_radius));
         group.addView(button);
         return button.getId();
     }
 
     /**
-     * 选中态过渡：选中按钮恢复不透明，另一个压暗；复用 Motion 的时长与曲线。
+     * 选中态过渡：选中按钮恢复不透明，另一个压暗；口径由 {@link Motion#syncSelectedAlpha} 统一。
      * {@code animate = false} 用于首帧落位——页面打开时不该自己播一段动画。
      */
     private void updateSourceButtonAlpha(boolean animate) {
         if (sourceGroup == null) {
             return;
         }
-        int checked = sourceGroup.getCheckedButtonId();
-        for (int i = 0; i < sourceGroup.getChildCount(); i++) {
-            View child = sourceGroup.getChildAt(i);
-            if (animate) {
-                Motion.animateSelected(child, child.getId() == checked);
-            } else {
-                child.setAlpha(child.getId() == checked ? 1f : 0.55f);
-            }
-        }
+        Motion.syncSelectedAlpha(sourceGroup, sourceGroup.getCheckedButtonId(), animate);
     }
 
     /** 下标只可能是 0 / 1；越界（旧版本保存值）按 daemon 处理。 */

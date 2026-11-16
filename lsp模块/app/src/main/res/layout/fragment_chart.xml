@@ -38,15 +38,17 @@
             android:paddingBottom="0dp">
 
             <!--
-                ===== ① 时间窗口档位 + 「修改默认」=====
-                档位按钮自然宽靠左，绿色文字开关靠右（weight=1 的空 View 吃掉余宽）。
-                文字开关只切换图例的编辑态：常态「修改默认」、编辑态「修改结束」。
+                ===== ① 时间窗口档位 + 「恢复默认」「修改默认」=====
+                档位按钮靠左，两个文字开关靠右（WrapRowLayout 的 trailing 尾段贴行右界）。
+                窄屏放不下时尾段整体换到下一行、仍贴右界，不会把卡片撑破。
+                两个文字开关都用主题强调色，字号比图例说明大一档（text_body）；
+                「修改默认」只切换图例的编辑态：常态「修改默认」、编辑态「修改结束」。
             -->
-            <LinearLayout
+            <com.example.waspwingtempctrl.ui.WrapRowLayout
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:gravity="center_vertical"
-                android:orientation="horizontal">
+                app:wrapColGap="@dimen/space_xs"
+                app:wrapRowGap="@dimen/space_xs">
 
                 <com.google.android.material.button.MaterialButtonToggleGroup
                     android:id="@+id/chart_window_group"
@@ -55,10 +57,22 @@
                     app:selectionRequired="true"
                     app:singleSelection="true" />
 
-                <View
-                    android:layout_width="0dp"
-                    android:layout_height="0dp"
-                    android:layout_weight="1" />
+                <TextView
+                    android:id="@+id/chart_defaults_restore"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:background="?attr/selectableItemBackgroundBorderless"
+                    android:clickable="true"
+                    android:focusable="true"
+                    android:maxLines="1"
+                    android:paddingStart="@dimen/space_xs"
+                    android:paddingTop="@dimen/space_xs"
+                    android:paddingEnd="@dimen/space_xs"
+                    android:paddingBottom="@dimen/space_xs"
+                    android:text="@string/chart_defaults_restore"
+                    android:textColor="?attr/colorPrimary"
+                    android:textSize="@dimen/text_body"
+                    app:wrapTrailing="true" />
 
                 <TextView
                     android:id="@+id/chart_defaults_toggle"
@@ -73,9 +87,10 @@
                     android:paddingEnd="@dimen/space_xs"
                     android:paddingBottom="@dimen/space_xs"
                     android:text="@string/chart_defaults_edit"
-                    android:textColor="@color/state_ok"
-                    android:textSize="@dimen/text_caption" />
-            </LinearLayout>
+                    android:textColor="?attr/colorPrimary"
+                    android:textSize="@dimen/text_body"
+                    app:wrapTrailing="true" />
+            </com.example.waspwingtempctrl.ui.WrapRowLayout>
 
             <!--
                 ===== ② 图例：固定 5+5 两行，窄屏按统一比例 k 整体等比缩放 =====

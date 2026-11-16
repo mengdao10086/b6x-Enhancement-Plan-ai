@@ -71,8 +71,11 @@ public class ChartView extends View {
     // 末端数值标签与端点的水平间距、标签相对端点的抬升量（沿用原多系列标注口径）
     private static final float LABEL_GAP_DP = 6f;
     private static final float LABEL_LIFT_DP = 4f;
-    // 按住查看的数值行高（webui 同名常量 LABEL_H）
+    // 按住查看的数值行高（webui 同名常量 LABEL_H）；末端标签逐行错位也用它当行高
     private static final float LABEL_H_DP = 11f;
+    // 近同锚点判据：两条曲线末端相距不到该值就直接并成一组——它们视觉上本就是一个点。
+    // 取 8dp（略大于圆点直径 6.4dp），宁可多并一点。
+    private static final float NEAR_DUP_DP = 8f;
     // 无左轴（左轴系列全关或窗口内无有效左轴值）时，整图横线改按右轴值域等分 4 段（5 条）
     private static final int RIGHT_ONLY_GRID_SEGMENTS = 4;
 
@@ -123,7 +126,7 @@ public class ChartView extends View {
     private String[] rightText;
     private Path[] paths;
     private ChartDotOp[] dots;
-    /** 末端数值标签（成对系列里当前强调的实际/目标两条，最多两条）。 */
+    /** 末端数值标签：所有开启系列各一条，近似锚点合并成一行（见 {@link #placeEndpointLabels}）。 */
     private ChartLabelOp[] endLabels;
     /** PID 重算标记：竖向虚线（x 坐标）。 */
     private float[] dashXs;
@@ -778,24 +781,24 @@ public class ChartView extends View {
 
     /**
      * 末端标记：每条开启系列取最后一个有效样本；圆点按 {@link ChartSeries#drawsEndDot} 决定是否画，
-     * 数值标签按 {@link ChartSeries#drawsEndLabel} 决定是否生成（只剩成对系列的强调方，最多两条；
-     * 位置见 {@link #placeEndpointLabel}）。按住查看面板里的数值由 {@link #buildTouchRows} 单独生成。
+     * 数值标签按 {@link ChartSeries#drawsEndLabel} 决定是否生成（所有系列都标，含成对的参考方）。
+     * 标签落位见 {@link #placeEndpointLabels}。按住查看面板里的数值由 {@link #buildTouchRows} 单独生成。
      */
     private void buildMarkers(ChartWindow win, ChartAxis lAxis, ChartAxis rAxis) {
         List<ChartDotOp> dotOps = new ArrayList<>();
-        List<ChartLabelOp> labelOps = new ArrayList<>();
+        List<LabelEntry> labelEntries = new ArrayList<>();
         for (int si = 0; si < series.length; si++) {
             ChartSeries s = series[si];
             if (!s.on) {
                 continue;
             }
             if ("pid".equals(s.id)) {
-                continue;   // pid 稀疏曲线由 buildPidSingles 单独画点
+                continue;   // pid 稀疏曲线由 buildPidSingles 单独画点（没有「窗口末端」这个锚点）
             }
             boolean wantDot = ChartSeries.drawsEndDot(s, config);
             boolean wantLabel = ChartSeries.drawsEndLabel(s, config);
             if (!wantDot && !wantLabel) {
-                continue;   // 参考方（半透明那条）既不画圆点也不标数值
+                continue;
             }
             ChartAxis ax = s.axis == ChartSeries.AXIS_LEFT ? lAxis : rAxis;
             if (ax == null) {
@@ -834,89 +837,222 @@ public class ChartView extends View {
                 dotOps.add(new ChartDotOp(ex, ey, seriesColors[si], overflow));
             }
             if (wantLabel) {
-                labelOps.add(placeEndpointLabel(s, lv, ex, ey, seriesColors[si], labelOps));
+                labelEntries.add(new LabelEntry(ChartSeries.format(s, lv), ex, ey, seriesColors[si]));
             }
         }
         dots = dotOps.isEmpty() ? null : dotOps.toArray(new ChartDotOp[0]);
-        endLabels = labelOps.isEmpty() ? null : labelOps.toArray(new ChartLabelOp[0]);
+        endLabels = labelEntries.isEmpty() ? null : placeEndpointLabels(labelEntries);
+    }
+
+    /** 一个待落位的末端标签：锚点（末端点）与文本/颜色。{@code w/tx/ly} 在落位时算好。 */
+    private static final class LabelEntry {
+        final String text;
+        final float anchorX;
+        final float anchorY;
+        final int color;
+        float w;
+        float tx;
+        float ly;
+
+        LabelEntry(String text, float anchorX, float anchorY, int color) {
+            this.text = text;
+            this.anchorX = anchorX;
+            this.anchorY = anchorY;
+            this.color = color;
+        }
+    }
+
+    /** 一行标签（一个或多个近似锚点合并成一行）：同一基线、横向依次排开。 */
+    private static final class LabelRow {
+        final List<LabelEntry> segs = new ArrayList<>();
+        final LabelEntry first;
+        float y;
+        float tx;
+        float width;
+
+        LabelRow(LabelEntry first) {
+            this(first, first.ly);
+        }
+
+        LabelRow(LabelEntry first, float y) {
+            this.first = first;
+            this.y = y;
+            segs.add(first);
+        }
     }
 
     /**
-     * 单个末端数值标签的落位（沿用原多系列标注的单锚点口径）：
-     * 横向放锚点右侧 {@link #LABEL_GAP_DP}，右越界翻到左侧，左界钳到 2dp；
-     * 纵向比较锚点上下空隙，优先选放得下且空隙更大的一侧，两侧都放不下时取空隙更大的一侧，
-     * 再钳在绘图区上沿与「画布下沿 − descent」之间。与已放标签（实际制冷 / 实际rpm）同高且横向相交时，
-     * 后放的一条沿纵向逐行向外找空位（阈值 {@link #LABEL_H_DP}，行距一行 + 1dp），避免两条数字叠在一起。
+     * 末端数值标签落位：<b>每个标签都必须画出来</b>，允许逐行错位或合并，绝不允许整条消失。
+     *
+     * <p><b>合并</b>：两个锚点在横纵两个方向都相距不到 {@link #NEAR_DUP_DP}（视觉上本就是一个点，
+     * 典型是实际/目标同值的一对）时并成一行，用「 / 」分隔、各自保留自己的颜色——这就是原先的
+     * 多系列合并口径。<b>错位</b>：其余标签先按锚点上下空隙选边，与其他行在纵向按
+     * {@link #LABEL_H_DP} 判定相交时，沿行距（一行 + 1dp）逐行向外找空位；上下都排满时并入最近一行，
+     * 仍然不丢。行横向位置按锚点均值算，右越界翻到左侧，并夹在画布可视区内。
      */
-    private ChartLabelOp placeEndpointLabel(ChartSeries s, float v, float ex, float ey, int color,
-                                            List<ChartLabelOp> placed) {
-        String text = ChartSeries.format(s, v);
-        float textW = tickPaint.measureText(text);
+    private ChartLabelOp[] placeEndpointLabels(List<LabelEntry> entries) {
+        tickPaint.setTextSize(TICK_TEXT_DP * density);
         Paint.FontMetrics fm = tickPaint.getFontMetrics();
         float labelH = LABEL_H_DP * density;
+        float rowStep = labelH + 1f * density;
+        float labelMaxY = Math.min(fPadT + fH + labelH, getHeight() - fm.descent);
         float needAbove = LABEL_LIFT_DP * density - fm.ascent;
         float needBelow = labelH + 1f * density + fm.descent;
-        float labelMaxY = Math.min(fPadT + fH + labelH, getHeight() - fm.descent);
-        float gapAbove = ey - fPadT;
-        float gapBelow = (fPadT + fH) - ey;
-        boolean fitsAbove = gapAbove >= needAbove;
-        boolean fitsBelow = gapBelow >= needBelow;
-        boolean placeAbove = fitsAbove == fitsBelow ? gapAbove >= gapBelow : fitsAbove;
-        float ly = placeAbove ? ey - LABEL_LIFT_DP * density
-                              : ey + LABEL_H_DP * density + 1f * density;
-        if (ly < fPadT) {
-            ly = fPadT;
+        float dotR = (DOT_RADIUS_DP + DOT_HALO_DP) * density;
+        float nearDup = NEAR_DUP_DP * density;
+        float sepW = tickPaint.measureText(" / ");
+        int maxSteps = Math.max(1, (int) Math.ceil((labelMaxY - fPadT) / rowStep) + 1);
+
+        for (LabelEntry e : entries) {
+            e.w = tickPaint.measureText(e.text);
         }
-        if (ly > labelMaxY) {
-            ly = labelMaxY;
+        entries.sort((a, b) -> Float.compare(a.anchorY, b.anchorY));
+
+        // 1) 每个锚点先按「上下空隙更大且放得下」的一侧算理想基线（障碍物 = 相邻锚点的圆点外沿）
+        for (int i = 0; i < entries.size(); i++) {
+            LabelEntry e = entries.get(i);
+            float obstacleAbove = fPadT;
+            if (i > 0) {
+                obstacleAbove = Math.max(obstacleAbove, entries.get(i - 1).anchorY + dotR);
+            }
+            float obstacleBelow = fPadT + fH;
+            if (i + 1 < entries.size()) {
+                obstacleBelow = Math.min(obstacleBelow, entries.get(i + 1).anchorY - dotR);
+            }
+            float gapAbove = e.anchorY - obstacleAbove;
+            float gapBelow = obstacleBelow - e.anchorY;
+            boolean fitsAbove = gapAbove >= needAbove;
+            boolean fitsBelow = gapBelow >= needBelow;
+            boolean placeAbove = fitsAbove == fitsBelow ? gapAbove >= gapBelow : fitsAbove;
+            float ly = placeAbove ? e.anchorY - LABEL_LIFT_DP * density
+                                  : e.anchorY + labelH + 1f * density;
+            e.ly = clamp(ly, fPadT, labelMaxY);
         }
-        float tx = ex + LABEL_GAP_DP * density;
-        if (tx + textW > fPadL + fW) {
-            tx = ex - LABEL_GAP_DP * density - textW;
-        }
-        if (tx < 2f * density) {
-            tx = 2f * density;
-        }
-        // 与已放标签重叠时逐行向外找空位：只试一行会在「越界 RPM 锚点被钳到画布下沿、
-        // 下方已无空间」时把候选行全部否掉，旧实现随即回落到同一条重叠位置（看起来像没触发避让）。
-        // 阈值沿用既有 LABEL_H_DP（一行字高），行距 = 一行 + 1dp。
-        float rowStep = LABEL_H_DP * density + 1f * density;
-        if (overlapsLabel(placed, tx, textW, ly)) {
-            boolean found = false;
-            int maxSteps = placed.size() + 1;
-            for (int k = 1; k <= maxSteps && !found; k++) {
-                float down = ly + k * rowStep;
-                if (down <= labelMaxY && !overlapsLabel(placed, tx, textW, down)) {
-                    ly = down;
-                    found = true;
+
+        // 2) 逐条落位：先试与近似锚点合并，再试逐行错位，最后并入最近一行——任何分支都会产出结果
+        float canvasLimit = getWidth() - 4f * density;   // 合并后的整行也不许越出画布（左右各留 2dp）
+        List<LabelRow> rows = new ArrayList<>();
+        for (LabelEntry e : entries) {
+            LabelRow near = null;
+            for (LabelRow r : rows) {
+                if (Math.abs(r.first.anchorX - e.anchorX) <= nearDup
+                        && Math.abs(r.first.anchorY - e.anchorY) <= nearDup
+                        && r.width + sepW + e.w <= canvasLimit) {
+                    near = r;
                     break;
                 }
-                float up = ly - k * rowStep;
-                if (up >= fPadT && !overlapsLabel(placed, tx, textW, up)) {
-                    ly = up;
-                    found = true;
+            }
+            if (near != null) {
+                near.segs.add(e);
+                layoutRow(near, sepW);
+                continue;
+            }
+            LabelRow row = null;
+            float tx0 = labelXFor(e.anchorX, e.w);
+            for (int k = 0; k <= maxSteps && row == null; k++) {
+                if (k == 0) {
+                    if (!labelOverlaps(rows, tx0, e.w, e.ly)) {
+                        row = new LabelRow(e);
+                    }
+                    continue;
+                }
+                float down = e.ly + k * rowStep;
+                if (down <= labelMaxY && !labelOverlaps(rows, tx0, e.w, down)) {
+                    row = new LabelRow(e, down);
+                    break;
+                }
+                float up = e.ly - k * rowStep;
+                if (up >= fPadT && !labelOverlaps(rows, tx0, e.w, up)) {
+                    row = new LabelRow(e, up);
                 }
             }
-            if (!found) {
-                // 上下都排满（标签数多于可用行数）：优先向上错开，至少不与最后一条同高
-                float up = Math.max(fPadT, ly - rowStep);
-                ly = up != ly ? up : Math.min(labelMaxY, ly + rowStep);
+            if (row != null) {
+                layoutRow(row, sepW);
+                rows.add(row);
+                continue;
+            }
+            LabelRow nearest = null;
+            float best = Float.MAX_VALUE;
+            for (LabelRow r : rows) {
+                float d = Math.abs(r.y - e.ly);
+                if (d < best) {
+                    best = d;
+                    nearest = r;
+                }
+            }
+            if (nearest != null) {
+                nearest.segs.add(e);   // 上下都排满：并入最近一行，仍保留本条数值
+                layoutRow(nearest, sepW);
             }
         }
-        return new ChartLabelOp(text, tx, ly, textW, color);
+
+        // 3) 输出：同一行内按段依次排开，段间「 / 」用轴色
+        List<ChartLabelOp> ops = new ArrayList<>();
+        for (LabelRow r : rows) {
+            float x = r.tx;
+            for (int i = 0; i < r.segs.size(); i++) {
+                LabelEntry s = r.segs.get(i);
+                ops.add(new ChartLabelOp(s.text, x, r.y, s.w, s.color));
+                x += s.w;
+                if (i < r.segs.size() - 1) {
+                    ops.add(new ChartLabelOp(" / ", x, r.y, sepW, colorAxis));
+                    x += sepW;
+                }
+            }
+        }
+        return ops.toArray(new ChartLabelOp[0]);
     }
 
-    /** 新标签与已放标签是否在横纵两个方向都相交（纵向按一行字高判定）。 */
-    private boolean overlapsLabel(List<ChartLabelOp> placed, float tx, float textW, float ly) {
+    /**
+     * 算一行的横向起点与总宽：锚点 x 均值 + 间距，右越界翻到左侧，最后夹进画布可视区
+     * （左 2dp、右「画布宽 − 2dp」）。合并后变长时同样重算，故不会越出画布。
+     */
+    private void layoutRow(LabelRow row, float sepW) {
+        float total = sepW * (row.segs.size() - 1);
+        float cx = 0f;
+        for (LabelEntry e : row.segs) {
+            total += e.w;
+            cx += e.anchorX;
+        }
+        cx /= row.segs.size();
+        float tx = cx + LABEL_GAP_DP * density;
+        if (tx + total > fPadL + fW) {
+            tx = cx - LABEL_GAP_DP * density - total;
+        }
+        float minX = 2f * density;
+        float maxX = Math.max(minX, getWidth() - 2f * density - total);
+        row.tx = Math.max(minX, Math.min(tx, maxX));
+        row.width = total;
+    }
+
+    /** 单条（未合并）标签的横向起点：锚点右侧，右越界翻到左侧，并夹进画布可视区。 */
+    private float labelXFor(float anchorX, float w) {
+        float tx = anchorX + LABEL_GAP_DP * density;
+        if (tx + w > fPadL + fW) {
+            tx = anchorX - LABEL_GAP_DP * density - w;
+        }
+        float minX = 2f * density;
+        float maxX = Math.max(minX, getWidth() - 2f * density - w);
+        return Math.max(minX, Math.min(tx, maxX));
+    }
+
+    /** 候选标签与已放各行是否在横纵两个方向都相交（纵向按一行字高判定）。 */
+    private boolean labelOverlaps(List<LabelRow> rows, float tx, float w, float y) {
         float lineH = LABEL_H_DP * density;
-        for (ChartLabelOp p : placed) {
-            boolean xHit = tx < p.x + p.w && p.x < tx + textW;
-            boolean yHit = Math.abs(p.y - ly) < lineH;
-            if (xHit && yHit) {
+        for (LabelRow r : rows) {
+            if (Math.abs(r.y - y) >= lineH) {
+                continue;
+            }
+            if (tx < r.tx + r.width && r.tx < tx + w) {
                 return true;
             }
         }
         return false;
+    }
+
+    /** 把值夹进 [lo, hi]（hi < lo 时取 lo）。 */
+    private static float clamp(float v, float lo, float hi) {
+        return v < lo ? lo : (v > hi ? hi : v);
     }
 
     // ==================== 按住查看 ====================
@@ -1322,7 +1458,7 @@ public class ChartView extends View {
             }
         }
 
-        // 末端数值标签（成对系列的强调方，最多两条）：先描边（halo）再填色，避免曲线穿过字形时同色糊在一起
+        // 末端数值标签（所有系列）：先描边（halo）再填色，避免曲线穿过字形时同色糊在一起
         if (endLabels != null) {
             haloPaint.setColor(colorBg);
             for (ChartLabelOp e : endLabels) {

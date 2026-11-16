@@ -452,7 +452,7 @@ jobs:
             echo "资源 ID: $BEFORE_NIDS -> $AFTER_NIDS";
             echo "APK 字节: $BEFORE_SIZE -> $AFTER_SIZE（净减 $((BEFORE_SIZE - AFTER_SIZE))）"; } >> "$GITHUB_STEP_SUMMARY"
 
-          # 基线断言：GUI 资源集合为 5,444 条 / 17 个类型（改动基线时需同步本检查）
+          # 基线断言：GUI 资源集合为 5,446 条 / 17 个类型（改动基线时需同步本检查）
           # 5,435 → 5,436：快捷方式「临时停止」确认文案迁入 strings.xml（+1 string）
           # 5,380 → 5,386：日志整行跨选新增 1 个 drawable、3 个 id、2 个 string
           # 5,386 → 5,393：停止控制app 新增 6 个 string、1 个 id
@@ -473,7 +473,8 @@ jobs:
           # 5,435 → 5,436：曲线新增「C平滑」系列（1 个 color + 1 条 string），删除死视图 config_key_note（-1 个 id）
           # 5,436 → 5,439：日志页新增 LSPosed 来源（1 个 id log_source_group、1 个 array log_source_entries、1 条 string log_empty_no_b6x）；类型数不变
           # 5,439 → 5,444：日志页标题行选择器（+1 id）、修改默认文字开关（+2 string）、短预填充（+1 string）、选择器圆角（+1 dimen）
-          [ "$BEFORE_ENTRIES" -eq 5444 ]           || { echo "基线资源条目数不是 5,444（$BEFORE_ENTRIES）"; exit 1; }
+          # 5,444 → 5,446：曲线页新增「恢复默认」（+1 id、+1 string）；选择器圆角改名不增条目
+          [ "$BEFORE_ENTRIES" -eq 5446 ]           || { echo "基线资源条目数不是 5,446（$BEFORE_ENTRIES）"; exit 1; }
           [ "$BEFORE_NTYPES" -eq 17 ]              || { echo "基线资源类型数不是 17（$BEFORE_NTYPES）"; exit 1; }
           [ "$REMOVE_N" -eq 19 ]                   || { echo "待移除 layout 数量不是 19（$REMOVE_N）"; exit 1; }
           [ "$AFTER_ENTRIES" -eq $((BEFORE_ENTRIES - REMOVE_N)) ] \
