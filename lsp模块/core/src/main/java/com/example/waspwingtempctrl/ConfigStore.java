@@ -1609,6 +1609,13 @@ public final class ConfigStore {
          * 渲染落点见 {@link com.example.waspwingtempctrl.ui.ConfigKeyRow}。
          */
         public final List<String> hiddenWhen;
+        /**
+         * 表单级隐藏（{@code params.json} 的 {@code uiHidden}，缺省 false）：键仍在定义、产物与
+         * 参数读写链里（键数/默认值不变），只是<b>设置页表单不渲染这一行</b>，用于只由其它页面
+         * 维护的键（如曲线页的 {@code UI_CHART_SERIES}）。渲染落点见
+         * {@link com.example.waspwingtempctrl.ui.ConfigFormController.Page#rendersKey}。
+         */
+        public final boolean uiHidden;
         public final boolean daemonConsumes;
         /** 多值键的字段定义；单值键为 null。 */
         public final List<FieldMeta> fields;
@@ -1636,6 +1643,7 @@ public final class ConfigStore {
             this.unitNote = o.optString("unitNote", "");
             this.requires = jsonStringList(o.optJSONArray("requires"));
             this.hiddenWhen = jsonStringList(o.optJSONArray("hiddenWhen"));
+            this.uiHidden = o.optBoolean("uiHidden", false);
             this.daemonConsumes = o.optBoolean("daemonConsumes", true);
             // 字段表与范围必须先就位：下面的 parseValue() 依赖 fieldCount()/min()/max()
             List<FieldMeta> f = new ArrayList<>();

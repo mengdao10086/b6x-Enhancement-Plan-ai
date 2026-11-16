@@ -76,7 +76,9 @@ public class UiSettingsFragment extends Fragment
     }
 
     /**
-     * 本页要渲染的键（按定义顺序，跨所有归本页的分组；不含 role=master 的键——{@code group.keys} 本就不含）。
+     * 本页承载的键（按定义顺序，跨所有归本页的分组；不含 role=master 的键——{@code group.keys} 本就不含）。
+     * <b>含 {@code uiHidden} 的键</b>：它们仍归本页分组、但表单不渲染（由其它页维护），
+     * 列进来是为了让「键渲染自检」的键数守恒（见 {@code ConfigFormFragment.renderSelfCheck}）。
      * 空列表表示定义里没有可渲染的分组（定义被改坏或换版本），此时页面给出空态而不是静默留白。
      */
     @NonNull

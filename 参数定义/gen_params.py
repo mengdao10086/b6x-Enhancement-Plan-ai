@@ -362,6 +362,11 @@ def build_params_json(definition):
         # 只有定义里写了才输出，未写则产物与改动前逐字节一致。
         if entry.get("hiddenWhen"):
             item["hiddenWhen"] = list(entry["hiddenWhen"])
+        # 表单级隐藏：键仍留在 keys / groups 里（键数、默认值与读写链不变），
+        # 只是设置页表单不渲染该行；由其它页面维护的键用这一条（见 params.def.json notes）。
+        # 只有定义里写了才输出，未写则产物与改动前逐字节一致。
+        if entry.get("uiHidden"):
+            item["uiHidden"] = True
         for opt in ("defaultNote", "factoryNote", "rangeNote"):
             if entry.get(opt):
                 item[opt] = entry[opt]

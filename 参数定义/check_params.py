@@ -116,6 +116,9 @@ def fail_check_b(definition):
             problems.append("%s 的分组 %r 不存在" % (name, k.get("group")))
         if k.get("type") not in VALID_TYPES:
             problems.append("%s 的类型 %r 非法" % (name, k.get("type")))
+        # uiHidden：键仍在产物与分组里（成员一致性照查、键数照算），仅标记「设置页表单不渲染」
+        if "uiHidden" in k and not isinstance(k["uiHidden"], bool):
+            problems.append("%s 的 uiHidden 不是布尔值" % name)
         if not isinstance(k.get("label"), str) or not k["label"].strip():
             problems.append("%s 的 label 为空" % name)
         if not isinstance(k.get("desc"), str) or not k["desc"].strip():

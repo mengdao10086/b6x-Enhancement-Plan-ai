@@ -67,9 +67,12 @@ final class ConfigFormController implements ConfigKeyRow.Host, ConfigWriteQueue.
         /** 本页是否渲染该分组（配置页：除设置页组外全部；设置页：{@code webui} 与 {@code control}）。 */
         boolean rendersGroup(@NonNull GroupMeta group);
 
-        /** 本页是否渲染该键（缺省全渲染）；个别页可据此跳过由其它页承载的键。 */
+        /**
+         * 本页是否渲染该键（缺省全渲染）；个别页可据此跳过由其它页承载的键。
+         * 定义里标了 {@code uiHidden} 的键一律不渲染（键仍在 {@code keys} / 分组里，读写真值不受影响）。
+         */
         default boolean rendersKey(@NonNull KeyMeta key) {
-            return true;
+            return !key.uiHidden;
         }
 
         /** 卡头标题（设置页去掉段标编号）。 */
@@ -631,7 +634,7 @@ final class ConfigFormController implements ConfigKeyRow.Host, ConfigWriteQueue.
             // 兜底：params.json 里没被任何分组列到的键也要能编辑（否则界面比定义少键还看不出来）
             List<KeyMeta> orphans = new ArrayList<>();
             for (KeyMeta meta : store.keys()) {
-                if (!covered.contains(meta.key)) {
+                if (!covered.contains(meta.key) && !meta.uiHidden) {
                     orphans.add(meta);
                 }
             }

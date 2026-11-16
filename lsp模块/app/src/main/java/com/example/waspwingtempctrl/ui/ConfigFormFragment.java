@@ -297,7 +297,8 @@ public class ConfigFormFragment extends Fragment
         ConfigStore store = form.store();
         int renderedRowCount = form.rowKeyCount();
         int renderedMasterCount = form.masterKeyCount();
-        // 设置页键数取自 UiSettingsFragment.settingsKeys()——那是设置页各组真正渲染的那一份，不另写数字
+        // 设置页键数取自 UiSettingsFragment.settingsKeys()——那是设置页各组承载的那一份（含定义里
+        // 标了 uiHidden、由其它页维护而不渲染的键，自检据此保持键数守恒），不另写数字
         int renderedSettingsCount = UiSettingsFragment.settingsKeys(store).size();
         // 状态页首行承载的键（如「自动更新」）：不在两页表单里，但仍是可编辑入口
         int renderedStatusPageCount = StatusFragment.statusPageKeyCount(store);
