@@ -23,7 +23,8 @@ import java.util.Locale;
  * <p><b>强调 / 参考</b>：制冷与风扇各是一对「实际 / 目标」。同一时刻每对只有一条是强调方
  * （不透明实线 + 末端圆点 + 末端数值），另一条是参考方（同 RGB 半透明、无圆点无数值）。
  * 默认强调「实际」，{@code UI_CHART_SWAP} 的第 1/2 值分别控制制冷对/风扇对是否换成强调「目标」。
- * 判定只此一处 {@link #emphasized}，图例位置、颜色、线样式、末端圆点/数值、按住查看全部由它派生。
+ * 判定只此一处 {@link #emphasized}，图例位置、颜色、线样式、末端圆点、按住查看全部由它派生；
+ * 末端数值标签的判据是<b>本次实际线色的不透明度</b>（见 {@link ChartView}），同样随强调方走。
  */
 final class ChartSeries {
 
@@ -153,15 +154,6 @@ final class ChartSeries {
             return false;
         }
         return !isPair(s) || emphasized(s, cfg);
-    }
-
-    /**
-     * 是否绘制末端数值标签：<b>所有系列都标</b>（含成对的参考方与温度系列）。数值接近的标签由
-     * {@link ChartView} 按 {@code LABEL_H_DP} 那一套逐行错位或合并，不允许整条消失。
-     * pid 是稀疏样本、没有「窗口末端」这个锚点，不走本路径（其数值见按住查看面板）。
-     */
-    static boolean drawsEndLabel(ChartSeries s, ChartConfig cfg) {
-        return true;
     }
 
     /**

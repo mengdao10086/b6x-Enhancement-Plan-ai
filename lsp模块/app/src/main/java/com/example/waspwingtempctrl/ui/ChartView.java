@@ -7,6 +7,7 @@ import android.content.Context;
 import android.content.res.Resources;
 import android.content.res.Resources.Theme;
 import android.graphics.Canvas;
+import android.graphics.Color;
 import android.graphics.DashPathEffect;
 import android.graphics.Paint;
 import android.graphics.Path;
@@ -781,8 +782,9 @@ public class ChartView extends View {
 
     /**
      * 末端标记：每条开启系列取最后一个有效样本；圆点按 {@link ChartSeries#drawsEndDot} 决定是否画，
-     * 数值标签按 {@link ChartSeries#drawsEndLabel} 决定是否生成（所有系列都标，含成对的参考方）。
-     * 标签落位见 {@link #placeEndpointLabels}。按住查看面板里的数值由 {@link #buildTouchRows} 单独生成。
+     * 数值标签只看<b>本次实际线色的不透明度</b>——不透明绘制（温度、两条 rpm 的强调方等）才标，
+     * 半透明的参考方 / 未强调对照系列不标。标签落位见 {@link #placeEndpointLabels}。
+     * 按住查看面板里的数值由 {@link #buildTouchRows} 单独生成。
      */
     private void buildMarkers(ChartWindow win, ChartAxis lAxis, ChartAxis rAxis) {
         List<ChartDotOp> dotOps = new ArrayList<>();
@@ -796,7 +798,10 @@ public class ChartView extends View {
                 continue;   // pid 稀疏曲线由 buildPidSingles 单独画点（没有「窗口末端」这个锚点）
             }
             boolean wantDot = ChartSeries.drawsEndDot(s, config);
-            boolean wantLabel = ChartSeries.drawsEndLabel(s, config);
+            // 只有以不透明线色绘制的系列才出末端标签：参考方 / 未强调的对照系列用同色半透明线，
+            // 标签会与曲线糊在一起，故不标。判据取本次实际线色的 alpha，不看系列名或下标——
+            // 交换开关换强调方后判据自动跟着换。pid 已在上面跳过（稀疏样本无窗口末端锚点）。
+            boolean wantLabel = Color.alpha(seriesColors[si]) >= 255;
             if (!wantDot && !wantLabel) {
                 continue;
             }
