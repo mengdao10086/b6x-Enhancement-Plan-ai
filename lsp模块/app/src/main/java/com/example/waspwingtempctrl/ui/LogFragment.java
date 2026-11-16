@@ -20,19 +20,20 @@ import androidx.fragment.app.Fragment;
 import androidx.recyclerview.widget.LinearLayoutManager;
 import androidx.recyclerview.widget.RecyclerView;
 
-import com.example.waspwingtempctrl.AppFiles;
 import com.example.waspwingtempctrl.SetupActivity;
 import com.example.waspwingtempctrl.R;
+import com.google.android.material.button.MaterialButton;
+import com.google.android.material.button.MaterialButtonToggleGroup;
 
-import java.io.File;
 import java.text.SimpleDateFormat;
 import java.util.Date;
 import java.util.Locale;
 
 /**
- * 日志页（D3）：尾读守护进程日志、跟随底部、关键词过滤、四类着色、失败可诊断。
+ * 日志页（D3）：按来源尾读日志（daemon / LSPosed）、跟随底部、关键词过滤、四类着色、失败可诊断。
  *
- * <p>读文件统一走 {@link AppFiles}（{@link LogTailReader} 内部调用），本类只负责渲染与刷新节奏。
+ * <p>来源由「日志文件」卡里的选择器切换；读取统一交给 {@link LogTailReader}
+ * （daemon 直读私有目录，LSPosed 经 root 读 /data/adb 并只保留本模块条目），本类只负责渲染与刷新节奏。
  *
  * <p>线程纪律、刷新节奏、无变化跳过、自动跟随：见 {@code app/逻辑说明.md} §8.3。
  * 键盘"只覆盖、不顶起"与聚焦兜底由 {@link EdgeToEdge} 全 app 统一负责，本页不再自行接管窗口设置。
@@ -56,6 +57,12 @@ public class LogFragment extends Fragment
     /** 拖动扩选：自动滚动的拍间隔。 */
     private static final long DRAG_SCROLL_INTERVAL_MS = 16L;
 
+    /** 来源选择器的选项顺序（与 {@code R.array.log_source_entries} 一致）。 */
+    private static final int SOURCE_DAEMON = 0;
+    private static final int SOURCE_LSPOSED = 1;
+    /** 旋转 / 重建时保留用户选的来源。 */
+    private static final String KEY_SOURCE = "log_source_index";
+
     /**
      * 本页是否为当前页（外壳 ViewPager2 广播，见 {@code PageAware}）：切页不再 hide/show、
      * 也不派发 onPause，故「是不是当前页」只能自己记着。
@@ -76,6 +83,13 @@ public class LogFragment extends Fragment
     private View selectionCopyButton;
     private View selectionCancelButton;
     private EditText filterInput;
+    /** 日志来源选择器（daemon / LSPosed），与配置页 enum 键同源的按钮组。 */
+    private MaterialButtonToggleGroup sourceGroup;
+    /** 两个来源按钮的运行时 id（{@link View#generateViewId()}）。 */
+    private int sourceDaemonId;
+    private int sourceLsposedId;
+    /** 当前来源下标，见 {@link #SOURCE_DAEMON} / {@link #SOURCE_LSPOSED}。 */
+    private int sourceIndex = SOURCE_DAEMON;
 
     /** 选择模式下接管返回键（只在「本页可见且在选择」时启用）。 */
     private OnBackPressedCallback selectionBackCallback;
@@ -105,6 +119,8 @@ public class LogFragment extends Fragment
     private String lastKeyword;
     /** 上次自动跟随滚到的行数；相同且已在底部就不再滚，避免反复唤醒滚动条。 */
     private int lastFollowCount = -1;
+    /** 来源切换代数：换源时自增，用来丢弃换源前那次读取的回包。 */
+    private int loadGeneration;
 
     private final Runnable tick = new Runnable() {
         @Override
@@ -138,7 +154,11 @@ public class LogFragment extends Fragment
     public void onViewCreated(@NonNull View view, @Nullable Bundle savedInstanceState) {
         super.onViewCreated(view, savedInstanceState);
         Context context = requireContext();
+        if (savedInstanceState != null) {
+            sourceIndex = clampSource(savedInstanceState.getInt(KEY_SOURCE, SOURCE_DAEMON));
+        }
 
+        sourceGroup = view.findViewById(R.id.log_source_group);
         listView = view.findViewById(R.id.log_list);
         infoView = view.findViewById(R.id.log_info_text);
         timeView = view.findViewById(R.id.log_time_text);
@@ -208,6 +228,17 @@ public class LogFragment extends Fragment
             }
         });
 
+        // 来源选择器：复用配置页 enum 键 / 曲线页窗口档位的按钮组与按钮布局，单选必选。
+        String[] sourceLabels = getResources().getStringArray(R.array.log_source_entries);
+        sourceDaemonId = addSourceButton(sourceGroup, sourceLabels[SOURCE_DAEMON]);
+        sourceLsposedId = addSourceButton(sourceGroup, sourceLabels[SOURCE_LSPOSED]);
+        sourceGroup.check(sourceIndex == SOURCE_LSPOSED ? sourceLsposedId : sourceDaemonId);
+        sourceGroup.addOnButtonCheckedListener((group, checkedId, isChecked) -> {
+            if (isChecked) {
+                selectSource(checkedId == sourceLsposedId ? SOURCE_LSPOSED : SOURCE_DAEMON);
+            }
+        });
+
         infoView.setText(R.string.log_loading);
         timeView.setText("");
         statView.setText(R.string.log_loading);
@@ -232,6 +263,12 @@ public class LogFragment extends Fragment
     public void onPause() {
         stopRefresh();
         super.onPause();
+    }
+
+    @Override
+    public void onSaveInstanceState(@NonNull Bundle outState) {
+        super.onSaveInstanceState(outState);
+        outState.putInt(KEY_SOURCE, sourceIndex);
     }
 
     @Override
@@ -278,10 +315,77 @@ public class LogFragment extends Fragment
         selectionCopyButton = null;
         selectionCancelButton = null;
         filterInput = null;
+        sourceGroup = null;
         super.onDestroyView();
     }
 
     // ==================== 刷新节奏 ====================
+
+    /** 切换来源：清掉上一次的指纹与跟随状态，让下一拍一定重新读。 */
+    private void selectSource(int index) {
+        int next = clampSource(index);
+        if (next == sourceIndex) {
+            return;
+        }
+        sourceIndex = next;
+        loadGeneration++;
+        if (isSelectingLines()) {
+            exitSelection();   // 选中区间属于旧来源的行，换源后不能再沿用
+        }
+        lastFingerprint = null;
+        lastKeyword = null;
+        following = true;   // 换了一份日志，默认仍看最新
+        lastFollowCount = -1;
+        if (infoView != null) {
+            infoView.setText(R.string.log_loading);
+        }
+        if (timeView != null) {
+            timeView.setText("");
+        }
+        if (statView != null) {
+            statView.setText(R.string.log_loading);
+        }
+        if (countView != null) {
+            countView.setVisibility(View.GONE);
+            countView.setText("");
+        }
+        if (emptyView != null) {
+            emptyView.setVisibility(View.GONE);
+        }
+        if (failureScroll != null) {
+            failureScroll.setVisibility(View.GONE);   // 旧来源的诊断不能盖在新来源上
+        }
+        if (listView != null) {
+            listView.setVisibility(View.VISIBLE);
+        }
+        if (adapter != null) {
+            adapter.submit(java.util.Collections.emptyList());   // 旧来源的行不能留在新来源标题下
+        }
+        updateFollowButton();
+        loadNow();
+    }
+
+    /** 复用曲线页档位按钮的布局，加进来源按钮组；返回运行时生成的按钮 id。 */
+    private int addSourceButton(MaterialButtonToggleGroup group, String label) {
+        MaterialButton button = (MaterialButton) getLayoutInflater()
+                .inflate(R.layout.item_chart_window_button, group, false);
+        button.setId(View.generateViewId());
+        button.setText(label);
+        button.setAllCaps(false);   // 保留 daemon / LSPosed 原始大小写
+        group.addView(button);
+        return button.getId();
+    }
+
+    /** 下标只可能是 0 / 1；越界（旧版本保存值）按 daemon 处理。 */
+    private static int clampSource(int index) {
+        return index == SOURCE_LSPOSED ? SOURCE_LSPOSED : SOURCE_DAEMON;
+    }
+
+    private LogTailReader.Source currentSource() {
+        return sourceIndex == SOURCE_LSPOSED
+                ? LogTailReader.Source.LSPOSED
+                : LogTailReader.Source.DAEMON;
+    }
 
     /** 幂等：重复调用只生效一次。 */
     private void startRefresh() {
@@ -308,17 +412,18 @@ public class LogFragment extends Fragment
             return;
         }
         final Context appContext = requireContext().getApplicationContext();
-        final File file = AppFiles.logFile(appContext);
+        final LogTailReader.Source source = currentSource();
         final String keyword = currentKeyword();
         final String fingerprint = lastFingerprint;
         final String lastKw = lastKeyword;
+        final int generation = loadGeneration;
 
         Thread thread = new Thread(() -> {
             final LogTailReader.Snapshot snap =
-                    LogTailReader.read(appContext, file, keyword, fingerprint, lastKw);
+                    LogTailReader.read(appContext, source, keyword, fingerprint, lastKw);
             mainHandler.post(() -> {
-                if (listView == null) {
-                    return;
+                if (listView == null || generation != loadGeneration) {
+                    return;   // 视图已销毁，或这次读取属于换源前的那一代
                 }
                 applySnapshot(snap, keyword);
             });
@@ -403,9 +508,13 @@ public class LogFragment extends Fragment
         boolean empty = snap.lines.isEmpty();
         emptyView.setVisibility(empty ? View.VISIBLE : View.GONE);
         if (empty) {
-            emptyView.setText(keyword.isEmpty()
-                    ? getString(R.string.log_empty_no_lines)
-                    : getString(R.string.log_empty_no_hit, keyword, snap.candidateLines));
+            if (keyword.isEmpty()) {
+                emptyView.setText(snap.source == LogTailReader.Source.LSPOSED
+                        ? getString(R.string.log_empty_no_b6x)
+                        : getString(R.string.log_empty_no_lines));
+            } else {
+                emptyView.setText(getString(R.string.log_empty_no_hit, keyword, snap.candidateLines));
+            }
         }
 
         if (following) {
@@ -654,21 +763,16 @@ public class LogFragment extends Fragment
 
     /** 信息条首行：只有路径本身，不带标签字样。 */
     private String buildInfoText(LogTailReader.Snapshot snap) {
-        AppFiles.Probe p = snap.probe;
-        if (p == null) {
+        if (snap.path == null) {
             return getString(R.string.log_loading);
         }
-        return getString(R.string.log_info_fmt, p.path);
+        return getString(R.string.log_info_fmt, snap.path);
     }
 
     /** 次行左半：修改时间（同一行的右半是 {@link #buildStatText} 的行数统计）。 */
     private String buildTimeText(LogTailReader.Snapshot snap) {
-        AppFiles.Probe p = snap.probe;
-        if (p == null) {
-            return "";
-        }
-        return (p.statOk && p.mtimeMs > 0L)
-                ? TIME_FMT.format(new Date(p.mtimeMs))
+        return (snap.statOk && snap.mtimeMs > 0L)
+                ? TIME_FMT.format(new Date(snap.mtimeMs))
                 : getString(R.string.log_value_unknown);
     }
 
@@ -678,15 +782,14 @@ public class LogFragment extends Fragment
      * 大小取文件字节数（超过上限即说明尾读被截断）。
      */
     private String buildStatText(LogTailReader.Snapshot snap) {
-        AppFiles.Probe p = snap.probe;
-        if (p == null) {
+        if (snap.path == null) {
             return getString(R.string.log_loading);
         }
         if (!snap.ok) {
             return getString(R.string.log_stat_failed);
         }
-        return getString(R.string.log_stat_fmt, snap.candidateLines, LogTailReader.MAX_LINES,
-                formatK(p.size), formatK(LogTailReader.TAIL_BYTES));
+        return getString(R.string.log_stat_fmt, snap.candidateLines, snap.lineLimit,
+                formatK(snap.size), formatK(snap.byteLimit));
     }
 
     /** 命中计数只在有关键词时才有意义；无关键词时行数信息统一在「日志文件」卡的统计行。 */

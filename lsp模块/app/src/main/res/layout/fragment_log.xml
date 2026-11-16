@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!--
-    日志页（D3）。两段式：日志文件卡（路径一行；修改时间与行数同一行，时间在左、统计右对齐 ——
-    都属"这是哪份日志、看到多少"的一组信息，故同卡）→ 日志区（关键词过滤 + 命中计数
+    日志页（D3）。两段式：日志文件卡（来源选择器一行；路径一行；修改时间与行数同一行，时间在左、
+    统计右对齐 —— 都属"这是哪份日志、看到多少"的一组信息，故同卡）→ 日志区（关键词过滤 + 命中计数
     固定在列表上方，与列表同卡：筛选控件须紧贴它作用的对象，命中计数即该筛选的反馈）
     → 日志列表（占满剩余高度）。
     读取失败时不进列表，直接把 AppFiles.diagnose() 的原文铺在列表位置，绝不静默留白。
@@ -18,7 +18,7 @@
     android:paddingRight="@dimen/page_padding"
     android:paddingBottom="@dimen/page_padding">
 
-    <!-- ===== 日志文件卡：路径一行；修改时间与行数同一行（时间左、统计右对齐） ===== -->
+    <!-- ===== 日志文件卡：来源选择器；路径一行；修改时间与行数同一行（时间左、统计右对齐） ===== -->
     <com.google.android.material.card.MaterialCardView
         android:layout_width="match_parent"
         android:layout_height="wrap_content">
@@ -34,6 +34,19 @@
                 android:layout_height="wrap_content"
                 android:text="@string/log_section_file"
                 android:textAppearance="@style/TextAppearance.B6XTempCtrl.SectionTitle" />
+
+            <!--
+                来源选择器：与配置页 enum 键、曲线页窗口档位同源的 MaterialButtonToggleGroup
+                （单选 + 必选）。按钮由 LogFragment 复用 item_chart_window_button.xml 逐个加进来，
+                不另造一套控件；选项顺序与 SOURCE_DAEMON / SOURCE_LSPOSED 一致。
+            -->
+            <com.google.android.material.button.MaterialButtonToggleGroup
+                android:id="@+id/log_source_group"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="@dimen/space_s"
+                app:selectionRequired="true"
+                app:singleSelection="true" />
 
             <!-- 路径单独一行、不加标签：长路径可折行，不与时间抢宽度 -->
             <TextView

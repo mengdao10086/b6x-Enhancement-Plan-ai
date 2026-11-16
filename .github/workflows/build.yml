@@ -471,7 +471,8 @@ jobs:
           # 5,436 → 5,437：日志页「超长行截断」提示（log_line_truncated，+1 string）
           # 5,437 → 5,435：移除组头「界面自用」徽标（删 1 个 string、1 个 id）
           # 5,435 → 5,436：曲线新增「C平滑」系列（1 个 color + 1 条 string），删除死视图 config_key_note（-1 个 id）
-          [ "$BEFORE_ENTRIES" -eq 5436 ]           || { echo "基线资源条目数不是 5,436（$BEFORE_ENTRIES）"; exit 1; }
+          # 5,436 → 5,439：日志页新增 LSPosed 来源（1 个 id log_source_group、1 个 array log_source_entries、1 条 string log_empty_no_b6x）；类型数不变
+          [ "$BEFORE_ENTRIES" -eq 5439 ]           || { echo "基线资源条目数不是 5,439（$BEFORE_ENTRIES）"; exit 1; }
           [ "$BEFORE_NTYPES" -eq 17 ]              || { echo "基线资源类型数不是 17（$BEFORE_NTYPES）"; exit 1; }
           [ "$REMOVE_N" -eq 19 ]                   || { echo "待移除 layout 数量不是 19（$REMOVE_N）"; exit 1; }
           [ "$AFTER_ENTRIES" -eq $((BEFORE_ENTRIES - REMOVE_N)) ] \

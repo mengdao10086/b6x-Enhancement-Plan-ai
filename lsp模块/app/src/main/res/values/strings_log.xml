@@ -4,6 +4,12 @@
 
     <string name="log_section_file">日志文件</string>
 
+    <!-- 来源选择器：选项顺序须与 LogFragment 的 SOURCE_DAEMON / SOURCE_LSPOSED 一致 -->
+    <string-array name="log_source_entries">
+        <item>daemon</item>
+        <item>LSPosed</item>
+    </string-array>
+
     <string name="log_filter_hint">关键词（大小写不敏感）</string>
     <string name="log_loading">正在读取日志…</string>
 
@@ -23,6 +29,7 @@
     <string name="log_count_hit_fmt">命中 %1$d 行</string>
 
     <string name="log_empty_no_lines">没有可显示的行（日志内容为空）</string>
+    <string name="log_empty_no_b6x">没有 b6x 模块的日志行（仅显示 com.example.waspwingtempctrl 的条目）</string>
     <string name="log_empty_no_hit">没有命中「%1$s」的行（仅在最近 %2$d 行内匹配）</string>
 
     <string name="log_failure_title">读取失败（下方为原始诊断）</string>

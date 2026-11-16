@@ -20,9 +20,11 @@ import java.io.BufferedReader;
 import java.io.File;
 import java.io.FileInputStream;
 import java.io.FileOutputStream;
+import java.io.FileReader;
 import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.Iterator;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
@@ -159,9 +161,14 @@ public class MainHook implements IXposedHookLoadPackage {
     /**
      * 安装期的「已钩住 xxx」先攒着，300ms 后合并成一行输出。
      * 逐条打印一次启动会刷二十多行，占掉 LSPosed 日志的大半体积。
+     *
+     * <p>同一次开机内只打一次全量：首次、或清单项数/集合变化时才打全量，其余只打
+     * 「N 项（清单未变）」。记录落宿主私有目录，进程被重注入后仍算同一次开机。
      */
     private static final List<String> sPendingHooked = new ArrayList<>();
+    private static final Set<String> sAllHooked = new LinkedHashSet<>();
     private static boolean sHookedFlushScheduled = false;
+    private static volatile String sHostPkg = null;   // handleLoadPackage 赋值；flushHooked 记录落点用
 
     private static void hooked(String item) {
         synchronized (sPendingHooked) {
@@ -183,8 +190,91 @@ public class MainHook implements IXposedHookLoadPackage {
             sPendingHooked.clear();
             sHookedFlushScheduled = false;
         }
-        XposedBridge.log(TAG + " 已钩住 " + items.size() + " 项: "
-                + String.join("、", items));
+        String pkg = sHostPkg;
+        String path = pkg != null ? hookListFileFor(pkg) : null;
+        String bootId = readBootId();
+        String[] record = path != null ? readHookRecord(path) : null;
+
+        // 进程内累计，保证「全量」是完整集合而不是单个 300ms 批次。
+        // 同一开机内重注入时先用上次记录预填，首批不全也不会误判为「清单变化」。
+        synchronized (sAllHooked) {
+            if (sAllHooked.isEmpty() && record != null && bootId.equals(record[0])) {
+                for (int i = 1; i < record.length; i++) sAllHooked.add(record[i]);
+            }
+            sAllHooked.addAll(items);
+        }
+        List<String> all;
+        synchronized (sAllHooked) {
+            all = new ArrayList<>(sAllHooked);
+        }
+
+        boolean firstOfBoot = record == null || !bootId.equals(record[0]);
+        boolean changed = false;
+        if (!firstOfBoot) {
+            Set<String> logged = new HashSet<>();
+            for (int i = 1; i < record.length; i++) logged.add(record[i]);
+            changed = logged.size() != all.size() || !logged.containsAll(all);
+        }
+
+        if (firstOfBoot || changed) {
+            XposedBridge.log(TAG + " 已钩住 " + all.size() + " 项: " + String.join("、", all));
+            if (path != null) writeHookRecord(path, bootId, all);
+        } else {
+            XposedBridge.log(TAG + " 已钩住 " + all.size() + " 项（清单未变）");
+        }
+    }
+
+    /** 「已钩住」记录落点：与 lastDevFileFor / btOnAtFileFor 同款，按宿主包拼死路径。 */
+    private static String hookListFileFor(String pkg) {
+        return "/data/data/" + pkg + "/files/tempctrl_hook_list";
+    }
+
+    /** 开机标识；与 daemon 侧 KERNEL_BOOT_ID_PATH 同一来源。读不到返回空串（按「换了开机」处理）。 */
+    private static String readBootId() {
+        try (BufferedReader br = new BufferedReader(
+                new FileReader("/proc/sys/kernel/random/boot_id"))) {
+            String line = br.readLine();
+            return line == null ? "" : line.trim();
+        } catch (Throwable t) {
+            return "";
+        }
+    }
+
+    /** 记录格式：第 1 行 boot_id，其后每行一个钩子项；读不到返回 null。 */
+    private static String[] readHookRecord(String path) {
+        try (BufferedReader br = new BufferedReader(new FileReader(path))) {
+            List<String> lines = new ArrayList<>();
+            String line;
+            while ((line = br.readLine()) != null) lines.add(line);
+            return lines.isEmpty() ? null : lines.toArray(new String[0]);
+        } catch (Throwable t) {
+            return null;
+        }
+    }
+
+    private static void writeHookRecord(String path, String bootId, List<String> items) {
+        File file = new File(path);
+        File parent = file.getParentFile();
+        if (parent != null) parent.mkdirs();
+        File tmp = new File(path + ".tmp");
+        try (FileOutputStream fos = new FileOutputStream(tmp)) {
+            fos.write((bootId + "\n").getBytes());
+            for (String item : items) fos.write((item + "\n").getBytes());
+            fos.flush();
+        } catch (Throwable t) {
+            tmp.delete();
+            return;
+        }
+        if (!tmp.renameTo(file)) {
+            try (FileOutputStream fos = new FileOutputStream(file)) {
+                fos.write((bootId + "\n").getBytes());
+                for (String item : items) fos.write((item + "\n").getBytes());
+                fos.flush();
+            } catch (Throwable ignored) {
+                // 写失败只影响下次是否重复打全量，不影响 hook 主流程
+            }
+            tmp.delete();
+        }
     }
 
     private static final int AUTO_LAUNCH_TIMEOUT_MS = 2000;        // 兜底：自动进入设置失败时仍退后台
@@ -241,7 +331,7 @@ public class MainHook implements IXposedHookLoadPackage {
     private static final long STUCK_STATE_CLEAR_COOLDOWN_MS = 60 * 1000;  // 清状态动作限频
 
     // ========== R1·任务2：state 观测（仅稳定变化/翻转汇总时输出，仅 tick 线程读写）==========
-    // 动机：`本段重连 N 次` 每 30 分钟才一条，上线后分不清「修好了」与「本来就会好」、
+    // 动机：`本段重连 N 次` 每 2 小时才一条，上线后分不清「修好了」与「本来就会好」、
     // 也分不清 state「卡 2」与「争用」。原实现每秒读、每 10min 打一条心跳（4 天 481 条/129.6 KB）；
     // 实测断连期 state 随重连尝试每几秒在 0/1 间翻转，逐次打点会涨到几万条，故改为：
     // ①首次观测打基线；②状态变化并稳定 STATE_OBS_SETTLE_MS 才输出「旧→新」（真实时间线）；
@@ -254,7 +344,7 @@ public class MainHook implements IXposedHookLoadPackage {
     private static int mergedStateChangeCount = 0;             // 上次输出后被合并（未单独输出）的翻转次数
     private static long lastStateObsLogAt = 0;                 // 上次输出时刻（翻转汇总限频 + 算「上条至今」）
     private static final long STATE_OBS_SETTLE_MS = 60 * 1000;             // 变化后持续多久才算「稳定态」
-    private static final long STATE_OBS_FLAP_SUMMARY_MS = 60 * 60 * 1000;  // 高频翻转汇总最小间隔（≤1 条/小时）
+    private static final long STATE_OBS_FLAP_SUMMARY_MS = 2 * 60 * 60 * 1000;  // 高频翻转汇总最小间隔（≤1 条/2 小时）
 
     // ========== M2：SDK 扫描自锁（inScanning）解除 + 扫描侧观测 ==========
     // 动机：SDK 的「正在扫描」标志在 startLeScan() 内先置 true、唯一清除点是 stopScan()（只在连接成功后触发）；
@@ -281,10 +371,10 @@ public class MainHook implements IXposedHookLoadPackage {
     private static volatile int setRunModeLogCount = 0;    // "setRunMode 已下发"当前连接已记录条数（markConnected 清零）
     private static final int DIAG_CONN_LOG_MAX = 1;        // 连接诊断日志每连最多条数（discoverServices 等风暴源）
     private static volatile int diagConnLogCount = 0;      // 连接诊断日志计数（markConnected 清零）
-    // ========== 后台重连日志：30 分钟聚合（无重连不输出） ==========
+    // ========== 后台重连日志：2 小时聚合（无重连不输出） ==========
     // 使「零输出 ≠ 无尝试」：断连期间重连块可能跑了成百上千次，日志按窗口聚合成一条。
     private static final long RECONNECT_LOG_INTERVAL_MS = 5 * 60 * 1000; // 异常类日志限频间隔（5 分钟）
-    private static final long RECONNECT_SUMMARY_INTERVAL_MS = 30 * 60 * 1000; // 重连次数聚合输出间隔
+    private static final long RECONNECT_SUMMARY_INTERVAL_MS = 2 * 60 * 60 * 1000; // 重连次数聚合输出间隔
     private static volatile int reconnectAttemptCount = 0;     // 本聚合窗口内实际发令次数（tick 线程累计）
     private static volatile long lastReconnectSummaryAt = 0;   // 上次聚合输出/窗口起点（markConnected 清零）
     // ---- 断连日志门控 ----
@@ -594,7 +684,7 @@ public class MainHook implements IXposedHookLoadPackage {
                         tryReconnectOnce();   // 只发令（见 app/逻辑说明.md §1.2）
                     }
 
-                    // ═══ 重连聚合日志：断连期间每 30 分钟一条（本段无重连则不输出）═══
+                    // ═══ 重连聚合日志：断连期间每 2 小时一条（本段无重连则不输出）═══
                     if (!bleConnected) logReconnectSummary();
 
                     Thread.sleep(1000);
@@ -688,7 +778,7 @@ public class MainHook implements IXposedHookLoadPackage {
                 logReconnectExOnce("发令异常 " + t.getClass().getSimpleName() + ": " + t.getMessage());
             }
 
-            // 重连尝试计数：由 tick 线程每 30 分钟聚合成一条（无尝试不输出）
+            // 重连尝试计数：由 tick 线程每 2 小时聚合成一条（无尝试不输出）
             if (reconnectAttemptCount == 0) lastReconnectSummaryAt = System.currentTimeMillis();
             reconnectAttemptCount++;
         } catch (Throwable t) {
@@ -1049,6 +1139,8 @@ public class MainHook implements IXposedHookLoadPackage {
             }
             return;
         }
+
+        sHostPkg = pkg;   // 「已钩住」记录的落点按宿主包分开
 
         XposedBridge.log(TAG + " LoadPackage: " + pkg);
         XposedBridge.log(TAG + " 模块已加载到 " + pkg

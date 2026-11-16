@@ -16,11 +16,16 @@ import java.util.Locale;
 
 /**
  * 日志尾读 + 截断 + 分级 + 过滤。**全部在后台线程调用**（唯一入口是
- * {@link #read(Context, File, String, String, String)}）。
+ * {@link #read(Context, Source, String, String, String)}）。
  *
- * <p>三条硬约束（只读末尾 {@link #TAIL_BYTES} 字节 / 一律走 {@link AppFiles} 的
- * {@link AppFiles#readTailText(File, int)} / 渲染行数上限 {@link #MAX_LINES}）与过滤顺序：
- * 见 {@code app/逻辑说明.md} §8.3。
+ * <p>两条来源共用同一份 {@link Snapshot} 与渲染路径：
+ * <ul>
+ *   <li>{@link Source#DAEMON}：app 私有目录里的守护进程日志，同 uid 直读 {@link AppFiles}；</li>
+ *   <li>{@link Source#LSPOSED}：/data/adb 下的 LSPosed 模块日志，由 {@link LogLsposedReader}
+ *       经 root 读最新一份并只保留本模块条目。</li>
+ * </ul>
+ *
+ * <p>硬约束（只读尾部 / 渲染行数上限 / 单行字符上限）与过滤顺序：见 {@code app/逻辑说明.md} §8.3。
  */
 final class LogTailReader {
 
@@ -37,6 +42,14 @@ final class LogTailReader {
      */
     static final int MAX_LINE_CHARS = 4096;
 
+    /** 日志来源。 */
+    enum Source {
+        /** 守护进程日志（app 私有目录，同 uid 直读）。 */
+        DAEMON,
+        /** LSPosed 模块日志（/data/adb/lspd/log，需要 root）。 */
+        LSPOSED
+    }
+
     private LogTailReader() {
     }
 
@@ -46,56 +59,94 @@ final class LogTailReader {
      */
     static final class Snapshot {
 
-        final AppFiles.Probe probe;
+        /** 本次读取的来源；{@link #unchanged()} 时为 null。 */
+        final Source source;
+        /** 实际读取的文件路径（LSPosed 无文件时为 glob 形式）。 */
+        final String path;
+        final boolean statOk;
+        final long size;
+        final long mtimeMs;
         final boolean ok;
         /** ok=false 时非空：可直接显示的诊断文本。 */
         final String failureText;
-        /** 命中过滤的行（已按 MAX_LINES 截断）。 */
+        /** 命中过滤的行（已按行数上限截断）。 */
         final List<LogLine> lines;
-        /** 尾读得到的总行数（过滤前）。 */
+        /** 尾读得到的总行数（daemon 为过滤前，LSPosed 为已筛出的 b6x 条目数）。 */
         final int tailLines;
-        /** 参与匹配的行数 = min(tailLines, MAX_LINES)，即界面上的「最近 N 行」。 */
+        /** 参与匹配的行数 = min(tailLines, lineLimit)，即界面上的「最近 N 行」。 */
         final int candidateLines;
-        /** 内容指纹（size:mtime），用于跳过无变化的刷新。 */
+        /** 本来源的渲染行数上限（daemon 3000 / LSPosed 1500）。 */
+        final int lineLimit;
+        /** 本来源的尾读字节上限（daemon 200k / LSPosed 400k），只用于统计行展示。 */
+        final int byteLimit;
+        /** 内容指纹（来源:size:mtime），用于跳过无变化的刷新。 */
         final String fingerprint;
         /** 内容与关键词都与上次一致时为 true，界面应直接跳过本次刷新。 */
         final boolean unchanged;
 
-        private Snapshot(AppFiles.Probe probe, boolean ok, String failureText, List<LogLine> lines,
-                         int tailLines, int candidateLines, String fingerprint, boolean unchanged) {
-            this.probe = probe;
+        private Snapshot(Source source, String path, boolean statOk, long size, long mtimeMs,
+                         boolean ok, String failureText, List<LogLine> lines, int tailLines,
+                         int candidateLines, int lineLimit, int byteLimit, String fingerprint,
+                         boolean unchanged) {
+            this.source = source;
+            this.path = path;
+            this.statOk = statOk;
+            this.size = size;
+            this.mtimeMs = mtimeMs;
             this.ok = ok;
             this.failureText = failureText;
             this.lines = lines;
             this.tailLines = tailLines;
             this.candidateLines = candidateLines;
+            this.lineLimit = lineLimit;
+            this.byteLimit = byteLimit;
             this.fingerprint = fingerprint;
             this.unchanged = unchanged;
         }
 
         static Snapshot unchanged() {
-            return new Snapshot(null, true, null, Collections.emptyList(), 0, 0, null, true);
+            return new Snapshot(null, null, false, 0L, 0L, true, null,
+                    Collections.emptyList(), 0, 0, 0, 0, null, true);
         }
+    }
+
+    /** 构造一个失败快照（诊断原文由调用方给出）。 */
+    static Snapshot failure(Source source, String path, boolean statOk, long size, long mtimeMs,
+                            String failureText, int lineLimit, int byteLimit) {
+        return new Snapshot(source, path, statOk, size, mtimeMs, false, failureText,
+                Collections.emptyList(), 0, 0, lineLimit, byteLimit, null, false);
+    }
+
+    /** 构造一个成功快照。 */
+    static Snapshot success(Source source, String path, boolean statOk, long size, long mtimeMs,
+                            List<LogLine> lines, int tailLines, int candidateLines,
+                            int lineLimit, int byteLimit, String fingerprint) {
+        return new Snapshot(source, path, statOk, size, mtimeMs, true, null, lines, tailLines,
+                candidateLines, lineLimit, byteLimit, fingerprint, false);
     }
 
     /**
      * 读一次。
      *
      * @param appContext    主线程取出的 Application Context（只用于取字符串资源）
-     * @param file          日志文件（主线程由 {@link AppFiles#logFile(Context)} 取得）
+     * @param source        来源（daemon / LSPosed）
      * @param keyword       关键词，空串表示不过滤
      * @param lastFingerprint 上次成功渲染的内容指纹，可为 null
      * @param lastKeyword     上次过滤用的关键词，可为 null
      */
     @NonNull
-    static Snapshot read(@NonNull Context appContext, @NonNull File file, @Nullable String keyword,
+    static Snapshot read(@NonNull Context appContext, @NonNull Source source, @Nullable String keyword,
                          @Nullable String lastFingerprint, @Nullable String lastKeyword) {
+        if (source == Source.LSPOSED) {
+            return LogLsposedReader.read(appContext, keyword, lastFingerprint, lastKeyword);
+        }
+        File file = AppFiles.logFile(appContext);
         try {
             return readInternal(appContext, file, keyword, lastFingerprint, lastKeyword);
         } catch (Throwable t) {
             // 兜底：任何意外都不能让页面静默留白
             AppFiles.Probe probe = AppFiles.probe(file);
-            return failure(probe, "读取异常：" + t.getClass().getSimpleName() + ": " + t.getMessage()
+            return daemonFailure(probe, "读取异常：" + t.getClass().getSimpleName() + ": " + t.getMessage()
                     + "\n\n" + AppFiles.diagnose(file));
         }
     }
@@ -110,10 +161,10 @@ final class LogTailReader {
             if (probe.statOk && probe.size == 0L) {
                 text = text + appContext.getString(R.string.log_empty_file_hint) + "\n";
             }
-            return failure(probe, text);
+            return daemonFailure(probe, text);
         }
 
-        String fingerprint = probe.size + ":" + probe.mtimeMs;
+        String fingerprint = "daemon:" + probe.size + ":" + probe.mtimeMs;
         String kw = keyword == null ? "" : keyword.trim();
         if (fingerprint.equals(lastFingerprint) && kw.equals(lastKeyword)) {
             return Snapshot.unchanged();
@@ -123,7 +174,7 @@ final class LogTailReader {
         try {
             text = AppFiles.readTailText(file, TAIL_BYTES);
         } catch (Throwable t) {
-            return failure(probe, String.valueOf(t.getMessage()) + "\n\n" + AppFiles.diagnose(file));
+            return daemonFailure(probe, String.valueOf(t.getMessage()) + "\n\n" + AppFiles.diagnose(file));
         }
 
         // 先不分配地定出「内容末尾」与「最近 MAX_LINES 行的起点」，只对这一小段 split：
@@ -164,15 +215,17 @@ final class LogTailReader {
                     : body;
             out.add(new LogLine(display, LogClassifier.classify(body)));
         }
-        return new Snapshot(probe, true, null, out, end, candidate, fingerprint, false);
+        return success(Source.DAEMON, probe.path, probe.statOk, probe.size, probe.mtimeMs,
+                out, end, candidate, MAX_LINES, TAIL_BYTES, fingerprint);
     }
 
-    private static Snapshot failure(AppFiles.Probe probe, String failureText) {
-        return new Snapshot(probe, false, failureText, Collections.emptyList(), 0, 0, null, false);
+    private static Snapshot daemonFailure(AppFiles.Probe probe, String failureText) {
+        return failure(Source.DAEMON, probe.path, probe.statOk, probe.size, probe.mtimeMs,
+                failureText, MAX_LINES, TAIL_BYTES);
     }
 
     /** C 端只写 {@code \n}；若文件被外部工具写成 CRLF，行尾的 {@code \r} 会渲染成怪字符，故剥掉。 */
-    private static String stripCr(String line) {
+    static String stripCr(String line) {
         if (line.endsWith("\r")) {
             return line.substring(0, line.length() - 1);
         }
