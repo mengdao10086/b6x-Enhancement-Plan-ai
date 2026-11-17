@@ -15,6 +15,8 @@
 #define STF_RPM_RUN          "RPM_RUN="
 #define STF_COLD_REAL        "COLD_REAL="
 #define STF_COLD_RUN         "COLD_RUN="
+#define STF_EXP_ON           "EXP_ON="
+#define STF_EXP_VALUE        "EXP_VALUE="
 
 /* 广播 action（与 Java Protocol.ACTION_* 同值） */
 #define BROADCAST_ACTION_B6X "com.flydigi.SET_TEMPERATURE"
@@ -25,6 +27,7 @@
 #define PROTO_PATH_STATUS_B7        "/data/local/tmp/tempctrl_b7x.status"
 #define PROTO_PATH_UIPREFS          "/data/local/tmp/tempctrl_uiprefs"
 #define PROTO_PATH_BT_REQ           "/data/local/tmp/tempctrl_bt_req"
+#define PROTO_PATH_EXP_REQ          "/data/local/tmp/tempctrl_exp_req"
 #define PROTO_PATH_TEMP_STOP        "/data/local/tmp/tempctrl_temp_stop"
 #define PROTO_NAME_TEMP_STOP_BOOT   "tempctrl_temp_stop_boot"
 #define PROTO_PATH_TEMP_STOP_BOOT   PRIVATE_DIR "/tempctrl_temp_stop_boot"

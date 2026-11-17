@@ -7,6 +7,7 @@ import android.os.Looper;
 import android.text.Editable;
 import android.text.TextUtils;
 import android.text.TextWatcher;
+import android.util.AttributeSet;
 import android.view.LayoutInflater;
 import android.view.MotionEvent;
 import android.view.View;
@@ -70,7 +71,7 @@ public class LogFragment extends Fragment
      */
     private boolean pageVisible;
 
-    private RecyclerView listView;
+    private LogListView listView;
     private LogListAdapter adapter;
     private TextView infoView;
     private TextView timeView;
@@ -203,14 +204,17 @@ public class LogFragment extends Fragment
         filterInput = view.findViewById(R.id.log_filter_input);
 
         adapter = new LogListAdapter(context, this);
-        // 关掉平滑滚动条：它按「已排布子项的平均高度」外推总高，日志行高随折行不等，
-        // 滑动时可见子项不断换人 → 外推总高反复变化 → 拇指长度周期性抖动。关掉后按行数算，稳定。
-        LinearLayoutManager layoutManager = new LinearLayoutManager(context);
-        layoutManager.setSmoothScrollbarEnabled(false);
-        listView.setLayoutManager(layoutManager);
+        // 滚动条几何量由 LogListView 统一按「像素 + 冻结的平均行高」上报，见其类注释
+        listView.setLayoutManager(new LinearLayoutManager(context));
         // 日志行不做增删动画：整批替换时动画只会变成闪烁
         listView.setItemAnimator(null);
         listView.setAdapter(adapter);
+        // 手指一抬起就补上挂起的快照；没有惯性时 scrolling 已回到 IDLE，不会在滑动中重绑
+        listView.setOnTouchEndListener(() -> {
+            if (!scrolling) {
+                flushPendingSnapshot();
+            }
+        });
         // 滚动条常显 + 加粗（见 fragment_log.xml），这里才接得上"按住滚动条拖动"
         ScrollbarDrag.attach(listView);
         // 长按后不抬手、直接滑动即扩选：接管发生在长按之后，见 dragSelectTouchListener
@@ -550,8 +554,10 @@ public class LogFragment extends Fragment
             caches[slot] = new SourceCache(snap, keyword, snap.ok ? snap.fingerprint : null);
             return;
         }
-        if (scrolling) {
-            pendingSnap = snap;          // 滑动中不重绑列表：回到 IDLE 再套用最新这份
+        // 触摸滚动由 scrolling 覆盖；按住滚动条拖动（ScrollbarDrag 用 scrollBy，状态仍是 IDLE）
+        // 靠 userTouching 覆盖——否则 5 秒刷新会在拖动中整批重绑，表现为顿挫与拇指跳位
+        if (scrolling || (listView != null && listView.isUserTouching())) {
+            pendingSnap = snap;          // 手势中不重绑列表：结束后再套用最新这份
             pendingKeyword = keyword;
             caches[slot] = new SourceCache(snap, keyword, snap.ok ? snap.fingerprint : null);
             return;
@@ -724,7 +730,13 @@ public class LogFragment extends Fragment
 
     @Override
     public void onLineClick(int position) {
-        if (adapter != null && adapter.isSelecting()) {
+        if (adapter == null || !adapter.isSelecting()) {
+            return;
+        }
+        // 只选中一行时再次点它 = 取消选择；选多行时点任意行照旧收拢/扩展区间
+        if (adapter.isSoleSelection(position)) {
+            exitSelection();
+        } else {
             adapter.extendSelectionTo(position);
         }
     }
@@ -981,4 +993,169 @@ public class LogFragment extends Fragment
 
     private static final SimpleDateFormat TIME_FMT =
             new SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.US);
+
+    /**
+     * 日志列表：把滚动条几何量固定到「像素空间 + 冻结的平均行高」。
+     *
+     * <p>为什么默认实现会抖：{@code RecyclerView} 把滚动条映射到<b>条目空间</b>——拇指长度
+     * = 当前可见条目数 / 总条目数。日志行高随折行长度不等，滑动时屏幕里的行高组合不断变化，
+     * 可见条目数随之反复增减，拇指长度就周期性伸缩（高行多时可见条目少 → 拇指短、移动慢）。
+     * 关掉平滑滚动条只是把外推值从「像素」换成「条目数」，比值口径不变，抖动照旧；副作用是
+     * {@code computeVerticalScrollOffset} 的单位从像素变成条目，{@link ScrollbarDrag} 把
+     * 拖动增量当像素交给 {@code scrollBy}，拖动因此变慢。
+     *
+     * <p>这里重写三个几何量，统一用像素：
+     * <ul>
+     *   <li>extent = 视口高度（常量）；</li>
+     *   <li>range = 条目数 × 平均行高。平均行高只在 IDLE / 首次布局时按屏幕内子项重算，
+     *       滑动中不更新；列表数据在滑动中也被 {@link LogFragment} 挂起，不整批重绑。
+     *       因此整段滑动里 range / extent 恒定，拇指长度不动；</li>
+     *   <li>offset = (首个可见条目 + 该条目内已滑过的比例) × 平均行高，跨条目连续，无跳变。</li>
+     * </ul>
+     *
+     * <p>开销：每次调用只读已绑定的十来个子项与一个首可见下标，O(可见行)；平均行高只在停稳时
+     * 扫一遍屏幕内子项。不做全量预测量、不缓存逐行高度，上千行与几十行同代价。
+     */
+    public static final class LogListView extends RecyclerView {
+        /** 平均行高尚未量到时的估算值（与 {@link #rowHeightPx} 的兜底同口径）。 */
+        private static final float DEFAULT_ROW_DP = 24f;
+
+        /** 平均行高（px）；滑动中冻结，只在 IDLE / 首次布局时更新。 */
+        private float avgRowPx;
+
+        /** 手指是否仍按在列表上（含按在滚动条上拖动：那种手势不改变滚动状态）。 */
+        private boolean userTouching;
+
+        /** 手指抬起（非惯性滑动）时回调，用于补上挂起的快照。 */
+        @Nullable
+        private Runnable touchEndListener;
+
+        public LogListView(@NonNull Context context, @Nullable AttributeSet attrs) {
+            super(context, attrs);
+            addOnScrollListener(new OnScrollListener() {
+                @Override
+                public void onScrollStateChanged(@NonNull RecyclerView rv, int newState) {
+                    // 只在停稳时更新平均行高：滑动中改它会直接改拇指长度
+                    if (newState == RecyclerView.SCROLL_STATE_IDLE) {
+                        refreshAverageRowHeight();
+                    }
+                }
+            });
+        }
+
+        void setOnTouchEndListener(@Nullable Runnable listener) {
+            touchEndListener = listener;
+        }
+
+        boolean isUserTouching() {
+            return userTouching;
+        }
+
+        @Override
+        public boolean dispatchTouchEvent(MotionEvent ev) {
+            switch (ev.getActionMasked()) {
+                case MotionEvent.ACTION_DOWN:
+                    userTouching = true;
+                    break;
+                case MotionEvent.ACTION_UP:
+                case MotionEvent.ACTION_CANCEL:
+                    userTouching = false;
+                    if (touchEndListener != null) {
+                        // 等本次事件（可能还在起惯性）分发给 RecyclerView 之后再补快照
+                        post(touchEndListener);
+                    }
+                    break;
+                default:
+                    break;
+            }
+            return super.dispatchTouchEvent(ev);
+        }
+
+        @Override
+        protected void onLayout(boolean changed, int l, int t, int r, int b) {
+            super.onLayout(changed, l, t, r, b);
+            if (avgRowPx <= 0f) {
+                refreshAverageRowHeight();
+            }
+        }
+
+        @Override
+        public int computeVerticalScrollExtent() {
+            return Math.max(1, getHeight() - getPaddingTop() - getPaddingBottom());
+        }
+
+        @Override
+        public int computeVerticalScrollRange() {
+            int count = getAdapter() == null ? 0 : getAdapter().getItemCount();
+            if (count <= 0) {
+                return 1;
+            }
+            long range = (long) Math.ceil(count * (double) rowHeightPx());
+            return (int) Math.min(Integer.MAX_VALUE,
+                    Math.max(computeVerticalScrollExtent() + 1L, range));
+        }
+
+        @Override
+        public int computeVerticalScrollOffset() {
+            int extent = computeVerticalScrollExtent();
+            int range = computeVerticalScrollRange();
+            if (range <= extent) {
+                return 0;
+            }
+            if (!canScrollVertically(1)) {
+                if (!canScrollVertically(-1)) {
+                    return 0;   // 内容不足一屏：不可滚动
+                }
+                // 已到底：估算总高有误差时也让拇指严格贴底，不悬在半路
+                return range - extent;
+            }
+            if (!(getLayoutManager() instanceof LinearLayoutManager)) {
+                return 0;
+            }
+            LinearLayoutManager manager = (LinearLayoutManager) getLayoutManager();
+            int first = manager.findFirstVisibleItemPosition();
+            if (first == RecyclerView.NO_POSITION) {
+                return 0;
+            }
+            View firstView = manager.findViewByPosition(first);
+            float fraction = 0f;
+            if (firstView != null) {
+                int height = firstView.getHeight();
+                if (height > 0) {
+                    int scrolled = getPaddingTop() - manager.getDecoratedTop(firstView);
+                    fraction = Math.min(1f, Math.max(0f, scrolled / (float) height));
+                }
+            }
+            long offset = (long) ((first + fraction) * (double) rowHeightPx());
+            return (int) Math.max(0L, Math.min(offset, (long) range - extent));
+        }
+
+        /** 当前平均行高（px）；还没量到按 24dp 估算。 */
+        private float rowHeightPx() {
+            if (avgRowPx > 0f) {
+                return avgRowPx;
+            }
+            return DEFAULT_ROW_DP * getResources().getDisplayMetrics().density;
+        }
+
+        /** 用屏幕内已绑定的子项重算平均行高；没有已量高的子项时保留旧值。 */
+        private void refreshAverageRowHeight() {
+            int count = getChildCount();
+            if (count == 0) {
+                return;
+            }
+            long sum = 0L;
+            int measured = 0;
+            for (int i = 0; i < count; i++) {
+                int height = getChildAt(i).getHeight();
+                if (height > 0) {
+                    sum += height;
+                    measured++;
+                }
+            }
+            if (measured > 0) {
+                avgRowPx = sum / (float) measured;
+            }
+        }
+    }
 }

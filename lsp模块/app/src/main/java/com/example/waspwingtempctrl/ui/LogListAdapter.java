@@ -31,7 +31,10 @@ final class LogListAdapter extends RecyclerView.Adapter<LogListAdapter.LineHolde
 
     /** 行手势回调。位置在事件发生时现取，不用 bind 时的旧下标。 */
     interface LineGestureListener {
-        /** 短按：选择模式下把选择范围扩到该行；未在选择模式时无动作。 */
+        /**
+         * 短按：选择模式下把选择范围扩到该行；点「当前唯一选中」的那一行则退出选择
+         * （由实现方调 {@link LogListAdapter#isSoleSelection(int)} 判断）；未在选择模式时无动作。
+         */
         void onLineClick(int position);
 
         /** 长按：进入选择模式并以此行为锚点。 */
@@ -127,6 +130,11 @@ final class LogListAdapter extends RecyclerView.Adapter<LogListAdapter.LineHolde
             text.append(items.get(i).text);
         }
         return text.toString();
+    }
+
+    /** 当前选择是否恰好只有 {@code position} 这一行（用于「再次点击取消选择」）。 */
+    boolean isSoleSelection(int position) {
+        return isSelecting() && selectionAnchor == position && selectionFocus == position;
     }
 
     private boolean isLineSelected(int position) {

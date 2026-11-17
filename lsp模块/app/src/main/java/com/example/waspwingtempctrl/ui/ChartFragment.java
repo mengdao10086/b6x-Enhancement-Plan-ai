@@ -1,6 +1,7 @@
 package com.example.waspwingtempctrl.ui;
 
 import android.content.Context;
+import android.content.SharedPreferences;
 import android.content.res.ColorStateList;
 import android.content.res.Resources;
 import android.graphics.Canvas;
@@ -77,6 +78,13 @@ public class ChartFragment extends Fragment {
     /** 自动刷新间隔（C 端 write_webui_data 约 1s 一行）。 */
     private static final long REFRESH_INTERVAL_MS = 1000L;
 
+    /**
+     * 时间窗口默认档位的偏好存储。{@code chart.windowDefaultSec} 在只读资产里，profile.conf 没有
+     * 对应参数键，故「修改默认」保存的档位落在这里；键值缺省时回落到资产里的默认档。
+     */
+    private static final String PREFS_CHART_UI = "chart_ui";
+    private static final String PREF_WINDOW_DEFAULT_SEC = "window_default_sec";
+
     private ChartView chartView;
     private ScrollView failureScroll;
     private TextView failureText;
@@ -136,6 +144,12 @@ public class ChartFragment extends Fragment {
 
     /** 当前窗口档位（秒）；-1 表示配置尚未加载。 */
     private int windowSec = -1;
+    /** 已保存的默认窗口档位（秒）：偏好里有且仍在档位集合内用它，否则用 {@code chart.windowDefaultSec}。 */
+    private int windowDefaultSec = -1;
+    /** 首次拿到配置时已把默认档位应用到当前选择（之后用户的临时选择不被刷新覆盖）。 */
+    private boolean windowDefaultApplied;
+    /** 编辑态里待保存的默认窗口档位（秒）；-1 = 未进入编辑态或尚未解析。 */
+    private int pendingWindowDefaultSec = -1;
     /** 正在整组重建档位按钮：期间的选中事件是程序化触发，不播选中过渡动画。 */
     private boolean buildingWindowButtons;
     private AppFiles.Probe lastProbe;
@@ -204,6 +218,11 @@ public class ChartFragment extends Fragment {
                 Motion.syncSelectedAlpha(group, checkedId, true);
             }
             int sec = (Integer) child.getTag();
+            if (editingDefaults) {
+                // 编辑态只改「待保存的默认档位」，不动当前窗口（与图例勾选同一口径）
+                pendingWindowDefaultSec = sec;
+                return;
+            }
             if (sec == windowSec) {
                 return;
             }
@@ -280,6 +299,7 @@ public class ChartFragment extends Fragment {
         defaultsRestore = null;
         editingDefaults = false;
         pendingDefaults = null;
+        pendingWindowDefaultSec = -1;
         seriesDefaultsApplied = false;
         canvasContainer = null;
         resizeHandle = null;
@@ -368,12 +388,34 @@ public class ChartFragment extends Fragment {
         if (legendSwapCool != cfg.swapCool || legendSwapRpm != cfg.swapRpm) {
             buildLegend();   // 任一对的交换值变化 → 图例槽位/颜色随之换位
         }
+        // 默认档位：首次拿到配置时解析一次（偏好优先、资产默认兜底），并应用到当前选择；
+        // 与图例默认项同一时机，之后只做有效性校正，不反复覆盖用户的临时选择。
+        int previousWindowDefault = windowDefaultSec;
+        if (!windowDefaultApplied) {
+            windowDefaultApplied = true;
+            windowDefaultSec = resolveWindowDefault(cfg);
+            if (editingDefaults) {
+                pendingWindowDefaultSec = windowDefaultSec;
+            } else {
+                windowSec = windowDefaultSec;
+            }
+        } else if (windowDefaultSec <= 0 || !contains(cfg.windowOptions, windowDefaultSec)) {
+            windowDefaultSec = cfg.windowDefaultSec;
+        }
+        // 编辑态先点了、配置才到（或重读后档位集合变化）：待保存的默认档同步校正
+        if (editingDefaults && (pendingWindowDefaultSec <= 0
+                || !contains(cfg.windowOptions, pendingWindowDefaultSec))) {
+            pendingWindowDefaultSec = windowDefaultSec;
+        }
         boolean windowInvalid = windowSec <= 0 || !contains(cfg.windowOptions, windowSec);
         if (windowInvalid) {
-            windowSec = cfg.windowDefaultSec;
+            windowSec = windowDefaultSec > 0 ? windowDefaultSec : cfg.windowDefaultSec;
         }
-        if (configChanged || windowInvalid) {
-            buildWindowButtons(cfg.windowOptions, windowSec);
+        boolean windowDefaultCorrected = windowDefaultSec != previousWindowDefault;
+        if (configChanged || windowInvalid || (editingDefaults && windowDefaultCorrected)) {
+            // 编辑态选中项显示「默认档位」，其余时候保持用户当前选择
+            buildWindowButtons(cfg.windowOptions,
+                    editingDefaults ? pendingWindowDefaultSec : windowSec);
         }
         if (snap.unchanged) {
             if (configChanged) {
@@ -798,13 +840,17 @@ public class ChartFragment extends Fragment {
     // ==================== 「修改默认」编辑态 ====================
 
     /**
-     * 文字开关：进入时把图例切成「默认打开项」的编辑态；再点一次把当前图例勾选保存为新默认。
-     * 文字与图例同一次交叉淡化（与状态页「部署状态」同款，见 {@link Motion#crossFade}）。
+     * 文字开关：进入时把图例与档位行切成「默认项」的编辑态；再点一次把两者的当前默认一起保存。
+     * 文字、图例与档位行同一次交叉淡化（与状态页「部署状态」同款，见 {@link Motion#crossFade}）。
      *
      * <p><b>读写路径</b>：进入时只读 {@code config.seriesDefaults} 到 {@link #pendingDefaults}
      * （图例改为显示它），当前实际的 {@code series[].on} 一个字都不动；编辑期间勾选框只改
      * {@link #pendingDefaults}；结束时把这份「默认打开项」写参数，<b>不碰实际勾选</b>——
      * 退出后图例仍按 {@code series[].on} 渲染，用户原先的曲线选择原样保留。
+     *
+     * <p>时间窗口档位同理：进入时把 {@link #pendingWindowDefaultSec} 置为已保存的默认档并让档位行
+     * 显示它，编辑期间切换档位只改 pending；退出时写偏好，{@link #windowSec}（当前窗口）始终不改，
+     * 档位行再摆回当前选择。
      */
     private void toggleDefaultsEditing() {
         if (chartView == null || legendRow == null) {
@@ -813,6 +859,9 @@ public class ChartFragment extends Fragment {
         if (!editingDefaults) {
             editingDefaults = true;
             pendingDefaults = chartView.defaultStates();
+            pendingWindowDefaultSec = windowDefaultSec > 0
+                    ? windowDefaultSec
+                    : (config != null ? resolveWindowDefault(config) : windowSec);
             Motion.crossFade(() -> {
                 if (!isAdded() || chartView == null || legendRow == null) {
                     return;   // 淡变期间页面已销毁：不再碰视图
@@ -821,15 +870,28 @@ public class ChartFragment extends Fragment {
                     defaultsToggle.setText(R.string.chart_defaults_done);
                 }
                 buildLegend();
-            }, defaultsToggle, legendRow);
+                // 档位行同时切到「默认档位」；监听在编辑态只改 pending，不动当前窗口
+                checkWindowSelection(pendingWindowDefaultSec);
+            }, defaultsToggle, legendRow, windowGroup);
             return;
         }
         final boolean[] saved = pendingDefaults != null
                 ? pendingDefaults.clone() : chartView.defaultStates();
+        // 配置未到时不落盘：此时的 pending 只是回落档位，尚无档位集合可校验
+        final int savedWindow;
+        if (config == null) {
+            savedWindow = -1;
+        } else if (pendingWindowDefaultSec > 0) {
+            savedWindow = pendingWindowDefaultSec;
+        } else {
+            savedWindow = resolveWindowDefault(config);
+        }
         editingDefaults = false;
         pendingDefaults = null;
+        pendingWindowDefaultSec = -1;
         // 落盘不依赖视图存活：先排写，再播淡变；淡变期间退出页面也不丢这次保存
         persistSeriesDefaults(saved);
+        persistWindowDefault(savedWindow);
         Motion.crossFade(() -> {
             if (!isAdded() || chartView == null || legendRow == null) {
                 return;
@@ -839,31 +901,41 @@ public class ChartFragment extends Fragment {
             }
             // 只重建图例（按实际 series[].on）：退出编辑不得把实际勾选改写成默认值
             buildLegend();
-        }, defaultsToggle, legendRow);
+            // 档位行退回用户的当前选择：编辑期间 windowSec 从未被改动
+            checkWindowSelection(windowSec);
+        }, defaultsToggle, legendRow, windowGroup);
     }
 
     /**
-     * 「恢复默认」：把当前图例勾选拉回<b>已保存的默认项</b>，只动界面、不写参数。
+     * 「恢复默认」：把当前图例勾选与时间窗口档位一起拉回<b>已保存的默认项</b>，只动界面、不写参数。
      *
-     * <p>编辑态里改的是 {@link #pendingDefaults}（保存新默认前的那份草稿）；常态下改的是各系列的
-     * 实际开关（曲线随之变化，但不落盘）。两种模式都只做一次交叉淡化，与「修改默认/结束」同款。
+     * <p>编辑态里改的是 {@link #pendingDefaults} / {@link #pendingWindowDefaultSec}（保存新默认前的
+     * 那份草稿）；常态下改的是各系列的实际开关与当前档位（曲线随之变化，但不落盘）。两种模式都只做
+     * 一次交叉淡化，与「修改默认/结束」同款。
      */
     private void restoreDefaultSelection() {
         if (chartView == null || legendRow == null) {
             return;
         }
         final boolean[] defaults = chartView.defaultStates();
+        final int windowDefault = windowDefaultSec > 0
+                ? windowDefaultSec
+                : (config != null ? resolveWindowDefault(config) : windowSec);
         if (editingDefaults) {
             pendingDefaults = defaults;
+            pendingWindowDefaultSec = windowDefault;
         } else {
             chartView.applySeriesStates(defaults);
+            // 常态「恢复默认」把当前选择拉回默认档位（只改界面，不写参数）
+            setWindowSec(windowDefault);
         }
         Motion.crossFade(() -> {
             if (!isAdded() || chartView == null || legendRow == null) {
                 return;
             }
             buildLegend();
-        }, legendRow);
+            checkWindowSelection(editingDefaults ? pendingWindowDefaultSec : windowSec);
+        }, legendRow, windowGroup);
     }
 
     /** 把 10 个开关写成 {@code UI_CHART_SERIES}；后台一次原子写，失败只提示不阻断界面。 */
@@ -893,6 +965,63 @@ public class ChartFragment extends Fragment {
         }, "ww-chart-defaults");
         thread.setDaemon(true);
         thread.start();
+    }
+
+    /** 已保存的默认档位优先；不在当前档位集合里（或没存过）回落到资产的 {@code chart.windowDefaultSec}。 */
+    private int resolveWindowDefault(@NonNull ChartConfig cfg) {
+        int saved = prefs().getInt(PREF_WINDOW_DEFAULT_SEC, 0);
+        return saved > 0 && contains(cfg.windowOptions, saved) ? saved : cfg.windowDefaultSec;
+    }
+
+    /** 曲线页界面偏好（仅本页的默认档位，与 profile.conf 的参数字段无关）。 */
+    private SharedPreferences prefs() {
+        return requireContext().getApplicationContext()
+                .getSharedPreferences(PREFS_CHART_UI, Context.MODE_PRIVATE);
+    }
+
+    /** 保存默认档位：立即更新内存值，偏好异步落盘（不阻塞退出编辑的淡变）。 */
+    private void persistWindowDefault(int sec) {
+        if (!isAdded() || sec <= 0) {
+            return;
+        }
+        windowDefaultSec = sec;
+        prefs().edit().putInt(PREF_WINDOW_DEFAULT_SEC, sec).apply();
+    }
+
+    /**
+     * 只把档位行选中项摆到 {@code sec}：程序化切换期间不播选中过渡、不触发窗口重算。
+     * 监听器在编辑态只写 pending；非编辑态下 {@code sec == windowSec} 时自身会相等返回。
+     */
+    private void checkWindowSelection(int sec) {
+        if (windowGroup == null || sec <= 0) {
+            return;
+        }
+        buildingWindowButtons = true;
+        try {
+            for (int i = 0; i < windowGroup.getChildCount(); i++) {
+                View child = windowGroup.getChildAt(i);
+                if (child.getTag() instanceof Integer && (Integer) child.getTag() == sec) {
+                    windowGroup.check(child.getId());
+                    break;
+                }
+            }
+        } finally {
+            buildingWindowButtons = false;
+        }
+        Motion.syncSelectedAlpha(windowGroup, windowGroup.getCheckedButtonId(), false);
+    }
+
+    /** 常态「恢复默认」用：改当前档位并重算窗口；{@code sec} 非法或未变化时只校正选中项。 */
+    private void setWindowSec(int sec) {
+        if (sec <= 0) {
+            return;
+        }
+        boolean changed = sec != windowSec;
+        windowSec = sec;
+        checkWindowSelection(sec);
+        if (changed) {
+            rebuildWindow();
+        }
     }
 
     /**

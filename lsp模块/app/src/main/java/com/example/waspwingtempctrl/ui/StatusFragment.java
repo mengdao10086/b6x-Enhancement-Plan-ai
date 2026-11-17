@@ -75,14 +75,8 @@ public class StatusFragment extends Fragment implements SetupActivity.PageAware 
     private static final long PROBE_MIN_INTERVAL_MS = 30_000L;
     /** 页面可见期间的周期静默复探间隔：及时反映控制 app 被杀等外部状态变化。 */
     private static final long PERIODIC_REFRESH_MS = 5_000L;
-    /** 手动刷新时文本淡出时长（旧层缩短，见 {@link #swapStatusTextAnimated}）。 */
-    private static final long FADE_OUT_MS = Motion.FADE_OUT_MS;
-    /** 手动刷新时文本淡入时长。 */
-    private static final long FADE_IN_MS = Motion.FADE_IN_MS;
-    /** 旧层延后起播：等新层接近不透明再退，避免两层同时过淡的空档。 */
-    private static final long FADE_OUT_DELAY_MS = Motion.FADE_OUT_DELAY_MS;
-    /** 换字高度动画时长：与旧层淡出终点对齐（105 + 180 = 285ms），高度与淡变同起同止。 */
-    private static final long HEIGHT_SYNC_MS = FADE_OUT_DELAY_MS + FADE_OUT_MS;
+    /** 换字高度动画时长：与 {@link Motion#crossFade} 的旧层淡出终点对齐（0 + 325 = 325ms），高度与淡变同起同止。 */
+    private static final long HEIGHT_SYNC_MS = Motion.FADE_OUT_DELAY_MS + Motion.FADE_OUT_MS;
     /** 部署/拉起结果在状态区的最短保留时长：在此期间周期扫描不覆盖状态文本。 */
     private static final long RESULT_HOLD_MS = 10_000L;
     /** 自动部署失败退避：首次 60 秒，逐次翻倍，上限 30 分钟（进程内；成功或 APK 变化时重置）。 */
@@ -110,9 +104,8 @@ public class StatusFragment extends Fragment implements SetupActivity.PageAware 
     private static volatile boolean syncManifestDone;
 
     private TextView statusView;
-    /** 换字交叉淡入的"旧文本"层（{@code status_text_stack} 内的装饰层，默认 GONE）。 */
-    private TextView statusOutgoingView;
-    /** 新旧文本的叠放层：换字时用 {@link Motion#animateHeightChange} 补间它的高度（窗口展开/收起）。 */
+    /** 状态文本的承载层：换字时用 {@link Motion#animateHeightChange} 补间它的高度（窗口展开/收起），
+     *  同时是 {@link Motion#crossFade} 快照层的宿主。 */
     private ViewGroup statusStack;
     private TextView infoView;
     private TextView logView;
@@ -177,9 +170,7 @@ public class StatusFragment extends Fragment implements SetupActivity.PageAware 
     private boolean lastRootOk;
     /** {@link #lastRootOk} 是否已取过值（false = 尚未取过，取过一次后置真）。 */
     private boolean rootOkSeen;
-    /** 淡入淡出代号：每次新动画递增，回调里对不上号即作废（连续刷新时两段动画不交叠）。 */
-    private int fadeGeneration;
-    /** 动作代号：每次起跑自增，收尾复位忙态时对不上号即作废（同 {@link #fadeGeneration} 的手法）。见 {@code app/逻辑说明.md} §8.1。 */
+    /** 动作代号：每次起跑自增，收尾复位忙态时对不上号即作废。见 {@code app/逻辑说明.md} §8.1。 */
     private int actionGeneration;
 
     /** 主线程 Handler：只在「拿不到 Activity」的收尾路径上用（那一刻不能借 Activity 回主线程）。见 {@code app/逻辑说明.md} §8.1。 */
@@ -250,10 +241,14 @@ public class StatusFragment extends Fragment implements SetupActivity.PageAware 
             // 缓存还新鲜：与静默刷新同一个 30 秒节流口径，避免紧接着再跑一趟 su
             lastProbeAtMs = DeployStatusCache.atMs();
         }
-        statusOutgoingView = view.findViewById(R.id.status_text_outgoing);
         statusStack = view.findViewById(R.id.status_text_stack);
         infoView = view.findViewById(R.id.info_text);
         logView = view.findViewById(R.id.action_log_text);
+        // 空串的 TextView 仍会量出一行高，会在归档提示下留出一段空行；无记录时让它退出布局
+        logView.setVisibility(logText.isEmpty() ? View.GONE : View.VISIBLE);
+        if (!logText.isEmpty()) {
+            logView.setText(PathDisplay.format(view.getContext(), logText));
+        }
         logBody = view.findViewById(R.id.action_log_body);
         arrowView = view.findViewById(R.id.action_log_arrow);
         progress = view.findViewById(R.id.status_progress);
@@ -385,7 +380,6 @@ public class StatusFragment extends Fragment implements SetupActivity.PageAware 
         // 先收掉动画并复位透明度：回调里判空就返回，不给已销毁的视图留半透明残影
         cancelFade();
         statusView = null;
-        statusOutgoingView = null;
         infoView = null;
         logView = null;
         logBody = null;
@@ -526,8 +520,8 @@ public class StatusFragment extends Fragment implements SetupActivity.PageAware 
             pendingStatusKeepHeight = true;   // 只换字、不改高度
             TextCopy.runWhenSelectionEnds(view, this::flushPendingStatus);
         } else {
-            cancelFade();   // 中断可能还在跑的上一次淡变，避免新文本半透明叠在旧层上
-            replaceFirstLine(view, end, placeholder);
+            // 中断可能还在跑的上一次淡变，避免新文本半透明叠在旧层上
+            replaceStatusTextDirect(() -> replaceFirstLine(view, end, placeholder));
         }
         return true;
     }
@@ -566,8 +560,7 @@ public class StatusFragment extends Fragment implements SetupActivity.PageAware 
             pendingStatusKeepHeight = true;
             TextCopy.runWhenSelectionEnds(view, this::flushPendingStatus);
         } else {
-            cancelFade();
-            replaceFirstLine(view, end, backup);
+            replaceStatusTextDirect(() -> replaceFirstLine(view, end, backup));
         }
     }
 
@@ -1289,21 +1282,20 @@ public class StatusFragment extends Fragment implements SetupActivity.PageAware 
 
     /**
      * 手动刷新的结果上屏：<b>业务上屏零延迟</b>——新文本立刻写上去（不再等淡出结束），视觉上做
-     * 「旧文本淡出、新文本淡入」的交叉淡入（旧的在下、新的在上叠放）。
-     * <p>文本只做交叉淡入淡出，不裁剪、不做上下收展。行数变化时的高度复用配置页那套
+     * 「旧文本淡出、新文本淡入」的交叉淡变，统一由 {@link Motion#crossFade} 负责：旧层按当前
+     * 外观抓快照后渐糊渐隐，新层由糊转清；连续调用先收上一轮，<b>打断不丢结果</b>
+     * （打断后当前文本即最新结果）。系统关掉动画时 {@code crossFade} 直接执行换文本。
+     * <p>文本只做交叉淡变，不裁剪、不做上下收展。行数变化时的高度复用配置页那套
      * {@link Motion#animateHeightChange}（{@code ValueAnimator} + panelCurve、按位移定时长）：
-     * 高低都不分时机、与淡变同拍启动，并在 285ms 后与旧层消失同时到位（变矮时旧层会被
-     * 容器底部裁掉一部分，是同步的必然结果）。防中间发灰：新层 270ms 淡入、旧层延后 105ms 起播且只用
-     * 180ms 淡出——新层接近不透明时旧层才退，任一帧至少一层接近不透明。代号保证串行、
-     * <b>打断不丢结果</b>（打断后当前文本即最新结果）；系统关掉动画时直接上屏。见 {@code app/逻辑说明.md} §8.1。
+     * 高低都不分时机、与淡变同拍启动，并在 325ms 后与旧层消失同时到位（变矮时快照层会被
+     * 容器底部裁掉一部分，是同步的必然结果）。
      *
-     * @param keepHeight true = 本次只换字、不驱动高度：把当前高度钉住，再走交叉淡入淡出。
+     * @param keepHeight true = 本次只换字、不驱动高度：把当前高度钉住，再走交叉淡变。
      *                   手动刷新的单行「正在探测…」占位用它，避免窗口先被占位压矮、结果到达再撑开；
      *                   结果到达的换字仍走 false，届时以钉住的高度为起点补间到结果高度。
      */
     private void swapStatusTextAnimated(final String text, boolean keepHeight) {
         final TextView view = statusView;
-        final TextView outgoing = statusOutgoingView;
         if (view == null || !isAdded()) {
             return;
         }
@@ -1318,59 +1310,31 @@ public class StatusFragment extends Fragment implements SetupActivity.PageAware 
         }
         pendingStatusText = null;
         pendingStatusKeepHeight = false;
-        if (outgoing == null || !Motion.enabled(view.getContext())) {
-            // 系统关掉动画（或叠放层缺失）：直接换文本，信息先可读
-            cancelFade();
-            view.setAlpha(1f);
+        // 快照抓取、旧层渐糊隐去、新层由糊转清都在 crossFade 内完成；swap 里只做业务动作：
+        // 驱动高度（与淡变同拍启动）并立即写新文本，保证信息先可读
+        Motion.crossFade(() -> {
+            if (keepHeight) {
+                // 只换字：钉住当前高度（可能正在补间，先记中间值再中止），不启动高度动画。
+                // 系统关掉动画时不钉高，保持与原先"直接上屏"一致的自然高度
+                final int held = Motion.enabled(view.getContext()) ? currentStatusStackHeight() : 0;
+                Motion.cancelHeightChange(statusStack);
+                if (held > 0 && statusStack != null) {
+                    ViewGroup.LayoutParams lp = statusStack.getLayoutParams();
+                    if (lp != null) {
+                        lp.height = held;
+                    }
+                }
+            } else {
+                final int newStackHeight = measureStatusStackHeight(shown);
+                if (newStackHeight > 0) {
+                    final int from = currentStatusStackHeight();
+                    if (from > 0) {
+                        Motion.animateHeightChange(statusStack, from, newStackHeight, HEIGHT_SYNC_MS);
+                    }
+                }
+            }
             view.setText(shown);
-            return;
-        }
-        final int generation = ++fadeGeneration;
-        view.animate().cancel();
-        outgoing.animate().cancel();
-        // 旧的 = 上一次换字的落点（打断时即当前可见的那段）。文本做交叉淡入淡出；
-        // 高度与淡变同起同止：不分增减，换字同一拍启动，285ms 后与旧层消失同时到位
-        final CharSequence old = view.getText();
-        if (keepHeight) {
-            // 只换字：钉住当前高度（可能正在补间，先记中间值再中止），不启动高度动画
-            final int held = currentStatusStackHeight();
-            Motion.cancelHeightChange(statusStack);
-            if (held > 0 && statusStack != null) {
-                ViewGroup.LayoutParams lp = statusStack.getLayoutParams();
-                if (lp != null) {
-                    lp.height = held;
-                }
-            }
-        } else {
-            final int newStackHeight = measureStatusStackHeight(shown);
-            if (newStackHeight > 0) {
-                final int from = currentStatusStackHeight();
-                if (from > 0) {
-                    Motion.animateHeightChange(statusStack, from, newStackHeight, HEIGHT_SYNC_MS);
-                }
-            }
-        }
-        outgoing.setText(old);
-        outgoing.setAlpha(1f);
-        outgoing.setVisibility(View.VISIBLE);
-        // 业务上屏：立即，不等动画；先置透明再写文本，避免新文本以不透明状态先露一帧
-        view.setAlpha(0f);
-        view.setText(shown);
-        view.animate().alpha(1f).setDuration(FADE_IN_MS).setInterpolator(Motion.easeOut()).start();
-        // 旧层延后起播并缩短：新层接近不透明时旧层才退，任一帧至少一层接近不透明，消除中间空档
-        outgoing.animate().alpha(0f).setDuration(FADE_OUT_MS)
-                .setStartDelay(FADE_OUT_DELAY_MS).setInterpolator(Motion.easeOut())
-                .withEndAction(() -> {
-            if (generation != fadeGeneration) {
-                return;   // 已被新一次换字 / cancelFade 接管：叠放层归它们管，这里什么都不动
-            }
-            if (statusOutgoingView == null || !isAdded()) {
-                return;   // 视图已销毁，无处收尾（onDestroyView 已复位）
-            }
-            // 高度已与淡变同起同止，这里只收旧层
-            outgoing.setVisibility(View.GONE);
-            outgoing.setAlpha(1f);
-        }).start();
+        }, view);
     }
 
     /**
@@ -1419,21 +1383,32 @@ public class StatusFragment extends Fragment implements SetupActivity.PageAware 
     }
 
     /**
-     * 作废在跑的淡入淡出、复位两层文本的透明度并收起叠放层（离开本页 / 视图销毁时收尾）。
-     * 高度补间一并中止并把叠放层还原为 {@code WRAP_CONTENT}，不留钉死的中间高度。
+     * 中止高度补间并把承载层还原为 {@code WRAP_CONTENT}，同时让当前文本立即可读
+     * （离开本页 / 视图销毁 / 直接改写文本前收尾）。
+     * <p>{@link Motion#crossFade} 的快照层由它自己按 325ms（另加 16ms 收尾）退场并回收，这里不再介入；
+     * 下次 {@code crossFade} 调用也会先收掉上一轮。
      */
     private void cancelFade() {
-        fadeGeneration++;
         if (statusView != null) {
             statusView.animate().cancel();
             statusView.setAlpha(1f);
         }
-        if (statusOutgoingView != null) {
-            statusOutgoingView.animate().cancel();
-            statusOutgoingView.setAlpha(1f);
-            statusOutgoingView.setVisibility(View.GONE);
-        }
         Motion.cancelHeightChange(statusStack);
+    }
+
+    /**
+     * 直接改写状态文本前的收尾（首行临时替换/恢复用）：有淡变在跑时交给 {@link Motion#crossFade}
+     * 换向，让旧快照按既有节奏退场，不在新文本上留残影；没有淡变时立即改写，不引入额外动画。
+     * 判据取新层透明度——{@code crossFade} 期间它从 0 升到 1，结束后复位为 1。
+     */
+    private void replaceStatusTextDirect(Runnable replace) {
+        if (statusView != null && statusView.getAlpha() < 1f) {
+            Motion.cancelHeightChange(statusStack);
+            Motion.crossFade(replace, statusView);
+            return;
+        }
+        cancelFade();
+        replace.run();
     }
 
     /**
@@ -1483,6 +1458,7 @@ public class StatusFragment extends Fragment implements SetupActivity.PageAware 
         if (TextCopy.isSelecting(logView)) {
             TextCopy.runWhenSelectionEnds(logView, this::flushPendingLog);
         } else {
+            logView.setVisibility(View.VISIBLE);
             logView.setText(PathDisplay.format(requireContext(), logText));
         }
         if (archive != null) {
@@ -1516,7 +1492,8 @@ public class StatusFragment extends Fragment implements SetupActivity.PageAware 
             text = getString(R.string.status_archive_hint_none, info.dir.getAbsolutePath());
         } else {
             text = getString(R.string.status_archive_hint,
-                    info.dir.getAbsolutePath(), info.count, formatBytes(info.bytes));
+                    info.dir.getAbsolutePath(), info.count,
+                    formatArchiveUsage(info.bytes), OpLog.LIMIT_BYTES / 1024L);
         }
         CharSequence shown = PathDisplay.format(requireContext(), text);
         // 文本没变就不动视图：逐条刷新时避免无谓的重排
@@ -1525,12 +1502,9 @@ public class StatusFragment extends Fragment implements SetupActivity.PageAware 
         }
     }
 
-    /** 归档占用的人话格式（<1 KB 给字节数，其余一位小数 KB）。 */
-    private static String formatBytes(long bytes) {
-        if (bytes < 1024L) {
-            return bytes + " B";
-        }
-        return String.format(Locale.US, "%.1f KB", bytes / 1024.0);
+    /** 归档占用的数字部分（单位「KB」由提示行末尾统一给出，与上限共用）：始终一位小数。 */
+    private static String formatArchiveUsage(long bytes) {
+        return String.format(Locale.US, "%.1f", bytes / 1024.0);
     }
 
     /** 拿到 root 后问是否立即部署（文案见 strings.xml；不需要则不打扰）。 */

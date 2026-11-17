@@ -194,8 +194,11 @@
                     滚动条：常显（fadeScrollbars=false）并加粗（@dimen/scrollbar_size），
                     配合 ui/ScrollbarDrag 才能按住拖动。常显之后原先"跟随刷新时亮灭闪烁"的问题不复存在，
                     故那两条淡出延时属性一并去掉。
+                    控件用 LogFragment.LogListView：它把滚动条几何量改成像素 + 冻结平均行高，
+                    否则可变行高会让拇指长度随屏幕内行高组合周期性伸缩（原因见该类注释）。
                 -->
-                <androidx.recyclerview.widget.RecyclerView
+                <view
+                    class="com.example.waspwingtempctrl.ui.LogFragment$LogListView"
                     android:id="@+id/log_list"
                     android:layout_width="match_parent"
                     android:layout_height="match_parent"

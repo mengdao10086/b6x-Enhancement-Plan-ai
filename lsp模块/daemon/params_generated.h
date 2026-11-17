@@ -13,7 +13,8 @@
     X("RECONNECT_KEEP_CYCLES", g_cfg.reconnect_keep_cycles, 0, 30) \
     X("CPU_FILTER_ALPHA", g_cfg.CPU_FILTER_ALPHA, 1, 100) \
     X("MAP_INPUT_SMOOTH_ALPHA", g_cfg.rpm_smooth_alpha, 1, 99) \
-    X("PID_CH_THRESHOLD", g_cfg.pid_ch_threshold, 1, 100)
+    X("PID_CH_THRESHOLD", g_cfg.pid_ch_threshold, 1, 100) \
+    X("EXPERIMENT_MODE", g_cfg.experiment_mode, 0, 1)
 
 /* sysfs 层键表（SYSFS_ENABLED=1）→ SYSFS_CFG_KEYS[]：
  *   X(键名, kind, ivar, imin, imax, svar, ssize)
@@ -97,7 +98,8 @@
     X(g_cfg.pid_spd_recall_weight, 1000) \
     X(g_cfg.pid_cold_min, 1) \
     X(g_cfg.pid_cold_max, 190) \
-    X(g_cfg.b7_pid_cold_max, 190)
+    X(g_cfg.b7_pid_cold_max, 190) \
+    X(g_cfg.experiment_mode, 0)
 
 #define CFG_SYSFS_DEFAULTS(X) \
     X(g_cfg.BATT_TEMP_DIVISOR, 1) \

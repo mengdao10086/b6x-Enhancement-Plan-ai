@@ -42,7 +42,11 @@
                 档位按钮靠左，两个文字开关靠右（WrapRowLayout 的 trailing 尾段贴行右界）。
                 窄屏放不下时尾段整体换到下一行、仍贴右界，不会把卡片撑破。
                 两个文字开关都用主题强调色，字号比图例说明大一档（text_body）；
-                「修改默认」只切换图例的编辑态：常态「修改默认」、编辑态「修改结束」。
+                「修改默认」同时编辑图例勾选与档位行的默认档：常态「修改默认」、编辑态「修改结束」。
+                整行高度钉在 chart_window_button_height(21dp)：文字开关去掉上下 padding、改用
+                minHeight + center_vertical。原先 14sp 文字 + 上下各 space_xs(4dp) 比档位按钮高，
+                WrapRowLayout 行内垂直居中把 21dp 的档位按钮往下推约 3dp，使选择器到卡片上边
+                比到左边多出这一截；行高一致后上下左右都是容器的 space_s(8dp)。
             -->
             <com.example.waspwingtempctrl.ui.WrapRowLayout
                 android:layout_width="match_parent"
@@ -64,11 +68,13 @@
                     android:background="?attr/selectableItemBackgroundBorderless"
                     android:clickable="true"
                     android:focusable="true"
+                    android:gravity="center_vertical"
                     android:maxLines="1"
+                    android:minHeight="@dimen/chart_window_button_height"
                     android:paddingStart="@dimen/space_xs"
-                    android:paddingTop="@dimen/space_xs"
+                    android:paddingTop="0dp"
                     android:paddingEnd="@dimen/space_xs"
-                    android:paddingBottom="@dimen/space_xs"
+                    android:paddingBottom="0dp"
                     android:text="@string/chart_defaults_restore"
                     android:textColor="?attr/colorPrimary"
                     android:textSize="@dimen/text_body"
@@ -81,11 +87,13 @@
                     android:background="?attr/selectableItemBackgroundBorderless"
                     android:clickable="true"
                     android:focusable="true"
+                    android:gravity="center_vertical"
                     android:maxLines="1"
+                    android:minHeight="@dimen/chart_window_button_height"
                     android:paddingStart="@dimen/space_xs"
-                    android:paddingTop="@dimen/space_xs"
+                    android:paddingTop="0dp"
                     android:paddingEnd="@dimen/space_xs"
-                    android:paddingBottom="@dimen/space_xs"
+                    android:paddingBottom="0dp"
                     android:text="@string/chart_defaults_edit"
                     android:textColor="?attr/colorPrimary"
                     android:textSize="@dimen/text_body"

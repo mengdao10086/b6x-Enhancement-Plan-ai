@@ -49,10 +49,11 @@
 | `mode` | int | 0=智能温控, 1=固定功率（模块协议值）。B6X 下发前由模块换算为宿主同款 SDK mode=2，B7X 原样使用 1 |
 | `temperature` | int | 目标温度 (°C)，智能温控模式 |
 | `windOC` | int | 风扇固定转速 (RPM)，固定功率模式 |
-| `coldOC` | int | 制冷片强度（B6X: 0-194, B7X: 0-255），固定功率模式。194=SDK/硬件上限，190=温控默认下发上限（`PID_COLD_RANGE` 可调） |
+| `coldOC` | int | 制冷片强度（B6X: 0-194；实验模式开启时 0-229，B7X: 0-255），固定功率模式。194=常规上限，229=实验模式上限，190=温控默认下发上限（`PID_COLD_RANGE` 可调） |
 | `windLevel` | int | 风扇转速上限 (RPM)，智能温控模式 |
 | `modeCustom` | int | 保留（传 0） |
 | `extra` | int | 保留（传 0） |
+| `experimental` | int | 实验模式开关（0=关、1=开，默认 0），仅 B6X 生效；对应配置键 `EXPERIMENT_MODE`。daemon 每次广播按当前配置带下，模块据此维持设备 0x52 实验运行模式；实验值取当前制冷目标本身（不加 1），开启后制冷上限允许到 229、关闭时按 194 生效 |
 
 > ⚠️ **`mode` 与回传 `RUN_MODE` 不是同一枚举，不可直接比对**：下发 `mode` 是模块协议值（0=智能温控 / 1=固定功率）；`RUN_MODE` 是设备回传的 SDK 原值（B6X：0=智能 / 1=手动 / 2=超频，宿主「固定功率」对应 2；B7X：0=智能 / 1=手动 / 2=超频 / 3=实验智能，宿主「Fixed power」对应 1 或 2）。B6X 的 mode=2 换算只在模块下发命令时进行，状态文件里的 `RUN_MODE` 仍为设备真实回传。
 
@@ -115,6 +116,8 @@ am broadcast -a com.flydigi.SET_TEMPERATURE_B7 \
 | `RPM_RUN=` | 设备实际风扇转速原始值（0x13 `value[0x0b]<<8 \| value[0x0a]`，与 `RPM_REAL` 的设定回显不同） | `getSpeed()` | int |
 | `COLD_REAL=` | 制冷设定回显（经超频逻辑折算） | `getRealColdLevel()` | int |
 | `COLD_RUN=` | 实际制冷运行档（设备 0x13 包 byte[0x0f]，与 `COLD_REAL` 的设定回显不同） | `getColdRunLevel()` | int |
+| `EXP_ON=` | 实验模式是否开启（设备回传 0/1；缺失=未知） | `isExperimentalRunModeOn()` → 1/0 | int |
+| `EXP_VALUE=` | 实验模式制冷值（设备回传；缺失=-1） | `getExperimentalRunModeValue()` | int |
 
 ### 解析端（tempctrl `read_status_ble_both` → `select_active_device`）
 
@@ -127,6 +130,8 @@ COLD_TEMP=58         ← 5.8°C
 RPM_REAL=77
 RPM_RUN=1850        ← 设备实际转速原始值
 COLD_REAL=115
+EXP_ON=1
+EXP_VALUE=116
 ```
 
 > `RPM_RUN` 由独立 try/catch 写入：B7X 或旧版本无 `getSpeed()` 时该行缺失，其余字段不受影响；daemon 缺该行时按 -1（无效）处理。
@@ -174,8 +179,8 @@ COLD_REAL=115
 | 项 | 值 |
 |---|---|
 | 路径 | `/data/local/tmp/tempctrl_uiprefs` |
-| 内容 | `BACK_HIDE=0/1`、`GATE_LE=0/1` 与 `BT_ON_SEC=<秒>`（各一行，换行结尾；`.tmp` + `rename` 原子替换） |
-| 写入方 | tempctrl daemon（root），每次配置重载时按需写（三值都没变才不写）；`GATE_LE` 恒为 `APP_LAUNCH_ENABLED ? 1 : 0` |
+| 内容 | `BACK_HIDE=0/1`、`GATE_LE=0/1`、`BT_ON_SEC=<秒>` 与 `EXPERIMENT_MODE=0/1`（各一行，换行结尾；`.tmp` + `rename` 原子替换） |
+| 写入方 | tempctrl daemon（root），每次配置重载时按需写（四值都没变才不写）；`GATE_LE` 恒为 `APP_LAUNCH_ENABLED ? 1 : 0`；`EXPERIMENT_MODE` 对应配置键 `EXPERIMENT_MODE`（默认 0，仅 B6X 生效） |
 | 读取方 | `MainHook.readBackHideEnabled()` 与 `btAutoEnableSec()`（宿主 app 进程）；前者**读不到按 1（开启）**、后者**读不到按 300 秒（开启）**处理 |
 
 > 方向与 status 文件相反：status 是「钩子写、daemon 读」，本文件是「daemon 写、钩子读」。
@@ -229,6 +234,7 @@ COLD_REAL=115
 | `tempctrl_b6x.status` / `tempctrl_b7x.status` | `/data/local/tmp/`（**原样未动**） | daemon 预创建 + `chmod 0666`；LSPosed 侧每秒覆写（详见上文 status 文件协议） |
 | `tempctrl_uiprefs` | `/data/local/tmp/` | daemon（按需转写，详见上文界面开关文件协议） |
 | `tempctrl_bt_req` | `/data/local/tmp/` | daemon 预创建 + `chmod 0666`；LSPosed 侧按需覆写 `REQ=<epoch秒>`（断连自动开蓝牙请求，daemon 读出后执行开蓝牙命令链） |
+| `tempctrl_exp_req` | `/data/local/tmp/` | daemon 预创建 + `chmod 0666`；LSPosed 侧按需覆写单行 `REQ=<epoch毫秒> EXP=<0\|1>`（宿主实验页手动开关的配置同步请求，daemon 读出后回写 `profile.conf` 的 `EXPERIMENT_MODE`） |
 | `tempctrl_temp_stop` | `/data/local/tmp/` | daemon 预创建 + `chmod 0666` 并每 5s 重写 `1/0`；LSPosed 侧每秒读取（临时停止期间跳过回传停滞重连，详见上文临时停止标记文件） |
 | `tempctrl_bt_on_at` | `/data/data/<飞智包名>/files/`（**各包各记**） | LSPosed 侧（`MainHook`）自建自用（断连自动开蓝牙限频时间戳），daemon 不参与 |
 | `tempctrl_last_dev` | `/data/data/<飞智包名>/files/`（**各包各记**） | LSPosed 侧（`MainHook`）自建自用，daemon 不参与 |
@@ -240,7 +246,7 @@ COLD_REAL=115
 | `tempctrl_deploy_stamp` | 同上 | service.d 脚本（核对通过后写）；界面卸载时清理 |
 | `tempctrl_wd_spawn` | 同上 | daemon（每次拉起看门狗时写一行时间戳，作拉起冷却用，详见上文反向保活） |
 
-> **跨进程协议文件原样未迁移**：`tempctrl_b6x.status` / `tempctrl_b7x.status`、`tempctrl_uiprefs`、`tempctrl_bt_req`、`tempctrl_temp_stop` 仍落 `/data/local/tmp/`（涉及 3 个宿主包寻址 + SELinux 未验证），列为后续待真机验证项。
+> **跨进程协议文件原样未迁移**：`tempctrl_b6x.status` / `tempctrl_b7x.status`、`tempctrl_uiprefs`、`tempctrl_bt_req`、`tempctrl_exp_req`、`tempctrl_temp_stop` 仍落 `/data/local/tmp/`（涉及 3 个宿主包寻址 + SELinux 未验证），列为后续待真机验证项。
 
 ### 卸载清理清单（三份实现同源）
 

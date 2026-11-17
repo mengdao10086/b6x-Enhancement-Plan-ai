@@ -6,7 +6,14 @@ import android.animation.ValueAnimator;
 import android.content.Context;
 import android.graphics.Bitmap;
 import android.graphics.Canvas;
-import android.graphics.drawable.BitmapDrawable;
+import android.graphics.ColorFilter;
+import android.graphics.Paint;
+import android.graphics.PixelFormat;
+import android.graphics.Rect;
+import android.graphics.RecordingCanvas;
+import android.graphics.RenderEffect;
+import android.graphics.RenderNode;
+import android.graphics.Shader;
 import android.graphics.drawable.Drawable;
 import android.os.Build;
 import android.os.Handler;
@@ -14,6 +21,7 @@ import android.os.Looper;
 import android.provider.Settings;
 import android.transition.AutoTransition;
 import android.transition.TransitionManager;
+import android.util.DisplayMetrics;
 import android.util.TypedValue;
 import android.view.Display;
 import android.view.View;
@@ -21,6 +29,7 @@ import android.view.ViewGroup;
 import android.view.ViewParent;
 import android.view.WindowManager;
 import android.view.animation.Interpolator;
+import android.view.animation.LinearInterpolator;
 import android.view.animation.PathInterpolator;
 import android.widget.ImageView;
 import android.widget.TextView;
@@ -36,14 +45,16 @@ import java.util.WeakHashMap;
 /**
  * 界面动效的统一口径：曲线、时长模型与无障碍门控只有这一处。
  *
- * <p><b>曲线（两条，按用途分家）</b>：<b>面板高度及随之同步的展开箭头</b>（{@link #animateHeight} 的展开/收起、
+ * <p><b>曲线（三条，按用途分家）</b>：<b>面板高度及随之同步的展开箭头</b>（{@link #animateHeight} 的展开/收起、
  * {@link #beginLayoutChange} 的内容驱动高度变化、{@link #rotate(View, float, long)} 的角度旋转）用
  * {@link SlowEndsCurve}——{@code y = t − (强度/2π)·sin(2πt)}，两端慢、中段稳，强度由界面参数喂入
  * （见 {@link #setAnimTuning(float, long, float)}）。箭头必须与
  * 它所在面板<b>同曲线同时长</b>：只同时长不换曲线时，强 ease-out 会在四分之一处就把 90° 转完 78%，
- * 剩下四分之三的时间箭头原地等面板。{@code StatusFragment} 状态卡的<b>交叉淡入</b>用 {@link #EASE_OUT}
- * ——强 ease-out，照抄 Web 侧 {@code cubic-bezier(0.23, 1, 0.32, 1)}；透明度这类"瞬时状态切换"要前倾、快到位。
- * 不用平台内置曲线（太弱）。
+ * 剩下四分之三的时间箭头原地等面板。{@link #EASE_OUT} 是强 ease-out，照抄 Web 侧
+ * {@code cubic-bezier(0.23, 1, 0.32, 1)}，用于选择器压暗、表单首次露面这类"瞬时状态切换"——要前倾、快到位。
+ * 而 {@link #crossFade}（含状态页「部署状态」换字）的交叉淡化用 {@link #FADE_CURVE}（线性）——
+ * 新旧两层同时起止、互补覆盖，线性推进才不会在切换瞬间再叠一层"前快后慢"的观感差。
+ * 其余动画不用平台内置曲线（太弱）。
  *
  * <p><b>时长模型（逻辑 2：起步时间 + 按位移递增，两个值可调）</b>：
  * {@code 时长 = (位移(dp) ÷ 速率 + 起步ms) ÷ 2}。<b>公式来历</b>：把「纯按位移递增」与「固定起步」
@@ -107,9 +118,9 @@ public final class Motion {
     private static final float FALLBACK_REFRESH_HZ = 60f;
 
     /**
-     * 强 ease-out，照抄 cubic-bezier(0.23, 1, 0.32, 1)；先建一次复用。用于<b>状态卡交叉淡入</b>
-     * （由 {@link #easeOut()} 供 {@code StatusFragment} 的透明度补间）——这类"瞬时状态切换"要前倾、快到位。
-     * <b>箭头旋转不走这条</b>：箭头与面板同步，必须同用 {@link #panelCurve}（见类注释）。
+     * 强 ease-out，照抄 cubic-bezier(0.23, 1, 0.32, 1)；先建一次复用。用于<b>单层透明度过渡</b>
+     * （选择器压暗、模式元素淡入、表单首次露面等，见 {@link #easeOut()}）——这类"瞬时状态切换"要前倾、快到位。
+     * <b>交叉淡化与箭头旋转都不走这条</b>：前者用 {@link #FADE_CURVE}，后者与面板同步、用 {@link #panelCurve}。
      */
     private static final Interpolator EASE_OUT = new PathInterpolator(0.23f, 1f, 0.32f, 1f);
 
@@ -121,7 +132,7 @@ public final class Motion {
      * 用于<b>面板高度类</b>补间（{@link #animateHeight(View, boolean)} 与
      * {@link #beginLayoutChange(ViewGroup, float)} 里的尺寸变化）与<b>展开箭头旋转</b>
      * （{@link #rotate(View, float, long)}）——大位移用强 ease-out 会前倾过猛（25% 时间走完约 78% 位移）。
-     * 箭头与所在面板<b>同曲线同时长</b>才锁得死，故箭头也用这条；状态卡交叉淡入仍用 {@link #EASE_OUT}。
+     * 箭头与所在面板<b>同曲线同时长</b>才锁得死，故箭头也用这条；交叉淡化不走这条，走 {@link #FADE_CURVE}。
      */
     private static final class SlowEndsCurve implements Interpolator {
 
@@ -162,7 +173,7 @@ public final class Motion {
                 ? easeStrength : DEFAULT_EASE_STRENGTH);
     }
 
-    /** 状态卡交叉淡入的透明度曲线（强 ease-out）；箭头旋转不走这条（它用 {@link #panelCurve} 那条）。 */
+    /** 单层透明度过渡的曲线（强 ease-out，选择器压暗/模式元素淡入等复用）；交叉淡化不走这条（用 {@link #FADE_CURVE}）。 */
     static Interpolator easeOut() {
         return EASE_OUT;
     }
@@ -181,24 +192,53 @@ public final class Motion {
     private static final float REVEAL_TRANSLATE_DP = 6f;
 
     /**
-     * 交叉淡入淡出的三段时长（毫秒），与状态页「部署状态」换字同源：新层淡入
-     * {@link #FADE_IN_MS}、旧层延后 {@link #FADE_OUT_DELAY_MS} 起播并用 {@link #FADE_OUT_MS} 退场。
-     * 连续刷新时任一帧至少一层接近不透明，消除中间空档。
+     * 交叉淡入淡出的三段时长（毫秒）：新层淡入 {@link #FADE_IN_MS}、旧层淡出 {@link #FADE_OUT_MS}，
+     * 两者在 t=0 同时起播、t=325ms 同时结束（延迟 {@link #FADE_OUT_DELAY_MS} 恒为 0，保留常量
+     * 供调用方与派生时长复用）。两层互补覆盖，连续刷新时合成不透明度始终不低于单层，无中间空档。
      */
-    static final long FADE_IN_MS = 270L;
-    static final long FADE_OUT_MS = 180L;
-    static final long FADE_OUT_DELAY_MS = 105L;
+    static final long FADE_IN_MS = 325L;
+    static final long FADE_OUT_MS = 325L;
+    static final long FADE_OUT_DELAY_MS = 0L;
+
+    /**
+     * 交叉淡化的专用曲线：线性（{@link LinearInterpolator}）。alpha 与模糊半径共用同一条归一化
+     * 进度；<b>只用于 {@link #crossFade}</b>，其它动画仍走 {@link #EASE_OUT} / {@link #panelCurve}。
+     */
+    private static final Interpolator FADE_CURVE = new LinearInterpolator();
+
+    /**
+     * 交叉淡化叠加的模糊上限（dp）：旧层随淡出由清晰变模糊、新层由模糊变清晰，用以掩盖切换闪烁。
+     * 只做保守的柔化，强度不是重点；半径按 {@link #BLUR_STEPS} 档量化，只在跨档时重设效果，
+     * 避免逐帧重做离屏滤波。需要 API 31 的 {@code RenderEffect}，不具备时静默退回纯 alpha。
+     */
+    private static final float FADE_BLUR_DP = 6f;
+
+    /** 模糊半径的量化档数：每段淡化最多重设这么多次效果，其余帧只改 alpha。 */
+    private static final int BLUR_STEPS = 4;
+
+    /**
+     * 允许叠加模糊的最大面积（占屏幕面积比例）：超过即退回纯 alpha。全屏层（如日志列表整张）
+     * 每帧离屏滤波代价高，宁可只淡不糊。
+     */
+    private static final float BLUR_MAX_SCREEN_FRACTION = 0.30f;
 
     /**
      * 同时交叉淡化：旧内容先在视图原位置留成一张快照层淡出，新内容在它下方同步淡入。
      *
-     * <p><b>与状态页「部署状态」同款</b>：新层从 0 淡到 1 用 {@link #FADE_IN_MS}，旧层延后
-     * {@link #FADE_OUT_DELAY_MS} 起播、只用 {@link #FADE_OUT_MS} 退场，两者同用 {@link #EASE_OUT}
-     * 曲线。任一帧至少一层接近不透明，没有「先退完再进」造成的中间空档。
+     * <p><b>同时起止</b>：新层从 0 淡到 1、旧层从 1 淡到 0，两层都在 t=0 起播、t=325ms 结束
+     * （{@link #FADE_OUT_DELAY_MS} = 0），同用线性的 {@link #FADE_CURVE}。两层互补覆盖，
+     * 合成不透明度始终不低于单层，没有「先退完再进」造成的中间空档。
      *
      * <p><b>业务内容零延迟</b>：{@code swap} 立即执行，动画只是视觉层；视图容器换内容后按新旧两帧
      * 同时淡化。旧层用 {@link View#draw(Canvas)} 抓成位图、经父容器的 {@link ViewGroup#getOverlay()}
      * 叠在原位——不参与触摸命中，不会挡住淡变期间的点击。
+     *
+     * <p><b>模糊辅助（API 31+）</b>：旧层淡出的同时由清晰变模糊，新层淡入时由模糊变清晰，半径与
+     * alpha 走同一条 {@link #FADE_CURVE} 同步推进（旧层 0 → {@link #FADE_BLUR_DP}dp，新层反向），
+     * 用以掩盖切换瞬间的闪烁。半径按 {@link #BLUR_STEPS} 档量化，只在跨档时重设
+     * {@code RenderEffect}；旧层快照一次录进 {@code RenderNode}，之后逐帧只改节点 alpha。
+     * 无 {@code RenderEffect}（低版本 / 软件渲染）或面积超过屏幕
+     * {@link #BLUR_MAX_SCREEN_FRACTION}（如整张列表）时静默退回纯 alpha，不崩、不逐帧重滤波。
      *
      * <p>系统关掉动效、或没有可淡的视图时直接执行 {@code swap}，并把 alpha 复位为 1，
      * 不留半透明残影。重复调用会先收掉上一轮（取消动画、移除快照层），不叠加残影。
@@ -250,18 +290,113 @@ public final class Motion {
             swap.run();
         } finally {
             for (View v : views) {
-                v.animate().alpha(1f).setDuration(FADE_IN_MS).setInterpolator(EASE_OUT).start();
+                startFadeIn(v, run);
             }
-            for (Drawable layer : run.layers) {
+            for (FadeLayer layer : run.layers) {
                 ValueAnimator fade = ValueAnimator.ofInt(255, 0);
                 fade.setDuration(FADE_OUT_MS);
                 fade.setStartDelay(FADE_OUT_DELAY_MS);
-                fade.setInterpolator(EASE_OUT);
-                fade.addUpdateListener(a -> layer.setAlpha((Integer) a.getAnimatedValue()));
+                fade.setInterpolator(FADE_CURVE);
+                final float maxBlurPx = layer.maxBlurPx();
+                fade.addUpdateListener(a -> {
+                    int value = (Integer) a.getAnimatedValue();
+                    layer.setAlpha(value);
+                    // 与 alpha 同一条曲线、同一拍：越淡越糊，消失时正好最糊
+                    layer.setBlurRadius(maxBlurPx * (1f - value / 255f));
+                });
                 run.anims.add(fade);
                 fade.start();
             }
             MAIN.postDelayed(run, FADE_OUT_DELAY_MS + FADE_OUT_MS + 16L);
+        }
+    }
+
+    /**
+     * 新内容淡入：alpha 与模糊同曲线（{@link #FADE_CURVE}，线性）、同起止——半径由
+     * {@link #FADE_BLUR_DP}dp 降到 0，视觉上从模糊变清晰。半径量化后只在跨档时施加；不满足
+     * {@link #blurAllowed(View)} 时只播 alpha。模糊动画单独记账，随 {@link CrossFadeRun#finish()}
+     * 一起取消并清效果。
+     */
+    private static void startFadeIn(View v, CrossFadeRun run) {
+        v.animate().alpha(1f).setDuration(FADE_IN_MS).setInterpolator(FADE_CURVE).start();
+        if (!blurAllowed(v)) {
+            return;
+        }
+        final float maxPx = blurRadiusPx(v.getContext());
+        final float[] lastPx = {maxPx};
+        applyViewBlur(v, maxPx);   // 首帧就带模糊，避免先清晰露一下
+        ValueAnimator blur = ValueAnimator.ofFloat(1f, 0f);
+        blur.setDuration(FADE_IN_MS);
+        blur.setInterpolator(FADE_CURVE);
+        blur.addUpdateListener(a -> {
+            float q = quantizeBlur(maxPx * (Float) a.getAnimatedValue(), maxPx);
+            if (q != lastPx[0]) {
+                lastPx[0] = q;
+                applyViewBlur(v, q);
+            }
+        });
+        blur.addListener(new AnimatorListenerAdapter() {
+            @Override
+            public void onAnimationEnd(Animator animation) {
+                applyViewBlur(v, 0f);   // 结束/取消都摘掉效果，视图恢复普通合成
+            }
+        });
+        run.anims.add(blur);
+        blur.start();
+    }
+
+    /** 交叉淡化所用模糊半径上限（像素）：按屏幕密度把 {@link #FADE_BLUR_DP} 换算成像素。 */
+    private static float blurRadiusPx(Context context) {
+        float density = 1f;
+        if (context != null) {
+            density = context.getResources().getDisplayMetrics().density;
+            if (density <= 0f) {
+                density = 1f;
+            }
+        }
+        return FADE_BLUR_DP * density;
+    }
+
+    /**
+     * 该视图能否承受离屏模糊：API 31+、已量出尺寸、且面积不超过屏幕的
+     * {@link #BLUR_MAX_SCREEN_FRACTION}。任一不满足即退回纯 alpha——稳定与低开销优先。
+     */
+    private static boolean blurAllowed(View v) {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.S) {
+            return false;
+        }
+        int w = v.getWidth();
+        int h = v.getHeight();
+        if (w <= 0 || h <= 0) {
+            return false;
+        }
+        DisplayMetrics dm = v.getResources().getDisplayMetrics();
+        long screen = (long) dm.widthPixels * dm.heightPixels;
+        return screen > 0L && (long) w * h <= (long) (screen * BLUR_MAX_SCREEN_FRACTION);
+    }
+
+    /** 半径按 {@link #BLUR_STEPS} 档量化：同一档内不重设效果，把离屏滤波次数压到每段动画 ≤ 档数。 */
+    private static float quantizeBlur(float radiusPx, float maxPx) {
+        if (maxPx <= 0f) {
+            return 0f;
+        }
+        float step = maxPx / BLUR_STEPS;
+        return Math.round(radiusPx / step) * step;
+    }
+
+    /** 给目标视图施加（或清除）模糊；任何异常都吞掉并按"无效果"处理，绝不把异常抛给业务。 */
+    private static void applyViewBlur(View v, float radiusPx) {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.S) {
+            return;
+        }
+        try {
+            BlurSupport.setViewBlur(v, radiusPx);
+        } catch (Throwable t) {
+            try {
+                BlurSupport.setViewBlur(v, 0f);
+            } catch (Throwable ignored) {
+                // 效果 API 在该设备不可用：保持纯 alpha
+            }
         }
     }
 
@@ -275,7 +410,7 @@ public final class Motion {
     private static final class CrossFadeRun implements Runnable {
         final List<View> views = new ArrayList<>();
         final List<ViewGroup> hosts = new ArrayList<>();
-        final List<Drawable> layers = new ArrayList<>();
+        final List<FadeLayer> layers = new ArrayList<>();
         final List<Bitmap> bitmaps = new ArrayList<>();
         final List<Animator> anims = new ArrayList<>();
         boolean done;
@@ -298,9 +433,11 @@ public final class Motion {
             anims.clear();
             for (int i = 0; i < layers.size(); i++) {
                 ViewGroup host = i < hosts.size() ? hosts.get(i) : null;
+                FadeLayer layer = layers.get(i);
                 if (host != null) {
-                    host.getOverlay().remove(layers.get(i));
+                    host.getOverlay().remove(layer);
                 }
+                layer.release();
                 Bitmap bmp = i < bitmaps.size() ? bitmaps.get(i) : null;
                 if (bmp != null && !bmp.isRecycled()) {
                     bmp.recycle();
@@ -315,6 +452,7 @@ public final class Motion {
                 }
                 v.animate().cancel();
                 v.setAlpha(1f);
+                applyViewBlur(v, 0f);   // 取消即摘效果，不留模糊残影
             }
             views.clear();
         }
@@ -339,7 +477,11 @@ public final class Motion {
             }
             return;   // 抓不到快照（极端视图/内存不足）：本轮退化为「新内容淡入」，不抛给业务
         }
-        BitmapDrawable layer = new BitmapDrawable(v.getResources(), bitmap);
+        float maxBlurPx = blurAllowed(v) ? blurRadiusPx(v.getContext()) : 0f;
+        // 带模糊的子类只在 API 31+ 实例化：低版本连类都不会加载
+        FadeLayer layer = maxBlurPx > 0f && Build.VERSION.SDK_INT >= Build.VERSION_CODES.S
+                ? new BlurFadeLayer(bitmap, maxBlurPx)
+                : new FadeLayer(bitmap, maxBlurPx);
         layer.setBounds(v.getLeft(), v.getTop(), v.getRight(), v.getBottom());
         layer.setAlpha(255);
         ViewGroup host = (ViewGroup) parent;
@@ -349,13 +491,182 @@ public final class Motion {
         run.bitmaps.add(bitmap);
     }
 
+    /**
+     * 旧内容快照层（退化实现）：直接按 alpha 画位图，行为与原先的 {@code BitmapDrawable} 一致。
+     * 本类<b>不引用任何 API 31 类型</b>；带模糊的版本见 {@link BlurFadeLayer}，低版本根本不加载它。
+     */
+    private static class FadeLayer extends Drawable {
+
+        final Bitmap bitmap;
+        final float maxBlurPx;
+        final Paint paint = new Paint();
+        int alpha = 255;
+
+        FadeLayer(Bitmap bitmap, float maxBlurPx) {
+            this.bitmap = bitmap;
+            this.maxBlurPx = maxBlurPx;
+        }
+
+        float maxBlurPx() {
+            return maxBlurPx;
+        }
+
+        /** 无效果时的退化实现：只靠 alpha（本类无模糊可施加）。 */
+        void setBlurRadius(float radiusPx) {
+        }
+
+        /** 收尾钩子：退化实现无事可做（位图由调用方统一回收）。 */
+        void release() {
+        }
+
+        @Override
+        public void draw(Canvas canvas) {
+            Rect bounds = getBounds();
+            if (bitmap.isRecycled() || bounds.isEmpty()) {
+                return;
+            }
+            paint.setAlpha(alpha);
+            canvas.drawBitmap(bitmap, null, bounds, paint);
+        }
+
+        @Override
+        public void setAlpha(int alpha) {
+            this.alpha = alpha;
+            invalidateSelf();
+        }
+
+        @Override
+        public int getAlpha() {
+            return alpha;
+        }
+
+        @Override
+        public void setColorFilter(@Nullable ColorFilter colorFilter) {
+            paint.setColorFilter(colorFilter);
+            invalidateSelf();
+        }
+
+        @Override
+        public int getOpacity() {
+            return PixelFormat.TRANSLUCENT;
+        }
+    }
+
+    /**
+     * 带模糊的快照层（仅 API 31+ 实例化）：位图一次录进 {@link RenderNode}，之后逐帧只改节点
+     * alpha；模糊只改节点效果，不重录内容。同一量化档内系统可复用离屏层，不重复滤波。
+     * 录音失败或画布非硬件加速时自动走 {@link FadeLayer} 的直接绘制。
+     */
+    private static final class BlurFadeLayer extends FadeLayer {
+
+        private RenderNode node;
+        private float appliedBlurPx = -1f;
+
+        BlurFadeLayer(Bitmap bitmap, float maxBlurPx) {
+            super(bitmap, maxBlurPx);
+            try {
+                node = BlurSupport.record(bitmap);
+                appliedBlurPx = 0f;
+            } catch (Throwable t) {
+                node = null;   // 极端尺寸/内存不足：退化为直接画位图
+            }
+        }
+
+        @Override
+        void setBlurRadius(float radiusPx) {
+            if (node == null) {
+                return;
+            }
+            float q = quantizeBlur(radiusPx, maxBlurPx);
+            if (q == appliedBlurPx) {
+                return;
+            }
+            appliedBlurPx = q;
+            try {
+                BlurSupport.setNodeBlur(node, q);
+            } catch (Throwable t) {
+                node = null;   // 效果不可用：本层退回直接画位图（alpha 照常）
+            }
+        }
+
+        @Override
+        void release() {
+            if (node != null) {
+                try {
+                    BlurSupport.setNodeBlur(node, 0f);
+                    node.discardDisplayList();   // 先放掉对位图的引用，调用方随后回收
+                } catch (Throwable ignored) {
+                    // 节点即将丢弃，忽略
+                }
+                node = null;
+            }
+        }
+
+        @Override
+        public void draw(Canvas canvas) {
+            if (node == null || !canvas.isHardwareAccelerated()) {
+                super.draw(canvas);
+                return;
+            }
+            Rect bounds = getBounds();
+            if (bitmap.isRecycled() || bounds.isEmpty()) {
+                return;
+            }
+            node.setAlpha(alpha / 255f);
+            canvas.save();
+            canvas.translate(bounds.left, bounds.top);
+            canvas.drawRenderNode(node);
+            canvas.restore();
+        }
+    }
+
+    /**
+     * API 31+ 的效果实现集中在这一个嵌套类：类只在实际执行时加载，低版本不会触碰
+     * {@link RenderEffect} / {@link RenderNode}，避免类校验期引用不可用类型。
+     */
+    private static final class BlurSupport {
+
+        private BlurSupport() {
+        }
+
+        static void setViewBlur(View v, float radiusPx) {
+            v.setRenderEffect(radiusPx >= 1f
+                    ? RenderEffect.createBlurEffect(radiusPx, radiusPx, Shader.TileMode.CLAMP)
+                    : null);
+        }
+
+        /** 把位图一次录进节点：之后只改 alpha / 效果，不重录内容。 */
+        static RenderNode record(Bitmap bitmap) {
+            int w = bitmap.getWidth();
+            int h = bitmap.getHeight();
+            RenderNode node = new RenderNode("motionCrossFade");
+            node.setPosition(0, 0, w, h);
+            RecordingCanvas canvas = node.beginRecording(w, h);
+            canvas.drawBitmap(bitmap, 0f, 0f, null);
+            node.endRecording();
+            return node;
+        }
+
+        static void setNodeBlur(RenderNode node, float radiusPx) {
+            node.setRenderEffect(radiusPx >= 1f
+                    ? RenderEffect.createBlurEffect(radiusPx, radiusPx, Shader.TileMode.CLAMP)
+                    : null);
+        }
+    }
+
     /** 未选中项的选择器按钮压到该透明度；与日志页来源选择器一致。 */
     private static final float SELECTED_DIM_ALPHA = 0.55f;
 
     /**
+     * 选择器压暗/恢复的过渡时长。原本借用交叉淡入的时长（270ms），交叉淡化改成 325ms 后
+     * 单独定值，避免顺带改变选择器手感；曲线仍用 {@link #EASE_OUT}。
+     */
+    private static final long SELECTED_FADE_MS = 270L;
+
+    /**
      * 选择器（{@link android.widget.RadioButton} 式的单选按钮组、Material 的
      * {@code MaterialButtonToggleGroup} 等任意 ViewGroup）：选中项不透明、未选中项压到
-     * {@link #SELECTED_DIM_ALPHA}，过渡时长与曲线同 {@link #FADE_IN_MS} / {@link #EASE_OUT}。
+     * {@link #SELECTED_DIM_ALPHA}，过渡时长与曲线同 {@link #SELECTED_FADE_MS} / {@link #EASE_OUT}。
      *
      * <p>日志页来源选择器（daemon / LSPosed）、曲线页窗口档位与配置页 enum 选择器共用这一处口径，
      * 不各自写一套。
@@ -383,7 +694,7 @@ public final class Motion {
         }
     }
 
-    /** 选中态切换的过渡：选中项恢复不透明、未选中项压到 55%，时长与曲线同淡变。 */
+    /** 选中态切换的过渡：选中项恢复不透明、未选中项压到 55%，时长 {@link #SELECTED_FADE_MS} + {@link #EASE_OUT}。 */
     private static void animateSelected(@Nullable View view, boolean selected) {
         if (view == null) {
             return;
@@ -393,7 +704,7 @@ public final class Motion {
             view.setAlpha(target);
             return;
         }
-        view.animate().alpha(target).setDuration(FADE_IN_MS).setInterpolator(EASE_OUT).start();
+        view.animate().alpha(target).setDuration(SELECTED_FADE_MS).setInterpolator(EASE_OUT).start();
     }
 
     /**

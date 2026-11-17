@@ -28,6 +28,10 @@ import java.util.Locale;
  *   <li>展示时去掉固定前缀，只留精简时间 + 消息体。</li>
  * </ul>
  *
+ * <p>着色：先取 header 的级别字母（E/F→ERROR、W→WARN、D/V→DEBUG、I→INFO），再用
+ * {@link LogClassifier#merge} 叠加与 daemon 同一套关键词族（失败 / 超时 / 跳过 / 钩住等），
+ * 只升不降；续行继承 header 的最终级别，再按自身文本（如 {@code Caused by:}）提升。
+ *
  * <p>读盘只读文件尾部 {@link #TAIL_BYTES} 字节（root 侧 {@code tail -c}），不整文件读入。
  * 400k 折算行数见 {@link #MAX_LINES}。
  */
@@ -165,16 +169,18 @@ final class LogLsposedReader {
             Header header = parseHeader(line);
             if (header != null) {
                 keep = MODULE_PKG.equals(header.pkg);
-                keepLevel = header.level;
+                // 级别字母先落档，再用与 daemon 相同的关键词族提升（失败/超时/跳过等）
+                keepLevel = LogClassifier.merge(header.level, header.display);
                 if (keep) {
-                    out.add(new Display(header.display, true, header.level));
+                    out.add(new Display(header.display, true, keepLevel));
                 }
                 continue;
             }
             if (!keep || line.trim().isEmpty()) {
                 continue;
             }
-            out.add(new Display(line, false, keepLevel));
+            // 续行归属不变：继承 header 的最终级别，自身含 Caused by / 失败等再提升
+            out.add(new Display(line, false, LogClassifier.merge(keepLevel, line)));
         }
         return out;
     }
