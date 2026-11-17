@@ -85,6 +85,7 @@ public class MainHook implements IXposedHookLoadPackage {
     // getIntExtra("windLevel", 0)
     // getIntExtra("modeCustom", 0)
     // getIntExtra("extra", 0)
+    // getIntExtra("experimental", 0)
     /* protocol-extras-mirror:end */
     // setRunMode 方法名候选（按 app 类型选；B7X 混淆为 W）
     private static final String[] SET_RUN_MODE_NAMES_B6 = {"setRunMode"};
@@ -109,6 +110,37 @@ public class MainHook implements IXposedHookLoadPackage {
     private static volatile long dispatchStallSinceMs = 0;             // 回传停滞起点（ms）；0=当前不在停滞态
     private static final long DISPATCH_STALL_TIMEOUT_MS = 15000;       // 回传停滞持续该时长 → 锁死
     private static volatile long lastForceReconnectAt = 0;              // forceReconnect 防抖（10s 内最多一次）
+
+    // ========== B6X 实验模式（模块权威：配置决定开/关，锁步下发） ==========
+    // 0x52 的 value 发当前制冷目标（≤229；0=关）。230 不再作为下发参数——真机表明设备会把它当制冷档执行，
+    // 造成冷值瞬时蹦 230；冷值与实验标记彻底分命名空间。
+    // 配置意图来自 daemon 的 uiprefs EXPERIMENT_MODE（2s 缓存），广播 extra experimental 作为兜底。
+    private static final int EXP_VALUE_OFF = 0;         // 关闭时 0x52 的 value（参数传 null 也等价于 0）
+    private static final int EXP_COLD_MAX = 229;        // 实验允许的制冷上限（常规 194）
+    private static final long EXP_CFG_CACHE_MS = 2000;  // uiprefs 读取缓存
+    private static final long EXP_AUTO_THROTTLE_MS = 900;   // 宿主自动调用改写后的重发间隔
+    private static final long EXP_MANUAL_DEDUPE_MS = 1000;  // 手动点击写配置的去重窗口
+    private static final long EXP_WANT_KEEP_MS = 10000;     // EXP_WANT 在 status 中保留的时长
+    private static final long EXP_LOG_MS = 30000;           // 实验日志限频
+    private static final ThreadLocal<Boolean> expModuleCall = new ThreadLocal<>();   // 模块自身下发
+    private static final ThreadLocal<Boolean> expManualCall = new ThreadLocal<>();   // 宿主手动开关路径
+    private static final Object expLock = new Object();
+    private static volatile Method expMethod = null;    // SDK setExperimentalRunMode(boolean,Integer,Integer)
+    private static volatile int expCfgCached = -1;      // uiprefs 最近读到的 EXPERIMENT_MODE（-1=缺失）
+    private static volatile int expAvailableCached = -1; // uiprefs 最近读到的 EXP_AVAILABLE（-1=缺失）
+    private static volatile long expCfgReadAtMs = 0;    // uiprefs 读取时刻
+    private static volatile int expBcastDesired = -1;   // 最近广播 extra experimental（兜底）
+    private static volatile int expWant = -1;           // 手动请求写回的配置值
+    private static volatile long expWantAt = 0;         // 手动请求时间戳（写进 status）
+    private static volatile int expManualValue = -1;    // 上次手动请求的值（去重）
+    private static volatile long expManualAt = 0;       // 上次手动请求的时刻
+    private static volatile boolean expAutoSentOn = false;  // 自动调用改写后最近一次的方向
+    private static volatile long expAutoSentAtMs = 0;       // 其上时间戳（节流）
+    private static volatile long expLogAtMs = 0;            // 实验日志限频
+    private static volatile long expEchoLogAtMs = 0;        // EXP_VALUE 回显不一致日志限频
+    private static volatile int expLastBcastOn = -1;        // 上一条广播的 experimental（-1=本进程尚未收到）
+    private static volatile int expLastSentCold = -1;       // 最近一次 0x52 开启时发送的 value（≤229）
+    private static volatile boolean expLastSentOn = false;  // 最近一次 0x52 是开还是关
     private static final long FORCE_RECONNECT_MIN_INTERVAL_MS = 10000;
 
     // ========== 回传新鲜度验证 + 设备唤醒 + 重连上限 ==========
@@ -419,6 +451,8 @@ public class MainHook implements IXposedHookLoadPackage {
                         int windLevel   = intent.getIntExtra(Protocol.EXTRA_WIND_LEVEL, 0);
                         int modeCustom  = intent.getIntExtra(Protocol.EXTRA_MODE_CUSTOM, 0);
                         int extra       = intent.getIntExtra(Protocol.EXTRA_EXTRA, 0);
+                        int experimental = intent.getIntExtra(Protocol.EXTRA_EXPERIMENTAL, 0);
+                        experimental = (experimental != 0) ? 1 : 0;
 
                         // 来源留痕（API 34+ 尽力）：未知 UID 放行并记日志，不拦截正常指令。
                         noteBroadcastSender(this);
@@ -431,7 +465,9 @@ public class MainHook implements IXposedHookLoadPackage {
                             return;
                         }
                         int fanMax = (appKind == 7) ? BCAST_FAN_MAX_B7X : BCAST_FAN_MAX_B6X;
-                        int coldMax = (appKind == 7) ? BCAST_COLD_MAX_B7X : BCAST_COLD_MAX_B6X;
+                        // B6X 实验模式允许冷值到 229；关闭时钳回 194（B7X 无此协议）
+                        int coldMax = (appKind == 7) ? BCAST_COLD_MAX_B7X
+                                : (experimental != 0 ? EXP_COLD_MAX : BCAST_COLD_MAX_B6X);
                         temperature = clampInt(temperature, 0, BCAST_TEMP_MAX);
                         windOC = clampInt(windOC, 0, fanMax);
                         coldOC = clampInt(coldOC, 0, coldMax);
@@ -442,13 +478,25 @@ public class MainHook implements IXposedHookLoadPackage {
                         // 诊断：每次连接最多 1 对——"收到广播参数" + "1s 后散热器实际回传"
                         logDiagOnBroadcast(mode, temperature, windOC, coldOC, windLevel);
 
-                        // 调用 setRunMode——优先用构造函数捕获的实例，其次试单例
+                        // 调用 setRunMode——优先用构造函数捕获的实例，其次试单例。
+                        // B6X 实验模式：开启时先 0x52(当前冷值≤229) 再 0x23；关闭时先 0x23(≤194) 再 0x52 关。
+                        if (appKind == 6) expBcastDesired = experimental;
                         try {
                             Object inst = resolveWaspWingManager(context);
                             if (inst != null) {
+                                boolean on = appKind == 6 && experimental != 0;
+                                boolean wasOn = expLastBcastOn == 1;
+                                boolean firstBcast = expLastBcastOn < 0;
+                                if (appKind == 6) expLastBcastOn = experimental;
+                                if (on && coldOC > 0) sendExperimental(true, coldOC);   // 解锁在前（value=当前冷值）
                                 // B7X WaspWingManager(t9.j) 的 setRunMode 更名为 W
                                 invokeSetRunMode(inst, mode, temperature, windOC, coldOC,
                                         windLevel, modeCustom, extra);
+                                // 关闭时先降冷（上一条 0x23，冷值已钳 ≤194）再关解锁；
+                                // 只在「开→关」边沿或本进程首条广播时发，避免每条广播都重复关。
+                                if (appKind == 6 && !on && (wasOn || firstBcast)) {
+                                    sendExperimental(false, EXP_VALUE_OFF);
+                                }
                             } else {
                                 XposedBridge.log(TAG + " setRunMode 失败: WaspWingManager 实例未就绪");
                             }
@@ -584,6 +632,19 @@ public class MainHook implements IXposedHookLoadPackage {
             sb.append(Protocol.STF_BLE_OWNER_LAST).append(bleLastOwner)
                     .append(" ").append(bleLastOwnerAt).append("\n");
 
+            // 宿主实验页手动开关 → 配置写回请求（daemon 读后写回 EXPERIMENT_MODE）。
+            // 只在点击后的 10 秒内携带，避免旧请求在重启后被补执行。
+            long wantAge = System.currentTimeMillis() - expWantAt;
+            if (expWant >= 0 && expWantAt > 0 && wantAge >= 0 && wantAge <= EXP_WANT_KEEP_MS) {
+                sb.append(Protocol.STF_EXP_WANT).append(expWant).append("\n");
+                sb.append(Protocol.STF_EXP_WANT_AT).append(expWantAt).append("\n");
+            }
+            // 实验可用性（uiprefs EXP_AVAILABLE，2 秒缓存刷新）：0 = 已开但 PERF_ENABLED=0
+            resolveExperimentDesired();
+            if (expAvailableCached >= 0) {
+                sb.append(Protocol.STF_EXP_AVAILABLE).append(expAvailableCached).append("\n");
+            }
+
             // 散热器全参数回传：每个字段独立 try/catch——任一 getter 不可用只丢该行，
             // 不影响其它字段（历史 RPM_RUN 整列缺失即同源问题）。
             if (lastWaspWingInfo != null) {
@@ -593,11 +654,18 @@ public class MainHook implements IXposedHookLoadPackage {
                 appendColdTemp(sb, lastWaspWingInfo);
                 appendGetterValueGuarded(sb, lastWaspWingInfo, "getRealWindLevel",
                         Protocol.STF_RPM_REAL);
-                appendGetterValueGuarded(sb, lastWaspWingInfo, "getRealColdLevel",
-                        Protocol.STF_COLD_REAL);
+                // 冷值回传消毒：设备可能把实验标记/异常值回显进 COLD_REAL/COLD_RUN；
+                // 超过合法冷值上限（B6X 229 / B7X 255）按上限写盘，不让 230 出现在 status 与下游控制。
+                appendColdSanitizedGuarded(sb, lastWaspWingInfo, "getRealColdLevel",
+                        Protocol.STF_COLD_REAL, appKind == 6 ? EXP_COLD_MAX : BCAST_COLD_MAX_B7X);
                 // 实际运行档（0x13 byte[0x0f]）：与 COLD_REAL 的回显设定档不同，见 制冷值语义取证.md
-                appendGetterValueGuarded(sb, lastWaspWingInfo, "getColdRunLevel",
-                        Protocol.STF_COLD_RUN);
+                appendColdSanitizedGuarded(sb, lastWaspWingInfo, "getColdRunLevel",
+                        Protocol.STF_COLD_RUN, appKind == 6 ? EXP_COLD_MAX : BCAST_COLD_MAX_B7X);
+                // 实验模式设备真值：直接读 getter 写盘，不做任何字段改写（先读后写）
+                appendBoolValueGuarded(sb, lastWaspWingInfo, "isExperimentalRunModeOn",
+                        Protocol.STF_EXP_ON);
+                appendGetterValueGuarded(sb, lastWaspWingInfo, "getExperimentalRunModeValue",
+                        Protocol.STF_EXP_VALUE);
                 // 回传恢复：此前缺失则补一条（状态翻转才打）
                 if (paramMissingLogged) {
                     paramMissingLogged = false;
@@ -1376,7 +1444,7 @@ public class MainHook implements IXposedHookLoadPackage {
         }
     };
 
-    /** 捕获全参数回传 + 重置重连新鲜度标记 + 型号识别 + 屏蔽 App 自修复。 */
+    /** 捕获全参数回传 + 重置重连新鲜度标记 + 型号识别（实验回传保持设备真值，不做字段改写）。 */
     private static void handleInfoUpdate(Object info) {
         lastWaspWingInfo = info;    // 捕获散热器全参数回传
         lastInfoUpdateAt = System.currentTimeMillis();
@@ -1384,7 +1452,7 @@ public class MainHook implements IXposedHookLoadPackage {
         reconnectPending = false;   // 收到新回传，重连新鲜度验证通过
         stallReconnectCount = 0;    // 设备恢复响应，清零连续无回传重连计数
         updateModelFromInfo(info);  // 型号识别 + 同步 BLE_OWNER_LAST
-        blockSelfRepair(info);      // 改 experimentalRunModeValue 使 self-repair 跳过（须在原方法前）
+        checkExperimentalValueEcho(info);   // 判断设备是否把 0x52 的 value 当冷值执行（限频日志）
     }
 
     /** 首包延迟 + 全 0 回传诊断（每类每连接各一条，见 app/逻辑说明.md §1.2）。 */
@@ -1586,6 +1654,27 @@ public class MainHook implements IXposedHookLoadPackage {
             XposedHelpers.findAndHookMethod(appVm, "onDeviceInfoUpdate",
                     waspInfoCls, infoUpdateHook);
             hooked("App WaspWingViewModel.onDeviceInfoUpdate（beforeHook）");
+
+            // 宿主实验页手动开关：binding 的 OnCheckedChanged 既会因用户点击触发，也会因设备回传
+            // 驱动的 setChecked 触发；只有调用栈含 performClick 的才算手动（防程序化回环）。
+            try {
+                XposedHelpers.findAndHookMethod(appVm, "enableExperimentalMode", boolean.class,
+                        new XC_MethodHook() {
+                            @Override
+                            protected void beforeHookedMethod(MethodHookParam param) {
+                                if (!isManualExperimentalToggle()) return;
+                                expManualCall.set(Boolean.TRUE);
+                                requestExperimentConfig((Boolean) param.args[0]);
+                            }
+                            @Override
+                            protected void afterHookedMethod(MethodHookParam param) {
+                                expManualCall.remove();
+                            }
+                        });
+                hooked("WaspWingViewModel.enableExperimentalMode（手动开关识别）");
+            } catch (Throwable t) {
+                XposedBridge.log(TAG + " 钩 enableExperimentalMode 失败: " + t.getMessage());
+            }
 
         } catch (Throwable t) {
             XposedBridge.log(TAG + " 钩诊断失败: " + t.getMessage());
@@ -2138,7 +2227,7 @@ public class MainHook implements IXposedHookLoadPackage {
             });
             hooked("WaspWingManager 构造函数");
 
-            // 屏蔽 App 自修复（仅 B6X）
+            // 实验模式调用改写（仅 B6X）：模块自身放行；宿主自动调用按配置改写；手动点击只写配置
             if (appKind == 6) {
                 try {
                     XposedHelpers.findAndHookMethod(mgrCls, "setExperimentalRunMode",
@@ -2146,13 +2235,55 @@ public class MainHook implements IXposedHookLoadPackage {
                             new XC_MethodHook() {
                                 @Override
                                 protected void beforeHookedMethod(MethodHookParam param) {
-                                    XposedBridge.log(TAG + " 拦截 setExperimentalRunMode("
-                                            + param.args[0] + ", " + param.args[1]
-                                            + ", " + param.args[2] + ")");
-                                    param.setResult(null);
+                                    try {
+                                        if (Boolean.TRUE.equals(expModuleCall.get())) return;   // 模块自身下发
+                                        boolean on = Boolean.TRUE.equals(param.args[0]);
+                                        boolean manual = Boolean.TRUE.equals(expManualCall.get())
+                                                || isManualExperimentalToggle();
+                                        if (manual) {
+                                            // 手动点击 = 一次配置写入请求；不直接驱动设备
+                                            requestExperimentConfig(on);
+                                            param.setResult(null);
+                                            return;
+                                        }
+                                        int desired = resolveExperimentDesired();
+                                        if (desired < 0) {
+                                            logExperimentLimited("实验模式 宿主自动调用暂缓：配置未知");
+                                            param.setResult(null);
+                                            return;
+                                        }
+                                        boolean want = desired == 1;
+                                        // 改写为配置意图：开→(true, 当前冷值≤229)；关→(false, null)
+                                        int cold = want ? currentExperimentalCold() : EXP_VALUE_OFF;
+                                        if (want && cold <= 0) {
+                                            logExperimentLimited("实验模式 宿主自动调用暂缓：当前冷值未就绪");
+                                            param.setResult(null);
+                                            return;
+                                        }
+                                        param.args[0] = want;
+                                        param.args[1] = want ? Integer.valueOf(cold) : null;
+                                        param.args[2] = null;
+                                        synchronized (expLock) {
+                                            long now = System.currentTimeMillis();
+                                            if (expAutoSentOn == want
+                                                    && now - expAutoSentAtMs < EXP_AUTO_THROTTLE_MS) {
+                                                param.setResult(null);   // 与上一拍同向，忽略重复
+                                                return;
+                                            }
+                                            expAutoSentOn = want;
+                                            expAutoSentAtMs = now;
+                                        }
+                                        // 放行的是宿主自动调用（已改写参数）：同步最近发送值供回显比对
+                                        expLastSentOn = want;
+                                        expLastSentCold = want ? cold : EXP_VALUE_OFF;
+                                        logExperimentLimited("实验模式 宿主自动调用改写为 "
+                                                + (want ? "开(value=" + cold + ")" : "关"));
+                                    } catch (Throwable t) {
+                                        XposedBridge.log(TAG + " 实验模式 钩子异常: " + t.getMessage());
+                                    }
                                 }
                             });
-                    hooked("setExperimentalRunMode（已屏蔽）");
+                    hooked("setExperimentalRunMode（模块放行 / 自动改写 / 手动写配置）");
                 } catch (Throwable t) { /* B6X only */ }
             }
         } catch (Throwable t) {
@@ -2802,6 +2933,9 @@ public class MainHook implements IXposedHookLoadPackage {
      */
     private static void invokeSetRunMode(Object inst, int mode, int temperature, int windOC,
                                         int coldOC, int windLevel, int modeCustom, int extra) {
+        // 0x23 冷槽最后一道钳制：B6X 冷值永远 ≤229（230 不进任何下发参数）
+        if (connectedModel == 6 && coldOC > EXP_COLD_MAX) coldOC = EXP_COLD_MAX;
+        if (coldOC < 0) coldOC = 0;
         // 下发前确保 static 指向 gatt 有效实例；否则命令被静默丢弃
         if (!ensureUsableController(inst)) {
             XposedBridge.log(TAG + " setRunMode 跳过: static controller 不可用（已触发重连，下周期重试）");
@@ -3525,15 +3659,150 @@ public class MainHook implements IXposedHookLoadPackage {
         } catch (Throwable t) { /* 型号未知保持包名兜底 */ }
     }
 
-    /** 修正 experimentalRunModeValue，使 self-repair 跳 */
-    private static void blockSelfRepair(Object info) {
+    // ========== B6X 实验模式：配置权威 + 0x52/0x23 锁步 ==========
+
+    /**
+     * 下发 0x52（模块自身调用，钩子按 ThreadLocal 放行）。
+     * SDK 固定组包 [0x52, 1, value, p3/100]：value=0 表示关；开启时发当前制冷目标（≤229）。
+     * 230 不进入任何下发参数（真机表明设备会把它当制冷档执行）。
+     */
+    private static void sendExperimental(boolean on, int cold) {
+        Object inst = capturedWaspWingMgr;
+        if (inst == null) {
+            logExperimentLimited("实验模式 下发跳过: WaspWingManager 实例未就绪");
+            return;
+        }
+        int value = on ? clampInt(cold, 1, EXP_COLD_MAX) : EXP_VALUE_OFF;
+        expModuleCall.set(Boolean.TRUE);
         try {
-            Object realCold = XposedHelpers.callMethod(info, "getRealColdLevel");
-            if (realCold != null) {
-                XposedHelpers.setIntField(info, "experimentalRunModeValue",
-                        ((Integer) realCold) + 1);
+            Method m = expMethod;
+            if (m == null) {
+                m = XposedHelpers.findMethodExact(inst.getClass(), "setExperimentalRunMode",
+                        boolean.class, Integer.class, Integer.class);
+                expMethod = m;
             }
-        } catch (Throwable t) { /* 字段可能不存在 */ }
+            m.invoke(inst, on, on ? Integer.valueOf(value) : null, null);
+            expLastSentOn = on;
+            expLastSentCold = value;
+            logExperimentLimited(on ? "实验模式 已下发: 开, value=" + value : "实验模式 已下发: 关");
+        } catch (Throwable t) {
+            XposedBridge.log(TAG + " 实验模式 下发失败: " + t.getMessage());
+        } finally {
+            expModuleCall.remove();
+        }
+    }
+
+    /** 0x52 开启时使用的当前制冷目标：最近广播目标优先，其次设备回显；统一钳到 ≤229。 */
+    private static int currentExperimentalCold() {
+        int v = lastBcastColdLv;
+        if (v <= 0) {
+            Object info = lastWaspWingInfo;
+            if (info != null) {
+                try {
+                    Object o = XposedHelpers.callMethod(info, "getRealColdLevel");
+                    if (o instanceof Number) v = ((Number) o).intValue();
+                } catch (Throwable ignored) {
+                    v = -1;
+                }
+            }
+        }
+        return (v > 0) ? clampInt(v, 1, EXP_COLD_MAX) : -1;
+    }
+
+    /** 设备 EXP_VALUE 回显与最近发送值不一致时记一条（限频），用于判断设备是否把 value 当冷值。 */
+    private static void checkExperimentalValueEcho(Object info) {
+        if (!expLastSentOn || expLastSentCold <= 0 || info == null) return;
+        try {
+            Object o = XposedHelpers.callMethod(info, "getExperimentalRunModeValue");
+            if (!(o instanceof Number)) return;
+            int echo = ((Number) o).intValue();
+            if (echo == expLastSentCold) return;
+            long now = System.currentTimeMillis();
+            if (now - expEchoLogAtMs < EXP_LOG_MS) return;
+            expEchoLogAtMs = now;
+            XposedBridge.log(TAG + " 实验回显不一致: 发送 value=" + expLastSentCold
+                    + " 设备 EXP_VALUE=" + echo + "（设备可能把 value 当制冷档）");
+        } catch (Throwable ignored) {
+            // getter 不可用：不影响控制
+        }
+    }
+
+    /**
+     * 期望的实验模式（0/1；-1=未知）：配置（uiprefs EXPERIMENT_MODE）优先，广播 extra 兜底。
+     * PERF_ENABLED=0 时 daemon 发布 EXP_AVAILABLE=0：配置即使为开也按「不可用=关」处理，
+     * 避免 App 自修复把设备反复打开（daemon 日志会说明「已开但温控未启用」）。
+     */
+    private static int resolveExperimentDesired() {
+        long now = System.currentTimeMillis();
+        if (expCfgReadAtMs != 0 && now - expCfgReadAtMs < EXP_CFG_CACHE_MS) {
+            return expAvailableCached == 0 ? 0 : expCfgCached;
+        }
+        int v = -1, available = -1;
+        try (BufferedReader br = new BufferedReader(new FileReader(UIPREFS_FILE))) {
+            String line;
+            while ((line = br.readLine()) != null) {
+                if (line.startsWith("EXPERIMENT_MODE=")) {
+                    String s = line.substring("EXPERIMENT_MODE=".length()).trim();
+                    if ("1".equals(s)) v = 1;
+                    else if ("0".equals(s)) v = 0;
+                } else if (line.startsWith("EXP_AVAILABLE=")) {
+                    String s = line.substring("EXP_AVAILABLE=".length()).trim();
+                    if ("1".equals(s)) available = 1;
+                    else if ("0".equals(s)) available = 0;
+                }
+            }
+        } catch (Throwable ignored) {
+            v = -1;
+            available = -1;
+        }
+        expCfgCached = v;
+        expAvailableCached = available;
+        expCfgReadAtMs = now;
+        if (available == 0) return 0;
+        return v >= 0 ? v : expBcastDesired;
+    }
+
+    /** 宿主实验页手动开关：写一次配置请求（经 status 交给 daemon 写回），不直接驱动设备。 */
+    private static void requestExperimentConfig(boolean on) {
+        int v = on ? 1 : 0;
+        long now = System.currentTimeMillis();
+        synchronized (expLock) {
+            if (expManualValue == v && now - expManualAt < EXP_MANUAL_DEDUPE_MS) return;
+            expManualValue = v;
+            expManualAt = now;
+            expWant = v;
+            expWantAt = now;
+            // 本地先用请求值兜住 2 秒（配置写回 + 热加载的窗口），避免 App 自修复按旧配置把设备重新打开；
+            // 缓存过期后回到配置真值（写回失败也不会长期偏离）。
+            expCfgCached = v;
+            expCfgReadAtMs = now;
+        }
+        writeStatusFile();        // 立刻落盘，daemon 下一拍读取
+        XposedBridge.log(TAG + " 实验模式 手动" + (on ? "开启" : "关闭")
+                + "（宿主实验页），已请求写回配置");
+    }
+
+    /**
+     * 用户点击判定：只有触屏/按键/无障碍点击的调用栈里才有 performClick（程序 setChecked 没有）。
+     * 刻意不看 onTouchEvent：其它控件上的触摸也可能触发一次 rebind，从而误判为手动。
+     */
+    private static boolean isManualExperimentalToggle() {
+        for (StackTraceElement e : new Throwable().getStackTrace()) {
+            String m = e.getMethodName();
+            if ("performClick".equals(m) || "performClickInternal".equals(m)
+                    || "PerformClick".equals(m)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /** 实验日志限频（默认 30s 一条，避免每秒刷屏）。 */
+    private static void logExperimentLimited(String msg) {
+        long now = System.currentTimeMillis();
+        if (now - expLogAtMs < EXP_LOG_MS) return;
+        expLogAtMs = now;
+        XposedBridge.log(TAG + " " + msg);
     }
 
     /** 读取控制器字段 X 的 WaspWingInfo：刷新回传 + 型号 + owner */
@@ -3573,6 +3842,45 @@ public class MainHook implements IXposedHookLoadPackage {
     private static void appendGetterValueGuarded(StringBuilder sb, Object info, String getter, String key) {
         try {
             appendGetterValue(sb, info, getter, key);
+        } catch (Throwable t) {
+            logGetterFailure(key, getter, t);
+        }
+    }
+
+    /** 布尔 getter 按 0/1 写入（Boolean.toString 会被 atoi 读成 0）。 */
+    private static void appendBoolValueGuarded(StringBuilder sb, Object info, String getter, String key) {
+        try {
+            Object v = XposedHelpers.callMethod(info, getter);
+            if (v instanceof Boolean) sb.append(key).append(((Boolean) v) ? 1 : 0).append("\n");
+        } catch (Throwable t) {
+            logGetterFailure(key, getter, t);
+        }
+    }
+
+    // 冷值回显超限累计（COLD_REAL / COLD_RUN 分开计数，日志 30s 一条带累计值）
+    private static long coldRealHiCount = 0, coldRunHiCount = 0;
+    private static long coldHiLogAtMs = 0;
+
+    /** 冷值 getter：>cap（B6X 229 / B7X 255）视为实验标记/异常值回显进了冷值，按 cap 写盘。 */
+    private static void appendColdSanitizedGuarded(StringBuilder sb, Object info, String getter,
+                                                   String key, int cap) {
+        try {
+            Object v = XposedHelpers.callMethod(info, getter);
+            if (!(v instanceof Number)) return;
+            int raw = ((Number) v).intValue();
+            if (raw > cap) {
+                if (Protocol.STF_COLD_REAL.equals(key)) coldRealHiCount++;
+                else coldRunHiCount++;
+                long now = System.currentTimeMillis();
+                if (coldHiLogAtMs == 0 || now - coldHiLogAtMs >= 30000) {
+                    coldHiLogAtMs = now;
+                    XposedBridge.log(TAG + " 设备把 EXP 标记回显进冷值 " + key + raw
+                            + "（累计 REAL=" + coldRealHiCount + " RUN=" + coldRunHiCount
+                            + "，已按 " + cap + " 处理）");
+                }
+                raw = cap;
+            }
+            sb.append(key).append(raw).append("\n");
         } catch (Throwable t) {
             logGetterFailure(key, getter, t);
         }
