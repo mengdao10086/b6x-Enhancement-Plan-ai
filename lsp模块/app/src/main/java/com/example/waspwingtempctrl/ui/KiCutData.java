@@ -65,7 +65,7 @@ final class KiCutData {
 
     /**
      * 横轴上限是否落在 {@code PID_COLD_RANGE} 的定义范围内。上限对应两个设备字段：
-     * {@code fields[1]}「制冷B6X」（{@code min=0, max=229}）与 {@code fields[2]}「制冷B7X」
+     * {@code fields[1]}「制冷B6X」（{@code min=0, max=194}）与 {@code fields[2]}「制冷B7X」
      * （{@code min=1, max=255}），取二者并集 0~255（调用方已保证 {@code candidate > 0}，故实际为 1~255）。
      * 定义缺失或字段无范围时没有可信上界，仅接受不超过降级值的正数（不按任意大值分配数组）。
      */

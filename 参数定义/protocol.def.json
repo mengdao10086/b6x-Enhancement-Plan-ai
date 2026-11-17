@@ -36,9 +36,7 @@
       {"name": "RPM_REAL", "const": "STF_RPM_REAL", "desc": "设定风速回显"},
       {"name": "RPM_RUN", "const": "STF_RPM_RUN", "desc": "设备实际转速原始值"},
       {"name": "COLD_REAL", "const": "STF_COLD_REAL", "desc": "设定制冷回显"},
-      {"name": "COLD_RUN", "const": "STF_COLD_RUN", "desc": "实际运行档"},
-      {"name": "EXP_ON", "const": "STF_EXP_ON", "desc": "实验模式是否开启（设备回传，0/1；缺失=未知）"},
-      {"name": "EXP_VALUE", "const": "STF_EXP_VALUE", "desc": "实验模式制冷值（设备回传；缺失=-1）"}
+      {"name": "COLD_RUN", "const": "STF_COLD_RUN", "desc": "实际运行档"}
     ]
   },
   "broadcast": {
@@ -47,7 +45,7 @@
       {"id": "b6", "value": "com.flydigi.SET_TEMPERATURE", "cConst": "BROADCAST_ACTION_B6X", "javaConst": "ACTION_TEMP_B6"},
       {"id": "b7", "value": "com.flydigi.SET_TEMPERATURE_B7", "cConst": "BROADCAST_ACTION_B7X", "javaConst": "ACTION_TEMP_B7"}
     ],
-    "extras": ["mode", "temperature", "windOC", "coldOC", "windLevel", "modeCustom", "extra", "experimental"]
+    "extras": ["mode", "temperature", "windOC", "coldOC", "windLevel", "modeCustom", "extra"]
   },
   "coldmax": {
     "field": "COLD_MAX=",
@@ -62,7 +60,6 @@
     {"id": "status_b7", "const": "STATUS_B7", "kind": "absolute", "value": "/data/local/tmp/tempctrl_b7x.status", "category": "status", "desc": "B7X status 文件"},
     {"id": "uiprefs", "const": "UIPREFS", "kind": "absolute", "value": "/data/local/tmp/tempctrl_uiprefs", "category": "uiprefs", "desc": "界面开关快照（daemon 写 / 钩子读）"},
     {"id": "bt_req", "const": "BT_REQ", "kind": "absolute", "value": "/data/local/tmp/tempctrl_bt_req", "category": "bt_req", "desc": "自动开蓝牙请求（钩子写 / daemon 读）"},
-    {"id": "exp_req", "const": "EXP_REQ", "kind": "absolute", "value": "/data/local/tmp/tempctrl_exp_req", "category": "aux", "desc": "实验模式配置同步请求（钩子写 / daemon 读；单行 REQ=<毫秒> EXP=<0|1>）"},
     {"id": "temp_stop", "const": "TEMP_STOP", "kind": "absolute", "value": "/data/local/tmp/tempctrl_temp_stop", "category": "temp_stop", "desc": "临时停止状态（daemon 写 / 钩子读）"},
     {"id": "temp_stop_boot", "const": "TEMP_STOP_BOOT", "kind": "private_name", "name": "tempctrl_temp_stop_boot", "category": "temp_stop", "desc": "临时停止的 boot_id 标记"},
     {"id": "log", "const": "LOG", "kind": "private_name", "name": "tempctrl.log", "category": "log", "desc": "守护进程日志"},

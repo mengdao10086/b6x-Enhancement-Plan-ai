@@ -14,7 +14,6 @@ PROTO_PATH_STATUS_B6=/data/local/tmp/tempctrl_b6x.status
 PROTO_PATH_STATUS_B7=/data/local/tmp/tempctrl_b7x.status
 PROTO_PATH_UIPREFS=/data/local/tmp/tempctrl_uiprefs
 PROTO_PATH_BT_REQ=/data/local/tmp/tempctrl_bt_req
-PROTO_PATH_EXP_REQ=/data/local/tmp/tempctrl_exp_req
 PROTO_PATH_TEMP_STOP=/data/local/tmp/tempctrl_temp_stop
 PROTO_NAME_TEMP_STOP_BOOT=tempctrl_temp_stop_boot
 PROTO_NAME_LOG=tempctrl.log
