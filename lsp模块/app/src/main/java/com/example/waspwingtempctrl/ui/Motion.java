@@ -211,7 +211,7 @@ public final class Motion {
      * 只做保守的柔化，强度不是重点；半径按 {@link #BLUR_STEPS} 档量化，只在跨档时重设效果，
      * 避免逐帧重做离屏滤波。需要 API 31 的 {@code RenderEffect}，不具备时静默退回纯 alpha。
      */
-    private static final float FADE_BLUR_DP = 6f;
+    private static final float FADE_BLUR_DP = 3f;
 
     /** 模糊半径的量化档数：每段淡化最多重设这么多次效果，其余帧只改 alpha。 */
     private static final int BLUR_STEPS = 4;

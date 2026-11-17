@@ -2415,6 +2415,13 @@ static DeviceType select_active_device(void) {
  * 切换设备时调用
  */
 static void update_active_limits(void) {
+    // 实验配置变化留痕：真机上据此区分「配置没读到」与「设备端解锁回落」
+    static int exp_mode_logged = -1;
+    static int exp_low_cap_logged = 0;
+    if (exp_mode_logged != g_cfg.experiment_mode) {
+        exp_mode_logged = g_cfg.experiment_mode;
+        write_log("实验模式 配置=%d", exp_mode_logged ? 1 : 0);
+    }
     // 按 status 回传的实际设备型号选择限制，而非按包名猜测。
     // （B7X 文件 BLE=6/7 回传实际型号；B6X 文件 BLE=1/2 型号未知，b6_model 已兜底为 6）
     int model = (active_device == DEVICE_B7X) ? b7_model : b6_model;
@@ -2429,6 +2436,16 @@ static void update_active_limits(void) {
         // 实验模式只是开关：关闭时超过常规上限的配置值钳回 194；开启时按配置生效（最大 229）
         if (!g_cfg.experiment_mode && active_pid_cold_max > COLD_MAX)
             active_pid_cold_max = COLD_MAX;
+    }
+    // 实验已开但配置上限仍 ≤194：冷值不会超过该值，提示一次（不是回落，是没配到 229）
+    if (g_cfg.experiment_mode && active_pid_cold_max <= COLD_MAX) {
+        if (!exp_low_cap_logged) {
+            exp_low_cap_logged = 1;
+            write_log("实验模式已开，但制冷上限=%d（≤194）；如需 229 请把 PID_COLD_RANGE 上限调到 229",
+                      active_pid_cold_max);
+        }
+    } else {
+        exp_low_cap_logged = 0;
     }
     // 基准上限变了（切设备 / 改配置）：旧的「相对削减量」及其冷却一并清零。
     // 否则旧基线（如 B7X 上 actual_cold>190）会算出负的 hot_derate，使生效上限反向高于配置（审查 S2-4）。
@@ -5854,8 +5871,13 @@ static void write_coldmax_hint(void) {
     if (fd < 0) return;   // 文件缺失（app 尚未预建）或不可写：不新建，下拍重试
     char buf[32];
     int n = snprintf(buf, sizeof(buf), PROTO_COLDMAX_FIELD "%d\n", active_pid_cold_max);
-    if (n > 0 && write(fd, buf, (size_t)n) == n)
+    int prev = coldmax_hint_written;
+    if (n > 0 && write(fd, buf, (size_t)n) == n) {
         coldmax_hint_written = active_pid_cold_max;
+        if (prev >= 0)
+            write_log("制冷上限 %d→%d（实验模式=%d）", prev, active_pid_cold_max,
+                      g_cfg.experiment_mode ? 1 : 0);
+    }
     close(fd);
 }
 

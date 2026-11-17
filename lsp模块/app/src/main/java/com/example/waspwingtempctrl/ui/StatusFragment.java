@@ -130,6 +130,8 @@ public class StatusFragment extends Fragment implements SetupActivity.PageAware 
     private String pendingStatusText;
     /** {@link #pendingStatusText} 是否属于「只换字、不改高度」的占位换字（见 keepHeight）。 */
     private boolean pendingStatusKeepHeight;
+    /** {@link #pendingStatusText} 上屏时是否播交叉淡变（用户动作 true；自动刷新/后台回填 false）。 */
+    private boolean pendingStatusAnimated;
     /** 「部署状态」首行临时替换前的原文首行；null = 当前没有待恢复的替换。 */
     @Nullable
     private String deployFirstLineBackup;
@@ -414,7 +416,7 @@ public class StatusFragment extends Fragment implements SetupActivity.PageAware 
 
     /**
      * 首次探测：先试一次 root（只此一次），再探部署状态。静默路径（不写记录、不播忙文本）；
-     * 结果到达仍走交叉淡入 + 高度补间，从预填充骨架过渡到真实文本。
+     * 结果到达直接替换文本与高度，不播淡变（自动路径）。
      */
     private void firstProbe() {
         final Context app = requireContext().getApplicationContext();
@@ -433,7 +435,7 @@ public class StatusFragment extends Fragment implements SetupActivity.PageAware 
             }
             sb.append(probeAndAutoFixScript(app));
             return sb.toString();
-        }, false, false);
+        }, false, false, false);   // 首次探测属自动路径：结果直替，不播淡变
     }
 
     /**
@@ -473,11 +475,11 @@ public class StatusFragment extends Fragment implements SetupActivity.PageAware 
             return;
         }
         appendLog(getString(R.string.status_busy_probe));
-        if (!replaceDeployFirstLine(R.string.status_deploy_checking)) {
+        if (!replaceDeployFirstLine(R.string.status_deploy_checking, true)) {
             final String busy = getString(R.string.status_busy_probe);
             if (!busy.contentEquals(statusView.getText())) {
                 // 占位只换字、不改高度：避免单行占位把窗口压矮、结果到达再撑开
-                swapStatusTextAnimated(busy, true);
+                swapStatusTextAnimated(busy, true, true);
             }
         }
         scanManualPending = true;
@@ -495,9 +497,10 @@ public class StatusFragment extends Fragment implements SetupActivity.PageAware 
      * pending 机制推迟。
      *
      * @param placeholderRes 临时首行文案（须以「部署状态：」开头）
+     * @param animated       选中期间推迟后上屏时是否播交叉淡变（来源口径同 swapStatusTextAnimated）
      * @return true = 已走首行替换；false = 当前不是部署状态文本（调用方自行决定是否回退）
      */
-    private boolean replaceDeployFirstLine(int placeholderRes) {
+    private boolean replaceDeployFirstLine(int placeholderRes, boolean animated) {
         final TextView view = statusView;
         if (view == null) {
             return false;
@@ -518,6 +521,7 @@ public class StatusFragment extends Fragment implements SetupActivity.PageAware 
         if (TextCopy.isSelecting(view)) {
             pendingStatusText = replaced;
             pendingStatusKeepHeight = true;   // 只换字、不改高度
+            pendingStatusAnimated = animated;
             TextCopy.runWhenSelectionEnds(view, this::flushPendingStatus);
         } else {
             // 中断可能还在跑的上一次淡变，避免新文本半透明叠在旧层上
@@ -678,7 +682,7 @@ public class StatusFragment extends Fragment implements SetupActivity.PageAware 
                         .create());
                 return;
             }
-            swapStatusTextAnimated(result);
+            swapStatusTextAnimated(result, false, true);
             return;
         }
         if (!silent || statusView == null) {
@@ -698,7 +702,8 @@ public class StatusFragment extends Fragment implements SetupActivity.PageAware 
             return;   // 部署/拉起结果的保留期内：周期扫描不覆盖状态文本
         }
         if (!result.contentEquals(statusView.getText())) {
-            swapStatusTextAnimated(result);   // 静默更新也走同一套淡变（内容没变就一个字都不动）
+            // 静默/周期更新直接替换，不播淡变（内容没变就一个字都不动）
+            swapStatusTextAnimated(result, false, false);
         }
     }
 
@@ -831,7 +836,8 @@ public class StatusFragment extends Fragment implements SetupActivity.PageAware 
         deployFailed = false;
         // 已有动作在跑时 runAsync 会直接返回（只写一条操作记录），此时不能换占位文案，否则会永久残留
         if (!actionRunning) {
-            replaceDeployFirstLine(R.string.status_deploy_busy);
+            // 自动部署是后台动作：占位与结果都不播淡变
+            replaceDeployFirstLine(R.string.status_deploy_busy, !auto);
         }
         runAsyncBlocking(busyText, () -> {
             try {
@@ -867,9 +873,9 @@ public class StatusFragment extends Fragment implements SetupActivity.PageAware 
                 }
             }
             if (deployPlaced) {
-                startDaemon();   // 手动按钮的同一条路径（同一方法）
+                startDaemon(!auto);   // 与部署同源：自动链直替，手动链播淡变
             }
-        }, RESULT_HOLD_MS);
+        }, RESULT_HOLD_MS, !auto);   // 自动部署的结果直替，用户手动部署才播淡变
     }
 
     /** 记一次自动部署失败并设置指数退避：60s、120s、240s…上限 30 分钟。 */
@@ -911,11 +917,18 @@ public class StatusFragment extends Fragment implements SetupActivity.PageAware 
                 () -> Deployer.get(app).uninstall().describe(), false, true);
     }
 
+    /** 用户入口（按钮 / 根可用提示 / 未运行提示）：结果播交叉淡变。 */
     private void startDaemon() {
+        startDaemon(true);
+    }
+
+    /** @param animated false = 自动部署链拉起的 daemon：结果直替，不播淡变 */
+    private void startDaemon(boolean animated) {
         daemonStoppedByUser = false;   // 用户明确要拉起：把「刚停过」的抑制位清掉
         final Context app = requireContext().getApplicationContext();
         runAsyncBlocking(getString(R.string.status_busy_start),
-                () -> Deployer.get(app).startDaemon().describe(), false, true, null, RESULT_HOLD_MS);
+                () -> Deployer.get(app).startDaemon().describe(), false, true, null,
+                RESULT_HOLD_MS, animated);
     }
 
     private void stopDaemon() {
@@ -975,12 +988,12 @@ public class StatusFragment extends Fragment implements SetupActivity.PageAware 
      * @param busyText 忙态文案。<b>不进状态区</b>（理由见 {@code app/逻辑说明.md} §8.1），
      *                 只在手动路径下作为「操作记录」的一条
      * @param asDialog true 时结果弹对话框（诊断类文本较长，状态区放不下）
-     * @param manual   true = 用户主动触发：写操作记录 + 结果文本淡入淡出（含高度补间）；
-     *                 false = 非手动刷新：不写记录、不碰文本（结果先比后写）、不做动画
+     * @param manual   true = 写操作记录；false = 非手动刷新不写记录
+     * @param animateResult true = 结果文本播交叉淡变（用户动作）；false = 直接替换（自动刷新/后台回填）
      */
     private void runAsync(final String busyText, final Task task, final boolean asDialog,
-                          final boolean manual) {
-        runAsync(busyText, task, asDialog, manual, null, false, 0L);
+                          final boolean manual, final boolean animateResult) {
+        runAsync(busyText, task, asDialog, manual, null, false, 0L, animateResult);
     }
 
     /**
@@ -995,19 +1008,19 @@ public class StatusFragment extends Fragment implements SetupActivity.PageAware 
      */
     private void runAsync(final String busyText, final Task task, final boolean asDialog,
                           final boolean manual, @Nullable final Runnable after) {
-        runAsync(busyText, task, asDialog, manual, after, false, 0L);
+        runAsync(busyText, task, asDialog, manual, after, false, 0L, manual);
     }
 
     /** 需要压暗全部按钮的动作（部署/卸载/拉起/kill daemon）。 */
     private void runAsyncBlocking(final String busyText, final Task task, final boolean asDialog,
                                   final boolean manual) {
-        runAsync(busyText, task, asDialog, manual, null, true, 0L);
+        runAsync(busyText, task, asDialog, manual, null, true, 0L, true);
     }
 
     /** 同上，带 after（部署→自动拉起）。 */
     private void runAsyncBlocking(final String busyText, final Task task, final boolean asDialog,
                                   final boolean manual, @Nullable final Runnable after) {
-        runAsync(busyText, task, asDialog, manual, after, true, 0L);
+        runAsync(busyText, task, asDialog, manual, after, true, 0L, true);
     }
 
     /**
@@ -1017,7 +1030,14 @@ public class StatusFragment extends Fragment implements SetupActivity.PageAware 
     private void runAsyncBlocking(final String busyText, final Task task, final boolean asDialog,
                                   final boolean manual, @Nullable final Runnable after,
                                   final long holdStatusMs) {
-        runAsync(busyText, task, asDialog, manual, after, true, holdStatusMs);
+        runAsync(busyText, task, asDialog, manual, after, true, holdStatusMs, true);
+    }
+
+    /** 同上，并显式指定结果是否播淡变（自动部署等后台动作传 false）。 */
+    private void runAsyncBlocking(final String busyText, final Task task, final boolean asDialog,
+                                  final boolean manual, @Nullable final Runnable after,
+                                  final long holdStatusMs, final boolean animateResult) {
+        runAsync(busyText, task, asDialog, manual, after, true, holdStatusMs, animateResult);
     }
 
     /**
@@ -1026,7 +1046,8 @@ public class StatusFragment extends Fragment implements SetupActivity.PageAware 
      */
     private void runAsync(final String busyText, final Task task, final boolean asDialog,
                           final boolean manual, @Nullable final Runnable after,
-                          final boolean dimButtons, final long holdStatusMs) {
+                          final boolean dimButtons, final long holdStatusMs,
+                          final boolean animateResult) {
         if (actionRunning) {
             if (manual) {
                 appendLog(getString(R.string.status_busy_other));
@@ -1102,15 +1123,14 @@ public class StatusFragment extends Fragment implements SetupActivity.PageAware 
                             .setPositiveButton(R.string.status_dialog_close, null)
                             .create());
                 } else if (manual) {
-                    swapStatusTextAnimated(result);
+                    swapStatusTextAnimated(result, false, animateResult);
                     if (holdStatusMs > 0) {
                         // 部署/拉起结果：到期前周期扫描不许覆盖
                         statusHoldUntilMs = System.currentTimeMillis() + holdStatusMs;
                     }
                 } else if (!result.contentEquals(statusView.getText())) {
-                    // 先比后写：内容没变就一个字都不动；变了也走交叉淡入 + 高度补间（与静默扫描同口径），
-                    // 首次探测从预填充骨架淡入结果，卡片高度由补间兜住残余差异
-                    swapStatusTextAnimated(result);
+                    // 先比后写：内容没变就一个字都不动；变了直接替换（自动路径，不播淡变）
+                    swapStatusTextAnimated(result, false, false);
                 }
                 if (after != null) {
                     after.run();
@@ -1275,26 +1295,25 @@ public class StatusFragment extends Fragment implements SetupActivity.PageAware 
         }
     }
 
-    /** 默认换字：高度与淡变同起同止（见带 {@code keepHeight} 的重载）。 */
-    private void swapStatusTextAnimated(final String text) {
-        swapStatusTextAnimated(text, false);
-    }
-
     /**
-     * 手动刷新的结果上屏：<b>业务上屏零延迟</b>——新文本立刻写上去（不再等淡出结束），视觉上做
-     * 「旧文本淡出、新文本淡入」的交叉淡变，统一由 {@link Motion#crossFade} 负责：旧层按当前
-     * 外观抓快照后渐糊渐隐，新层由糊转清；连续调用先收上一轮，<b>打断不丢结果</b>
-     * （打断后当前文本即最新结果）。系统关掉动画时 {@code crossFade} 直接执行换文本。
-     * <p>文本只做交叉淡变，不裁剪、不做上下收展。行数变化时的高度复用配置页那套
+     * 状态文本上屏。<b>业务上屏零延迟</b>——新文本立即写入，不等淡出结束。
+     *
+     * <p>{@code animated} 由<b>调用点按来源显式决定</b>：用户动作（刷新按钮、部署/卸载/拉起/kill）
+     * 传 true，走 {@link Motion#crossFade}——旧层按当前外观抓快照后渐糊渐隐、新层由糊转清；
+     * 自动刷新（周期/静默探测、首次探测、自动部署回填）传 false，<b>直接替换文本与高度</b>，
+     * 不播淡变、不触发模糊。系统关掉动画时 true 路径也由 {@code crossFade} 直接执行换文本。
+     *
+     * <p>true 路径：文本只做交叉淡变，不裁剪、不做上下收展。行数变化时的高度复用配置页那套
      * {@link Motion#animateHeightChange}（{@code ValueAnimator} + panelCurve、按位移定时长）：
      * 高低都不分时机、与淡变同拍启动，并在 325ms 后与旧层消失同时到位（变矮时快照层会被
      * 容器底部裁掉一部分，是同步的必然结果）。
      *
-     * @param keepHeight true = 本次只换字、不驱动高度：把当前高度钉住，再走交叉淡变。
+     * @param keepHeight true = 本次只换字、不驱动高度：把当前高度钉住。
      *                   手动刷新的单行「正在探测…」占位用它，避免窗口先被占位压矮、结果到达再撑开；
      *                   结果到达的换字仍走 false，届时以钉住的高度为起点补间到结果高度。
+     * @param animated   true = 播交叉淡变（用户动作）；false = 直接替换（自动刷新/后台回填）。
      */
-    private void swapStatusTextAnimated(final String text, boolean keepHeight) {
+    private void swapStatusTextAnimated(final String text, boolean keepHeight, boolean animated) {
         final TextView view = statusView;
         if (view == null || !isAdded()) {
             return;
@@ -1305,11 +1324,17 @@ public class StatusFragment extends Fragment implements SetupActivity.PageAware 
         if (TextCopy.isSelecting(view)) {
             pendingStatusText = text;
             pendingStatusKeepHeight = keepHeight;
+            pendingStatusAnimated = animated;
             TextCopy.runWhenSelectionEnds(view, this::flushPendingStatus);
             return;
         }
         pendingStatusText = null;
         pendingStatusKeepHeight = false;
+        pendingStatusAnimated = false;
+        if (!animated) {
+            swapStatusTextNow(shown, keepHeight);
+            return;
+        }
         // 快照抓取、旧层渐糊隐去、新层由糊转清都在 crossFade 内完成；swap 里只做业务动作：
         // 驱动高度（与淡变同拍启动）并立即写新文本，保证信息先可读
         Motion.crossFade(() -> {
@@ -1335,6 +1360,27 @@ public class StatusFragment extends Fragment implements SetupActivity.PageAware 
             }
             view.setText(shown);
         }, view);
+    }
+
+    /**
+     * 无动画直接换字（自动刷新/后台回填）：先收掉可能残留的淡变与高度补间，再把文本与高度直接落位。
+     * 高度语义与原路径一致：{@code keepHeight} 钉住当前高度；否则还原 {@code WRAP_CONTENT}，
+     * 由新文本自然高度决定（无补间）。
+     */
+    private void swapStatusTextNow(CharSequence shown, boolean keepHeight) {
+        final TextView view = statusView;
+        if (view == null) {
+            return;
+        }
+        final int held = keepHeight ? currentStatusStackHeight() : 0;
+        cancelFade();   // 取消可能继承自用户动作的 alpha/高度补间，并复位透明度
+        if (held > 0 && statusStack != null) {
+            ViewGroup.LayoutParams lp = statusStack.getLayoutParams();
+            if (lp != null) {
+                lp.height = held;
+            }
+        }
+        view.setText(shown);
     }
 
     /**
@@ -1377,9 +1423,11 @@ public class StatusFragment extends Fragment implements SetupActivity.PageAware 
             return;
         }
         boolean keepHeight = pendingStatusKeepHeight;
+        boolean animated = pendingStatusAnimated;
         pendingStatusText = null;
         pendingStatusKeepHeight = false;
-        swapStatusTextAnimated(pending, keepHeight);
+        pendingStatusAnimated = false;
+        swapStatusTextAnimated(pending, keepHeight, animated);
     }
 
     /**

@@ -113,7 +113,7 @@ public class MainHook implements IXposedHookLoadPackage {
     private static final long EXP_OVERRIDE_MS = 20000;          // 手动操作后本地覆盖配置的宽限（等 daemon 回写）
     private static final long EXP_CFG_CACHE_MS = 2000;          // uiprefs 读取缓存
     private static final long EXP_SEND_COOLDOWN_MS = 1500;      // 0x52 重下发最小间隔
-    private static final long EXP_UNKNOWN_KEEPALIVE_MS = 60000; // 设备不回报实验模式位时的保活重发间隔
+    private static final long EXP_ACTIVE_KEEPALIVE_MS = 1000;   // 模式位为开/未知时的刷新间隔（设备端解锁会超时回落）
     private static final int EXP_COLD_MAX = 229;                // 实验模式允许的 B6X 制冷上限（常规为 194）
     private static final long EXP_BLOCK_LOG_MS = 30000;         // 拦截自动调用日志限频
     private static final long EXP_SEND_LOG_MS = 30000;          // 下发日志限频
@@ -132,6 +132,7 @@ public class MainHook implements IXposedHookLoadPackage {
     private static long expBlockLogAtMs = 0;
     private static long expSendLogAtMs = 0;
     private static long expManualValueLogAtMs = 0;
+    private static long expClampLogAtMs = 0;                    // 广播冷值被 194 钳制的日志限频
     private static volatile Method expMethod = null;   // SDK setExperimentalRunMode(boolean,Integer,Integer)
     private static volatile int stallLastCold = -1, stallLastRpm = -1; // 回传停滞快照（锁死检测）
     private static volatile long dispatchStallSinceMs = 0;             // 回传停滞起点（ms）；0=当前不在停滞态
@@ -467,7 +468,16 @@ public class MainHook implements IXposedHookLoadPackage {
                                 : (experimental != 0 ? BCAST_COLD_MAX_B6X_EXP : BCAST_COLD_MAX_B6X);
                         temperature = clampInt(temperature, 0, BCAST_TEMP_MAX);
                         windOC = clampInt(windOC, 0, fanMax);
+                        int coldOCRaw = coldOC;
                         coldOC = clampInt(coldOC, 0, coldMax);
+                        if (appKind == 6 && experimental == 0 && coldOCRaw > BCAST_COLD_MAX_B6X) {
+                            long now = System.currentTimeMillis();
+                            if (now - expClampLogAtMs > EXP_BLOCK_LOG_MS) {
+                                expClampLogAtMs = now;
+                                XposedBridge.log(TAG + " 广播冷值 " + coldOCRaw + "→" + coldOC
+                                        + "（experimental=0，实验模式关闭钳回 194）");
+                            }
+                        }
                         windLevel = clampInt(windLevel, 0, fanMax);
                         modeCustom = 0;   // 保留字段：模块协议约定传 0
                         extra = 0;
@@ -1427,9 +1437,10 @@ public class MainHook implements IXposedHookLoadPackage {
     }
 
     /**
-     * 实验模式维持：配置为开时确保设备实验模式位为开，配置为关时确保关闭。
-     * 判据只看模式位（isExperimentalRunModeOn）：设备明确回报关 → 冷却后重发；
-     * 设备不回报该位 → 只按 60s 保活重发。实验值不参与重发判定，重发时顺带带当前制冷目标本身（不加 1）。
+     * 实验模式维持：配置为开时确保设备实验模式持续有效，配置为关时确保关闭。
+     * 设备端的实验解锁会超时回落（即使模式位仍回报开），故配置开期间无条件按 1s 周期刷新
+     * 0x52，不比较模式位/实验值；刷新时顺带带当前制冷目标本身（不加 1）。
+     * 关闭态仍按 1.5s 冷却重发，连续 10 次未确认后放慢到 10s。
      * 期望值来自 daemon 发布的 uiprefs（EXPERIMENT_MODE=）；手动操作后用本地覆盖值兜住回写延迟。
      */
     private static void maintainExperimentalMode(Object info) {
@@ -1440,19 +1451,10 @@ public class MainHook implements IXposedHookLoadPackage {
             long now = System.currentTimeMillis();
             Boolean devOnObj = callBoolGetter(info, "isExperimentalRunModeOn");
             if (desired == 1) {
-                if (Boolean.TRUE.equals(devOnObj)) {   // 模式位已开：值变化不再追发
-                    expResendCount = 0;
-                    return;
-                }
-                // 明确回报关 → 正常冷却；模式位未知 → 60s 保活（避免每帧重发）
-                boolean knownOff = Boolean.FALSE.equals(devOnObj);
-                if (!knownOff && expLastSentOn
-                        && now - expLastSendAtMs < EXP_UNKNOWN_KEEPALIVE_MS) return;
-                long cooldown = expResendCount >= 10 ? 10000 : EXP_SEND_COOLDOWN_MS;
-                if (now - expLastSendAtMs < cooldown) return;
+                if (now - expLastSendAtMs < EXP_ACTIVE_KEEPALIVE_MS) return;
                 int cold = currentExperimentalColdLocked(info);
                 if (cold < 0) return;   // 制冷目标尚未就绪，等回传
-                expResendCount++;
+                expResendCount = 0;
                 sendExperimentalLocked(true, cold);
             } else {
                 boolean devOn = Boolean.TRUE.equals(devOnObj);

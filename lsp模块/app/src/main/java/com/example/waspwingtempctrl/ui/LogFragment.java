@@ -1030,8 +1030,16 @@ public class LogFragment extends Fragment
         @Nullable
         private Runnable touchEndListener;
 
+        public LogListView(@NonNull Context context) {
+            this(context, null);
+        }
+
         public LogListView(@NonNull Context context, @Nullable AttributeSet attrs) {
-            super(context, attrs);
+            this(context, attrs, 0);
+        }
+
+        public LogListView(@NonNull Context context, @Nullable AttributeSet attrs, int defStyleAttr) {
+            super(context, attrs, defStyleAttr);
             addOnScrollListener(new OnScrollListener() {
                 @Override
                 public void onScrollStateChanged(@NonNull RecyclerView rv, int newState) {
@@ -1080,6 +1088,13 @@ public class LogFragment extends Fragment
         }
 
         @Override
+        protected void onDetachedFromWindow() {
+            // 手势被窗口切换打断时可能收不到 UP/CANCEL：避免 userTouching 卡在 true
+            userTouching = false;
+            super.onDetachedFromWindow();
+        }
+
+        @Override
         public int computeVerticalScrollExtent() {
             return Math.max(1, getHeight() - getPaddingTop() - getPaddingBottom());
         }
@@ -1102,13 +1117,9 @@ public class LogFragment extends Fragment
             if (range <= extent) {
                 return 0;
             }
-            if (!canScrollVertically(1)) {
-                if (!canScrollVertically(-1)) {
-                    return 0;   // 内容不足一屏：不可滚动
-                }
-                // 已到底：估算总高有误差时也让拇指严格贴底，不悬在半路
-                return range - extent;
-            }
+            // 注意：这里绝不能调 canScrollVertically()——View.canScrollVertically 会回调
+            // computeVerticalScrollOffset()，形成无限递归（StackOverflowError）。
+            // 边界改由已绑定子项的位置直接判断。
             if (!(getLayoutManager() instanceof LinearLayoutManager)) {
                 return 0;
             }
@@ -1118,13 +1129,22 @@ public class LogFragment extends Fragment
                 return 0;
             }
             View firstView = manager.findViewByPosition(first);
+            if (firstView == null) {
+                return 0;
+            }
+            int count = getAdapter() == null ? 0 : getAdapter().getItemCount();
+            int last = manager.findLastVisibleItemPosition();
+            View lastView = last == RecyclerView.NO_POSITION ? null : manager.findViewByPosition(last);
+            if (last == count - 1 && lastView != null
+                    && manager.getDecoratedBottom(lastView) <= getHeight() - getPaddingBottom()) {
+                // 最后一条已完整露出：内容不足一屏 → 0；已滚到底 → 贴底
+                return first == 0 ? 0 : range - extent;
+            }
             float fraction = 0f;
-            if (firstView != null) {
-                int height = firstView.getHeight();
-                if (height > 0) {
-                    int scrolled = getPaddingTop() - manager.getDecoratedTop(firstView);
-                    fraction = Math.min(1f, Math.max(0f, scrolled / (float) height));
-                }
+            int height = firstView.getHeight();
+            if (height > 0) {
+                int scrolled = getPaddingTop() - manager.getDecoratedTop(firstView);
+                fraction = Math.min(1f, Math.max(0f, scrolled / (float) height));
             }
             long offset = (long) ((first + fraction) * (double) rowHeightPx());
             return (int) Math.max(0L, Math.min(offset, (long) range - extent));
