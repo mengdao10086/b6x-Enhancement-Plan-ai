@@ -117,6 +117,7 @@ public class MainHook implements IXposedHookLoadPackage {
     private static final int EXP_COLD_MAX = 229;                // 实验模式允许的 B6X 制冷上限（常规为 194）
     private static final long EXP_BLOCK_LOG_MS = 30000;         // 拦截自动调用日志限频
     private static final long EXP_SEND_LOG_MS = 30000;          // 下发日志限频
+    private static final long EXP_MANUAL_VALUE_LOG_MS = 30000;  // 宿主手动值不一致日志限频
     private static final Object expLock = new Object();
     private static final ThreadLocal<Boolean> expModuleCall = new ThreadLocal<>();  // 模块自身调用放行
     private static final ThreadLocal<Boolean> expManualCall = new ThreadLocal<>();  // 宿主手动开关放行
@@ -130,6 +131,7 @@ public class MainHook implements IXposedHookLoadPackage {
     private static int expResendCount = 0;                      // 连续重发且设备未确认的次数（≥10 后放慢到 10s）
     private static long expBlockLogAtMs = 0;
     private static long expSendLogAtMs = 0;
+    private static long expManualValueLogAtMs = 0;
     private static volatile Method expMethod = null;   // SDK setExperimentalRunMode(boolean,Integer,Integer)
     private static volatile int stallLastCold = -1, stallLastRpm = -1; // 回传停滞快照（锁死检测）
     private static volatile long dispatchStallSinceMs = 0;             // 回传停滞起点（ms）；0=当前不在停滞态
@@ -1474,6 +1476,19 @@ public class MainHook implements IXposedHookLoadPackage {
         return Math.min(v, EXP_COLD_MAX);
     }
 
+    /** 宿主手动值日志（限频）：与模块目标不一致或发生边界钳制时记一条，标明来源与取值。 */
+    private static void logManualExperimentalValue(int appVal, int sent) {
+        int target = currentExperimentalColdLocked(lastWaspWingInfo);
+        boolean differs = target > 0 && sent != target;
+        if (!differs && sent == appVal) return;   // 无差异且未钳制：不吵
+        long now = System.currentTimeMillis();
+        if (now - expManualValueLogAtMs < EXP_MANUAL_VALUE_LOG_MS) return;
+        expManualValueLogAtMs = now;
+        XposedBridge.log(TAG + " 实验模式 宿主App下发值=" + appVal
+                + (sent != appVal ? "（钳为" + sent + "）" : "")
+                + "，模块当前目标=" + target);
+    }
+
     /** 期望的实验模式（0/1；-1=未知）。手动操作后覆盖配置，配置回写追上即清除覆盖。 */
     private static int resolveExperimentDesiredLocked() {
         long now = System.currentTimeMillis();
@@ -1569,6 +1584,7 @@ public class MainHook implements IXposedHookLoadPackage {
      * 下发 0x52（模块自身调用；放行判据见 setExperimentalRunMode 钩子）。
      * SDK 固定组包 [0x52, 1, value, p3/100]：第 2 字节恒为 1，value=0 表示关；
      * 开启时 value 取当前制冷目标本身（不发 +1），关闭时传 null → value=0。
+     * 宿主 App 的手动调用不经过本函数：值原样放行，仅在钩子里做 229/230 边界钳制。
      */
     private static void sendExperimentalLocked(boolean on, int cold) {
         Object inst = capturedWaspWingMgr;
@@ -2389,13 +2405,14 @@ public class MainHook implements IXposedHookLoadPackage {
                                     if (module || manual) {
                                         if (manual) {   // 手动动作记入维持状态，避免立刻重复下发
                                             boolean on = (Boolean) param.args[0];
-                                            int cold = 0;
-                                            if (on) {
-                                                // 宿主手动开启也发当前目标本身，不沿用 App 的「冷+1」
-                                                cold = currentExperimentalColdLocked(lastWaspWingInfo);
-                                                if (cold > 0) param.args[1] = Integer.valueOf(cold);
-                                                else if (param.args[1] instanceof Number)
-                                                    cold = ((Number) param.args[1]).intValue();
+                                            if (on && param.args[1] instanceof Number) {
+                                                // 宿主 App 的值原样放行，只做边界校正：>229（含 230 回传标记）钳到 229，
+                                                // 0 保留「关闭」语义，1~229 含「目标+1」原样通过。
+                                                int appVal = ((Number) param.args[1]).intValue();
+                                                int sent = appVal > EXP_COLD_MAX ? EXP_COLD_MAX
+                                                        : (appVal < 0 ? 0 : appVal);
+                                                if (sent != appVal) param.args[1] = Integer.valueOf(sent);
+                                                logManualExperimentalValue(appVal, sent);
                                             }
                                             synchronized (expLock) {
                                                 expLastSentOn = on;
