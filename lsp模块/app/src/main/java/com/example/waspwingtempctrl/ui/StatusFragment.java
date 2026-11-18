@@ -412,7 +412,9 @@ public class StatusFragment extends Fragment implements SetupActivity.PageAware 
         lastShowFullPath = showFull;
         // 行文本按原始完整路径保存，普通刷新会因「内容没变」跳过；这里逐行强制重走渲染链
         for (int i = 0; i < detailRowViews.size(); i++) {
-            applyRowText(detailRowViews.get(i), detailRowTexts.get(i));
+            TextView row = detailRowViews.get(i);
+            Motion.cancelCrossFade(row);   // 直替前收掉可能残留的快照层
+            applyRowText(row, detailRowTexts.get(i));
         }
         updateProbeNoticeView(true);
     }
