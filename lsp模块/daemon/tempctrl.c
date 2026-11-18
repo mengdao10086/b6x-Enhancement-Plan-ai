@@ -65,7 +65,8 @@
 
 // ======================== 常量与边界 ========================
 #define COLD_MIN             1
-#define COLD_MAX           194     // 制冷强度最大有效值（B6X 硬件上限），PID_COLD_RANGE/RATE_LIMIT_COLD/COLD_RPM_MAP 的 clamp 上界
+#define COLD_MAX           194     // 制冷强度最大有效值（B6X 常规上限），PID_COLD_RANGE/RATE_LIMIT_COLD/COLD_RPM_MAP 的 clamp 上界
+#define COLD_MAX_EXP       229     // 实验模式（EXPERIMENT_MODE=1，仅 B6X）下允许的制冷设定上限；关闭时运行时钳回 COLD_MAX
 // B7X 独立上限（运行时根据 active_device 选择）
 #define B7X_COLD_MAX       255
 #define B7X_FAN_RPM_MAX    8000
@@ -215,6 +216,8 @@ struct TempCfg {
     int temp_stop_enabled;    // 配置值（每轮控制前由热重载刷新）
     // UI_BACK_HIDE：1=返回键收后台（默认），0=恢复系统默认退出
     int back_hide_enabled;
+    // EXPERIMENT_MODE（仅 B6X）：1=允许 PID_COLD_RANGE 上限到 229，并按 1 秒锁步下发实验解锁 + 当前制冷
+    int experiment_mode;
     // --- 看门狗反向保活开关（WD_KEEPALIVE）---
     // 声明点必须在 load_config 之前（那里第一遍读它）；实现与其余状态在文件末尾的「看门狗反向保活」小节。
     // 默认开：默认值来源、审计口径与"旧值优先"见 逻辑说明.md「看门狗反向保活」；判活口径与拉起方式同见该节。
@@ -294,6 +297,7 @@ static struct TempCfg g_cfg = {
     .app_launch_screen_dozing_on = 0,
     .temp_stop_enabled = 0,
     .back_hide_enabled = 1,
+    .experiment_mode = 0,
     .wd_keepalive_enabled = 1,
     .bt_auto_enable_sec = 300,
 };
@@ -324,6 +328,7 @@ static const char *const BROADCAST_EXTRAS[] = {
     "windLevel",
     "modeCustom",
     "extra",
+    "experimental",
 };
 #define BROADCAST_EXTRAS_N  ((int)(sizeof(BROADCAST_EXTRAS) / sizeof(BROADCAST_EXTRAS[0])))
 /* protocol-const:end */
@@ -501,6 +506,8 @@ struct SensorSnapshot {
     int cooler_rpm_run;    // 实际风扇转速（0x13 value[0x0b]<<8|value[0x0a]；未就绪 -1）
     int cooler_cold_real;  // 目标制冷（设备回显的设定档；控制路径用它对齐/限速）
     int cooler_cold_run;   // 实际制冷（运行档，0x13 byte[0x0f]；仅入数据行，不参与控制）
+    int experiment_on;     // 设备实验模式开关回传（0/1；-1=缺失）
+    int experiment_value;  // 设备实验模式值回传（原样；-1=缺失）
 };
 static struct SensorSnapshot g_sensor = {
     .cooler_hot_temp = -1,
@@ -509,6 +516,8 @@ static struct SensorSnapshot g_sensor = {
     .cooler_rpm_run = -1,
     .cooler_cold_real = -1,
     .cooler_cold_run = -1,
+    .experiment_on = -1,
+    .experiment_value = -1,
 };
 
 // --- 回传可信就绪 + 启动/重连对齐（不拿 -1/占位 1 兜底，等真实回传再定基线；理由见 逻辑说明.md「启动流程」）---
@@ -942,7 +951,8 @@ static int parse_pid_cfg(const char *key, int val, const char *val_str) {
     if (strcmp(key, "PID_COLD_RANGE") == 0) {
         int a = g_cfg.pid_cold_min, b = g_cfg.pid_cold_max, c = g_cfg.b7_pid_cold_max;
         int n = sscanf(val_str, "%d %d %d", &a, &b, &c);
-        if (n >= 2) { g_cfg.pid_cold_min=clamp(a,0,COLD_MAX); g_cfg.pid_cold_max=clamp(b,0,COLD_MAX); }
+        // 解析层允许到实验上限 229；实验关闭时由 load_config 末尾的 apply_experiment_cold_cap 钳回 194
+        if (n >= 2) { g_cfg.pid_cold_min=clamp(a,0,COLD_MAX); g_cfg.pid_cold_max=clamp(b,0,COLD_MAX_EXP); }
         if (n >= 3) { g_cfg.b7_pid_cold_max = clamp(c, 1, B7X_COLD_MAX); }
         return 1;
     }
@@ -1026,6 +1036,8 @@ static int parse_common_cfg(const char *key, int val, const char *val_str) {
 }
 
 // ======================== 界面开关发布（UIPREFS） ========================
+static int g_perf_enabled_now = 1;    // 本轮 PERF_ENABLED（实验模式可用性判定用；publish_uiprefs 早于 last_perf 更新）
+
 /**
  * 把界面侧开关转写成 /data/local/tmp 标志文件（BACK_HIDE=0/1、GATE_LE=0/1、BT_ON_SEC=<秒>），供宿主进程里的钩子读取。
  *
@@ -1039,13 +1051,19 @@ static void publish_uiprefs(void) {
     static int uiprefs_last_back_hide = -1;   // 上次已写出的值（-1 = 尚未写过，首轮必写一次）
     static int uiprefs_last_gate_le = -1;   // 同上的 GATE_LE 记录（哨兵=尚未写过）
     static int uiprefs_last_bt_sec = -2147483647;   // 同上的 BT_ON_SEC 记录（哨兵=尚未写过）
+    static int uiprefs_last_experiment = -1;        // 同上的 EXPERIMENT_MODE 记录（哨兵=尚未写过）
+    static int uiprefs_last_exp_available = -1;     // 同上的 EXP_AVAILABLE 记录（哨兵=尚未写过）
     // 受 APP_LAUNCH_ENABLED 控制（用户 2026-10-24 定）：总开关关闭时不发布放行/自开蓝牙请求。
     // GATE_LE 不再有独立开关，恒等于自动拉起总开关。
     int gate_le_eff = g_cfg.APP_LAUNCH_ENABLED ? 1 : 0;
     int bt_sec_eff  = g_cfg.APP_LAUNCH_ENABLED ? g_cfg.bt_auto_enable_sec : 0;
+    int experiment_eff = g_cfg.experiment_mode ? 1 : 0;   // 配置意图，与 PERF 解耦
+    int exp_available = (g_cfg.experiment_mode && g_perf_enabled_now) ? 1 : 0;
     if (g_cfg.back_hide_enabled == uiprefs_last_back_hide
             && gate_le_eff == uiprefs_last_gate_le
-            && bt_sec_eff == uiprefs_last_bt_sec) {
+            && bt_sec_eff == uiprefs_last_bt_sec
+            && experiment_eff == uiprefs_last_experiment
+            && exp_available == uiprefs_last_exp_available) {
         return;
     }
     char tmp[64];
@@ -1061,6 +1079,8 @@ static void publish_uiprefs(void) {
     fprintf(f, "BACK_HIDE=%d\n", g_cfg.back_hide_enabled ? 1 : 0);
     fprintf(f, "GATE_LE=%d\n", gate_le_eff);
     fprintf(f, "BT_ON_SEC=%d\n", bt_sec_eff);
+    fprintf(f, "EXPERIMENT_MODE=%d\n", experiment_eff);
+    fprintf(f, "EXP_AVAILABLE=%d\n", exp_available);
     fclose(f);
     if (rename(tmp, UIPREFS_PATH) != 0) {
         if (!uiprefs_fail_logged) {
@@ -1073,6 +1093,8 @@ static void publish_uiprefs(void) {
     uiprefs_last_back_hide = g_cfg.back_hide_enabled;
     uiprefs_last_gate_le = gate_le_eff;
     uiprefs_last_bt_sec = bt_sec_eff;
+    uiprefs_last_experiment = experiment_eff;
+    uiprefs_last_exp_available = exp_available;
     uiprefs_fail_logged = 0;
 }
 
@@ -1218,6 +1240,10 @@ static int config_apply_prepass_key(struct PrepassCfg *out, const char *key, con
         // 界面键里唯一被守护进程读取的一个：本机不消费，只转写标志文件供钩子读取。
         // 与 APP_LAUNCH_ENABLED 同理，必须在第一遍读掉——否则 PERF/DEBUG/SYSFS 全关时本函数会提前 return。
         if (out) g_cfg.back_hide_enabled = (atoi(val_str) != 0);
+    } else if (strcmp(key, "EXPERIMENT_MODE") == 0) {
+        // 实验模式（仅 B6X）：与 UI_BACK_HIDE 同理在预扫阶段读掉，三层全关时也保留意图；
+        // 制冷上限的分档钳制在 load_config 末尾统一执行（依赖第二遍解析出的 PID_COLD_RANGE）。
+        if (out) g_cfg.experiment_mode = (atoi(val_str) != 0);
     } else if (strcmp(key, "WD_KEEPALIVE") == 0) {
         // 反向保活开关：与 UI_BACK_HIDE 同理必须在第一遍读掉（它是基础设施，不受 PERF/DEBUG/SYSFS 层开关管辖，
         // 三层全关时本函数会提前 return，那时也必须已生效）。
@@ -1248,6 +1274,28 @@ static int  config_read_prepass(FILE *f, struct PrepassState *pre);
 static void config_migrate_legacy(const char *path);
 static int  config_apply_prepass_effects(struct PrepassState *pre);
 static void config_scan_apply(FILE *f, const struct PrepassState *pre);
+
+static int experiment_mode_prev = 0;     // 上一次加载后的实验开关（识别「开→关」边沿）
+static int experiment_close_pending = 0; // 关闭边沿待补发：下一拍先发一条 ≤194 的制冷（钩子随后关解锁）
+
+/**
+ * 实验模式的制冷上限分档（唯一钳制点）：开=229，关=194。
+ * 只改运行时值，不改配置文件——用户配置的 229 在关闭期间仍保留，重新开启即可恢复。
+ * 关闭边沿同时把运行值/平滑起点立即压回 194 并丢弃未走完的拆分，避免限速期间继续下发高冷。
+ */
+static void apply_experiment_cold_cap(void) {
+    int cap = g_cfg.experiment_mode ? COLD_MAX_EXP : COLD_MAX;
+    if (g_cfg.pid_cold_max > cap) g_cfg.pid_cold_max = cap;
+    if (experiment_mode_prev && !g_cfg.experiment_mode) {
+        if (actual_cold > COLD_MAX) actual_cold = COLD_MAX;
+        if (sent_cold > COLD_MAX) sent_cold = COLD_MAX;
+        ramp_slots_left = 0;
+        experiment_close_pending = 1;
+    } else if (g_cfg.experiment_mode) {
+        experiment_close_pending = 0;   // 关闭后又在补发前重新开启：不补发关闭包
+    }
+    experiment_mode_prev = g_cfg.experiment_mode;
+}
 
 /**
  * 配置加载唯一入口。
@@ -1280,9 +1328,11 @@ static int load_config(const char *path) {
     config_migrate_legacy(path);
     if (!config_apply_prepass_effects(&st)) {
         fclose(f);   // PERF/DEBUG/SYSFS 全关：跳过解析
+        apply_experiment_cold_cap();   // 实验开关键已在预扫阶段读出，上限分档仍须生效
         return 1;    // 文件已读到（内容就是"全关"），算加载成功，不要再触发重试
     }
     config_scan_apply(f, &st);
+    apply_experiment_cold_cap();       // 二次解析结束后统一钳 PID_COLD_RANGE 上限（开 229 / 关 194）
     return 1;   // 已读完并解析
 }
 
@@ -1341,8 +1391,20 @@ static void config_migrate_legacy(const char *path) {
  * @return 0 = PERF/DEBUG/SYSFS 全关（调用方跳过第二遍，但仍算加载成功）；1 = 至少一层开启
  */
 static int config_apply_prepass_effects(struct PrepassState *pre) {
-    // 界面开关转写：总开关全关时也要发布
+    static int exp_suppressed_logged = 0;
+    g_perf_enabled_now = pre->pre.perf_enabled;
+    // 界面开关转写：总开关全关时也要发布（EXPERIMENT_MODE 与 EXP_AVAILABLE 都在这里落盘）
     publish_uiprefs();
+    // 实验模式与性能层解耦：开关照常解析/发布；PERF 关闭时明确告知「已开但温控未启用」，
+    // 不出现「开关能开、实际静默无效」的假象。
+    if (g_cfg.experiment_mode && !g_perf_enabled_now) {
+        if (!exp_suppressed_logged) {
+            exp_suppressed_logged = 1;
+            write_log("实验模式 已开但温控未启用（PERF_ENABLED=0）：保留开关与配置，不执行锁步");
+        }
+    } else {
+        exp_suppressed_logged = 0;
+    }
 
     // 前置条件：自动拉起关闭 → 锁死自动重启（watchdog）强制关闭（不改配置，仅运行时生效）。
     if (!g_cfg.APP_LAUNCH_ENABLED && g_cfg.app_watchdog_cycles > 0) {
@@ -2420,6 +2482,30 @@ static void invalidate_report_ok(void) {
     report_ok = 0;
 }
 
+// 宿主实验页手动开关写进 status 的配置写入请求（EXP_WANT/EXP_WANT_AT）；-1=本帧缺失
+static int exp_want = -1;
+static long long exp_want_at_ms = -1;
+static int exp_on_last = -1, exp_value_last = -1;   // 设备实验回传变化才记日志
+static void maybe_apply_experiment_request(void);     // 定义在配置写回区（依赖 config_path / 写锁）
+
+/**
+ * 冷值回传消毒：设备可能把实验标记/异常值（如历史 230）回显进 COLD_REAL/COLD_RUN。
+ * 超过设备合法冷值上限（B6X 229 / B7X 255）一律按上限处理，不进入 PID/去重/ramp；
+ * EXP_VALUE 单独保存、不参与控制。日志 30 秒一条并带累计次数，便于和真机现象对账。
+ */
+static int sanitize_cold_feedback(long raw, int cap, const char *field, unsigned long *count) {
+    if (raw <= cap) return (int)raw;
+    (*count)++;
+    static time_t last_log = 0;
+    time_t now = time(NULL);
+    if (last_log == 0 || now - last_log >= 30) {
+        last_log = now;
+        write_log("设备把 EXP 标记回显进冷值 %s=%ld（累计 %lu 次，已按 %d 处理）",
+                  field, raw, *count, cap);
+    }
+    return cap;
+}
+
 /**
  * 读取 active_device 对应的状态文件中的散热器回传参数
  * 在仲裁确定 active_device 后调用
@@ -2438,6 +2524,8 @@ static void read_cooler_params(void) {
 
     g_sensor.cooler_hot_temp = -1; g_sensor.cooler_cold_temp = -1;
     g_sensor.cooler_rpm_real = -1; g_sensor.cooler_rpm_run = -1; g_sensor.cooler_cold_real = -1; g_sensor.cooler_cold_run = -1;
+    g_sensor.experiment_on = -1; g_sensor.experiment_value = -1;
+    exp_want = -1; exp_want_at_ms = -1;
 
     FILE *f = fopen(path, "r");
     if (!f) {   // 本帧读不到 status：按异常帧处理，不许沿用断连前的「已就绪」
@@ -2451,6 +2539,8 @@ static void read_cooler_params(void) {
     char line[64];
     int run_mode_seen = 0;   // 本帧是否读到 RUN_MODE（与 COLD_REAL 同块写入，lastWaspWingInfo 就绪才有）
     int rpm_run_seen = 0;    // 本帧是否读到 RPM_RUN（诊断旧模块 / getSpeed 不可用）
+    static unsigned long cold_real_hi_count = 0, cold_run_hi_count = 0;   // 回显超限累计（日志对账用）
+    int cold_cap = is_b6_path ? COLD_MAX_EXP : B7X_COLD_MAX;
     while (fgets(line, sizeof(line), f)) {
         const char *v;
         if ((v = status_field_value(line, STF_BLE)) != NULL) {
@@ -2487,16 +2577,37 @@ static void read_cooler_params(void) {
             while (*end == ' ' || *end == '\r' || *end == '\n') end++;
             g_sensor.cooler_rpm_run = (end != v && *end == '\0' && run_rpm >= 0) ? (int)run_rpm : -1;
         } else if ((v = status_field_value(line, STF_COLD_REAL)) != NULL) {
-            g_sensor.cooler_cold_real = atoi(v);
+            g_sensor.cooler_cold_real =
+                    sanitize_cold_feedback((long)atoi(v), cold_cap, "COLD_REAL", &cold_real_hi_count);
         } else if ((v = status_field_value(line, STF_COLD_RUN)) != NULL) {
             // 缺失保持 -1；非法（非整数/负数/尾随垃圾）同样写 -1
             char *end = NULL;
             long run = strtol(v, &end, 10);
             while (*end == ' ' || *end == '\r' || *end == '\n') end++;
-            g_sensor.cooler_cold_run = (end != v && *end == '\0' && run >= 0) ? (int)run : -1;
+            g_sensor.cooler_cold_run = (end != v && *end == '\0' && run >= 0)
+                    ? sanitize_cold_feedback(run, cold_cap, "COLD_RUN", &cold_run_hi_count)
+                    : -1;
+        } else if ((v = status_field_value(line, STF_EXP_ON)) != NULL) {
+            g_sensor.experiment_on = (atoi(v) != 0) ? 1 : 0;
+        } else if ((v = status_field_value(line, STF_EXP_VALUE)) != NULL) {
+            g_sensor.experiment_value = atoi(v);
+        } else if ((v = status_field_value(line, STF_EXP_WANT)) != NULL) {
+            exp_want = (atoi(v) != 0) ? 1 : 0;
+        } else if ((v = status_field_value(line, STF_EXP_WANT_AT)) != NULL) {
+            exp_want_at_ms = atoll(v);
         }
     }
     fclose(f);
+
+    // 设备实验回传变化才记日志（60 秒记录流程的判读锚点）
+    if (!is_b6_path) { /* B7X 无实验协议 */ }
+    else if (g_sensor.experiment_on != exp_on_last || g_sensor.experiment_value != exp_value_last) {
+        write_log("实验回报 开=%d 值=%d", g_sensor.experiment_on, g_sensor.experiment_value);
+        exp_on_last = g_sensor.experiment_on;
+        exp_value_last = g_sensor.experiment_value;
+    }
+    // 宿主实验页手动开关 → 配置写回（仅 B6X；文件写失败保留下拍重试）
+    if (is_b6_path) maybe_apply_experiment_request();
 
     // 本帧解析结果可供同一拍的 read_status_ble_both 复用（R40）；跨拍由序号不等自动失效。
     status_meta_is_b6 = is_b6_path;
@@ -3014,12 +3125,25 @@ static void reap_am_children(void) {
 }
 
 // ======================== 广播下发（am broadcast） ========================
+/** 实验模式当前是否生效（仅 B6X）：配置开 + 性能层开启 + 当前控制的是 B6X。B7X 无此协议。 */
+static int experiment_active(void) {
+    return g_cfg.experiment_mode && g_perf_enabled_now && active_device == DEVICE_B6X;
+}
+
+/** 最近一次广播派发时刻（单调秒）：实验期 1 秒强制派发据此避免与常规/平滑下发同一秒重复。 */
+static time_t last_bcast_mono = 0;
+
 /**
  * 通过 am broadcast 下发控制参数到 LSPosed 模块（fork+exec，非阻塞）
  */
 static void send_am_broadcast(int mode, int target, int windOC, int coldOC, int windLevel) {
-    // 取值顺序必须与 BROADCAST_EXTRAS 一致（前 5 项来自形参，后 2 项固定 0）
-    const int vals[BROADCAST_EXTRAS_N] = { mode, target, windOC, coldOC, windLevel, 0, 0 };
+    // 最后一道冷值钳制：230 不是合法冷值（0x52 的 value 现在也发当前冷值），绝不进入 0x23 槽/广播冷值。
+    int cold_cap = (active_device == DEVICE_B7X) ? B7X_COLD_MAX : COLD_MAX_EXP;
+    if (coldOC > cold_cap) coldOC = cold_cap;
+    if (coldOC < 0) coldOC = 0;
+    // 取值顺序必须与 BROADCAST_EXTRAS 一致（前 5 项来自形参，第 6/7 项固定 0，第 8 项=实验模式）
+    const int vals[BROADCAST_EXTRAS_N] = { mode, target, windOC, coldOC, windLevel, 0, 0,
+                                           experiment_active() ? 1 : 0 };
     char v_s[BROADCAST_EXTRAS_N][BROADCAST_VAL_MAX];
     for (int i = 0; i < BROADCAST_EXTRAS_N; i++)
         snprintf(v_s[i], sizeof(v_s[i]), "%d", vals[i]);
@@ -3068,7 +3192,10 @@ static void send_am_broadcast(int mode, int target, int windOC, int coldOC, int 
     }
     am_pending_pid[am_pending_n] = pid;
     am_pending_at[am_pending_n]  = mono_now();
+    last_bcast_mono = am_pending_at[am_pending_n];
     am_pending_n++;
+    // 关闭边沿的「先降冷」已随本条非实验广播发出：无需再补发
+    if (experiment_close_pending && !experiment_active()) experiment_close_pending = 0;
     debug_log(g_cfg.debug_exec, "am broadcast 已派发 mode=%d target=%d windOC=%d coldOC=%d windLevel=%d",
               mode, target, windOC, coldOC, windLevel);
 }
@@ -3102,6 +3229,9 @@ static void rate_limit_cold(int desired_cold) {
     int old_cold = actual_cold;
     cold_rate_bound = (desired_cold >= old_cold) ? cold_up : cold_down;   // 方向对应的上限，供平滑下发拆步长
     rate_limit(&actual_cold, desired_cold, cold_up, cold_down);
+    // 运行值上限按设备钳制：230 永远不是合法冷值
+    int cold_cap = (active_device == DEVICE_B7X) ? B7X_COLD_MAX : COLD_MAX_EXP;
+    if (actual_cold > cold_cap) actual_cold = cold_cap;
     debug_log(g_cfg.debug_exec, "cold 限速 %d→%d desired=%d（升%d 降%d）",
               old_cold, actual_cold, desired_cold, cold_up, cold_down);
 }
@@ -3167,6 +3297,10 @@ static inline int within_deadzone(int diff, int deadzone, int room) {
  */
 static int should_skip_dispatch(int mode, int target, int windOC, int cold, int windLevel, int force_dispatch) {
     int send_rpm = (mode == 0) ? windLevel : windOC;
+
+    // 实验模式：目标冷 >194 时绕过去重——设备可能「设定回显 229、实际运行 194」，
+    // 若按 COLD_REAL 判定会认为已到位而不再发高冷，实验解锁后的 0x23 就被吞掉。
+    if (experiment_active() && cold > COLD_MAX) return 0;
 
     // 全 0 回传 = 未就绪（刚连上/通知未生效）：与 -1 同等对待，走下方 last_* 退化分支。
     // 否则「目标冷=1、回传冷=0」会被制冷死区判成已到位，首条命令永远发不出去。
@@ -4282,10 +4416,12 @@ static void config_write_unlock(int fd) {
 
 // ======================== 临时停止（UI_TEMP_STOP） ========================
 /**
- * 把配置文件里的 UI_TEMP_STOP 值写回 0（只改该行值，保留行首空白与行内注释）。
- * 复用 commit_config_rewrite 的原子替换与属主/权限对齐。返回 1=已改写。
+ * 把配置文件里某个整数键就地改成新值（只改该行值，保留行首空白与行内注释）。
+ * 复用 commit_config_rewrite 的原子替换与属主/权限对齐；suffix 区分不同调用方的临时文件。
+ * 返回 1=已改写；0=无该键/打不开/写失败（调用方自行决定重试）。
  */
-static int writeback_temp_stop_disabled(const char *path) {
+static int writeback_config_int(const char *path, const char *key, int value,
+                                const char *suffix, const char *what) {
     int lock_fd = config_write_lock(path);
     if (lock_fd < 0) return 0;
     FILE *f = fopen(path, "r");
@@ -4294,12 +4430,11 @@ static int writeback_temp_stop_disabled(const char *path) {
     if (stat(path, &st) != 0) { fclose(f); config_write_unlock(lock_fd); return 0; }
 
     char tmp[300];
-    snprintf(tmp, sizeof(tmp), "%s.tmpstop", path);
+    snprintf(tmp, sizeof(tmp), "%s%s", path, suffix);
     FILE *g = fopen(tmp, "w");
     if (!g) { fclose(f); config_write_unlock(lock_fd); return 0; }
 
-    static const char KEY[] = "UI_TEMP_STOP";
-    const size_t KEY_LEN = sizeof(KEY) - 1;
+    const size_t KEY_LEN = strlen(key);
     int changed = 0;
     char line[640];
     while (fgets(line, sizeof(line), f)) {
@@ -4309,10 +4444,10 @@ static int writeback_temp_stop_disabled(const char *path) {
         if (*p != '#' && eq) {
             size_t klen = (size_t)(eq - p);
             while (klen > 0 && (p[klen - 1] == ' ' || p[klen - 1] == '\t')) klen--;
-            if (klen == KEY_LEN && strncmp(p, KEY, KEY_LEN) == 0) {
+            if (klen == KEY_LEN && strncmp(p, key, KEY_LEN) == 0) {
                 const char *hash = strchr(eq + 1, '#');
                 fwrite(line, 1, (size_t)(p - line), g);   // 保留行首缩进
-                fprintf(g, "%.*s=0", (int)KEY_LEN, KEY);
+                fprintf(g, "%s=%d", key, value);
                 if (hash) fprintf(g, "  %s", hash);        // 保留行内注释（含行尾换行）
                 else fputc('\n', g);
                 changed = 1;
@@ -4323,9 +4458,57 @@ static int writeback_temp_stop_disabled(const char *path) {
     }
     fclose(f);
     if (!changed) { fclose(g); remove(tmp); config_write_unlock(lock_fd); return 0; }
-    int ok = commit_config_rewrite(path, tmp, g, &st, "临时停止失效写回");
+    int ok = commit_config_rewrite(path, tmp, g, &st, what);
     config_write_unlock(lock_fd);
     return ok;
+}
+
+/** 把配置文件里的 UI_TEMP_STOP 值写回 0。返回 1=已改写。 */
+static int writeback_temp_stop_disabled(const char *path) {
+    return writeback_config_int(path, "UI_TEMP_STOP", 0, ".tmpstop", "临时停止失效写回");
+}
+
+/**
+ * 实验模式配置写回：宿主实验页手动开关在 status 里留下 EXP_WANT/EXP_WANT_AT，
+ * 本函数按 token 去重后写回 profile.conf 的 EXPERIMENT_MODE，再走正常热加载生效。
+ * 首拍（守护进程刚启动）只执行「新于配置文件 mtime」的请求，避免旧请求覆盖新配置；
+ * 超过 120 秒的请求视为过期。写失败保留请求，下拍重试（2 秒节流）。
+ */
+static void maybe_apply_experiment_request(void) {
+    static long long handled = -1;     // 已处理的最大 token（epoch 毫秒）
+    static int primed = 0;             // 首拍基准已建立
+    static time_t last_try = 0;        // 失败重试节流（单调秒）
+    if (exp_want < 0 || exp_want_at_ms <= 0) return;
+    if (config_path[0] == '\0') return;   // 配置尚未加载：保留请求，稍后重试
+
+    long long now_ms = (long long)time(NULL) * 1000;
+    if (exp_want_at_ms > now_ms + 60000) return;    // 时钟异常（未来值）不采信
+    if (exp_want_at_ms < now_ms - 120000) return;   // 过期请求不补执行
+
+    if (!primed) {
+        primed = 1;
+        struct stat cst;
+        if (stat(config_path, &cst) == 0
+                && exp_want_at_ms <= (long long)cst.st_mtime * 1000) {
+            return;   // 请求早于配置最后修改时间：配置已有更新，旧请求不补执行
+        }
+    }
+    if (exp_want_at_ms <= handled) return;          // 同一 token 只执行一次
+
+    time_t now = mono_now();
+    if (last_try != 0 && now - last_try < 2) return;
+    last_try = now;
+
+    if (writeback_config_int(config_path, "EXPERIMENT_MODE", exp_want,
+                             ".tmpexp", "实验模式联动写回")) {
+        // 走既有热加载路径：EXPERIMENT_MODE 与 PID_COLD_RANGE 上限一起按新配置生效
+        load_config(config_path);
+        struct stat mst;
+        if (stat(config_path, &mst) == 0) config_mtime = mst.st_mtime;
+        update_active_limits();
+        handled = exp_want_at_ms;
+        write_log("实验模式 配置已同步为 %d（宿主实验页手动操作）", exp_want);
+    }
 }
 
 /**
@@ -4420,6 +4603,73 @@ static int temp_stop_active(void) {
     temp_stop_cached = g_cfg.temp_stop_enabled;
     temp_stop_cached_at = now;
     return temp_stop_cached;
+}
+
+// ======================== 实验模式（B6X）锁步下发 ========================
+/**
+ * 关闭边沿补发：实验由开变关后，立即下发一条 ≤194 的制冷广播（experimental=0），
+ * 让钩子按「先 0x23 降冷、再 0x52 关解锁」的固定顺序执行，不依赖下一轮常规下发是否被去重。
+ */
+static void experiment_close_send(void) {
+    if (!experiment_close_pending) return;
+    if (active_device != DEVICE_B6X || !app_ble_connected || temp_stop_active()) return;
+    int rpm = (sent_rpm >= g_cfg.fan_rpm_min) ? sent_rpm
+            : (actual_rpm >= g_cfg.fan_rpm_min ? actual_rpm : g_cfg.fan_rpm_min);
+    int cold = (actual_cold >= COLD_MIN) ? actual_cold : g_cfg.pid_cold_min;
+    if (cold > COLD_MAX) cold = COLD_MAX;
+    send_am_broadcast(1, 5, rpm, cold, 0);
+    experiment_close_pending = 0;
+    write_log("实验模式 关闭下发 冷%d RPM%d（钩子先降冷再关解锁）", cold, rpm);
+}
+
+/**
+ * 实验期锁步维持：每 1 秒强制派发一次，保证「解锁 + 高冷」在设备重锁前重新到达。
+ * 冷值取限速后的 actual_cold；平滑下发进行中改用已发出的 sent_cold，不打断 ramp 步进语义。
+ * 设备实际运行档连续 30 秒超过 194 后退避到 2 秒；判定固件硬顶（H3）后降到 5 秒并只记一条日志。
+ */
+static void experiment_tick(void) {
+    static time_t last_send = 0;
+    static int h3_streak = 0;       // 连续「设定已高、运行档仍 ≤194」秒数
+    static int h3_downgraded = 0;   // 1=已判定固件硬顶，只承诺设定值
+    static int stable_sec = 0;      // 连续「实际运行档 >194」秒数
+    if (!experiment_active() || !app_ble_connected || temp_stop_active()) {
+        h3_streak = 0;
+        stable_sec = 0;
+        h3_downgraded = 0;
+        return;
+    }
+    if (actual_cold < COLD_MIN || sent_rpm < g_cfg.fan_rpm_min) return;   // 实际值未就绪
+
+    int cold = (ramp_slots_left > 0 && sent_cold >= COLD_MIN) ? sent_cold : actual_cold;
+    if (cold > COLD_MAX_EXP) cold = COLD_MAX_EXP;
+
+    // H3：设备已回报实验开启、目标已超过常规上限，但实际运行档仍停在 ≤194。
+    if (cold > COLD_MAX && g_sensor.experiment_on == 1
+            && g_sensor.cooler_cold_run >= 0 && g_sensor.cooler_cold_run <= COLD_MAX) {
+        if (h3_streak < 30) h3_streak++;
+        if (h3_streak >= 10 && !h3_downgraded) {
+            h3_downgraded = 1;
+            write_log("实验模式 仅设定值解锁：COLD_RUN 连续 10s ≤194，固件实际运行档未抬高");
+        }
+    } else {
+        h3_streak = 0;
+        if (h3_downgraded && g_sensor.cooler_cold_run > COLD_MAX) {
+            h3_downgraded = 0;
+            write_log("实验模式 实际运行档已超过 194，恢复 1 秒锁步");
+        }
+    }
+    if (g_sensor.cooler_cold_run > COLD_MAX) {
+        if (stable_sec < 600) stable_sec++;
+    } else {
+        stable_sec = 0;
+    }
+
+    int interval = h3_downgraded ? 5 : (stable_sec >= 30 ? 2 : 1);
+    time_t now = mono_now();
+    if (last_send != 0 && now - last_send < interval) return;
+    if (last_bcast_mono != 0 && now - last_bcast_mono < 1) return;   // 本秒已有常规/平滑下发
+    send_am_broadcast(1, 5, sent_rpm, cold, 0);
+    last_send = now;
 }
 
 // ======================== 配置迁移（旧键 → 新键一次性写回） ========================
@@ -5024,6 +5274,11 @@ static int apply_gear_direct(int mode, int target,
     }
     // 削减触发的下压判据（写死、可解释、不依赖越界巧合）：过温削减生效 且 本轮 cold 确被钳制压低
     int hot_forced_down = (hot_derate > 0 && cold < cold_pre_clamp);
+
+    // 冷值最后钳制：去重/ramp/last_cold 都只接受设备合法冷值（B6X 229 封顶，B7X 255）
+    int cold_cap = (active_device == DEVICE_B7X) ? B7X_COLD_MAX : COLD_MAX_EXP;
+    if (cold > cold_cap) cold = cold_cap;
+    if (cold < 0) cold = 0;
 
     // ---- 去重检测 + 制冷变化死区（以散热器实际回传为准）----
     if (should_skip_dispatch(mode, target, send_rpm, cold, wl, hot_forced_down)) {
@@ -6527,6 +6782,12 @@ static void run_main_loop(struct MainCtx *ctx) {
         // 若 dispatch 恰在本拍执行期间到期（与 tick 仅差几微秒），此处补取一次，保持同拍下发。
         if (!disp_due && use_timerfd) disp_due = timerfd_drain(tfd_dispatch);
         if (disp_due) ramp_tick();
+        // 实验模式：关闭边沿补发 + 实验期 1 秒锁步。放在常规/平滑下发之后，
+        // 由 last_bcast_mono 保证同一秒不重复派发；无设备/失活路径已在上方 continue。
+        if (tick_due) {
+            experiment_close_send();
+            experiment_tick();
+        }
     }
     if (tfd_tick >= 0) close(tfd_tick);
     if (tfd_dispatch >= 0) close(tfd_dispatch);

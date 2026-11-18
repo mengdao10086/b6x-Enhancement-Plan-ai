@@ -15,6 +15,11 @@
 #define STF_RPM_RUN          "RPM_RUN="
 #define STF_COLD_REAL        "COLD_REAL="
 #define STF_COLD_RUN         "COLD_RUN="
+#define STF_EXP_ON           "EXP_ON="
+#define STF_EXP_AVAILABLE    "EXP_AVAILABLE="
+#define STF_EXP_VALUE        "EXP_VALUE="
+#define STF_EXP_WANT         "EXP_WANT="
+#define STF_EXP_WANT_AT      "EXP_WANT_AT="
 
 /* 广播 action（与 Java Protocol.ACTION_* 同值） */
 #define BROADCAST_ACTION_B6X "com.flydigi.SET_TEMPERATURE"
