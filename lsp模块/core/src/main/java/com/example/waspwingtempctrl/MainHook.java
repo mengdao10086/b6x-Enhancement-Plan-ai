@@ -401,6 +401,10 @@ public class MainHook implements IXposedHookLoadPackage {
     private static final int DIAG_LOG_MAX_PER_CONN = 1;   // 每次连接最多记录的对数
     private static volatile int diagLogCount = 0;          // 当前连接已记录的对数（markConnected 清零）
     private static volatile int setRunModeLogCount = 0;    // "setRunMode 已下发"当前连接已记录条数（markConnected 清零）
+    // ========== 宿主直调 setRunMode 的冷值钳制（B6X） ==========
+    private static final ThreadLocal<Boolean> setRunModeModuleCall = new ThreadLocal<>();  // 模块自身下发标记（仅日志区分来源）
+    private static final long SET_RUN_MODE_SRC_LOG_MS = 30000;  // 来源/钳制日志限频
+    private static volatile long setRunModeSrcLogAt = 0;         // 上次来源日志时刻
     private static final int DIAG_CONN_LOG_MAX = 1;        // 连接诊断日志每连最多条数（discoverServices 等风暴源）
     private static volatile int diagConnLogCount = 0;      // 连接诊断日志计数（markConnected 清零）
     // ========== 后台重连日志：2 小时聚合（无重连不输出） ==========
@@ -1238,6 +1242,7 @@ public class MainHook implements IXposedHookLoadPackage {
         // 其余分区保持原相对顺序（回调目标不同，注册先后不影响执行次序，仅影响加载窗口）。
         hookRunFetchLoopCpuFix(lpparam);              // 第 1：AbstractDataInteractionController 构造（最急）
         hookWaspWingManagerCapture(lpparam);          // 第 2：WaspWingManager 实例捕获（最急）
+        if (appKind == 6) hookSetRunModeColdClamp(lpparam);  // 宿主直调 setRunMode 的冷值钳制
         hookControllerStopScan(lpparam);              // 修复 #1：控制器层停扫描（双设备）
         hookControllerScanEntry(lpparam);             // M2：扫描入口解 SDK 扫描自锁（双设备）
         if (appKind == 6) hookB6ViewModelFix(lpparam);   // 修复 #2：ViewModel LiveData（仅 B6X）
@@ -2616,7 +2621,7 @@ public class MainHook implements IXposedHookLoadPackage {
                     // 已离开引导页（B6X=进入设置界面；farsef 无引导页概念，首个 Activity 即退）
                     autoLaunchPending = false;
                     cancelAutoLaunchTimeout();
-                    backgroundForAutoLaunch(act);
+                    backgroundByModuleExit(act);
                 }
             });
             hooked("Activity.onCreate/onResume（b6x_auto_launch 后台化）");
@@ -2626,15 +2631,16 @@ public class MainHook implements IXposedHookLoadPackage {
     }
 
     /**
-     * 自动拉起（守护进程拉起）：把当前任务切到后台（界面已就绪；连接由后台重连线程完成）。
+     * 模块主动退出的唯一入口：守护进程拉起（intent 显式带 {@code b6x_auto_launch}）后，
+     * 把当前任务切到后台（界面已就绪；连接由后台重连线程完成）。
      * 延迟 {@link #AUTO_LAUNCH_BACKGROUND_DELAY_MS} 再切，给界面稳定留时间。
      * 与返回键路径同源：开关开启时一并从最近任务隐藏（见 {@link #excludeFromRecents}）。
      */
-    private static void backgroundForAutoLaunch(final Activity act) {
+    private static void backgroundByModuleExit(final Activity act) {
         mainHandler().postDelayed(new Runnable() {
             @Override
             public void run() {
-                backgroundActivity(act, "自动拉起");
+                backgroundActivity(act, "模块主动退出");
                 if (readBackHideEnabled()) excludeFromRecents(act);   // 与返回键路径一致：开关开则隐藏，失败不影响上面的收后台
             }
         }, AUTO_LAUNCH_BACKGROUND_DELAY_MS);
@@ -2793,10 +2799,36 @@ public class MainHook implements IXposedHookLoadPackage {
     }
 
     /**
+     * androidx 返回派发器是否还有启用的回调；取不到（非 androidx 页面/反射失败）返回 null。
+     * 有启用的回调 = 本次返回会被页面内消费（退子页、收浮窗），不是退出 App。
+     */
+    private static Boolean backDispatcherHasEnabledCallbacks(final Activity act) {
+        try {
+            Object dispatcher = act.getClass().getMethod("getOnBackPressedDispatcher").invoke(act);
+            if (dispatcher == null) return null;
+            Object enabled = dispatcher.getClass().getMethod("hasEnabledCallbacks").invoke(dispatcher);
+            return (enabled instanceof Boolean) ? (Boolean) enabled : null;
+        } catch (Throwable t) {
+            return null;
+        }
+    }
+
+    /**
+     * 这次返回是否会退出 App：只有任务根 Activity 且没有启用的返回回调时才会。
+     * 非任务根的返回只会结束当前页/露出上一页；有回调的返回由页面自己消费——两者都保持系统默认。
+     */
+    private static boolean backWouldExitApp(final Activity act) {
+        if (!act.isTaskRoot()) return false;
+        Boolean hasCallbacks = backDispatcherHasEnabledCallbacks(act);
+        return hasCallbacks == null || !hasCallbacks;
+    }
+
+    /**
      * 返回键退出时把 app 收进后台 + 从最近任务隐藏，而不是真正退出。
      *
-     * <p>接管判据、为何不再硬要求 isTaskRoot、两处钩子的必要性、排除表与预测性返回的处理，
-     * 见 app/逻辑说明.md §1.4。
+     * <p>明确返回判据：{@link #backWouldExitApp}（任务根 + 无已启用返回回调）成立才接管；
+     * Home 键、最近任务、切换应用、息屏及其它 finish 不经过本钩子，保持系统默认行为。
+     * 两处钩子的必要性、排除表与预测性返回的处理见 app/逻辑说明.md §1.4。
      *
      * <p>未验证：B7X（farsef）是否同为 {@code AppCompatActivity}（见 app/逻辑说明.md §10）；
      * androidx 类缺失时只跳过主钩子、保留兜底，不崩。
@@ -2809,17 +2841,18 @@ public class MainHook implements IXposedHookLoadPackage {
                 try {
                     Activity act = (Activity) param.thisObject;
                     boolean switchOn = readBackHideEnabled();   // 返回键是低频事件，每次读一次以做到改即生效
-                    boolean taskRoot = act.isTaskRoot();
-                    boolean inScope = taskRoot || isBackHideTargetActivity(act);
-                    if (switchOn && !act.isFinishing() && inScope) {
+                    boolean inScope = isBackHideTargetActivity(act);
+                    boolean exitsApp = inScope && backWouldExitApp(act);
+                    if (switchOn && !act.isFinishing() && exitsApp) {
                         param.setResult(null);               // 阻断默认的 finish
-                        backgroundActivity(act, "返回键");   // 收后台（保进程、BLE 不断）
+                        backgroundActivity(act, "返回键退出");   // 收后台（保进程、BLE 不断）
                         excludeFromRecents(act);             // 从最近任务隐藏（仅返回键路径；失败不影响上面的收后台）
                         return;
                     }
                     // 判据不成立也要留痕：真机靠这行区分"回调没进"与"进了但判据不成立"
-                    XposedBridge.log(TAG + " 返回键未接管: isTaskRoot=" + taskRoot
-                            + " 在范围内=" + inScope
+                    XposedBridge.log(TAG + " 返回键未接管: isTaskRoot=" + act.isTaskRoot()
+                            + " 有返回回调=" + backDispatcherHasEnabledCallbacks(act)
+                            + " 在范围内=" + inScope + " 会退出App=" + exitsApp
                             + " pkg=" + act.getPackageName()
                             + " cls=" + act.getClass().getName()
                             + " finishing=" + act.isFinishing()
@@ -2862,7 +2895,7 @@ public class MainHook implements IXposedHookLoadPackage {
                 autoLaunchTimeoutRunnable = null;
                 if (!autoLaunchPending) return;
                 autoLaunchPending = false;
-                backgroundForAutoLaunch(act);
+                backgroundByModuleExit(act);
             }
         };
         mainHandler().postDelayed(autoLaunchTimeoutRunnable, AUTO_LAUNCH_TIMEOUT_MS);
@@ -2923,6 +2956,82 @@ public class MainHook implements IXposedHookLoadPackage {
     }
 
     /**
+     * B6X：钳制宿主直调 setRunMode 的冷值参数。
+     *
+     * <p>广播与模块自身下发已各自钳制，但宿主 App（固定功率条/自动修复）直接调用
+     * {@code WaspWingManager.setRunMode} 时冷值可带出 230（真机表现为冷值瞬时蹦 230）。
+     * 钩子挂在控制器层 {@code WaspWingDataInteractionController.setRunMode(IIIIIII)}——所有
+     * 下发路径的最终汇合点，按当前有效上限（实验开 229 / 关 194）钳制承载冷值的槽位：
+     * 第 4 参 coldLevelOverclock（mode 0/1）与第 6 参 modeCustom（B6X mode=2 固定功率的冷值槽）。
+     * 来源（模块下发 / 宿主直发）只写日志、30s 限频，不改变钳制行为。
+     */
+    private static void hookSetRunModeColdClamp(XC_LoadPackage.LoadPackageParam lpparam) {
+        try {
+            Class<?> ctrl = lpparam.classLoader.loadClass(
+                    "com.flydigi.sdk.waspwing.WaspWingDataInteractionController");
+            XposedHelpers.findAndHookMethod(ctrl, "setRunMode",
+                    int.class, int.class, int.class, int.class, int.class, int.class, int.class,
+                    new XC_MethodHook() {
+                        @Override
+                        protected void beforeHookedMethod(MethodHookParam param) {
+                            clampSetRunModeCold(param);
+                        }
+                    });
+            hooked("WaspWingDataInteractionController.setRunMode（冷值钳制）");
+        } catch (Throwable t) {
+            // 类名/方法不符时退回管理器层（宿主直调的入口），两条路径任一可用即可
+            try {
+                Class<?> mgr = lpparam.classLoader.loadClass(
+                        "com.flydigi.sdk.waspwing.WaspWingManager");
+                XposedHelpers.findAndHookMethod(mgr, "setRunMode",
+                        int.class, int.class, int.class, int.class, int.class, int.class, int.class,
+                        new XC_MethodHook() {
+                            @Override
+                            protected void beforeHookedMethod(MethodHookParam param) {
+                                clampSetRunModeCold(param);
+                            }
+                        });
+                hooked("WaspWingManager.setRunMode（冷值钳制·控制器层不可用）");
+            } catch (Throwable t2) {
+                XposedBridge.log(TAG + " 钩 setRunMode 冷值钳制失败: " + t2.getMessage());
+            }
+        }
+    }
+
+    /** 冷值槽钳制 + 来源日志（30s 一条）：异常一律忽略，不改宿主其它参数。 */
+    private static void clampSetRunModeCold(XC_MethodHook.MethodHookParam param) {
+        try {
+            int mode = (Integer) param.args[0];
+            int cap = effectiveColdCap();
+            int coldOverclock = (Integer) param.args[3];
+            int modeCustom = (Integer) param.args[5];
+            int clampedOverclock = clampInt(coldOverclock, 0, cap);
+            // 只有 mode=2（B6X 固定功率 0x23）把冷值放在 modeCustom；其它模式的该槽不是冷值
+            int clampedCustom = (mode == 2) ? clampInt(modeCustom, 0, cap) : modeCustom;
+            boolean clamped = clampedOverclock != coldOverclock || clampedCustom != modeCustom;
+            if (clampedOverclock != coldOverclock) param.args[3] = clampedOverclock;
+            if (clampedCustom != modeCustom) param.args[5] = clampedCustom;
+
+            long now = System.currentTimeMillis();
+            if (now - setRunModeSrcLogAt < SET_RUN_MODE_SRC_LOG_MS) return;
+            setRunModeSrcLogAt = now;
+            String source = Boolean.TRUE.equals(setRunModeModuleCall.get()) ? "模块下发" : "宿主直发";
+            XposedBridge.log(TAG + " setRunMode 来源=" + source + " mode=" + mode
+                    + " coldOverclock=" + coldOverclock + "→" + clampedOverclock
+                    + (mode == 2 ? " modeCustom=" + modeCustom + "→" + clampedCustom : "")
+                    + " 上限=" + cap + (clamped ? "（已钳制）" : ""));
+        } catch (Throwable ignored) {
+            // 参数异常：保持原行为，不影响宿主下发
+        }
+    }
+
+    /** 当前有效冷值上限：B6X 实验开 229 / 关 194；B7X 不钳制。 */
+    private static int effectiveColdCap() {
+        if (appKind != 6) return Integer.MAX_VALUE;
+        return resolveExperimentDesired() == 1 ? EXP_COLD_MAX : BCAST_COLD_MAX_B6X;
+    }
+
+    /**
      * 调用 WaspWingManager.setRunMode。
      * WaspWingManager：B6X 的 setRunMode，B7X 混淆为 W
      *
@@ -2977,27 +3086,32 @@ public class MainHook implements IXposedHookLoadPackage {
             sdkColdOC = 0;
         }
         Throwable last = null;
-        for (String n : names) {
-            try {
-                XposedHelpers.callMethod(inst, n, sdkMode, temperature, sdkWindOC, sdkColdOC,
-                        sdkWindLevel, sdkModeCustom, extra);
-                // 记录最近下发目标（锁死检测基准：目标≠回传且停滞时判定锁死）；仅 callMethod 成功后更新。
-                // 基准取模块侧原始 coldOC/windOC，不取换算后的参数槽，否则目标会错位。
-                lastBcastColdLv = coldOC;
-                lastBcastRpmLv = (mode == 0) ? windLevel : windOC;
-                // 下发成功日志每连最多 DIAG_LOG_MAX_PER_CONN 条
-                if (setRunModeLogCount < DIAG_LOG_MAX_PER_CONN) {
-                    setRunModeLogCount++;
-                    XposedBridge.log(TAG + " setRunMode 已下发 method=" + n
-                            + " 请求mode=" + mode + " SDKmode=" + sdkMode + " temp=" + temperature
-                            + " windOC=" + windOC + " coldOC=" + coldOC
-                            + " windLv=" + windLevel + " modeCustom=" + modeCustom
-                            + " extra=" + extra);
+        setRunModeModuleCall.set(Boolean.TRUE);   // 仅用于钩子日志区分来源
+        try {
+            for (String n : names) {
+                try {
+                    XposedHelpers.callMethod(inst, n, sdkMode, temperature, sdkWindOC, sdkColdOC,
+                            sdkWindLevel, sdkModeCustom, extra);
+                    // 记录最近下发目标（锁死检测基准：目标≠回传且停滞时判定锁死）；仅 callMethod 成功后更新。
+                    // 基准取模块侧原始 coldOC/windOC，不取换算后的参数槽，否则目标会错位。
+                    lastBcastColdLv = coldOC;
+                    lastBcastRpmLv = (mode == 0) ? windLevel : windOC;
+                    // 下发成功日志每连最多 DIAG_LOG_MAX_PER_CONN 条
+                    if (setRunModeLogCount < DIAG_LOG_MAX_PER_CONN) {
+                        setRunModeLogCount++;
+                        XposedBridge.log(TAG + " setRunMode 已下发 method=" + n
+                                + " 请求mode=" + mode + " SDKmode=" + sdkMode + " temp=" + temperature
+                                + " windOC=" + windOC + " coldOC=" + coldOC
+                                + " windLv=" + windLevel + " modeCustom=" + modeCustom
+                                + " extra=" + extra);
+                    }
+                    return;
+                } catch (Throwable t) {
+                    last = t;
                 }
-                return;
-            } catch (Throwable t) {
-                last = t;
             }
+        } finally {
+            setRunModeModuleCall.remove();
         }
         XposedBridge.log(TAG + " setRunMode 失败: " + (last != null ? last.getMessage() : "无此方法"));
     }

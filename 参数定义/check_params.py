@@ -524,6 +524,8 @@ def fail_check_d3(definition, h_text, c_text):
             if e["type"] == "path":
                 paths.append(e["key"])
                 continue
+            if e.get("perfReset", True) is False:
+                continue        # 明确排除：该键是用户意图开关，不随层开关 1→0 复位
             for i, v in enumerate(c_vars_all.get(e["key"]) or []):
                 if v is None:
                     problems.append("D3 %s 的取值位 %d 在 audit.cVars 里为空，运行时无法复位"
