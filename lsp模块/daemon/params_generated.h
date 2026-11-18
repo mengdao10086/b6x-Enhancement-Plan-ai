@@ -97,7 +97,8 @@
     X(g_cfg.pid_spd_recall_weight, 1000) \
     X(g_cfg.pid_cold_min, 1) \
     X(g_cfg.pid_cold_max, 190) \
-    X(g_cfg.b7_pid_cold_max, 190)
+    X(g_cfg.b7_pid_cold_max, 190) \
+    X(g_cfg.experiment_mode, 0)
 
 #define CFG_SYSFS_DEFAULTS(X) \
     X(g_cfg.BATT_TEMP_DIVISOR, 1) \

@@ -1331,6 +1331,31 @@
       "fields": null
     },
     {
+      "key": "EXPERIMENT_MODE",
+      "group": "perf",
+      "role": "setting",
+      "type": "switch",
+      "label": "实验模式",
+      "desc": "B6X 专用：开启后允许制冷范围（PID_COLD_RANGE）的 B6X 上限到 229，并由守护进程按 1 秒节奏向设备重复下发「实验解锁 + 当前制冷」；关闭时制冷上限回到 194，并先降冷再关解锁。B7X 忽略本键。",
+      "docOrder": 57.5,
+      "docDesc": "实验模式（0/1，默认 0）：B6X 专用。开启后 `PID_COLD_RANGE` 的 B6X 上限允许到 229，守护进程每 1 秒重复下发一对「实验解锁（value=当前制冷目标，≤229）→ 当前制冷」，设备连续稳定 30 秒后退避到 2 秒；关闭时先下发 ≤194 的制冷再关解锁。若设备实际运行档硬顶 194，只承诺设定值解锁并在日志标注。`PERF_ENABLED=0` 时保留开关但明确标记不可用。**守护进程读取**",
+      "confNote": [
+        "实验模式（0/1，默认 0，仅 B6X）：开启后 PID_COLD_RANGE 的 B6X 上限允许到 229",
+        "  守护进程按 1 秒重复下发「解锁 + 当前制冷」；关闭时先降冷再关解锁",
+        "  设备实际运行档若硬顶 194，只解锁设定值，实际制冷仍为 194"
+      ],
+      "confInline": "实验模式",
+      "unit": "",
+      "unitNote": "布尔开关，取值 0/1，无单位",
+      "default": 0,
+      "factory": 0,
+      "min": 0,
+      "max": 1,
+      "requires": [],
+      "daemonConsumes": true,
+      "fields": null
+    },
+    {
       "key": "SYSFS_ENABLED",
       "group": "sysfs",
       "role": "master",
@@ -2306,31 +2331,6 @@
       "unitNote": "布尔开关，取值 0/1，无单位",
       "default": 1,
       "factory": 1,
-      "min": 0,
-      "max": 1,
-      "requires": [],
-      "daemonConsumes": true,
-      "fields": null
-    },
-    {
-      "key": "EXPERIMENT_MODE",
-      "group": "control",
-      "role": "setting",
-      "type": "switch",
-      "label": "实验模式",
-      "desc": "B6X 专用：开启后允许制冷范围（PID_COLD_RANGE）的 B6X 上限到 229，并由守护进程按 1 秒节奏向设备重复下发「实验解锁 + 当前制冷」；关闭时制冷上限回到 194，并先降冷再关解锁。B7X 忽略本键。",
-      "docOrder": 57.5,
-      "docDesc": "实验模式（0/1，默认 0）：B6X 专用。开启后 `PID_COLD_RANGE` 的 B6X 上限允许到 229，守护进程每 1 秒重复下发一对「实验解锁（value=当前制冷目标，≤229）→ 当前制冷」，设备连续稳定 30 秒后退避到 2 秒；关闭时先下发 ≤194 的制冷再关解锁。若设备实际运行档硬顶 194，只承诺设定值解锁并在日志标注。`PERF_ENABLED=0` 时保留开关但明确标记不可用。**守护进程读取**",
-      "confNote": [
-        "实验模式（0/1，默认 0，仅 B6X）：开启后 PID_COLD_RANGE 的 B6X 上限允许到 229",
-        "  守护进程按 1 秒重复下发「解锁 + 当前制冷」；关闭时先降冷再关解锁",
-        "  设备实际运行档若硬顶 194，只解锁设定值，实际制冷仍为 194"
-      ],
-      "confInline": "实验模式",
-      "unit": "",
-      "unitNote": "布尔开关，取值 0/1，无单位",
-      "default": 0,
-      "factory": 0,
       "min": 0,
       "max": 1,
       "requires": [],
