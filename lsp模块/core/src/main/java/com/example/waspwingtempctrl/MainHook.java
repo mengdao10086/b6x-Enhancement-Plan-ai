@@ -158,6 +158,63 @@ public class MainHook implements IXposedHookLoadPackage {
     private static final int STALL_RECONNECT_MAX = 3;              // 连续 3 次重连仍无回传 → 设备固件锁死，停止循环
     private static volatile boolean deviceLockedAlerted = false;   // 设备锁死提示已发出（markConnected 重置）
 
+    // ========== 连接存活判据 + 30/60/90 分级恢复（2026-11-18）==========
+    // 动机：bleConnected 是「SDK 回调告诉我们的状态」，不是「链路还活着」。
+    // 半死连接（gatt 未回调断连）会一直保持 true，导致 maybeClearStuckControllerState()
+    // 与 tryReconnectOnce() 的 !bleConnected 门禁同时失效，表现为「前台只放行扫描、发不起连接」。
+    // 判据改为「最近一次参数回传」的年龄：25s 判死（逻辑判死，允许重连）→ 30s 告警/软重写 →
+    // 60s 公开断开/重建控制器 → 90s 强断 + 状态字段 reset（最后一级）。
+    private static final long LINK_SUSPECT_MS = 25000;    // 25s 无新回传 → 判死
+    private static final long HEAL_WARN_MS = 30000;       // 分级 1：30s 告警 + 软重写
+    private static final long HEAL_SOFT_MS = 60000;       // 分级 2：60s 公开断开/重建控制器
+    private static final long HEAL_HARD_MS = 90000;       // 分级 3：90s 强断 + 状态字段 reset
+    private static final long LINK_PROBE_MIN_INTERVAL_MS = 10000; // 判死后每 10s 发一次连接令
+    private static final long HEAL_LOG_MIN_INTERVAL_MS = 5000;    // 分级日志限频
+    private static volatile boolean linkDead = false;     // 25s 判死（逻辑判死，不直接断 gatt）
+    private static volatile long linkDeadSinceMs = 0;     // 判死起点（ms）
+    private static volatile int healLevel = 0;            // 0=正常,1=30s,2=60s,3=90s
+    private static volatile long lastHealLogAt = 0;       // 分级动作日志限频
+    private static volatile long lastLinkProbeAt = 0;     // 判死后低频连接令计时
+    // ---- 重连熔断：连续 3 次尝试 30s 内无回传 → 5 分钟冷却，期间 30s 低频探测 ----
+    private static final int RECONNECT_FAIL_MAX = 3;
+    private static final long BREAKER_COOLDOWN_MS = 5 * 60 * 1000;
+    private static final long BREAKER_PROBE_MS = 30000;
+    private static volatile int reconnectFailStreak = 0;
+    private static volatile long breakerOpenUntilMs = 0;
+    private static volatile long lastBreakerProbeAt = 0;
+    private static volatile long attemptExpectInfoBy = 0; // 本次连接令后应收到回传的截止（ms；0=无在途）
+    private static volatile long lastAttemptAt = 0;       // 最近一次连接令时刻（ms）
+    // ---- 最近一条广播参数（分级 1 软重写用；断连期也能重放最新目标）----
+    private static volatile boolean hasLastCmd = false;
+    private static volatile int lastCmdMode = 1, lastCmdTemp = 20, lastCmdWindOC = 0,
+            lastCmdColdOC = 0, lastCmdWindLevel = 0;
+    // ---- 背压单槽：断连/判死时只保留最新目标，不入队（恢复后补发一条）----
+    private static volatile boolean hasPendingTarget = false;
+    private static volatile int pendingTargetMode = 1, pendingTargetTemp = 20,
+            pendingTargetWindOC = 0, pendingTargetColdOC = 0, pendingTargetWindLevel = 0,
+            pendingTargetExperimental = 0;
+    private static volatile long lastBackpressureLogAt = 0;
+
+    // ========== 送达三态：已入队 / 已写入 / 已回显（2026-11-18）==========
+    // 旧日志「setRunMode 已下发」只证明 callMethod 入队成功，不能区分「写进旧 gatt」与「设备真收到」。
+    // seq 贯通三态；回显用 COLD_REAL（设定回显）判接受，COLD_RUN/RPM_REAL 判执行。
+    private static final AtomicInteger cmdSeqGen = new AtomicInteger();
+    private static final long ECHO_TTL_MS = 5000;         // 入队后 5s 内无回显 → 送达失败
+    private static final long ECHO_STATE_GUARD_MS = 2000; // 写入回执与入队的时间窗
+    private static volatile int pendingSeq = -1;          // 最近一条 setRunMode 的序号
+    private static volatile int pendingCold = -1;         // 该条的目标冷值（-1=不是冷值命令）
+    private static volatile int pendingRpm = -1;          // 该条的目标 RPM
+    private static volatile long pendingAtMs = 0;
+    private static volatile int pendingState = 0;         // 0=无,1=已入队,2=已写入,3=已回显,4=失败
+    private static volatile int echoHitCount = 0, echoMissCount = 0;
+    private static volatile int consumeOkCount = 0, consumeFailCount = 0;
+    private static final long DELIVERY_LOG_MIN_INTERVAL_MS = 5000;  // 三态成功日志限频（失败不限）
+    private static volatile long lastDeliveryLogAt = 0;
+    // ---- 队列上限/老化/丢弃计数 ----
+    private static final int QUEUE_CAP = 32;              // 队列长度上限
+    private static final long QUEUE_AGE_DROP_MS = 10000;  // 命令年龄上限（超过即丢）
+    private static volatile int dropByGatt = 0, dropByCap = 0, dropByAge = 0;
+
     // ========== 连接诊断（每次连接各记一条，定位"连上但回传全 0"）==========
     private static volatile long lastInfoUpdateAt = 0;             // 最近一次参数回传时刻（ms）
     private static volatile boolean firstPacketLogged = false;     // 本次连接的首包延迟是否已记录
@@ -169,8 +226,8 @@ public class MainHook implements IXposedHookLoadPackage {
 
     // ========== runFetchLoop 崩溃兜底 ==========
     private static volatile long queueNonEmptySinceMs = 0;        // 队列持续非空起点（ms）；0=队列为空
-    private static final long QUEUE_STALL_TIMEOUT_MS = 30000;     // 队列持续非空该时长 = runFetchLoop 疑似崩溃
-    private static final long QUEUE_TAKEOVER_MS = 5000;           // 守护线程接管判定：同一队首停留超 5s 才消费
+    private static final long QUEUE_STALL_TIMEOUT_MS = 2000;      // 队列持续非空该时长 = runFetchLoop 疑似停摆（原 30s）
+    private static final long QUEUE_TAKEOVER_MS = 1000;           // 守护线程接管判定：同一队首停留超 1s 才消费（原 5s）
     private static volatile boolean consumerThreadStarted = false; // 守护消费线程已启动（幂等，进程内一次）
     private static volatile long consumerThreadStartedAt = 0;      // 守护线程启动防抖（10s 内不重复触发）
     private static final long CONSUMER_START_MIN_INTERVAL_MS = 10000;
@@ -343,6 +400,10 @@ public class MainHook implements IXposedHookLoadPackage {
     private static volatile BluetoothDevice lastDevice = null;      // 上次连接的 BLE 设备
     private static ClassLoader appClassLoader = null;      // App 类加载器（后台线程反射用）
     private static volatile boolean loggedReconnectSkip = false;    // 后台重连被跳过（控制器/类加载器未就绪）仅记一次
+    // 连接入口留痕：区分「SDK 门禁挡住」与「根本没发起」
+    private static final ThreadLocal<Integer> connectGateState = new ThreadLocal<>();
+    private static final long CONNECT_ATTEMPT_LOG_MS = 5000;
+    private static volatile long lastConnectAttemptLogAt = 0;
     private static volatile boolean needFreshObject = false;        // B：冷启动对象待换（取"类型已知"对象，markConnected 清）
     // 息屏退避用的屏幕状态（取法与缓存策略见 reconnectIntervalTicks）：
     // appContext 由 Application.onCreate 钩子（主线程）写、tick 线程读 → volatile；
@@ -485,6 +546,28 @@ public class MainHook implements IXposedHookLoadPackage {
                         // 调用 setRunMode——优先用构造函数捕获的实例，其次试单例。
                         // B6X 实验模式：开启时先 0x52(当前冷值≤229) 再 0x23；关闭时先 0x23(≤194) 再 0x52 关。
                         if (appKind == 6) expBcastDesired = experimental;
+
+                        // 最近一条目标（分级 1 软重写用）
+                        lastCmdMode = mode;
+                        lastCmdTemp = temperature;
+                        lastCmdWindOC = windOC;
+                        lastCmdColdOC = coldOC;
+                        lastCmdWindLevel = windLevel;
+                        hasLastCmd = true;
+
+                        // 背压（模块侧单槽）：断连/判死时只保留最新目标，不入队；恢复后补发一条。
+                        if (!bleConnected || linkDead) {
+                            pendingTargetMode = mode;
+                            pendingTargetTemp = temperature;
+                            pendingTargetWindOC = windOC;
+                            pendingTargetColdOC = coldOC;
+                            pendingTargetWindLevel = windLevel;
+                            pendingTargetExperimental = experimental;
+                            hasPendingTarget = true;
+                            dropByGatt++;   // 背压丢弃计数（status DROP_TOTAL）
+                            logBackpressure();
+                            return;
+                        }
                         try {
                             Object inst = resolveWaspWingManager(context);
                             if (inst != null) {
@@ -649,6 +732,19 @@ public class MainHook implements IXposedHookLoadPackage {
                 sb.append(Protocol.STF_EXP_AVAILABLE).append(expAvailableCached).append("\n");
             }
 
+            // ===== 连接/队列/恢复分级可观测字段（2026-11-18）=====
+            sb.append(Protocol.STF_QUEUE_LEN).append(getCommandQueueSize()).append("\n");
+            long queueOldest = queueNonEmptySinceMs > 0
+                    ? Math.max(0, System.currentTimeMillis() - queueNonEmptySinceMs) : 0;
+            sb.append(Protocol.STF_QUEUE_OLDEST_MS).append(queueOldest).append("\n");
+            sb.append(Protocol.STF_DROP_TOTAL)
+                    .append(dropByGatt + dropByCap + dropByAge).append("\n");
+            sb.append(Protocol.STF_CONSUME_FAIL).append(consumeFailCount).append("\n");
+            long linkAge = lastInfoUpdateAt > 0
+                    ? Math.max(0, System.currentTimeMillis() - lastInfoUpdateAt) : -1;
+            sb.append(Protocol.STF_LINK_AGE_MS).append(linkAge).append("\n");
+            sb.append(Protocol.STF_HEAL_LEVEL).append(healLevel).append("\n");
+
             // 散热器全参数回传：每个字段独立 try/catch——任一 getter 不可用只丢该行，
             // 不影响其它字段（历史 RPM_RUN 整列缺失即同源问题）。
             if (lastWaspWingInfo != null) {
@@ -743,20 +839,43 @@ public class MainHook implements IXposedHookLoadPackage {
                     tick++;
                     writeStatusFile();   // 每 1 秒写一次 status（供 daemon 3s 判死 + 曲线页）
 
-                    // ① 有界清状态：断连期每秒查一次门禁是否卡死（独立于发令）
-                    if (!bleConnected) {
+                    // ① 连接存活判据 + 30/60/90 分级（25s 判死 / 30s 软重写 / 60s 重建 / 90s 强断）
+                    updateLinkHealth();
+
+                    // ② 有界清状态：正常断连立即生效；半死连接按分级到 60s（level>=2）才清，
+                    //    避免 30s 软重写之前就把 gatt 拆掉。熔断冷却期内不做状态 reset。
+                    if ((!bleConnected || (linkDead && healLevel >= 2))
+                            && breakerOpenUntilMs == 0) {
                         maybeClearStuckControllerState();
                     }
 
-                    // ═══ 后台自动重连（亮屏 5s / 息屏 10s，见 app/逻辑说明.md §1.2）═══
-                    // 设备锁死（多次重连无回传）时停止自动重连，等用户强制重启 App
-                    if (!bleConnected && lastDevice != null && !deviceLockedAlerted
-                            && tick % reconnectIntervalTicks(tick) == 0) {
-                        tryReconnectOnce();   // 只发令（见 app/逻辑说明.md §1.2）
+                    // ③ 后台自动重连（亮屏 5s / 息屏 10s）；判死时即使 bleConnected=true 也允许发令
+                    boolean connDown = !bleConnected;
+                    boolean deadButConnected = linkDead && bleConnected;
+                    if ((connDown || deadButConnected) && lastDevice != null && !deviceLockedAlerted) {
+                        long nowMs = System.currentTimeMillis();
+                        boolean due = connDown
+                                ? (tick % reconnectIntervalTicks(tick) == 0)
+                                : (nowMs - lastLinkProbeAt >= LINK_PROBE_MIN_INTERVAL_MS);
+                        if (due) {
+                            if (deadButConnected) lastLinkProbeAt = nowMs;
+                            if (breakerOpenUntilMs > nowMs) {
+                                if (nowMs - lastBreakerProbeAt >= BREAKER_PROBE_MS) {
+                                    lastBreakerProbeAt = nowMs;
+                                    logBreaker("冷却低频探测");
+                                    tryReconnectOnce();
+                                }
+                            } else {
+                                tryReconnectOnce();   // 只发令（见 app/逻辑说明.md §1.2）
+                            }
+                        }
                     }
 
-                    // ═══ 重连聚合日志：断连期间每 2 小时一条（本段无重连则不输出）═══
-                    if (!bleConnected) logReconnectSummary();
+                    // ④ 队列上限/老化（每秒）
+                    trimCommandQueue();
+
+                    // ⑤ 重连聚合日志：断连/判死期间每 2 小时一条（本段无重连则不输出）
+                    if (!bleConnected || linkDead) logReconnectSummary();
 
                     Thread.sleep(1000);
                 } catch (InterruptedException e) {
@@ -771,6 +890,293 @@ public class MainHook implements IXposedHookLoadPackage {
         });
         t.setDaemon(true);
         t.start();
+    }
+
+    // =====================================================================
+    // 连接存活判据 + 30/60/90 分级恢复（tick 线程，每秒一次）
+    // 判死（25s）→ 告警/软重写（30s）→ 公开断开/重建控制器（60s）→ 强断+状态 reset（90s）
+    // =====================================================================
+
+    /**
+     * 链路存活判据：以「最近一次参数回传」的年龄为准，而不是 bleConnected 布尔值。
+     * 半死连接（gatt 未回调断连）会一直 bleConnected=true，导致旧的两条自愈都被 !bleConnected
+     * 门禁挡死；本方法让判死状态也能触发清状态与重连。
+     */
+    private static void updateLinkHealth() {
+        checkAttemptBreaker();
+        // 设备固件锁死已判定（连续 3 次唤醒/重连无回传）→ 沿用既有语义：停止自动重连，
+        // 等用户强制重启 App；分级恢复不再叠加，避免与「锁死提示」互相打架。
+        if (deviceLockedAlerted) {
+            linkDead = false;
+            linkDeadSinceMs = 0;
+            healLevel = 0;
+            return;
+        }
+        if (!bleConnected || lastWaspWingInfo == null) {
+            if (linkDead || healLevel != 0) logHeal("链路状态复位（未连接/无回传对象）", 0);
+            linkDead = false;
+            linkDeadSinceMs = 0;
+            healLevel = 0;
+            return;
+        }
+        long now = System.currentTimeMillis();
+        long lastData = Math.max(lastInfoUpdateAt, connectStartedAt);
+        long noInfoAge = now - lastData;
+        // 两条判据取较大者：① 无新回传；② 有回传但值长期不变（dispatchStallSinceMs）
+        long valueStallAge = dispatchStallSinceMs > 0 ? now - dispatchStallSinceMs : 0;
+        long age = Math.max(noInfoAge, valueStallAge);
+        if (age < LINK_SUSPECT_MS) {
+            if (linkDead || healLevel != 0) logHeal("回传恢复 age=" + age + "ms，分级/熔断复位", 0);
+            linkDead = false;
+            linkDeadSinceMs = 0;
+            healLevel = 0;
+            return;
+        }
+        if (!linkDead) {
+            linkDead = true;
+            linkDeadSinceMs = now;
+            healLevel = 0;
+            logHeal("判死：25s 无新回传（允许重连；物理断开由 60s 级执行）", 0);
+        }
+        long stall = age;
+        if (stall >= HEAL_HARD_MS && healLevel < 3) {
+            healLevel = 3;
+            logHeal("90s 强断 + 状态字段 reset", 3);
+            forceReconnectHard();
+        } else if (stall >= HEAL_SOFT_MS && healLevel < 2) {
+            healLevel = 2;
+            logHeal("60s 公开断开/重建控制器", 2);
+            rebuildControllerLink();
+        } else if (stall >= HEAL_WARN_MS && healLevel < 1) {
+            healLevel = 1;
+            logHeal("30s 告警 + 软重写最新目标", 1);
+            resendLatestTarget();
+        }
+    }
+
+    /** 分级日志：level=0（恢复/复位）不限频，1~3 每级只打一条（5s 内不重复）。 */
+    private static void logHeal(String msg, int level) {
+        long now = System.currentTimeMillis();
+        if (level != 0 && now - lastHealLogAt < HEAL_LOG_MIN_INTERVAL_MS) return;
+        lastHealLogAt = now;
+        XposedBridge.log(TAG + " 连接恢复[level=" + level + "/3] " + msg
+                + "（ble=" + bleConnected + " linkDead=" + linkDead
+                + " heal=" + healLevel + "）");
+    }
+
+    /** 分级 1：重发最近一条广播目标（软重写，不断 gatt、不清队列）。 */
+    private static void resendLatestTarget() {
+        if (!hasLastCmd) {
+            XposedBridge.log(TAG + " 软重写跳过: 尚无广播目标");
+            return;
+        }
+        Object inst = capturedWaspWingMgr;
+        if (inst == null) {
+            XposedBridge.log(TAG + " 软重写跳过: WaspWingManager 未就绪");
+            return;
+        }
+        XposedBridge.log(TAG + " 软重写: 重发最新目标 mode=" + lastCmdMode
+                + " cold=" + lastCmdColdOC + " rpm=" + lastCmdWindOC);
+        invokeSetRunMode(inst, lastCmdMode, lastCmdTemp, lastCmdWindOC,
+                lastCmdColdOC, lastCmdWindLevel, 0, 0);
+    }
+
+    /** 分级 2：走 SDK 公开入口公开断开并重建控制器（不裸写状态字段）。 */
+    private static void rebuildControllerLink() {
+        Object inst = capturedWaspWingMgr;
+        if (inst == null) {
+            XposedBridge.log(TAG + " 重建控制器跳过: WaspWingManager 未就绪");
+            return;
+        }
+        try {
+            Object dic = XposedHelpers.getStaticObjectField(inst.getClass(), dicFieldName());
+            if (dic != null) {
+                clearStuckControllerState(dic);   // disconnectManually → disconnectGatt
+                lastStuckClearAt = System.currentTimeMillis();   // 与有界清状态共用限频，避免重复拆
+            }
+        } catch (Throwable t) {
+            XposedBridge.log(TAG + " 重建控制器异常: " + t.getMessage());
+        }
+        BluetoothGatt g = currentValidGatt;
+        try {
+            if (g != null) g.disconnect();   // 公开断开；断连回调会走 markDisconnected
+        } catch (Throwable ignored) {
+            // 断开失败忽略：仍由下一轮分级/后台重连接管
+        }
+        // 注意：这里不主动 markDisconnected。若 SDK 回调没来，bleConnected 会保持 true，
+        // updateLinkHealth 才能在 90s 级继续执行「强断 + 状态字段 reset」；
+        // 若回调来了，bleConnected=false，正常后台重连/熔断接管。
+        XposedBridge.log(TAG + " 重建控制器: 已走 SDK 公开断开入口（等待断连回调/90s 兜底）");
+    }
+
+    /** 分级 3：强断（不清队列，只丢 >10s 旧命令）+ 最后一级状态字段 reset。 */
+    private static void forceReconnectHard() {
+        forceReconnect();                    // 公开断开 + 按年龄清旧命令
+        resetControllerStateLastResort();    // 仅在 gatt 已失效时写 mDataConnectState=0
+        XposedBridge.log(TAG + " 强断完成（level=3）");
+    }
+
+    /**
+     * 最后一级：状态字段 reset。严格顺序「判死 → 公开断开/重建 → reset」；
+     * 仅当 state∈{1,2} 且 gatt 已不是 currentValidGatt 时才写 0，避免把有效连接写成未连。
+     */
+    private static void resetControllerStateLastResort() {
+        Object inst = capturedWaspWingMgr;
+        if (inst == null) return;
+        try {
+            Object dic = XposedHelpers.getStaticObjectField(inst.getClass(), dicFieldName());
+            if (dic == null) return;
+            int st = readConnectState(dic);
+            if (st != 1 && st != 2) {
+                XposedBridge.log(TAG + " 状态字段 reset 跳过: state=" + stateDesc(st));
+                return;
+            }
+            Object gatt = null;
+            try {
+                gatt = XposedHelpers.getObjectField(dic, gattFieldName());
+            } catch (Throwable ignored) {
+                // 字段不可读按 gatt 失效处理
+            }
+            if (gatt != null && gatt == currentValidGatt) {
+                XposedBridge.log(TAG + " 状态字段 reset 跳过: gatt 仍为当前有效实例（避免去同步）");
+                return;
+            }
+            XposedHelpers.setIntField(dic, stateFieldName(), 0);
+            XposedBridge.log(TAG + " 状态字段 reset: state " + stateDesc(st)
+                    + "→0（最后一级，gatt 已失效）");
+        } catch (Throwable t) {
+            XposedBridge.log(TAG + " 状态字段 reset 失败: " + t.getMessage());
+        }
+    }
+
+    /** 连接令超时 → 失败计数；连续 3 次 → 5 分钟熔断（30s 低频探测）。 */
+    private static void checkAttemptBreaker() {
+        long now = System.currentTimeMillis();
+        if (attemptExpectInfoBy > 0 && now > attemptExpectInfoBy) {
+            attemptExpectInfoBy = 0;
+            if (!bleConnected || linkDead) {
+                reconnectFailStreak++;
+                XposedBridge.log(TAG + " 重连失败计数 " + reconnectFailStreak + "/" + RECONNECT_FAIL_MAX
+                        + "（发令后 30s 内无回传）");
+                if (reconnectFailStreak >= RECONNECT_FAIL_MAX && breakerOpenUntilMs == 0) {
+                    breakerOpenUntilMs = now + BREAKER_COOLDOWN_MS;
+                    lastBreakerProbeAt = now;
+                    XposedBridge.log(TAG + " 重连熔断: 连续 " + reconnectFailStreak
+                            + " 次失败，冷却 5 分钟（30s 低频探测）");
+                }
+            }
+        }
+        if (breakerOpenUntilMs > 0 && now >= breakerOpenUntilMs) {
+            breakerOpenUntilMs = 0;
+            reconnectFailStreak = 0;
+            XposedBridge.log(TAG + " 重连熔断: close（冷却结束，恢复正常重连）");
+        }
+    }
+
+    private static void logBreaker(String msg) {
+        long left = Math.max(0, breakerOpenUntilMs - System.currentTimeMillis()) / 1000;
+        XposedBridge.log(TAG + " 重连熔断: " + msg + "（剩余 " + left + "s）");
+    }
+
+    /** 连接入口日志（5s 限频）：state∈{1,2} 即 SDK connectWith() 会静默 return。 */
+    private static void logConnectAttempt(int state) {
+        long now = System.currentTimeMillis();
+        if (now - lastConnectAttemptLogAt < CONNECT_ATTEMPT_LOG_MS) return;
+        lastConnectAttemptLogAt = now;
+        boolean blocked = (state == 1 || state == 2);
+        XposedBridge.log(TAG + " 连接尝试: state=" + state
+                + " gate=" + (blocked ? "blocked（connectWith 预计静默 return）" : "pass"));
+    }
+
+    /** 回传到达：分级/熔断/在途连接令全部复位。 */
+    private static void onLinkHealthy() {
+        boolean wasDead = linkDead || healLevel != 0
+                || reconnectFailStreak > 0 || breakerOpenUntilMs > 0;
+        linkDead = false;
+        linkDeadSinceMs = 0;
+        healLevel = 0;
+        reconnectFailStreak = 0;
+        breakerOpenUntilMs = 0;
+        attemptExpectInfoBy = 0;
+        if (wasDead) {
+            XposedBridge.log(TAG + " 连接恢复: 回传到达，分级/熔断/在途连接令复位");
+        }
+    }
+
+    /** 队列上限/老化（每秒）：超 32 条丢最旧；队首等待 >10s 整队清空并计数。 */
+    private static void trimCommandQueue() {
+        try {
+            Object ctrl = getStaticController();
+            if (ctrl == null) return;
+            ConcurrentLinkedQueue<?> q = (ConcurrentLinkedQueue<?>) XposedHelpers.getObjectField(
+                    ctrl, queueFieldName());
+            if (q == null) return;
+            long now = System.currentTimeMillis();
+            if (queueNonEmptySinceMs > 0 && now - queueNonEmptySinceMs > QUEUE_AGE_DROP_MS) {
+                int n = q.size();
+                q.clear();
+                dropByAge += n;
+                queueNonEmptySinceMs = 0;
+                XposedBridge.log(TAG + " 队列老化清空: " + n + " 条（队首等待 >"
+                        + QUEUE_AGE_DROP_MS / 1000 + "s）");
+                return;
+            }
+            int len = q.size();
+            if (len > QUEUE_CAP) {
+                int drop = len - QUEUE_CAP;
+                for (int i = 0; i < drop; i++) {
+                    if (q.poll() == null) break;
+                }
+                dropByCap += drop;
+                XposedBridge.log(TAG + " 队列上限丢弃: " + drop + " 条（cap=" + QUEUE_CAP + "）");
+            }
+        } catch (Throwable ignored) {
+            // 队列不可读：下一轮再试
+        }
+    }
+
+    /** 重连前只清「年龄已超阈值」的命令；新命令保留，重连后按序重放。 */
+    private static void clearQueueOlderThan(long ageMs) {
+        if (queueNonEmptySinceMs == 0) return;
+        long age = System.currentTimeMillis() - queueNonEmptySinceMs;
+        if (age < ageMs) return;
+        int n = getCommandQueueSize();
+        if (n <= 0) {
+            queueNonEmptySinceMs = 0;
+            return;
+        }
+        clearCommandQueue();
+        dropByAge += n;
+        queueNonEmptySinceMs = 0;
+        XposedBridge.log(TAG + " 重连前清队列: " + n + " 条（年龄 " + age + "ms > " + ageMs + "ms）");
+    }
+
+    /** 背压日志限频 5s。 */
+    private static void logBackpressure() {
+        long now = System.currentTimeMillis();
+        if (now - lastBackpressureLogAt < 5000) return;
+        lastBackpressureLogAt = now;
+        XposedBridge.log(TAG + " 背压: 链路不可用，只保留最新目标（ble=" + bleConnected
+                + " linkDead=" + linkDead + "）");
+    }
+
+    /** 链路恢复：补发背压单槽里的最新目标（只一条）。 */
+    private static void flushPendingTarget() {
+        if (!hasPendingTarget) return;
+        hasPendingTarget = false;
+        Object inst = capturedWaspWingMgr;
+        if (inst == null) return;
+        XposedBridge.log(TAG + " 背压恢复: 补发最新目标 mode=" + pendingTargetMode
+                + " cold=" + pendingTargetColdOC + " rpm=" + pendingTargetWindOC
+                + " exp=" + pendingTargetExperimental);
+        if (appKind == 6) {
+            expBcastDesired = pendingTargetExperimental;
+            if (pendingTargetExperimental != 0 && pendingTargetColdOC > 0) {
+                sendExperimental(true, pendingTargetColdOC);
+            }
+        }
+        invokeSetRunMode(inst, pendingTargetMode, pendingTargetTemp, pendingTargetWindOC,
+                pendingTargetColdOC, pendingTargetWindLevel, 0, 0);
     }
 
     /** 后台重连管理器类名：B6X=WaspWingManager，B7X 混淆=t9.j */
@@ -840,6 +1246,9 @@ public class MainHook implements IXposedHookLoadPackage {
             }
 
             try {
+                // 在途连接令：30s 内没有回传/连接成功即计一次失败（熔断用）
+                lastAttemptAt = System.currentTimeMillis();
+                attemptExpectInfoBy = lastAttemptAt + 30000;
                 XposedHelpers.callStaticMethod(mgrCls, reconnectMethodName(), lastDevice);
             } catch (SecurityException se) {
                 // R2 唯一能露头的地方：不再静默吞掉
@@ -1248,6 +1657,7 @@ public class MainHook implements IXposedHookLoadPackage {
         if (appKind == 6) hookB6ViewModelFix(lpparam);   // 修复 #2：ViewModel LiveData（仅 B6X）
         if (appKind == 6) hookB6Diagnostics(lpparam);    // 修复 #3/#4 + 诊断钩子（仅 B6X）
         hookCommonDisconnect(lpparam);                // 公共 BLE 断联（双设备）
+        if (appKind == 6) hookDeliveryAck(lpparam);   // 送达三态：processData + 写特征值回执（仅 B6X）
         // 修复 #5：SDK 类型门禁放行（仅老 B6X app；新包/B7X 未验证同门禁，暂不装）
         if (isB6X) hookDeviceTypeGate(lpparam);
         if (appKind == 6) hookB6Activity(lpparam);       // 自动进入设置界面（仅 B6X）
@@ -1457,6 +1867,15 @@ public class MainHook implements IXposedHookLoadPackage {
         reconnectPending = false;   // 收到新回传，重连新鲜度验证通过
         stallReconnectCount = 0;    // 设备恢复响应，清零连续无回传重连计数
         updateModelFromInfo(info);  // 型号识别 + 同步 BLE_OWNER_LAST
+        onLinkHealthy();            // 回传到达：分级/熔断/在途连接令复位
+        checkDeliveryEcho(info);    // 三态：已回显（COLD_REAL 判接受，COLD_RUN/RPM 判执行）
+        if (hasPendingTarget) {     // 背压单槽：链路恢复后补发最新目标（主线程，避免阻塞 BLE 回调）
+            try {
+                mainHandler().post(MainHook::flushPendingTarget);
+            } catch (Throwable ignored) {
+                flushPendingTarget();
+            }
+        }
         checkExperimentalValueEcho(info);   // 判断设备是否把 0x52 的 value 当冷值执行（限频日志）
     }
 
@@ -1579,6 +1998,14 @@ public class MainHook implements IXposedHookLoadPackage {
                         protected void beforeHookedMethod(MethodHookParam param) {
                             gateLeActive.set(Boolean.TRUE);   // 修复 #5：标记「SDK 连接期」，供 getType 钩子放行
                             probeBtConnectPermission();       // 修复 #4 边界：与崩溃同线程实测权限，供权限钩子判定
+                            // 连接入口留痕：state∈{1,2} 时 SDK connectWith() 会静默 return
+                            try {
+                                int st = XposedHelpers.getIntField(param.thisObject, "mDataConnectState");
+                                connectGateState.set(st);
+                                logConnectAttempt(st);
+                            } catch (Throwable ignored) {
+                                // 状态不可读：不阻断连接
+                            }
                         }
                         @Override
                         protected void afterHookedMethod(MethodHookParam param) {
@@ -1586,6 +2013,13 @@ public class MainHook implements IXposedHookLoadPackage {
                             Object ctrl = param.thisObject;
                             Object gatt = XposedHelpers.getObjectField(ctrl, "mBluetoothGatt");
                             Throwable th = param.getThrowable();
+                            Integer st = connectGateState.get();
+                            connectGateState.remove();
+                            // 门禁挡住：state 仍是 1/2 且没有新 gatt
+                            if (st != null && (st == 1 || st == 2) && gatt == null) {
+                                XposedBridge.log(TAG + " 连接尝试: 被 SDK 门禁挡住 state=" + st
+                                        + "（connectWith 静默 return，未发起 GATT）");
+                            }
                             // 正常成功路径静默；仅在无 gatt 或抛异常时留一条，供 R2 等故障定位
                             if (gatt == null || th != null) {
                                 XposedBridge.log(TAG + " [诊断] connect() 结果异常"
@@ -3047,6 +3481,7 @@ public class MainHook implements IXposedHookLoadPackage {
         if (coldOC < 0) coldOC = 0;
         // 下发前确保 static 指向 gatt 有效实例；否则命令被静默丢弃
         if (!ensureUsableController(inst)) {
+            dropByGatt++;
             XposedBridge.log(TAG + " setRunMode 跳过: static controller 不可用（已触发重连，下周期重试）");
             return;
         }
@@ -3085,6 +3520,22 @@ public class MainHook implements IXposedHookLoadPackage {
             sdkWindOC = 0;
             sdkColdOC = 0;
         }
+        // 三态：记录本条命令（seq 贯通 已入队 → 已写入 → 已回显）
+        long cmdNow = System.currentTimeMillis();
+        if (pendingSeq > 0 && pendingState > 0 && pendingState < 3) {
+            echoMissCount++;
+            if (deliveryLogAllowed()) {
+                XposedBridge.log(TAG + " 送达: 上一条未回显 seq=" + pendingSeq
+                        + " state=" + deliveryStateName(pendingState));
+            }
+        }
+        int seq = cmdSeqGen.incrementAndGet();
+        pendingSeq = seq;
+        pendingCold = coldOC;
+        pendingRpm = (mode == 0) ? windLevel : windOC;
+        pendingAtMs = cmdNow;
+        pendingState = 1;
+
         Throwable last = null;
         setRunModeModuleCall.set(Boolean.TRUE);   // 仅用于钩子日志区分来源
         try {
@@ -3096,10 +3547,10 @@ public class MainHook implements IXposedHookLoadPackage {
                     // 基准取模块侧原始 coldOC/windOC，不取换算后的参数槽，否则目标会错位。
                     lastBcastColdLv = coldOC;
                     lastBcastRpmLv = (mode == 0) ? windLevel : windOC;
-                    // 下发成功日志每连最多 DIAG_LOG_MAX_PER_CONN 条
+                    // 三态 1/3：已入队（callMethod 返回，≠ 送达）
                     if (setRunModeLogCount < DIAG_LOG_MAX_PER_CONN) {
                         setRunModeLogCount++;
-                        XposedBridge.log(TAG + " setRunMode 已下发 method=" + n
+                        XposedBridge.log(TAG + " 送达: 已入队 seq=" + seq + " method=" + n
                                 + " 请求mode=" + mode + " SDKmode=" + sdkMode + " temp=" + temperature
                                 + " windOC=" + windOC + " coldOC=" + coldOC
                                 + " windLv=" + windLevel + " modeCustom=" + modeCustom
@@ -3155,7 +3606,8 @@ public class MainHook implements IXposedHookLoadPackage {
         long now = System.currentTimeMillis();
         if (now - lastForceReconnectAt < FORCE_RECONNECT_MIN_INTERVAL_MS) return;
         lastForceReconnectAt = now;
-        clearCommandQueue();  // 重连前清空堆积的无效命令（断连期入队的命令写在旧 gatt 上必然失败）
+        // 不再无条件清空：只丢年龄已超 10s 的旧命令，重连后按序重放最新目标（2026-11-18）
+        clearQueueOlderThan(QUEUE_AGE_DROP_MS);
         try {
             BluetoothGatt g = currentValidGatt;
             if (g != null) g.disconnect();
@@ -3348,71 +3800,52 @@ public class MainHook implements IXposedHookLoadPackage {
      * 两者都按时间窗口判定，与下发频率无关。
      */
     private static void checkCommandStall() {
-        // 设备固件锁死已判定 → 完全退出锁死检测，旧值停滞判定不再触发 forceReconnect
+        // 设备固件锁死已判定 → 停止值停滞判定（恢复由用户强制重启 App 或 90s 强断兜底）
         if (deviceLockedAlerted) { dispatchStallSinceMs = 0; return; }
-        if (!bleConnected || lastWaspWingInfo == null) { dispatchStallSinceMs = 0; return; }
+        if (!bleConnected || lastWaspWingInfo == null) {
+            dispatchStallSinceMs = 0;
+            queueNonEmptySinceMs = 0;
+            return;
+        }
         checkZeroInfoTimeout();
         try {
             // ═══ 回传新鲜度验证（先于值停滞判定）═══
-            // 重连后长时间无新 onDeviceInfoUpdate → 无回传，仍是旧缓存；
-            // 此时值停滞判定会误判并无限重连。
+            // 重连后长时间无新 onDeviceInfoUpdate → 无回传，仍是旧缓存。
             if (reconnectPending && System.currentTimeMillis() - connectStartedAt > INFO_STALE_AFTER_MS) {
                 handleDeviceNoResponse();
-                return;   // 设备无响应期间不做旧值停滞判定
+                return;
             }
+            // ═══ 值停滞快照（只记时间，不在这里强断）═══
+            // 30/60/90 的处置统一交给 updateLinkHealth()：本例日志里的「回传==目标但链路半死」
+            // 也会由 lastInfoUpdateAt 年龄捕获，不再被这里的提前 return 掩盖。
             int cold = ((Number) XposedHelpers.callMethod(lastWaspWingInfo, "getRealColdLevel")).intValue();
             int rpm = ((Number) XposedHelpers.callMethod(lastWaspWingInfo, "getRealWindLevel")).intValue();
-            // 回传已到位（与最近下发目标一致）→ 完全正常，清零
+            long now = System.currentTimeMillis();
             if (cold == lastBcastColdLv && rpm == lastBcastRpmLv) {
                 dispatchStallSinceMs = 0;
                 stallLastCold = cold;
                 stallLastRpm = rpm;
-                return;
+            } else if (cold == stallLastCold && rpm == stallLastRpm) {
+                // 临时停止期间 daemon 刻意不下发，回显值与目标长期不等属预期
+                if (isTempStopFresh()) {
+                    dispatchStallSinceMs = 0;
+                } else if (dispatchStallSinceMs == 0) {
+                    dispatchStallSinceMs = now;
+                }
+            } else {
+                stallLastCold = cold;
+                stallLastRpm = rpm;
+                dispatchStallSinceMs = 0;
             }
-            long now = System.currentTimeMillis();
 
-            // ① 队列持续非空超时 → 消费协程疑似崩溃
+            // ═══ 队列持续非空 → 消费协程疑似停摆（2-3s 探测，原 30s）═══
             if (getCommandQueueSize() > 0) {
                 if (queueNonEmptySinceMs == 0) queueNonEmptySinceMs = now;
             } else {
                 queueNonEmptySinceMs = 0;
             }
-            boolean queueStalled = queueNonEmptySinceMs != 0
-                    && now - queueNonEmptySinceMs >= QUEUE_STALL_TIMEOUT_MS;
-
-            // ② 回传停滞持续超时 → 连接/设备问题
-            // 未成功下发过任何命令（lastBcast 仍为 -1）时没有可比较的目标，值停滞判据不成立；
-            // 否则 daemon 未部署/未运行时模块会每 15s 强断一次。队列信号不受此门禁影响。
-            boolean hasDispatchTarget = lastBcastColdLv >= 0 && lastBcastRpmLv >= 0;
-            boolean deviceStalled = false;
-            if (hasDispatchTarget) {
-                // 临时停止期间 daemon 刻意不下发，回显值与目标长期不等属预期，跳过停滞判定并清零起点。
-                // 仅在"回显值未变化"（疑似停滞）时读标记文件，避免健康路径每秒 stat+open。
-                if (cold == stallLastCold && rpm == stallLastRpm) {
-                    if (isTempStopFresh()) {
-                        dispatchStallSinceMs = 0;
-                    } else if (dispatchStallSinceMs == 0) {
-                        dispatchStallSinceMs = now;
-                    }
-                } else {
-                    stallLastCold = cold;
-                    stallLastRpm = rpm;
-                    dispatchStallSinceMs = 0;
-                }
-                deviceStalled = dispatchStallSinceMs != 0
-                        && now - dispatchStallSinceMs >= DISPATCH_STALL_TIMEOUT_MS;
-            } else {
-                dispatchStallSinceMs = 0;
-            }
-
-            if (queueStalled) startConsumerThreadIfNeeded();
-            if (deviceStalled) {
-                XposedBridge.log(TAG + " 锁死检测: 回传停滞 " + DISPATCH_STALL_TIMEOUT_MS / 1000
-                        + "s 冷" + cold + " RPM" + rpm
-                        + " ≠ 目标 冷" + lastBcastColdLv + " RPM" + lastBcastRpmLv
-                        + "，触发重连自愈");
-                dispatchStallSinceMs = 0;
-                forceReconnect();
+            if (queueNonEmptySinceMs != 0 && now - queueNonEmptySinceMs >= QUEUE_STALL_TIMEOUT_MS) {
+                startConsumerThreadIfNeeded();
             }
         } catch (Throwable t) { /* 回传读取失败忽略 */ }
     }
@@ -3488,6 +3921,7 @@ public class MainHook implements IXposedHookLoadPackage {
                                     if (head != null && head == headSeen) {
                                         if (nowMs - headSeenAt > QUEUE_TAKEOVER_MS) {
                                             processData.invoke(ctrl, head);
+                                            consumeOkCount++;
                                         }
                                     } else {
                                         headSeen = head;   // 队首变化（含变空/换新）：刷新观察基准
@@ -3502,16 +3936,199 @@ public class MainHook implements IXposedHookLoadPackage {
                         break;
                     } catch (Throwable t2) {
                         // 单条命令消费失败（gatt 失效等）忽略，继续下一轮——不冒泡保证线程不崩溃
+                        consumeFailCount++;
                     }
                 }
             });
             t.setDaemon(true);
             t.start();
             consumerThreadStarted = true;
-            XposedBridge.log(TAG + " 守护消费线程已启动（runFetchLoop 崩溃接管，队列持续非空>"
-                    + QUEUE_STALL_TIMEOUT_MS / 1000 + "s）");
+            XposedBridge.log(TAG + " 守护消费线程已启动（runFetchLoop 疑似停摆：队列持续非空>"
+                    + QUEUE_STALL_TIMEOUT_MS / 1000 + "s，队首停留>" + QUEUE_TAKEOVER_MS / 1000 + "s 接管）");
         } catch (Throwable t) {
             XposedBridge.log(TAG + " 守护消费线程启动失败: " + t.getMessage());
+        }
+    }
+
+    // =====================================================================
+    // 送达三态：已入队（invokeSetRunMode）→ 已写入（processData/write 回执）→ 已回显（0x13 回传）
+    // =====================================================================
+
+    private static String deliveryStateName(int s) {
+        switch (s) {
+            case 0: return "无";
+            case 1: return "已入队";
+            case 2: return "已写入";
+            case 3: return "已回显";
+            default: return "失败";
+        }
+    }
+
+    /** 三态日志限频 5s（计数与 status 不受限；避免 1.7s 广播把日志刷爆）。 */
+    private static boolean deliveryLogAllowed() {
+        long now = System.currentTimeMillis();
+        if (now - lastDeliveryLogAt < DELIVERY_LOG_MIN_INTERVAL_MS) return false;
+        lastDeliveryLogAt = now;
+        return true;
+    }
+
+    /**
+     * 回显校验：用 COLD_REAL（设定回显）判断「设备是否接受本条命令」；
+     * COLD_RUN / RPM_REAL 只作「是否执行」的辅助，不参与接受判定。
+     * 超过 TTL 未命中 → 送达失败（no_echo），计数并在下一条命令入队时留痕。
+     */
+    private static void checkDeliveryEcho(Object info) {
+        if (pendingSeq < 0 || pendingState >= 3) return;
+        long now = System.currentTimeMillis();
+        long age = now - pendingAtMs;
+        if (age > ECHO_TTL_MS) {
+            pendingState = 4;
+            echoMissCount++;
+            if (deliveryLogAllowed()) {
+                XposedBridge.log(TAG + " 送达: 失败 seq=" + pendingSeq
+                        + " reason=no_echo age=" + age + "ms expect=" + pendingCold);
+            }
+            return;
+        }
+        if (pendingCold < 0) return;
+        try {
+            int coldReal = ((Number) XposedHelpers.callMethod(info, "getRealColdLevel")).intValue();
+            int coldRun = -1, rpm = -1;
+            try {
+                coldRun = ((Number) XposedHelpers.callMethod(info, "getColdRunLevel")).intValue();
+            } catch (Throwable ignored) {
+                // 旧 SDK 无该 getter：只判接受
+            }
+            try {
+                rpm = ((Number) XposedHelpers.callMethod(info, "getRealWindLevel")).intValue();
+            } catch (Throwable ignored) {
+                // 同上
+            }
+            if (Math.abs(coldReal - pendingCold) <= 1) {
+                pendingState = 3;
+                echoHitCount++;
+                boolean exec = coldRun >= 0 && Math.abs(coldRun - pendingCold) <= 1;
+                if (deliveryLogAllowed()) {
+                    XposedBridge.log(TAG + " 送达: 已回显 seq=" + pendingSeq
+                            + " expect=" + pendingCold + " cold_real=" + coldReal
+                            + " cold_run=" + coldRun + " rpm=" + rpm
+                            + (exec ? " 执行=是" : " 执行=未确认"));
+                }
+            }
+        } catch (Throwable ignored) {
+            // getter 不可用：等 TTL 到期判失败
+        }
+    }
+
+    /** 安装送达三态钩子：processData（消费/写入门槛）+ writeCharacteristic/onCharacteristicWrite（写回执）。 */
+    private static void hookDeliveryAck(XC_LoadPackage.LoadPackageParam lpparam) {
+        try {
+            Class<?> rpCls = lpparam.classLoader.loadClass(
+                    "com.flydigi.sdk.bluetooth.data.RequestPack");
+            Method processData = findProcessDataMethod(rpCls);
+            if (processData != null) {
+                XposedBridge.hookMethod(processData, new XC_MethodHook() {
+                    @Override
+                    protected void beforeHookedMethod(MethodHookParam param) {
+                        try {
+                            param.setObjectExtra("st",
+                                    XposedHelpers.getIntField(param.thisObject, "mDataConnectState"));
+                        } catch (Throwable ignored) {
+                            // 状态不可读：按未知处理
+                        }
+                    }
+
+                    @Override
+                    protected void afterHookedMethod(MethodHookParam param) {
+                        if (pendingSeq < 0 || pendingState != 1) return;
+                        long age = System.currentTimeMillis() - pendingAtMs;
+                        if (age > ECHO_STATE_GUARD_MS) return;
+                        Object o = param.getObjectExtra("st");
+                        int st = (o instanceof Integer) ? (Integer) o : -1;
+                        if (param.getThrowable() == null && st == 2) {
+                            pendingState = 2;
+                            consumeOkCount++;
+                            if (deliveryLogAllowed()) {
+                                XposedBridge.log(TAG + " 送达: 已写入 seq=" + pendingSeq
+                                        + " 途经=processData");
+                            }
+                        } else {
+                            pendingState = 4;
+                            consumeFailCount++;
+                            if (deliveryLogAllowed()) {
+                                XposedBridge.log(TAG + " 送达: 失败 seq=" + pendingSeq
+                                        + " reason=" + (param.getThrowable() != null
+                                        ? "processData异常" : "state!=2（命令被丢弃）"));
+                            }
+                        }
+                    }
+                });
+                hooked("processData（送达三态）");
+            } else {
+                XposedBridge.log(TAG + " 送达三态: 未找到 processData（跳过已写入判定）");
+            }
+        } catch (Throwable t) {
+            XposedBridge.log(TAG + " 送达三态钩子安装失败: " + t.getMessage());
+        }
+        try {
+            XposedHelpers.findAndHookMethod(BluetoothGatt.class, "writeCharacteristic",
+                    android.bluetooth.BluetoothGattCharacteristic.class,
+                    new XC_MethodHook() {
+                        @Override
+                        protected void afterHookedMethod(MethodHookParam param) {
+                            if (pendingSeq < 0 || pendingState != 2) return;
+                            long age = System.currentTimeMillis() - pendingAtMs;
+                            if (age > ECHO_STATE_GUARD_MS) return;
+                            Object r = param.getResult();
+                            if (r instanceof Boolean && (Boolean) r) {
+                                if (deliveryLogAllowed()) {
+                                    XposedBridge.log(TAG + " 送达: 已写入回执 seq=" + pendingSeq
+                                            + " result=true");
+                                }
+                            } else {
+                                pendingState = 4;
+                                consumeFailCount++;
+                                if (deliveryLogAllowed()) {
+                                    XposedBridge.log(TAG + " 送达: 失败 seq=" + pendingSeq
+                                            + " reason=writeCharacteristic=false");
+                                }
+                            }
+                        }
+                    });
+            hooked("BluetoothGatt.writeCharacteristic（写入回执）");
+        } catch (Throwable t) {
+            XposedBridge.log(TAG + " 写入回执钩子安装失败: " + t.getMessage());
+        }
+        try {
+            XposedHelpers.findAndHookMethod(
+                    android.bluetooth.BluetoothGattCallback.class,
+                    "onCharacteristicWrite", BluetoothGatt.class,
+                    android.bluetooth.BluetoothGattCharacteristic.class, int.class,
+                    new XC_MethodHook() {
+                        @Override
+                        protected void afterHookedMethod(MethodHookParam param) {
+                            if (pendingSeq < 0 || pendingState != 2) return;
+                            long age = System.currentTimeMillis() - pendingAtMs;
+                            if (age > ECHO_STATE_GUARD_MS) return;
+                            int status = (Integer) param.args[2];
+                            if (status == 0) {
+                                if (deliveryLogAllowed()) {
+                                    XposedBridge.log(TAG + " 送达: 已写入回执 seq=" + pendingSeq
+                                            + " status=0");
+                                }
+                            } else {
+                                pendingState = 4;
+                                consumeFailCount++;
+                                if (deliveryLogAllowed()) {
+                                    XposedBridge.log(TAG + " 送达: 失败 seq=" + pendingSeq
+                                            + " reason=write_status_" + status);
+                                }
+                            }
+                        }
+                    });
+            hooked("BluetoothGattCallback.onCharacteristicWrite（写入结果）");
+        } catch (Throwable t) {
+            XposedBridge.log(TAG + " 写入结果钩子安装失败: " + t.getMessage());
         }
     }
 

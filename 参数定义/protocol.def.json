@@ -41,7 +41,13 @@
       {"name": "EXP_AVAILABLE", "const": "STF_EXP_AVAILABLE", "desc": "实验模式当前是否可用（1=配置开且 PERF_ENABLED=1；0=已开但温控未启用）"},
       {"name": "EXP_VALUE", "const": "STF_EXP_VALUE", "desc": "设备实验模式值回传（原样，缺失=未知）"},
       {"name": "EXP_WANT", "const": "STF_EXP_WANT", "desc": "实验模式配置写入请求（宿主手动开关，0/1；仅 B6X）"},
-      {"name": "EXP_WANT_AT", "const": "STF_EXP_WANT_AT", "desc": "配置写入请求时间戳（epoch 毫秒；daemon 按 token 去重）"}
+      {"name": "EXP_WANT_AT", "const": "STF_EXP_WANT_AT", "desc": "配置写入请求时间戳（epoch 毫秒；daemon 按 token 去重）"},
+      {"name": "QUEUE_LEN", "const": "STF_QUEUE_LEN", "desc": "命令队列长度（runFetchLoop 是否在消费）"},
+      {"name": "QUEUE_OLDEST_MS", "const": "STF_QUEUE_OLDEST_MS", "desc": "队首命令已等待毫秒（0=队列空）"},
+      {"name": "DROP_TOTAL", "const": "STF_DROP_TOTAL", "desc": "累计丢弃命令数（背压/上限/老化）"},
+      {"name": "CONSUME_FAIL", "const": "STF_CONSUME_FAIL", "desc": "累计消费失败次数"},
+      {"name": "LINK_AGE_MS", "const": "STF_LINK_AGE_MS", "desc": "距最近一次参数回传的毫秒数（-1=尚未回传）"},
+      {"name": "HEAL_LEVEL", "const": "STF_HEAL_LEVEL", "desc": "连接恢复分级：0=正常,1=30s告警,2=60s软恢复,3=90s强断"}
     ]
   },
   "broadcast": {

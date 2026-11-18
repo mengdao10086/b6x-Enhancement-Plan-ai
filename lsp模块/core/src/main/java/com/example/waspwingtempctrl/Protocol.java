@@ -43,6 +43,12 @@ public final class Protocol {
     public static final String STF_EXP_VALUE = "EXP_VALUE=";
     public static final String STF_EXP_WANT = "EXP_WANT=";
     public static final String STF_EXP_WANT_AT = "EXP_WANT_AT=";
+    public static final String STF_QUEUE_LEN = "QUEUE_LEN=";
+    public static final String STF_QUEUE_OLDEST_MS = "QUEUE_OLDEST_MS=";
+    public static final String STF_DROP_TOTAL = "DROP_TOTAL=";
+    public static final String STF_CONSUME_FAIL = "CONSUME_FAIL=";
+    public static final String STF_LINK_AGE_MS = "LINK_AGE_MS=";
+    public static final String STF_HEAL_LEVEL = "HEAL_LEVEL=";
 
     // ==================== 广播 action 与 extra ====================
     public static final String ACTION_TEMP_B6 = "com.flydigi.SET_TEMPERATURE";

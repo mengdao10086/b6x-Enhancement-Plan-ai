@@ -20,6 +20,12 @@
 #define STF_EXP_VALUE        "EXP_VALUE="
 #define STF_EXP_WANT         "EXP_WANT="
 #define STF_EXP_WANT_AT      "EXP_WANT_AT="
+#define STF_QUEUE_LEN        "QUEUE_LEN="
+#define STF_QUEUE_OLDEST_MS  "QUEUE_OLDEST_MS="
+#define STF_DROP_TOTAL       "DROP_TOTAL="
+#define STF_CONSUME_FAIL     "CONSUME_FAIL="
+#define STF_LINK_AGE_MS      "LINK_AGE_MS="
+#define STF_HEAL_LEVEL       "HEAL_LEVEL="
 
 /* 广播 action（与 Java Protocol.ACTION_* 同值） */
 #define BROADCAST_ACTION_B6X "com.flydigi.SET_TEMPERATURE"
