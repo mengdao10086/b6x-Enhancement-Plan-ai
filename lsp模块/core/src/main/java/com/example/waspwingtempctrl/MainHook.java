@@ -82,6 +82,9 @@ public class MainHook implements IXposedHookLoadPackage {
     private static final String UPDATE_PREFS = "b6x_module_update";
     private static final String KEY_UPDATE_VERSION = "version_code";
     private static final String KEY_UPDATE_TIME = "last_update_time";
+    private static final String KEY_APK_PATH = "apk_path";
+    private static final String KEY_APK_MTIME = "apk_mtime";
+    private static final String KEY_APK_SIZE = "apk_size";
     private static volatile boolean autoRestartDefaultLogged = false;   // uiprefs 缺键提示只打一次
     private static final String ACTION_TEMP_B6 = Protocol.ACTION_TEMP_B6;   // B6X 温控广播
     private static final String ACTION_TEMP_B7 = Protocol.ACTION_TEMP_B7;   // B7X 温控广播
@@ -3012,58 +3015,92 @@ public class MainHook implements IXposedHookLoadPackage {
 
     /**
      * 模块更新后自动重启宿主（{@code AUTO_RESTART_ON_UPDATE}，默认开）。
-     * 判定：读取模块自身 versionCode / lastUpdateTime，与本宿主进程上次记录比对；
-     * 变化即写回新值，并在开关开启时结束当前宿主进程后重新拉起一次。
+     * 主信号：LSPosed 实际加载的模块 APK 的 mtime + size（同版本重装/覆盖构建都会变）；
+     * 兜底：PackageManager 的 versionCode + lastUpdateTime。
+     * 首次运行只记录基线；之后任一信号变化即同步落盘新基线并重启一次。
      * 全程后台线程；失败只记日志、不重试，不阻塞启动。
      */
     private static void maybeRestartOnModuleUpdate(Context ctx) {
         Thread worker = new Thread(() -> {
             try {
                 if (!readAutoRestartOnUpdate()) return;   // 开关关闭：不产生任何行为
-                long ver, upd;
-                PackageManager pm = ctx.getPackageManager();
+                String apkPath = moduleApkPath();
+                File apk = apkPath != null ? new File(apkPath) : null;
+                boolean apkOk = apk != null && apk.isFile();
+                long apkMtime = apkOk ? apk.lastModified() : -1;
+                long apkSize = apkOk ? apk.length() : -1;
+
+                long ver = -1, upd = -1;
+                boolean pmOk = false;
                 try {
-                    PackageInfo pi = pm.getPackageInfo(MODULE_PKG, 0);
+                    PackageInfo pi = ctx.getPackageManager().getPackageInfo(MODULE_PKG, 0);
                     ver = (Build.VERSION.SDK_INT >= 28) ? pi.getLongVersionCode() : pi.versionCode;
                     upd = pi.lastUpdateTime;
-                } catch (PackageManager.NameNotFoundException nfe) {
-                    // 包不可见时的退路：模块类所在 APK 的 mtime 即 lastUpdateTime 的等价信号
-                    String path = moduleApkPath();
-                    if (path == null) {
-                        XposedBridge.log(TAG + " 更新重启检查跳过: 模块包不可见且取不到 APK 路径");
-                        return;
-                    }
-                    XposedBridge.log(TAG + " 模块包不可见，改用 APK mtime 检测: " + path);
-                    ver = -1;
-                    upd = new File(path).lastModified();
-                    if (upd <= 0) return;
+                    pmOk = true;
+                } catch (Throwable ignored) {
+                    // 包不可见：主信号（APK 文件）不受影响
                 }
-                SharedPreferences sp = ctx.getSharedPreferences(UPDATE_PREFS, Context.MODE_PRIVATE);
-                boolean seen = sp.contains(KEY_UPDATE_VERSION);
-                long oldVer = sp.getLong(KEY_UPDATE_VERSION, -1);
-                long oldUpd = sp.getLong(KEY_UPDATE_TIME, -1);
-                // 先同步落盘再重启：force-stop 会立刻杀进程，apply() 的异步写可能还没落盘，
-                // 重启后会被当成「首次运行」再次重启，形成循环。
-                if (!sp.edit().putLong(KEY_UPDATE_VERSION, ver)
-                        .putLong(KEY_UPDATE_TIME, upd).commit()) {
-                    XposedBridge.log(TAG + " 更新重启跳过: 版本记录写入失败");
+
+                if (!apkOk && !pmOk) {
+                    XposedBridge.log(TAG + " 更新重启检查跳过: APK 与 PackageManager 均取不到模块信息");
                     return;
                 }
-                if (!seen) {
-                    // 首次运行没有基线：本次按一次更新处理并重启一次，否则升级到本功能后
-                    // 用户第一次更新永远等不到「变化」（新值已写入，重启后不会重复）。
-                    String first = (ver >= 0) ? ("v" + ver + "（首次启用）")
-                            : ("时间戳 " + upd + "（首次启用）");
-                    XposedBridge.log(TAG + " 检测到模块更新 " + first + "，重启宿主 " + sHostPkg);
+
+                SharedPreferences sp = ctx.getSharedPreferences(UPDATE_PREFS, Context.MODE_PRIVATE);
+                SharedPreferences.Editor ed = sp.edit();
+                if (apkOk) {
+                    ed.putString(KEY_APK_PATH, apkPath);
+                    ed.putLong(KEY_APK_MTIME, apkMtime);
+                    ed.putLong(KEY_APK_SIZE, apkSize);
+                }
+                if (pmOk) {
+                    ed.putLong(KEY_UPDATE_VERSION, ver);
+                    ed.putLong(KEY_UPDATE_TIME, upd);
+                }
+
+                if (apkOk) {
+                    boolean seen = sp.contains(KEY_APK_MTIME) && sp.contains(KEY_APK_SIZE);
+                    long oldM = sp.getLong(KEY_APK_MTIME, -1);
+                    long oldS = sp.getLong(KEY_APK_SIZE, -1);
+                    String oldP = sp.getString(KEY_APK_PATH, null);
+                    // 同步落盘：force-stop 会立刻杀进程，apply() 的异步写可能还没落盘。
+                    if (!ed.commit()) {
+                        XposedBridge.log(TAG + " 更新重启跳过: 基线写入失败");
+                        return;
+                    }
+                    if (!seen) {
+                        XposedBridge.log(TAG + " 记录模块更新基线 source=apk mtime=" + apkMtime
+                                + " size=" + apkSize + " path=" + apkPath);
+                        return;
+                    }
+                    boolean changed = apkMtime != oldM || apkSize != oldS
+                            || (oldP != null && !oldP.equals(apkPath));
+                    if (!changed) return;
+                    XposedBridge.log(TAG + " 检测到模块更新 source=apk mtime=" + oldM + "→" + apkMtime
+                            + " size=" + oldS + "→" + apkSize
+                            + (oldP != null && !oldP.equals(apkPath)
+                                    ? " path=" + oldP + "→" + apkPath : "")
+                            + "，重启宿主 " + sHostPkg);
                     requestHostRestart(ctx, sHostPkg);
                     return;
                 }
-                if (ver == oldVer && upd == oldUpd) return;   // 未变化
-                String label;
-                if (ver >= 0 && oldVer >= 0 && ver != oldVer) label = "v" + oldVer + "→v" + ver;
-                else if (ver >= 0) label = "v" + ver + "（重装）";
-                else label = "时间戳 " + oldUpd + "→" + upd;
-                XposedBridge.log(TAG + " 检测到模块更新 " + label + "，重启宿主 " + sHostPkg);
+
+                // APK 文件取不到：退回 PackageManager 信号
+                boolean seen = sp.contains(KEY_UPDATE_VERSION) && sp.contains(KEY_UPDATE_TIME);
+                long oldVer = sp.getLong(KEY_UPDATE_VERSION, -1);
+                long oldUpd = sp.getLong(KEY_UPDATE_TIME, -1);
+                if (!ed.commit()) {
+                    XposedBridge.log(TAG + " 更新重启跳过: 基线写入失败");
+                    return;
+                }
+                if (!seen) {
+                    XposedBridge.log(TAG + " 记录模块更新基线 source=pm version=" + ver
+                            + " lastUpdate=" + upd);
+                    return;
+                }
+                if (ver == oldVer && upd == oldUpd) return;
+                XposedBridge.log(TAG + " 检测到模块更新 source=pm version=" + oldVer + "→" + ver
+                        + " lastUpdate=" + oldUpd + "→" + upd + "，重启宿主 " + sHostPkg);
                 requestHostRestart(ctx, sHostPkg);
             } catch (Throwable t) {
                 XposedBridge.log(TAG + " 更新重启检查失败: " + t.getMessage());
@@ -3092,17 +3129,20 @@ public class MainHook implements IXposedHookLoadPackage {
         return true;
     }
 
-    /** 模块类所在 APK 路径（PackageManager 不可见时的版本信号来源）。 */
+    /** LSPosed 实际加载的模块 APK 路径（CodeSource）。取不到返回 null。 */
     private static String moduleApkPath() {
         try {
-            if (MainHook.class.getProtectionDomain() != null
-                    && MainHook.class.getProtectionDomain().getCodeSource() != null
-                    && MainHook.class.getProtectionDomain().getCodeSource().getLocation() != null) {
-                return MainHook.class.getProtectionDomain().getCodeSource().getLocation().getPath();
+            java.security.CodeSource cs = MainHook.class.getProtectionDomain().getCodeSource();
+            if (cs == null || cs.getLocation() == null) return null;
+            java.net.URI uri = cs.getLocation().toURI();
+            if ("file".equalsIgnoreCase(uri.getScheme())) {
+                return new File(uri).getAbsolutePath();
             }
+            String p = uri.getPath();
+            return (p == null || p.isEmpty()) ? null : new File(p).getAbsolutePath();
         } catch (Throwable ignored) {
+            return null;
         }
-        return null;
     }
 
     /**
