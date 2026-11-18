@@ -204,7 +204,7 @@ final class TextCopy {
 
     /**
      * 给一段要上屏的文本补路径强调色，不安装选择/触摸逻辑。
-     * 供拆行后的非可选中视图（状态页明细行）沿用原来的路径着色观感；返回的 Spannable 可直接 setText。
+     * 供拆行后的非可选中视图（状态页明细行/提示）沿用原来的路径着色观感；返回的 Spannable 可直接 setText。
      */
     @NonNull
     static CharSequence withPathColors(@NonNull TextView view, @Nullable CharSequence text) {
@@ -227,35 +227,48 @@ final class TextCopy {
         return spannable;
     }
 
-    /** 文本里是否含可点路径（开关关闭时仍返回真；点击入口会再查开关）。 */
+    /** 文本里是否含可点路径（开关关闭时仍按文本判定；点击入口会再查开关）。 */
     static boolean hasPath(@Nullable CharSequence text) {
-        return text != null && findPathSpans(text).length > 0;
+        return findPathSpans(text).length > 0;
     }
 
-    /** 按当前文本与开关刷新控件的可点状态；不可点时保留长按（长按由调用方自己挂）。 */
-    static void refreshPathClickable(@NonNull TextView view) {
-        view.setClickable(isPathCopyEnabled(view.getContext()) && hasPath(view.getText()));
+    /** 按文本是否含路径与开关刷新控件的可点状态；不可点时保留长按复制。 */
+    static void refreshPathClickable(@NonNull TextView view, boolean hasPath) {
+        view.setClickable(isPathCopyEnabled(view.getContext()) && hasPath);
+    }
+
+    /** 第一条可点路径（优先显式 PathTargetSpan 记下的完整路径）；没有则返回空串。 */
+    @NonNull
+    static String firstPathText(@Nullable CharSequence text) {
+        final PathSpan[] spans = findPathSpans(text);
+        if (spans.length == 0 || text == null) {
+            return "";
+        }
+        final PathSpan first = spans[0];
+        return first.target != null ? first.target
+                : text.subSequence(first.start, first.end).toString();
     }
 
     /**
-     * 直接点击整条文本时弹「复制 / 跳转」小卡：取文本里的**第一条**路径。
-     * 供非可选中的拆行视图（状态页明细行/提示）使用，不依赖系统选区与坐标命中。
+     * 直接点击整条文本时弹「复制 / 跳转」小卡：取文本里的<b>第一条</b>路径。
+     * 供非可选中的拆行视图（状态页明细行/提示）使用，不依赖系统选区与父容器坐标命中。
      *
      * @return true = 文本里有路径并已安排弹卡；false = 无路径/开关关闭
      */
     static boolean tapFirstPath(@NonNull TextView view) {
         if (!isPathCopyEnabled(view.getContext())) {
+            Log.w(TAG, "tapFirstPath: path copy disabled");
             return false;
         }
-        final Layout layout = view.getLayout();
         final PathSpan[] spans = findPathSpans(view.getText());
+        final Layout layout = view.getLayout();
         if (layout == null || spans.length == 0) {
             Log.w(TAG, "tapFirstPath: no path (spans=" + spans.length
                     + ", layout=" + (layout != null) + ")");
             return false;
         }
-        final PathHit hit = PathSelectionCallback.hitFor(
-                view, layout, layout.getLineForOffset(spans[0].start), spans[0]);
+        final PathHit hit = PathSelectionCallback.hitFor(view, layout,
+                layout.getLineForOffset(spans[0].start), spans[0]);
         if (hit == null) {
             Log.w(TAG, "tapFirstPath: hit=null");
             return false;
@@ -268,35 +281,6 @@ final class TextCopy {
             }
         });
         return true;
-    }
-
-    /** 触点命中的路径；落在行间空白、行尾留白或路径外时返回 null。坐标为控件内坐标。 */
-    @Nullable
-    private static PathHit pathHitAt(@NonNull TextView view, float x, float y,
-                                     @NonNull PathSpan[] spans) {
-        Layout layout = view.getLayout();
-        CharSequence text = view.getText();
-        if (layout == null || text == null || text.length() == 0) {
-            return null;
-        }
-        // 与 TextView 的点击判定同一坐标口径：先扣掉内边距并加上滚动偏移
-        float localX = x - view.getTotalPaddingLeft() + view.getScrollX();
-        float localY = y - view.getTotalPaddingTop() + view.getScrollY();
-        int line = layout.getLineForVertical((int) localY);
-        if (localY < layout.getLineTop(line) || localY >= layout.getLineBottom(line)
-                || localX < layout.getLineLeft(line) || localX > layout.getLineRight(line)) {
-            return null;   // 点在行间/行尾的空白，不是文字
-        }
-        int offset = layout.getOffsetForHorizontal(line, localX);
-        if (offset < 0 || offset >= text.length()) {
-            return null;
-        }
-        for (PathSpan span : spans) {
-            if (offset >= span.start && offset < span.end) {
-                return PathSelectionCallback.hitFor(view, layout, line, span);
-            }
-        }
-        return null;
     }
 
     /**
@@ -423,7 +407,29 @@ final class TextCopy {
         /** 触点命中的路径；落在行间空白、行尾留白或路径外时返回 null。 */
         @Nullable
         private PathHit pathHitAt(float x, float y) {
-            return TextCopy.pathHitAt(view, x, y, ensurePathIndex());
+            Layout layout = view.getLayout();
+            CharSequence text = view.getText();
+            if (layout == null || text == null || text.length() == 0) {
+                return null;
+            }
+            // 与 TextView 的点击判定同一坐标口径：先扣掉内边距并加上滚动偏移
+            float localX = x - view.getTotalPaddingLeft() + view.getScrollX();
+            float localY = y - view.getTotalPaddingTop() + view.getScrollY();
+            int line = layout.getLineForVertical((int) localY);
+            if (localY < layout.getLineTop(line) || localY >= layout.getLineBottom(line)
+                    || localX < layout.getLineLeft(line) || localX > layout.getLineRight(line)) {
+                return null;   // 点在行间/行尾的空白，不是文字
+            }
+            int offset = layout.getOffsetForHorizontal(line, localX);
+            if (offset < 0 || offset >= text.length()) {
+                return null;
+            }
+            for (PathSpan span : ensurePathIndex()) {
+                if (offset >= span.start && offset < span.end) {
+                    return hitFor(view, layout, line, span);
+                }
+            }
+            return null;
         }
 
         /**

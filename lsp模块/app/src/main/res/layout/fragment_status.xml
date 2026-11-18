@@ -47,12 +47,13 @@
                     状态文本承载层：换字时用 Motion.animateHeightChange 补间本层高度，
                     同时作为 Motion.crossFade 快照层的宿主。
                     结论行再拆成「静态标签 status_label_text + 动态值 status_text」：
-                    淡化/模糊只作用在动态值上，标签与明细块都不动。明细块一律直接更新。
-                    三段与拆分前的单 TextView 逐像素一致——都关掉 includeFontPadding，
+                    淡化/模糊只作用在动态值上，标签不动。明细按行拆成多个 TextView：
+                    刷新时逐行比对，只对内容变化的行播动画。
+                    结论行与明细行仍与拆分前的单 TextView 对齐——都关掉 includeFontPadding，
                     再由 StatusFragment 按字体度量把上下 font padding 只补在整块头尾
-                    （summary_row 的上下内边距与明细块的底部内边距），故行高、行距、
-                    缩进与原来完全相同；标签与值之间不加任何 margin，仍在同一基线。
-                    本层自身不加 margin，高度 = marginTop + 结论行高 + 明细块高。
+                    （summary_row 的上下内边距与明细列表的底部内边距），故行高、行距、
+                    缩进与原来保持一致；标签与值之间不加任何 margin，仍在同一基线。
+                    本层自身不加 margin，高度 = marginTop + 结论行高 + 明细列表高。
                 -->
                 <LinearLayout
                     android:id="@+id/status_text_stack"
@@ -85,9 +86,10 @@
                     </LinearLayout>
 
                     <!--
-                        明细块逐行容器：每行由 StatusFragment 按「静态键 + 动态值」构建
-                        （见 item_status_detail_line.xml），值变化时只对该行的值做淡化+模糊。
-                        长按整块复制全文（拆行后系统跨行选区无法保留）。
+                        明细块逐行容器：每行一个 TextView（item_status_detail_row.xml）。
+                        刷新时按行比对，只对内容变化的行播淡化+模糊；新增行只淡入、删除行直接移除。
+                        行的文本保留原有缩进（「  二进制 …」「    apk = 设备 = …」），不另做键值拆分。
+                        长按整块复制全文（行不开 textIsSelectable，避免与行点击/整块复制抢手势）。
                     -->
                     <LinearLayout
                         android:id="@+id/status_detail_list"
@@ -98,9 +100,8 @@
                 </LinearLayout>
 
                 <!--
-                    探测提示（脚本自动重推三选一 / 同步清单未刷新）：不并进状态文本、不参与行级
-                    动画，直接更新；有内容才显示。放在状态块之后、进度条之前，上间距用
-                    status_notice_gap，下间距仍由进度条的 status_progress_gap(0dp) 承担。
+                    探测提示（脚本自动重推三选一 / 同步清单未刷新）：放在状态块下方独立视图，
+                    不参与行级动画；有内容才显示。路径同样着色并可点击。
                 -->
                 <TextView
                     android:id="@+id/status_probe_notice"

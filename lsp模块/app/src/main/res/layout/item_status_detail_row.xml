@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    部署状态明细的一行：整行一个 TextView，文本里自带原有缩进与「键：值」。
+    行级 diff 只对内容变化的这一行播淡化+模糊；路径强调色与点击由 StatusFragment 在 setText 前补。
+    字体/行高与拆分前的单块 TextView 一致（同一 Mono 外观、关 includeFontPadding）。
+-->
+<TextView xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content"
+    android:includeFontPadding="false"
+    android:textAppearance="@style/TextAppearance.B6XTempCtrl.Mono" />

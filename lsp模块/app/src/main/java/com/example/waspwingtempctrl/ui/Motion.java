@@ -295,6 +295,40 @@ public final class Motion {
     }
 
     /**
+     * 单视图淡入：只做 alpha 0→1（{@link #FADE_IN_MS}、线性），不抓旧快照、不叠加模糊。
+     * 用于「新增行只让新值淡入」这类没有旧内容可交叉的场景；系统关动效时直接置为不透明。
+     */
+    static void fadeIn(@Nullable View v) {
+        if (v == null) {
+            return;
+        }
+        v.animate().cancel();
+        if (!enabled(v.getContext())) {
+            v.setAlpha(1f);
+            return;
+        }
+        v.setAlpha(0f);
+        v.animate().alpha(1f).setDuration(FADE_IN_MS).setInterpolator(FADE_CURVE).start();
+    }
+
+    /**
+     * 取消某个视图上正在跑的交叉淡化（连同同一轮的其它视图一起收尾），并复位 alpha 与模糊。
+     * 用于「明细行被直接改写/移除」前收掉可能残留的淡变，避免旧快照继续绘制。
+     */
+    static void cancelCrossFade(@Nullable View v) {
+        if (v == null) {
+            return;
+        }
+        CrossFadeRun running = CROSS_FADES.remove(v);
+        if (running != null) {
+            running.finish();
+        }
+        v.animate().cancel();
+        v.setAlpha(1f);
+        applyViewBlur(v, 0f);
+    }
+
+    /**
      * 交叉淡化的公共实现。
      *
      * @param blurAll    true = 默认允许按 {@link #blurAllowed(View)} 叠加模糊
@@ -367,40 +401,6 @@ public final class Motion {
             }
             MAIN.postDelayed(run, FADE_OUT_DELAY_MS + FADE_OUT_MS + 16L);
         }
-    }
-
-    /**
-     * 单视图淡入：只做 alpha 0→1（{@link #FADE_IN_MS}、线性），不抓旧快照、不叠加模糊。
-     * 用于「新增行只让新值淡入」这类没有旧内容可交叉的场景；系统关动效时直接置为不透明。
-     */
-    static void fadeIn(@Nullable View v) {
-        if (v == null) {
-            return;
-        }
-        v.animate().cancel();
-        if (!enabled(v.getContext())) {
-            v.setAlpha(1f);
-            return;
-        }
-        v.setAlpha(0f);
-        v.animate().alpha(1f).setDuration(FADE_IN_MS).setInterpolator(FADE_CURVE).start();
-    }
-
-    /**
-     * 取消某个视图上正在跑的交叉淡化（连同同一轮的其它视图一起收尾），并复位 alpha 与模糊。
-     * 用于「明细行被直接改写」前收掉可能残留的淡变，避免旧快照继续绘制。
-     */
-    static void cancelCrossFade(@Nullable View v) {
-        if (v == null) {
-            return;
-        }
-        CrossFadeRun running = CROSS_FADES.remove(v);
-        if (running != null) {
-            running.finish();
-        }
-        v.animate().cancel();
-        v.setAlpha(1f);
-        applyViewBlur(v, 0f);
     }
 
     /**
