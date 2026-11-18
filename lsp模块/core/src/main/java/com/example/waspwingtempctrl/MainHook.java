@@ -82,6 +82,7 @@ public class MainHook implements IXposedHookLoadPackage {
     private static final String UPDATE_PREFS = "b6x_module_update";
     private static final String KEY_UPDATE_VERSION = "version_code";
     private static final String KEY_UPDATE_TIME = "last_update_time";
+    private static volatile boolean autoRestartDefaultLogged = false;   // uiprefs 缺键提示只打一次
     private static final String ACTION_TEMP_B6 = Protocol.ACTION_TEMP_B6;   // B6X 温控广播
     private static final String ACTION_TEMP_B7 = Protocol.ACTION_TEMP_B7;   // B7X 温控广播
     /* protocol-extras-mirror:start （本节由 参数定义/gen_params.py 生成，勿手改；实际调用使用 Protocol 的 EXTRA_* 常量） */
@@ -2819,10 +2820,11 @@ public class MainHook implements IXposedHookLoadPackage {
                     protected void afterHookedMethod(MethodHookParam param) {
                         Context ctx = (Context) param.thisObject;
                         appContext = ctx;      // 存下宿主 Context，供 tick 线程取 PowerManager（息屏退避用）
+                        // 更新检测放最前：后续任一初始化抛错也不影响这条独立的后台检查。
+                        maybeRestartOnModuleUpdate(ctx);   // 模块更新检测（默认开，后台线程）
                         registerTemperatureReceiver(ctx);
                         restoreLastDevice();   // 冷启动恢复上次设备引用，后台重连自动接管
                         startPeriodicStatusWrite();
-                        maybeRestartOnModuleUpdate(ctx);   // 模块更新检测（默认关，后台线程）
                     }
                 });
     }
@@ -3009,7 +3011,7 @@ public class MainHook implements IXposedHookLoadPackage {
     }
 
     /**
-     * 模块更新后自动重启宿主（{@code AUTO_RESTART_ON_UPDATE}，默认关）。
+     * 模块更新后自动重启宿主（{@code AUTO_RESTART_ON_UPDATE}，默认开）。
      * 判定：读取模块自身 versionCode / lastUpdateTime，与本宿主进程上次记录比对；
      * 变化即写回新值，并在开关开启时结束当前宿主进程后重新拉起一次。
      * 全程后台线程；失败只记日志、不重试，不阻塞启动。
@@ -3027,7 +3029,11 @@ public class MainHook implements IXposedHookLoadPackage {
                 } catch (PackageManager.NameNotFoundException nfe) {
                     // 包不可见时的退路：模块类所在 APK 的 mtime 即 lastUpdateTime 的等价信号
                     String path = moduleApkPath();
-                    if (path == null) return;
+                    if (path == null) {
+                        XposedBridge.log(TAG + " 更新重启检查跳过: 模块包不可见且取不到 APK 路径");
+                        return;
+                    }
+                    XposedBridge.log(TAG + " 模块包不可见，改用 APK mtime 检测: " + path);
                     ver = -1;
                     upd = new File(path).lastModified();
                     if (upd <= 0) return;
@@ -3036,16 +3042,29 @@ public class MainHook implements IXposedHookLoadPackage {
                 boolean seen = sp.contains(KEY_UPDATE_VERSION);
                 long oldVer = sp.getLong(KEY_UPDATE_VERSION, -1);
                 long oldUpd = sp.getLong(KEY_UPDATE_TIME, -1);
-                // 先写新值：随后即使重启成功，重启后也不会再次触发。
-                sp.edit().putLong(KEY_UPDATE_VERSION, ver)
-                        .putLong(KEY_UPDATE_TIME, upd).apply();
-                if (!seen || (ver == oldVer && upd == oldUpd)) return;   // 首次记录 / 未变化
+                // 先同步落盘再重启：force-stop 会立刻杀进程，apply() 的异步写可能还没落盘，
+                // 重启后会被当成「首次运行」再次重启，形成循环。
+                if (!sp.edit().putLong(KEY_UPDATE_VERSION, ver)
+                        .putLong(KEY_UPDATE_TIME, upd).commit()) {
+                    XposedBridge.log(TAG + " 更新重启跳过: 版本记录写入失败");
+                    return;
+                }
+                if (!seen) {
+                    // 首次运行没有基线：本次按一次更新处理并重启一次，否则升级到本功能后
+                    // 用户第一次更新永远等不到「变化」（新值已写入，重启后不会重复）。
+                    String first = (ver >= 0) ? ("v" + ver + "（首次启用）")
+                            : ("时间戳 " + upd + "（首次启用）");
+                    XposedBridge.log(TAG + " 检测到模块更新 " + first + "，重启宿主 " + sHostPkg);
+                    requestHostRestart(ctx, sHostPkg);
+                    return;
+                }
+                if (ver == oldVer && upd == oldUpd) return;   // 未变化
                 String label;
                 if (ver >= 0 && oldVer >= 0 && ver != oldVer) label = "v" + oldVer + "→v" + ver;
                 else if (ver >= 0) label = "v" + ver + "（重装）";
                 else label = "时间戳 " + oldUpd + "→" + upd;
                 XposedBridge.log(TAG + " 检测到模块更新 " + label + "，重启宿主 " + sHostPkg);
-                requestHostRestart(sHostPkg);
+                requestHostRestart(ctx, sHostPkg);
             } catch (Throwable t) {
                 XposedBridge.log(TAG + " 更新重启检查失败: " + t.getMessage());
             }
@@ -3054,7 +3073,7 @@ public class MainHook implements IXposedHookLoadPackage {
         worker.start();
     }
 
-    /** 读守护进程发布的 {@code AUTO_RESTART=0/1}；读不到按关（默认 0）。 */
+    /** 读守护进程发布的 {@code AUTO_RESTART=0/1}；读不到按默认开（与参数 default=1 一致）。 */
     private static boolean readAutoRestartOnUpdate() {
         try (BufferedReader br = new BufferedReader(new FileReader(UIPREFS_FILE))) {
             String line;
@@ -3066,7 +3085,11 @@ public class MainHook implements IXposedHookLoadPackage {
         } catch (Throwable ignored) {
             // 文件不存在属正常（守护进程尚未写过）
         }
-        return false;
+        if (!autoRestartDefaultLogged) {
+            autoRestartDefaultLogged = true;
+            XposedBridge.log(TAG + " uiprefs 无 AUTO_RESTART，按默认开处理（daemon 可能未重新部署）");
+        }
+        return true;
     }
 
     /** 模块类所在 APK 路径（PackageManager 不可见时的版本信号来源）。 */
@@ -3082,14 +3105,48 @@ public class MainHook implements IXposedHookLoadPackage {
         return null;
     }
 
-    /** 写模块更新重启请求；daemon 轮询后执行 force-stop + am start。失败只记日志、不重试。 */
-    private static void requestHostRestart(String pkg) {
+    /**
+     * 写模块更新重启请求；daemon 轮询后执行 force-stop + am start。
+     * 请求文件不可写（旧 daemon 未预建 / daemon 未运行）时退回 RootShell 直连执行一次；失败只记日志。
+     */
+    private static void requestHostRestart(Context ctx, String pkg) {
         try (FileOutputStream fos = new FileOutputStream(Protocol.PATH_MODULE_RESTART)) {
             String body = "PKG=" + pkg + "\nAT=" + System.currentTimeMillis() + "\n";
             fos.write(body.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+            return;
         } catch (Throwable t) {
-            XposedBridge.log(TAG + " 更新重启请求写入失败: " + t.getMessage());
+            XposedBridge.log(TAG + " 更新重启请求写入失败，改用 root 直连: " + t.getMessage());
         }
+        restartHostDirect(ctx, pkg);
+    }
+
+    /** 兜底：直接经 RootShell 执行 force-stop + am start（旧 daemon 没有请求文件时的路径）。 */
+    private static void restartHostDirect(Context ctx, String pkg) {
+        String act = launcherActivityFor(pkg);
+        if (act == null) {
+            XposedBridge.log(TAG + " 更新重启跳过: 无 launcher 映射（" + pkg + "）");
+            return;
+        }
+        String script = "/system/bin/am force-stop " + pkg + " >/dev/null 2>&1; sleep 1; "
+                + "/system/bin/am start -n " + pkg + "/" + act
+                + " --es b6x_auto_launch 1 >/dev/null 2>&1";
+        try {
+            RootShell.Result r = RootShell.get(ctx).tryExec(script, 15000);
+            if (!r.isOk()) {
+                XposedBridge.log(TAG + " 更新重启失败（root 不可用）: " + r.describe());
+            }
+        } catch (Throwable t) {
+            XposedBridge.log(TAG + " 更新重启异常: " + t.getMessage());
+        }
+    }
+
+    /** 受管宿主的 launcher 组件（与 daemon 的 am_start_app 一致；未知包返回 null）。 */
+    private static String launcherActivityFor(String pkg) {
+        if (PACKAGE_B6X.equals(pkg) || PACKAGE_B6X_NEW.equals(pkg))
+            return "com.example.extool.MainActivity";
+        if (PACKAGE_B7X.equals(pkg))
+            return "com.game.motionelf.activity.ActivityStart";
+        return null;
     }
 
     /**
