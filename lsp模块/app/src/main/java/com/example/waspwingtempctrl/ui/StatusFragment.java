@@ -12,6 +12,7 @@ import android.text.SpannableStringBuilder;
 import android.text.Spanned;
 import android.text.TextUtils;
 import android.text.style.LeadingMarginSpan;
+import android.view.HapticFeedbackConstants;
 import android.view.LayoutInflater;
 import android.view.MotionEvent;
 import android.view.View;
@@ -259,10 +260,8 @@ public class StatusFragment extends Fragment implements SetupActivity.PageAware 
         statusStack = view.findViewById(R.id.status_text_stack);
         // 拆行后系统跨行选区无法保留：整个状态块长按复制全文（结论 + 明细，见 TextCopy.copyOnLongPress）
         TextCopy.copyOnLongPress(statusStack, this::statusCopyText);
-        // 短按路径仍弹「复制 / 跳转」小卡：不消费触摸，长按继续由上面的长按复制接管
-        statusStack.setOnTouchListener(new PathTapWatcher(statusStack));
-        TextCopy.copyOnLongPress(statusProbeNoticeView, this::statusCopyText);
-        statusProbeNoticeView.setOnTouchListener(new PathTapWatcher(statusProbeNoticeView));
+        // 提示视图自身也装路径点击与长按复制（它不在 statusStack 子树内）
+        installPathClick(statusProbeNoticeView);
         // 宽度变化（旋转/分屏）时按新宽度重算「键是否能与值同行」，直接重排、不播动画
         statusDetailList.addOnLayoutChangeListener((v, l, t, r, b, ol, ot, or, ob) -> {
             if (r - l != or - ol && !detailModels.isEmpty()) {
@@ -1506,9 +1505,11 @@ public class StatusFragment extends Fragment implements SetupActivity.PageAware 
                 statusProbeNoticeView.setText(
                         TextCopy.withPathColors(statusProbeNoticeView, text));
             }
+            TextCopy.refreshPathClickable(statusProbeNoticeView);
             statusProbeNoticeView.setVisibility(View.VISIBLE);
         } else {
             statusProbeNoticeView.setText("");
+            statusProbeNoticeView.setClickable(false);
             statusProbeNoticeView.setVisibility(View.GONE);
         }
     }
@@ -1614,6 +1615,8 @@ public class StatusFragment extends Fragment implements SetupActivity.PageAware 
         TextView valueView = root.findViewById(R.id.status_detail_value);
         keyView.setIncludeFontPadding(false);
         valueView.setIncludeFontPadding(false);
+        installPathClick(keyView);
+        installPathClick(valueView);
         return new DetailRow(id, root, keyView, valueView);
     }
 
@@ -1671,6 +1674,7 @@ public class StatusFragment extends Fragment implements SetupActivity.PageAware 
         if (keyChanged || row.key.getVisibility() != keyVisibility) {
             row.key.setVisibility(keyVisibility);   // 长键退化时确保键层不残留可见
         }
+        TextCopy.refreshPathClickable(row.key);
 
         if (animateValues && !added && valueChanged) {
             // 只对变化的值播淡化+模糊；键和未变化的行不动
@@ -1680,6 +1684,7 @@ public class StatusFragment extends Fragment implements SetupActivity.PageAware 
             applyDetailValue(row.value, shownValue, indent);
             row.pendingFadeIn = animateValues && added;   // 挂载后再淡入（见 renderDetailLines）
         }
+        TextCopy.refreshPathClickable(row.value);
         row.appliedValue = valueText;
     }
 
@@ -1760,86 +1765,56 @@ public class StatusFragment extends Fragment implements SetupActivity.PageAware 
         return height;
     }
 
-    /** 状态块上的短按路径识别：只观察、不消费；长按由 OnLongClickListener 负责整块复制。 */
-    private final class PathTapWatcher implements View.OnTouchListener {
-
-        private final View target;
-        private float downX;
-        private float downY;
-        private boolean moved;
-        private boolean multiTouch;
-
-        PathTapWatcher(View target) {
-            this.target = target;
+    /**
+     * 给单个 TextView 装路径短按 + 整块长按复制：
+     * 点击时直接按该控件当前文本找第一条路径并弹卡（不做坐标命中）；
+     * 触摸监听只用于「移动超过阈值就放弃点击」，长按复制整个状态块。
+     */
+    private void installPathClick(@Nullable TextView view) {
+        if (view == null) {
+            return;
         }
-
-        @Override
-        public boolean onTouch(View v, MotionEvent event) {
+        final float[] down = new float[2];
+        final boolean[] moved = {false};
+        view.setOnTouchListener((v, event) -> {
             switch (event.getActionMasked()) {
                 case MotionEvent.ACTION_DOWN:
-                    downX = event.getX();
-                    downY = event.getY();
-                    moved = false;
-                    multiTouch = false;
+                    down[0] = event.getX();
+                    down[1] = event.getY();
+                    moved[0] = false;
                     break;
                 case MotionEvent.ACTION_POINTER_DOWN:
-                    multiTouch = true;
+                    moved[0] = true;   // 多指不认作路径点击
                     break;
                 case MotionEvent.ACTION_MOVE:
-                    if (!moved) {
-                        float dx = event.getX() - downX;
-                        float dy = event.getY() - downY;
+                    if (!moved[0]) {
+                        float dx = event.getX() - down[0];
+                        float dy = event.getY() - down[1];
                         int slop = ViewConfiguration.get(v.getContext()).getScaledTouchSlop();
                         if (dx * dx + dy * dy > (float) slop * slop) {
-                            moved = true;
-                        }
-                    }
-                    break;
-                case MotionEvent.ACTION_UP:
-                    // 短按（未移动、未长按）才认路径；长按已由整块复制接管
-                    if (!moved && !multiTouch
-                            && event.getEventTime() - event.getDownTime()
-                            < ViewConfiguration.getLongPressTimeout()) {
-                        if (target instanceof TextView) {
-                            TextCopy.tapPathAt((TextView) target, event.getX(), event.getY());
-                        } else if (target instanceof ViewGroup) {
-                            tapPathIn((ViewGroup) target, event.getX(), event.getY());
+                            moved[0] = true;
                         }
                     }
                     break;
                 case MotionEvent.ACTION_CANCEL:
-                    moved = true;
+                    moved[0] = true;
                     break;
                 default:
                     break;
             }
-            return false;   // 不消费：滚动、长按复制与其它手势维持原样
-        }
-    }
-
-    /** 在状态块子树里找落点下的路径文本；命中即弹卡并返回 true。 */
-    private static boolean tapPathIn(ViewGroup group, float x, float y) {
-        for (int i = group.getChildCount() - 1; i >= 0; i--) {
-            View child = group.getChildAt(i);
-            if (child.getVisibility() != View.VISIBLE) {
-                continue;
+            return false;   // 不消费：拖动仍可被 ScrollView 接管
+        });
+        view.setOnClickListener(v -> {
+            if (!moved[0]) {
+                TextCopy.tapFirstPath(view);
             }
-            float cx = x - child.getLeft() - child.getTranslationX();
-            float cy = y - child.getTop() - child.getTranslationY();
-            if (cx < 0 || cy < 0 || cx >= child.getWidth() || cy >= child.getHeight()) {
-                continue;
-            }
-            if (child instanceof ViewGroup) {
-                if (tapPathIn((ViewGroup) child, cx, cy)) {
-                    return true;
-                }
-            } else if (child instanceof TextView) {
-                if (TextCopy.tapPathAt((TextView) child, cx, cy)) {
-                    return true;
-                }
-            }
-        }
-        return false;
+        });
+        view.setOnLongClickListener(v -> {
+            moved[0] = true;   // 长按已消费：抬起不再触发路径点击
+            TextCopy.copy(v.getContext(), statusCopyText());
+            v.performHapticFeedback(HapticFeedbackConstants.LONG_PRESS);
+            return true;
+        });
     }
 
     // ==================== 明细行模型 ====================

@@ -227,20 +227,40 @@ final class TextCopy {
         return spannable;
     }
 
+    /** 文本里是否含可点路径（开关关闭时仍返回真；点击入口会再查开关）。 */
+    static boolean hasPath(@Nullable CharSequence text) {
+        return text != null && findPathSpans(text).length > 0;
+    }
+
+    /** 按当前文本与开关刷新控件的可点状态；不可点时保留长按（长按由调用方自己挂）。 */
+    static void refreshPathClickable(@NonNull TextView view) {
+        view.setClickable(isPathCopyEnabled(view.getContext()) && hasPath(view.getText()));
+    }
+
     /**
-     * 短按命中路径时弹「复制 / 跳转」小卡；供非可选中的拆行视图（状态页明细行/提示）使用。
-     * 与可选控件里的短按是同一套命中与卡片实现，只是不依赖系统选区。
+     * 直接点击整条文本时弹「复制 / 跳转」小卡：取文本里的**第一条**路径。
+     * 供非可选中的拆行视图（状态页明细行/提示）使用，不依赖系统选区与坐标命中。
      *
-     * @return true = 点中了路径并已安排弹卡；false = 不是路径
+     * @return true = 文本里有路径并已安排弹卡；false = 无路径/开关关闭
      */
-    static boolean tapPathAt(@NonNull TextView view, float x, float y) {
+    static boolean tapFirstPath(@NonNull TextView view) {
         if (!isPathCopyEnabled(view.getContext())) {
             return false;
         }
-        final PathHit hit = pathHitAt(view, x, y, findPathSpans(view.getText()));
-        if (hit == null) {
+        final Layout layout = view.getLayout();
+        final PathSpan[] spans = findPathSpans(view.getText());
+        if (layout == null || spans.length == 0) {
+            Log.w(TAG, "tapFirstPath: no path (spans=" + spans.length
+                    + ", layout=" + (layout != null) + ")");
             return false;
         }
+        final PathHit hit = PathSelectionCallback.hitFor(
+                view, layout, layout.getLineForOffset(spans[0].start), spans[0]);
+        if (hit == null) {
+            Log.w(TAG, "tapFirstPath: hit=null");
+            return false;
+        }
+        Log.w(TAG, "tapFirstPath: hit=" + hit.path);
         // 等本次触摸分发结束再弹窗：避免在 dispatchTouchEvent 里同步换窗口焦点
         view.post(() -> {
             if (view.isAttachedToWindow()) {
