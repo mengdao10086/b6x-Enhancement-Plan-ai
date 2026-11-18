@@ -13,7 +13,9 @@ import android.text.Spanned;
 import android.text.TextUtils;
 import android.text.style.LeadingMarginSpan;
 import android.view.LayoutInflater;
+import android.view.MotionEvent;
 import android.view.View;
+import android.view.ViewConfiguration;
 import android.view.ViewGroup;
 import android.widget.FrameLayout;
 import android.widget.ImageView;
@@ -257,6 +259,10 @@ public class StatusFragment extends Fragment implements SetupActivity.PageAware 
         statusStack = view.findViewById(R.id.status_text_stack);
         // 拆行后系统跨行选区无法保留：整个状态块长按复制全文（结论 + 明细，见 TextCopy.copyOnLongPress）
         TextCopy.copyOnLongPress(statusStack, this::statusCopyText);
+        // 短按路径仍弹「复制 / 跳转」小卡：不消费触摸，长按继续由上面的长按复制接管
+        statusStack.setOnTouchListener(new PathTapWatcher(statusStack));
+        TextCopy.copyOnLongPress(statusProbeNoticeView, this::statusCopyText);
+        statusProbeNoticeView.setOnTouchListener(new PathTapWatcher(statusProbeNoticeView));
         // 宽度变化（旋转/分屏）时按新宽度重算「键是否能与值同行」，直接重排、不播动画
         statusDetailList.addOnLayoutChangeListener((v, l, t, r, b, ol, ot, or, ob) -> {
             if (r - l != or - ol && !detailModels.isEmpty()) {
@@ -1752,6 +1758,88 @@ public class StatusFragment extends Fragment implements SetupActivity.PageAware 
             height += ((ViewGroup.MarginLayoutParams) lp).topMargin;
         }
         return height;
+    }
+
+    /** 状态块上的短按路径识别：只观察、不消费；长按由 OnLongClickListener 负责整块复制。 */
+    private final class PathTapWatcher implements View.OnTouchListener {
+
+        private final View target;
+        private float downX;
+        private float downY;
+        private boolean moved;
+        private boolean multiTouch;
+
+        PathTapWatcher(View target) {
+            this.target = target;
+        }
+
+        @Override
+        public boolean onTouch(View v, MotionEvent event) {
+            switch (event.getActionMasked()) {
+                case MotionEvent.ACTION_DOWN:
+                    downX = event.getX();
+                    downY = event.getY();
+                    moved = false;
+                    multiTouch = false;
+                    break;
+                case MotionEvent.ACTION_POINTER_DOWN:
+                    multiTouch = true;
+                    break;
+                case MotionEvent.ACTION_MOVE:
+                    if (!moved) {
+                        float dx = event.getX() - downX;
+                        float dy = event.getY() - downY;
+                        int slop = ViewConfiguration.get(v.getContext()).getScaledTouchSlop();
+                        if (dx * dx + dy * dy > (float) slop * slop) {
+                            moved = true;
+                        }
+                    }
+                    break;
+                case MotionEvent.ACTION_UP:
+                    // 短按（未移动、未长按）才认路径；长按已由整块复制接管
+                    if (!moved && !multiTouch
+                            && event.getEventTime() - event.getDownTime()
+                            < ViewConfiguration.getLongPressTimeout()) {
+                        if (target instanceof TextView) {
+                            TextCopy.tapPathAt((TextView) target, event.getX(), event.getY());
+                        } else if (target instanceof ViewGroup) {
+                            tapPathIn((ViewGroup) target, event.getX(), event.getY());
+                        }
+                    }
+                    break;
+                case MotionEvent.ACTION_CANCEL:
+                    moved = true;
+                    break;
+                default:
+                    break;
+            }
+            return false;   // 不消费：滚动、长按复制与其它手势维持原样
+        }
+    }
+
+    /** 在状态块子树里找落点下的路径文本；命中即弹卡并返回 true。 */
+    private static boolean tapPathIn(ViewGroup group, float x, float y) {
+        for (int i = group.getChildCount() - 1; i >= 0; i--) {
+            View child = group.getChildAt(i);
+            if (child.getVisibility() != View.VISIBLE) {
+                continue;
+            }
+            float cx = x - child.getLeft() - child.getTranslationX();
+            float cy = y - child.getTop() - child.getTranslationY();
+            if (cx < 0 || cy < 0 || cx >= child.getWidth() || cy >= child.getHeight()) {
+                continue;
+            }
+            if (child instanceof ViewGroup) {
+                if (tapPathIn((ViewGroup) child, cx, cy)) {
+                    return true;
+                }
+            } else if (child instanceof TextView) {
+                if (TextCopy.tapPathAt((TextView) child, cx, cy)) {
+                    return true;
+                }
+            }
+        }
+        return false;
     }
 
     // ==================== 明细行模型 ====================

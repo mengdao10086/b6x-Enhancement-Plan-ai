@@ -228,6 +228,58 @@ final class TextCopy {
     }
 
     /**
+     * 短按命中路径时弹「复制 / 跳转」小卡；供非可选中的拆行视图（状态页明细行/提示）使用。
+     * 与可选控件里的短按是同一套命中与卡片实现，只是不依赖系统选区。
+     *
+     * @return true = 点中了路径并已安排弹卡；false = 不是路径
+     */
+    static boolean tapPathAt(@NonNull TextView view, float x, float y) {
+        if (!isPathCopyEnabled(view.getContext())) {
+            return false;
+        }
+        final PathHit hit = pathHitAt(view, x, y, findPathSpans(view.getText()));
+        if (hit == null) {
+            return false;
+        }
+        // 等本次触摸分发结束再弹窗：避免在 dispatchTouchEvent 里同步换窗口焦点
+        view.post(() -> {
+            if (view.isAttachedToWindow()) {
+                PathActionCard.show(view, hit);
+            }
+        });
+        return true;
+    }
+
+    /** 触点命中的路径；落在行间空白、行尾留白或路径外时返回 null。坐标为控件内坐标。 */
+    @Nullable
+    private static PathHit pathHitAt(@NonNull TextView view, float x, float y,
+                                     @NonNull PathSpan[] spans) {
+        Layout layout = view.getLayout();
+        CharSequence text = view.getText();
+        if (layout == null || text == null || text.length() == 0) {
+            return null;
+        }
+        // 与 TextView 的点击判定同一坐标口径：先扣掉内边距并加上滚动偏移
+        float localX = x - view.getTotalPaddingLeft() + view.getScrollX();
+        float localY = y - view.getTotalPaddingTop() + view.getScrollY();
+        int line = layout.getLineForVertical((int) localY);
+        if (localY < layout.getLineTop(line) || localY >= layout.getLineBottom(line)
+                || localX < layout.getLineLeft(line) || localX > layout.getLineRight(line)) {
+            return null;   // 点在行间/行尾的空白，不是文字
+        }
+        int offset = layout.getOffsetForHorizontal(line, localX);
+        if (offset < 0 || offset >= text.length()) {
+            return null;
+        }
+        for (PathSpan span : spans) {
+            if (offset >= span.start && offset < span.end) {
+                return PathSelectionCallback.hitFor(view, layout, line, span);
+            }
+        }
+        return null;
+    }
+
+    /**
      * 单个控件的路径交互：<b>两段式扩选</b>——系统长按先按词选中一段，继续按住满 {@link #HOLD_TO_EXPAND_MS}
      * 才扩成整条路径；抬手或改成拖选即保持系统那一段。每次 ActionMode 至多扩一次。
      * <b>短按</b>则由 {@link #onTap} 弹「复制 / 跳转」小卡，两者共用同一套触摸观察。
@@ -351,29 +403,7 @@ final class TextCopy {
         /** 触点命中的路径；落在行间空白、行尾留白或路径外时返回 null。 */
         @Nullable
         private PathHit pathHitAt(float x, float y) {
-            Layout layout = view.getLayout();
-            CharSequence text = view.getText();
-            if (layout == null || text == null || text.length() == 0) {
-                return null;
-            }
-            // 与 TextView 的点击判定同一坐标口径：先扣掉内边距并加上滚动偏移
-            float localX = x - view.getTotalPaddingLeft() + view.getScrollX();
-            float localY = y - view.getTotalPaddingTop() + view.getScrollY();
-            int line = layout.getLineForVertical((int) localY);
-            if (localY < layout.getLineTop(line) || localY >= layout.getLineBottom(line)
-                    || localX < layout.getLineLeft(line) || localX > layout.getLineRight(line)) {
-                return null;   // 点在行间/行尾的空白，不是文字
-            }
-            int offset = layout.getOffsetForHorizontal(line, localX);
-            if (offset < 0 || offset >= text.length()) {
-                return null;
-            }
-            for (PathSpan span : ensurePathIndex()) {
-                if (offset >= span.start && offset < span.end) {
-                    return hitFor(layout, line, span);
-                }
-            }
-            return null;
+            return TextCopy.pathHitAt(view, x, y, ensurePathIndex());
         }
 
         /**
@@ -381,7 +411,8 @@ final class TextCopy {
          * 路径可能跨行，这里只取被点那一行，保证小卡贴着手指附近。
          */
         @Nullable
-        private PathHit hitFor(@NonNull Layout layout, int line, @NonNull PathSpan span) {
+        private static PathHit hitFor(@NonNull TextView view, @NonNull Layout layout,
+                                      int line, @NonNull PathSpan span) {
             int lineStart = layout.getLineStart(line);
             int lineEnd = layout.getLineEnd(line);
             int segStart = Math.max(span.start, lineStart);
