@@ -45,24 +45,37 @@
 
                 <!--
                     状态文本承载层：换字时用 Motion.animateHeightChange 补间本层高度，
-                    同时作为 Motion.crossFade 快照层的宿主（旧文本由它抓成 overlay 渐糊渐隐，
-                    新文本在原位由糊转清），不再需要第二层 TextView。
-                    本层自身不加 margin，高度 = 文本高 + status_text 的 marginTop。
+                    同时作为 Motion.crossFade 快照层的宿主（旧结论行由它抓成 overlay 渐糊渐隐，
+                    新结论行在原位由糊转清）。
+                    结论行（首行）与明细块拆成两个 TextView：淡化/模糊只作用在结论行，
+                    明细行一律直接更新。两视图与拆分前的单 TextView 逐像素一致——都关掉
+                    includeFontPadding，再由 StatusFragment 按字体度量补回头/尾 font padding，
+                    故行高、行距、缩进与原来完全相同。
+                    本层自身不加 margin，高度 = 结论行高 + status_text 的 marginTop + 明细块高。
                 -->
-                <FrameLayout
+                <LinearLayout
                     android:id="@+id/status_text_stack"
                     android:layout_width="match_parent"
-                    android:layout_height="wrap_content">
+                    android:layout_height="wrap_content"
+                    android:orientation="vertical">
 
                     <TextView
                         android:id="@+id/status_text"
                         android:layout_width="match_parent"
                         android:layout_height="wrap_content"
                         android:layout_marginTop="@dimen/space_s"
-                        android:text="@string/status_deploy_prefill"
+                        android:includeFontPadding="false"
+                        android:textAppearance="@style/TextAppearance.B6XTempCtrl.Mono" />
+
+                    <TextView
+                        android:id="@+id/status_detail_text"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:includeFontPadding="false"
                         android:textAppearance="@style/TextAppearance.B6XTempCtrl.Mono"
-                        android:textIsSelectable="true" />
-                </FrameLayout>
+                        android:textIsSelectable="true"
+                        android:visibility="gone" />
+                </LinearLayout>
 
                 <!--
                     进度条常占位：从首帧起就占住这块高度（invisible 不是 gone），

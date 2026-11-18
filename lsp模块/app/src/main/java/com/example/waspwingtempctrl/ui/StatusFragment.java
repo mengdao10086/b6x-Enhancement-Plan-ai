@@ -3,12 +3,11 @@ package com.example.waspwingtempctrl.ui;
 import android.content.Context;
 import android.content.SharedPreferences;
 import android.content.pm.PackageInfo;
+import android.graphics.Paint;
 import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
-import android.text.Spannable;
-import android.text.SpannableStringBuilder;
 import android.text.TextUtils;
 import android.view.LayoutInflater;
 import android.view.View;
@@ -103,7 +102,14 @@ public class StatusFragment extends Fragment implements SetupActivity.PageAware 
      */
     private static volatile boolean syncManifestDone;
 
+    /** 部署状态的结论行（首行）：换字动画只作用在这里。 */
     private TextView statusView;
+    /** 部署状态的明细块（结论行之后的全部内容）：一律直接更新，不参与淡化/模糊。 */
+    private TextView statusDetailView;
+    /** 拆分后补在整块头/尾的 font padding（像素）：结论行顶部固定用它，
+     *  底部 padding 归明细块；明细为空时改由结论行承担，保证单行状态与拆分前等高。 */
+    private int statusTopPad;
+    private int statusBottomPad;
     /** 状态文本的承载层：换字时用 {@link Motion#animateHeightChange} 补间它的高度（窗口展开/收起），
      *  同时是 {@link Motion#crossFade} 快照层的宿主。 */
     private ViewGroup statusStack;
@@ -232,18 +238,21 @@ public class StatusFragment extends Fragment implements SetupActivity.PageAware 
     public void onViewCreated(@NonNull View view, @Nullable Bundle savedInstanceState) {
         super.onViewCreated(view, savedInstanceState);
         statusView = view.findViewById(R.id.status_text);
+        statusDetailView = view.findViewById(R.id.status_detail_text);
+        statusStack = view.findViewById(R.id.status_text_stack);
+        // 两视图与拆分前的单 TextView 逐像素一致：关掉 includeFontPadding 后，
+        // 按字体度量把上下 font padding 补回结论行顶部与明细块底部（行间不重复补）。
+        applyStatusTextMetrics();
         // 启动预取：本页随 ViewPager2 一起在冷启动建页，这里只提交后台任务（进程级一次、失败静默）。
         DeployStatusCache.prefetch(requireContext());
         // 有缓存就先上内容（同一帧内替换，用户看不到骨架）；从未成功过才用预填充骨架。
         // 缓存陈旧也照常先显示，紧随其后的首探/周期刷新会交叉淡入覆盖。
         final String cachedStatus = DeployStatusCache.text();
-        statusView.setText(cachedStatus != null
-                ? PathDisplay.format(view.getContext(), cachedStatus) : prefillText());
+        applyStatusTextDirect(cachedStatus != null ? cachedStatus : prefillText(), false);
         if (cachedStatus != null && !DeployStatusCache.isStale()) {
             // 缓存还新鲜：与静默刷新同一个 30 秒节流口径，避免紧接着再跑一趟 su
             lastProbeAtMs = DeployStatusCache.atMs();
         }
-        statusStack = view.findViewById(R.id.status_text_stack);
         infoView = view.findViewById(R.id.info_text);
         logView = view.findViewById(R.id.action_log_text);
         // 空串的 TextView 仍会量出一行高，会在归档提示下留出一段空行；无记录时让它退出布局
@@ -340,11 +349,10 @@ public class StatusFragment extends Fragment implements SetupActivity.PageAware 
      * 避免覆盖真实状态；开关变化因此在「首次探测前 / 下次进页」都能生效。
      */
     private void syncPrefillVariant() {
-        TextView view = statusView;
-        if (view == null || !isAdded()) {
+        if (statusView == null || statusDetailView == null || !isAdded()) {
             return;
         }
-        String current = view.getText().toString();
+        String current = fullStatusText();
         String longText = getString(R.string.status_deploy_prefill);
         String shortText = getString(R.string.status_deploy_prefill_short);
         if (!current.equals(longText) && !current.equals(shortText)) {
@@ -352,7 +360,7 @@ public class StatusFragment extends Fragment implements SetupActivity.PageAware 
         }
         String want = PathDisplay.showFull(requireContext()) ? longText : shortText;
         if (!current.equals(want)) {
-            view.setText(want);
+            applyStatusTextDirect(want, false);
         }
     }
 
@@ -382,6 +390,7 @@ public class StatusFragment extends Fragment implements SetupActivity.PageAware 
         // 先收掉动画并复位透明度：回调里判空就返回，不给已销毁的视图留半透明残影
         cancelFade();
         statusView = null;
+        statusDetailView = null;
         infoView = null;
         logView = null;
         logBody = null;
@@ -475,9 +484,9 @@ public class StatusFragment extends Fragment implements SetupActivity.PageAware 
             return;
         }
         appendLog(getString(R.string.status_busy_probe));
-        if (!replaceDeployFirstLine(R.string.status_deploy_checking, true)) {
+        if (!replaceDeployFirstLine(R.string.status_deploy_checking)) {
             final String busy = getString(R.string.status_busy_probe);
-            if (!busy.contentEquals(statusView.getText())) {
+            if (!statusTextEquals(busy)) {
                 // 占位只换字、不改高度：避免单行占位把窗口压矮、结果到达再撑开
                 swapStatusTextAnimated(busy, true, true);
             }
@@ -492,22 +501,20 @@ public class StatusFragment extends Fragment implements SetupActivity.PageAware 
     }
 
     /**
-     * 当前状态文本以「部署状态：」开头时，只把结论行换成给定文案（正在检测 / 部署中…），
-     * 其余行原样保留。行数不变，故直接 setText（不淡变、不做高度动画）；正在选中时走既有
-     * pending 机制推迟。
+     * 当前结论行以「部署状态：」开头时，只把结论行换成给定文案（正在检测 / 部署中…），
+     * 明细块原样保留。结论行已独立成视图且不可选中，故直接 setText：不淡变、不做高度动画，
+     * 也不会清掉明细块上正在进行的选区。若上一次淡变尚未结束，走 {@link #replaceStatusTextDirect}
+     * 让旧快照按既有节奏退场，不在新文本上留残影。
      *
      * @param placeholderRes 临时首行文案（须以「部署状态：」开头）
-     * @param animated       选中期间推迟后上屏时是否播交叉淡变（来源口径同 swapStatusTextAnimated）
      * @return true = 已走首行替换；false = 当前不是部署状态文本（调用方自行决定是否回退）
      */
-    private boolean replaceDeployFirstLine(int placeholderRes, boolean animated) {
+    private boolean replaceDeployFirstLine(int placeholderRes) {
         final TextView view = statusView;
         if (view == null) {
             return false;
         }
-        final String text = view.getText().toString();
-        final int end = firstLineEnd(text);
-        final String firstLine = text.substring(0, end);
+        final String firstLine = view.getText().toString();
         if (!firstLine.startsWith(DEPLOY_STATUS_PREFIX)) {
             return false;
         }
@@ -517,23 +524,19 @@ public class StatusFragment extends Fragment implements SetupActivity.PageAware 
         }
         deployFirstLineBackup = firstLine;
         deployFirstLinePlaceholder = placeholder;
-        final String replaced = placeholder + text.substring(end);
-        if (TextCopy.isSelecting(view)) {
-            pendingStatusText = replaced;
-            pendingStatusKeepHeight = true;   // 只换字、不改高度
-            pendingStatusAnimated = animated;
-            TextCopy.runWhenSelectionEnds(view, this::flushPendingStatus);
-        } else {
-            // 中断可能还在跑的上一次淡变，避免新文本半透明叠在旧层上
-            replaceStatusTextDirect(() -> replaceFirstLine(view, end, placeholder));
-        }
+        // 中断可能还在跑的上一次淡变，避免新文本半透明叠在旧层上
+        replaceStatusTextDirect(() -> {
+            if (statusView != null) {
+                statusView.setText(placeholder);
+            }
+        });
         return true;
     }
 
     /**
      * 扫描失败时恢复被临时替换的结论行（失败分支只弹对话框、不换文本，不能把首行留在「正在检测」）。
-     * 仅在当前首行仍是该临时态时恢复，避免把过期备份写进已被其它结果覆盖的文本；
-     * 正在选中时同样走 pending 推迟。
+     * 仅在结论行仍是该临时态时恢复，避免把过期备份写进已被其它结果覆盖的文本。
+     * 明细块选中期间推迟的整段更新若首行也是该临时态，一并改回。
      */
     private void restoreDeployFirstLineIfNeeded() {
         final String backup = deployFirstLineBackup;
@@ -544,7 +547,7 @@ public class StatusFragment extends Fragment implements SetupActivity.PageAware 
         if (backup == null || placeholder == null || view == null) {
             return;
         }
-        // 替换可能还挂在 pending 里（选中期间）：把待上屏文本的首行也改回去
+        // 推迟上屏的整段更新若首行也是该临时态，把它的首行也改回去
         final String pending = pendingStatusText;
         if (pending != null) {
             final int pendingEnd = firstLineEnd(pending);
@@ -553,19 +556,14 @@ public class StatusFragment extends Fragment implements SetupActivity.PageAware 
                 pendingStatusKeepHeight = true;
             }
         }
-        final String text = view.getText().toString();
-        final int end = firstLineEnd(text);
-        if (!placeholder.equals(text.substring(0, end))) {
+        if (!placeholder.equals(view.getText().toString())) {
             return;   // 临时态已被完整结果/动作文案覆盖，无需恢复
         }
-        final String restored = backup + text.substring(end);
-        if (TextCopy.isSelecting(view)) {
-            pendingStatusText = restored;
-            pendingStatusKeepHeight = true;
-            TextCopy.runWhenSelectionEnds(view, this::flushPendingStatus);
-        } else {
-            replaceStatusTextDirect(() -> replaceFirstLine(view, end, backup));
-        }
+        replaceStatusTextDirect(() -> {
+            if (statusView != null) {
+                statusView.setText(backup);
+            }
+        });
     }
 
     /** 作废首行替换的备份（结果已整段覆盖时调用，避免过期备份被后续失败分支误用）。 */
@@ -574,26 +572,34 @@ public class StatusFragment extends Fragment implements SetupActivity.PageAware 
         deployFirstLinePlaceholder = null;
     }
 
-    /**
-     * 只替换首行、保留其余行的 span：状态文本里的路径区间（短名显示时由 PathDisplay 标记）
-     * 与着色都在后续行，字符串拼接会整体丢 span，导致路径小卡失效。
-     */
-    private static void replaceFirstLine(TextView view, int end, String replacement) {
-        CharSequence current = view.getText();
-        if (current instanceof Spannable) {
-            SpannableStringBuilder span = new SpannableStringBuilder(current);
-            span.replace(0, Math.min(end, span.length()), replacement);
-            view.setText(span);
-            return;
-        }
-        String text = current == null ? "" : current.toString();
-        view.setText(replacement + text.substring(Math.min(end, text.length())));
-    }
-
     /** 第一行结束位置（不含换行符）；无换行时返回整串长度。 */
     private static int firstLineEnd(String text) {
         final int newline = text.indexOf('\n');
         return newline < 0 ? text.length() : newline;
+    }
+
+    /** 把整段状态文本切成「结论行 + 明细块（不含开头换行）」；无换行时明细块为空串。 */
+    private static String[] splitStatusText(String text) {
+        final int end = firstLineEnd(text);
+        return end < text.length()
+                ? new String[]{text.substring(0, end), text.substring(end + 1)}
+                : new String[]{text, ""};
+    }
+
+    /** 当前两段拼回的整段文本（纯文本；用于与探测结果做「先比后写」）。 */
+    private String fullStatusText() {
+        if (statusView == null) {
+            return "";
+        }
+        final String head = statusView.getText().toString();
+        final String detail = statusDetailView == null
+                ? "" : statusDetailView.getText().toString();
+        return detail.isEmpty() ? head : head + '\n' + detail;
+    }
+
+    /** 当前状态文本是否等于给定整段文本（只比字符，不比 span）。 */
+    private boolean statusTextEquals(CharSequence value) {
+        return TextUtils.equals(fullStatusText(), value);
     }
 
     /** 静默刷新：不写记录、不做动画；扫描中复用同一趟。 */
@@ -701,7 +707,7 @@ public class StatusFragment extends Fragment implements SetupActivity.PageAware 
         if (System.currentTimeMillis() < statusHoldUntilMs) {
             return;   // 部署/拉起结果的保留期内：周期扫描不覆盖状态文本
         }
-        if (!result.contentEquals(statusView.getText())) {
+        if (!statusTextEquals(result)) {
             // 静默/周期更新直接替换，不播淡变（内容没变就一个字都不动）
             swapStatusTextAnimated(result, false, false);
         }
@@ -837,7 +843,7 @@ public class StatusFragment extends Fragment implements SetupActivity.PageAware 
         // 已有动作在跑时 runAsync 会直接返回（只写一条操作记录），此时不能换占位文案，否则会永久残留
         if (!actionRunning) {
             // 自动部署是后台动作：占位与结果都不播淡变
-            replaceDeployFirstLine(R.string.status_deploy_busy, !auto);
+            replaceDeployFirstLine(R.string.status_deploy_busy);
         }
         runAsyncBlocking(busyText, () -> {
             try {
@@ -1128,7 +1134,7 @@ public class StatusFragment extends Fragment implements SetupActivity.PageAware 
                         // 部署/拉起结果：到期前周期扫描不许覆盖
                         statusHoldUntilMs = System.currentTimeMillis() + holdStatusMs;
                     }
-                } else if (!result.contentEquals(statusView.getText())) {
+                } else if (!statusTextEquals(result)) {
                     // 先比后写：内容没变就一个字都不动；变了直接替换（自动路径，不播淡变）
                     swapStatusTextAnimated(result, false, false);
                 }
@@ -1296,70 +1302,142 @@ public class StatusFragment extends Fragment implements SetupActivity.PageAware 
     }
 
     /**
+     * 把拆分后的两个 TextView 对齐成拆分前的单 TextView：
+     * 两边都关掉 {@code includeFontPadding}（否则每段各带一份上下 font padding，行间会多出一截），
+     * 再把这份 padding 按字体度量只补在整块的头尾——结论行顶部、明细块底部。
+     * 这样每行行高、行距、首行缩进与整块上下边界都与原来一致。
+     */
+    private void applyStatusTextMetrics() {
+        if (statusView == null || statusDetailView == null) {
+            return;
+        }
+        final Paint.FontMetricsInt fm = statusView.getPaint().getFontMetricsInt();
+        statusTopPad = Math.max(0, fm.ascent - fm.top);
+        statusBottomPad = Math.max(0, fm.bottom - fm.descent);
+        statusView.setIncludeFontPadding(false);
+        statusDetailView.setIncludeFontPadding(false);
+        // 初态视作「无明细」：顶部与底部 font padding 先都由结论行承担
+        statusView.setPadding(0, statusTopPad, 0, statusBottomPad);
+        statusDetailView.setPadding(0, 0, 0, statusBottomPad);
+    }
+
+    /** 结论行的底部 font padding 只在没有明细块时承担（有明细时归明细块尾部）。 */
+    private void applyTitleBottomPad(boolean hasDetail) {
+        if (statusView == null) {
+            return;
+        }
+        final int bottom = hasDetail ? 0 : statusBottomPad;
+        if (statusView.getPaddingBottom() != bottom) {
+            statusView.setPadding(0, statusTopPad, 0, bottom);
+        }
+    }
+
+    /**
      * 状态文本上屏。<b>业务上屏零延迟</b>——新文本立即写入，不等淡出结束。
      *
+     * <p>部署状态已拆成「结论行（首行）+ 明细块（其余行）」两个视图：
+     * <b>只有结论行文本变化时</b>才对结论行播 {@link Motion#crossFade}（含模糊）；
+     * 明细块一律直接更新、不参与淡化/模糊；明细块内部变化（PID、哈希等）也不会触发结论行动画。
+     *
      * <p>{@code animated} 由<b>调用点按来源显式决定</b>：用户动作（刷新按钮、部署/卸载/拉起/kill）
-     * 传 true，走 {@link Motion#crossFade}——旧层按当前外观抓快照后渐糊渐隐、新层由糊转清；
-     * 自动刷新（周期/静默探测、首次探测、自动部署回填）传 false，<b>直接替换文本与高度</b>，
+     * 传 true；自动刷新（周期/静默探测、首次探测、自动部署回填）传 false，<b>直接替换文本与高度</b>，
      * 不播淡变、不触发模糊。系统关掉动画时 true 路径也由 {@code crossFade} 直接执行换文本。
      *
-     * <p>true 路径：文本只做交叉淡变，不裁剪、不做上下收展。行数变化时的高度复用配置页那套
-     * {@link Motion#animateHeightChange}（{@code ValueAnimator} + panelCurve、按位移定时长）：
-     * 高低都不分时机、与淡变同拍启动，并在 325ms 后与旧层消失同时到位（变矮时快照层会被
-     * 容器底部裁掉一部分，是同步的必然结果）。
+     * <p>结论行变化时，行数/高度变化仍复用配置页那套 {@link Motion#animateHeightChange}
+     * （{@code ValueAnimator} + panelCurve）：与淡变同拍启动，并在 325ms 后与旧层消失同时到位。
      *
      * @param keepHeight true = 本次只换字、不驱动高度：把当前高度钉住。
      *                   手动刷新的单行「正在探测…」占位用它，避免窗口先被占位压矮、结果到达再撑开；
      *                   结果到达的换字仍走 false，届时以钉住的高度为起点补间到结果高度。
-     * @param animated   true = 播交叉淡变（用户动作）；false = 直接替换（自动刷新/后台回填）。
+     * @param animated   true = 用户动作，结论行变化时播交叉淡变；false = 自动刷新/后台回填，一律直替。
      */
     private void swapStatusTextAnimated(final String text, boolean keepHeight, boolean animated) {
         final TextView view = statusView;
-        if (view == null || !isAdded()) {
+        if (view == null || statusDetailView == null || !isAdded()) {
             return;
         }
+        final String[] parts = splitStatusText(text);
         // 路径显示口径实时现取：上屏文本按「展示完整路径」开关裁剪，测量也按裁剪后的文本
-        final CharSequence shown = PathDisplay.format(view.getContext(), text);
+        final CharSequence shownTitle = PathDisplay.format(view.getContext(), parts[0]);
+        final CharSequence shownDetail = PathDisplay.format(view.getContext(), parts[1]);
         // 正选中时推迟上屏：setText 会清掉选择与手柄。结果不丢——存起来，选择一结束就补
-        if (TextCopy.isSelecting(view)) {
+        if (TextCopy.isSelecting(statusDetailView)) {
             pendingStatusText = text;
             pendingStatusKeepHeight = keepHeight;
             pendingStatusAnimated = animated;
-            TextCopy.runWhenSelectionEnds(view, this::flushPendingStatus);
+            TextCopy.runWhenSelectionEnds(statusDetailView, this::flushPendingStatus);
             return;
         }
         pendingStatusText = null;
         pendingStatusKeepHeight = false;
         pendingStatusAnimated = false;
         if (!animated) {
-            swapStatusTextNow(shown, keepHeight);
+            swapStatusTextNow(shownTitle, shownDetail, keepHeight);
             return;
         }
-        // 快照抓取、旧层渐糊隐去、新层由糊转清都在 crossFade 内完成；swap 里只做业务动作：
-        // 驱动高度（与淡变同拍启动）并立即写新文本，保证信息先可读
+        // 结论行没变：明细更新不播动画，高度仍按原规则处理（明细块本身直接换成新文本）
+        if (TextUtils.equals(shownTitle, view.getText())) {
+            applyStatusHeight(shownTitle, shownDetail, keepHeight);
+            showStatusParts(shownTitle, shownDetail);
+            return;
+        }
+        // 快照抓取、旧层渐糊隐去、新层由糊转清都在 crossFade 内完成，且只覆盖结论行；
+        // swap 里只做业务动作：驱动高度（与淡变同拍启动）并立即写新文本，保证信息先可读
         Motion.crossFade(() -> {
-            if (keepHeight) {
-                // 只换字：钉住当前高度（可能正在补间，先记中间值再中止），不启动高度动画。
-                // 系统关掉动画时不钉高，保持与原先"直接上屏"一致的自然高度
-                final int held = Motion.enabled(view.getContext()) ? currentStatusStackHeight() : 0;
-                Motion.cancelHeightChange(statusStack);
-                if (held > 0 && statusStack != null) {
-                    ViewGroup.LayoutParams lp = statusStack.getLayoutParams();
-                    if (lp != null) {
-                        lp.height = held;
-                    }
-                }
-            } else {
-                final int newStackHeight = measureStatusStackHeight(shown);
-                if (newStackHeight > 0) {
-                    final int from = currentStatusStackHeight();
-                    if (from > 0) {
-                        Motion.animateHeightChange(statusStack, from, newStackHeight, HEIGHT_SYNC_MS);
-                    }
+            applyStatusHeight(shownTitle, shownDetail, keepHeight);
+            showStatusParts(shownTitle, shownDetail);
+        }, view);
+    }
+
+    /** 按原始整段文本直替（首次上屏/骨架切换用）：路径裁剪与分段都在这里统一处理，不播动画。 */
+    private void applyStatusTextDirect(String text, boolean keepHeight) {
+        if (statusView == null || statusDetailView == null) {
+            return;
+        }
+        final String[] parts = splitStatusText(text);
+        swapStatusTextNow(
+                PathDisplay.format(statusView.getContext(), parts[0]),
+                PathDisplay.format(statusView.getContext(), parts[1]),
+                keepHeight);
+    }
+
+    /** 高度处理（动画/直替共用）：keepHeight 钉住当前高；否则补间到新文本的自然高。 */
+    private void applyStatusHeight(CharSequence title, CharSequence detail, boolean keepHeight) {
+        if (statusView == null) {
+            return;
+        }
+        if (keepHeight) {
+            // 只换字：钉住当前高度（可能正在补间，先记中间值再中止），不启动高度动画。
+            // 系统关掉动画时不钉高，保持与原先"直接上屏"一致的自然高度
+            final int held = Motion.enabled(statusView.getContext()) ? currentStatusStackHeight() : 0;
+            Motion.cancelHeightChange(statusStack);
+            if (held > 0 && statusStack != null) {
+                ViewGroup.LayoutParams lp = statusStack.getLayoutParams();
+                if (lp != null) {
+                    lp.height = held;
                 }
             }
-            view.setText(shown);
-        }, view);
+            return;
+        }
+        final int newStackHeight = measureStatusStackHeight(title, detail);
+        if (newStackHeight > 0) {
+            final int from = currentStatusStackHeight();
+            if (from > 0) {
+                Motion.animateHeightChange(statusStack, from, newStackHeight, HEIGHT_SYNC_MS);
+            }
+        }
+    }
+
+    /** 两段文本直接写进各自视图；明细块为空时退出布局（空 TextView 会量出一行高）。 */
+    private void showStatusParts(CharSequence title, CharSequence detail) {
+        if (statusView == null || statusDetailView == null) {
+            return;
+        }
+        final boolean hasDetail = detail != null && detail.length() > 0;
+        applyTitleBottomPad(hasDetail);
+        statusView.setText(title);
+        statusDetailView.setText(hasDetail ? detail : "");
+        statusDetailView.setVisibility(hasDetail ? View.VISIBLE : View.GONE);
     }
 
     /**
@@ -1367,9 +1445,8 @@ public class StatusFragment extends Fragment implements SetupActivity.PageAware 
      * 高度语义与原路径一致：{@code keepHeight} 钉住当前高度；否则还原 {@code WRAP_CONTENT}，
      * 由新文本自然高度决定（无补间）。
      */
-    private void swapStatusTextNow(CharSequence shown, boolean keepHeight) {
-        final TextView view = statusView;
-        if (view == null) {
+    private void swapStatusTextNow(CharSequence title, CharSequence detail, boolean keepHeight) {
+        if (statusView == null || statusDetailView == null) {
             return;
         }
         final int held = keepHeight ? currentStatusStackHeight() : 0;
@@ -1380,25 +1457,35 @@ public class StatusFragment extends Fragment implements SetupActivity.PageAware 
                 lp.height = held;
             }
         }
-        view.setText(shown);
+        showStatusParts(title, detail);
     }
 
     /**
-     * 叠放层在给定文本下的自然高度（像素）：文本自然高 + 子 TextView 的 {@code marginTop}。
-     * FrameLayout 的 {@code wrap_content} 高度把子 View 的外边距算在内，故必须补上这一段。
+     * 叠放层在给定文本下的自然高度（像素）：结论行高 + 明细块高 + 结论行的 {@code marginTop}。
+     * 两段都按同一可用宽测量（明细块可能 GONE、自身宽为 0，故显式传入结论行的宽）。
      * 宽度尚未排版时返回 -1（量不出真实换行，调用方据此放弃高度补间）。
      */
-    private int measureStatusStackHeight(CharSequence text) {
-        if (statusView == null || statusView.getWidth() <= 0) {
+    private int measureStatusStackHeight(CharSequence title, CharSequence detail) {
+        if (statusView == null || statusDetailView == null) {
             return -1;
         }
-        int textHeight = Motion.measureTextHeight(statusView, text);
+        final int width = statusView.getWidth();
+        if (width <= 0) {
+            return -1;
+        }
+        final boolean hasDetail = detail != null && detail.length() > 0;
+        // 先按目标文本调整尾部 padding 归属，再量：单行时结论行带底部 padding，多行时归明细块
+        applyTitleBottomPad(hasDetail);
+        int height = Motion.measureTextHeight(statusView, title, width);
+        if (hasDetail) {
+            height += Motion.measureTextHeight(statusDetailView, detail, width);
+        }
         int topMargin = 0;
         ViewGroup.LayoutParams lp = statusView.getLayoutParams();
         if (lp instanceof ViewGroup.MarginLayoutParams) {
             topMargin = ((ViewGroup.MarginLayoutParams) lp).topMargin;
         }
-        return textHeight + topMargin;
+        return height + topMargin;
     }
 
     /**
@@ -1419,7 +1506,8 @@ public class StatusFragment extends Fragment implements SetupActivity.PageAware 
     /** 把选中期间推迟的状态文本补上（选择已结束或页面重新可见时调用）。 */
     private void flushPendingStatus() {
         String pending = pendingStatusText;
-        if (pending == null || statusView == null || TextCopy.isSelecting(statusView)) {
+        if (pending == null || statusView == null || statusDetailView == null
+                || TextCopy.isSelecting(statusDetailView)) {
             return;
         }
         boolean keepHeight = pendingStatusKeepHeight;

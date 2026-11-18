@@ -1095,10 +1095,17 @@ public final class Motion {
      * 用于内容驱动的高度变化（状态卡换字）按时长模型补间——位移量在改动前无法直接得知。
      */
     static int measureTextHeight(TextView view, CharSequence target) {
+        return measureTextHeight(view, target, view == null ? 0 : view.getWidth());
+    }
+
+    /**
+     * 同上，按调用方给定的宽测量：用于 GONE（尚未排版、自身宽为 0）的分段视图——
+     * 状态页明细块默认 GONE，测量时必须借用同一行的结论行宽度，否则会量成 0。
+     */
+    static int measureTextHeight(TextView view, CharSequence target, int width) {
         if (view == null) {
             return 0;
         }
-        int width = view.getWidth();
         if (width <= 0) {
             return view.getHeight();
         }
