@@ -1,0 +1,26 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    部署状态明细的一行：静态键 + 动态值。
+    值在下、键在上（FrameLayout 后画的在上）：值文本的第一行用 LeadingMarginSpan 让出键宽，
+    后续换行回到行首——与原单块 TextView 的换行位置一致；键只负责在让出的区域绘制。
+    两者同字体、同基线；行高由值（可能多行）决定。
+-->
+<FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content">
+
+    <TextView
+        android:id="@+id/status_detail_value"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:includeFontPadding="false"
+        android:textAppearance="@style/TextAppearance.B6XTempCtrl.Mono" />
+
+    <TextView
+        android:id="@+id/status_detail_key"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:includeFontPadding="false"
+        android:textAppearance="@style/TextAppearance.B6XTempCtrl.Mono"
+        android:visibility="gone" />
+</FrameLayout>

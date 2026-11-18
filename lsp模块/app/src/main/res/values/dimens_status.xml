@@ -62,6 +62,13 @@
         新开专用项而非改 space_s，因为后者被多页共用。
     -->
     <dimen name="status_progress_gap">0dp</dimen>
+
+    <!--
+        探测提示（脚本自动重推 / 同步清单未刷新）与上方状态块之间的间隔：8dp。
+        提示视图放在 status_text_stack 之后、进度条之前；它自己只设这个上间距，
+        下方仍走 status_progress_gap(0dp)，故无提示时状态块到进度条的间距保持原值不变。
+    -->
+    <dimen name="status_notice_gap">8dp</dimen>
     <!--
         原 diag_body_max_height(200dp) 已删：它只服务"操作记录限高 + 内部滚动"，
         该方案本轮已按用户裁定改为与配置·曲线页诊断卡同款（自适应高、无内部滚动），

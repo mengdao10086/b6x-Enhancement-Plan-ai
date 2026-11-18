@@ -69,7 +69,7 @@
     <string name="status_root_later">稍后</string>
 
     <!-- 状态页：脚本哈希不一致时的自动重推 -->
-    <string name="status_script_autofixed">检测到 service.d 脚本与 APK 内不一致，已自动重推脚本（二进制未动）</string>
+    <string name="status_script_autofixed">检测到 service.d 脚本与 APK 内不一致，已自动重推脚本</string>
     <string name="status_script_autofix_failed">检测到 service.d 脚本与 APK 内不一致，自动重推失败：</string>
     <!-- 第三种状态：重推成功但 c-daemon 没在跑。只报"已自动重推"会把"进程没起来"盖掉，只报"失败"又与事实不符 -->
     <string name="status_script_autofixed_no_daemon">检测到 service.d 脚本与 APK 内不一致，已自动重推脚本；但当前未探测到 c-daemon 在运行（灭屏或正在重部署时会稍晚，否则请点「拉起daemon」）</string>

@@ -84,15 +84,32 @@
                             android:textAppearance="@style/TextAppearance.B6XTempCtrl.Mono" />
                     </LinearLayout>
 
-                    <TextView
-                        android:id="@+id/status_detail_text"
+                    <!--
+                        明细块逐行容器：每行由 StatusFragment 按「静态键 + 动态值」构建
+                        （见 item_status_detail_line.xml），值变化时只对该行的值做淡化+模糊。
+                        长按整块复制全文（拆行后系统跨行选区无法保留）。
+                    -->
+                    <LinearLayout
+                        android:id="@+id/status_detail_list"
                         android:layout_width="match_parent"
                         android:layout_height="wrap_content"
-                        android:includeFontPadding="false"
-                        android:textAppearance="@style/TextAppearance.B6XTempCtrl.Mono"
-                        android:textIsSelectable="true"
+                        android:orientation="vertical"
                         android:visibility="gone" />
                 </LinearLayout>
+
+                <!--
+                    探测提示（脚本自动重推三选一 / 同步清单未刷新）：不并进状态文本、不参与行级
+                    动画，直接更新；有内容才显示。放在状态块之后、进度条之前，上间距用
+                    status_notice_gap，下间距仍由进度条的 status_progress_gap(0dp) 承担。
+                -->
+                <TextView
+                    android:id="@+id/status_probe_notice"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="@dimen/status_notice_gap"
+                    android:textAppearance="@style/TextAppearance.B6XTempCtrl.Caption"
+                    android:textColor="@color/app_on_surface_variant"
+                    android:visibility="gone" />
 
                 <!--
                     进度条常占位：从首帧起就占住这块高度（invisible 不是 gone），

@@ -21,6 +21,7 @@ import android.provider.DocumentsContract;
 import android.text.Layout;
 import android.text.Selection;
 import android.text.Spannable;
+import android.text.SpannableString;
 import android.text.Spanned;
 import android.text.style.ForegroundColorSpan;
 import android.util.Log;
@@ -199,6 +200,31 @@ final class TextCopy {
                 installPathSelection(group.getChildAt(i));
             }
         }
+    }
+
+    /**
+     * 给一段要上屏的文本补路径强调色，不安装选择/触摸逻辑。
+     * 供拆行后的非可选中视图（状态页明细行）沿用原来的路径着色观感；返回的 Spannable 可直接 setText。
+     */
+    @NonNull
+    static CharSequence withPathColors(@NonNull TextView view, @Nullable CharSequence text) {
+        final CharSequence source = text == null ? "" : text;
+        if (!isPathCopyEnabled(view.getContext())) {
+            return source;
+        }
+        final Spannable spannable = source instanceof Spannable
+                ? (Spannable) source : new SpannableString(source);
+        final int color;
+        try {
+            color = MaterialColors.getColor(view, androidx.appcompat.R.attr.colorPrimary);
+        } catch (RuntimeException e) {
+            return spannable;   // 主题异常时不着色
+        }
+        for (PathSpan span : findPathSpans(spannable)) {
+            spannable.setSpan(new PathColorSpan(color), span.start, span.end,
+                    Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+        }
+        return spannable;
     }
 
     /**

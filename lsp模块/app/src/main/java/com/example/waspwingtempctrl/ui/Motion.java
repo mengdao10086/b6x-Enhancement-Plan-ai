@@ -32,7 +32,6 @@ import android.view.animation.Interpolator;
 import android.view.animation.LinearInterpolator;
 import android.view.animation.PathInterpolator;
 import android.widget.ImageView;
-import android.widget.TextView;
 
 import androidx.annotation.Nullable;
 
@@ -368,6 +367,40 @@ public final class Motion {
             }
             MAIN.postDelayed(run, FADE_OUT_DELAY_MS + FADE_OUT_MS + 16L);
         }
+    }
+
+    /**
+     * 单视图淡入：只做 alpha 0→1（{@link #FADE_IN_MS}、线性），不抓旧快照、不叠加模糊。
+     * 用于「新增行只让新值淡入」这类没有旧内容可交叉的场景；系统关动效时直接置为不透明。
+     */
+    static void fadeIn(@Nullable View v) {
+        if (v == null) {
+            return;
+        }
+        v.animate().cancel();
+        if (!enabled(v.getContext())) {
+            v.setAlpha(1f);
+            return;
+        }
+        v.setAlpha(0f);
+        v.animate().alpha(1f).setDuration(FADE_IN_MS).setInterpolator(FADE_CURVE).start();
+    }
+
+    /**
+     * 取消某个视图上正在跑的交叉淡化（连同同一轮的其它视图一起收尾），并复位 alpha 与模糊。
+     * 用于「明细行被直接改写」前收掉可能残留的淡变，避免旧快照继续绘制。
+     */
+    static void cancelCrossFade(@Nullable View v) {
+        if (v == null) {
+            return;
+        }
+        CrossFadeRun running = CROSS_FADES.remove(v);
+        if (running != null) {
+            running.finish();
+        }
+        v.animate().cancel();
+        v.setAlpha(1f);
+        applyViewBlur(v, 0f);
     }
 
     /**
@@ -1156,34 +1189,6 @@ public final class Motion {
             return mlp.leftMargin + mlp.rightMargin;
         }
         return 0;
-    }
-
-    /**
-     * 预测把 {@code target} 文本换给 {@code view} 后的高度（不改视图最终状态：测完即还原）。
-     * 用于内容驱动的高度变化（状态卡换字）按时长模型补间——位移量在改动前无法直接得知。
-     */
-    static int measureTextHeight(TextView view, CharSequence target) {
-        return measureTextHeight(view, target, view == null ? 0 : view.getWidth());
-    }
-
-    /**
-     * 同上，按调用方给定的宽测量：用于 GONE（尚未排版、自身宽为 0）的分段视图——
-     * 状态页明细块默认 GONE，测量时必须借用同一行的结论行宽度，否则会量成 0。
-     */
-    static int measureTextHeight(TextView view, CharSequence target, int width) {
-        if (view == null) {
-            return 0;
-        }
-        if (width <= 0) {
-            return view.getHeight();
-        }
-        CharSequence old = view.getText();
-        view.setText(target);
-        view.measure(View.MeasureSpec.makeMeasureSpec(width, View.MeasureSpec.EXACTLY),
-                View.MeasureSpec.makeMeasureSpec(0, View.MeasureSpec.UNSPECIFIED));
-        int measured = view.getMeasuredHeight();
-        view.setText(old);
-        return measured;
     }
 
     /**

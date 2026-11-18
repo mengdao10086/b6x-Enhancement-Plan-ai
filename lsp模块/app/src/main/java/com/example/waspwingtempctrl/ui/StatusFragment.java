@@ -8,11 +8,16 @@ import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
+import android.text.SpannableStringBuilder;
+import android.text.Spanned;
 import android.text.TextUtils;
+import android.text.style.LeadingMarginSpan;
 import android.view.LayoutInflater;
 import android.view.View;
 import android.view.ViewGroup;
+import android.widget.FrameLayout;
 import android.widget.ImageView;
+import android.widget.LinearLayout;
 import android.widget.TextView;
 import android.widget.Toast;
 
@@ -29,8 +34,10 @@ import com.example.waspwingtempctrl.R;
 import java.text.SimpleDateFormat;
 import java.util.ArrayList;
 import java.util.Date;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
 
 /**
  * 状态页：部署状态 / 一键部署 / 卸载部署 / 拉起daemon / 刷新状态 / kill daemon。
@@ -108,8 +115,16 @@ public class StatusFragment extends Fragment implements SetupActivity.PageAware 
     private TextView statusLabelView;
     /** 结论行容器（标签 + 动态值同行，基线对齐）。头部 font padding 由它承担。 */
     private View statusSummaryRow;
-    /** 部署状态的明细块（结论行之后的全部内容）：一律直接更新，不参与淡化/模糊。 */
-    private TextView statusDetailView;
+    /** 部署状态的明细块逐行容器：每行一个「静态键 + 动态值」，只对变化的值播动画。 */
+    private LinearLayout statusDetailList;
+    /** 探测提示（脚本自动重推 / 同步清单未刷新）：在状态块下方单独显示，不参与行级动画。 */
+    private TextView statusProbeNoticeView;
+    /** 最近一次探测产生的提示文本；空串 = 不显示。后台线程写、主线程读。 */
+    private volatile String probeNotices = "";
+    /** 当前已挂载的明细行视图（按显示顺序）。 */
+    private final List<DetailRow> detailRows = new ArrayList<>();
+    /** 最近一帧的明细行模型（宽度变化时按它重排，不播动画）。 */
+    private List<DetailLine> detailModels = new ArrayList<>();
     /** 拆分后补在整块头/尾的 font padding（像素）：结论行顶部固定用它，
      *  底部 padding 归明细块；明细为空时改由结论行承担，保证单行状态与拆分前等高。 */
     private int statusTopPad;
@@ -135,13 +150,6 @@ public class StatusFragment extends Fragment implements SetupActivity.PageAware 
      * 选择一结束就补上（否则跳过的那几条记录会永久丢失）。
      */
     private String logText = "";
-    /** 选中期间被推迟上屏的状态文本；选择结束后由 {@link #flushPendingStatus()} 补。 */
-    @Nullable
-    private String pendingStatusText;
-    /** {@link #pendingStatusText} 是否属于「只换字、不改高度」的占位换字（见 keepHeight）。 */
-    private boolean pendingStatusKeepHeight;
-    /** {@link #pendingStatusText} 上屏时是否播交叉淡变（用户动作 true；自动刷新/后台回填 false）。 */
-    private boolean pendingStatusAnimated;
     /** 「部署状态」动态值临时替换前的原文（不含标签）；null = 当前没有待恢复的替换。 */
     @Nullable
     private String deployFirstLineBackup;
@@ -244,8 +252,17 @@ public class StatusFragment extends Fragment implements SetupActivity.PageAware 
         statusView = view.findViewById(R.id.status_text);
         statusLabelView = view.findViewById(R.id.status_label_text);
         statusSummaryRow = view.findViewById(R.id.status_summary_row);
-        statusDetailView = view.findViewById(R.id.status_detail_text);
+        statusDetailList = view.findViewById(R.id.status_detail_list);
+        statusProbeNoticeView = view.findViewById(R.id.status_probe_notice);
         statusStack = view.findViewById(R.id.status_text_stack);
+        // 拆行后系统跨行选区无法保留：整个状态块长按复制全文（结论 + 明细，见 TextCopy.copyOnLongPress）
+        TextCopy.copyOnLongPress(statusStack, this::statusCopyText);
+        // 宽度变化（旋转/分屏）时按新宽度重算「键是否能与值同行」，直接重排、不播动画
+        statusDetailList.addOnLayoutChangeListener((v, l, t, r, b, ol, ot, or, ob) -> {
+            if (r - l != or - ol && !detailModels.isEmpty()) {
+                renderDetailLines(detailModels, false);
+            }
+        });
         // 两视图与拆分前的单 TextView 逐像素一致：关掉 includeFontPadding 后，
         // 按字体度量把上下 font padding 补回结论行顶部与明细块底部（行间不重复补）。
         applyStatusTextMetrics();
@@ -326,8 +343,6 @@ public class StatusFragment extends Fragment implements SetupActivity.PageAware 
             return;
         }
         firstProbeIfNeeded();
-        // 选中期间攒下的结果，回到本页时若无选择就补上
-        flushPendingStatus();
         startPeriodicRefresh();
     }
 
@@ -355,7 +370,8 @@ public class StatusFragment extends Fragment implements SetupActivity.PageAware 
      * 避免覆盖真实状态；开关变化因此在「首次探测前 / 下次进页」都能生效。
      */
     private void syncPrefillVariant() {
-        if (statusView == null || statusDetailView == null || !isAdded()) {
+        if (statusView == null || statusDetailList == null || statusSummaryRow == null
+                || !isAdded()) {
             return;
         }
         String current = fullStatusText();
@@ -398,7 +414,10 @@ public class StatusFragment extends Fragment implements SetupActivity.PageAware 
         statusView = null;
         statusLabelView = null;
         statusSummaryRow = null;
-        statusDetailView = null;
+        detailRows.clear();
+        detailModels = new ArrayList<>();
+        statusDetailList = null;
+        statusProbeNoticeView = null;
         infoView = null;
         logView = null;
         logBody = null;
@@ -557,15 +576,6 @@ public class StatusFragment extends Fragment implements SetupActivity.PageAware 
         if (backup == null || placeholder == null || view == null) {
             return;
         }
-        // 推迟上屏的整段更新若首行也是该临时态（标签仍在、值为临时值），把它的首行也改回去
-        final String pending = pendingStatusText;
-        if (pending != null) {
-            final int pendingEnd = firstLineEnd(pending);
-            if ((DEPLOY_STATUS_PREFIX + placeholder).equals(pending.substring(0, pendingEnd))) {
-                pendingStatusText = DEPLOY_STATUS_PREFIX + backup + pending.substring(pendingEnd);
-                pendingStatusKeepHeight = true;
-            }
-        }
         if (!placeholder.equals(view.getText().toString())) {
             return;   // 临时态已被完整结果/动作文案覆盖，无需恢复
         }
@@ -596,7 +606,7 @@ public class StatusFragment extends Fragment implements SetupActivity.PageAware 
                 : new String[]{text, ""};
     }
 
-    /** 当前「标签 + 动态值 + 明细块」拼回的整段文本（纯文本；用于「先比后写」）。 */
+    /** 当前「标签 + 动态值 + 明细块」拼回的整段显示文本（用于「先比后写」）。 */
     private String fullStatusText() {
         if (statusView == null) {
             return "";
@@ -605,9 +615,41 @@ public class StatusFragment extends Fragment implements SetupActivity.PageAware 
                 && statusLabelView.getVisibility() == View.VISIBLE;
         final String head = (hasLabel ? DEPLOY_STATUS_PREFIX : "")
                 + statusView.getText().toString();
-        final String detail = statusDetailView == null
-                ? "" : statusDetailView.getText().toString();
+        final String detail = detailDisplayText();
         return detail.isEmpty() ? head : head + '\n' + detail;
+    }
+
+    /** 当前明细行按显示顺序拼回（不含末尾换行）；无行时为空串。 */
+    private String detailDisplayText() {
+        if (detailRows.isEmpty()) {
+            return "";
+        }
+        StringBuilder sb = new StringBuilder();
+        for (int i = 0; i < detailRows.size(); i++) {
+            DetailRow row = detailRows.get(i);
+            if (i > 0) {
+                sb.append('\n');
+            }
+            sb.append(row.displayKey).append(row.displayValue);
+        }
+        return sb.toString();
+    }
+
+    /** 长按复制用的整块全文（结论 + 明细）：明细保留原始完整路径，不按「展示完整路径」开关裁剪。 */
+    private CharSequence statusCopyText() {
+        final StringBuilder sb = new StringBuilder();
+        final boolean hasLabel = statusLabelView != null
+                && statusLabelView.getVisibility() == View.VISIBLE;
+        if (hasLabel) {
+            sb.append(DEPLOY_STATUS_PREFIX);
+        }
+        if (statusView != null) {
+            sb.append(statusView.getText());
+        }
+        for (DetailLine line : detailModels) {
+            sb.append('\n').append(line.key).append(line.value);
+        }
+        return sb.toString();
     }
 
     /** 当前状态文本是否等于给定整段文本（只比字符，不比 span）。 */
@@ -690,6 +732,8 @@ public class StatusFragment extends Fragment implements SetupActivity.PageAware 
 
     /** 把扫描结果分发给监听者：手动播动画并写记录，静默只做「比后写」。 */
     private void renderScanResult(String result, boolean manual, boolean silent, boolean failed) {
+        // 提示与状态文本独立：即使状态文本没变，也要把本次探测得到的提示上屏
+        updateProbeNoticeView();
         if (manual) {
             appendLog(result);
             if (failed) {
@@ -769,7 +813,8 @@ public class StatusFragment extends Fragment implements SetupActivity.PageAware 
         final Deployer deployer = Deployer.get(app);
         Deployer.Status status = deployer.probe();
         lastProbeExpectedMd5 = status.binExpectedMd5;
-        final String head;
+        // 探测提示不再拼进状态文本：脚本重推与同步清单各占一行，由状态块下方的独立视图直接显示
+        final StringBuilder notices = new StringBuilder();
         // su 不可用时不尝试（否则每次进页面都白撞一次授权框）
         if (allowAutoFix && status.suOk && status.scriptPresent && !status.scriptHashOk) {
             // 三选一，判据取自紧随其后的那次 probe（更晚、更权威，且不额外增加 su 往返）——见 app/逻辑说明.md §8.1
@@ -784,9 +829,7 @@ public class StatusFragment extends Fragment implements SetupActivity.PageAware 
             } else {
                 res = R.string.status_script_autofixed;
             }
-            head = app.getString(res) + "\n\n";
-        } else {
-            head = "";
+            notices.append(app.getString(res));
         }
         // 同步清单只随 APK 变（进程存活期内 APK 不可能变）：成功刷新过就不再重复读盘，失败仍重试
         final String manifestNote;
@@ -798,6 +841,13 @@ public class StatusFragment extends Fragment implements SetupActivity.PageAware 
                 syncManifestDone = true;   // 成功（含"无需刷新"）：本进程不再重复
             }
         }
+        if (manifestNote != null) {
+            if (notices.length() > 0) {
+                notices.append('\n');
+            }
+            notices.append(manifestNote);
+        }
+        probeNotices = notices.toString().trim();
         armDeployPrompt(app, status);
         rememberDeployedBinMd5(app, status);
         // 顺手记下本次探测的 root 可用性：落页判定下次冷启动据此判"root 尚未取得"（见 app/逻辑说明.md §5.1）。
@@ -812,9 +862,9 @@ public class StatusFragment extends Fragment implements SetupActivity.PageAware 
         }
         // 兜底归一：源侧已保证 describe() 不产出末尾换行（见 app/逻辑说明.md §8.1），这里仍 trim 一次。
         // 「先比后写」的 contentEquals 与写入都用这一份，否则每 5 秒静默复探都会被判成变化。
-        final String result = (head + (manifestNote == null ? "" : manifestNote + "\n")
-                + status.describe()).trim();
-        // 回写进程内缓存：下次建页（含旋转/返回本页）直接拿它上屏，再后台刷新
+        final String result = status.describe().trim();
+        // 回写进程内缓存：下次建页（含旋转/返回本页）直接拿它上屏，再后台刷新。
+        // 缓存只存状态文本本身，不存探测提示（提示随下一次探测重新得出）。
         DeployStatusCache.store(result);
         return result;
     }
@@ -1127,6 +1177,7 @@ public class StatusFragment extends Fragment implements SetupActivity.PageAware 
                 // 结果已回到主线程：本动作到此结束，先放掉占用——紧接着要接的那一段（after）
                 // 才不会被守卫挡在门外
                 finishAction(generation);
+                updateProbeNoticeView();   // 探测提示独立于状态文本，直接上屏
                 if (manual) {
                     appendLog(result);
                 }
@@ -1315,14 +1366,14 @@ public class StatusFragment extends Fragment implements SetupActivity.PageAware 
     }
 
     /**
-     * 把三段（静态标签 + 动态值 + 明细块）对齐成拆分前的单 TextView：
+     * 把「标签 + 动态值 + 逐行明细」对齐成拆分前的单 TextView：
      * 全部关掉 {@code includeFontPadding}，再把这份 padding 按字体度量只补在整块的头尾——
-     * 结论行容器（summary row）的顶部、明细块底部；明细为空时底部改由结论行容器承担。
+     * 结论行容器（summary row）的顶部、明细列表底部；明细为空时底部改由结论行容器承担。
      * 这样每行行高、行距、首行缩进与整块上下边界都与原来一致。
      */
     private void applyStatusTextMetrics() {
         if (statusView == null || statusLabelView == null
-                || statusDetailView == null || statusSummaryRow == null) {
+                || statusDetailList == null || statusSummaryRow == null) {
             return;
         }
         final Paint.FontMetricsInt fm = statusView.getPaint().getFontMetricsInt();
@@ -1330,13 +1381,12 @@ public class StatusFragment extends Fragment implements SetupActivity.PageAware 
         statusBottomPad = Math.max(0, fm.bottom - fm.descent);
         statusLabelView.setIncludeFontPadding(false);
         statusView.setIncludeFontPadding(false);
-        statusDetailView.setIncludeFontPadding(false);
-        // 初态视作「无明细」：头部 padding 由结论行容器承担，明细块只承担尾部
+        // 初态视作「无明细」：头部 padding 由结论行容器承担，明细列表只承担尾部
         applySummaryBottomPad(false);
-        statusDetailView.setPadding(0, 0, 0, statusBottomPad);
+        statusDetailList.setPadding(0, 0, 0, statusBottomPad);
     }
 
-    /** 结论行容器的量高把头部 font padding 算在内；底部 padding 只在没有明细块时承担。 */
+    /** 结论行容器的量高把头部 font padding 算在内；底部 padding 只在没有明细行时承担。 */
     private void applySummaryBottomPad(boolean hasDetail) {
         if (statusSummaryRow == null) {
             return;
@@ -1348,61 +1398,52 @@ public class StatusFragment extends Fragment implements SetupActivity.PageAware 
     /**
      * 状态文本上屏。<b>业务上屏零延迟</b>——新文本立即写入，不等淡出结束。
      *
-     * <p>部署状态已拆成「静态标签 + 动态值 + 明细块」三个视图：
-     * <b>只有动态值文本变化时</b>才对动态值播 {@link Motion#crossFade}（含模糊）；
-     * 静态标签（「部署状态：」）与明细块都不参与淡化/模糊；明细块内部变化（PID、哈希等）
-     * 也不会触发动态值的动画。
+     * <p>部署状态已拆成「静态标签 + 动态值」与「逐行明细（键 + 值）」：
+     * <b>只有动态值 / 某行明细值文本变化时</b>才对对应值视图播 {@link Motion#crossFade}（含模糊）；
+     * 静态标签、静态键、未变化的行都不参与淡化/模糊。
      *
      * <p>{@code animated} 由<b>调用点按来源显式决定</b>：用户动作（刷新按钮、部署/卸载/拉起/kill）
      * 传 true；自动刷新（周期/静默探测、首次探测、自动部署回填）传 false，<b>直接替换文本与高度</b>，
      * 不播淡变、不触发模糊。系统关掉动画时 true 路径也由 {@code crossFade} 直接执行换文本。
      *
-     * <p>动态值变化时，行数/高度变化仍复用配置页那套 {@link Motion#animateHeightChange}
-     * （{@code ValueAnimator} + panelCurve）：与淡变同拍启动，并在 325ms 后与旧层消失同时到位。
+     * <p>值变化时，整体高度变化仍复用配置页那套 {@link Motion#animateHeightChange}
+     * （{@code ValueAnimator} + panelCurve）：与各值淡变同拍启动，并在 325ms 后同时到位。
      *
      * @param keepHeight true = 本次只换字、不驱动高度：把当前高度钉住。
      *                   手动刷新的单行「正在探测…」占位用它，避免窗口先被占位压矮、结果到达再撑开；
      *                   结果到达的换字仍走 false，届时以钉住的高度为起点补间到结果高度。
-     * @param animated   true = 用户动作，动态值变化时播交叉淡变；false = 自动刷新/后台回填，一律直替。
+     * @param animated   true = 用户动作，值变化时播交叉淡变；false = 自动刷新/后台回填，一律直替。
      */
     private void swapStatusTextAnimated(final String text, boolean keepHeight, boolean animated) {
         final TextView view = statusView;
         if (view == null || statusLabelView == null
-                || statusDetailView == null || statusSummaryRow == null || !isAdded()) {
+                || statusDetailList == null || statusSummaryRow == null || !isAdded()) {
             return;
         }
+        updateProbeNoticeView();   // 探测提示直接更新，不参与行级动画
         final String[] parts = splitStatusText(text);
-        // 路径显示口径实时现取：上屏文本按「展示完整路径」开关裁剪，测量也按裁剪后的文本
+        // 路径显示口径实时现取：结论与每行的键/值各自裁剪
         final CharSequence shownConclusion = PathDisplay.format(view.getContext(), parts[0]);
-        final CharSequence shownDetail = PathDisplay.format(view.getContext(), parts[1]);
-        // 正选中时推迟上屏：setText 会清掉选择与手柄。结果不丢——存起来，选择一结束就补
-        if (TextCopy.isSelecting(statusDetailView)) {
-            pendingStatusText = text;
-            pendingStatusKeepHeight = keepHeight;
-            pendingStatusAnimated = animated;
-            TextCopy.runWhenSelectionEnds(statusDetailView, this::flushPendingStatus);
-            return;
-        }
-        pendingStatusText = null;
-        pendingStatusKeepHeight = false;
-        pendingStatusAnimated = false;
+        final List<DetailLine> models = parseDetailLines(parts[1]);
         if (!animated) {
-            swapStatusTextNow(shownConclusion, shownDetail, keepHeight);
+            swapStatusTextNow(shownConclusion, models, keepHeight);
             return;
         }
-        // 动态值没变：标签/明细更新不播动画，高度仍按原规则处理
+        final int from = currentStatusStackHeight();
+        final boolean animationsEnabled = Motion.enabled(view.getContext());
         final String shownValue = dynamicValue(shownConclusion.toString());
-        if (TextUtils.equals(shownValue, view.getText())) {
-            applyStatusHeight(shownConclusion, shownDetail, keepHeight);
-            showStatusParts(shownConclusion, shownDetail);
+        final boolean valueChanged = !TextUtils.equals(shownValue, view.getText());
+        final Runnable apply = () -> {
+            showStatusParts(shownConclusion, models, true);
+            applyStatusHeightAfterShow(keepHeight, from, animationsEnabled);
+        };
+        if (!valueChanged) {
+            // 结论动态值没变：明细行按各自值是否变化独立决定动画
+            apply.run();
             return;
         }
-        // 快照抓取、旧层渐糊隐去、新层由糊转清都在 crossFade 内完成，且只覆盖动态值；
-        // swap 里只做业务动作：标签/明细直替、驱动高度（与淡变同拍启动）并立即写新值
-        Motion.crossFade(() -> {
-            applyStatusHeight(shownConclusion, shownDetail, keepHeight);
-            showStatusParts(shownConclusion, shownDetail);
-        }, view);
+        // 快照只覆盖结论动态值；明细行的淡变在 swap 内各自发起，同拍启动
+        Motion.crossFade(apply, view);
     }
 
     /** 结论行去掉静态标签后的动态值（无标签时就是整行）。 */
@@ -1413,54 +1454,70 @@ public class StatusFragment extends Fragment implements SetupActivity.PageAware 
 
     /** 按原始整段文本直替（首次上屏/骨架切换用）：路径裁剪与分段都在这里统一处理，不播动画。 */
     private void applyStatusTextDirect(String text, boolean keepHeight) {
-        if (statusView == null || statusDetailView == null) {
+        if (statusView == null || statusDetailList == null || statusSummaryRow == null) {
             return;
         }
         final String[] parts = splitStatusText(text);
         swapStatusTextNow(
                 PathDisplay.format(statusView.getContext(), parts[0]),
-                PathDisplay.format(statusView.getContext(), parts[1]),
+                parseDetailLines(parts[1]),
                 keepHeight);
     }
 
-    /** 高度处理（动画/直替共用）：keepHeight 钉住当前高；否则补间到新文本的自然高。 */
-    private void applyStatusHeight(CharSequence conclusion, CharSequence detail, boolean keepHeight) {
-        if (statusView == null) {
+    /** 上屏后处理整体高度：keepHeight 钉住进入本次更新前的高度；否则补间到新自然高。 */
+    private void applyStatusHeightAfterShow(boolean keepHeight, int fromPx, boolean animationsEnabled) {
+        if (statusStack == null) {
             return;
         }
         if (keepHeight) {
-            // 只换字：钉住当前高度（可能正在补间，先记中间值再中止），不启动高度动画。
-            // 系统关掉动画时不钉高，保持与原先"直接上屏"一致的自然高度
-            final int held = Motion.enabled(statusView.getContext()) ? currentStatusStackHeight() : 0;
+            // 只换字：钉住当前高度（可能正在补间，先记中间值再中止），不启动高度动画
             Motion.cancelHeightChange(statusStack);
-            if (held > 0 && statusStack != null) {
+            if (animationsEnabled && fromPx > 0) {
                 ViewGroup.LayoutParams lp = statusStack.getLayoutParams();
                 if (lp != null) {
-                    lp.height = held;
+                    lp.height = fromPx;
                 }
             }
             return;
         }
-        final int newStackHeight = measureStatusStackHeight(conclusion, detail);
-        if (newStackHeight > 0) {
-            final int from = currentStatusStackHeight();
-            if (from > 0) {
-                Motion.animateHeightChange(statusStack, from, newStackHeight, HEIGHT_SYNC_MS);
+        final int toPx = measureStatusStackHeightNow();
+        if (fromPx > 0 && toPx > 0) {
+            Motion.animateHeightChange(statusStack, fromPx, toPx, HEIGHT_SYNC_MS);
+        } else {
+            Motion.cancelHeightChange(statusStack);
+        }
+    }
+
+    /** 探测提示直接上屏/隐藏：不参与行级 diff 与模糊，有内容才显示。 */
+    private void updateProbeNoticeView() {
+        if (statusProbeNoticeView == null) {
+            return;
+        }
+        final String text = probeNotices;
+        final boolean show = text != null && !text.isEmpty();
+        if (show) {
+            if (!TextUtils.equals(text, statusProbeNoticeView.getText())) {
+                statusProbeNoticeView.setText(
+                        TextCopy.withPathColors(statusProbeNoticeView, text));
             }
+            statusProbeNoticeView.setVisibility(View.VISIBLE);
+        } else {
+            statusProbeNoticeView.setText("");
+            statusProbeNoticeView.setVisibility(View.GONE);
         }
     }
 
     /**
      * 结论行按静态标签拆开：标签只随形态显隐、永远直替；动态值单独写。
-     * 明细块为空时退出布局（空 TextView 会量出一行高）。
+     * 明细行交给 {@link #renderDetailLines(List, boolean)} 逐行 diff。
      */
-    private void showStatusParts(CharSequence conclusion, CharSequence detail) {
-        if (statusView == null || statusLabelView == null || statusDetailView == null) {
+    private void showStatusParts(CharSequence conclusion, List<DetailLine> models, boolean animateValues) {
+        if (statusView == null || statusLabelView == null || statusDetailList == null) {
             return;
         }
         final String head = conclusion == null ? "" : conclusion.toString();
         final boolean hasLabel = head.startsWith(DEPLOY_STATUS_PREFIX);
-        final boolean hasDetail = detail != null && detail.length() > 0;
+        final boolean hasDetail = models != null && !models.isEmpty();
         applySummaryBottomPad(hasDetail);
         if (hasLabel) {
             statusLabelView.setText(DEPLOY_STATUS_PREFIX);
@@ -1471,8 +1528,7 @@ public class StatusFragment extends Fragment implements SetupActivity.PageAware 
             statusLabelView.setVisibility(View.GONE);
             statusView.setText(head);
         }
-        statusDetailView.setText(hasDetail ? detail : "");
-        statusDetailView.setVisibility(hasDetail ? View.VISIBLE : View.GONE);
+        renderDetailLines(models == null ? new ArrayList<>() : models, animateValues);
     }
 
     /**
@@ -1480,10 +1536,11 @@ public class StatusFragment extends Fragment implements SetupActivity.PageAware 
      * 高度语义与原路径一致：{@code keepHeight} 钉住当前高度；否则还原 {@code WRAP_CONTENT}，
      * 由新文本自然高度决定（无补间）。
      */
-    private void swapStatusTextNow(CharSequence conclusion, CharSequence detail, boolean keepHeight) {
-        if (statusView == null || statusDetailView == null) {
+    private void swapStatusTextNow(CharSequence conclusion, List<DetailLine> models, boolean keepHeight) {
+        if (statusView == null || statusDetailList == null || statusSummaryRow == null) {
             return;
         }
+        updateProbeNoticeView();   // 探测提示直接更新，不参与行级动画
         final int held = keepHeight ? currentStatusStackHeight() : 0;
         cancelFade();   // 取消可能继承自用户动作的 alpha/高度补间，并复位透明度
         if (held > 0 && statusStack != null) {
@@ -1492,17 +1549,187 @@ public class StatusFragment extends Fragment implements SetupActivity.PageAware 
                 lp.height = held;
             }
         }
-        showStatusParts(conclusion, detail);
+        showStatusParts(conclusion, models, false);
     }
 
     /**
-     * 叠放层在给定文本下的自然高度（像素）：结论行高 + 明细块高 + 结论行容器的 {@code marginTop}。
-     * 结论行由「标签 + 动态值」同行组成，行高与值长短无关；头部 padding 与单行尾部 padding
-     * 由结论行容器承担。两段都按同一可用宽测量（明细块可能 GONE、自身宽为 0，故显式传入宽度）。
-     * 宽度尚未排版时返回 -1（量不出真实换行，调用方据此放弃高度补间）。
+     * 明细行渲染：按 {@code id} 复用行视图，只对「值文本变化」的行播交叉淡变；
+     * 新增行只让它的值淡入；删除行直接移除（避免旧行淡出期间参与布局导致高度抖动）。
+     * 值文本按 {@link PathDisplay} 现取，键只随形态直替。
      */
-    private int measureStatusStackHeight(CharSequence conclusion, CharSequence detail) {
-        if (statusView == null || statusDetailView == null || statusSummaryRow == null) {
+    private void renderDetailLines(List<DetailLine> models, boolean animateValues) {
+        if (statusDetailList == null) {
+            return;
+        }
+        detailModels = models;
+        final Map<String, DetailRow> reusable = new HashMap<>();
+        for (DetailRow row : detailRows) {
+            reusable.put(row.id, row);
+        }
+        final List<DetailRow> next = new ArrayList<>();
+        for (DetailLine line : models) {
+            DetailRow row = reusable.remove(line.id);
+            final boolean added = row == null;
+            if (row == null) {
+                row = createDetailRow(line.id);
+            }
+            bindDetailRow(row, line, animateValues, added);
+            next.add(row);
+        }
+        for (DetailRow removed : reusable.values()) {
+            Motion.cancelCrossFade(removed.value);
+            statusDetailList.removeView(removed.root);
+        }
+        // 复用行的顺序可能因提示行增减而变化：按新顺序重排（不重建视图）
+        for (int i = 0; i < next.size(); i++) {
+            DetailRow row = next.get(i);
+            if (statusDetailList.indexOfChild(row.root) != i) {
+                statusDetailList.removeView(row.root);
+                statusDetailList.addView(row.root, i);
+            }
+        }
+        detailRows.clear();
+        detailRows.addAll(next);
+        statusDetailList.setVisibility(next.isEmpty() ? View.GONE : View.VISIBLE);
+        // 新增行的值淡入放在挂载之后启动（未附着的 View 不保证动画能跑）
+        for (DetailRow row : next) {
+            if (row.pendingFadeIn) {
+                row.pendingFadeIn = false;
+                Motion.fadeIn(row.value);
+            }
+        }
+    }
+
+    /** 新建一行：FrameLayout（值在下、键在上）从模板填充。 */
+    private DetailRow createDetailRow(String id) {
+        FrameLayout root = (FrameLayout) LayoutInflater.from(statusDetailList.getContext())
+                .inflate(R.layout.item_status_detail_line, statusDetailList, false);
+        TextView keyView = root.findViewById(R.id.status_detail_key);
+        TextView valueView = root.findViewById(R.id.status_detail_value);
+        keyView.setIncludeFontPadding(false);
+        valueView.setIncludeFontPadding(false);
+        return new DetailRow(id, root, keyView, valueView);
+    }
+
+    /**
+     * 绑定一行：键宽能让出至少 {@code 24dp} 给值时，用「键叠加 + 值首行缩进」保持与原单行
+     * 完全相同的换行；键本身过长时退化为整行一个值视图（键并入值文本），保证不出现 0 宽值。
+     */
+    private void bindDetailRow(DetailRow row, DetailLine line, boolean animateValues, boolean added) {
+        final Context ctx = statusDetailList.getContext();
+        // 路径着色沿用拆行前的观感：键/值各自补强调色（不安装选择/触摸逻辑）
+        final CharSequence keyColors = TextCopy.withPathColors(row.key,
+                PathDisplay.format(ctx, line.key));
+        final CharSequence valueColors = TextCopy.withPathColors(row.value,
+                PathDisplay.format(ctx, line.value));
+        final String displayKey = keyColors.toString();
+        final String displayValue = valueColors.toString();
+        final int fullWidth = detailWidth();
+        final int keyWidth;
+        if (displayKey.isEmpty()) {
+            keyWidth = 0;
+        } else if (TextUtils.equals(displayKey, row.measuredKey)) {
+            keyWidth = row.keyNatWidth;   // 同一键不重复量、也不重复 setText
+        } else {
+            keyWidth = measureKeyWidth(row, displayKey);
+            row.measuredKey = displayKey;
+            row.keyNatWidth = keyWidth;
+        }
+        final boolean split = !displayKey.isEmpty() && fullWidth > 0
+                && keyWidth + dp(24) <= fullWidth;
+        final CharSequence shownValue = split ? valueColors : TextUtils.concat(keyColors, valueColors);
+        final String valueText = shownValue.toString();
+        final String shownKey = split ? displayKey : "";
+        final int indent = split ? keyWidth : 0;
+
+        // 只有「值文本」变化才播动画；键/缩进变化直接重排；三者都没变则一个字都不动
+        final boolean valueChanged = !TextUtils.equals(valueText, row.appliedValue);
+        final boolean keyChanged = !TextUtils.equals(shownKey, row.displayKey);
+        final boolean layoutChanged = split != row.split || indent != row.indentPx;
+
+        row.rawKey = line.key;
+        row.rawValue = line.value;
+        if (!added && !valueChanged && !keyChanged && !layoutChanged) {
+            return;   // 完全无变化：不碰视图，也不取消可能正在跑的用户动作动画
+        }
+
+        row.displayKey = shownKey;
+        row.displayValue = valueText;
+        row.split = split;
+        row.indentPx = indent;
+
+        final int keyVisibility = split ? View.VISIBLE : View.GONE;
+        if (keyChanged) {
+            row.key.setText(keyColors);
+        }
+        if (keyChanged || row.key.getVisibility() != keyVisibility) {
+            row.key.setVisibility(keyVisibility);   // 长键退化时确保键层不残留可见
+        }
+
+        if (animateValues && !added && valueChanged) {
+            // 只对变化的值播淡化+模糊；键和未变化的行不动
+            Motion.crossFade(() -> applyDetailValue(row.value, shownValue, indent), row.value);
+        } else {
+            Motion.cancelCrossFade(row.value);
+            applyDetailValue(row.value, shownValue, indent);
+            row.pendingFadeIn = animateValues && added;   // 挂载后再淡入（见 renderDetailLines）
+        }
+        row.appliedValue = valueText;
+    }
+
+    /** 键的自然宽度（按当前字体/字距实量）；空键返回 0。 */
+    private int measureKeyWidth(DetailRow row, String text) {
+        if (text.isEmpty()) {
+            return 0;
+        }
+        row.key.setText(text);
+        row.key.setVisibility(View.VISIBLE);
+        row.key.measure(View.MeasureSpec.makeMeasureSpec(0, View.MeasureSpec.UNSPECIFIED),
+                View.MeasureSpec.makeMeasureSpec(0, View.MeasureSpec.UNSPECIFIED));
+        return row.key.getMeasuredWidth();
+    }
+
+    /**
+     * 值上屏：首行缩进 {@code indent}、后续行回到行首（与原单块文本的换行一致）；
+     * 保留路径强调色；空行补一个空格保住行高。
+     */
+    private static void applyDetailValue(TextView view, CharSequence text, int indent) {
+        if (view == null) {
+            return;
+        }
+        final CharSequence source = text == null ? "" : text;
+        final SpannableStringBuilder span = new SpannableStringBuilder(source);
+        if (span.length() == 0) {
+            span.append(' ');
+        }
+        if (indent > 0) {
+            span.setSpan(new LeadingMarginSpan.Standard(indent, 0), 0, span.length(),
+                    Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+        }
+        view.setText(span);
+    }
+
+    /** 明细可用宽：优先已布局实宽，其次结论行宽，最后按屏幕宽扣除页面/卡片内边距估算。 */
+    private int detailWidth() {
+        if (statusDetailList != null && statusDetailList.getWidth() > 0) {
+            return statusDetailList.getWidth();
+        }
+        if (statusStack != null && statusStack.getWidth() > 0) {
+            return statusStack.getWidth();
+        }
+        return Math.max(1, getResources().getDisplayMetrics().widthPixels - dp(56));
+    }
+
+    private int dp(int value) {
+        return Math.round(value * getResources().getDisplayMetrics().density);
+    }
+
+    /**
+     * 叠放层当前自然高度（像素）：直接量已上屏的结论行容器 + 明细列表，再加结论行容器的
+     * {@code marginTop}。宽度尚未排版时返回 -1（调用方据此放弃高度补间）。
+     */
+    private int measureStatusStackHeightNow() {
+        if (statusSummaryRow == null) {
             return -1;
         }
         final int width = statusSummaryRow.getWidth() > 0
@@ -1511,25 +1738,143 @@ public class StatusFragment extends Fragment implements SetupActivity.PageAware 
         if (width <= 0) {
             return -1;
         }
-        final boolean hasDetail = detail != null && detail.length() > 0;
-        // 先按目标文本调整尾部 padding 归属，再量：单行时结论行容器带底部 padding，多行时归明细块
-        applySummaryBottomPad(hasDetail);
-        final String head = conclusion == null ? "" : conclusion.toString();
-        String value = dynamicValue(head);
-        if (value.isEmpty()) {
-            value = " ";   // 空串也要量到一行行高（结论行本身始终占一行）
+        statusSummaryRow.measure(View.MeasureSpec.makeMeasureSpec(width, View.MeasureSpec.EXACTLY),
+                View.MeasureSpec.makeMeasureSpec(0, View.MeasureSpec.UNSPECIFIED));
+        int height = statusSummaryRow.getMeasuredHeight();
+        if (statusDetailList != null && statusDetailList.getVisibility() == View.VISIBLE) {
+            statusDetailList.measure(
+                    View.MeasureSpec.makeMeasureSpec(width, View.MeasureSpec.EXACTLY),
+                    View.MeasureSpec.makeMeasureSpec(0, View.MeasureSpec.UNSPECIFIED));
+            height += statusDetailList.getMeasuredHeight();
         }
-        int height = Motion.measureTextHeight(statusView, value, width)
-                + statusTopPad + (hasDetail ? 0 : statusBottomPad);
-        if (hasDetail) {
-            height += Motion.measureTextHeight(statusDetailView, detail, width);
-        }
-        int topMargin = 0;
         ViewGroup.LayoutParams lp = statusSummaryRow.getLayoutParams();
         if (lp instanceof ViewGroup.MarginLayoutParams) {
-            topMargin = ((ViewGroup.MarginLayoutParams) lp).topMargin;
+            height += ((ViewGroup.MarginLayoutParams) lp).topMargin;
         }
-        return height + topMargin;
+        return height;
+    }
+
+    // ==================== 明细行模型 ====================
+
+    /** 键前缀常量：与 {@code Deployer.Status.describe()} 的输出结构一一对应。 */
+    private static final String DETAIL_BINARY_PREFIX = "  二进制 ";
+    private static final String DETAIL_SCRIPT_PREFIX = "  service.d 脚本：";
+    private static final String DETAIL_CONFIG_PREFIX = "  配置 ";
+    private static final String DETAIL_DAEMON_PREFIX = "  c-daemon：";
+    private static final String DETAIL_WATCHDOG_PREFIX = "  sh-watchdog：";
+    private static final String DETAIL_NOTE_PREFIX = "  提示：";
+    private static final String DETAIL_HASH_BOTH = "    apk = 设备 = ";
+    private static final String DETAIL_HASH_APK = "    apk  = ";
+    private static final String DETAIL_HASH_DEV = "    设备 = ";
+
+    /** 一行明细的模型：静态前缀 + 动态值；id 用于跨帧复用行视图。 */
+    private static final class DetailLine {
+        final String id;
+        final String key;
+        final String value;
+
+        DetailLine(String id, String key, String value) {
+            this.id = id;
+            this.key = key;
+            this.value = value;
+        }
+    }
+
+    /** 已挂载的一行：值和键是独立视图，只有值参与动画。 */
+    private static final class DetailRow {
+        final String id;
+        final FrameLayout root;
+        final TextView key;
+        final TextView value;
+        String rawKey = "";
+        String rawValue = "";
+        String displayKey = "";
+        String displayValue = "";
+        String appliedValue = "";
+        /** 上次量过的键文本与自然宽度：键不变时连测量/setText 都跳过。 */
+        String measuredKey = "";
+        int keyNatWidth;
+        boolean split;
+        int indentPx;
+        /** 新增行挂载后等待一次值淡入。 */
+        boolean pendingFadeIn;
+
+        DetailRow(String id, FrameLayout root, TextView key, TextView value) {
+            this.id = id;
+            this.root = root;
+            this.key = key;
+            this.value = value;
+        }
+    }
+
+    /** 把明细整块文本解析成行模型；无法识别的行按「整行是值」兜底（如自动重推提示、空行）。 */
+    private static List<DetailLine> parseDetailLines(String detail) {
+        final List<DetailLine> lines = new ArrayList<>();
+        if (detail == null || detail.isEmpty()) {
+            return lines;
+        }
+        String section = "other";
+        int noteIndex = 0;
+        int rawIndex = 0;
+        for (String line : detail.split("\n", -1)) {
+            if (line.startsWith(DETAIL_BINARY_PREFIX)) {
+                int colon = line.indexOf('：', DETAIL_BINARY_PREFIX.length());
+                if (colon > 0) {
+                    lines.add(new DetailLine("binary", line.substring(0, colon + 1),
+                            line.substring(colon + 1)));
+                    section = "binary";
+                    continue;
+                }
+            }
+            if (line.startsWith(DETAIL_SCRIPT_PREFIX)) {
+                lines.add(new DetailLine("script", DETAIL_SCRIPT_PREFIX,
+                        line.substring(DETAIL_SCRIPT_PREFIX.length())));
+                section = "script";
+                continue;
+            }
+            if (line.startsWith(DETAIL_HASH_BOTH)) {
+                lines.add(new DetailLine(section + ".hash.both", DETAIL_HASH_BOTH,
+                        line.substring(DETAIL_HASH_BOTH.length())));
+                continue;
+            }
+            if (line.startsWith(DETAIL_HASH_APK)) {
+                lines.add(new DetailLine(section + ".hash.apk", DETAIL_HASH_APK,
+                        line.substring(DETAIL_HASH_APK.length())));
+                continue;
+            }
+            if (line.startsWith(DETAIL_HASH_DEV)) {
+                lines.add(new DetailLine(section + ".hash.dev", DETAIL_HASH_DEV,
+                        line.substring(DETAIL_HASH_DEV.length())));
+                continue;
+            }
+            if (line.startsWith(DETAIL_CONFIG_PREFIX)) {
+                int colon = line.indexOf('：', DETAIL_CONFIG_PREFIX.length());
+                if (colon > 0) {
+                    lines.add(new DetailLine("config", line.substring(0, colon + 1),
+                            line.substring(colon + 1)));
+                    continue;
+                }
+            }
+            if (line.startsWith(DETAIL_DAEMON_PREFIX)) {
+                lines.add(new DetailLine("daemon", DETAIL_DAEMON_PREFIX,
+                        line.substring(DETAIL_DAEMON_PREFIX.length())));
+                continue;
+            }
+            if (line.startsWith(DETAIL_WATCHDOG_PREFIX)) {
+                lines.add(new DetailLine("watchdog", DETAIL_WATCHDOG_PREFIX,
+                        line.substring(DETAIL_WATCHDOG_PREFIX.length())));
+                continue;
+            }
+            if (line.startsWith(DETAIL_NOTE_PREFIX)) {
+                lines.add(new DetailLine("note:" + noteIndex, DETAIL_NOTE_PREFIX,
+                        line.substring(DETAIL_NOTE_PREFIX.length())));
+                noteIndex++;
+                continue;
+            }
+            lines.add(new DetailLine("raw:" + rawIndex, "", line));
+            rawIndex++;
+        }
+        return lines;
     }
 
     /**
@@ -1547,31 +1892,19 @@ public class StatusFragment extends Fragment implements SetupActivity.PageAware 
         return statusStack.getHeight();
     }
 
-    /** 把选中期间推迟的状态文本补上（选择已结束或页面重新可见时调用）。 */
-    private void flushPendingStatus() {
-        String pending = pendingStatusText;
-        if (pending == null || statusView == null || statusDetailView == null
-                || TextCopy.isSelecting(statusDetailView)) {
-            return;
-        }
-        boolean keepHeight = pendingStatusKeepHeight;
-        boolean animated = pendingStatusAnimated;
-        pendingStatusText = null;
-        pendingStatusKeepHeight = false;
-        pendingStatusAnimated = false;
-        swapStatusTextAnimated(pending, keepHeight, animated);
-    }
-
     /**
-     * 中止高度补间并把承载层还原为 {@code WRAP_CONTENT}，同时让当前文本立即可读
+     * 中止本轮所有淡变与高度补间，并把承载层还原为 {@code WRAP_CONTENT}，同时让当前文本立即可读
      * （离开本页 / 视图销毁 / 直接改写文本前收尾）。
      * <p>{@link Motion#crossFade} 的快照层由它自己按 325ms（另加 16ms 收尾）退场并回收，这里不再介入；
-     * 下次 {@code crossFade} 调用也会先收掉上一轮。
+     * 下次 {@code crossFade} 调用也会先收掉上一轮。明细行逐值取消——直接替换时不能让旧行快照继续绘制。
      */
     private void cancelFade() {
         if (statusView != null) {
             statusView.animate().cancel();
             statusView.setAlpha(1f);
+        }
+        for (DetailRow row : detailRows) {
+            Motion.cancelCrossFade(row.value);
         }
         Motion.cancelHeightChange(statusStack);
     }
