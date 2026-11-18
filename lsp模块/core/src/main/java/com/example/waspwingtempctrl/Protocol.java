@@ -38,11 +38,6 @@ public final class Protocol {
     public static final String STF_RPM_RUN = "RPM_RUN=";
     public static final String STF_COLD_REAL = "COLD_REAL=";
     public static final String STF_COLD_RUN = "COLD_RUN=";
-    public static final String STF_EXP_ON = "EXP_ON=";
-    public static final String STF_EXP_AVAILABLE = "EXP_AVAILABLE=";
-    public static final String STF_EXP_VALUE = "EXP_VALUE=";
-    public static final String STF_EXP_WANT = "EXP_WANT=";
-    public static final String STF_EXP_WANT_AT = "EXP_WANT_AT=";
     public static final String STF_QUEUE_LEN = "QUEUE_LEN=";
     public static final String STF_QUEUE_OLDEST_MS = "QUEUE_OLDEST_MS=";
     public static final String STF_DROP_TOTAL = "DROP_TOTAL=";
@@ -60,7 +55,6 @@ public final class Protocol {
     public static final String EXTRA_WIND_LEVEL = "windLevel";
     public static final String EXTRA_MODE_CUSTOM = "modeCustom";
     public static final String EXTRA_EXTRA = "extra";
-    public static final String EXTRA_EXPERIMENTAL = "experimental";
 
     // ==================== 路径与文件名 ====================
     public static final String PATH_STATUS_B6 = "/data/local/tmp/tempctrl_b6x.status";

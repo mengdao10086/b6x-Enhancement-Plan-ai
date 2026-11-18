@@ -49,24 +49,12 @@
 | `mode` | int | 0=智能温控, 1=固定功率（模块协议值）。B6X 下发前由模块换算为宿主同款 SDK mode=2，B7X 原样使用 1 |
 | `temperature` | int | 目标温度 (°C)，智能温控模式 |
 | `windOC` | int | 风扇固定转速 (RPM)，固定功率模式 |
-| `coldOC` | int | 制冷片强度（B6X: 0-194，实验模式开启时 0-229；B7X: 0-255），固定功率模式。194=SDK/硬件上限，190=温控默认下发上限（`PID_COLD_RANGE` 可调） |
+| `coldOC` | int | 制冷片强度（B6X: 0-194；B7X: 0-255），固定功率模式。194=SDK/硬件上限，190=温控默认下发上限（`PID_COLD_RANGE` 可调） |
 | `windLevel` | int | 风扇转速上限 (RPM)，智能温控模式 |
 | `modeCustom` | int | 保留（传 0） |
 | `extra` | int | 保留（传 0） |
-| `experimental` | int | 1=实验模式生效（仅 B6X；daemon 按配置与设备判定）。钩子据此决定配对顺序：开→先 `0x52(当前冷值≤229)` 再 `0x23`；关→先 `0x23(≤194)` 再 `0x52`；0=B7X、未开启或 PERF 未启用 |
 
 > ⚠️ **`mode` 与回传 `RUN_MODE` 不是同一枚举，不可直接比对**：下发 `mode` 是模块协议值（0=智能温控 / 1=固定功率）；`RUN_MODE` 是设备回传的 SDK 原值（B6X：0=智能 / 1=手动 / 2=超频，宿主「固定功率」对应 2；B7X：0=智能 / 1=手动 / 2=超频 / 3=实验智能，宿主「Fixed power」对应 1 或 2）。B6X 的 mode=2 换算只在模块下发命令时进行，状态文件里的 `RUN_MODE` 仍为设备真实回传。
-
-### B6X 实验模式（0x52 + 0x23 锁步）
-
-- **分工**：`0x52`（`setExperimentalRunMode`）管实验上限/开关，`value` 发当前制冷目标（≤229；0=关）；制冷设定值只由 `0x23`（固定功率 `setRunMode`）承载。230 不再作为任何下发参数（真机表明设备会把它当制冷档执行）。
-- **开启**：daemon 每 1 秒下发一条 `experimental=1` 广播；钩子收到后先 `0x52(当前冷值≤229)`、再 `0x23(当前冷值，≤229)`。设备实际运行档连续 30 秒 >194 后退避到 2 秒一对。
-- **关闭**：配置关闭时 daemon 立即补发一条 `experimental=0`、冷值已钳 ≤194 的广播；钩子先 `0x23` 再 `0x52` 关，之后不再刷实验节拍。
-- **控制权**：`EXPERIMENT_MODE`（模块配置）是唯一意图源。飞智 App 的实验开关只做显示与请求——手动点击写一次配置（经 status 的 `EXP_WANT/EXP_WANT_AT`），宿主自动调用按配置改写；`EXP_ON/EXP_VALUE` 反映设备真值。
-- **冷值与实验标记分命名空间**：`0x52` 的 value、`0x23` 冷槽、广播 `coldOC`、daemon 的 `actual_cold/sent_cold/last_cold` 一律 ≤229（B7X ≤255）；模块调 SDK 前、daemon 拼广播前各有一道最后钳制。
-- **回传消毒**：设备若把实验标记/异常值（如历史 230）回显进 `COLD_REAL/COLD_RUN`，写入端与 daemon 读取端都按 229 处理并计数记日志（30 秒一条），不进入 PID/去重/ramp；`EXP_VALUE` 单独保存。若 `EXP_VALUE` 与发送值不一致，另记一条限频日志（判断设备是否把 value 当冷值）。
-- **PERF 解耦**：`EXPERIMENT_MODE` 不依赖性能层即可解析/发布；`PERF_ENABLED=0` 时 daemon 记一条「实验模式已开但温控未启用」，uiprefs 发布 `EXP_AVAILABLE=0`，status 同步该字段，钩子按不可用=关处理。
-- **降级**：若设备 `EXP_ON=1`、目标 >194 但 `COLD_RUN` 连续 10 秒 ≤194，判定固件实际运行档硬顶，退避到 5 秒并记录「仅设定值解锁」。
 
 ```bash
 # B6X 智能温控：目标 16°C，风扇上限 4000RPM
@@ -127,11 +115,6 @@ am broadcast -a com.flydigi.SET_TEMPERATURE_B7 \
 | `RPM_RUN=` | 设备实际风扇转速原始值（0x13 `value[0x0b]<<8 \| value[0x0a]`，与 `RPM_REAL` 的设定回显不同） | `getSpeed()` | int |
 | `COLD_REAL=` | 制冷设定回显（经超频逻辑折算） | `getRealColdLevel()` | int |
 | `COLD_RUN=` | 实际制冷运行档（设备 0x13 包 byte[0x0f]，与 `COLD_REAL` 的设定回显不同） | `getColdRunLevel()` | int |
-| `EXP_ON=` | 设备实验模式开关回传（0/1；缺行=未知）。不做任何字段改写，反映设备真值 | `isExperimentalRunModeOn()` | int |
-| `EXP_VALUE=` | 设备实验模式值回传（原样；缺行=未知；仅供判读，不参与任何冷值控制） | `getExperimentalRunModeValue()` | int |
-| `EXP_AVAILABLE=` | 实验模式当前是否可用：1=配置开且 `PERF_ENABLED=1`；0=已开但温控未启用（daemon 经 uiprefs 发布） | uiprefs 转写 | int |
-| `EXP_WANT=` | 实验模式配置写入请求（0/1，仅 B6X）：宿主实验页手动开关点一次写一次，daemon 读后写回 `EXPERIMENT_MODE` | 模块内部 | int |
-| `EXP_WANT_AT=` | 上述请求的 epoch 毫秒时间戳（token，daemon 按此去重；请求保留 10 秒） | 模块内部 | long |
 
 ### 解析端（tempctrl `read_status_ble_both` → `select_active_device`）
 
@@ -182,10 +165,8 @@ COLD_REAL=115
 
 ## 界面开关文件协议（daemon → 钩子）
 
-需要送达宿主编进程的界面开关有三个：`UI_BACK_HIDE`（「返回隐藏后台」，返回键每次读取）、
-`BT_AUTO_ENABLE_SEC`（断连自动开蓝牙间隔，钩子按 tick 读取、带 30s 缓存）与
-`EXPERIMENT_MODE`/`EXP_AVAILABLE`（实验模式的配置意图与实际可用性，钩子按 2s 缓存读取，
-决定 0x52/0x23 配对与冷值上限；`EXP_AVAILABLE=0` 时按关处理）。
+需要送达宿主进程的界面开关有两个：`UI_BACK_HIDE`（「返回隐藏后台」，返回键每次读取）与
+`BT_AUTO_ENABLE_SEC`（断连自动开蓝牙间隔，钩子按 tick 读取、带 30s 缓存）。
 文件还携带 `GATE_LE`（类型门禁放行）——它已无独立开关，恒等于 `APP_LAUNCH_ENABLED` 的镜像，
 供旧版模块继续读取。
 界面与钩子分属两个进程、不共享内存，故由 daemon 转写成标志文件：
@@ -193,8 +174,8 @@ COLD_REAL=115
 | 项 | 值 |
 |---|---|
 | 路径 | `/data/local/tmp/tempctrl_uiprefs` |
-| 内容 | `BACK_HIDE=0/1`、`GATE_LE=0/1`、`BT_ON_SEC=<秒>`、`EXPERIMENT_MODE=0/1` 与 `EXP_AVAILABLE=0/1`（各一行，换行结尾；`.tmp` + `rename` 原子替换） |
-| 写入方 | tempctrl daemon（root），每次配置重载时按需写（五值都没变才不写）；`GATE_LE` 恒为 `APP_LAUNCH_ENABLED ? 1 : 0`；`EXPERIMENT_MODE` 是配置意图（与 PERF 解耦发布），`EXP_AVAILABLE` 是实际可用性（`EXPERIMENT_MODE && PERF_ENABLED`） |
+| 内容 | `BACK_HIDE=0/1`、`GATE_LE=0/1`、`BT_ON_SEC=<秒>`（各一行，换行结尾；`.tmp` + `rename` 原子替换） |
+| 写入方 | tempctrl daemon（root），每次配置重载时按需写（三值都没变才不写）；`GATE_LE` 恒为 `APP_LAUNCH_ENABLED ? 1 : 0` |
 | 读取方 | `MainHook.readBackHideEnabled()` 与 `btAutoEnableSec()`（宿主 app 进程）；前者**读不到按 1（开启）**、后者**读不到按 300 秒（开启）**处理 |
 
 > 方向与 status 文件相反：status 是「钩子写、daemon 读」，本文件是「daemon 写、钩子读」。

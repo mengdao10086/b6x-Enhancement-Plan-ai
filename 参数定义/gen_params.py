@@ -629,7 +629,7 @@ def c_layer_defaults(definition, group):
         if entry["type"] == "path":
             continue
         if entry.get("perfReset", True) is False:
-            continue                      # 用户明确意图的开关不随层开关复位（如 EXPERIMENT_MODE）
+            continue                      # 用户明确意图的开关不随层开关复位
         c_vars = c_vars_all.get(entry["key"]) or []
         if entry["type"] == "multi":
             for i, field in enumerate(entry.get("fields") or []):

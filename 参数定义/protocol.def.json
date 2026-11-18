@@ -37,11 +37,6 @@
       {"name": "RPM_RUN", "const": "STF_RPM_RUN", "desc": "设备实际转速原始值"},
       {"name": "COLD_REAL", "const": "STF_COLD_REAL", "desc": "设定制冷回显"},
       {"name": "COLD_RUN", "const": "STF_COLD_RUN", "desc": "实际运行档"},
-      {"name": "EXP_ON", "const": "STF_EXP_ON", "desc": "设备实验模式开关回传（0/1，缺失=未知）"},
-      {"name": "EXP_AVAILABLE", "const": "STF_EXP_AVAILABLE", "desc": "实验模式当前是否可用（1=配置开且 PERF_ENABLED=1；0=已开但温控未启用）"},
-      {"name": "EXP_VALUE", "const": "STF_EXP_VALUE", "desc": "设备实验模式值回传（原样，缺失=未知）"},
-      {"name": "EXP_WANT", "const": "STF_EXP_WANT", "desc": "实验模式配置写入请求（宿主手动开关，0/1；仅 B6X）"},
-      {"name": "EXP_WANT_AT", "const": "STF_EXP_WANT_AT", "desc": "配置写入请求时间戳（epoch 毫秒；daemon 按 token 去重）"},
       {"name": "QUEUE_LEN", "const": "STF_QUEUE_LEN", "desc": "命令队列长度（runFetchLoop 是否在消费）"},
       {"name": "QUEUE_OLDEST_MS", "const": "STF_QUEUE_OLDEST_MS", "desc": "队首命令已等待毫秒（0=队列空）"},
       {"name": "DROP_TOTAL", "const": "STF_DROP_TOTAL", "desc": "累计丢弃命令数（背压/上限/老化）"},
@@ -56,7 +51,7 @@
       {"id": "b6", "value": "com.flydigi.SET_TEMPERATURE", "cConst": "BROADCAST_ACTION_B6X", "javaConst": "ACTION_TEMP_B6"},
       {"id": "b7", "value": "com.flydigi.SET_TEMPERATURE_B7", "cConst": "BROADCAST_ACTION_B7X", "javaConst": "ACTION_TEMP_B7"}
     ],
-    "extras": ["mode", "temperature", "windOC", "coldOC", "windLevel", "modeCustom", "extra", "experimental"]
+    "extras": ["mode", "temperature", "windOC", "coldOC", "windLevel", "modeCustom", "extra"]
   },
   "coldmax": {
     "field": "COLD_MAX=",
