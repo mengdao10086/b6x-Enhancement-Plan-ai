@@ -31,6 +31,7 @@
 #define PROTO_PATH_STATUS_B7        "/data/local/tmp/tempctrl_b7x.status"
 #define PROTO_PATH_UIPREFS          "/data/local/tmp/tempctrl_uiprefs"
 #define PROTO_PATH_BT_REQ           "/data/local/tmp/tempctrl_bt_req"
+#define PROTO_PATH_MODULE_RESTART   "/data/local/tmp/tempctrl_module_restart"
 #define PROTO_PATH_TEMP_STOP        "/data/local/tmp/tempctrl_temp_stop"
 #define PROTO_NAME_TEMP_STOP_BOOT   "tempctrl_temp_stop_boot"
 #define PROTO_PATH_TEMP_STOP_BOOT   PRIVATE_DIR "/tempctrl_temp_stop_boot"
@@ -98,6 +99,7 @@ enum WebuiDataCol {
     X(PROTO_PATH_LOCK_FALLBACK) \
     X(PROTO_PATH_SCRIPT_MODERN) \
     X(PROTO_PATH_SCRIPT_KSU) \
-    X(PROTO_PATH_LOG_FALLBACK)
+    X(PROTO_PATH_LOG_FALLBACK) \
+    X(PROTO_PATH_MODULE_RESTART)
 
 #endif  /* PROTOCOL_GENERATED_H */

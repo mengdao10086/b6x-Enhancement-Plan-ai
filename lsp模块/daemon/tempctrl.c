@@ -202,6 +202,8 @@ struct TempCfg {
     int LOG_MAX;
     // 自动拉起散热器 app（优先上次使用的 app）
     int APP_LAUNCH_ENABLED;    // 总开关：1=允许自动拉起，0=关闭（默认关，刷入时可选开）
+    // AUTO_RESTART_ON_UPDATE：1=检测到模块更新后重启宿主（daemon 转发到 uiprefs 并执行重启请求）
+    int auto_restart_on_update;
     // APP_LAUNCH_TIMING 第 1 值：两次拉起最小间隔（秒，默认 60）
     int app_launch_cooldown;
     // 锁死自动重启（watchdog）：每次实际下发制冷变化时判定——实际停滞（=上周期实际）且≠上周期下发持续 N 次 → kill app 并重新拉起
@@ -288,6 +290,7 @@ static struct TempCfg g_cfg = {
     .log_file_path = "",
     .LOG_MAX = 16256,
     .APP_LAUNCH_ENABLED = 0,
+    .auto_restart_on_update = 0,
     .app_launch_cooldown = 60,
     .app_watchdog_cycles = 6,
     .app_launch_screen_gate_enabled = 1,
@@ -618,6 +621,10 @@ static int temp_stop_active(void);       // 前置声明：自动拉起守卫早
 // token 变大才执行一次开蓝牙命令链。限频（两次之间至少间隔 N 秒、0=关闭）在钩子侧完成，
 // 这里只负责「新请求即执行」。文件由本进程预建 0666（方向是 app 写 / daemon 读，同 status 文件）。
 #define BT_REQ_PATH PROTO_PATH_BT_REQ
+// --- 模块更新后重启宿主（AUTO_RESTART_ON_UPDATE）---
+// 钩子检测到模块版本变化且开关开启时写 PKG=<包名> / AT=<epoch毫秒>；本进程 5s 拍读取，
+// token 变大才执行一次「force-stop + am start」。文件由本进程预建 0666（app 写 / daemon 读）。
+#define MODULE_RESTART_PATH PROTO_PATH_MODULE_RESTART
 // 临时停止状态发布：daemon 写 / 模块读（内容 "1\n"/"0\n"，每 5s 重写刷新 mtime）
 #define TEMP_STOP_FLAG_PATH PROTO_PATH_TEMP_STOP
 
@@ -1040,13 +1047,16 @@ static void publish_uiprefs(void) {
     static int uiprefs_last_back_hide = -1;   // 上次已写出的值（-1 = 尚未写过，首轮必写一次）
     static int uiprefs_last_gate_le = -1;   // 同上的 GATE_LE 记录（哨兵=尚未写过）
     static int uiprefs_last_bt_sec = -2147483647;   // 同上的 BT_ON_SEC 记录（哨兵=尚未写过）
+    static int uiprefs_last_auto_restart = -1;      // 同上的 AUTO_RESTART 记录（哨兵=尚未写过）
     // 受 APP_LAUNCH_ENABLED 控制（用户 2026-10-24 定）：总开关关闭时不发布放行/自开蓝牙请求。
     // GATE_LE 不再有独立开关，恒等于自动拉起总开关。
     int gate_le_eff = g_cfg.APP_LAUNCH_ENABLED ? 1 : 0;
     int bt_sec_eff  = g_cfg.APP_LAUNCH_ENABLED ? g_cfg.bt_auto_enable_sec : 0;
+    int auto_restart_eff = g_cfg.auto_restart_on_update ? 1 : 0;   // 与自动拉起总开关解耦
     if (g_cfg.back_hide_enabled == uiprefs_last_back_hide
             && gate_le_eff == uiprefs_last_gate_le
-            && bt_sec_eff == uiprefs_last_bt_sec) {
+            && bt_sec_eff == uiprefs_last_bt_sec
+            && auto_restart_eff == uiprefs_last_auto_restart) {
         return;
     }
     char tmp[64];
@@ -1062,6 +1072,7 @@ static void publish_uiprefs(void) {
     fprintf(f, "BACK_HIDE=%d\n", g_cfg.back_hide_enabled ? 1 : 0);
     fprintf(f, "GATE_LE=%d\n", gate_le_eff);
     fprintf(f, "BT_ON_SEC=%d\n", bt_sec_eff);
+    fprintf(f, "AUTO_RESTART=%d\n", auto_restart_eff);
     fclose(f);
     if (rename(tmp, UIPREFS_PATH) != 0) {
         if (!uiprefs_fail_logged) {
@@ -1074,6 +1085,7 @@ static void publish_uiprefs(void) {
     uiprefs_last_back_hide = g_cfg.back_hide_enabled;
     uiprefs_last_gate_le = gate_le_eff;
     uiprefs_last_bt_sec = bt_sec_eff;
+    uiprefs_last_auto_restart = auto_restart_eff;
     uiprefs_fail_logged = 0;
 }
 
@@ -1176,6 +1188,8 @@ static int config_apply_prepass_key(struct PrepassCfg *out, const char *key, con
         if (out) out->sysfs_enabled = atoi(val_str) != 0;   // sysfs 路径与缩放独立大类
     } else if (strcmp(key, "APP_LAUNCH_ENABLED") == 0) {
         if (out) g_cfg.APP_LAUNCH_ENABLED = (atoi(val_str) != 0);   // 任何模式下都生效（含 PERF=0/DEBUG=0）
+    } else if (strcmp(key, "AUTO_RESTART_ON_UPDATE") == 0) {
+        if (out) g_cfg.auto_restart_on_update = (atoi(val_str) != 0);   // 独立开关，三层全关也生效
     } else if (strcmp(key, "APP_LAUNCH_TIMING") == 0) {
         // 拉起冷却 + 停滞重启（二值）：第 1 值秒、第 2 值连续周期数；新键优先于两个旧键。
         if (!out) return 1;
@@ -2266,6 +2280,15 @@ static void create_status_files(void) {
         write_log("开蓝牙请求文件 就绪 %s", BT_REQ_PATH);
     } else {
         write_log("开蓝牙请求文件 创建失败 %s", BT_REQ_PATH);
+    }
+    // 模块更新重启请求文件：同方向 app 写 / daemon 读，预建 0666 供钩子覆盖写
+    FILE *mf = fopen(MODULE_RESTART_PATH, "a");
+    if (mf) {
+        fclose(mf);
+        chmod(MODULE_RESTART_PATH, 0666);
+        write_log("更新重启请求文件 就绪 %s", MODULE_RESTART_PATH);
+    } else {
+        write_log("更新重启请求文件 创建失败 %s", MODULE_RESTART_PATH);
     }
     // 临时停止状态文件：预建 0666 并写入当前值（配置已加载，反映启动时的 UI_TEMP_STOP）
     if (publish_temp_stop_state()) {
@@ -3849,10 +3872,9 @@ static void launch_last_app(int pkg_known_dead) {
     write_log("自动拉起散热器 app %s（后台化）rc=%d", pkg, rc);
 }
 
-/** kill 目标散热器 app 并重新拉起（绕过 APP_LAUNCH_ENABLED 开关：本处主动 kill 必须拉起） */
-static void force_kill_and_relaunch(void) {
-    const char *pkg = resolve_launch_pkg(NULL);
-    write_log("锁死自动重启 强制停止 %s 并重新拉起", pkg);
+/** kill 指定散热器 app 并重新拉起（reason 仅用于日志前缀）。 */
+static void restart_app_pkg(const char *pkg, const char *reason) {
+    write_log("%s 强制停止 %s 并重新拉起", reason, pkg);
     run_cmd_silent(AM_BIN " force-stop %s > /dev/null 2>&1", pkg);
     // 等进程退出（最多 2s）
     for (int i = 0; i < 20; i++) {
@@ -3863,7 +3885,12 @@ static void force_kill_and_relaunch(void) {
     }
     // 复用自动拉起的显式组件逻辑（b6x_auto_launch 后台化）
     int rc = am_start_app(pkg);
-    write_log("锁死自动重启 重新拉起 %s rc=%d", pkg, rc);
+    write_log("%s 重新拉起 %s rc=%d", reason, pkg, rc);
+}
+
+/** kill 目标散热器 app 并重新拉起（绕过 APP_LAUNCH_ENABLED 开关：本处主动 kill 必须拉起） */
+static void force_kill_and_relaunch(void) {
+    restart_app_pkg(resolve_launch_pkg(NULL), "锁死自动重启");
 }
 
 // ======================== 看门狗与死链重启 ========================
@@ -5911,6 +5938,65 @@ static void poll_bt_request(void) {
     else     write_log("自动开蓝牙 命令链全部失败（svc/cmd）req=%lld", tok);
 }
 
+// ======================== 模块更新后重启宿主（AUTO_RESTART_ON_UPDATE）========================
+/** 只允许重启受管宿主，防止请求文件被伪造后杀其它应用。 */
+static int is_known_host_pkg(const char *pkg) {
+    return strcmp(pkg, APP_PKG_B6X_OLD) == 0
+            || strcmp(pkg, APP_PKG_B6X_NEW) == 0
+            || strcmp(pkg, APP_PKG_B7X) == 0;
+}
+
+/**
+ * 读取钩子写入的模块更新重启请求（MODULE_RESTART_PATH）：
+ *   PKG=<宿主包名>
+ *   AT=<epoch 毫秒 token>
+ * token 变大才执行一次；开关关闭时消费但不执行；包名不在白名单时只记日志。
+ */
+static void poll_module_restart_request(void) {
+    static long long handled = -1;   // 已处理的最大 token；-1=尚未处理
+    static int primed = 0;           // 首拍只记基准，避免 daemon 重启后补执行旧请求
+    static time_t poll_at = 0;
+    time_t now_mono = mono_now();
+    if (poll_at != 0 && now_mono - poll_at < 5) return;
+    poll_at = now_mono;
+
+    FILE *f = fopen(MODULE_RESTART_PATH, "r");
+    if (!f) return;                  // 尚未预建或不可读：下拍再试
+    char pkg[64] = {0};
+    long long tok = -1;
+    char line[96];
+    while (fgets(line, sizeof(line), f)) {
+        if (strncmp(line, "PKG=", 4) == 0) {
+            snprintf(pkg, sizeof(pkg), "%s", line + 4);
+            pkg[strcspn(pkg, "\r\n")] = '\0';
+        } else if (strncmp(line, "AT=", 3) == 0) {
+            tok = atoll(line + 3);
+        }
+    }
+    fclose(f);
+
+    // token 为 epoch 毫秒：须为正且贴合当前墙钟（±366 天），畸形值不采信。
+    long long now_ms = (long long)time(NULL) * 1000;
+    int tok_valid = (tok > 0 && tok >= now_ms - 366LL * 86400 * 1000
+            && tok <= now_ms + 366LL * 86400 * 1000);
+    if (!primed) {
+        primed = 1;
+        // 首拍只跳过陈旧请求；2 分钟内写入的新请求照常执行（覆盖 daemon 与宿主同时启动的竞态）。
+        if (!tok_valid || now_ms - tok > 120000) {
+            handled = tok_valid ? tok : -1;
+            return;
+        }
+    }
+    if (!tok_valid || tok <= handled) return;
+    handled = tok;
+    if (!g_cfg.auto_restart_on_update) return;   // 开关已关：消费请求但不执行
+    if (!is_known_host_pkg(pkg)) {
+        write_log("更新重启 请求包名非法，已忽略: %.40s", pkg);
+        return;
+    }
+    restart_app_pkg(pkg, "更新自动重启");
+}
+
 // ======================== 看门狗反向保活（WD_KEEPALIVE）========================
 // 需求 / 破环设计（先查后拉 + 连续两次未见 + 拉起冷却）/ 判据为何逐参数整等 / 两个踩过的坑 / 降级
 // 见 逻辑说明.md「看门狗反向保活」。开关 WD_KEEPALIVE 默认开（2026-09-29 用户指定）。
@@ -6291,6 +6377,7 @@ static int wait_for_device(struct MainCtx *ctx) {
         // 断连自动开蓝牙：与卸载自清理同理必须放在本循环内——蓝牙未开时正好停在本循环（连不上设备），
         // 若不在此处轮询，钩子写的开蓝牙请求将永远得不到执行。
         poll_bt_request();
+        poll_module_restart_request();
         read_status_ble_both();
         DeviceType dev = select_active_device();
         if (dev != DEVICE_NONE) {
@@ -6518,6 +6605,7 @@ static void run_main_loop(struct MainCtx *ctx) {
         sample_webui_inputs();   // 每 1s 采集（控制块用新鲜缓存；写行在 5s 控制块之后）
         write_coldmax_hint(); // 每 1s 核对生效制冷上限，变了才写给 app（定 KI 曲线横轴）
         poll_bt_request();    // 每 1s 查开蓝牙请求，有新请求才执行一次命令链
+        poll_module_restart_request();   // 模块更新后重启宿主请求（5s 节流）
 
         if (last_ctrl == 0 || mono_now() - last_ctrl >= 5) {
             last_ctrl = mono_now();

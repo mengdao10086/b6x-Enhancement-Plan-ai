@@ -165,8 +165,9 @@ COLD_REAL=115
 
 ## 界面开关文件协议（daemon → 钩子）
 
-需要送达宿主进程的界面开关有两个：`UI_BACK_HIDE`（「返回隐藏后台」，返回键每次读取）与
-`BT_AUTO_ENABLE_SEC`（断连自动开蓝牙间隔，钩子按 tick 读取、带 30s 缓存）。
+需要送达宿主进程的界面开关有三个：`UI_BACK_HIDE`（「返回隐藏后台」，返回键每次读取）、
+`BT_AUTO_ENABLE_SEC`（断连自动开蓝牙间隔，钩子按 tick 读取、带 30s 缓存）与
+`AUTO_RESTART_ON_UPDATE`（更新自动重启，钩子在 `Application.onCreate` 读取）。
 文件还携带 `GATE_LE`（类型门禁放行）——它已无独立开关，恒等于 `APP_LAUNCH_ENABLED` 的镜像，
 供旧版模块继续读取。
 界面与钩子分属两个进程、不共享内存，故由 daemon 转写成标志文件：
@@ -174,8 +175,8 @@ COLD_REAL=115
 | 项 | 值 |
 |---|---|
 | 路径 | `/data/local/tmp/tempctrl_uiprefs` |
-| 内容 | `BACK_HIDE=0/1`、`GATE_LE=0/1`、`BT_ON_SEC=<秒>`（各一行，换行结尾；`.tmp` + `rename` 原子替换） |
-| 写入方 | tempctrl daemon（root），每次配置重载时按需写（三值都没变才不写）；`GATE_LE` 恒为 `APP_LAUNCH_ENABLED ? 1 : 0` |
+| 内容 | `BACK_HIDE=0/1`、`GATE_LE=0/1`、`BT_ON_SEC=<秒>`、`AUTO_RESTART=0/1`（各一行，换行结尾；`.tmp` + `rename` 原子替换） |
+| 写入方 | tempctrl daemon（root），每次配置重载时按需写（四值都没变才不写）；`GATE_LE` 恒为 `APP_LAUNCH_ENABLED ? 1 : 0`；`AUTO_RESTART` 与自动拉起总开关解耦 |
 | 读取方 | `MainHook.readBackHideEnabled()` 与 `btAutoEnableSec()`（宿主 app 进程）；前者**读不到按 1（开启）**、后者**读不到按 300 秒（开启）**处理 |
 
 > 方向与 status 文件相反：status 是「钩子写、daemon 读」，本文件是「daemon 写、钩子读」。

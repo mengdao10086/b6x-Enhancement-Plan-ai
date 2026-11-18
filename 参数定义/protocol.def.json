@@ -66,6 +66,7 @@
     {"id": "status_b7", "const": "STATUS_B7", "kind": "absolute", "value": "/data/local/tmp/tempctrl_b7x.status", "category": "status", "desc": "B7X status 文件"},
     {"id": "uiprefs", "const": "UIPREFS", "kind": "absolute", "value": "/data/local/tmp/tempctrl_uiprefs", "category": "uiprefs", "desc": "界面开关快照（daemon 写 / 钩子读）"},
     {"id": "bt_req", "const": "BT_REQ", "kind": "absolute", "value": "/data/local/tmp/tempctrl_bt_req", "category": "bt_req", "desc": "自动开蓝牙请求（钩子写 / daemon 读）"},
+    {"id": "module_restart", "const": "MODULE_RESTART", "kind": "absolute", "value": "/data/local/tmp/tempctrl_module_restart", "category": "aux", "desc": "模块更新后重启宿主请求（钩子写 / daemon 读）"},
     {"id": "temp_stop", "const": "TEMP_STOP", "kind": "absolute", "value": "/data/local/tmp/tempctrl_temp_stop", "category": "temp_stop", "desc": "临时停止状态（daemon 写 / 钩子读）"},
     {"id": "temp_stop_boot", "const": "TEMP_STOP_BOOT", "kind": "private_name", "name": "tempctrl_temp_stop_boot", "category": "temp_stop", "desc": "临时停止的 boot_id 标记"},
     {"id": "log", "const": "LOG", "kind": "private_name", "name": "tempctrl.log", "category": "log", "desc": "守护进程日志"},
@@ -91,9 +92,9 @@
   ],
   "cleanup": {
     "sourceNote": "卸载清理清单按执行面拆分，全部由本文件生成；各面集合不同是既有行为（C 端不删私有目录、脚本补三类、app 另清私有目录），不要为求一致而合并。",
-    "daemon": ["status_b6", "status_b7", "uiprefs", "service_log", "lock_fallback", "script_modern", "script_ksu", "log_fallback"],
-    "service_script": ["bin", "bin_new", "status_b6", "status_b7", "uiprefs", "service_log", "lock_fallback", "last_dev", "script_modern", "script_ksu", "log_fallback"],
-    "app": ["script_modern", "script_ksu", "bin", "bin_new", "bin_new_app", "bin_prev", "lock_fallback", "status_b6", "status_b7", "uiprefs", "service_log", "last_dev", "log_fallback"],
+    "daemon": ["status_b6", "status_b7", "uiprefs", "service_log", "lock_fallback", "script_modern", "script_ksu", "log_fallback", "module_restart"],
+    "service_script": ["bin", "bin_new", "status_b6", "status_b7", "uiprefs", "service_log", "lock_fallback", "last_dev", "script_modern", "script_ksu", "log_fallback", "module_restart"],
+    "app": ["script_modern", "script_ksu", "bin", "bin_new", "bin_new_app", "bin_prev", "lock_fallback", "status_b6", "status_b7", "uiprefs", "service_log", "last_dev", "log_fallback", "module_restart"],
     "app_private": ["lock_private", "log", "data", "manifest", "deploy_stamp", "wd_spawn"]
   }
 }

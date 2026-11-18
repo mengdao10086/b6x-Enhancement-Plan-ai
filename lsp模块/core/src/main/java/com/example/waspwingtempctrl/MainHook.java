@@ -9,6 +9,8 @@ import android.content.BroadcastReceiver;
 import android.content.Context;
 import android.content.Intent;
 import android.content.IntentFilter;
+import android.content.SharedPreferences;
+import android.content.pm.PackageInfo;
 import android.content.pm.PackageManager;
 import android.os.Build;
 import android.os.Bundle;
@@ -75,6 +77,11 @@ public class MainHook implements IXposedHookLoadPackage {
     // 落点选择与冷启动自动连接的说明见 app/逻辑说明.md §1.6；在 handleLoadPackage 里赋值。
     private static String lastDevFile = null;
     private static final String AUTO_LAUNCH_EXTRA = "b6x_auto_launch";               // tempctrl 拉起 app 时携带的标志
+    // 模块更新检测（AUTO_RESTART_ON_UPDATE）：宿主进程内记录上次看到的模块版本
+    private static final String MODULE_PKG = "com.example.waspwingtempctrl";
+    private static final String UPDATE_PREFS = "b6x_module_update";
+    private static final String KEY_UPDATE_VERSION = "version_code";
+    private static final String KEY_UPDATE_TIME = "last_update_time";
     private static final String ACTION_TEMP_B6 = Protocol.ACTION_TEMP_B6;   // B6X 温控广播
     private static final String ACTION_TEMP_B7 = Protocol.ACTION_TEMP_B7;   // B7X 温控广播
     /* protocol-extras-mirror:start （本节由 参数定义/gen_params.py 生成，勿手改；实际调用使用 Protocol 的 EXTRA_* 常量） */
@@ -2815,6 +2822,7 @@ public class MainHook implements IXposedHookLoadPackage {
                         registerTemperatureReceiver(ctx);
                         restoreLastDevice();   // 冷启动恢复上次设备引用，后台重连自动接管
                         startPeriodicStatusWrite();
+                        maybeRestartOnModuleUpdate(ctx);   // 模块更新检测（默认关，后台线程）
                     }
                 });
     }
@@ -2998,6 +3006,90 @@ public class MainHook implements IXposedHookLoadPackage {
             // 文件不存在属正常（守护进程尚未写过），走默认值
         }
         return true;
+    }
+
+    /**
+     * 模块更新后自动重启宿主（{@code AUTO_RESTART_ON_UPDATE}，默认关）。
+     * 判定：读取模块自身 versionCode / lastUpdateTime，与本宿主进程上次记录比对；
+     * 变化即写回新值，并在开关开启时结束当前宿主进程后重新拉起一次。
+     * 全程后台线程；失败只记日志、不重试，不阻塞启动。
+     */
+    private static void maybeRestartOnModuleUpdate(Context ctx) {
+        Thread worker = new Thread(() -> {
+            try {
+                if (!readAutoRestartOnUpdate()) return;   // 开关关闭：不产生任何行为
+                long ver, upd;
+                PackageManager pm = ctx.getPackageManager();
+                try {
+                    PackageInfo pi = pm.getPackageInfo(MODULE_PKG, 0);
+                    ver = (Build.VERSION.SDK_INT >= 28) ? pi.getLongVersionCode() : pi.versionCode;
+                    upd = pi.lastUpdateTime;
+                } catch (PackageManager.NameNotFoundException nfe) {
+                    // 包不可见时的退路：模块类所在 APK 的 mtime 即 lastUpdateTime 的等价信号
+                    String path = moduleApkPath();
+                    if (path == null) return;
+                    ver = -1;
+                    upd = new File(path).lastModified();
+                    if (upd <= 0) return;
+                }
+                SharedPreferences sp = ctx.getSharedPreferences(UPDATE_PREFS, Context.MODE_PRIVATE);
+                boolean seen = sp.contains(KEY_UPDATE_VERSION);
+                long oldVer = sp.getLong(KEY_UPDATE_VERSION, -1);
+                long oldUpd = sp.getLong(KEY_UPDATE_TIME, -1);
+                // 先写新值：随后即使重启成功，重启后也不会再次触发。
+                sp.edit().putLong(KEY_UPDATE_VERSION, ver)
+                        .putLong(KEY_UPDATE_TIME, upd).apply();
+                if (!seen || (ver == oldVer && upd == oldUpd)) return;   // 首次记录 / 未变化
+                String label;
+                if (ver >= 0 && oldVer >= 0 && ver != oldVer) label = "v" + oldVer + "→v" + ver;
+                else if (ver >= 0) label = "v" + ver + "（重装）";
+                else label = "时间戳 " + oldUpd + "→" + upd;
+                XposedBridge.log(TAG + " 检测到模块更新 " + label + "，重启宿主 " + sHostPkg);
+                requestHostRestart(sHostPkg);
+            } catch (Throwable t) {
+                XposedBridge.log(TAG + " 更新重启检查失败: " + t.getMessage());
+            }
+        }, "b6x-update-restart");
+        worker.setDaemon(true);
+        worker.start();
+    }
+
+    /** 读守护进程发布的 {@code AUTO_RESTART=0/1}；读不到按关（默认 0）。 */
+    private static boolean readAutoRestartOnUpdate() {
+        try (BufferedReader br = new BufferedReader(new FileReader(UIPREFS_FILE))) {
+            String line;
+            while ((line = br.readLine()) != null) {
+                if (line.startsWith("AUTO_RESTART=")) {
+                    return "1".equals(line.substring("AUTO_RESTART=".length()).trim());
+                }
+            }
+        } catch (Throwable ignored) {
+            // 文件不存在属正常（守护进程尚未写过）
+        }
+        return false;
+    }
+
+    /** 模块类所在 APK 路径（PackageManager 不可见时的版本信号来源）。 */
+    private static String moduleApkPath() {
+        try {
+            if (MainHook.class.getProtectionDomain() != null
+                    && MainHook.class.getProtectionDomain().getCodeSource() != null
+                    && MainHook.class.getProtectionDomain().getCodeSource().getLocation() != null) {
+                return MainHook.class.getProtectionDomain().getCodeSource().getLocation().getPath();
+            }
+        } catch (Throwable ignored) {
+        }
+        return null;
+    }
+
+    /** 写模块更新重启请求；daemon 轮询后执行 force-stop + am start。失败只记日志、不重试。 */
+    private static void requestHostRestart(String pkg) {
+        try (FileOutputStream fos = new FileOutputStream(Protocol.PATH_MODULE_RESTART)) {
+            String body = "PKG=" + pkg + "\nAT=" + System.currentTimeMillis() + "\n";
+            fos.write(body.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+        } catch (Throwable t) {
+            XposedBridge.log(TAG + " 更新重启请求写入失败: " + t.getMessage());
+        }
     }
 
     /**
