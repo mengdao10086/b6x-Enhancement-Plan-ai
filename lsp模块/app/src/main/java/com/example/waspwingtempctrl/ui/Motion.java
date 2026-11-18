@@ -39,7 +39,11 @@ import androidx.annotation.Nullable;
 import com.example.waspwingtempctrl.R;
 
 import java.util.ArrayList;
+import java.util.Collections;
+import java.util.HashSet;
+import java.util.IdentityHashMap;
 import java.util.List;
+import java.util.Set;
 import java.util.WeakHashMap;
 
 /**
@@ -242,12 +246,63 @@ public final class Motion {
      *
      * <p>系统关掉动效、或没有可淡的视图时直接执行 {@code swap}，并把 alpha 复位为 1，
      * 不留半透明残影。重复调用会先收掉上一轮（取消动画、移除快照层），不叠加残影。
+     * 需要只做 alpha 的调用点用 {@link #crossFadeNoBlur}；同一轮里两类目标混用时用
+     * {@link #crossFadeMixed}，三者时长、曲线、起止点完全一致。
      *
      * @param swap    换内容（立即执行）
      * @param targets 参与淡入淡出的视图（旧内容按各自当前外观抓快照；GONE / 未量出尺寸的跳过抓取，
      *                但仍参与淡入）
      */
     static void crossFade(@Nullable Runnable swap, @Nullable View... targets) {
+        crossFade(swap, true, null, targets);
+    }
+
+    /**
+     * 同 {@link #crossFade}，但<b>显式关闭模糊</b>：只做 alpha 交叉淡化，旧/新层都不施加
+     * {@code RenderEffect}。用于「整块内容一起换、拆不出更小单元」或「不值得为这点面积做离屏滤波」
+     * 的调用点；默认 {@link #crossFade} 的行为（允许模糊）不变。时长、曲线、起止点完全一致。
+     */
+    static void crossFadeNoBlur(@Nullable Runnable swap, @Nullable View... targets) {
+        crossFade(swap, false, null, targets);
+    }
+
+    /**
+     * 同一次交叉淡化里<b>按视图分组选择是否模糊</b>：{@code blurred} 允许模糊，
+     * {@code plain} 只做 alpha。用于「同一屏里文件信息窗口不糊、日志列表窗口继续糊」这类
+     * 一次 swap、两类目标的场景；两组仍同起同止（325/325/0、线性）。
+     * 同一视图同时出现在两组时以「不模糊」为准。
+     */
+    static void crossFadeMixed(@Nullable Runnable swap,
+                               @Nullable View[] blurred, @Nullable View[] plain) {
+        int blurredCount = blurred == null ? 0 : blurred.length;
+        int plainCount = plain == null ? 0 : plain.length;
+        View[] all = new View[blurredCount + plainCount];
+        if (blurredCount > 0) {
+            System.arraycopy(blurred, 0, all, 0, blurredCount);
+        }
+        if (plainCount > 0) {
+            System.arraycopy(plain, 0, all, blurredCount, plainCount);
+        }
+        Set<View> plainSet = null;
+        if (plainCount > 0) {
+            plainSet = new HashSet<>();
+            for (View v : plain) {
+                if (v != null) {
+                    plainSet.add(v);
+                }
+            }
+        }
+        crossFade(swap, true, plainSet, all);
+    }
+
+    /**
+     * 交叉淡化的公共实现。
+     *
+     * @param blurAll    true = 默认允许按 {@link #blurAllowed(View)} 叠加模糊
+     * @param plainViews 本次只做 alpha 的视图（身份集合；null = 无例外）
+     */
+    private static void crossFade(@Nullable Runnable swap, boolean blurAll,
+                                  @Nullable Set<View> plainViews, @Nullable View... targets) {
         if (swap == null) {
             return;
         }
@@ -278,6 +333,10 @@ public final class Motion {
             return;
         }
         CrossFadeRun run = new CrossFadeRun();
+        run.blurAll = blurAll;
+        if (plainViews != null) {
+            run.plainViews.addAll(plainViews);
+        }
         run.views.addAll(views);
         for (View v : views) {
             CROSS_FADES.put(v, run);
@@ -319,7 +378,7 @@ public final class Motion {
      */
     private static void startFadeIn(View v, CrossFadeRun run) {
         v.animate().alpha(1f).setDuration(FADE_IN_MS).setInterpolator(FADE_CURVE).start();
-        if (!blurAllowed(v)) {
+        if (!run.blurFor(v)) {
             return;
         }
         final float maxPx = blurRadiusPx(v.getContext());
@@ -413,7 +472,16 @@ public final class Motion {
         final List<FadeLayer> layers = new ArrayList<>();
         final List<Bitmap> bitmaps = new ArrayList<>();
         final List<Animator> anims = new ArrayList<>();
+        /** 本轮默认是否允许模糊（{@link #crossFadeNoBlur} 关掉整轮，{@link #crossFadeMixed} 按视图例外）。 */
+        boolean blurAll = true;
+        /** 本轮只做 alpha 的视图（身份比较；默认空）。 */
+        final Set<View> plainViews = Collections.newSetFromMap(new IdentityHashMap<>());
         boolean done;
+
+        /** 该视图本轮能否叠加模糊：整轮允许、不在例外集、且满足面积/版本条件。 */
+        boolean blurFor(View v) {
+            return blurAll && !plainViews.contains(v) && blurAllowed(v);
+        }
 
         @Override
         public void run() {
@@ -477,7 +545,7 @@ public final class Motion {
             }
             return;   // 抓不到快照（极端视图/内存不足）：本轮退化为「新内容淡入」，不抛给业务
         }
-        float maxBlurPx = blurAllowed(v) ? blurRadiusPx(v.getContext()) : 0f;
+        float maxBlurPx = run.blurFor(v) ? blurRadiusPx(v.getContext()) : 0f;
         // 带模糊的子类只在 API 31+ 实例化：低版本连类都不会加载
         FadeLayer layer = maxBlurPx > 0f && Build.VERSION.SDK_INT >= Build.VERSION_CODES.S
                 ? new BlurFadeLayer(bitmap, maxBlurPx)

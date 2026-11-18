@@ -102,8 +102,12 @@ public class StatusFragment extends Fragment implements SetupActivity.PageAware 
      */
     private static volatile boolean syncManifestDone;
 
-    /** 部署状态的结论行（首行）：换字动画只作用在这里。 */
+    /** 结论行的动态值（「已完成 / 正在检测」等）：换字动画只作用在这里。 */
     private TextView statusView;
+    /** 结论行的静态标签（「部署状态：」）：只随结论行形态显隐，不参与动画。 */
+    private TextView statusLabelView;
+    /** 结论行容器（标签 + 动态值同行，基线对齐）。头部 font padding 由它承担。 */
+    private View statusSummaryRow;
     /** 部署状态的明细块（结论行之后的全部内容）：一律直接更新，不参与淡化/模糊。 */
     private TextView statusDetailView;
     /** 拆分后补在整块头/尾的 font padding（像素）：结论行顶部固定用它，
@@ -138,10 +142,10 @@ public class StatusFragment extends Fragment implements SetupActivity.PageAware 
     private boolean pendingStatusKeepHeight;
     /** {@link #pendingStatusText} 上屏时是否播交叉淡变（用户动作 true；自动刷新/后台回填 false）。 */
     private boolean pendingStatusAnimated;
-    /** 「部署状态」首行临时替换前的原文首行；null = 当前没有待恢复的替换。 */
+    /** 「部署状态」动态值临时替换前的原文（不含标签）；null = 当前没有待恢复的替换。 */
     @Nullable
     private String deployFirstLineBackup;
-    /** 当前临时替换用的首行文案（正在检测 / 部署中…），与 backup 成对出现。 */
+    /** 当前临时替换用的动态值（正在检测 / 部署中…，不含标签），与 backup 成对出现。 */
     @Nullable
     private String deployFirstLinePlaceholder;
 
@@ -238,6 +242,8 @@ public class StatusFragment extends Fragment implements SetupActivity.PageAware 
     public void onViewCreated(@NonNull View view, @Nullable Bundle savedInstanceState) {
         super.onViewCreated(view, savedInstanceState);
         statusView = view.findViewById(R.id.status_text);
+        statusLabelView = view.findViewById(R.id.status_label_text);
+        statusSummaryRow = view.findViewById(R.id.status_summary_row);
         statusDetailView = view.findViewById(R.id.status_detail_text);
         statusStack = view.findViewById(R.id.status_text_stack);
         // 两视图与拆分前的单 TextView 逐像素一致：关掉 includeFontPadding 后，
@@ -390,6 +396,8 @@ public class StatusFragment extends Fragment implements SetupActivity.PageAware 
         // 先收掉动画并复位透明度：回调里判空就返回，不给已销毁的视图留半透明残影
         cancelFade();
         statusView = null;
+        statusLabelView = null;
+        statusSummaryRow = null;
         statusDetailView = null;
         infoView = null;
         logView = null;
@@ -501,8 +509,8 @@ public class StatusFragment extends Fragment implements SetupActivity.PageAware 
     }
 
     /**
-     * 当前结论行以「部署状态：」开头时，只把结论行换成给定文案（正在检测 / 部署中…），
-     * 明细块原样保留。结论行已独立成视图且不可选中，故直接 setText：不淡变、不做高度动画，
+     * 当前结论行是「部署状态：…」形态时，只把<b>动态值</b>换成给定文案（正在检测 / 部署中…），
+     * 静态标签、明细块原样保留。动态值已独立成视图且不可选中，故直接 setText：不淡变、不做高度动画，
      * 也不会清掉明细块上正在进行的选区。若上一次淡变尚未结束，走 {@link #replaceStatusTextDirect}
      * 让旧快照按既有节奏退场，不在新文本上留残影。
      *
@@ -511,31 +519,33 @@ public class StatusFragment extends Fragment implements SetupActivity.PageAware 
      */
     private boolean replaceDeployFirstLine(int placeholderRes) {
         final TextView view = statusView;
-        if (view == null) {
-            return false;
-        }
-        final String firstLine = view.getText().toString();
-        if (!firstLine.startsWith(DEPLOY_STATUS_PREFIX)) {
+        if (view == null || statusLabelView == null
+                || statusLabelView.getVisibility() != View.VISIBLE) {
             return false;
         }
         final String placeholder = getString(placeholderRes);
-        if (placeholder.equals(firstLine)) {
-            return true;   // 已在该临时态：保留首次记下的原首行，不重复覆盖
+        if (!placeholder.startsWith(DEPLOY_STATUS_PREFIX)) {
+            return false;   // 资源必须是带「部署状态：」前缀的临时首行
         }
-        deployFirstLineBackup = firstLine;
-        deployFirstLinePlaceholder = placeholder;
+        final String currentValue = view.getText().toString();
+        final String placeholderValue = placeholder.substring(DEPLOY_STATUS_PREFIX.length());
+        if (placeholderValue.equals(currentValue)) {
+            return true;   // 已在该临时态：保留首次记下的原动态值，不重复覆盖
+        }
+        deployFirstLineBackup = currentValue;
+        deployFirstLinePlaceholder = placeholderValue;
         // 中断可能还在跑的上一次淡变，避免新文本半透明叠在旧层上
         replaceStatusTextDirect(() -> {
             if (statusView != null) {
-                statusView.setText(placeholder);
+                statusView.setText(placeholderValue);
             }
         });
         return true;
     }
 
     /**
-     * 扫描失败时恢复被临时替换的结论行（失败分支只弹对话框、不换文本，不能把首行留在「正在检测」）。
-     * 仅在结论行仍是该临时态时恢复，避免把过期备份写进已被其它结果覆盖的文本。
+     * 扫描失败时恢复被临时替换的动态值（失败分支只弹对话框、不换文本，不能把值留在「正在检测」）。
+     * 仅在动态值仍是该临时态时恢复，避免把过期备份写进已被其它结果覆盖的文本。
      * 明细块选中期间推迟的整段更新若首行也是该临时态，一并改回。
      */
     private void restoreDeployFirstLineIfNeeded() {
@@ -547,12 +557,12 @@ public class StatusFragment extends Fragment implements SetupActivity.PageAware 
         if (backup == null || placeholder == null || view == null) {
             return;
         }
-        // 推迟上屏的整段更新若首行也是该临时态，把它的首行也改回去
+        // 推迟上屏的整段更新若首行也是该临时态（标签仍在、值为临时值），把它的首行也改回去
         final String pending = pendingStatusText;
         if (pending != null) {
             final int pendingEnd = firstLineEnd(pending);
-            if (placeholder.equals(pending.substring(0, pendingEnd))) {
-                pendingStatusText = backup + pending.substring(pendingEnd);
+            if ((DEPLOY_STATUS_PREFIX + placeholder).equals(pending.substring(0, pendingEnd))) {
+                pendingStatusText = DEPLOY_STATUS_PREFIX + backup + pending.substring(pendingEnd);
                 pendingStatusKeepHeight = true;
             }
         }
@@ -586,12 +596,15 @@ public class StatusFragment extends Fragment implements SetupActivity.PageAware 
                 : new String[]{text, ""};
     }
 
-    /** 当前两段拼回的整段文本（纯文本；用于与探测结果做「先比后写」）。 */
+    /** 当前「标签 + 动态值 + 明细块」拼回的整段文本（纯文本；用于「先比后写」）。 */
     private String fullStatusText() {
         if (statusView == null) {
             return "";
         }
-        final String head = statusView.getText().toString();
+        final boolean hasLabel = statusLabelView != null
+                && statusLabelView.getVisibility() == View.VISIBLE;
+        final String head = (hasLabel ? DEPLOY_STATUS_PREFIX : "")
+                + statusView.getText().toString();
         final String detail = statusDetailView == null
                 ? "" : statusDetailView.getText().toString();
         return detail.isEmpty() ? head : head + '\n' + detail;
@@ -1302,63 +1315,65 @@ public class StatusFragment extends Fragment implements SetupActivity.PageAware 
     }
 
     /**
-     * 把拆分后的两个 TextView 对齐成拆分前的单 TextView：
-     * 两边都关掉 {@code includeFontPadding}（否则每段各带一份上下 font padding，行间会多出一截），
-     * 再把这份 padding 按字体度量只补在整块的头尾——结论行顶部、明细块底部。
+     * 把三段（静态标签 + 动态值 + 明细块）对齐成拆分前的单 TextView：
+     * 全部关掉 {@code includeFontPadding}，再把这份 padding 按字体度量只补在整块的头尾——
+     * 结论行容器（summary row）的顶部、明细块底部；明细为空时底部改由结论行容器承担。
      * 这样每行行高、行距、首行缩进与整块上下边界都与原来一致。
      */
     private void applyStatusTextMetrics() {
-        if (statusView == null || statusDetailView == null) {
+        if (statusView == null || statusLabelView == null
+                || statusDetailView == null || statusSummaryRow == null) {
             return;
         }
         final Paint.FontMetricsInt fm = statusView.getPaint().getFontMetricsInt();
         statusTopPad = Math.max(0, fm.ascent - fm.top);
         statusBottomPad = Math.max(0, fm.bottom - fm.descent);
+        statusLabelView.setIncludeFontPadding(false);
         statusView.setIncludeFontPadding(false);
         statusDetailView.setIncludeFontPadding(false);
-        // 初态视作「无明细」：顶部与底部 font padding 先都由结论行承担
-        statusView.setPadding(0, statusTopPad, 0, statusBottomPad);
+        // 初态视作「无明细」：头部 padding 由结论行容器承担，明细块只承担尾部
+        applySummaryBottomPad(false);
         statusDetailView.setPadding(0, 0, 0, statusBottomPad);
     }
 
-    /** 结论行的底部 font padding 只在没有明细块时承担（有明细时归明细块尾部）。 */
-    private void applyTitleBottomPad(boolean hasDetail) {
-        if (statusView == null) {
+    /** 结论行容器的量高把头部 font padding 算在内；底部 padding 只在没有明细块时承担。 */
+    private void applySummaryBottomPad(boolean hasDetail) {
+        if (statusSummaryRow == null) {
             return;
         }
         final int bottom = hasDetail ? 0 : statusBottomPad;
-        if (statusView.getPaddingBottom() != bottom) {
-            statusView.setPadding(0, statusTopPad, 0, bottom);
-        }
+        statusSummaryRow.setPadding(0, statusTopPad, 0, bottom);
     }
 
     /**
      * 状态文本上屏。<b>业务上屏零延迟</b>——新文本立即写入，不等淡出结束。
      *
-     * <p>部署状态已拆成「结论行（首行）+ 明细块（其余行）」两个视图：
-     * <b>只有结论行文本变化时</b>才对结论行播 {@link Motion#crossFade}（含模糊）；
-     * 明细块一律直接更新、不参与淡化/模糊；明细块内部变化（PID、哈希等）也不会触发结论行动画。
+     * <p>部署状态已拆成「静态标签 + 动态值 + 明细块」三个视图：
+     * <b>只有动态值文本变化时</b>才对动态值播 {@link Motion#crossFade}（含模糊）；
+     * 静态标签（「部署状态：」）与明细块都不参与淡化/模糊；明细块内部变化（PID、哈希等）
+     * 也不会触发动态值的动画。
      *
      * <p>{@code animated} 由<b>调用点按来源显式决定</b>：用户动作（刷新按钮、部署/卸载/拉起/kill）
      * 传 true；自动刷新（周期/静默探测、首次探测、自动部署回填）传 false，<b>直接替换文本与高度</b>，
      * 不播淡变、不触发模糊。系统关掉动画时 true 路径也由 {@code crossFade} 直接执行换文本。
      *
-     * <p>结论行变化时，行数/高度变化仍复用配置页那套 {@link Motion#animateHeightChange}
+     * <p>动态值变化时，行数/高度变化仍复用配置页那套 {@link Motion#animateHeightChange}
      * （{@code ValueAnimator} + panelCurve）：与淡变同拍启动，并在 325ms 后与旧层消失同时到位。
      *
      * @param keepHeight true = 本次只换字、不驱动高度：把当前高度钉住。
      *                   手动刷新的单行「正在探测…」占位用它，避免窗口先被占位压矮、结果到达再撑开；
      *                   结果到达的换字仍走 false，届时以钉住的高度为起点补间到结果高度。
-     * @param animated   true = 用户动作，结论行变化时播交叉淡变；false = 自动刷新/后台回填，一律直替。
+     * @param animated   true = 用户动作，动态值变化时播交叉淡变；false = 自动刷新/后台回填，一律直替。
      */
     private void swapStatusTextAnimated(final String text, boolean keepHeight, boolean animated) {
         final TextView view = statusView;
-        if (view == null || statusDetailView == null || !isAdded()) {
+        if (view == null || statusLabelView == null
+                || statusDetailView == null || statusSummaryRow == null || !isAdded()) {
             return;
         }
         final String[] parts = splitStatusText(text);
         // 路径显示口径实时现取：上屏文本按「展示完整路径」开关裁剪，测量也按裁剪后的文本
-        final CharSequence shownTitle = PathDisplay.format(view.getContext(), parts[0]);
+        final CharSequence shownConclusion = PathDisplay.format(view.getContext(), parts[0]);
         final CharSequence shownDetail = PathDisplay.format(view.getContext(), parts[1]);
         // 正选中时推迟上屏：setText 会清掉选择与手柄。结果不丢——存起来，选择一结束就补
         if (TextCopy.isSelecting(statusDetailView)) {
@@ -1372,21 +1387,28 @@ public class StatusFragment extends Fragment implements SetupActivity.PageAware 
         pendingStatusKeepHeight = false;
         pendingStatusAnimated = false;
         if (!animated) {
-            swapStatusTextNow(shownTitle, shownDetail, keepHeight);
+            swapStatusTextNow(shownConclusion, shownDetail, keepHeight);
             return;
         }
-        // 结论行没变：明细更新不播动画，高度仍按原规则处理（明细块本身直接换成新文本）
-        if (TextUtils.equals(shownTitle, view.getText())) {
-            applyStatusHeight(shownTitle, shownDetail, keepHeight);
-            showStatusParts(shownTitle, shownDetail);
+        // 动态值没变：标签/明细更新不播动画，高度仍按原规则处理
+        final String shownValue = dynamicValue(shownConclusion.toString());
+        if (TextUtils.equals(shownValue, view.getText())) {
+            applyStatusHeight(shownConclusion, shownDetail, keepHeight);
+            showStatusParts(shownConclusion, shownDetail);
             return;
         }
-        // 快照抓取、旧层渐糊隐去、新层由糊转清都在 crossFade 内完成，且只覆盖结论行；
-        // swap 里只做业务动作：驱动高度（与淡变同拍启动）并立即写新文本，保证信息先可读
+        // 快照抓取、旧层渐糊隐去、新层由糊转清都在 crossFade 内完成，且只覆盖动态值；
+        // swap 里只做业务动作：标签/明细直替、驱动高度（与淡变同拍启动）并立即写新值
         Motion.crossFade(() -> {
-            applyStatusHeight(shownTitle, shownDetail, keepHeight);
-            showStatusParts(shownTitle, shownDetail);
+            applyStatusHeight(shownConclusion, shownDetail, keepHeight);
+            showStatusParts(shownConclusion, shownDetail);
         }, view);
+    }
+
+    /** 结论行去掉静态标签后的动态值（无标签时就是整行）。 */
+    private static String dynamicValue(String conclusion) {
+        return conclusion.startsWith(DEPLOY_STATUS_PREFIX)
+                ? conclusion.substring(DEPLOY_STATUS_PREFIX.length()) : conclusion;
     }
 
     /** 按原始整段文本直替（首次上屏/骨架切换用）：路径裁剪与分段都在这里统一处理，不播动画。 */
@@ -1402,7 +1424,7 @@ public class StatusFragment extends Fragment implements SetupActivity.PageAware 
     }
 
     /** 高度处理（动画/直替共用）：keepHeight 钉住当前高；否则补间到新文本的自然高。 */
-    private void applyStatusHeight(CharSequence title, CharSequence detail, boolean keepHeight) {
+    private void applyStatusHeight(CharSequence conclusion, CharSequence detail, boolean keepHeight) {
         if (statusView == null) {
             return;
         }
@@ -1419,7 +1441,7 @@ public class StatusFragment extends Fragment implements SetupActivity.PageAware 
             }
             return;
         }
-        final int newStackHeight = measureStatusStackHeight(title, detail);
+        final int newStackHeight = measureStatusStackHeight(conclusion, detail);
         if (newStackHeight > 0) {
             final int from = currentStatusStackHeight();
             if (from > 0) {
@@ -1428,14 +1450,27 @@ public class StatusFragment extends Fragment implements SetupActivity.PageAware 
         }
     }
 
-    /** 两段文本直接写进各自视图；明细块为空时退出布局（空 TextView 会量出一行高）。 */
-    private void showStatusParts(CharSequence title, CharSequence detail) {
-        if (statusView == null || statusDetailView == null) {
+    /**
+     * 结论行按静态标签拆开：标签只随形态显隐、永远直替；动态值单独写。
+     * 明细块为空时退出布局（空 TextView 会量出一行高）。
+     */
+    private void showStatusParts(CharSequence conclusion, CharSequence detail) {
+        if (statusView == null || statusLabelView == null || statusDetailView == null) {
             return;
         }
+        final String head = conclusion == null ? "" : conclusion.toString();
+        final boolean hasLabel = head.startsWith(DEPLOY_STATUS_PREFIX);
         final boolean hasDetail = detail != null && detail.length() > 0;
-        applyTitleBottomPad(hasDetail);
-        statusView.setText(title);
+        applySummaryBottomPad(hasDetail);
+        if (hasLabel) {
+            statusLabelView.setText(DEPLOY_STATUS_PREFIX);
+            statusLabelView.setVisibility(View.VISIBLE);
+            statusView.setText(head.substring(DEPLOY_STATUS_PREFIX.length()));
+        } else {
+            statusLabelView.setText("");
+            statusLabelView.setVisibility(View.GONE);
+            statusView.setText(head);
+        }
         statusDetailView.setText(hasDetail ? detail : "");
         statusDetailView.setVisibility(hasDetail ? View.VISIBLE : View.GONE);
     }
@@ -1445,7 +1480,7 @@ public class StatusFragment extends Fragment implements SetupActivity.PageAware 
      * 高度语义与原路径一致：{@code keepHeight} 钉住当前高度；否则还原 {@code WRAP_CONTENT}，
      * 由新文本自然高度决定（无补间）。
      */
-    private void swapStatusTextNow(CharSequence title, CharSequence detail, boolean keepHeight) {
+    private void swapStatusTextNow(CharSequence conclusion, CharSequence detail, boolean keepHeight) {
         if (statusView == null || statusDetailView == null) {
             return;
         }
@@ -1457,31 +1492,40 @@ public class StatusFragment extends Fragment implements SetupActivity.PageAware 
                 lp.height = held;
             }
         }
-        showStatusParts(title, detail);
+        showStatusParts(conclusion, detail);
     }
 
     /**
-     * 叠放层在给定文本下的自然高度（像素）：结论行高 + 明细块高 + 结论行的 {@code marginTop}。
-     * 两段都按同一可用宽测量（明细块可能 GONE、自身宽为 0，故显式传入结论行的宽）。
+     * 叠放层在给定文本下的自然高度（像素）：结论行高 + 明细块高 + 结论行容器的 {@code marginTop}。
+     * 结论行由「标签 + 动态值」同行组成，行高与值长短无关；头部 padding 与单行尾部 padding
+     * 由结论行容器承担。两段都按同一可用宽测量（明细块可能 GONE、自身宽为 0，故显式传入宽度）。
      * 宽度尚未排版时返回 -1（量不出真实换行，调用方据此放弃高度补间）。
      */
-    private int measureStatusStackHeight(CharSequence title, CharSequence detail) {
-        if (statusView == null || statusDetailView == null) {
+    private int measureStatusStackHeight(CharSequence conclusion, CharSequence detail) {
+        if (statusView == null || statusDetailView == null || statusSummaryRow == null) {
             return -1;
         }
-        final int width = statusView.getWidth();
+        final int width = statusSummaryRow.getWidth() > 0
+                ? statusSummaryRow.getWidth()
+                : (statusStack == null ? 0 : statusStack.getWidth());
         if (width <= 0) {
             return -1;
         }
         final boolean hasDetail = detail != null && detail.length() > 0;
-        // 先按目标文本调整尾部 padding 归属，再量：单行时结论行带底部 padding，多行时归明细块
-        applyTitleBottomPad(hasDetail);
-        int height = Motion.measureTextHeight(statusView, title, width);
+        // 先按目标文本调整尾部 padding 归属，再量：单行时结论行容器带底部 padding，多行时归明细块
+        applySummaryBottomPad(hasDetail);
+        final String head = conclusion == null ? "" : conclusion.toString();
+        String value = dynamicValue(head);
+        if (value.isEmpty()) {
+            value = " ";   // 空串也要量到一行行高（结论行本身始终占一行）
+        }
+        int height = Motion.measureTextHeight(statusView, value, width)
+                + statusTopPad + (hasDetail ? 0 : statusBottomPad);
         if (hasDetail) {
             height += Motion.measureTextHeight(statusDetailView, detail, width);
         }
         int topMargin = 0;
-        ViewGroup.LayoutParams lp = statusView.getLayoutParams();
+        ViewGroup.LayoutParams lp = statusSummaryRow.getLayoutParams();
         if (lp instanceof ViewGroup.MarginLayoutParams) {
             topMargin = ((ViewGroup.MarginLayoutParams) lp).topMargin;
         }

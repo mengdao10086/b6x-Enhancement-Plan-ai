@@ -862,7 +862,8 @@ public class ChartFragment extends Fragment {
             pendingWindowDefaultSec = windowDefaultSec > 0
                     ? windowDefaultSec
                     : (config != null ? resolveWindowDefault(config) : windowSec);
-            Motion.crossFade(() -> {
+            // 整行图例一起重建，拆不出更小单元：只淡化、不模糊
+            Motion.crossFadeNoBlur(() -> {
                 if (!isAdded() || chartView == null || legendRow == null) {
                     return;   // 淡变期间页面已销毁：不再碰视图
                 }
@@ -892,7 +893,7 @@ public class ChartFragment extends Fragment {
         // 落盘不依赖视图存活：先排写，再播淡变；淡变期间退出页面也不丢这次保存
         persistSeriesDefaults(saved);
         persistWindowDefault(savedWindow);
-        Motion.crossFade(() -> {
+        Motion.crossFadeNoBlur(() -> {
             if (!isAdded() || chartView == null || legendRow == null) {
                 return;
             }
@@ -929,7 +930,7 @@ public class ChartFragment extends Fragment {
             // 常态「恢复默认」把当前选择拉回默认档位（只改界面，不写参数）
             setWindowSec(windowDefault);
         }
-        Motion.crossFade(() -> {
+        Motion.crossFadeNoBlur(() -> {
             if (!isAdded() || chartView == null || legendRow == null) {
                 return;
             }

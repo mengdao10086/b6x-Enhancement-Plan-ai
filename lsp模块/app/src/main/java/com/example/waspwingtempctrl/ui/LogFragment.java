@@ -399,7 +399,9 @@ public class LogFragment extends Fragment
         sourceSwapPending = true;
         // 缓存可能还没有（首次进页/刚清过滤关键词）：立刻补一次，不等下一拍 5 秒
         loadNow(currentSource());
-        Motion.crossFade(() -> {
+        // 按窗口分组：文件信息窗口（信息/时间/统计/命中）只淡化不模糊；
+        // 日志显示窗口（列表 + 空态 + 失败区）保持原有模糊。
+        Motion.crossFadeMixed(() -> {
             sourceSwapPending = false;
             SourceCache cache = caches[sourceIndex];
             if (listView == null) {
@@ -410,7 +412,8 @@ public class LogFragment extends Fragment
             } else {
                 showLoadingState();
             }
-        }, infoView, timeView, statView, countView, listView, emptyView, failureScroll);
+        }, new View[]{listView, emptyView, failureScroll},
+                new View[]{infoView, timeView, statView, countView});
     }
 
     /** 读不到缓存时的占位：与首进页一致，绝不留旧来源的行。 */

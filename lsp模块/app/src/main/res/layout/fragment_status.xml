@@ -45,13 +45,14 @@
 
                 <!--
                     状态文本承载层：换字时用 Motion.animateHeightChange 补间本层高度，
-                    同时作为 Motion.crossFade 快照层的宿主（旧结论行由它抓成 overlay 渐糊渐隐，
-                    新结论行在原位由糊转清）。
-                    结论行（首行）与明细块拆成两个 TextView：淡化/模糊只作用在结论行，
-                    明细行一律直接更新。两视图与拆分前的单 TextView 逐像素一致——都关掉
-                    includeFontPadding，再由 StatusFragment 按字体度量补回头/尾 font padding，
-                    故行高、行距、缩进与原来完全相同。
-                    本层自身不加 margin，高度 = 结论行高 + status_text 的 marginTop + 明细块高。
+                    同时作为 Motion.crossFade 快照层的宿主。
+                    结论行再拆成「静态标签 status_label_text + 动态值 status_text」：
+                    淡化/模糊只作用在动态值上，标签与明细块都不动。明细块一律直接更新。
+                    三段与拆分前的单 TextView 逐像素一致——都关掉 includeFontPadding，
+                    再由 StatusFragment 按字体度量把上下 font padding 只补在整块头尾
+                    （summary_row 的上下内边距与明细块的底部内边距），故行高、行距、
+                    缩进与原来完全相同；标签与值之间不加任何 margin，仍在同一基线。
+                    本层自身不加 margin，高度 = marginTop + 结论行高 + 明细块高。
                 -->
                 <LinearLayout
                     android:id="@+id/status_text_stack"
@@ -59,13 +60,29 @@
                     android:layout_height="wrap_content"
                     android:orientation="vertical">
 
-                    <TextView
-                        android:id="@+id/status_text"
+                    <LinearLayout
+                        android:id="@+id/status_summary_row"
                         android:layout_width="match_parent"
                         android:layout_height="wrap_content"
                         android:layout_marginTop="@dimen/space_s"
-                        android:includeFontPadding="false"
-                        android:textAppearance="@style/TextAppearance.B6XTempCtrl.Mono" />
+                        android:orientation="horizontal">
+
+                        <TextView
+                            android:id="@+id/status_label_text"
+                            android:layout_width="wrap_content"
+                            android:layout_height="wrap_content"
+                            android:includeFontPadding="false"
+                            android:textAppearance="@style/TextAppearance.B6XTempCtrl.Mono"
+                            android:visibility="gone" />
+
+                        <TextView
+                            android:id="@+id/status_text"
+                            android:layout_width="0dp"
+                            android:layout_height="wrap_content"
+                            android:layout_weight="1"
+                            android:includeFontPadding="false"
+                            android:textAppearance="@style/TextAppearance.B6XTempCtrl.Mono" />
+                    </LinearLayout>
 
                     <TextView
                         android:id="@+id/status_detail_text"
