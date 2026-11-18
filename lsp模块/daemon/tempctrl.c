@@ -2914,6 +2914,62 @@ static void update_active_cold_range(void) {
     active_cold_eff_max = eff_cold_max(active_pid_cold_max, g_cfg.pid_cold_min);
 }
 
+// ======================== PID 基准播种（复位点专用） ========================
+
+// 同秒内多个复位点可能同时触发（典型：「临时停止结束」与「配置热重载」）。
+// 按优先级只保留一次：低/同级复位不得覆盖同秒内已完成的更高优先级播种，避免结果被冲掉。
+#define PID_SEED_PRIO_RELOAD   1   // 配置热重载 / 补加载
+#define PID_SEED_PRIO_ALIGN    2   // 回传对齐 / 启动就绪 / 设备切换
+#define PID_SEED_PRIO_TEMPSTOP 3   // 临时停止结束（最高：真实控制权交接）
+
+static time_t pid_seed_sec = 0;        // 最近一次播种的单调秒
+static int    pid_seed_prio_last = -1; // 该次播种的优先级
+
+/**
+ * 播种基准冷值：实际运行档 COLD_RUN（有效）→ 设定回显 COLD_REAL → 上次下发 → 下限，
+ * 结果钳到 [pid_cold_min, cmax]。COLD_RUN 才是设备真实运行档，按回显取值会造成高冷下坡。
+ */
+static int pid_seed_base_cold(int cmax) {
+    int base;
+    if (g_sensor.cooler_cold_run >= COLD_MIN)       base = g_sensor.cooler_cold_run;
+    else if (g_sensor.cooler_cold_real >= COLD_MIN) base = g_sensor.cooler_cold_real;
+    else if (sent_cold >= COLD_MIN)                 base = sent_cold;
+    else                                            base = g_cfg.pid_cold_min;
+    if (base < g_cfg.pid_cold_min) base = g_cfg.pid_cold_min;
+    if (base > cmax) base = cmax;
+    return base;
+}
+
+/**
+ * 按设备当前状态播种 PID：ki = base_norm − kdp（钳到 [0, 1−kdp]），使复位瞬间总目标 = 基准；
+ * 之后 KI 继续按误差累积，总目标 = ki + kdp 随温度升降。只在把控制拉回设备当前状态的
+ * 复位点调用，不得每周期调用。同秒内按 prio 去重（见上）。
+ */
+static void pid_seed_from_device(const char *reason, int prio) {
+    time_t now = mono_now();
+    if (now == pid_seed_sec && prio <= pid_seed_prio_last) return;   // 同秒低/同级：保留已有结果
+    pid_seed_sec = now;
+    pid_seed_prio_last = prio;
+
+    int cmax = eff_cold_max(active_pid_cold_max, g_cfg.pid_cold_min);
+    if (cmax < g_cfg.pid_cold_min) cmax = g_cfg.pid_cold_min;
+    int base = pid_seed_base_cold(cmax);
+    int range = cmax - g_cfg.pid_cold_min;
+    if (range < 1) range = 1;
+
+    float base_norm = (float)(base - g_cfg.pid_cold_min) / (float)range;
+    float ki = base_norm - pid_kdp;      // 等价归一化写法；KDP 仍按原公式独立计算
+    float budget = 1.0f - pid_kdp;       // 抗 windup 预算，与 pid_compute 一致
+    if (budget < 0.0f) budget = 0.0f;
+    if (ki > budget) ki = budget;
+    if (ki < 0.0f)   ki = 0.0f;
+    pid_ki = ki;
+    pid_align_cold = base;
+
+    write_log("PID seed: base=%d kdp_cold=%d ki_cold=%d (%s)", base,
+              (int)lroundf(pid_kdp * range), (int)lroundf(ki * range), reason);
+}
+
 // ======================== 广播协议（须与 MainHook.java 侧一致） ========================
 // Action / extra 名单由上方 protocol-const 区块生成（唯一手写处 protocol.def.json）；
 // 完整协议见 README「广播协议」（唯一规范处）。
@@ -4378,10 +4434,11 @@ static void maintain_temp_stop(void) {
         // 否则上一开机周期留下的旧标记会把新开启误判成「重启后失效」。
         remove(TEMP_STOP_BOOT_PATH);
         if (temp_stop_active_last) {
-            // 恢复控制：把限速起点重置为设备当前回传（非法时退回上次下发值，再退回最小合法值），
-            // 保证恢复后的第一包也从真实值按 RATE_LIMIT_* 步长走，不会补发停止前未走完的整段。
-            int base_cold = (g_sensor.cooler_cold_real >= COLD_MIN) ? g_sensor.cooler_cold_real
-                          : (sent_cold >= COLD_MIN ? sent_cold : g_cfg.pid_cold_min);
+            // 恢复控制：把限速起点重置为设备当前状态，并播种 PID 基准（总目标=基准）。
+            // 起点优先取实际运行档 COLD_RUN：设定回显可能高于实际运行档，按回显会走出长下坡。
+            int cmax = eff_cold_max(active_pid_cold_max, g_cfg.pid_cold_min);
+            if (cmax < g_cfg.pid_cold_min) cmax = g_cfg.pid_cold_min;
+            int base_cold = pid_seed_base_cold(cmax);
             int base_rpm  = (g_sensor.cooler_rpm_real >= g_cfg.fan_rpm_min) ? g_sensor.cooler_rpm_real
                           : (sent_rpm >= g_cfg.fan_rpm_min ? sent_rpm : g_cfg.fan_rpm_min);
             actual_cold = base_cold;
@@ -4389,6 +4446,7 @@ static void maintain_temp_stop(void) {
             sent_cold   = base_cold;
             sent_rpm    = base_rpm;
             ramp_slots_left = 0;   // 丢弃停止前未走完的平滑下发
+            pid_seed_from_device("临时停止结束", PID_SEED_PRIO_TEMPSTOP);
             debug_log(g_cfg.debug_main, "临时停止 已关闭，恢复风扇/温控下发（限速起点 冷%d rpm%d）",
                       base_cold, base_rpm);
             temp_stop_active_last = 0;
@@ -4415,6 +4473,7 @@ static void maintain_temp_stop(void) {
         // 开机标识变了 = 手机已重启：自动关闭并写回配置 0
         g_cfg.temp_stop_enabled = 0;
         ramp_slots_left = 0;
+        pid_seed_from_device("临时停止重启失效", PID_SEED_PRIO_ALIGN);
         write_boot_marker(boot_id);
         if (writeback_temp_stop_disabled(config_path)) {
             struct stat mst;
@@ -5330,10 +5389,13 @@ static void alarm_handler(int sig) {
 static int try_align_actual(void) {
     if (!pending_align) return 0;
     if (report_ok) {
-        actual_cold = (g_sensor.cooler_cold_real >= COLD_MIN) ? g_sensor.cooler_cold_real : g_cfg.pid_cold_min;
+        int cmax = eff_cold_max(active_pid_cold_max, g_cfg.pid_cold_min);
+        if (cmax < g_cfg.pid_cold_min) cmax = g_cfg.pid_cold_min;
+        actual_cold = pid_seed_base_cold(cmax);   // 起点优先实际运行档 COLD_RUN
         actual_rpm = (g_sensor.cooler_rpm_real >= g_cfg.fan_rpm_min) ? g_sensor.cooler_rpm_real : g_cfg.fan_rpm_min;
         sent_cold = actual_cold;   // 平滑下发起点：以回传值为准，首发从此渐变
         sent_rpm  = actual_rpm;
+        pid_seed_from_device("回传就绪对齐", PID_SEED_PRIO_ALIGN);
         write_log("回传就绪对齐 冷=%d rpm=%d", actual_cold, actual_rpm);
         pending_align = 0;
         return 1;
@@ -5343,6 +5405,7 @@ static int try_align_actual(void) {
         actual_rpm = g_cfg.fan_rpm_min;
         sent_cold = actual_cold;
         sent_rpm  = actual_rpm;
+        pid_seed_from_device("回传超时起步", PID_SEED_PRIO_ALIGN);
         write_log("回传超时（>%ds）未就绪，用保守值起步 冷=%d rpm=%d",
                   ALIGN_WAIT_TIMEOUT, actual_cold, actual_rpm);
         pending_align = 0;
@@ -5606,8 +5669,11 @@ static void maintain_config_and_temp_stop(void) {
         if (config_retry_if_needed()) {
             update_active_limits();
             apply_cpu_affinity();
+            pid_seed_from_device("配置补加载", PID_SEED_PRIO_RELOAD);
         }
     } else if (config_path[0] != '\0' && stat(config_path, &st) == 0 && st.st_mtime != config_mtime) {
+        int cap_before  = active_pid_cold_max;
+        int perf_before = last_perf_enabled;
         load_config(config_path);
         // load_config 内可能已做旧键迁移写回（改了 mtime）：重取，避免用迁移前的 st 覆盖、多触发一次热重载
         struct stat mst2;
@@ -5618,6 +5684,10 @@ static void maintain_config_and_temp_stop(void) {
         update_active_limits();
         // 亲和同样按重载后的值重算（CPU_AFFINITY 可能被改，也可能随层关闭被复位为默认）
         apply_cpu_affinity();
+        // 控制基准变化（制冷上限 / 性能层开关）后重新接管：按设备当前状态播种 PID。
+        // 同秒内若临时停止同时结束，由优先级去重保证后者的结果不被这里冲掉。
+        if (active_pid_cold_max != cap_before || last_perf_enabled != perf_before)
+            pid_seed_from_device("配置热重载", PID_SEED_PRIO_RELOAD);
     }
     maintain_temp_stop();
 }
@@ -6356,10 +6426,11 @@ static void run_main_loop(struct MainCtx *ctx) {
     // 由主循环等真实回传到达后起步，避免被 COLD_MIN 兜底成 1 或用低基线强制下发导致跳变。
     if (report_ok) {
         float pid_ratio = 0.0f;
-        int cold_ref = (g_sensor.cooler_cold_real >= g_cfg.pid_cold_min) ? g_sensor.cooler_cold_real : g_cfg.pid_cold_min;
+        int cmax = eff_cold_max(active_pid_cold_max, g_cfg.pid_cold_min);
+        if (cmax < g_cfg.pid_cold_min) cmax = g_cfg.pid_cold_min;
+        int cold_ref = pid_seed_base_cold(cmax);   // 实际运行档优先，回显仅作退路
         pid_ratio = pid_ratio_from_cold(cold_ref, active_pid_cold_max);
-        if (g_sensor.cooler_cold_real >= COLD_MIN) actual_cold = g_sensor.cooler_cold_real;
-        else actual_cold = g_cfg.pid_cold_min;
+        actual_cold = cold_ref;
         if (g_sensor.cooler_rpm_real >= g_cfg.fan_rpm_min) actual_rpm = g_sensor.cooler_rpm_real;
         else actual_rpm = g_cfg.fan_rpm_min;
         write_log("LSP 回传承载就绪 制冷=%d ratio=%.2f rpm=%d", actual_cold, pid_ratio, pid_align_rpm);
@@ -6367,6 +6438,7 @@ static void run_main_loop(struct MainCtx *ctx) {
         // 强制首次下发（起点=当前回传值，同样走平滑下发）
         sent_cold = actual_cold;
         sent_rpm  = actual_rpm;
+        pid_seed_from_device("启动就绪", PID_SEED_PRIO_ALIGN);
         if (temp_stop_active()) {
             write_log("临时停止 生效，跳过启动首下（保持散热器现状）");
         } else {
@@ -6506,6 +6578,7 @@ static void run_main_loop(struct MainCtx *ctx) {
                     update_active_limits();
                     read_cooler_params();
                     reconnect_align();
+                    pid_seed_from_device("设备切换", PID_SEED_PRIO_ALIGN);
                 }
             } else if (active_device == DEVICE_NONE) {
                 continue;   // 无可用设备，5s 后重试
