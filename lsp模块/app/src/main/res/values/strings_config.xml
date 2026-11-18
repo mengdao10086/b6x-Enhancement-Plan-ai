@@ -31,6 +31,7 @@
 
     <!-- ===== 键行 ===== -->
     <string name="config_badge_inactive">未生效</string>
+    <string name="config_badge_disabled">已关闭</string>
     <string name="config_range">范围 %1$s~%2$s</string>
     <string name="config_clamped">原值 %1$s → 已按定义范围钳制为 %2$s</string>
     <string name="config_input_restored">输入为空或不可解析，已恢复为上一次的值</string>

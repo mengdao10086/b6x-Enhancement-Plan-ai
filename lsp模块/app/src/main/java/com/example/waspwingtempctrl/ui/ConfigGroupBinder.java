@@ -216,13 +216,21 @@ final class ConfigGroupBinder {
         return value != null && value.intAt(0) == 0;
     }
 
-    /** 卡头那枚「未生效」徽标：可见性与无障碍描述两处一起改（两条刷新路共用这一处落点）。 */
+    /** 卡头徽标：可见性、文案与无障碍描述一起改（两条刷新路共用这一处落点）。 */
     private void setBadge(int unsatisfied) {
         badgeView.setVisibility(unsatisfied > 0 ? View.VISIBLE : View.GONE);
         if (unsatisfied > 0) {
+            // 「拉起应用」组关闭时用「已关闭」，其余组沿用「未生效」；判据与可见性完全不变。
+            badgeView.setText(isLaunchGroup()
+                    ? R.string.config_badge_disabled : R.string.config_badge_inactive);
             badgeView.setContentDescription(card.getContext().getString(
                     R.string.config_group_badge_desc, unsatisfied));
         }
+    }
+
+    /** 本组是否「拉起应用」组（以其总开关键识别）。 */
+    private boolean isLaunchGroup() {
+        return masterMeta != null && "APP_LAUNCH_ENABLED".equals(masterMeta.key);
     }
 
     /**

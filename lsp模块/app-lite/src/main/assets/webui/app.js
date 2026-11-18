@@ -1248,7 +1248,8 @@
             }
             var badge = state.badges[group.id];
             if (badge) {
-                badge.textContent = inactive ? '未生效 ' + inactive : '';
+                badge.textContent = inactive
+                    ? (group.id === 'launch' ? '已关闭 ' : '未生效 ') + inactive : '';
                 toggleClass(badge, 'hidden', inactive === 0);
             }
             var masterRow = group.master ? state.rows[group.master] : null;
