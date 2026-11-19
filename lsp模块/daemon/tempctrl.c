@@ -1035,7 +1035,7 @@ static int parse_common_cfg(const char *key, int val, const char *val_str) {
 // ======================== 界面开关发布（UIPREFS） ========================
 
 /**
- * 把界面侧开关转写成 /data/local/tmp 标志文件（BACK_HIDE=0/1、GATE_LE=0/1、BT_ON_SEC=<秒>），供宿主进程里的钩子读取。
+ * 把界面侧开关转写成 /data/local/tmp 标志文件（BACK_HIDE、GATE_LE、BT_ON_SEC、AUTO_RESTART、DEBUG_ENABLED），供宿主进程里的钩子读取。
  *
  * <p>GATE_LE / BT_ON_SEC 受 APP_LAUNCH_ENABLED 控制（用户 2026-10-24 定）：拉起应用总开关关闭时
  * 对外只发布关闭值（0 / 0），配置值本身不改，重新开启后按原配置恢复。
@@ -1048,15 +1048,18 @@ static void publish_uiprefs(void) {
     static int uiprefs_last_gate_le = -1;   // 同上的 GATE_LE 记录（哨兵=尚未写过）
     static int uiprefs_last_bt_sec = -2147483647;   // 同上的 BT_ON_SEC 记录（哨兵=尚未写过）
     static int uiprefs_last_auto_restart = -1;      // 同上的 AUTO_RESTART 记录（哨兵=尚未写过）
+    static int uiprefs_last_debug = -1;             // 同上的 DEBUG_ENABLED 记录（供模块门控详细日志）
     // 受 APP_LAUNCH_ENABLED 控制（用户 2026-10-24 定）：总开关关闭时不发布放行/自开蓝牙请求。
     // GATE_LE 不再有独立开关，恒等于自动拉起总开关。
     int gate_le_eff = g_cfg.APP_LAUNCH_ENABLED ? 1 : 0;
     int bt_sec_eff  = g_cfg.APP_LAUNCH_ENABLED ? g_cfg.bt_auto_enable_sec : 0;
     int auto_restart_eff = g_cfg.auto_restart_on_update ? 1 : 0;   // 与自动拉起总开关解耦
+    int debug_enabled_eff = g_cfg.debug_mode ? 1 : 0;   // 供模块的 verboseLogAllowed() 门控
     if (g_cfg.back_hide_enabled == uiprefs_last_back_hide
             && gate_le_eff == uiprefs_last_gate_le
             && bt_sec_eff == uiprefs_last_bt_sec
-            && auto_restart_eff == uiprefs_last_auto_restart) {
+            && auto_restart_eff == uiprefs_last_auto_restart
+            && debug_enabled_eff == uiprefs_last_debug) {
         return;
     }
     char tmp[64];
@@ -1073,6 +1076,7 @@ static void publish_uiprefs(void) {
     fprintf(f, "GATE_LE=%d\n", gate_le_eff);
     fprintf(f, "BT_ON_SEC=%d\n", bt_sec_eff);
     fprintf(f, "AUTO_RESTART=%d\n", auto_restart_eff);
+    fprintf(f, "DEBUG_ENABLED=%d\n", debug_enabled_eff);
     fclose(f);
     if (rename(tmp, UIPREFS_PATH) != 0) {
         if (!uiprefs_fail_logged) {
@@ -1086,6 +1090,7 @@ static void publish_uiprefs(void) {
     uiprefs_last_gate_le = gate_le_eff;
     uiprefs_last_bt_sec = bt_sec_eff;
     uiprefs_last_auto_restart = auto_restart_eff;
+    uiprefs_last_debug = debug_enabled_eff;
     uiprefs_fail_logged = 0;
 }
 
@@ -1356,9 +1361,6 @@ static void config_migrate_legacy(const char *path) {
  * @return 0 = PERF/DEBUG/SYSFS 全关（调用方跳过第二遍，但仍算加载成功）；1 = 至少一层开启
  */
 static int config_apply_prepass_effects(struct PrepassState *pre) {
-    // 界面开关转写：总开关全关时也要发布
-    publish_uiprefs();
-
     // 前置条件：自动拉起关闭 → 锁死自动重启（watchdog）强制关闭（不改配置，仅运行时生效）。
     if (!g_cfg.APP_LAUNCH_ENABLED && g_cfg.app_watchdog_cycles > 0) {
         write_log("配置 自动拉起关闭 → 锁死自动重启 强制关闭（APP_LAUNCH_TIMING 第 2 值=%d 运行时置 0）", g_cfg.app_watchdog_cycles);
@@ -1385,6 +1387,9 @@ static int config_apply_prepass_effects(struct PrepassState *pre) {
     } else {
         g_cfg.debug_mode = 0;
     }
+
+    // 界面开关转写：放在 debug_mode 更新之后，保证 DEBUG_ENABLED 发布当前值；总开关全关时也要发布
+    publish_uiprefs();
 
     // 三层全关：第二遍不跑（文件已读到，调用方按加载成功处理）
     if (!pre->pre.perf_enabled && !pre->pre.debug_enabled && !pre->pre.sysfs_enabled)

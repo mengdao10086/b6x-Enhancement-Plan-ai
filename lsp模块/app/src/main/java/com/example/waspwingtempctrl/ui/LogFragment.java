@@ -29,6 +29,7 @@ import com.google.android.material.button.MaterialButtonToggleGroup;
 
 import java.text.SimpleDateFormat;
 import java.util.Date;
+import java.util.List;
 import java.util.Locale;
 
 /**
@@ -654,9 +655,12 @@ public class LogFragment extends Fragment
         }
         String fp = linesFingerprint(snap, keyword);
         if (!fp.equals(onScreenLinesFp)) {
+            // 不在底部时先记视口锚点：行数达上限后头部行被挤掉，重绑会让内容整体上移
+            ScrollAnchor anchor = following ? null : captureScrollAnchor();
             failureScroll.setVisibility(View.GONE);
             listView.setVisibility(View.VISIBLE);
             adapter.submit(snap.lines);
+            restoreScrollAnchor(anchor, snap.lines);
 
             boolean empty = snap.lines.isEmpty();
             emptyView.setVisibility(empty ? View.VISIBLE : View.GONE);
@@ -694,6 +698,94 @@ public class LogFragment extends Fragment
             h = 31 * h + line.level.ordinal();
         }
         return "L:" + snap.lines.size() + ":" + h;
+    }
+
+    /** 视口锚点：重绑前记录首/次可见行文本、旧下标与首个可见行的顶部偏移。 */
+    private static final class ScrollAnchor {
+        final String firstText;
+        @Nullable
+        final String secondText;
+        final int firstIndex;
+        final int firstOffset;
+
+        ScrollAnchor(String firstText, @Nullable String secondText, int firstIndex, int firstOffset) {
+            this.firstText = firstText;
+            this.secondText = secondText;
+            this.firstIndex = firstIndex;
+            this.firstOffset = firstOffset;
+        }
+    }
+
+    /** 重绑前取锚点；列表尚未布局（无可见行）时返回 null。 */
+    @Nullable
+    private ScrollAnchor captureScrollAnchor() {
+        if (listView == null || adapter == null
+                || !(listView.getLayoutManager() instanceof LinearLayoutManager)) {
+            return null;
+        }
+        LinearLayoutManager manager = (LinearLayoutManager) listView.getLayoutManager();
+        int first = manager.findFirstVisibleItemPosition();
+        if (first == RecyclerView.NO_POSITION) {
+            return null;
+        }
+        View firstView = manager.findViewByPosition(first);
+        String firstText = lineTextOf(firstView);
+        if (firstText == null) {
+            return null;
+        }
+        String secondText = first + 1 < adapter.getItemCount()
+                ? lineTextOf(manager.findViewByPosition(first + 1))
+                : null;
+        return new ScrollAnchor(firstText, secondText, first,
+                firstView.getTop() - listView.getPaddingTop());
+    }
+
+    /** 行视图里的日志文本；不是日志行时返回 null。 */
+    @Nullable
+    private static String lineTextOf(@Nullable View row) {
+        if (row == null) {
+            return null;
+        }
+        View text = row.findViewById(R.id.log_line_text);
+        return text instanceof TextView ? ((TextView) text).getText().toString() : null;
+    }
+
+    /** 重绑后按文本找回锚行并滚回原位；首个锚丢失用第二个，都丢则保持现状。 */
+    private void restoreScrollAnchor(@Nullable ScrollAnchor anchor, List<LogLine> lines) {
+        if (anchor == null || listView == null || following) {
+            return;
+        }
+        if (scrolling || listView.isUserTouching()) {
+            return;   // 手指在列表上时不纠偏
+        }
+        int position = findAnchorPosition(lines, anchor.firstText, anchor.firstIndex);
+        if (position < 0) {
+            position = findAnchorPosition(lines, anchor.secondText, anchor.firstIndex + 1);
+        }
+        if (position < 0 || !(listView.getLayoutManager() instanceof LinearLayoutManager)) {
+            return;
+        }
+        ((LinearLayoutManager) listView.getLayoutManager())
+                .scrollToPositionWithOffset(position, anchor.firstOffset);
+    }
+
+    /** 文本命中行下标：优先取不晚于 expected 的最近一次，避免重复行锚到很后面。 */
+    private static int findAnchorPosition(List<LogLine> lines, @Nullable String text, int expected) {
+        if (text == null) {
+            return -1;
+        }
+        int nearestBefore = -1;
+        for (int i = 0; i < lines.size(); i++) {
+            if (!text.equals(lines.get(i).text)) {
+                continue;
+            }
+            if (i <= expected) {
+                nearestBefore = i;
+            } else if (nearestBefore < 0) {
+                return i;   // 锚行只出现在更靠后的位置：按第一次命中处理
+            }
+        }
+        return nearestBefore;
     }
 
     /** 文本没变就不碰控件：避免无谓的重排（滚动条长度依赖列表，不依赖这些行，但少一次算一次）。 */
@@ -962,9 +1054,8 @@ public class LogFragment extends Fragment
     }
 
     /**
-     * 统计行（与修改时间同一行、右对齐）：行数 / 渲染上限行数，文件大小 / 尾读上限。
-     * 行数取参与匹配的最近 N 行（{@link LogTailReader.Snapshot#candidateLines}），
-     * 大小取文件字节数（超过上限即说明尾读被截断）。
+     * 统计行（与修改时间同一行、右对齐）：行数与文件大小两段拼接。
+     * 行数达 lineLimit 或文件超 byteLimit 即视为截断，各自标「尾部」/「仅读尾部」。
      */
     private String buildStatText(LogTailReader.Snapshot snap) {
         if (snap.path == null) {
@@ -973,8 +1064,13 @@ public class LogFragment extends Fragment
         if (!snap.ok) {
             return getString(R.string.log_stat_failed);
         }
-        return getString(R.string.log_stat_fmt, snap.candidateLines, snap.lineLimit,
-                formatK(snap.size), formatK(snap.byteLimit));
+        String lines = snap.candidateLines >= snap.lineLimit
+                ? getString(R.string.log_stat_lines_tail_fmt, snap.candidateLines, snap.lineLimit)
+                : getString(R.string.log_stat_lines_fmt, snap.candidateLines, snap.lineLimit);
+        String file = snap.size > snap.byteLimit
+                ? getString(R.string.log_stat_file_tail_fmt, formatK(snap.size), formatK(snap.byteLimit))
+                : getString(R.string.log_stat_file_fmt, formatK(snap.size));
+        return getString(R.string.log_stat_join_fmt, lines, file);
     }
 
     /** 命中计数只在有关键词时才有意义；无关键词时行数信息统一在「日志文件」卡的统计行。 */

@@ -16,7 +16,6 @@ import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
-import android.os.PowerManager;
 
 import java.io.BufferedReader;
 import java.io.File;
@@ -86,6 +85,10 @@ public class MainHook implements IXposedHookLoadPackage {
     private static final String KEY_APK_MTIME = "apk_mtime";
     private static final String KEY_APK_SIZE = "apk_size";
     private static volatile boolean autoRestartDefaultLogged = false;   // uiprefs 缺键提示只打一次
+    // 详细日志门控（DEBUG_ENABLED；守护进程经 uiprefs 发布，默认 0=关）
+    private static volatile int debugEnabledCache = -1;
+    private static volatile long debugEnabledReadAt = 0;
+    private static final long DEBUG_ENABLED_CACHE_MS = 60 * 1000;
     private static final String ACTION_TEMP_B6 = Protocol.ACTION_TEMP_B6;   // B6X 温控广播
     private static final String ACTION_TEMP_B7 = Protocol.ACTION_TEMP_B7;   // B7X 温控广播
     /* protocol-extras-mirror:start （本节由 参数定义/gen_params.py 生成，勿手改；实际调用使用 Protocol 的 EXTRA_* 常量） */
@@ -148,22 +151,19 @@ public class MainHook implements IXposedHookLoadPackage {
     private static final long HEAL_WARN_MS = 30000;       // 分级 1：30s 告警 + 软重写
     private static final long HEAL_SOFT_MS = 60000;       // 分级 2：60s 公开断开/重建控制器
     private static final long HEAL_HARD_MS = 90000;       // 分级 3：90s 强断 + 状态字段 reset
-    private static final long LINK_PROBE_MIN_INTERVAL_MS = 10000; // 判死后每 10s 发一次连接令
     private static final long HEAL_LOG_MIN_INTERVAL_MS = 5000;    // 分级日志限频
     private static volatile boolean linkDead = false;     // 25s 判死（逻辑判死，不直接断 gatt）
     private static volatile long linkDeadSinceMs = 0;     // 判死起点（ms）
     private static volatile int healLevel = 0;            // 0=正常,1=30s,2=60s,3=90s
     private static volatile long lastHealLogAt = 0;       // 分级动作日志限频
-    private static volatile long lastLinkProbeAt = 0;     // 判死后低频连接令计时
-    // ---- 重连熔断：连续 3 次尝试 30s 内无回传 → 5 分钟冷却，期间 30s 低频探测 ----
-    private static final int RECONNECT_FAIL_MAX = 3;
-    private static final long BREAKER_COOLDOWN_MS = 5 * 60 * 1000;
-    private static final long BREAKER_PROBE_MS = 30000;
+    // ---- 重连熔断：每次实际发令计一次，连续 12 次仍无回传 → 熔断（不超时退出，30s 探测）----
+    private static final int RECONNECT_FAIL_MAX = 12;
+    private static final long RECONNECT_INTERVAL_MS = 30000;  // 普通重连与熔断探测统一间隔
     private static volatile int reconnectFailStreak = 0;
-    private static volatile long breakerOpenUntilMs = 0;
-    private static volatile long lastBreakerProbeAt = 0;
-    private static volatile long attemptExpectInfoBy = 0; // 本次连接令后应收到回传的截止（ms；0=无在途）
-    private static volatile long lastAttemptAt = 0;       // 最近一次连接令时刻（ms）
+    private static volatile boolean breakerOpen = false;
+    private static volatile long breakerOpenedAtMs = 0;
+    private static volatile int breakerProbeCount = 0;        // 熔断期探测次数（进 2h 摘要）
+    private static volatile long lastAttemptAt = 0;           // 最近一次连接令时刻（ms；节拍基准）
     // ---- 最近一条广播参数（分级 1 软重写用；断连期也能重放最新目标）----
     private static volatile boolean hasLastCmd = false;
     private static volatile int lastCmdMode = 1, lastCmdTemp = 20, lastCmdWindOC = 0,
@@ -285,9 +285,11 @@ public class MainHook implements IXposedHookLoadPackage {
         }
 
         if (firstOfBoot || changed) {
-            XposedBridge.log(TAG + " 已钩住 " + all.size() + " 项: " + String.join("、", all));
+            if (verboseLogAllowed()) {
+                XposedBridge.log(TAG + " 已钩住 " + all.size() + " 项: " + String.join("、", all));
+            }
             if (path != null) writeHookRecord(path, bootId, all);
-        } else {
+        } else if (verboseLogAllowed()) {
             XposedBridge.log(TAG + " 已钩住 " + all.size() + " 项（清单未变）");
         }
     }
@@ -384,15 +386,9 @@ public class MainHook implements IXposedHookLoadPackage {
     private static final long CONNECT_ATTEMPT_LOG_MS = 5000;
     private static volatile long lastConnectAttemptLogAt = 0;
     private static volatile boolean needFreshObject = false;        // B：冷启动对象待换（取"类型已知"对象，markConnected 清）
-    // 息屏退避用的屏幕状态（取法与缓存策略见 reconnectIntervalTicks）：
-    // appContext 由 Application.onCreate 钩子（主线程）写、tick 线程读 → volatile；
-    // 另两个字段只有 tick 线程读写、不与任何线程共享，故不加 volatile。
+    // appContext 由 Application.onCreate 钩子（主线程）写、tick 线程读 → volatile。
+    // 重连节拍已统一为 RECONNECT_INTERVAL_MS，不再读取屏幕状态。
     private static volatile Context appContext = null;   // 宿主 Application Context（进程内常驻，仅用于取系统服务）
-    private static int screenProbedAtTick = 0;           // 上次探测的 tick（tick 自 1 起；首个可能触发重连的 tick 必已探测）
-    private static boolean screenInteractive = true;     // 缓存值：初值与"取不到"一律按亮屏
-    private static final int SCREEN_PROBE_TICKS = 5;     // 探测间隔（秒）：isInteractive() 是一次到 system_server 的调用，不每秒问
-    private static final int RECONNECT_INTERVAL_SCREEN_ON_TICKS = 5;    // 亮屏重连间隔（原节奏，秒）
-    private static final int RECONNECT_INTERVAL_SCREEN_OFF_TICKS = 10;  // 息屏重连间隔（用户拍板值，秒）
 
     // ========== P1：门禁有界自解（见 app/逻辑说明.md §1.2）==========
     // stuckStateTicks：tick 线程自增、markConnected（SDK hook 线程）复位 → 跨线程，故 volatile。
@@ -400,7 +396,13 @@ public class MainHook implements IXposedHookLoadPackage {
     private static volatile int stuckStateTicks = 0;  // readConnectState() 连续 ∈{1,2} 的秒数（tick 自增 / markConnected 复位）
     private static long lastStuckClearAt = 0;      // 上次「有界清状态」动作时刻（限频计时）
     private static final int STUCK_STATE_CLEAR_AFTER_TICKS = 30;     // state∈{1,2} 连续达此秒数才清（>SDK 5s 建连超时，不误拆）
-    private static final long STUCK_STATE_CLEAR_COOLDOWN_MS = 60 * 1000;  // 清状态动作限频
+    private static final long STUCK_STATE_CLEAR_COOLDOWN_MS = 60 * 1000;  // 成功后 60s 内不再动作
+    private static final long STUCK_CLEAR_RETRY_INTERVAL_MS = 30 * 1000;  // 失败后每 30s 重试
+    private static final int STUCK_CLEAR_RETRY_MAX = 10;                  // 最多 10 次（约 5 分钟）
+    private static final long STUCK_CLEAR_RETRY_WINDOW_MS = 5 * 60 * 1000; // 重试预算窗口
+    private static volatile int stuckClearRetryCount = 0;    // 本轮失败后的重试次数（markConnected 复位）
+    private static volatile long stuckClearWindowStartAt = 0;
+    private static volatile int stuckClearActionCount = 0;  // 本聚合窗口清状态动作数（进 2h 摘要）
 
     // ========== R1·任务2：state 观测（仅稳定变化/翻转汇总时输出，仅 tick 线程读写）==========
     // 动机：`本段重连 N 次` 每 2 小时才一条，上线后分不清「修好了」与「本来就会好」、
@@ -557,7 +559,8 @@ public class MainHook implements IXposedHookLoadPackage {
                     }
                 }
             }, filter, Context.RECEIVER_EXPORTED);
-            XposedBridge.log(TAG + " 已注册 SET_TEMPERATURE 广播接收器 (RECEIVER_EXPORTED)");
+            if (verboseLogAllowed())
+                XposedBridge.log(TAG + " 已注册 SET_TEMPERATURE 广播接收器 (RECEIVER_EXPORTED)");
         } catch (Throwable t) {
             XposedBridge.log(TAG + " 注册广播接收器失败: " + t.getMessage());
         }
@@ -637,6 +640,7 @@ public class MainHook implements IXposedHookLoadPackage {
      */
     private static void logDiagOnBroadcast(final int mode, final int temperature,
                                            final int windOC, final int coldOC, final int windLevel) {
+        if (!verboseLogAllowed()) return;   // 连接诊断成功路径：默认关
         if (diagLogCount >= DIAG_LOG_MAX_PER_CONN) return;
         diagLogCount++;
         XposedBridge.log(TAG + " 收到广播 mode=" + mode + " temp=" + temperature
@@ -719,7 +723,8 @@ public class MainHook implements IXposedHookLoadPackage {
                 // 参数回传缺失：BLE 已连接但 lastWaspWingInfo 未就绪（如首包未到/回传断）
                 if (!paramMissingLogged) {
                     paramMissingLogged = true;
-                    XposedBridge.log(TAG + " 参数回传缺失: lastWaspWingInfo 未就绪（BLE 已连接但无回传）");
+                    if (verboseLogAllowed())
+                        XposedBridge.log(TAG + " 参数回传缺失: lastWaspWingInfo 未就绪（BLE 已连接但无回传）");
                 }
             }
 
@@ -777,41 +782,26 @@ public class MainHook implements IXposedHookLoadPackage {
 
     private static void startPeriodicStatusWrite() {
         Thread t = new Thread(() -> {
-            int tick = 0;   // 状态写 1s；后台重连亮屏 5s、息屏 10s（见 reconnectIntervalTicks）
             while (true) {
                 try {
-                    tick++;
                     writeStatusFile();   // 每 1 秒写一次 status（供 daemon 3s 判死 + 曲线页）
 
                     // ① 连接存活判据 + 30/60/90 分级（25s 判死 / 30s 软重写 / 60s 重建 / 90s 强断）
                     updateLinkHealth();
 
-                    // ② 有界清状态：正常断连立即生效；半死连接按分级到 60s（level>=2）才清，
-                    //    避免 30s 软重写之前就把 gatt 拆掉。熔断冷却期内不做状态 reset。
-                    if ((!bleConnected || (linkDead && healLevel >= 2))
-                            && breakerOpenUntilMs == 0) {
+                    // ② 有界清状态：正常断连/半死连接都按同一判定式；成功 60s 内不再动作，
+                    //    失败每 30s 重试（5 分钟预算），见 maybeClearStuckControllerState。
+                    if (!bleConnected || (linkDead && healLevel >= 2)) {
                         maybeClearStuckControllerState();
                     }
 
-                    // ③ 后台自动重连（亮屏 5s / 息屏 10s）；判死时即使 bleConnected=true 也允许发令
+                    // ③ 后台自动重连：统一 30s；熔断期同频探测，不看屏幕状态
                     boolean connDown = !bleConnected;
                     boolean deadButConnected = linkDead && bleConnected;
                     if ((connDown || deadButConnected) && lastDevice != null && !deviceLockedAlerted) {
                         long nowMs = System.currentTimeMillis();
-                        boolean due = connDown
-                                ? (tick % reconnectIntervalTicks(tick) == 0)
-                                : (nowMs - lastLinkProbeAt >= LINK_PROBE_MIN_INTERVAL_MS);
-                        if (due) {
-                            if (deadButConnected) lastLinkProbeAt = nowMs;
-                            if (breakerOpenUntilMs > nowMs) {
-                                if (nowMs - lastBreakerProbeAt >= BREAKER_PROBE_MS) {
-                                    lastBreakerProbeAt = nowMs;
-                                    logBreaker("冷却低频探测");
-                                    tryReconnectOnce();
-                                }
-                            } else {
-                                tryReconnectOnce();   // 只发令（见 app/逻辑说明.md §1.2）
-                            }
+                        if (nowMs - lastAttemptAt >= RECONNECT_INTERVAL_MS) {
+                            tryReconnectOnce();   // 只发令（见 app/逻辑说明.md §1.2）
                         }
                     }
 
@@ -847,7 +837,6 @@ public class MainHook implements IXposedHookLoadPackage {
      * 门禁挡死；本方法让判死状态也能触发清状态与重连。
      */
     private static void updateLinkHealth() {
-        checkAttemptBreaker();
         // 设备固件锁死已判定（连续 3 次唤醒/重连无回传）→ 沿用既有语义：停止自动重连，
         // 等用户强制重启 App；分级恢复不再叠加，避免与「锁死提示」互相打架。
         if (deviceLockedAlerted) {
@@ -935,7 +924,7 @@ public class MainHook implements IXposedHookLoadPackage {
         try {
             Object dic = XposedHelpers.getStaticObjectField(inst.getClass(), dicFieldName());
             if (dic != null) {
-                clearStuckControllerState(dic);   // disconnectManually → disconnectGatt
+                clearStuckControllerState(dic, readConnectState(dic));   // disconnectManually → disconnectGatt
                 lastStuckClearAt = System.currentTimeMillis();   // 与有界清状态共用限频，避免重复拆
             }
         } catch (Throwable t) {
@@ -993,33 +982,24 @@ public class MainHook implements IXposedHookLoadPackage {
         }
     }
 
-    /** 连接令超时 → 失败计数；连续 3 次 → 5 分钟熔断（30s 低频探测）。 */
-    private static void checkAttemptBreaker() {
-        long now = System.currentTimeMillis();
-        if (attemptExpectInfoBy > 0 && now > attemptExpectInfoBy) {
-            attemptExpectInfoBy = 0;
-            if (!bleConnected || linkDead) {
-                reconnectFailStreak++;
-                XposedBridge.log(TAG + " 重连失败计数 " + reconnectFailStreak + "/" + RECONNECT_FAIL_MAX
-                        + "（发令后 30s 内无回传）");
-                if (reconnectFailStreak >= RECONNECT_FAIL_MAX && breakerOpenUntilMs == 0) {
-                    breakerOpenUntilMs = now + BREAKER_COOLDOWN_MS;
-                    lastBreakerProbeAt = now;
-                    XposedBridge.log(TAG + " 重连熔断: 连续 " + reconnectFailStreak
-                            + " 次失败，冷却 5 分钟（30s 低频探测）");
-                }
-            }
+    /**
+     * 口径乙：每次真正调用 SDK 发令计一次（由 tryReconnectOnce 在调用点去重后调用）。
+     * 未熔断时累计失败，到 12 次开启熔断；熔断期只累计探测次数，不再推高 streak。
+     * 只在一次调用内计一次，不负责超时判定（不再超时退出）。
+     */
+    private static void countReconnectAttempt() {
+        if (breakerOpen) {
+            breakerProbeCount++;
+            return;
         }
-        if (breakerOpenUntilMs > 0 && now >= breakerOpenUntilMs) {
-            breakerOpenUntilMs = 0;
-            reconnectFailStreak = 0;
-            XposedBridge.log(TAG + " 重连熔断: close（冷却结束，恢复正常重连）");
-        }
-    }
-
-    private static void logBreaker(String msg) {
-        long left = Math.max(0, breakerOpenUntilMs - System.currentTimeMillis()) / 1000;
-        XposedBridge.log(TAG + " 重连熔断: " + msg + "（剩余 " + left + "s）");
+        reconnectFailStreak++;
+        if (reconnectFailStreak < RECONNECT_FAIL_MAX) return;
+        breakerOpen = true;
+        breakerOpenedAtMs = System.currentTimeMillis();
+        reconnectFailStreak = RECONNECT_FAIL_MAX;   // 冻结在 12，探测不累加
+        breakerProbeCount = 0;                      // 新一轮熔断从 0 计探测
+        XposedBridge.log(TAG + " 重连失败计数 " + RECONNECT_FAIL_MAX + "/" + RECONNECT_FAIL_MAX
+                + "，进入熔断（30s 探测，直至回传）");
     }
 
     /** 连接入口日志（5s 限频）：state∈{1,2} 即 SDK connectWith() 会静默 return。 */
@@ -1032,18 +1012,26 @@ public class MainHook implements IXposedHookLoadPackage {
                 + " gate=" + (blocked ? "blocked（connectWith 预计静默 return）" : "pass"));
     }
 
-    /** 回传到达：分级/熔断/在途连接令全部复位。 */
+    /** 回传到达：分级/熔断全部复位（熔断的唯一正常出口之一）。 */
     private static void onLinkHealthy() {
-        boolean wasDead = linkDead || healLevel != 0
-                || reconnectFailStreak > 0 || breakerOpenUntilMs > 0;
+        long now = System.currentTimeMillis();
+        int probes = breakerProbeCount;
+        boolean wasBreaker = breakerOpen || probes > 0;
+        long breakerMin = breakerOpenedAtMs > 0 ? Math.max(0, now - breakerOpenedAtMs) / 60000 : 0;
+        boolean wasDead = linkDead || healLevel != 0 || reconnectFailStreak > 0 || wasBreaker;
         linkDead = false;
         linkDeadSinceMs = 0;
         healLevel = 0;
         reconnectFailStreak = 0;
-        breakerOpenUntilMs = 0;
-        attemptExpectInfoBy = 0;
+        breakerOpen = false;
+        breakerOpenedAtMs = 0;
+        breakerProbeCount = 0;
         if (wasDead) {
-            XposedBridge.log(TAG + " 连接恢复: 回传到达，分级/熔断/在途连接令复位");
+            String detail = wasBreaker
+                    ? "（熔断" + (breakerMin > 0 ? "持续 " + breakerMin + " 分钟，" : "")
+                    + "探测 " + probes + " 次）"
+                    : "";
+            XposedBridge.log(TAG + " 连接恢复: 回传到达，分级/熔断复位" + detail);
         }
     }
 
@@ -1134,6 +1122,7 @@ public class MainHook implements IXposedHookLoadPackage {
      * 任一反射失败只记录并按时间限频输出，绝不向 tick 循环抛出。
      */
     private static void tryReconnectOnce() {
+        lastAttemptAt = System.currentTimeMillis();   // 30s 节拍基准：早退（蓝牙未开/类加载器为空）也计入，避免每秒重入
         try {
             if (appClassLoader == null) {
                 if (!loggedReconnectSkip) {
@@ -1182,17 +1171,20 @@ public class MainHook implements IXposedHookLoadPackage {
                         + " 非 BLE（仍发令，交回 SDK 判定）");
             }
 
+            boolean attemptCounted = false;
             try {
-                // 在途连接令：30s 内没有回传/连接成功即计一次失败（熔断用）
-                lastAttemptAt = System.currentTimeMillis();
-                attemptExpectInfoBy = lastAttemptAt + 30000;
+                // 口径乙：真正调用 SDK 发令后计一次（含抛异常）；未发令的早退分支不进入此处
                 XposedHelpers.callStaticMethod(mgrCls, reconnectMethodName(), lastDevice);
             } catch (SecurityException se) {
                 // R2 唯一能露头的地方：不再静默吞掉
                 logReconnectExOnce("R2 命中: 发令期 SecurityException -> " + se.getMessage());
-                return;
             } catch (Throwable t) {
                 logReconnectExOnce("发令异常 " + t.getClass().getSimpleName() + ": " + t.getMessage());
+            } finally {
+                if (!attemptCounted) {   // 局部去重：同一次调用只计一次
+                    attemptCounted = true;
+                    countReconnectAttempt();
+                }
             }
 
             // 重连尝试计数：由 tick 线程每 2 小时聚合成一条（无尝试不输出）
@@ -1297,8 +1289,9 @@ public class MainHook implements IXposedHookLoadPackage {
      * ① 有界清状态（P1 核心修复）：门禁卡死的自解。SDK 的 {@code connectWith()} 在控制器
      * {@code mDataConnectState ∈ {1,2}} 时静默 return，模块重连与 App 手动连接都会被挡死。
      * 每秒查一次：state 连续 ∈{1,2} 达 {@link #STUCK_STATE_CLEAR_AFTER_TICKS}s（用 tick 计数，不 sleep）
-     * 即判卡死 → 走 SDK 自己的断连入口清状态。用 ∈{1,2} 而非「非 0」，排除读失败 -1 误清。
-     * 仅在 tick 线程调用。
+     * 即判卡死；动作前按 gatt 判定式分流（非空走 SDK 断连入口，为空才直写 state=0）。
+     * 成功 60s 内不再动作；失败每 30s 重试，最多 10 次/5 分钟，之后暂停到下次断连。
+     * 用 ∈{1,2} 而非「非 0」，排除读失败 -1 误清。仅在 tick 线程调用。
      */
     private static void maybeClearStuckControllerState() {
         if (appClassLoader == null) { stuckStateTicks = 0; return; }
@@ -1312,17 +1305,35 @@ public class MainHook implements IXposedHookLoadPackage {
         }
         int st = readConnectState(dic);
         observeConnectState(st, readInScanning(dic));   // 任务2：稳定变化/翻转汇总观测（含扫描侧 inScanning）
-        if (st != 1 && st != 2) {   // 0=空闲、-1=读失败、其它：一律清零
+        if (st != 1 && st != 2) {   // 0=空闲、-1=读失败、其它：清零并结束本轮重试预算
             stuckStateTicks = 0;
+            stuckClearRetryCount = 0;
+            stuckClearWindowStartAt = 0;
             return;
         }
         stuckStateTicks++;
         if (stuckStateTicks < STUCK_STATE_CLEAR_AFTER_TICKS) return;
         long now = System.currentTimeMillis();
-        if (now - lastStuckClearAt < STUCK_STATE_CLEAR_COOLDOWN_MS) return;
+        if (stuckClearRetryCount > 0) {   // 已失败过：每 30s 重试，受 10 次/5 分钟预算约束
+            if (now - lastStuckClearAt < STUCK_CLEAR_RETRY_INTERVAL_MS) return;
+            if (stuckClearRetryCount >= STUCK_CLEAR_RETRY_MAX
+                    || now - stuckClearWindowStartAt >= STUCK_CLEAR_RETRY_WINDOW_MS) {
+                return;   // 预算耗尽：暂停到下次断连（state 离开 {1,2}）
+            }
+        } else if (now - lastStuckClearAt < STUCK_STATE_CLEAR_COOLDOWN_MS) {
+            return;   // 上次成功后 60s 内不再动作
+        }
         lastStuckClearAt = now;
         stuckStateTicks = 0;
-        clearStuckControllerState(dic);
+        stuckClearActionCount++;
+        boolean ok = clearStuckControllerState(dic, st);
+        if (ok) {
+            stuckClearRetryCount = 0;
+            stuckClearWindowStartAt = 0;
+        } else {
+            if (stuckClearRetryCount == 0) stuckClearWindowStartAt = now;
+            stuckClearRetryCount++;
+        }
     }
 
     /**
@@ -1343,12 +1354,14 @@ public class MainHook implements IXposedHookLoadPackage {
             observedStateSince = now;
             if (lastLoggedState != Integer.MIN_VALUE) mergedStateChangeCount++;
         }
-        if (lastLoggedState == Integer.MIN_VALUE) {   // ① 基线：模块启动后首次观测
+        if (lastLoggedState == Integer.MIN_VALUE) {   // ① 基线：模块启动后首次观测（详细族，默认关）
             lastLoggedState = st;
             lastStateObsLogAt = now;
             mergedStateChangeCount = 0;
-            XposedBridge.log(TAG + " 状态观测: state=" + stateDesc(st) + "（基线）"
-                    + stateObsSuffix(scanning));
+            if (verboseLogAllowed()) {
+                XposedBridge.log(TAG + " 状态观测: state=" + stateDesc(st) + "（基线）"
+                        + stateObsSuffix(scanning));
+            }
             return;
         }
         if (st != lastLoggedState && now - observedStateSince >= STATE_OBS_SETTLE_MS) {   // ② 稳定迁移
@@ -1379,52 +1392,69 @@ public class MainHook implements IXposedHookLoadPackage {
     }
 
     /**
-     * 调 SDK 自己的断连入口把 {@code mDataConnectState} 置 0（<b>严禁裸写该字段</b>）：
-     * 首选 {@code disconnectManually()}（其 {@code onGattDisconnected} 同步置 0 + close），
-     * 退回 {@code disconnectGatt()}；都失败只记一条，60s 后由限频重试。
-     *
-     * <p><b>调用后复读 state 再定日志措辞</b>：SDK 的 {@code disconnectManually()} 内部
-     * {@code if (mBluetoothGatt != null)}，gatt 为空时纯空转、state 清不掉——「调用不抛异常」不等于
-     * 「已清」。故以复读到的 state 判定成功/未清，避免日志误导（真机排障时关键）。
+     * 按判定式清 {@code mDataConnectState}：gatt 非空走 SDK 断连入口（disconnectManually，
+     * 退回 disconnectGatt），gatt 为空才直写 state=0；<b>gatt 非空时严禁直写</b>。
+     * 调用后复读 state，只输出一条结果日志；返回是否已归零。
      */
-    private static void clearStuckControllerState(Object dic) {
-        String entry = null;
+    private static boolean clearStuckControllerState(Object dic, int before) {
+        Object gatt = null;
+        boolean gattReadable = false;
         try {
-            XposedHelpers.callMethod(dic, "disconnectManually");
-            entry = "disconnectManually()";
-        } catch (Throwable t) {
+            gatt = XposedHelpers.getObjectField(dic, gattFieldName());
+            gattReadable = true;
+        } catch (Throwable ignored) {
+            // 字段不可读 = 无法确认 gatt 为空，按非空处理，只走 SDK 断连入口
+        }
+        String entry;
+        if (!gattReadable || gatt != null) {
+            entry = "disconnectManually";
             try {
-                XposedHelpers.callMethod(dic, "disconnectGatt");
-                entry = "disconnectGatt()";
-            } catch (Throwable t2) {
-                XposedBridge.log(TAG + " 有界清状态失败: " + t2.getClass().getSimpleName()
-                        + ": " + t2.getMessage());
-                return;
+                XposedHelpers.callMethod(dic, "disconnectManually");
+            } catch (Throwable t) {
+                try {
+                    XposedHelpers.callMethod(dic, "disconnectGatt");
+                    entry = "disconnectGatt";
+                } catch (Throwable t2) {
+                    XposedBridge.log(TAG + " 有界清状态: 失败 " + before + "→" + stateDesc(readConnectState(dic))
+                            + "（" + t2.getClass().getSimpleName() + "）");
+                    return false;
+                }
+            }
+        } else {
+            entry = "直写";
+            try {
+                XposedHelpers.setIntField(dic, stateFieldName(), 0);
+            } catch (Throwable t) {
+                XposedBridge.log(TAG + " 有界清状态: 失败 gatt 为空，直写异常 "
+                        + t.getClass().getSimpleName());
+                return false;
             }
         }
         int after = readConnectState(dic);   // 复读：不以「调用不抛异常」当成功
-        if (after == 0) {
-            XposedBridge.log(TAG + " 有界清状态: 调 SDK " + entry + " 后 state→0，门禁已清");
-        } else {
-            XposedBridge.log(TAG + " 有界清状态: 调 SDK " + entry + " 后 state 仍=" + stateDesc(after)
-                    + "（gatt 为空时该入口空转、清不掉；60s 后重试）");
-        }
+        boolean ok = after == 0;
+        XposedBridge.log(TAG + " 有界清状态: " + (ok ? "成功" : "失败")
+                + " " + before + "→" + stateDesc(after) + "（" + entry + "）");
+        return ok;
     }
 
     /**
      * 重连聚合日志：断连期间每 {@link #RECONNECT_SUMMARY_INTERVAL_MS} 输出一条
-     * 「本段重连 N 次 state=.. 屏幕=..」，输出后清零；本段无重连则不输出。
+     * 「本段重连 N 次 state=.. 熔断探测 P 次 清状态 C 次」，输出后清零；本段无活动则不输出。
      * 让「循环在跑但没发起」与「循环停了」在日志上可区分。只在 tick 线程调用。
      */
     private static void logReconnectSummary() {
         long now = System.currentTimeMillis();
-        if (reconnectAttemptCount == 0) return;
+        if (reconnectAttemptCount == 0 && breakerProbeCount == 0 && stuckClearActionCount == 0) return;
         if (now - lastReconnectSummaryAt < RECONNECT_SUMMARY_INTERVAL_MS) return;
         int count = reconnectAttemptCount;
+        int probes = breakerProbeCount;
+        int clears = stuckClearActionCount;
         reconnectAttemptCount = 0;
+        breakerProbeCount = 0;
+        stuckClearActionCount = 0;
         lastReconnectSummaryAt = now;
         XposedBridge.log(TAG + " 本段重连 " + count + " 次 state=" + currentReconnectStateDesc()
-                + " 屏幕=" + (screenInteractive ? "亮" : "灭"));
+                + " 熔断探测 " + probes + " 次 清状态 " + clears + " 次");
     }
 
     /** 读当前连接状态供聚合日志使用；读取失败返回 ?（只读，不改状态）。仅在 tick 线程调用。 */
@@ -1436,30 +1466,6 @@ public class MainHook implements IXposedHookLoadPackage {
         } catch (Throwable t) {
             return "?";
         }
-    }
-
-    /**
-     * 后台重连节奏：亮屏 5s、息屏 10s（取法缓存与失败兜底见 app/逻辑说明.md §1.2）。
-     *
-     * @param tick 1Hz tick 计数（等价秒数）
-     * @return 本次 tick 的重连间隔（秒）
-     */
-    private static int reconnectIntervalTicks(int tick) {
-        if (tick - screenProbedAtTick >= SCREEN_PROBE_TICKS) {
-            screenProbedAtTick = tick;
-            Boolean interactive = null;   // null = 未取到 → 兜底亮屏
-            try {
-                Context ctx = appContext;
-                PowerManager pm = (ctx == null) ? null
-                        : (PowerManager) ctx.getSystemService(Context.POWER_SERVICE);
-                if (pm != null) interactive = pm.isInteractive();
-            } catch (Throwable t) {
-                // 探测异常按亮屏兜底，不冒泡打断 tick 循环
-            }
-            screenInteractive = (interactive != null) ? interactive : true;   // 取不到 → 亮屏
-        }
-        return screenInteractive ? RECONNECT_INTERVAL_SCREEN_ON_TICKS
-                : RECONNECT_INTERVAL_SCREEN_OFF_TICKS;
     }
 
     /**
@@ -1579,9 +1585,9 @@ public class MainHook implements IXposedHookLoadPackage {
 
         sHostPkg = pkg;   // 「已钩住」记录的落点按宿主包分开
 
-        XposedBridge.log(TAG + " LoadPackage: " + pkg);
+        if (verboseLogAllowed()) XposedBridge.log(TAG + " LoadPackage: " + pkg);
         XposedBridge.log(TAG + " 模块已加载到 " + pkg
-                + " (appKind=" + appKind + ")");
+                + " (appKind=" + appKind + ")");   // 每进程保留 1 行
         appClassLoader = lpparam.classLoader;  // 保存类加载器供后台重连线程使用
 
         // 注册顺序：两个构造/实例捕获 hook 必须抢在宿主 SDK 建实例之前，放最前；
@@ -1643,7 +1649,8 @@ public class MainHook implements IXposedHookLoadPackage {
                         try {
                             markConnected(null);  // onDeviceConnected 无 gatt 参数，不保存设备引用
                             stopControllerScan(param.thisObject);
-                            XposedBridge.log(TAG + " 控制器：扫描已停止，" + getDeviceLabel() + " BLE 已连接");
+                            if (verboseLogAllowed())
+                                XposedBridge.log(TAG + " 控制器：扫描已停止，" + getDeviceLabel() + " BLE 已连接");
                             writeStatusFile();  // 连接事件立刻写 status 文件
                         } catch (Throwable t) {
                             XposedBridge.log(TAG + " 控制器修复异常: " + t.getMessage());
@@ -1695,8 +1702,9 @@ public class MainHook implements IXposedHookLoadPackage {
                             if (!lastScanUnlockAt.compareAndSet(prev, now)) return;
                             // SDK 自身入口：清标志 + 停残留扫描（蓝牙不支持时 SDK 会提前返回、清不动，属极端场景，扫描本就无意义）
                             XposedHelpers.callMethod(controller, stopScanMethodName());
-                            XposedBridge.log(TAG + " 扫描自锁已清: " + inScanningFieldName()
-                                    + " true→false（App 扫描请求放行）");
+                            if (verboseLogAllowed())
+                                XposedBridge.log(TAG + " 扫描自锁已清: " + inScanningFieldName()
+                                        + " true→false（App 扫描请求放行）");
                         } catch (Throwable t) {
                             logReconnectExOnce("扫描入口解自锁异常 " + t.getClass().getSimpleName()
                                     + ": " + t.getMessage());
@@ -1744,7 +1752,8 @@ public class MainHook implements IXposedHookLoadPackage {
         }
         if (count == 0) return;
         long agoSec = (System.currentTimeMillis() - lastAt) / 1000;
-        XposedBridge.log(TAG + " ViewModel 修复完成 ×" + count + "（最近一次 " + agoSec + "s 前）");
+        if (verboseLogAllowed())
+            XposedBridge.log(TAG + " ViewModel 修复完成 ×" + count + "（最近一次 " + agoSec + "s 前）");
     }
 
     /** 修复 #2（仅 B6X）：ViewModel 层连接后更新 LiveData */
@@ -1820,12 +1829,14 @@ public class MainHook implements IXposedHookLoadPackage {
         try {
             if (!firstPacketLogged) {
                 firstPacketLogged = true;
-                long since = connectStartedAt > 0 ? lastInfoUpdateAt - connectStartedAt : -1;
-                XposedBridge.log(TAG + " [诊断] 连接后首个参数回传："
-                        + (since >= 0 ? since + "ms" : "连接时刻未知")
-                        + " 冷=" + XposedHelpers.callMethod(info, "getRealColdLevel")
-                        + " 热=" + XposedHelpers.callMethod(info, "getHotSurfaceTemperature")
-                        + " RPM=" + XposedHelpers.callMethod(info, "getRealWindLevel"));
+                if (verboseLogAllowed()) {
+                    long since = connectStartedAt > 0 ? lastInfoUpdateAt - connectStartedAt : -1;
+                    XposedBridge.log(TAG + " [诊断] 连接后首个参数回传："
+                            + (since >= 0 ? since + "ms" : "连接时刻未知")
+                            + " 冷=" + XposedHelpers.callMethod(info, "getRealColdLevel")
+                            + " 热=" + XposedHelpers.callMethod(info, "getHotSurfaceTemperature")
+                            + " RPM=" + XposedHelpers.callMethod(info, "getRealWindLevel"));
+                }
             }
             if (!zeroInfoLogged && isAllZeroInfo(info)) {
                 zeroInfoLogged = true;
@@ -1863,10 +1874,14 @@ public class MainHook implements IXposedHookLoadPackage {
                     Object chr = XposedHelpers.callMethod(ctrl, "getReadCharacteristic");
                     int state = XposedHelpers.getIntField(ctrl, "mDataConnectState");
                     long since = lastInfoUpdateAt >= startedAt ? lastInfoUpdateAt - startedAt : -1;
-                    XposedBridge.log(TAG + " [诊断] 连接后 3s：state=" + state
-                            + " service=" + (service != null)
-                            + " readChar=" + (chr != null)
-                            + " 首包=" + (since >= 0 ? since + "ms" : "无"));
+                    boolean abnormal = service == null || chr == null || since < 0
+                            || state == 1 || state == 2;
+                    if (abnormal || verboseLogAllowed()) {
+                        XposedBridge.log(TAG + " [诊断] 连接后 3s：state=" + state
+                                + " service=" + (service != null)
+                                + " readChar=" + (chr != null)
+                                + " 首包=" + (since >= 0 ? since + "ms" : "无"));
+                    }
                 } catch (Throwable t) {
                     XposedBridge.log(TAG + " [诊断] 连接后 3s 检查异常: " + t);
                 }
@@ -1910,7 +1925,7 @@ public class MainHook implements IXposedHookLoadPackage {
                     new XC_MethodHook() {
                         @Override
                         protected void beforeHookedMethod(MethodHookParam param) {
-                            if (!diagConnLogAllowed()) return;
+                            if (!verboseLogAllowed() || !diagConnLogAllowed()) return;
                             BluetoothGatt gatt = (BluetoothGatt) param.thisObject;
                             String devName = gatt.getDevice() != null
                                     ? gatt.getDevice().getName() : "null";
@@ -1919,10 +1934,12 @@ public class MainHook implements IXposedHookLoadPackage {
                         }
                         @Override
                         protected void afterHookedMethod(MethodHookParam param) {
-                            if (!diagConnLogAllowed()) return;
                             Object result = param.getResult();
-                            XposedBridge.log(TAG + " [诊断] discoverServices 返回 "
-                                    + (result != null ? result : "null"));  // 防御 getResult() 为 null
+                            // 返回非 true 为异常路径，始终保留
+                            if (!Boolean.TRUE.equals(result) || (verboseLogAllowed() && diagConnLogAllowed())) {
+                                XposedBridge.log(TAG + " [诊断] discoverServices 返回 "
+                                        + (result != null ? result : "null"));  // 防御 getResult() 为 null
+                            }
                         }
                     });
             hooked("BluetoothGatt.discoverServices");
@@ -1996,9 +2013,13 @@ public class MainHook implements IXposedHookLoadPackage {
                                 Object ctrl = XposedHelpers.getObjectField(param.thisObject, "this$0");
                                 Object service = XposedHelpers.callMethod(ctrl, "getGattService");
                                 Object chr = XposedHelpers.callMethod(ctrl, "getReadCharacteristic");
-                                XposedBridge.log(TAG + " [诊断] onServicesDiscovered status=" + param.args[1]
-                                        + " service=" + (service != null)
-                                        + " readChar=" + (chr != null));
+                                int status = (Integer) param.args[1];
+                                boolean abnormal = status != 0 || service == null || chr == null;
+                                if (abnormal || verboseLogAllowed()) {
+                                    XposedBridge.log(TAG + " [诊断] onServicesDiscovered status=" + status
+                                            + " service=" + (service != null)
+                                            + " readChar=" + (chr != null));
+                                }
                             } catch (Throwable t) {
                                 XposedBridge.log(TAG + " [诊断] onServicesDiscovered 检查异常: " + t);
                             }
@@ -2191,7 +2212,8 @@ public class MainHook implements IXposedHookLoadPackage {
                 }
                 // volatile 字段，替换后运行中的协程线程立即可见
                 XposedHelpers.setObjectField(ctrl, queueFieldName(), wrapped);
-                XposedBridge.log(TAG + " runFetchLoop 队列已替换（空待 sleep 50ms）");
+                if (verboseLogAllowed())
+                    XposedBridge.log(TAG + " runFetchLoop 队列已替换（空待 sleep 50ms）");
             } catch (Throwable t) {
                 XposedBridge.log(TAG + " runFetchLoop 队列替换失败: " + t.getMessage());
             }
@@ -2235,7 +2257,8 @@ public class MainHook implements IXposedHookLoadPackage {
                             appBackgrounded = false;
                             if (enteredSetup) {
                                 enteredSetup = false;
-                                XposedBridge.log(TAG + " 前台会话重新开始：enteredSetup 复位");
+                                if (verboseLogAllowed())
+                                    XposedBridge.log(TAG + " 前台会话重新开始：enteredSetup 复位");
                             }
                         }
                         currentGuideActivity = (Activity) param.thisObject;
@@ -2400,7 +2423,8 @@ public class MainHook implements IXposedHookLoadPackage {
             b7AppBackgrounded = false;
             if (b7EnteredControl) {   // 退后台再回来 = 新前台会话
                 b7EnteredControl = false;
-                XposedBridge.log(TAG + " B7X 前台会话重新开始");
+                if (verboseLogAllowed())
+                    XposedBridge.log(TAG + " B7X 前台会话重新开始");
             }
         }
         if (b7EnteredControl) return;   // 本次会话已进过（含用户从控制页手动返回）
@@ -2479,7 +2503,8 @@ public class MainHook implements IXposedHookLoadPackage {
             intent.putExtra("b7x_auto_enter", true);     // 仅供本模块识别，宿主忽略未知 extra
             b7AutoEnterFrom = from;                       // 本次跳转引起的 onStop 不算退后台
             from.startActivity(intent);
-            XposedBridge.log(TAG + " B7X 自动进入控制页 code=" + code);
+            if (verboseLogAllowed())
+                XposedBridge.log(TAG + " B7X 自动进入控制页 code=" + code);
             return true;
         } catch (Throwable t) {
             b7AutoEnterFrom = null;
@@ -2575,7 +2600,8 @@ public class MainHook implements IXposedHookLoadPackage {
                 @Override
                 protected void afterHookedMethod(MethodHookParam param) {
                     capturedWaspWingMgr = param.thisObject;
-                    XposedBridge.log(TAG + " 已捕获 WaspWingManager 实例");
+                    if (verboseLogAllowed())
+                        XposedBridge.log(TAG + " 已捕获 WaspWingManager 实例");
                     ensureFetchLoopQueueWrapped(getStaticController(), "mgrCapture");
                 }
             });
@@ -2607,7 +2633,8 @@ public class MainHook implements IXposedHookLoadPackage {
                         @Override
                         protected void afterHookedMethod(MethodHookParam param) {
                             capturedWaspWingMgr = param.thisObject;
-                            XposedBridge.log(TAG + " 已捕获 WaspWingManager(t9.j) 实例");
+                            if (verboseLogAllowed())
+                                XposedBridge.log(TAG + " 已捕获 WaspWingManager(t9.j) 实例");
                             ensureFetchLoopQueueWrapped(getStaticController(), "mgrCapture7");
                         }
                     });
@@ -2646,7 +2673,8 @@ public class MainHook implements IXposedHookLoadPackage {
                                 currentValidGatt = gatt;
                                 connectedControllers.put(param.thisObject, gatt);
                                 int st = XposedHelpers.getIntField(param.thisObject, "mDataConnectState");
-                                XposedBridge.log(TAG + " dataInteractionController 已同步到已连接实例 state=" + st);
+                                if (verboseLogAllowed())
+                                    XposedBridge.log(TAG + " dataInteractionController 已同步到已连接实例 state=" + st);
                             } catch (Throwable t) {
                                 XposedBridge.log(TAG + " 同步 dataInteractionController 失败: " + t.getMessage());
                             }
@@ -2770,7 +2798,8 @@ public class MainHook implements IXposedHookLoadPackage {
                                 currentValidGatt = (BluetoothGatt) param.args[0];
                                 connectedControllers.put(param.thisObject, (BluetoothGatt) param.args[0]);
                                 int st = XposedHelpers.getIntField(param.thisObject, "E");
-                                XposedBridge.log(TAG + " b7x dataInteractionController 已同步到已连接实例 state=" + st);
+                                if (verboseLogAllowed())
+                                    XposedBridge.log(TAG + " b7x dataInteractionController 已同步到已连接实例 state=" + st);
                             } catch (Throwable t) {
                                 XposedBridge.log(TAG + " b7x 同步 dataInteractionController 失败: " + t.getMessage());
                             }
@@ -2822,7 +2851,7 @@ public class MainHook implements IXposedHookLoadPackage {
                     @Override
                     protected void afterHookedMethod(MethodHookParam param) {
                         Context ctx = (Context) param.thisObject;
-                        appContext = ctx;      // 存下宿主 Context，供 tick 线程取 PowerManager（息屏退避用）
+                        appContext = ctx;      // 存下宿主 Context，供权限探测等使用
                         // 更新检测放最前：后续任一初始化抛错也不影响这条独立的后台检查。
                         maybeRestartOnModuleUpdate(ctx);   // 模块更新检测（默认开，后台线程）
                         registerTemperatureReceiver(ctx);
@@ -2891,7 +2920,8 @@ public class MainHook implements IXposedHookLoadPackage {
             if (adapter == null) return;
             lastDevice = adapter.getRemoteDevice(addr);   // 兜底对象：供 tick 守卫通过 + 取得目标地址
             needFreshObject = true;                        // B：首轮重连前尝试换成"类型已知"对象
-            XposedBridge.log(TAG + " 已恢复上次设备 " + addr + "，后台重连将自动接管");
+            if (verboseLogAllowed())
+                XposedBridge.log(TAG + " 已恢复上次设备 " + addr + "，后台重连将自动接管");
         } catch (Throwable t) {
             XposedBridge.log(TAG + " 恢复上次设备失败: " + t.getMessage());
         }
@@ -3108,6 +3138,31 @@ public class MainHook implements IXposedHookLoadPackage {
         }, "b6x-update-restart");
         worker.setDaemon(true);
         worker.start();
+    }
+
+    /**
+     * 详细日志是否允许（读守护进程发布的 {@code DEBUG_ENABLED=0/1}，60s 缓存）。
+     * 默认关闭；只门控详细族，硬底线日志不经过本判断。
+     */
+    private static boolean verboseLogAllowed() {
+        long now = System.currentTimeMillis();
+        int cached = debugEnabledCache;
+        if (cached >= 0 && now - debugEnabledReadAt < DEBUG_ENABLED_CACHE_MS) return cached == 1;
+        int v = 0;
+        try (BufferedReader br = new BufferedReader(new FileReader(UIPREFS_FILE))) {
+            String line;
+            while ((line = br.readLine()) != null) {
+                if (line.startsWith("DEBUG_ENABLED=")) {
+                    v = "1".equals(line.substring("DEBUG_ENABLED=".length()).trim()) ? 1 : 0;
+                    break;
+                }
+            }
+        } catch (Throwable ignored) {
+            // 文件不存在（daemon 尚未写过）或解析失败：按默认关
+        }
+        debugEnabledCache = v;
+        debugEnabledReadAt = now;
+        return v == 1;
     }
 
     /** 读守护进程发布的 {@code AUTO_RESTART=0/1}；读不到按默认开（与参数 default=1 一致）。 */
@@ -3501,10 +3556,11 @@ public class MainHook implements IXposedHookLoadPackage {
             if (now - setRunModeSrcLogAt < SET_RUN_MODE_SRC_LOG_MS) return;
             setRunModeSrcLogAt = now;
             String source = Boolean.TRUE.equals(setRunModeModuleCall.get()) ? "模块下发" : "宿主直发";
-            XposedBridge.log(TAG + " setRunMode 来源=" + source + " mode=" + mode
-                    + " coldOverclock=" + coldOverclock + "→" + clampedOverclock
-                    + (mode == 2 ? " modeCustom=" + modeCustom + "→" + clampedCustom : "")
-                    + " 上限=" + cap + (clamped ? "（已钳制）" : ""));
+            if (verboseLogAllowed())
+                XposedBridge.log(TAG + " setRunMode 来源=" + source + " mode=" + mode
+                        + " coldOverclock=" + coldOverclock + "→" + clampedOverclock
+                        + (mode == 2 ? " modeCustom=" + modeCustom + "→" + clampedCustom : "")
+                        + " 上限=" + cap + (clamped ? "（已钳制）" : ""));
         } catch (Throwable ignored) {
             // 参数异常：保持原行为，不影响宿主下发
         }
@@ -3601,11 +3657,12 @@ public class MainHook implements IXposedHookLoadPackage {
                     // 三态 1/3：已入队（callMethod 返回，≠ 送达）
                     if (setRunModeLogCount < DIAG_LOG_MAX_PER_CONN) {
                         setRunModeLogCount++;
-                        XposedBridge.log(TAG + " 送达: 已入队 seq=" + seq + " method=" + n
-                                + " 请求mode=" + mode + " SDKmode=" + sdkMode + " temp=" + temperature
-                                + " windOC=" + windOC + " coldOC=" + coldOC
-                                + " windLv=" + windLevel + " modeCustom=" + modeCustom
-                                + " extra=" + extra);
+                        if (verboseLogAllowed())
+                            XposedBridge.log(TAG + " 送达: 已入队 seq=" + seq + " method=" + n
+                                    + " 请求mode=" + mode + " SDKmode=" + sdkMode + " temp=" + temperature
+                                    + " windOC=" + windOC + " coldOC=" + coldOC
+                                    + " windLv=" + windLevel + " modeCustom=" + modeCustom
+                                    + " extra=" + extra);
                     }
                     return;
                 } catch (Throwable t) {
@@ -3664,7 +3721,8 @@ public class MainHook implements IXposedHookLoadPackage {
             if (g != null) g.disconnect();
         } catch (Throwable t) { /* 断开失败忽略 */ }
         markDisconnected(currentValidGatt);  // 置 bleConnected=false，后台重连线程检测后自动接管
-        XposedBridge.log(TAG + " forceReconnect: 已触发重新连接（gatt 失效/锁死自愈）");
+        if (verboseLogAllowed())
+            XposedBridge.log(TAG + " forceReconnect: 已触发重新连接（gatt 失效/锁死自愈）");
     }
 
     /**
@@ -3711,8 +3769,10 @@ public class MainHook implements IXposedHookLoadPackage {
             if (allZero) zeroPacketCount++;
             if (!packetInfoLogged) {
                 packetInfoLogged = true;
-                XposedBridge.log(TAG + " [诊断] 收包首包 len=" + (v == null ? -1 : v.length)
-                        + " 全0=" + (allZero ? "是" : "否"));
+                if (verboseLogAllowed()) {
+                    XposedBridge.log(TAG + " [诊断] 收包首包 len=" + (v == null ? -1 : v.length)
+                            + " 全0=" + (allZero ? "是" : "否"));
+                }
             }
             if (allZero && !zeroPacketLogged) {
                 zeroPacketLogged = true;
@@ -3994,8 +4054,9 @@ public class MainHook implements IXposedHookLoadPackage {
             t.setDaemon(true);
             t.start();
             consumerThreadStarted = true;
-            XposedBridge.log(TAG + " 守护消费线程已启动（runFetchLoop 疑似停摆：队列持续非空>"
-                    + QUEUE_STALL_TIMEOUT_MS / 1000 + "s，队首停留>" + QUEUE_TAKEOVER_MS / 1000 + "s 接管）");
+            if (verboseLogAllowed())
+                XposedBridge.log(TAG + " 守护消费线程已启动（runFetchLoop 疑似停摆：队列持续非空>"
+                        + QUEUE_STALL_TIMEOUT_MS / 1000 + "s，队首停留>" + QUEUE_TAKEOVER_MS / 1000 + "s 接管）");
         } catch (Throwable t) {
             XposedBridge.log(TAG + " 守护消费线程启动失败: " + t.getMessage());
         }
@@ -4059,7 +4120,7 @@ public class MainHook implements IXposedHookLoadPackage {
                 pendingState = 3;
                 echoHitCount++;
                 boolean exec = coldRun >= 0 && Math.abs(coldRun - pendingCold) <= 1;
-                if (deliveryLogAllowed()) {
+                if (verboseLogAllowed() && deliveryLogAllowed()) {
                     XposedBridge.log(TAG + " 送达: 已回显 seq=" + pendingSeq
                             + " expect=" + pendingCold + " cold_real=" + coldReal
                             + " cold_run=" + coldRun + " rpm=" + rpm
@@ -4099,7 +4160,7 @@ public class MainHook implements IXposedHookLoadPackage {
                         if (param.getThrowable() == null && st == 2) {
                             pendingState = 2;
                             consumeOkCount++;
-                            if (deliveryLogAllowed()) {
+                            if (verboseLogAllowed() && deliveryLogAllowed()) {
                                 XposedBridge.log(TAG + " 送达: 已写入 seq=" + pendingSeq
                                         + " 途经=processData");
                             }
@@ -4132,7 +4193,7 @@ public class MainHook implements IXposedHookLoadPackage {
                             if (age > ECHO_STATE_GUARD_MS) return;
                             Object r = param.getResult();
                             if (r instanceof Boolean && (Boolean) r) {
-                                if (deliveryLogAllowed()) {
+                                if (verboseLogAllowed() && deliveryLogAllowed()) {
                                     XposedBridge.log(TAG + " 送达: 已写入回执 seq=" + pendingSeq
                                             + " result=true");
                                 }
@@ -4163,7 +4224,7 @@ public class MainHook implements IXposedHookLoadPackage {
                             if (age > ECHO_STATE_GUARD_MS) return;
                             int status = (Integer) param.args[2];
                             if (status == 0) {
-                                if (deliveryLogAllowed()) {
+                                if (verboseLogAllowed() && deliveryLogAllowed()) {
                                     XposedBridge.log(TAG + " 送达: 已写入回执 seq=" + pendingSeq
                                             + " status=0");
                                 }
@@ -4279,7 +4340,7 @@ public class MainHook implements IXposedHookLoadPackage {
                         Intent intent = new Intent(act, b6ExpCls);
                         act.startActivity(intent);
                         if (finishGuide) act.finish();
-                        if (okLog != null) XposedBridge.log(TAG + " " + okLog);
+                        if (okLog != null && verboseLogAllowed()) XposedBridge.log(TAG + " " + okLog);
                     } catch (Throwable t) {
                         XposedBridge.log(TAG + " " + failLogPrefix + "失败: " + t.getMessage());
                     }
@@ -4316,7 +4377,7 @@ public class MainHook implements IXposedHookLoadPackage {
             try {
                 Class<?> mgrCls7 = ctx.getClassLoader().loadClass("t9.j");
                 inst = XposedHelpers.getStaticObjectField(mgrCls7, "f50990a");
-                if (firstFallback) {
+                if (firstFallback && verboseLogAllowed()) {
                     XposedBridge.log(TAG + (inst != null
                             ? " resolveWaspWingManager: t9.j.f50990a 成功"
                             : " resolveWaspWingManager: t9.j.f50990a 为空"));
@@ -4337,7 +4398,8 @@ public class MainHook implements IXposedHookLoadPackage {
             try {
                 inst = XposedHelpers.callStaticMethod(mgrCls, m);
                 if (inst != null) {
-                    if (firstFallback) XposedBridge.log(TAG + " resolveWaspWingManager: 静态方法 " + m + " 成功");
+                    if (firstFallback && verboseLogAllowed())
+                        XposedBridge.log(TAG + " resolveWaspWingManager: 静态方法 " + m + " 成功");
                     break;
                 }
             } catch (Throwable t) {
@@ -4350,7 +4412,8 @@ public class MainHook implements IXposedHookLoadPackage {
                 // Kotlin object singleton: ClassName.INSTANCE
                 inst = XposedHelpers.getStaticObjectField(mgrCls, "INSTANCE");
                 if (inst != null) {
-                    if (firstFallback) XposedBridge.log(TAG + " resolveWaspWingManager: INSTANCE 字段成功");
+                    if (firstFallback && verboseLogAllowed())
+                        XposedBridge.log(TAG + " resolveWaspWingManager: INSTANCE 字段成功");
                 }
             } catch (Throwable t) {
                 if (firstFallback) XposedBridge.log(TAG + " resolveWaspWingManager: INSTANCE 字段失败: " + t.getMessage());
@@ -4388,6 +4451,12 @@ public class MainHook implements IXposedHookLoadPackage {
         lastReconnectExLogAt = 0;        // 新连接：重置连接期异常限频（异常计数 reconnectExCount 累计不清）
         needFreshObject = false;          // 新连接：设备对象已新鲜，无需再换
         stuckStateTicks = 0;             // 新连接：门禁卡死计时归零（严格化「连续 ≥30s」，防跨连接累计）
+        stuckClearRetryCount = 0;        // 新连接：清状态重试预算复位
+        stuckClearWindowStartAt = 0;
+        reconnectFailStreak = 0;         // 新连接：熔断复位（连接成功的唯一正常出口之一）
+        breakerOpen = false;
+        breakerOpenedAtMs = 0;
+        // breakerProbeCount 保留到 2h 摘要或 onLinkHealthy，避免恢复前的探测次数丢失
         bleConnectedTimestamp = System.currentTimeMillis() / 1000L;
         if (connectedModel != 6 && connectedModel != 7)
             connectedModel = (appKind == 7) ? 7 : 6;  // 型号未知按包名兜底
