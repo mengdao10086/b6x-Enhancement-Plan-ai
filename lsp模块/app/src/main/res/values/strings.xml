@@ -14,7 +14,7 @@
     <string name="status_section_actions">操作记录</string>
     <!-- 操作记录归档提示行：只展示归档在哪、几份、占多大与上限，不提供翻看。上限由调用方传入 OpLog.LIMIT_BYTES，不在文案里重复数字 -->
     <string name="status_archive_hint">归档：%1$s（%2$d 份， %3$s / %4$d KB）</string>
-    <string name="status_archive_hint_none">归档：%1$s（暂无历史记录）</string>
+    <string name="status_archive_hint_none">归档：%1$s</string>
     <string name="status_archive_hint_unavailable">归档：不可用（%1$s）</string>
     <string name="status_loading">读取中…</string>
     <!-- 首次探测前的骨架：字段名与固定路径照抄 Deployer.Status#describe()，占位宽度与真实文本一致
@@ -40,7 +40,7 @@
     <!-- 拉起daemon 的进行态：同为只换结论行，完成后以实际结果整段刷新 -->
     <string name="status_deploy_starting">部署状态：正在拉起</string>
     <!-- 部署只到"盘上就位"为止；拉起daemon 是紧随其后独立的一段（见 StatusFragment.deploy），不写进本行 -->
-    <string name="status_busy_deploy">部署中…（落盘 + root 就位 + 省电白名单）</string>
+    <string name="status_busy_deploy">部署中…</string>
     <string name="status_busy_uninstall">卸载部署中…</string>
     <!-- 拉起＝停旧实例再起新实例，空窗只来自等旧实例退出（最多 8 秒），故把代价写在忙态文案里（手动动作会进「操作记录」） -->
     <string name="status_busy_start">拉起daemon…（停旧实例→起新实例，温控空窗约 10 秒内）</string>
@@ -71,7 +71,7 @@
     <string name="status_root_later">稍后</string>
 
     <!-- 状态页：脚本哈希不一致时的自动重推 -->
-    <string name="status_script_autofixed">检测到 service.d 脚本与 APK 内不一致，已自动重推脚本（二进制未动）</string>
+    <string name="status_script_autofixed">检测到 service.d 脚本与 APK 内不一致，已自动重推脚本</string>
     <string name="status_script_autofix_failed">检测到 service.d 脚本与 APK 内不一致，自动重推失败：</string>
     <!-- 第三种状态：重推成功但 c-daemon 没在跑。只报"已自动重推"会把"进程没起来"盖掉，只报"失败"又与事实不符 -->
     <string name="status_script_autofixed_no_daemon">检测到 service.d 脚本与 APK 内不一致，已自动重推脚本；但当前未探测到 c-daemon 在运行（灭屏或正在重部署时会稍晚，否则请点「拉起daemon」）</string>
