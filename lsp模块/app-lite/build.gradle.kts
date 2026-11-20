@@ -1,6 +1,14 @@
+import java.nio.file.Files
+import java.nio.file.StandardCopyOption
+
 plugins {
     id("com.android.application")
 }
+
+// WebUI 打包资源：源码保持可维护，打包时复制一份并只压缩 app.js。
+// 生成目录整体替换 src/main/assets（先完整复制，再替换 webui/app.js），源码目录不动。
+val webUiAssetsSrc = layout.projectDirectory.dir("src/main/assets")
+val webUiAssetsOut = layout.buildDirectory.dir("generated/webUiAssets")
 
 android {
     namespace = "com.example.waspwingtempctrl.lite"
@@ -51,7 +59,77 @@ android {
         includeInApk = false
         includeInBundle = false
     }
+
+    // 打包只读生成目录（任务会完整复制后替换 app.js）；源码目录不再直接参与打包
+    sourceSets.getByName("main").assets.setSrcDirs(listOf(webUiAssetsOut.get().asFile))
 }
+
+// ---- app.js 压缩：terser --compress --mangle --ecma 5；工具缺失即失败，不静默跳过 ----
+abstract class PrepareWebUiAssetsTask : DefaultTask() {
+    @get:InputDirectory
+    abstract val sourceDir: DirectoryProperty
+
+    @get:OutputDirectory
+    abstract val outputDir: DirectoryProperty
+
+    @get:Internal
+    abstract val workDir: DirectoryProperty
+
+    @TaskAction
+    fun prepare() {
+        val src = sourceDir.get().asFile
+        val outDir = outputDir.get().asFile
+        outDir.deleteRecursively()
+        src.copyRecursively(outDir, overwrite = true)
+
+        val appJs = File(outDir, "webui/app.js")
+        check(appJs.isFile) { "缺少 WebUI 源文件：$appJs" }
+        val minified = File(outDir, "webui/app.js.min")
+        val isWindows = System.getProperty("os.name").lowercase().contains("win")
+
+        fun run(vararg cmd: String) {
+            val process = ProcessBuilder(*cmd)
+                .directory(workDir.get().asFile)
+                .redirectErrorStream(true)
+                .start()
+            val output = process.inputStream.bufferedReader().readText()
+            val code = process.waitFor()
+            check(code == 0) { "命令失败（exit=$code）：${cmd.joinToString(" ")}\n$output" }
+        }
+
+        // 固定版本：npx 不写版本会随最新发布漂移，破坏发版构建的确定性
+        run(
+            if (isWindows) "npx.cmd" else "npx",
+            "--yes", "terser@5.51.3", appJs.absolutePath,
+            "--compress", "--mangle", "--ecma", "5", "--comments", "false",
+            "--output", minified.absolutePath
+        )
+        Files.move(minified.toPath(), appJs.toPath(), StandardCopyOption.REPLACE_EXISTING)
+        run(if (isWindows) "node.exe" else "node", "--check", appJs.absolutePath)
+
+        // 契约自检：这些入口/字符串必须仍在（terser 只改本地名）
+        val js = appJs.readText()
+        listOf(
+            "WaspBridge", "LiteApp", "applySysTheme",
+            "defs", "snapshot", "chartData", "logs", "status",
+            "setValues", "deploy", "uninstall", "startDaemon", "stopDaemon"
+        ).forEach { key ->
+            check(js.contains(key)) { "压缩后 app.js 丢失契约字符串：$key" }
+        }
+        logger.lifecycle("WebUI app.js 已压缩：${appJs.length()} B")
+    }
+}
+
+val prepareWebUiAssets = tasks.register<PrepareWebUiAssetsTask>("prepareWebUiAssets") {
+    description = "复制 WebUI 资产并以 terser 压缩 webui/app.js（不修改源码）"
+    sourceDir.set(webUiAssetsSrc)
+    outputDir.set(webUiAssetsOut)
+    workDir.set(layout.projectDirectory)
+}
+
+tasks.matching { it.name.startsWith("merge") && it.name.endsWith("Assets") }
+    .configureEach { dependsOn(prepareWebUiAssets) }
+tasks.matching { it.name == "preBuild" }.configureEach { dependsOn(prepareWebUiAssets) }
 
 dependencies {
     // 共享协议/配置/部署实现与资产。core 的运行时依赖为空（Xposed API 为 compileOnly），
