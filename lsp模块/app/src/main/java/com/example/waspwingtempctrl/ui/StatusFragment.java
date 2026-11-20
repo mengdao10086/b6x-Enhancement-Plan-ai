@@ -553,8 +553,9 @@ public class StatusFragment extends Fragment implements SetupActivity.PageAware 
         }
         appendLog(getString(R.string.status_busy_probe));
         if (!replaceDeployFirstLine(R.string.status_deploy_checking)) {
-            // 占位只换字、不改高度：避免单行占位把窗口压矮、结果到达再撑开
-            writeStatusText(getString(R.string.status_busy_probe), true, true);
+            // 非「部署状态：」形态（动作结果）：只换结论行、保留现有明细，
+            // 避免清空明细却钉住旧高度，留出整块空白/黑块
+            writeStatusText(withCurrentDetailRows(getString(R.string.status_busy_probe)), true, true);
         }
         scanManualPending = true;
         if (scanRunning) {
@@ -681,6 +682,15 @@ public class StatusFragment extends Fragment implements SetupActivity.PageAware 
     /** 长按复制的整块全文：结论 + 明细（不含状态块下方的探测提示，提示行另行复制）。 */
     private CharSequence statusCopyText() {
         return fullStatusText();
+    }
+
+    /** 结论行 + 当前明细行（原始文本）拼回整段，供只换结论行的占位写入。 */
+    private String withCurrentDetailRows(String conclusion) {
+        final StringBuilder sb = new StringBuilder(conclusion);
+        for (String row : detailRowTexts) {
+            sb.append('\n').append(row);
+        }
+        return sb.toString();
     }
 
     /** 当前状态文本是否等于给定整段文本（只比字符，不比 span）。 */
