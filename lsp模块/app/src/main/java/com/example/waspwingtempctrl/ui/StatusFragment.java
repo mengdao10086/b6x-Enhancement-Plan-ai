@@ -1425,13 +1425,14 @@ public class StatusFragment extends Fragment implements SetupActivity.PageAware 
      * <p>部署状态拆成「静态标签 + 动态值」与「逐行明细」（每行一个 TextView）：
      * <b>只有动态值文本变化时</b>才对动态值播 {@link Motion#crossFade}（含模糊）；
      * 静态标签不参与淡化/模糊。明细行按位置逐行比对：内容没变不播动画，内容变了只对该行
-     * 播 {@code crossFade}，新增行等高度展开到位后淡入，删除行直接移除。
+     * 播 {@code crossFade}，新增行在高度补间把它露出时带模糊淡入，删除行直接移除。
      *
      * <p>{@code animated} 由调用点决定：除首次上屏/骨架切换外一律传 true，变化处播淡变+模糊；
      * 首次上屏传 false，<b>直接替换文本与高度</b>。系统关掉动画时 true 路径也直接换字。
      *
      * <p>行数/高度变化仍复用配置页那套 {@link Motion#animateHeightChange}
-     * （{@code ValueAnimator} + panelCurve）：与各行淡变同拍启动，并在 325ms 后同时到位。
+     * （{@code ValueAnimator} + panelCurve）：变更行与结论同拍启动；新增行按该曲线算出
+     * 自己被露出的时刻再带模糊淡入，不等补间结束。
      *
      * @param keepHeight true = 本次只换字、不驱动高度：把当前高度钉住。
      *                   手动刷新的单行「正在探测…」占位用它，避免窗口先被占位压矮、结果到达再撑开；
@@ -1490,12 +1491,14 @@ public class StatusFragment extends Fragment implements SetupActivity.PageAware 
 
     /**
      * 上屏后处理整体高度：keepHeight 钉住进入本次更新前的高度；否则补间到新自然高。
-     * 新增行等高度展开到位后再淡入，避免被 statusStack 的高度裁剪遮掉。
+     * 新增行按「高度补间露出该行」的时刻带模糊淡入，不等到补间结束。
      */
     private void applyStatusHeightAfterShow(boolean keepHeight, int fromPx, boolean animationsEnabled,
                                             List<TextView> addedRows) {
         if (statusStack == null) {
-            fadeInAddedRows(addedRows, 0L);
+            for (TextView row : addedRows) {
+                fadeInWhenLaidOut(row);
+            }
             return;
         }
         if (keepHeight) {
@@ -1507,7 +1510,9 @@ public class StatusFragment extends Fragment implements SetupActivity.PageAware 
                     lp.height = fromPx;
                 }
             }
-            fadeInAddedRows(addedRows, 0L);
+            for (TextView row : addedRows) {
+                fadeInWhenLaidOut(row);
+            }
             return;
         }
         final int toPx = measureStatusStackHeightNow();
@@ -1517,22 +1522,63 @@ public class StatusFragment extends Fragment implements SetupActivity.PageAware 
         } else {
             Motion.cancelHeightChange(statusStack);
         }
-        fadeInAddedRows(addedRows, duration > 0L ? duration : 0L);
+        scheduleAddedRowFades(addedRows, fromPx, toPx, duration);
     }
 
-    /** 新增行淡入：高度有补间时等展开到终点再起，否则立即淡入。 */
-    private void fadeInAddedRows(List<TextView> rows, long delayMs) {
-        for (TextView row : rows) {
-            if (delayMs > 0L) {
+    /**
+     * 新增行按高度补间的露出时刻淡入：行高用刚量到的 measuredHeight 反推，
+     * 行顶一到可视区就起淡入，既不被裁剪遮掉，也不推迟到补间结束。
+     * 没有高度补间时立即淡入。
+     */
+    private void scheduleAddedRowFades(List<TextView> rows, int fromPx, int toPx, long durationMs) {
+        if (rows.isEmpty()) {
+            return;
+        }
+        if (durationMs <= 0L || toPx <= fromPx) {
+            for (TextView row : rows) {
+                fadeInWhenLaidOut(row);
+            }
+            return;
+        }
+        final int delta = toPx - fromPx;
+        int bottom = toPx - statusBottomPad;   // 明细列表末尾的底 padding 之后即最后一行底边
+        for (int i = rows.size() - 1; i >= 0; i--) {
+            final TextView row = rows.get(i);
+            final int rowHeight = row.getMeasuredHeight();
+            final int rowTop = bottom - rowHeight;
+            bottom = rowTop;
+            final long delay = Motion.revealDelayMs((rowTop - fromPx) / (float) delta, durationMs);
+            if (delay <= 0L) {
+                fadeInWhenLaidOut(row);
+            } else {
                 row.postDelayed(() -> {
                     if (statusDetailList != null && row.getParent() == statusDetailList) {
-                        Motion.fadeIn(row);
+                        fadeInWhenLaidOut(row);
                     }
-                }, delayMs);
-            } else {
-                Motion.fadeIn(row);
+                }, delay);
             }
         }
+    }
+
+    /** 等行完成布局再带模糊淡入：模糊判据需要非零宽高，刚挂载的同帧量不到。 */
+    private void fadeInWhenLaidOut(final TextView row) {
+        if (row.getWidth() > 0 && row.getHeight() > 0) {
+            Motion.fadeInBlurred(row);
+            return;
+        }
+        row.addOnLayoutChangeListener(new View.OnLayoutChangeListener() {
+            @Override
+            public void onLayoutChange(View v, int left, int top, int right, int bottom,
+                                       int oldLeft, int oldTop, int oldRight, int oldBottom) {
+                if (v.getWidth() <= 0 || v.getHeight() <= 0) {
+                    return;
+                }
+                v.removeOnLayoutChangeListener(this);
+                if (statusDetailList != null && v.getParent() == statusDetailList) {
+                    Motion.fadeInBlurred((TextView) v);
+                }
+            }
+        });
     }
 
     /** 探测提示直接上屏/隐藏：有内容才显示，不参与行级动画。 */
@@ -1608,7 +1654,7 @@ public class StatusFragment extends Fragment implements SetupActivity.PageAware 
     /**
      * 明细行按位置逐行比对（新行数组 vs 上一帧行数组）：
      * 内容没变 → 不碰视图；内容变了 → 只对这几行播 {@link Motion#crossFade}；
-     * 新增行 → 先挂载并置透明，等高度展开到位后由调用方淡入；删除行 → 直接移除。
+     * 新增行 → 挂载前置透明，由调用方按露出时刻带模糊淡入；删除行 → 直接移除。
      *
      * @return 新增的行（{@code animateRows=false} 时为空）
      */
@@ -1648,23 +1694,20 @@ public class StatusFragment extends Fragment implements SetupActivity.PageAware 
         for (int i = 0; i < common; i++) {
             detailRowTexts.set(i, rows.get(i));
         }
-        // 新增行：先挂载；要动画时置透明，等在高度展开到位后再淡入，避免被父容器裁剪遮掉
+        // 新增行：挂载前置透明，由调用方按高度补间的露出时刻带模糊淡入，避免闪出一帧实心内容
         final List<TextView> addedRows = new ArrayList<>();
         for (int i = common; i < rows.size(); i++) {
             TextView row = createDetailRow(rows.get(i));
+            if (animateRows) {
+                row.setAlpha(0f);
+            }
             detailRowViews.add(row);
             detailRowTexts.add(rows.get(i));
             statusDetailList.addView(row);
             addedRows.add(row);
         }
         statusDetailList.setVisibility(rows.isEmpty() ? View.GONE : View.VISIBLE);
-        if (!animateRows) {
-            return new ArrayList<>();
-        }
-        for (TextView row : addedRows) {
-            row.setAlpha(0f);
-        }
-        return addedRows;
+        return animateRows ? addedRows : new ArrayList<>();
     }
 
     /** 新建一行（整行一个 TextView）：挂路径点击、长按整块复制与限频触摸日志。 */

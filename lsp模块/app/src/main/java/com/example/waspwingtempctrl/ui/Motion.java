@@ -295,20 +295,54 @@ public final class Motion {
     }
 
     /**
-     * 单视图淡入：只做 alpha 0→1（{@link #FADE_IN_MS}、线性），不抓旧快照、不叠加模糊。
-     * 用于「新增行只让新值淡入」这类没有旧内容可交叉的场景；系统关动效时直接置为不透明。
+     * 单视图带模糊淡入：alpha 0→1，同时模糊半径由 {@link #FADE_BLUR_DP} 降到 0，
+     * 与交叉淡化的新层同曲线、同长。用于「新增内容从无到有」——没有旧内容可交叉，
+     * 但仍要与其它变化处同一观感。系统关动效或面积不允许模糊时退化为纯 alpha。
      */
-    static void fadeIn(@Nullable View v) {
+    static void fadeInBlurred(@Nullable View v) {
         if (v == null) {
             return;
         }
-        v.animate().cancel();
+        cancelCrossFade(v);   // 先收掉残留的快照/淡变，避免叠加
         if (!enabled(v.getContext())) {
             v.setAlpha(1f);
             return;
         }
+        CrossFadeRun run = new CrossFadeRun();
+        run.views.add(v);
+        CROSS_FADES.put(v, run);
         v.setAlpha(0f);
-        v.animate().alpha(1f).setDuration(FADE_IN_MS).setInterpolator(FADE_CURVE).start();
+        startFadeIn(v, run);
+        MAIN.postDelayed(run, FADE_IN_MS + 16L);
+    }
+
+    /**
+     * 面板高度补间「露出到给定位移比例」所需的毫秒数：按 {@link #panelCurve} 反解，
+     * 供新增行在真正可见时才开始淡入。
+     *
+     * @param fraction   目标位移比例（0~1，越界自动收口）
+     * @param durationMs 本次高度补间时长
+     */
+    static long revealDelayMs(float fraction, long durationMs) {
+        if (durationMs <= 0L) {
+            return 0L;
+        }
+        final Interpolator curve = panelCurve;
+        float f = Math.max(0f, Math.min(1f, fraction));
+        if (f <= 0f) {
+            return 0L;
+        }
+        float lo = 0f;
+        float hi = 1f;
+        for (int i = 0; i < 12; i++) {
+            float mid = (lo + hi) / 2f;
+            if (curve.getInterpolation(mid) < f) {
+                lo = mid;
+            } else {
+                hi = mid;
+            }
+        }
+        return Math.round(durationMs * hi);
     }
 
     /**
