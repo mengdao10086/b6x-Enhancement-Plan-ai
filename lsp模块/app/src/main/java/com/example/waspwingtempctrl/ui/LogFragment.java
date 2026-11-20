@@ -1054,8 +1054,9 @@ public class LogFragment extends Fragment
     }
 
     /**
-     * 统计行（与修改时间同一行、右对齐）：行数与文件大小两段拼接。
-     * 行数达 lineLimit 或文件超 byteLimit 即视为截断，各自标「尾部」/「仅读尾部」。
+     * 统计行（与修改时间同一行、右对齐）：行数 / 渲染上限行数，文件大小 / 尾读上限。
+     * 行数取参与匹配的最近 N 行（{@link LogTailReader.Snapshot#candidateLines}），
+     * 大小取文件字节数（超过上限即说明尾读被截断）。
      */
     private String buildStatText(LogTailReader.Snapshot snap) {
         if (snap.path == null) {
@@ -1064,13 +1065,8 @@ public class LogFragment extends Fragment
         if (!snap.ok) {
             return getString(R.string.log_stat_failed);
         }
-        String lines = snap.candidateLines >= snap.lineLimit
-                ? getString(R.string.log_stat_lines_tail_fmt, snap.candidateLines, snap.lineLimit)
-                : getString(R.string.log_stat_lines_fmt, snap.candidateLines, snap.lineLimit);
-        String file = snap.size > snap.byteLimit
-                ? getString(R.string.log_stat_file_tail_fmt, formatK(snap.size), formatK(snap.byteLimit))
-                : getString(R.string.log_stat_file_fmt, formatK(snap.size));
-        return getString(R.string.log_stat_join_fmt, lines, file);
+        return getString(R.string.log_stat_fmt, snap.candidateLines, snap.lineLimit,
+                formatK(snap.size), formatK(snap.byteLimit));
     }
 
     /** 命中计数只在有关键词时才有意义；无关键词时行数信息统一在「日志文件」卡的统计行。 */

@@ -758,7 +758,7 @@ public class StatusFragment extends Fragment implements SetupActivity.PageAware 
         applyProbeSideEffects();
     }
 
-    /** 把扫描结果分发给监听者：手动播动画并写记录，静默只做「比后写」。 */
+    /** 把扫描结果分发给监听者：手动播动画并写记录；静默内容变化时播行级动画，无变化不碰视图。 */
     private void renderScanResult(String result, boolean manual, boolean silent, boolean failed) {
         if (manual) {
             appendLog(result);
@@ -793,8 +793,8 @@ public class StatusFragment extends Fragment implements SetupActivity.PageAware 
             return;   // 部署/拉起结果的保留期内：周期扫描不覆盖状态文本
         }
         if (!statusTextEquals(result)) {
-            // 静默/周期更新直接替换，不播淡变（内容没变就一个字都不动）
-            swapStatusTextAnimated(result, false, false);
+            // 内容真变化才走动画：只模糊变化处；无变化已在上方短路，不碰视图
+            swapStatusTextAnimated(result, false, true);
         }
     }
 
@@ -1434,8 +1434,8 @@ public class StatusFragment extends Fragment implements SetupActivity.PageAware 
      * 播 {@code crossFade}，新增行只淡入，删除行直接移除。
      *
      * <p>{@code animated} 由<b>调用点按来源显式决定</b>：用户动作（刷新按钮、部署/卸载/拉起/kill）
-     * 传 true；自动刷新（周期/静默探测、首次探测、自动部署回填）传 false，<b>直接替换文本与高度</b>，
-     * 不播淡变、不触发模糊。系统关掉动画时 true 路径也由 {@code crossFade} 直接执行换文本。
+     * 与内容有变化的自动刷新（周期/静默探测）传 true，变化处播淡变+模糊；首次探测、自动部署回填
+     * 仍传 false，<b>直接替换文本与高度</b>。系统关掉动画时 true 路径也由 {@code crossFade} 直接换字。
      *
      * <p>行数/高度变化仍复用配置页那套 {@link Motion#animateHeightChange}
      * （{@code ValueAnimator} + panelCurve）：与各行淡变同拍启动，并在 325ms 后同时到位。
@@ -1443,7 +1443,8 @@ public class StatusFragment extends Fragment implements SetupActivity.PageAware 
      * @param keepHeight true = 本次只换字、不驱动高度：把当前高度钉住。
      *                   手动刷新的单行「正在探测…」占位用它，避免窗口先被占位压矮、结果到达再撑开；
      *                   结果到达的换字仍走 false，届时以钉住的高度为起点补间到结果高度。
-     * @param animated   true = 用户动作，变化处播交叉淡变；false = 自动刷新/后台回填，一律直替。
+     * @param animated   true = 用户动作或内容有变化的自动刷新，变化处播交叉淡变；
+     *                   false = 首次探测/自动部署回填等后台路径，一律直替。
      */
     private void swapStatusTextAnimated(final String text, boolean keepHeight, boolean animated) {
         final TextView view = statusView;

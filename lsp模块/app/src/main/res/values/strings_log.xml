@@ -13,20 +13,16 @@
     <string name="log_filter_hint">关键词（大小写不敏感）</string>
     <string name="log_loading">正在读取日志…</string>
 
-    <!-- 信息条首行：只有路径（不带标签）；修改时间与统计行同占下一行，见 log_stat_lines_fmt -->
+    <!-- 信息条首行：只有路径（不带标签）；修改时间与行数同占下一行，见 log_stat_fmt -->
     <string name="log_info_fmt">%1$s</string>
     <string name="log_value_unknown">—</string>
 
     <!--
-        统计行：与修改时间同一行、右对齐。行数与文件大小两段独立，按 log_stat_join_fmt 拼接。
-        行数取 Snapshot.candidateLines / lineLimit，文件取 stat 字节数 / byteLimit，k = 1024 字节。
-        截断显式写出：行数达上限标「尾部」，文件超 byteLimit 标「仅读尾部」。
+        统计行：与修改时间同一行、右对齐。行数（读取行数 / 渲染上限 = LogTailReader.MAX_LINES）
+        与大小（文件字节数 / 尾读上限 = LogTailReader.TAIL_BYTES），k = 1024 字节。
+        截断必须显式写出，不让用户以为看到了全部。
     -->
-    <string name="log_stat_lines_fmt">显示 %1$d 行（上限 %2$d）</string>
-    <string name="log_stat_lines_tail_fmt">显示尾部 %1$d 行（上限 %2$d）</string>
-    <string name="log_stat_file_fmt">文件 %1$s k</string>
-    <string name="log_stat_file_tail_fmt">文件 %1$s k，仅读尾部 %2$s k</string>
-    <string name="log_stat_join_fmt">%1$s· %2$s</string>
+    <string name="log_stat_fmt">%1$d / %2$d 行，%3$s / %4$s k</string>
     <string name="log_stat_failed">读取失败：未渲染任何行</string>
 
     <!-- 过滤命中计数：只在有关键词时显示（无关键词时行数在「日志文件」卡的统计行里） -->
