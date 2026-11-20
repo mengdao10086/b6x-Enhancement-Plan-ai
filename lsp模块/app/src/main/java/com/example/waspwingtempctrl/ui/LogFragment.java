@@ -402,7 +402,8 @@ public class LogFragment extends Fragment
         loadNow(currentSource());
         // 按窗口分组：文件信息窗口（信息/时间/统计/命中）只淡化不模糊；
         // 日志显示窗口（列表 + 空态 + 失败区）保持原有模糊。
-        Motion.crossFadeMixed(() -> {
+        // 列表占屏超过 30%：本次一次性解除面积上限，接受整张列表离屏滤波的代价（低频动作）。
+        Motion.crossFadeMixedUncapped(() -> {
             sourceSwapPending = false;
             SourceCache cache = caches[sourceIndex];
             if (listView == null) {
