@@ -844,8 +844,8 @@ public final class Deployer {
         steps.add("已删 " + BIN_DEST + "（进程已停，可安全 unlink）");
         steps.add("已删 status 双文件（c-daemon 下次启动会重建；仍激活的 MainHook 读到缺失即视为断联）");
         steps.add("已删脚本自身日志 /data/local/tmp/tempctrl_service.log");
-        steps.add("已删旧版迁移残留 /data/local/tmp/tempctrl_last_dev"
-                + "（新版落点在飞智 app 自己的私有目录，各包各记，本类不碰）");
+        steps.add("已清 /data/local/tmp/tempctrl_last_dev 与三个宿主 app 私有目录的模块残留"
+                + "（设备/钩子记录、旧更新基线 prefs；宿主进程仍活着时可能被重新写入，需重启宿主才彻底）");
         steps.add(daemonStopped
                 ? "已删兜底单实例锁 /data/local/tmp/tempctrl.lock（c-daemon 已确认停止）"
                 : "保留兜底单实例锁 /data/local/tmp/tempctrl.lock（c-daemon 未确认停止，删了会绕过单实例锁）");
@@ -1604,6 +1604,13 @@ public final class Deployer {
                 + probeTail();
     }
 
+    /** 受管宿主包名（与 MainHook 的 PACKAGE_* 一致）。 */
+    private static final String[] HOST_PKGS = {
+            "com.flydigi.waspwing.experimental",
+            "com.flydigi.waspwing.experimentanliuliu",
+            "com.fdg.flashplay.farsef",
+    };
+
     /** 卸载清理执行面：按 Protocol.CLEANUP_APP 生成 rm 行；兜底锁保留「daemon 已停才删」的条件。 */
     private static String uninstallCleanupScript() {
         StringBuilder sb = new StringBuilder();
@@ -1613,6 +1620,21 @@ public final class Deployer {
                 sb.append("if [ \"$DAEMON_STOPPED\" = 1 ]; then rm -f ").append(path).append("; fi\n");
             } else {
                 sb.append("rm -f ").append(path).append('\n');
+            }
+        }
+        // 宿主 app 私有目录：模块写入的设备/钩子记录与更新基线 SharedPreferences。
+        for (String pkg : HOST_PKGS) {
+            String base = "/data/data/" + pkg;
+            for (String rel : new String[]{
+                    "/files/tempctrl_last_dev",
+                    "/files/tempctrl_last_dev_code",
+                    "/files/tempctrl_bt_on_at",
+                    "/files/tempctrl_hook_list",
+                    "/files/tempctrl_hook_list.tmp",
+                    "/shared_prefs/b6x_module_update.xml",
+                    "/shared_prefs/b6x_module_update.xml.bak",
+            }) {
+                sb.append("rm -f ").append(base).append(rel).append('\n');
             }
         }
         return sb.toString();

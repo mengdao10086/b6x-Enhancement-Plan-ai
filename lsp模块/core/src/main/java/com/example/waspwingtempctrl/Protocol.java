@@ -59,9 +59,10 @@ public final class Protocol {
     // ==================== 路径与文件名 ====================
     public static final String PATH_STATUS_B6 = "/data/local/tmp/tempctrl_b6x.status";
     public static final String PATH_STATUS_B7 = "/data/local/tmp/tempctrl_b7x.status";
+    public static final String PATH_STATUS_B6_TMP = "/data/local/tmp/tempctrl_b6x.status.tmp";
+    public static final String PATH_STATUS_B7_TMP = "/data/local/tmp/tempctrl_b7x.status.tmp";
     public static final String PATH_UIPREFS = "/data/local/tmp/tempctrl_uiprefs";
     public static final String PATH_BT_REQ = "/data/local/tmp/tempctrl_bt_req";
-    public static final String PATH_MODULE_RESTART = "/data/local/tmp/tempctrl_module_restart";
     public static final String PATH_TEMP_STOP = "/data/local/tmp/tempctrl_temp_stop";
     public static final String NAME_TEMP_STOP_BOOT = "tempctrl_temp_stop_boot";
     public static final String NAME_LOG = "tempctrl.log";
@@ -100,11 +101,14 @@ public final class Protocol {
         "/data/local/tmp/tempctrl.lock",
         "/data/local/tmp/tempctrl_b6x.status",
         "/data/local/tmp/tempctrl_b7x.status",
+        "/data/local/tmp/tempctrl_b6x.status.tmp",
+        "/data/local/tmp/tempctrl_b7x.status.tmp",
         "/data/local/tmp/tempctrl_uiprefs",
         "/data/local/tmp/tempctrl_service.log",
         "/data/local/tmp/tempctrl_last_dev",
         "/cache/tempctrl.log",
-        "/data/local/tmp/tempctrl_module_restart",
+        "/data/local/tmp/tempctrl_bt_req",
+        "/data/local/tmp/tempctrl_temp_stop",
     };
 
     /** 卸载清理清单（app_private 执行面）。 */
@@ -115,5 +119,7 @@ public final class Protocol {
         "tempctrl_sync_manifest",
         "tempctrl_deploy_stamp",
         "tempctrl_wd_spawn",
+        "tempctrl_temp_stop_boot",
+        "tempctrl_coldmax",
     };
 }

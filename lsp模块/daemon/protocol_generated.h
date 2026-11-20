@@ -29,9 +29,10 @@
 /* 路径与文件名（R10：core/daemon/脚本三方同源） */
 #define PROTO_PATH_STATUS_B6        "/data/local/tmp/tempctrl_b6x.status"
 #define PROTO_PATH_STATUS_B7        "/data/local/tmp/tempctrl_b7x.status"
+#define PROTO_PATH_STATUS_B6_TMP    "/data/local/tmp/tempctrl_b6x.status.tmp"
+#define PROTO_PATH_STATUS_B7_TMP    "/data/local/tmp/tempctrl_b7x.status.tmp"
 #define PROTO_PATH_UIPREFS          "/data/local/tmp/tempctrl_uiprefs"
 #define PROTO_PATH_BT_REQ           "/data/local/tmp/tempctrl_bt_req"
-#define PROTO_PATH_MODULE_RESTART   "/data/local/tmp/tempctrl_module_restart"
 #define PROTO_PATH_TEMP_STOP        "/data/local/tmp/tempctrl_temp_stop"
 #define PROTO_NAME_TEMP_STOP_BOOT   "tempctrl_temp_stop_boot"
 #define PROTO_PATH_TEMP_STOP_BOOT   PRIVATE_DIR "/tempctrl_temp_stop_boot"
@@ -94,12 +95,19 @@ enum WebuiDataCol {
 #define PROTO_CLEANUP_DAEMON(X) \
     X(PROTO_PATH_STATUS_B6) \
     X(PROTO_PATH_STATUS_B7) \
+    X(PROTO_PATH_STATUS_B6_TMP) \
+    X(PROTO_PATH_STATUS_B7_TMP) \
     X(PROTO_PATH_UIPREFS) \
     X(PROTO_PATH_SERVICE_LOG) \
     X(PROTO_PATH_LOCK_FALLBACK) \
     X(PROTO_PATH_SCRIPT_MODERN) \
     X(PROTO_PATH_SCRIPT_KSU) \
     X(PROTO_PATH_LOG_FALLBACK) \
-    X(PROTO_PATH_MODULE_RESTART)
+    X(PROTO_PATH_BT_REQ) \
+    X(PROTO_PATH_TEMP_STOP) \
+    X(PROTO_PATH_LAST_DEV) \
+    X(PROTO_PATH_BIN_NEW) \
+    X(PROTO_PATH_BIN_NEW_APP) \
+    X(PROTO_PATH_BIN_PREV)
 
 #endif  /* PROTOCOL_GENERATED_H */

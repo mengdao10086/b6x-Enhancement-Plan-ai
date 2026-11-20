@@ -165,19 +165,19 @@ COLD_REAL=115
 
 ## 界面开关文件协议（daemon → 钩子）
 
-需要送达宿主进程的界面开关有三个：`UI_BACK_HIDE`（「返回隐藏后台」，返回键每次读取）、
-`BT_AUTO_ENABLE_SEC`（断连自动开蓝牙间隔，钩子按 tick 读取、带 30s 缓存）与
-`AUTO_RESTART_ON_UPDATE`（更新自动重启，钩子在 `Application.onCreate` 读取）。
-文件还携带 `GATE_LE`（类型门禁放行）——它已无独立开关，恒等于 `APP_LAUNCH_ENABLED` 的镜像，
-供旧版模块继续读取。
+需要送达宿主进程的界面开关有两个：`UI_BACK_HIDE`（「返回隐藏后台」，返回键每次读取）与
+`BT_AUTO_ENABLE_SEC`（断连自动开蓝牙间隔，钩子按 tick 读取、带 30s 缓存）。
+`AUTO_RESTART_ON_UPDATE`（更新自动重启）**已改为 daemon 自用**，不再由宿主进程读取；
+`AUTO_RESTART=0/1` 仍保留发布，供旧版模块/诊断读取。文件还携带 `GATE_LE`（类型门禁放行）——
+它已无独立开关，恒等于 `APP_LAUNCH_ENABLED` 的镜像，供旧版模块继续读取。
 界面与钩子分属两个进程、不共享内存，故由 daemon 转写成标志文件：
 
 | 项 | 值 |
 |---|---|
 | 路径 | `/data/local/tmp/tempctrl_uiprefs` |
-| 内容 | `BACK_HIDE=0/1`、`GATE_LE=0/1`、`BT_ON_SEC=<秒>`、`AUTO_RESTART=0/1`（各一行，换行结尾；`.tmp` + `rename` 原子替换） |
-| 写入方 | tempctrl daemon（root），每次配置重载时按需写（四值都没变才不写）；`GATE_LE` 恒为 `APP_LAUNCH_ENABLED ? 1 : 0`；`AUTO_RESTART` 与自动拉起总开关解耦 |
-| 读取方 | `MainHook.readBackHideEnabled()` 与 `btAutoEnableSec()`（宿主 app 进程）；前者**读不到按 1（开启）**、后者**读不到按 300 秒（开启）**处理 |
+| 内容 | `BACK_HIDE=0/1`、`GATE_LE=0/1`、`BT_ON_SEC=<秒>`、`AUTO_RESTART=0/1`、`DEBUG_ENABLED=0/1`、`MODULE_RESTART_DONE=<模块 APK 指纹>`（各一行，换行结尾；`.tmp` + `rename` 原子替换） |
+| 写入方 | tempctrl daemon（root），每次配置重载时按需写；任一值或去重指纹变化才写；`GATE_LE` 恒为 `APP_LAUNCH_ENABLED ? 1 : 0`；`AUTO_RESTART` 与自动拉起总开关解耦；`MODULE_RESTART_DONE` 供 daemon 重启后去重 |
+| 读取方 | `MainHook.readBackHideEnabled()` 与 `btAutoEnableSec()`（宿主 app 进程）；前者**读不到按 1（开启）**、后者**读不到按 300 秒（开启）**处理；`MODULE_RESTART_DONE` 仅 daemon 自读 |
 
 > 方向与 status 文件相反：status 是「钩子写、daemon 读」，本文件是「daemon 写、钩子读」。
 
@@ -228,11 +228,16 @@ COLD_REAL=115
 | `tempctrl.lock` | 同上（daemon 单实例锁） | daemon（`flock` 非阻塞；第二个实例以**退出码 2** 自行退出） |
 | `tempctrl.lock`（兜底） | `/data/local/tmp/` | daemon（第二把单实例锁，DE 存储、开机解锁前也可用；两把任一被占即以**退出码 2** 退出，故私有目录不可用时单实例保护不消失） |
 | `tempctrl_b6x.status` / `tempctrl_b7x.status` | `/data/local/tmp/`（**原样未动**） | daemon 预创建 + `chmod 0666`；LSPosed 侧每秒覆写（详见上文 status 文件协议） |
-| `tempctrl_uiprefs` | `/data/local/tmp/` | daemon（按需转写，详见上文界面开关文件协议） |
+| `tempctrl_b6x.status.tmp` / `tempctrl_b7x.status.tmp` | `/data/local/tmp/` | LSPosed 侧原子写的临时文件；`rename` 成功即消失，异常中断时可能残留，卸载时清理 |
+| `tempctrl_uiprefs` | `/data/local/tmp/` | daemon（按需转写，详见上文界面开关文件协议；含 `MODULE_RESTART_DONE=`） |
 | `tempctrl_bt_req` | `/data/local/tmp/` | daemon 预创建 + `chmod 0666`；LSPosed 侧按需覆写 `REQ=<epoch秒>`（断连自动开蓝牙请求，daemon 读出后执行开蓝牙命令链） |
 | `tempctrl_temp_stop` | `/data/local/tmp/` | daemon 预创建 + `chmod 0666` 并每 5s 重写 `1/0`；LSPosed 侧每秒读取（临时停止期间跳过回传停滞重连，详见上文临时停止标记文件） |
+| `tempctrl_temp_stop_boot` | `/data/data/com.example.waspwingtempctrl/files/` | daemon 自建自用（临时停止的 boot_id 戳，重启后自动失效；卸载时清理） |
 | `tempctrl_bt_on_at` | `/data/data/<飞智包名>/files/`（**各包各记**） | LSPosed 侧（`MainHook`）自建自用（断连自动开蓝牙限频时间戳），daemon 不参与 |
 | `tempctrl_last_dev` | `/data/data/<飞智包名>/files/`（**各包各记**） | LSPosed 侧（`MainHook`）自建自用，daemon 不参与 |
+| `tempctrl_last_dev_code` | `/data/data/<飞智包名>/files/`（**各包各记**） | LSPosed 侧（B7X 型号缓存），daemon 不参与 |
+| `tempctrl_hook_list` / `.tmp` | `/data/data/<飞智包名>/files/`（**各包各记**） | LSPosed 侧（「已钩住」清单 + boot_id，减少重复日志），daemon 不参与 |
+| `b6x_module_update.xml` / `.bak` | `/data/data/<飞智包名>/shared_prefs/`（**各包各记**） | 旧版宿主侧更新基线（新版已删除宿主检测，仅卸载时清理） |
 | `tempctrl`（二进制） | `/data/local/tmp/tempctrl`（沿用 noexec 规避） | 部署时由 root 从 APK assets 落盘 + `chmod 0755` |
 | `$BIN.new` / `$BIN.new.app` / `$BIN.prev` | `/data/local/tmp/`（`$BIN` = `/data/local/tmp/tempctrl`） | app（写 `$BIN.new.app`）/ service.d 脚本（写 `$BIN.new`）；`$BIN.prev` 为上一版备份。部署前 `rm -f`、卸载时删除 |
 | `tempctrl_service.log` | `/data/local/tmp/` | service.d 脚本 / app 启动路径（启动日志）；卸载时删除 |
@@ -245,16 +250,18 @@ COLD_REAL=115
 
 ### 卸载清理清单（三份实现同源）
 
-卸载自清的清理清单有三份实现——C 端 `cleanup_artifacts_on_uninstall()`、`service.d` 脚本的 `cleanup_all()`、app 的 `Deployer.uninstallScript()`，各存一份，改一处须同步另两处。清单固定为：
+卸载自清的清理清单由 [`参数定义/protocol.def.json`](../参数定义/protocol.def.json) 的 `cleanup` 段**生成三份实现**——C 端 `cleanup_artifacts_on_uninstall()`、`service.d` 脚本的 `cleanup_all()`、app 的 `Deployer.uninstallScript()`；改清单只改 JSON，改后跑 `gen_params.py`。当前清单固定为：
 
-- `/data/local/tmp` 下的二进制 `tempctrl` 与运行文件：status 双文件、`tempctrl_uiprefs`、`tempctrl_service.log`；
+- `/data/local/tmp` 下的二进制 `tempctrl` / `tempctrl.new` / `tempctrl.new.app` / `tempctrl.prev` 与运行文件：status 双文件及其 `.tmp`、`tempctrl_uiprefs`、`tempctrl_service.log`、`tempctrl.lock`、`tempctrl_last_dev`、`tempctrl_bt_req`、`tempctrl_temp_stop`；
 - 两个候选路径的 `service.d` 脚本：`/data/adb/service.d/` 与 `/data/adb/ksu/service.d/`；
 - `/cache/tempctrl.log`（私有目录不可用时的兜底日志）；
+- APK 私有目录：`tempctrl.lock`、`tempctrl.log`、`tempctrl_webui.data`、`tempctrl_sync_manifest`、`tempctrl_deploy_stamp`、`tempctrl_wd_spawn`、`tempctrl_temp_stop_boot`、`tempctrl_coldmax`；
+- 宿主 app 私有目录（三个受管包各清一次）：`files/tempctrl_last_dev`、`files/tempctrl_last_dev_code`、`files/tempctrl_bt_on_at`、`files/tempctrl_hook_list`（含 `.tmp`）、`shared_prefs/b6x_module_update.xml`（含 `.bak`）；
 - `$BIN.new` / `$BIN.new.app` / `$BIN.prev` 中间文件（部署/自动更新中断的残留、上一版备份）：部署前 `rm -f`、卸载时删除，避免被预置成符号链接后被后续 root 写入跟随。
 
 **不显式删 `profile.conf`**：系统卸载会连带删掉整个 `/data/data/<包名>`，与「卸载部署 ≠ 删配置」的既有口径一致。
 
-旧版迁移残留 `/data/local/tmp/tempctrl_last_dev` 由 `Deployer.deployScript()` 在部署时主动清一次，卸载时从 `Deployer.uninstallScript()` 与脚本 `cleanup_all()` 两侧各兜底清一次（见 [app/逻辑说明.md](app/逻辑说明.md) §2.4）。**已知局限**：`tempctrl_b6x/b7x.status` 只要飞智 app 进程还活着就被其 LSPosed 钩子每秒重写，unlink 后可能被立刻重建、删不干净（须重启 app 或设备才彻底消失）；脚本那一侧全程静默——那一路的任何写盘都会把刚删掉的日志文件重新建出来。
+旧版迁移残留 `/data/local/tmp/tempctrl_last_dev` 由 `Deployer.deployScript()` 在部署时主动清一次，卸载时从 `Deployer.uninstallScript()` 与脚本 `cleanup_all()` 两侧各兜底清一次（见 [app/逻辑说明.md](app/逻辑说明.md) §2.4）。**已知局限**：`tempctrl_b6x/b7x.status` 只要飞智 app 进程还活着就被其 LSPosed 钩子每秒重写，unlink 后可能被立刻重建、删不干净（须重启 app 或设备才彻底消失）；同理，宿主私有目录的 `tempctrl_last_dev` / `tempctrl_bt_on_at` / `tempctrl_hook_list` 也可能被仍存活的宿主进程重新写入，需重启宿主才彻底；脚本那一侧全程静默——那一路的任何写盘都会把刚删掉的日志文件重新建出来。
 
 > 「清除数据」的已知代价见 [app/逻辑说明.md](app/逻辑说明.md) §2.5。
 

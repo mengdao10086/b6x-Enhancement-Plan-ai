@@ -624,7 +624,6 @@ static int temp_stop_active(void);       // 前置声明：自动拉起守卫早
 // --- 模块更新后重启宿主（AUTO_RESTART_ON_UPDATE）---
 // 钩子检测到模块版本变化且开关开启时写 PKG=<包名> / AT=<epoch毫秒>；本进程 5s 拍读取，
 // token 变大才执行一次「force-stop + am start」。文件由本进程预建 0666（app 写 / daemon 读）。
-#define MODULE_RESTART_PATH PROTO_PATH_MODULE_RESTART
 // 临时停止状态发布：daemon 写 / 模块读（内容 "1\n"/"0\n"，每 5s 重写刷新 mtime）
 #define TEMP_STOP_FLAG_PATH PROTO_PATH_TEMP_STOP
 
@@ -1042,71 +1041,138 @@ static int parse_common_cfg(const char *key, int val, const char *val_str) {
  * <p>只在值变化时写；写失败不更新「已写出」记录，下一轮配置重载会重试，且只记一条日志。
  * 先写 .tmp 再 rename，避免钩子读到半行。
  */
-// --- 模块 APK 指纹（AUTO_RESTART_ON_UPDATE 的主信号）---
-// 钩子进程看不到更新后的新 APK：Android 11+ 每次更新在 /data/app 换一个随机目录，
-// 且 LSPosed 用内存 DEX 加载模块（Java 侧 CodeSource 为空）。daemon 以 root 视角扫描模块 APK，
-// 把 path|mtime|size|ino 写进 uiprefs 的 MODULE_STAMP= 行，由钩子周期比对。
+// --- 模块 APK 定位（AUTO_RESTART_ON_UPDATE 的唯一信号源）---
+// 判定全部在 daemon 侧：以 root 视角扫描 /data/app，得到模块 APK 的 path|mtime|size|ino。
 // 目录两代共存：Android 11+ 为 /data/app/~~*/<pkg>-*/base.apk，旧版为 /data/app/<pkg>-*/base.apk。
-#define MODULE_APK_DIR      "/data/app"
-#define MODULE_PKG_DIR_PFX  "com.example.waspwingtempctrl-"
-#define MODULE_STAMP_REFRESH_SEC 60
-static void module_apk_consider(const char *path, char *best, size_t best_sz,
-                                struct stat *best_st) {
+// 成本控制：每拍只 stat 缓存的 APK 与每个 ~~* 目录；仅当目录 mtime 变化（或首次）才 readdir，
+// 目标 2–4 次 stat/5s；缓存失效（stat 失败）时全量重扫一次。
+#define MODULE_APK_DIR        "/data/app"
+#define MODULE_PKG_DIR_PFX    "com.example.waspwingtempctrl-"
+#define MODULE_DIR_CACHE_MAX  64
+struct ModuleApkInfo {
+    int valid;
+    char path[192];
+    long long mtime;
+    long long size;
+    unsigned long long ino;
+};
+static struct ModuleApkInfo g_module_apk;
+static struct { char name[96]; time_t mtime; } g_module_dirs[MODULE_DIR_CACHE_MAX];
+static int g_module_dirs_n = 0;
+static int g_module_scan_changed = 0;   // 本拍是否有目录新出现/mtime 变化（决定是否需要全量重扫）
+// 上次已处理的重启指纹（uiprefs 持久化，daemon 重启后仍可去重）
+static char g_module_restart_done[256] = "";
+
+static void module_apk_consider(const char *path, struct ModuleApkInfo *best) {
     struct stat st;
     if (stat(path, &st) != 0 || st.st_size <= 0) return;
-    if (best[0] == '\0' || st.st_mtime > best_st->st_mtime
-            || (st.st_mtime == best_st->st_mtime && st.st_size != best_st->st_size)) {
-        snprintf(best, best_sz, "%s", path);
-        *best_st = st;
+    if (!best->valid || st.st_mtime > best->mtime
+            || (st.st_mtime == best->mtime && st.st_size != best->size)) {
+        snprintf(best->path, sizeof(best->path), "%s", path);
+        best->mtime = (long long)st.st_mtime;
+        best->size = (long long)st.st_size;
+        best->ino = (unsigned long long)st.st_ino;
+        best->valid = 1;
     }
 }
 
-static void module_apk_stamp(char *out, size_t out_sz) {
-    static char cached[256] = "";
-    static time_t next_at = 0;
-    time_t now = mono_now();
-    if (next_at != 0 && now < next_at) {
-        snprintf(out, out_sz, "%s", cached);
+/** 扫描一个目录下的 <pkg>-<suffix>/base.apk；只在该目录 mtime 变化时调用。 */
+static void module_apk_scan_dir(const char *dir_path, struct ModuleApkInfo *best) {
+    DIR *d = opendir(dir_path);
+    if (!d) return;
+    const size_t pfx_len = sizeof(MODULE_PKG_DIR_PFX) - 1;
+    struct dirent *de;
+    while ((de = readdir(d)) != NULL) {
+        if (strncmp(de->d_name, MODULE_PKG_DIR_PFX, pfx_len) != 0) continue;
+        char path[256];
+        snprintf(path, sizeof(path), "%s/%s/base.apk", dir_path, de->d_name);
+        module_apk_consider(path, best);
+    }
+    closedir(d);
+}
+
+/**
+ * 扫描 /data/app。gated=1 时只 readdir mtime 变过（或新出现）的 ~~* 目录；
+ * 同时总对缓存 APK 路径做一次 stat，覆盖「目录 mtime 未变但 APK 被原地替换」。
+ */
+static void module_apk_scan(int gated, struct ModuleApkInfo *best) {
+    memset(best, 0, sizeof(*best));
+    g_module_scan_changed = 0;
+    if (g_module_apk.valid) module_apk_consider(g_module_apk.path, best);
+    struct { char name[96]; time_t mtime; } next[MODULE_DIR_CACHE_MAX];
+    int n = 0;
+    DIR *d = opendir(MODULE_APK_DIR);
+    if (!d) {
+        g_module_dirs_n = 0;
         return;
     }
-    next_at = now + MODULE_STAMP_REFRESH_SEC;
-    char best[192] = "";
-    struct stat best_st;
-    memset(&best_st, 0, sizeof(best_st));
     const size_t pfx_len = sizeof(MODULE_PKG_DIR_PFX) - 1;
-    DIR *d = opendir(MODULE_APK_DIR);
-    if (d) {
-        struct dirent *de;
-        while ((de = readdir(d)) != NULL) {
-            char path[256];
-            if (strncmp(de->d_name, MODULE_PKG_DIR_PFX, pfx_len) == 0) {
-                // 旧版平地放：/data/app/<pkg>-<suffix>/base.apk
-                snprintf(path, sizeof(path), MODULE_APK_DIR "/%s/base.apk", de->d_name);
-                module_apk_consider(path, best, sizeof(best), &best_st);
-            } else if (strncmp(de->d_name, "~~", 2) == 0) {
-                // Android 11+：/data/app/~~<random>/<pkg>-<random>/base.apk
-                char sub[224];
-                snprintf(sub, sizeof(sub), MODULE_APK_DIR "/%s", de->d_name);
-                DIR *d2 = opendir(sub);
-                if (!d2) continue;
-                struct dirent *de2;
-                while ((de2 = readdir(d2)) != NULL) {
-                    if (strncmp(de2->d_name, MODULE_PKG_DIR_PFX, pfx_len) != 0) continue;
-                    snprintf(path, sizeof(path), "%s/%s/base.apk", sub, de2->d_name);
-                    module_apk_consider(path, best, sizeof(best), &best_st);
+    struct dirent *de;
+    while ((de = readdir(d)) != NULL) {
+        if (strncmp(de->d_name, "~~", 2) == 0) {
+            char sub[224];
+            snprintf(sub, sizeof(sub), MODULE_APK_DIR "/%s", de->d_name);
+            struct stat st;
+            if (stat(sub, &st) != 0) continue;
+            int old = -1;
+            for (int i = 0; i < g_module_dirs_n; i++) {
+                if (strcmp(g_module_dirs[i].name, de->d_name) == 0) {
+                    old = i;
+                    break;
                 }
-                closedir(d2);
             }
+            if (!gated || old < 0 || g_module_dirs[old].mtime != st.st_mtime) {
+                g_module_scan_changed = 1;
+                module_apk_scan_dir(sub, best);
+            }
+            if (n < MODULE_DIR_CACHE_MAX) {
+                snprintf(next[n].name, sizeof(next[n].name), "%s", de->d_name);
+                next[n].mtime = st.st_mtime;
+                n++;
+            }
+        } else if (strncmp(de->d_name, MODULE_PKG_DIR_PFX, pfx_len) == 0) {
+            // 旧版平地放；顶层 readdir 已给出目录名，直接 stat 一个文件。
+            char path[256];
+            snprintf(path, sizeof(path), MODULE_APK_DIR "/%s/base.apk", de->d_name);
+            module_apk_consider(path, best);
         }
-        closedir(d);
     }
-    if (best[0] != '\0')
-        snprintf(cached, sizeof(cached), "%s|%lld|%lld|%llu",
-                 best, (long long)best_st.st_mtime, (long long)best_st.st_size,
-                 (unsigned long long)best_st.st_ino);
-    else
-        cached[0] = '\0';
-    snprintf(out, out_sz, "%s", cached);
+    closedir(d);
+    memcpy(g_module_dirs, next, sizeof(next));
+    g_module_dirs_n = n;
+}
+
+/** 取模块 APK 信息；返回 1=有效。每拍 1 次 APK stat + 每个 ~~* 目录 1 次 stat，仅变化目录 readdir。 */
+static int module_apk_info(struct ModuleApkInfo *out) {
+    struct ModuleApkInfo best;
+    int gated = g_module_dirs_n > 0;
+    module_apk_scan(gated, &best);
+    if (!best.valid && gated && (g_module_scan_changed || g_module_apk.valid)) {
+        // 缓存可疑（目录变化后找不到 / 原 APK 路径失效）→ 全量重扫一次
+        g_module_dirs_n = 0;
+        module_apk_scan(0, &best);
+    }
+    g_module_apk = best;
+    *out = best;
+    return best.valid;
+}
+
+/** 从 uiprefs 读回上次已处理的指纹；daemon 重启后仍能「同一指纹只重启一次」。 */
+static void load_module_restart_done(void) {
+    FILE *f = fopen(UIPREFS_PATH, "r");
+    if (!f) return;
+    const char *prefix = "MODULE_RESTART_DONE=";
+    const size_t plen = strlen(prefix);
+    char line[320];
+    while (fgets(line, sizeof(line), f)) {
+        if (strncmp(line, prefix, plen) == 0) {
+            char *v = line + plen;
+            v[strcspn(v, "\r\n")] = '\0';
+            snprintf(g_module_restart_done, sizeof(g_module_restart_done), "%s", v);
+            break;
+        }
+    }
+    fclose(f);
 }
 
 static void publish_uiprefs(void) {
@@ -1116,21 +1182,19 @@ static void publish_uiprefs(void) {
     static int uiprefs_last_bt_sec = -2147483647;   // 同上的 BT_ON_SEC 记录（哨兵=尚未写过）
     static int uiprefs_last_auto_restart = -1;      // 同上的 AUTO_RESTART 记录（哨兵=尚未写过）
     static int uiprefs_last_debug = -1;             // 同上的 DEBUG_ENABLED 记录（供模块门控详细日志）
-    static char uiprefs_last_module_stamp[256] = "\x01";   // 哨兵：首轮必写
+    static char uiprefs_last_module_restart_done[256] = "\x01";   // 哨兵：首轮必写
     // 受 APP_LAUNCH_ENABLED 控制（用户 2026-10-24 定）：总开关关闭时不发布放行/自开蓝牙请求。
     // GATE_LE 不再有独立开关，恒等于自动拉起总开关。
     int gate_le_eff = g_cfg.APP_LAUNCH_ENABLED ? 1 : 0;
     int bt_sec_eff  = g_cfg.APP_LAUNCH_ENABLED ? g_cfg.bt_auto_enable_sec : 0;
     int auto_restart_eff = g_cfg.auto_restart_on_update ? 1 : 0;   // 与自动拉起总开关解耦
     int debug_enabled_eff = g_cfg.debug_mode ? 1 : 0;   // 供模块的 verboseLogAllowed() 门控
-    char module_stamp[256];
-    module_apk_stamp(module_stamp, sizeof(module_stamp));   // 内部 ≤60s 缓存
     if (g_cfg.back_hide_enabled == uiprefs_last_back_hide
             && gate_le_eff == uiprefs_last_gate_le
             && bt_sec_eff == uiprefs_last_bt_sec
             && auto_restart_eff == uiprefs_last_auto_restart
             && debug_enabled_eff == uiprefs_last_debug
-            && strcmp(module_stamp, uiprefs_last_module_stamp) == 0) {
+            && strcmp(g_module_restart_done, uiprefs_last_module_restart_done) == 0) {
         return;
     }
     char tmp[64];
@@ -1148,7 +1212,7 @@ static void publish_uiprefs(void) {
     fprintf(f, "BT_ON_SEC=%d\n", bt_sec_eff);
     fprintf(f, "AUTO_RESTART=%d\n", auto_restart_eff);
     fprintf(f, "DEBUG_ENABLED=%d\n", debug_enabled_eff);
-    fprintf(f, "MODULE_STAMP=%s\n", module_stamp);
+    fprintf(f, "MODULE_RESTART_DONE=%s\n", g_module_restart_done);
     fclose(f);
     if (rename(tmp, UIPREFS_PATH) != 0) {
         if (!uiprefs_fail_logged) {
@@ -1163,11 +1227,8 @@ static void publish_uiprefs(void) {
     uiprefs_last_bt_sec = bt_sec_eff;
     uiprefs_last_auto_restart = auto_restart_eff;
     uiprefs_last_debug = debug_enabled_eff;
-    if (uiprefs_last_module_stamp[0] != '\x01'
-            && strcmp(module_stamp, uiprefs_last_module_stamp) != 0) {
-        write_log("模块 APK 指纹变化: %s", module_stamp[0] ? module_stamp : "（未找到模块 APK）");
-    }
-    snprintf(uiprefs_last_module_stamp, sizeof(uiprefs_last_module_stamp), "%s", module_stamp);
+    snprintf(uiprefs_last_module_restart_done,
+             sizeof(uiprefs_last_module_restart_done), "%s", g_module_restart_done);
     uiprefs_fail_logged = 0;
 }
 
@@ -2362,15 +2423,6 @@ static void create_status_files(void) {
         write_log("开蓝牙请求文件 就绪 %s", BT_REQ_PATH);
     } else {
         write_log("开蓝牙请求文件 创建失败 %s", BT_REQ_PATH);
-    }
-    // 模块更新重启请求文件：同方向 app 写 / daemon 读，预建 0666 供钩子覆盖写
-    FILE *mf = fopen(MODULE_RESTART_PATH, "a");
-    if (mf) {
-        fclose(mf);
-        chmod(MODULE_RESTART_PATH, 0666);
-        write_log("更新重启请求文件 就绪 %s", MODULE_RESTART_PATH);
-    } else {
-        write_log("更新重启请求文件 创建失败 %s", MODULE_RESTART_PATH);
     }
     // 临时停止状态文件：预建 0666 并写入当前值（配置已加载，反映启动时的 UI_TEMP_STOP）
     if (publish_temp_stop_state()) {
@@ -3954,8 +4006,8 @@ static void launch_last_app(int pkg_known_dead) {
     write_log("自动拉起散热器 app %s（后台化）rc=%d", pkg, rc);
 }
 
-/** kill 指定散热器 app 并重新拉起（reason 仅用于日志前缀）。 */
-static void restart_app_pkg(const char *pkg, const char *reason) {
+/** kill 指定散热器 app 并重新拉起（reason 仅用于日志前缀）；返回 am start 的退出码（0=成功）。 */
+static int restart_app_pkg(const char *pkg, const char *reason) {
     write_log("%s 强制停止 %s 并重新拉起", reason, pkg);
     run_cmd_silent(AM_BIN " force-stop %s > /dev/null 2>&1", pkg);
     // 等进程退出（最多 2s）
@@ -3968,6 +4020,7 @@ static void restart_app_pkg(const char *pkg, const char *reason) {
     // 复用自动拉起的显式组件逻辑（b6x_auto_launch 后台化）
     int rc = am_start_app(pkg);
     write_log("%s 重新拉起 %s rc=%d", reason, pkg, rc);
+    return rc;
 }
 
 /** kill 目标散热器 app 并重新拉起（绕过 APP_LAUNCH_ENABLED 开关：本处主动 kill 必须拉起） */
@@ -6020,66 +6073,158 @@ static void poll_bt_request(void) {
     else     write_log("自动开蓝牙 命令链全部失败（svc/cmd）req=%lld", tok);
 }
 
-// ======================== 模块更新后重启宿主（AUTO_RESTART_ON_UPDATE）========================
-/** 只允许重启受管宿主，防止请求文件被伪造后杀其它应用。 */
-static int is_known_host_pkg(const char *pkg) {
-    return strcmp(pkg, APP_PKG_B6X_OLD) == 0
-            || strcmp(pkg, APP_PKG_B6X_NEW) == 0
-            || strcmp(pkg, APP_PKG_B7X) == 0;
-}
+// ======================== 模块更新：daemon 直接判定宿主是否跑旧代码 ========================
+// 信号只有模块 APK 的 mtime（+ 指纹）。判定全部在本进程，延迟 ≤5s：
+//   1) 模块 APK mtime 在未来（>now+60s）→ 忽略并关闭本 daemon 生命周期内的自动重启（时钟异常）；
+//   2) 宿主主进程启动时间 + 2s < APK mtime → 该进程加载的是旧模块代码 → force-stop + am start；
+//   3) OR：当前指纹（path|mtime|size|ino）与上次已处理指纹不同 → 同样重启（防 mtime 被保留）。
+// 同一指纹只重启一次：uiprefs 的 MODULE_RESTART_DONE= 持久记录 + 进程内 handled 双保险。
+#define MODULE_RESTART_MARGIN_SEC 2
 
-/**
- * 读取钩子写入的模块更新重启请求（MODULE_RESTART_PATH）：
- *   PKG=<宿主包名>
- *   AT=<epoch 毫秒 token>
- * token 变大才执行一次；开关关闭时消费但不执行；包名不在白名单时只记日志。
- */
-static void poll_module_restart_request(void) {
-    static long long handled = -1;   // 已处理的最大 token；-1=尚未处理
-    static int primed = 0;           // 首拍只记基准，避免 daemon 重启后补执行旧请求
-    static time_t poll_at = 0;
-    time_t now_mono = mono_now();
-    if (poll_at != 0 && now_mono - poll_at < 5) return;
-    poll_at = now_mono;
-
-    FILE *f = fopen(MODULE_RESTART_PATH, "r");
-    if (!f) return;                  // 尚未预建或不可读：下拍再试
-    char pkg[64] = {0};
-    long long tok = -1;
-    char line[96];
+/** /proc/stat 的 btime（开机墙钟秒）；读不到返回 0。 */
+static time_t read_kernel_btime(void) {
+    static time_t cached = 0;
+    if (cached > 0) return cached;
+    FILE *f = fopen("/proc/stat", "r");
+    if (!f) return 0;
+    char line[128];
     while (fgets(line, sizeof(line), f)) {
-        if (strncmp(line, "PKG=", 4) == 0) {
-            snprintf(pkg, sizeof(pkg), "%s", line + 4);
-            pkg[strcspn(pkg, "\r\n")] = '\0';
-        } else if (strncmp(line, "AT=", 3) == 0) {
-            tok = atoll(line + 3);
+        long long bt = 0;
+        if (sscanf(line, "btime %lld", &bt) == 1 && bt > 0) {
+            cached = (time_t)bt;
+            break;
         }
     }
     fclose(f);
+    return cached;
+}
 
-    // token 为 epoch 毫秒：须为正且贴合当前墙钟（±366 天），畸形值不采信。
-    long long now_ms = (long long)time(NULL) * 1000;
-    int tok_valid = (tok > 0 && tok >= now_ms - 366LL * 86400 * 1000
-            && tok <= now_ms + 366LL * 86400 * 1000);
-    if (!primed) {
-        primed = 1;
-        // 首拍只跳过陈旧请求；2 分钟内写入的新请求照常执行（覆盖 daemon 与宿主同时启动的竞态）。
-        if (!tok_valid || now_ms - tok > 120000) {
-            handled = tok_valid ? tok : -1;
-            return;
+/** 读 /proc/<pid>/stat 第 22 字段 starttime（clock ticks）。 */
+static int read_proc_starttime(int pid, unsigned long long *out) {
+    char path[64], buf[1024];
+    snprintf(path, sizeof(path), "/proc/%d/stat", pid);
+    FILE *f = fopen(path, "r");
+    if (!f) return 0;
+    size_t n = fread(buf, 1, sizeof(buf) - 1, f);
+    fclose(f);
+    buf[n] = '\0';
+    char *p = strrchr(buf, ')');   // comm 可能含空格/括号，取最后一个 ')'
+    if (!p) return 0;
+    p++;
+    while (*p == ' ' || *p == '\t') p++;
+    if (*p == '\0') return 0;
+    p++;   // 跳过第 3 字段 state（单字符 R/S/D/Z，不是数字）
+    unsigned long long v = 0;
+    for (int field = 4; field <= 22; field++) {   // 第 22 字段 starttime
+        char *end = NULL;
+        v = strtoull(p, &end, 10);
+        if (end == p) return 0;
+        p = end;
+    }
+    *out = v;
+    return 1;
+}
+
+struct HostProc {
+    int found;        // 主进程存在
+    long long start;  // 墙钟启动秒；btime 不可读时为 -1
+};
+
+/** 一次扫 /proc，找出三个受管宿主的主进程（cmdline 恰为包名，排除 :service 子进程）。 */
+static void collect_host_procs(const char *const pkgs[3], struct HostProc procs[3]) {
+    for (int i = 0; i < 3; i++) {
+        procs[i].found = 0;
+        procs[i].start = -1;
+    }
+    DIR *d = opendir("/proc");
+    if (!d) return;
+    int remaining = 3;
+    time_t btime = read_kernel_btime();
+    long hz = sysconf(_SC_CLK_TCK);
+    if (hz <= 0) hz = 100;
+    struct dirent *de;
+    while (remaining > 0 && (de = readdir(d)) != NULL) {
+        if (de->d_name[0] < '0' || de->d_name[0] > '9') continue;
+        int pid = atoi(de->d_name);
+        char path[64], cmd[256];
+        snprintf(path, sizeof(path), "/proc/%d/cmdline", pid);
+        FILE *f = fopen(path, "r");
+        if (!f) continue;
+        size_t n = fread(cmd, 1, sizeof(cmd) - 1, f);
+        fclose(f);
+        cmd[n] = '\0';
+        int idx = -1;
+        for (int i = 0; i < 3; i++) {
+            size_t len = strlen(pkgs[i]);
+            if (procs[i].found || n < len || memcmp(cmd, pkgs[i], len) != 0) continue;
+            if (n > len && cmd[len] != '\0') continue;   // 排除 pkg:service
+            idx = i;
+            break;
+        }
+        if (idx < 0) continue;
+        unsigned long long ticks;
+        if (!read_proc_starttime(pid, &ticks)) continue;
+        procs[idx].found = 1;
+        procs[idx].start = btime > 0
+                ? (long long)btime + (long long)(ticks / (unsigned long long)hz)
+                : -1;
+        remaining--;
+    }
+    closedir(d);
+}
+
+/** 每 5s 拍：模块 APK 比宿主主进程新（或指纹变化）→ 重启该宿主。 */
+static void check_host_module_update(void) {
+    static int disabled = 0;          // 未来时间：本 daemon 生命周期内关闭
+    static char handled[256] = "";    // 本进程已处理指纹（防同一拍风暴）
+    static int btime_warned = 0;
+    if (disabled || !g_cfg.auto_restart_on_update) return;
+
+    struct ModuleApkInfo info;
+    if (!module_apk_info(&info) || !info.valid) return;
+
+    time_t now = time(NULL);
+    if (info.mtime > (long long)now + 60) {
+        disabled = 1;
+        write_log("更新自动重启 已禁用：模块 APK mtime 在未来（%lld > now+60s）", info.mtime);
+        return;
+    }
+    char stamp[256];
+    snprintf(stamp, sizeof(stamp), "%s|%lld|%lld|%llu",
+             info.path, info.mtime, info.size, info.ino);
+    if (handled[0] != '\0' && strcmp(handled, stamp) == 0) return;
+
+    int first_run = g_module_restart_done[0] == '\0';
+    int fp_changed = !first_run && strcmp(g_module_restart_done, stamp) != 0;
+    static const char *const hosts[3] = {APP_PKG_B6X_OLD, APP_PKG_B6X_NEW, APP_PKG_B7X};
+    struct HostProc procs[3];
+    collect_host_procs(hosts, procs);
+    int any_attempt = 0;
+    int all_ok = 1;
+    for (int i = 0; i < 3; i++) {
+        if (!procs[i].found) continue;
+        if (procs[i].start <= 0 && !btime_warned) {
+            btime_warned = 1;
+            write_log("更新自动重启 无法读 /proc/stat btime，本次仅按指纹差异判定");
+        }
+        int old = procs[i].start > 0 && info.mtime > procs[i].start + MODULE_RESTART_MARGIN_SEC;
+        if (!old && !fp_changed) continue;
+        any_attempt = 1;
+        write_log("更新自动重启 %s：模块 APK mtime=%lld，进程启动=%lld%s，强制停止并拉起",
+                  hosts[i], info.mtime, procs[i].start, old ? "" : "（指纹变化）");
+        int rc = restart_app_pkg(hosts[i], "更新自动重启");
+        if (rc != 0) {
+            all_ok = 0;
+            write_log("更新自动重启 %s 拉起失败 rc=%d（daemon 重启后再试）", hosts[i], rc);
         }
     }
-    if (!tok_valid || tok <= handled) return;
-    handled = tok;
-    if (!g_cfg.auto_restart_on_update) {   // 开关已关：消费请求但不执行
-        write_log("更新重启 开关关闭，请求已忽略");
-        return;
+    snprintf(handled, sizeof(handled), "%s", stamp);
+    if (!any_attempt || all_ok) {
+        // 没有需重启的宿主（未运行/已是新代码），或全部重启成功：把本指纹记为已处理。
+        snprintf(g_module_restart_done, sizeof(g_module_restart_done), "%s", stamp);
+        publish_uiprefs();   // 持久化，daemon 重启后同一指纹不再重复
+        if (any_attempt) write_log("更新自动重启 已处理指纹 %s", stamp);
     }
-    if (!is_known_host_pkg(pkg)) {
-        write_log("更新重启 请求包名非法，已忽略: %.40s", pkg);
-        return;
-    }
-    restart_app_pkg(pkg, "更新自动重启");
 }
 
 // ======================== 看门狗反向保活（WD_KEEPALIVE）========================
@@ -6377,6 +6522,9 @@ static int parse_args(int argc, char **argv) {
     // 由 main_loop 按 CONFIG_RETRY_INTERVAL 周期重试（开机早期私有目录尚未挂上时只能如此，
     // 见 config_loaded 声明处的说明）。--config 指定的路径同样保留，重试时沿用同一条来源。
     set_default_log_path();
+    // 模块更新重启去重记录：必须在首次 publish_uiprefs（load_config 内）之前读回，
+    // 否则空值会覆盖持久记录，daemon 重启后同一指纹会被重复处理。
+    load_module_restart_done();
     // PID 分段倍率表：先装入代码默认表（配置缺失或三层全关时也按默认生效），随后 load_config 的 PID_CUT_n 会覆盖
     reset_ki_cut_defaults();
     if (argc >= 3 && strcmp(argv[1], "--config") == 0) {
@@ -6459,12 +6607,12 @@ static int wait_for_device(struct MainCtx *ctx) {
         // CPU 亲和低频重申：等待设备这段可能很久（开机早期甚至一直等不到设备），
         // 同样挂在既有的 5s 节拍上、由函数内部自限流（真读 /proc/self/cgroup 至多每 300s 一次）。
         cpu_affinity_reassert();
-        // 模块 APK 指纹刷新：等待设备期间也可能发生模块更新，钩子靠这里发布的 MODULE_STAMP 检测。
+        // 界面开关/去重记录的低频重写（幂等）：配置热重载之外也保证 uiprefs 存在。
         if (config_loaded) publish_uiprefs();
         // 断连自动开蓝牙：与卸载自清理同理必须放在本循环内——蓝牙未开时正好停在本循环（连不上设备），
         // 若不在此处轮询，钩子写的开蓝牙请求将永远得不到执行。
         poll_bt_request();
-        poll_module_restart_request();
+        check_host_module_update();
         read_status_ble_both();
         DeviceType dev = select_active_device();
         if (dev != DEVICE_NONE) {
@@ -6692,7 +6840,6 @@ static void run_main_loop(struct MainCtx *ctx) {
         sample_webui_inputs();   // 每 1s 采集（控制块用新鲜缓存；写行在 5s 控制块之后）
         write_coldmax_hint(); // 每 1s 核对生效制冷上限，变了才写给 app（定 KI 曲线横轴）
         poll_bt_request();    // 每 1s 查开蓝牙请求，有新请求才执行一次命令链
-        poll_module_restart_request();   // 模块更新后重启宿主请求（5s 节流）
 
         if (last_ctrl == 0 || mono_now() - last_ctrl >= 5) {
             last_ctrl = mono_now();
@@ -6709,6 +6856,9 @@ static void run_main_loop(struct MainCtx *ctx) {
                 cleanup_artifacts_on_uninstall();
                 break;   // running 已置 0，跳出主循环走 exit: 收尾
             }
+
+            // 模块更新判定：全部由本进程负责；放在所有 continue 之前（断联/无设备时也要跑）。
+            check_host_module_update();
 
             // -1.5 看门狗反向保活：必须排在本块内所有 `continue`（断联/无设备）之前——两处 continue
             //      之后的代码在无 BLE 时不执行，放后面就会出现"最需要它的时候它不跑"。内部 60s 门控。
