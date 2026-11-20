@@ -21,7 +21,6 @@ import android.os.Looper;
 import android.provider.Settings;
 import android.transition.AutoTransition;
 import android.transition.TransitionManager;
-import android.util.DisplayMetrics;
 import android.util.TypedValue;
 import android.view.Display;
 import android.view.View;
@@ -220,12 +219,6 @@ public final class Motion {
     private static final int BLUR_STEPS = 4;
 
     /**
-     * 允许叠加模糊的最大面积（占屏幕面积比例）：超过即退回纯 alpha。全屏层（如日志列表整张）
-     * 每帧离屏滤波代价高，宁可只淡不糊；仅 {@code crossFadeMixedUncapped} 的调用点可一次性解除。
-     */
-    private static final float BLUR_MAX_SCREEN_FRACTION = 0.30f;
-
-    /**
      * 同时交叉淡化：旧内容先在视图原位置留成一张快照层淡出，新内容在它下方同步淡入。
      *
      * <p><b>同时起止</b>：新层从 0 淡到 1、旧层从 1 淡到 0，两层都在 t=0 起播、t=325ms 结束
@@ -240,9 +233,8 @@ public final class Motion {
      * alpha 走同一条 {@link #FADE_CURVE} 同步推进（旧层 0 → {@link #FADE_BLUR_DP}dp，新层反向），
      * 用以掩盖切换瞬间的闪烁。半径按 {@link #BLUR_STEPS} 档量化，只在跨档时重设
      * {@code RenderEffect}；旧层快照一次录进 {@code RenderNode}，之后逐帧只改节点 alpha。
-     * 无 {@code RenderEffect}（低版本 / 软件渲染）或面积超过屏幕
-     * {@link #BLUR_MAX_SCREEN_FRACTION}（如整张列表）时静默退回纯 alpha，不崩、不逐帧重滤波；
-     * 仅 {@code crossFadeMixedUncapped} 的调用点可一次性解除面积限制。
+     * 无 {@code RenderEffect}（低版本 / 软件渲染）或视图未量出尺寸时静默退回纯 alpha，
+     * 不崩、不逐帧重滤波。不再按面积降级：整屏模糊属已知代价，由调用点自行决定是否值得。
      *
      * <p>系统关掉动效、或没有可淡的视图时直接执行 {@code swap}，并把 alpha 复位为 1，
      * 不留半透明残影。重复调用会先收掉上一轮（取消动画、移除快照层），不叠加残影。
@@ -254,7 +246,7 @@ public final class Motion {
      *                但仍参与淡入）
      */
     static void crossFade(@Nullable Runnable swap, @Nullable View... targets) {
-        crossFadeInternal(swap, true, null, false, targets);
+        crossFadeInternal(swap, true, null, targets);
     }
 
     /**
@@ -263,7 +255,7 @@ public final class Motion {
      * 的调用点；默认 {@link #crossFade} 的行为（允许模糊）不变。时长、曲线、起止点完全一致。
      */
     static void crossFadeNoBlur(@Nullable Runnable swap, @Nullable View... targets) {
-        crossFadeInternal(swap, false, null, false, targets);
+        crossFadeInternal(swap, false, null, targets);
     }
 
     /**
@@ -274,22 +266,6 @@ public final class Motion {
      */
     static void crossFadeMixed(@Nullable Runnable swap,
                                @Nullable View[] blurred, @Nullable View[] plain) {
-        crossFadeMixed(swap, blurred, plain, false);
-    }
-
-    /**
-     * 同 {@link #crossFadeMixed}，但<b>解除 30% 屏幕面积上限</b>，大视图也会真正离屏滤波。
-     * 只用于来源切换这类低频、一次性的大面积切换；其余调用点必须继续走受限制的入口。
-     * 系统关动效、API &lt; 31 或视图尚未量出尺寸时仍退化为纯 alpha。
-     */
-    static void crossFadeMixedUncapped(@Nullable Runnable swap,
-                                       @Nullable View[] blurred, @Nullable View[] plain) {
-        crossFadeMixed(swap, blurred, plain, true);
-    }
-
-    private static void crossFadeMixed(@Nullable Runnable swap,
-                                       @Nullable View[] blurred, @Nullable View[] plain,
-                                       boolean allowLargeArea) {
         int blurredCount = blurred == null ? 0 : blurred.length;
         int plainCount = plain == null ? 0 : plain.length;
         View[] all = new View[blurredCount + plainCount];
@@ -308,13 +284,13 @@ public final class Motion {
                 }
             }
         }
-        crossFadeInternal(swap, true, plainSet, allowLargeArea, all);
+        crossFadeInternal(swap, true, plainSet, all);
     }
 
     /**
      * 单视图带模糊淡入：alpha 0→1，同时模糊半径由 {@link #FADE_BLUR_DP} 降到 0，
      * 与交叉淡化的新层同曲线、同长。用于「新增内容从无到有」——没有旧内容可交叉，
-     * 但仍要与其它变化处同一观感。系统关动效或面积不允许模糊时退化为纯 alpha。
+     * 但仍要与其它变化处同一观感。系统关动效或视图未量出尺寸时退化为纯 alpha。
      */
     static void fadeInBlurred(@Nullable View v) {
         if (v == null) {
@@ -325,7 +301,7 @@ public final class Motion {
             v.setAlpha(1f);
             return;
         }
-        CrossFadeRun run = new CrossFadeRun();   // 默认 run：30% 面积上限照旧生效
+        CrossFadeRun run = new CrossFadeRun();
         run.views.add(v);
         CROSS_FADES.put(v, run);
         v.setAlpha(0f);
@@ -382,13 +358,11 @@ public final class Motion {
     /**
      * 交叉淡化的公共实现。
      *
-     * @param blurAll    true = 默认允许叠加模糊（仍受版本/尺寸/面积门槛约束）
+     * @param blurAll    true = 默认允许叠加模糊（仍受版本/尺寸门槛约束）
      * @param plainViews 本次只做 alpha 的视图（身份集合；null = 无例外）
-     * @param allowLargeArea true = 跳过 30% 面积上限（仅低频大视图调用点使用）
      */
     private static void crossFadeInternal(@Nullable Runnable swap, boolean blurAll,
-                                          @Nullable Set<View> plainViews,
-                                          boolean allowLargeArea, @Nullable View... targets) {
+                                          @Nullable Set<View> plainViews, @Nullable View... targets) {
         if (swap == null) {
             return;
         }
@@ -420,7 +394,6 @@ public final class Motion {
         }
         CrossFadeRun run = new CrossFadeRun();
         run.blurAll = blurAll;
-        run.allowLargeArea = allowLargeArea;
         if (plainViews != null) {
             run.plainViews.addAll(plainViews);
         }
@@ -505,23 +478,11 @@ public final class Motion {
 
     /**
      * 该视图能否承受离屏模糊的硬门槛：API 31+ 且已量出尺寸。
-     * 面积上限见 {@link #blurAreaAllowed(View)}，可被调用点按需解除。
+     * 不按面积降级——整屏模糊属已知代价，由调用点自行决定是否值得。
      */
     private static boolean blurSupported(View v) {
         return Build.VERSION.SDK_INT >= Build.VERSION_CODES.S
                 && v.getWidth() > 0 && v.getHeight() > 0;
-    }
-
-    /**
-     * 面积门槛：不超过屏幕的 {@link #BLUR_MAX_SCREEN_FRACTION}，稳定与低开销优先。
-     * 只有 {@code crossFadeMixedUncapped} 的调用点会跳过这一项。
-     */
-    private static boolean blurAreaAllowed(View v) {
-        DisplayMetrics dm = v.getResources().getDisplayMetrics();
-        long screen = (long) dm.widthPixels * dm.heightPixels;
-        return screen > 0L
-                && (long) v.getWidth() * v.getHeight()
-                <= (long) (screen * BLUR_MAX_SCREEN_FRACTION);
     }
 
     /** 半径按 {@link #BLUR_STEPS} 档量化：同一档内不重设效果，把离屏滤波次数压到每段动画 ≤ 档数。 */
@@ -566,14 +527,11 @@ public final class Motion {
         boolean blurAll = true;
         /** 本轮只做 alpha 的视图（身份比较；默认空）。 */
         final Set<View> plainViews = Collections.newSetFromMap(new IdentityHashMap<>());
-        /** 仅来源切换这类低频大视图调用点置真：跳过 30% 面积上限，API/尺寸门槛仍保留。 */
-        boolean allowLargeArea;
         boolean done;
 
-        /** 该视图本轮能否叠加模糊：整轮允许、不在例外集、满足版本/尺寸，且面积达标或按调用点放开。 */
+        /** 该视图本轮能否叠加模糊：整轮允许、不在例外集、且满足版本/尺寸门槛。 */
         boolean blurFor(View v) {
-            return blurAll && !plainViews.contains(v) && blurSupported(v)
-                    && (allowLargeArea || blurAreaAllowed(v));
+            return blurAll && !plainViews.contains(v) && blurSupported(v);
         }
 
         @Override
