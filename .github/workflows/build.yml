@@ -477,7 +477,8 @@ jobs:
           # 5,446 → 5,445：状态卡换字改用 Motion.crossFade，删除 status_text_outgoing 控件（-1 id）
           # 5,445 → 5,449：日志统计行拆两段独立拼接（删 log_stat_fmt、新增 5 条 log_stat_*，净 +4 string）；类型数不变
           # 5,449 → 5,452：日志统计行恢复单条 log_stat_fmt（净 -4 string）；上一基线漏计状态页拆分的净增，按实际打包数校正
-          [ "$BEFORE_ENTRIES" -eq 5452 ]           || { echo "基线资源条目数不是 5,452（$BEFORE_ENTRIES）"; exit 1; }
+          # 5,452 → 5,453：状态页新增「正在拉起」进行态文案（+1 string）；类型数不变
+          [ "$BEFORE_ENTRIES" -eq 5453 ]           || { echo "基线资源条目数不是 5,453（$BEFORE_ENTRIES）"; exit 1; }
           [ "$BEFORE_NTYPES" -eq 17 ]              || { echo "基线资源类型数不是 17（$BEFORE_NTYPES）"; exit 1; }
           [ "$REMOVE_N" -eq 19 ]                   || { echo "待移除 layout 数量不是 19（$REMOVE_N）"; exit 1; }
           [ "$AFTER_ENTRIES" -eq $((BEFORE_ENTRIES - REMOVE_N)) ] \
