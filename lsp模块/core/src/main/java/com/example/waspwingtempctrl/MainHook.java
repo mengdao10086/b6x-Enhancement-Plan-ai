@@ -36,6 +36,7 @@ import java.lang.reflect.Method;
 import java.util.UUID;
 
 import de.robv.android.xposed.IXposedHookLoadPackage;
+import de.robv.android.xposed.IXposedHookZygoteInit;
 import de.robv.android.xposed.XC_MethodHook;
 import de.robv.android.xposed.XposedBridge;
 import de.robv.android.xposed.XposedHelpers;
@@ -45,7 +46,7 @@ import de.robv.android.xposed.callbacks.XC_LoadPackage;
  * 飞智散热器 — LSPosed 模块。
  * 模块功能、钩子清单与注册时机见 app/逻辑说明.md §1。
  */
-public class MainHook implements IXposedHookLoadPackage {
+public class MainHook implements IXposedHookLoadPackage, IXposedHookZygoteInit {
 
     // ========== 多设备支持 ==========
     private static final String PACKAGE_B6X = "com.flydigi.waspwing.experimental";
@@ -84,7 +85,13 @@ public class MainHook implements IXposedHookLoadPackage {
     private static final String KEY_APK_PATH = "apk_path";
     private static final String KEY_APK_MTIME = "apk_mtime";
     private static final String KEY_APK_SIZE = "apk_size";
+    private static final String KEY_DAEMON_STAMP = "daemon_stamp";     // daemon 发布的模块 APK 指纹
+    private static final long MODULE_CHECK_INTERVAL_MS = 30000L;       // 常驻复查周期
     private static volatile boolean autoRestartDefaultLogged = false;   // uiprefs 缺键提示只打一次
+    private static volatile boolean updateMonitorStarted = false;       // 一个进程只起一个复查线程
+    private static volatile boolean updateSignalMissingLogged = false;  // 「三路信号都不可用」只打一次
+    private static volatile long updateFailLogAt = 0;                   // 检查异常日志限频（10 分钟）
+    private static volatile String moduleApkFromZygote = null;          // initZygote 给出的模块 APK 路径
     // 详细日志门控（DEBUG_ENABLED；守护进程经 uiprefs 发布，默认 0=关）
     private static volatile int debugEnabledCache = -1;
     private static volatile long debugEnabledReadAt = 0;
@@ -3044,100 +3051,180 @@ public class MainHook implements IXposedHookLoadPackage {
     }
 
     /**
+     * LSPosed 加载模块时回调一次（每个加载了本模块的进程各一次），给出模块 APK 的真实路径。
+     * <p>必须用这个值：LSPosed 用 {@code ByteBufferDexClassLoader} 把模块 DEX 读进内存加载，
+     * {@code MainHook.class.getProtectionDomain().getCodeSource()} 为空；宿主进程又通常看不到
+     * 模块包（Android 11+ 包可见性）。见 tempctrl.c 的 {@code module_apk_stamp()}。
+     */
+    @Override
+    public void initZygote(IXposedHookZygoteInit.StartupParam startupParam) {
+        try {
+            if (startupParam != null && startupParam.modulePath != null
+                    && !startupParam.modulePath.isEmpty()) {
+                moduleApkFromZygote = startupParam.modulePath;
+            }
+        } catch (Throwable ignored) {
+            // 取不到路径不影响其它功能；更新检测退回 daemon 指纹 / PackageManager
+        }
+    }
+
+    /**
      * 模块更新后自动重启宿主（{@code AUTO_RESTART_ON_UPDATE}，默认开）。
-     * 主信号：LSPosed 实际加载的模块 APK 的 mtime + size（同版本重装/覆盖构建都会变）；
-     * 兜底：PackageManager 的 versionCode + lastUpdateTime。
-     * 首次运行只记录基线；之后任一信号变化即同步落盘新基线并重启一次。
-     * 全程后台线程；失败只记日志、不重试，不阻塞启动。
+     * <p>信号优先级：daemon 以 root 视角发布的模块 APK 指纹（{@code MODULE_STAMP=path|mtime|size|ino}，
+     * 覆盖 Android 11+ 每次更新更换 /data/app 随机目录）＞ {@link #moduleApkPath()} 的文件
+     * mtime+size（启动时有效）＞ PackageManager 的 versionCode+lastUpdateTime 兜底。
+     * <p>进程启动时检查一次，之后每 30s 复查：LSPosed 不会把新模块代码热加载进已运行进程，
+     * 只有常驻复查才能让「安装新版本 → 旧进程自行重启」成立。
+     * <p>首个基线只记录不重启；变化后先同步落盘新基线（commit）再请求重启，避免重启循环。
      */
     private static void maybeRestartOnModuleUpdate(Context ctx) {
+        synchronized (MainHook.class) {
+            if (updateMonitorStarted) return;
+            updateMonitorStarted = true;
+        }
         Thread worker = new Thread(() -> {
-            try {
-                if (!readAutoRestartOnUpdate()) return;   // 开关关闭：不产生任何行为
-                String apkPath = moduleApkPath();
-                File apk = apkPath != null ? new File(apkPath) : null;
-                boolean apkOk = apk != null && apk.isFile();
-                long apkMtime = apkOk ? apk.lastModified() : -1;
-                long apkSize = apkOk ? apk.length() : -1;
-
-                long ver = -1, upd = -1;
-                boolean pmOk = false;
+            while (true) {
                 try {
-                    PackageInfo pi = ctx.getPackageManager().getPackageInfo(MODULE_PKG, 0);
-                    ver = (Build.VERSION.SDK_INT >= 28) ? pi.getLongVersionCode() : pi.versionCode;
-                    upd = pi.lastUpdateTime;
-                    pmOk = true;
-                } catch (Throwable ignored) {
-                    // 包不可见：主信号（APK 文件）不受影响
-                }
-
-                if (!apkOk && !pmOk) {
-                    XposedBridge.log(TAG + " 更新重启检查跳过: APK 与 PackageManager 均取不到模块信息");
-                    return;
-                }
-
-                SharedPreferences sp = ctx.getSharedPreferences(UPDATE_PREFS, Context.MODE_PRIVATE);
-                SharedPreferences.Editor ed = sp.edit();
-                if (apkOk) {
-                    ed.putString(KEY_APK_PATH, apkPath);
-                    ed.putLong(KEY_APK_MTIME, apkMtime);
-                    ed.putLong(KEY_APK_SIZE, apkSize);
-                }
-                if (pmOk) {
-                    ed.putLong(KEY_UPDATE_VERSION, ver);
-                    ed.putLong(KEY_UPDATE_TIME, upd);
-                }
-
-                if (apkOk) {
-                    boolean seen = sp.contains(KEY_APK_MTIME) && sp.contains(KEY_APK_SIZE);
-                    long oldM = sp.getLong(KEY_APK_MTIME, -1);
-                    long oldS = sp.getLong(KEY_APK_SIZE, -1);
-                    String oldP = sp.getString(KEY_APK_PATH, null);
-                    // 同步落盘：force-stop 会立刻杀进程，apply() 的异步写可能还没落盘。
-                    if (!ed.commit()) {
-                        XposedBridge.log(TAG + " 更新重启跳过: 基线写入失败");
-                        return;
+                    checkModuleUpdateOnce(ctx);
+                } catch (Throwable t) {
+                    long now = System.currentTimeMillis();
+                    if (now - updateFailLogAt > 10 * 60 * 1000L) {
+                        updateFailLogAt = now;
+                        XposedBridge.log(TAG + " 更新重启检查失败: " + t.getMessage());
                     }
-                    if (!seen) {
-                        XposedBridge.log(TAG + " 记录模块更新基线 source=apk mtime=" + apkMtime
-                                + " size=" + apkSize + " path=" + apkPath);
-                        return;
-                    }
-                    boolean changed = apkMtime != oldM || apkSize != oldS
-                            || (oldP != null && !oldP.equals(apkPath));
-                    if (!changed) return;
-                    XposedBridge.log(TAG + " 检测到模块更新 source=apk mtime=" + oldM + "→" + apkMtime
-                            + " size=" + oldS + "→" + apkSize
-                            + (oldP != null && !oldP.equals(apkPath)
-                                    ? " path=" + oldP + "→" + apkPath : "")
-                            + "，重启宿主 " + sHostPkg);
-                    requestHostRestart(ctx, sHostPkg);
+                }
+                try {
+                    Thread.sleep(MODULE_CHECK_INTERVAL_MS);
+                } catch (InterruptedException e) {
                     return;
                 }
-
-                // APK 文件取不到：退回 PackageManager 信号
-                boolean seen = sp.contains(KEY_UPDATE_VERSION) && sp.contains(KEY_UPDATE_TIME);
-                long oldVer = sp.getLong(KEY_UPDATE_VERSION, -1);
-                long oldUpd = sp.getLong(KEY_UPDATE_TIME, -1);
-                if (!ed.commit()) {
-                    XposedBridge.log(TAG + " 更新重启跳过: 基线写入失败");
-                    return;
-                }
-                if (!seen) {
-                    XposedBridge.log(TAG + " 记录模块更新基线 source=pm version=" + ver
-                            + " lastUpdate=" + upd);
-                    return;
-                }
-                if (ver == oldVer && upd == oldUpd) return;
-                XposedBridge.log(TAG + " 检测到模块更新 source=pm version=" + oldVer + "→" + ver
-                        + " lastUpdate=" + oldUpd + "→" + upd + "，重启宿主 " + sHostPkg);
-                requestHostRestart(ctx, sHostPkg);
-            } catch (Throwable t) {
-                XposedBridge.log(TAG + " 更新重启检查失败: " + t.getMessage());
             }
-        }, "b6x-update-restart");
+        }, "b6x-update-monitor");
         worker.setDaemon(true);
         worker.start();
+    }
+
+    /** 单次模块更新检查；三路信号都取不到时不产生行为（只提示一次）。 */
+    private static void checkModuleUpdateOnce(Context ctx) {
+        if (!readAutoRestartOnUpdate()) return;   // 开关关闭：不产生任何行为
+
+        // 主信号：daemon 发布的模块 APK 指纹（root 能定位更新后的新路径）
+        String daemonStamp = readUiprefsValue("MODULE_STAMP=");
+        if (daemonStamp != null && !daemonStamp.isEmpty()) {
+            SharedPreferences sp = ctx.getSharedPreferences(UPDATE_PREFS, Context.MODE_PRIVATE);
+            String old = sp.getString(KEY_DAEMON_STAMP, null);
+            if (old == null) {
+                if (sp.edit().putString(KEY_DAEMON_STAMP, daemonStamp).commit()) {
+                    XposedBridge.log(TAG + " 记录模块更新基线 source=daemon " + daemonStamp);
+                } else {
+                    XposedBridge.log(TAG + " 更新重启跳过: 基线写入失败");
+                }
+                return;
+            }
+            if (old.equals(daemonStamp)) return;
+            // 同步落盘：force-stop 会立刻杀进程，apply() 的异步写可能还没落盘。
+            if (!sp.edit().putString(KEY_DAEMON_STAMP, daemonStamp).commit()) {
+                XposedBridge.log(TAG + " 更新重启跳过: 基线写入失败");
+                return;
+            }
+            XposedBridge.log(TAG + " 检测到模块更新 source=daemon " + old + " → " + daemonStamp
+                    + "，重启宿主 " + sHostPkg);
+            requestHostRestart(ctx, sHostPkg);
+            return;
+        }
+
+        // 兜底一：本进程加载的 APK 文件（进程启动后 daemon 尚未刷新指纹时有效）
+        String apkPath = moduleApkPath();
+        File apk = apkPath != null ? new File(apkPath) : null;
+        boolean apkOk = apk != null && apk.isFile();
+        if (apkOk) {
+            long apkMtime = apk.lastModified();
+            long apkSize = apk.length();
+            SharedPreferences sp = ctx.getSharedPreferences(UPDATE_PREFS, Context.MODE_PRIVATE);
+            boolean seen = sp.contains(KEY_APK_MTIME) && sp.contains(KEY_APK_SIZE);
+            long oldM = sp.getLong(KEY_APK_MTIME, -1);
+            long oldS = sp.getLong(KEY_APK_SIZE, -1);
+            String oldP = sp.getString(KEY_APK_PATH, null);
+            if (!seen) {
+                if (sp.edit().putString(KEY_APK_PATH, apkPath)
+                        .putLong(KEY_APK_MTIME, apkMtime)
+                        .putLong(KEY_APK_SIZE, apkSize).commit()) {
+                    XposedBridge.log(TAG + " 记录模块更新基线 source=apk mtime=" + apkMtime
+                            + " size=" + apkSize + " path=" + apkPath);
+                }
+                return;
+            }
+            boolean changed = apkMtime != oldM || apkSize != oldS
+                    || (oldP != null && !oldP.equals(apkPath));
+            if (!changed) return;
+            if (!sp.edit().putString(KEY_APK_PATH, apkPath)
+                    .putLong(KEY_APK_MTIME, apkMtime)
+                    .putLong(KEY_APK_SIZE, apkSize).commit()) {
+                XposedBridge.log(TAG + " 更新重启跳过: 基线写入失败");
+                return;
+            }
+            XposedBridge.log(TAG + " 检测到模块更新 source=apk mtime=" + oldM + "→" + apkMtime
+                    + " size=" + oldS + "→" + apkSize
+                    + (oldP != null && !oldP.equals(apkPath)
+                            ? " path=" + oldP + "→" + apkPath : "")
+                    + "，重启宿主 " + sHostPkg);
+            requestHostRestart(ctx, sHostPkg);
+            return;
+        }
+
+        // 兜底二：PackageManager（宿主声明了包可见性时可用）
+        long ver = -1, upd = -1;
+        boolean pmOk = false;
+        try {
+            PackageInfo pi = ctx.getPackageManager().getPackageInfo(MODULE_PKG, 0);
+            ver = (Build.VERSION.SDK_INT >= 28) ? pi.getLongVersionCode() : pi.versionCode;
+            upd = pi.lastUpdateTime;
+            pmOk = true;
+        } catch (Throwable ignored) {
+            // 包不可见：Android 11+ 的默认结果
+        }
+        if (!pmOk) {
+            if (!updateSignalMissingLogged) {
+                updateSignalMissingLogged = true;
+                XposedBridge.log(TAG + " 更新重启检查: 三路信号均不可用（daemon 未发布 MODULE_STAMP、"
+                        + "APK 路径为空、模块包不可见）；本进程只能等下次启动时检测");
+            }
+            return;
+        }
+        SharedPreferences sp = ctx.getSharedPreferences(UPDATE_PREFS, Context.MODE_PRIVATE);
+        boolean seen = sp.contains(KEY_UPDATE_VERSION) && sp.contains(KEY_UPDATE_TIME);
+        long oldVer = sp.getLong(KEY_UPDATE_VERSION, -1);
+        long oldUpd = sp.getLong(KEY_UPDATE_TIME, -1);
+        if (!seen) {
+            if (sp.edit().putLong(KEY_UPDATE_VERSION, ver)
+                    .putLong(KEY_UPDATE_TIME, upd).commit()) {
+                XposedBridge.log(TAG + " 记录模块更新基线 source=pm version=" + ver
+                        + " lastUpdate=" + upd);
+            }
+            return;
+        }
+        if (ver == oldVer && upd == oldUpd) return;
+        if (!sp.edit().putLong(KEY_UPDATE_VERSION, ver)
+                .putLong(KEY_UPDATE_TIME, upd).commit()) {
+            XposedBridge.log(TAG + " 更新重启跳过: 版本记录写入失败");
+            return;
+        }
+        XposedBridge.log(TAG + " 检测到模块更新 source=pm version=" + oldVer + "→" + ver
+                + " lastUpdate=" + oldUpd + "→" + upd + "，重启宿主 " + sHostPkg);
+        requestHostRestart(ctx, sHostPkg);
+    }
+
+    /** 读 uiprefs 中某一行的值（prefix 含 '='）；缺键或读失败返回 null。 */
+    private static String readUiprefsValue(String prefix) {
+        try (BufferedReader br = new BufferedReader(new FileReader(UIPREFS_FILE))) {
+            String line;
+            while ((line = br.readLine()) != null) {
+                if (line.startsWith(prefix)) return line.substring(prefix.length()).trim();
+            }
+        } catch (Throwable ignored) {
+            // 文件不存在属正常（守护进程尚未写过）
+        }
+        return null;
     }
 
     /**
@@ -3167,16 +3254,8 @@ public class MainHook implements IXposedHookLoadPackage {
 
     /** 读守护进程发布的 {@code AUTO_RESTART=0/1}；读不到按默认开（与参数 default=1 一致）。 */
     private static boolean readAutoRestartOnUpdate() {
-        try (BufferedReader br = new BufferedReader(new FileReader(UIPREFS_FILE))) {
-            String line;
-            while ((line = br.readLine()) != null) {
-                if (line.startsWith("AUTO_RESTART=")) {
-                    return "1".equals(line.substring("AUTO_RESTART=".length()).trim());
-                }
-            }
-        } catch (Throwable ignored) {
-            // 文件不存在属正常（守护进程尚未写过）
-        }
+        String v = readUiprefsValue("AUTO_RESTART=");
+        if (v != null) return "1".equals(v);
         if (!autoRestartDefaultLogged) {
             autoRestartDefaultLogged = true;
             XposedBridge.log(TAG + " uiprefs 无 AUTO_RESTART，按默认开处理（daemon 可能未重新部署）");
@@ -3184,8 +3263,13 @@ public class MainHook implements IXposedHookLoadPackage {
         return true;
     }
 
-    /** LSPosed 实际加载的模块 APK 路径（CodeSource）。取不到返回 null。 */
+    /**
+     * 模块 APK 路径：优先 {@link #initZygote} 给出的真实路径。
+     * CodeSource 仅作其它框架的兜底——LSPosed 用内存 DEX 加载模块，CodeSource 为空。
+     */
     private static String moduleApkPath() {
+        String p = moduleApkFromZygote;
+        if (p != null && !p.isEmpty()) return p;
         try {
             java.security.CodeSource cs = MainHook.class.getProtectionDomain().getCodeSource();
             if (cs == null || cs.getLocation() == null) return null;
@@ -3193,8 +3277,8 @@ public class MainHook implements IXposedHookLoadPackage {
             if ("file".equalsIgnoreCase(uri.getScheme())) {
                 return new File(uri).getAbsolutePath();
             }
-            String p = uri.getPath();
-            return (p == null || p.isEmpty()) ? null : new File(p).getAbsolutePath();
+            String path = uri.getPath();
+            return (path == null || path.isEmpty()) ? null : new File(path).getAbsolutePath();
         } catch (Throwable ignored) {
             return null;
         }
@@ -3208,6 +3292,7 @@ public class MainHook implements IXposedHookLoadPackage {
         try (FileOutputStream fos = new FileOutputStream(Protocol.PATH_MODULE_RESTART)) {
             String body = "PKG=" + pkg + "\nAT=" + System.currentTimeMillis() + "\n";
             fos.write(body.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+            XposedBridge.log(TAG + " 更新重启请求已写入（等待 daemon 执行）: " + pkg);
             return;
         } catch (Throwable t) {
             XposedBridge.log(TAG + " 更新重启请求写入失败，改用 root 直连: " + t.getMessage());

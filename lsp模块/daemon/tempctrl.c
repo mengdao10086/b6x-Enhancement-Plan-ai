@@ -1042,6 +1042,73 @@ static int parse_common_cfg(const char *key, int val, const char *val_str) {
  * <p>只在值变化时写；写失败不更新「已写出」记录，下一轮配置重载会重试，且只记一条日志。
  * 先写 .tmp 再 rename，避免钩子读到半行。
  */
+// --- 模块 APK 指纹（AUTO_RESTART_ON_UPDATE 的主信号）---
+// 钩子进程看不到更新后的新 APK：Android 11+ 每次更新在 /data/app 换一个随机目录，
+// 且 LSPosed 用内存 DEX 加载模块（Java 侧 CodeSource 为空）。daemon 以 root 视角扫描模块 APK，
+// 把 path|mtime|size|ino 写进 uiprefs 的 MODULE_STAMP= 行，由钩子周期比对。
+// 目录两代共存：Android 11+ 为 /data/app/~~*/<pkg>-*/base.apk，旧版为 /data/app/<pkg>-*/base.apk。
+#define MODULE_APK_DIR      "/data/app"
+#define MODULE_PKG_DIR_PFX  "com.example.waspwingtempctrl-"
+#define MODULE_STAMP_REFRESH_SEC 60
+static void module_apk_consider(const char *path, char *best, size_t best_sz,
+                                struct stat *best_st) {
+    struct stat st;
+    if (stat(path, &st) != 0 || st.st_size <= 0) return;
+    if (best[0] == '\0' || st.st_mtime > best_st->st_mtime
+            || (st.st_mtime == best_st->st_mtime && st.st_size != best_st->st_size)) {
+        snprintf(best, best_sz, "%s", path);
+        *best_st = st;
+    }
+}
+
+static void module_apk_stamp(char *out, size_t out_sz) {
+    static char cached[256] = "";
+    static time_t next_at = 0;
+    time_t now = mono_now();
+    if (next_at != 0 && now < next_at) {
+        snprintf(out, out_sz, "%s", cached);
+        return;
+    }
+    next_at = now + MODULE_STAMP_REFRESH_SEC;
+    char best[192] = "";
+    struct stat best_st;
+    memset(&best_st, 0, sizeof(best_st));
+    const size_t pfx_len = sizeof(MODULE_PKG_DIR_PFX) - 1;
+    DIR *d = opendir(MODULE_APK_DIR);
+    if (d) {
+        struct dirent *de;
+        while ((de = readdir(d)) != NULL) {
+            char path[256];
+            if (strncmp(de->d_name, MODULE_PKG_DIR_PFX, pfx_len) == 0) {
+                // 旧版平地放：/data/app/<pkg>-<suffix>/base.apk
+                snprintf(path, sizeof(path), MODULE_APK_DIR "/%s/base.apk", de->d_name);
+                module_apk_consider(path, best, sizeof(best), &best_st);
+            } else if (strncmp(de->d_name, "~~", 2) == 0) {
+                // Android 11+：/data/app/~~<random>/<pkg>-<random>/base.apk
+                char sub[224];
+                snprintf(sub, sizeof(sub), MODULE_APK_DIR "/%s", de->d_name);
+                DIR *d2 = opendir(sub);
+                if (!d2) continue;
+                struct dirent *de2;
+                while ((de2 = readdir(d2)) != NULL) {
+                    if (strncmp(de2->d_name, MODULE_PKG_DIR_PFX, pfx_len) != 0) continue;
+                    snprintf(path, sizeof(path), "%s/%s/base.apk", sub, de2->d_name);
+                    module_apk_consider(path, best, sizeof(best), &best_st);
+                }
+                closedir(d2);
+            }
+        }
+        closedir(d);
+    }
+    if (best[0] != '\0')
+        snprintf(cached, sizeof(cached), "%s|%lld|%lld|%llu",
+                 best, (long long)best_st.st_mtime, (long long)best_st.st_size,
+                 (unsigned long long)best_st.st_ino);
+    else
+        cached[0] = '\0';
+    snprintf(out, out_sz, "%s", cached);
+}
+
 static void publish_uiprefs(void) {
     static int uiprefs_fail_logged = 0;   // 写失败只记一条日志，避免每轮重复刷屏
     static int uiprefs_last_back_hide = -1;   // 上次已写出的值（-1 = 尚未写过，首轮必写一次）
@@ -1049,17 +1116,21 @@ static void publish_uiprefs(void) {
     static int uiprefs_last_bt_sec = -2147483647;   // 同上的 BT_ON_SEC 记录（哨兵=尚未写过）
     static int uiprefs_last_auto_restart = -1;      // 同上的 AUTO_RESTART 记录（哨兵=尚未写过）
     static int uiprefs_last_debug = -1;             // 同上的 DEBUG_ENABLED 记录（供模块门控详细日志）
+    static char uiprefs_last_module_stamp[256] = "\x01";   // 哨兵：首轮必写
     // 受 APP_LAUNCH_ENABLED 控制（用户 2026-10-24 定）：总开关关闭时不发布放行/自开蓝牙请求。
     // GATE_LE 不再有独立开关，恒等于自动拉起总开关。
     int gate_le_eff = g_cfg.APP_LAUNCH_ENABLED ? 1 : 0;
     int bt_sec_eff  = g_cfg.APP_LAUNCH_ENABLED ? g_cfg.bt_auto_enable_sec : 0;
     int auto_restart_eff = g_cfg.auto_restart_on_update ? 1 : 0;   // 与自动拉起总开关解耦
     int debug_enabled_eff = g_cfg.debug_mode ? 1 : 0;   // 供模块的 verboseLogAllowed() 门控
+    char module_stamp[256];
+    module_apk_stamp(module_stamp, sizeof(module_stamp));   // 内部 ≤60s 缓存
     if (g_cfg.back_hide_enabled == uiprefs_last_back_hide
             && gate_le_eff == uiprefs_last_gate_le
             && bt_sec_eff == uiprefs_last_bt_sec
             && auto_restart_eff == uiprefs_last_auto_restart
-            && debug_enabled_eff == uiprefs_last_debug) {
+            && debug_enabled_eff == uiprefs_last_debug
+            && strcmp(module_stamp, uiprefs_last_module_stamp) == 0) {
         return;
     }
     char tmp[64];
@@ -1077,6 +1148,7 @@ static void publish_uiprefs(void) {
     fprintf(f, "BT_ON_SEC=%d\n", bt_sec_eff);
     fprintf(f, "AUTO_RESTART=%d\n", auto_restart_eff);
     fprintf(f, "DEBUG_ENABLED=%d\n", debug_enabled_eff);
+    fprintf(f, "MODULE_STAMP=%s\n", module_stamp);
     fclose(f);
     if (rename(tmp, UIPREFS_PATH) != 0) {
         if (!uiprefs_fail_logged) {
@@ -1091,6 +1163,11 @@ static void publish_uiprefs(void) {
     uiprefs_last_bt_sec = bt_sec_eff;
     uiprefs_last_auto_restart = auto_restart_eff;
     uiprefs_last_debug = debug_enabled_eff;
+    if (uiprefs_last_module_stamp[0] != '\x01'
+            && strcmp(module_stamp, uiprefs_last_module_stamp) != 0) {
+        write_log("模块 APK 指纹变化: %s", module_stamp[0] ? module_stamp : "（未找到模块 APK）");
+    }
+    snprintf(uiprefs_last_module_stamp, sizeof(uiprefs_last_module_stamp), "%s", module_stamp);
     uiprefs_fail_logged = 0;
 }
 
@@ -5994,7 +6071,10 @@ static void poll_module_restart_request(void) {
     }
     if (!tok_valid || tok <= handled) return;
     handled = tok;
-    if (!g_cfg.auto_restart_on_update) return;   // 开关已关：消费请求但不执行
+    if (!g_cfg.auto_restart_on_update) {   // 开关已关：消费请求但不执行
+        write_log("更新重启 开关关闭，请求已忽略");
+        return;
+    }
     if (!is_known_host_pkg(pkg)) {
         write_log("更新重启 请求包名非法，已忽略: %.40s", pkg);
         return;
@@ -6379,6 +6459,8 @@ static int wait_for_device(struct MainCtx *ctx) {
         // CPU 亲和低频重申：等待设备这段可能很久（开机早期甚至一直等不到设备），
         // 同样挂在既有的 5s 节拍上、由函数内部自限流（真读 /proc/self/cgroup 至多每 300s 一次）。
         cpu_affinity_reassert();
+        // 模块 APK 指纹刷新：等待设备期间也可能发生模块更新，钩子靠这里发布的 MODULE_STAMP 检测。
+        if (config_loaded) publish_uiprefs();
         // 断连自动开蓝牙：与卸载自清理同理必须放在本循环内——蓝牙未开时正好停在本循环（连不上设备），
         // 若不在此处轮询，钩子写的开蓝牙请求将永远得不到执行。
         poll_bt_request();
@@ -6618,6 +6700,9 @@ static void run_main_loop(struct MainCtx *ctx) {
             // -0.5. 配置热重载 + 临时停止维护：必须排在所有 `continue`（无设备 / app 失活）之前，
             //        否则断联期间这两件事完全不跑（审查 S2-1）。
             maintain_config_and_temp_stop();
+            // 模块 APK 指纹刷新：publish_uiprefs 只在值变化时写盘，指纹本身 ≤60s 缓存。
+            // 必须放在所有 `continue` 之前，否则断联/无设备时更新检测停摆。
+            if (config_loaded) publish_uiprefs();
 
             // -1. 宿主 APK 卸载自清理（走 5s 节拍：一级 stat 每轮可跑，二级 pm 自带 60s 节流）
             if (host_app_uninstalled()) {
